@@ -2,7 +2,7 @@
 import type { SessionGroup } from "~/composables/useBoard";
 import type { Task, Thread } from "~/types";
 
-defineProps<{ group: SessionGroup; threads: Record<string, Thread> }>();
+defineProps<{ group: SessionGroup; threads: Record<string, Thread>; running: Record<string, boolean> }>();
 defineEmits<{ openThread: [task: Task]; instruct: [session: string] }>();
 const showDone = ref(false);
 </script>
@@ -32,6 +32,7 @@ const showDone = ref(false);
         :key="t.path"
         :task="t"
         :thread="threads[t.id]"
+        :running="running[t.id]"
         kind="working"
         @open-thread="$emit('openThread', $event)"
       />
@@ -40,6 +41,7 @@ const showDone = ref(false);
         :key="t.path"
         :task="t"
         :thread="threads[t.id]"
+        :running="running[t.id]"
         kind="queued"
         @open-thread="$emit('openThread', $event)"
       />
@@ -63,6 +65,7 @@ const showDone = ref(false);
         :key="t.path"
         :task="t"
         :thread="threads[t.id]"
+        :running="running[t.id]"
         kind="done"
         @open-thread="$emit('openThread', $event)"
       />

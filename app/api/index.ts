@@ -11,7 +11,9 @@ export {
   brokerConnect,
   brokerStatus,
   getThread,
+  listPings,
   listThreads,
+  PINGS_CHANGED_EVENT,
   THREADS_CHANGED_EVENT,
 } from "./threads";
 export {

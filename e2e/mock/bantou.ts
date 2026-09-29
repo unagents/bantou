@@ -32,6 +32,8 @@ export class MockBantou {
   sessionsList: Session[];
   calls: InvokeRecord[] = [];
   sent: { to: string; text: string }[] = [];
+  /** Ping timers: task id → expiry (ISO). */
+  pings = new Map<string, string>();
   private listeners = new Map<string, number[]>();
   private nextEventId = 1;
   emitter: Emit = () => {};
@@ -74,6 +76,12 @@ export class MockBantou {
       this.changed();
       this.emitter("bantou://agent", { workspace: this.dir, task_id: taskId, state: "idle", message: null });
     }, 150);
+  }
+
+  /** A ping for `taskId` arrives: its timer is set to `ttlMs` from now. */
+  ping(taskId: string, ttlMs = 5 * 60_000) {
+    this.pings.set(taskId, new Date(Date.now() + ttlMs).toISOString());
+    this.emitter("bantou://pings-changed", this.dir);
   }
 
   listenerIds(event: string) {
@@ -144,6 +152,10 @@ export class MockBantou {
           name: "bantou-core",
           error: null,
         } satisfies BrokerStatus;
+      case "list_pings":
+        return [...this.pings]
+          .filter(([, at]) => Date.parse(at) > Date.now())
+          .map(([task_id, expires_at]) => ({ task_id, expires_at }));
       case "agent_open": {
         const id = args.taskId as string;
         const t = this.threads.get(id)!;

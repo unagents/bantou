@@ -34,6 +34,7 @@ fn live_full_path() {
     let app = tauri::test::mock_app();
     app.manage(Agents::default());
     app.manage(Brokers::default());
+    app.manage(broker::Pings::default());
     let h = app.handle().clone();
 
     // bantou poller (same code path as `broker_connect`).

@@ -1,6 +1,18 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { getStatuses, listSessions, listTasks, listThreads, THREADS_CHANGED_EVENT } from "~/api";
-import type { Session, Task, Thread } from "~/types";
+import { useIntervalFn } from "@vueuse/core";
+import {
+  getStatuses,
+  listPings,
+  listSessions,
+  listTasks,
+  listThreads,
+  PINGS_CHANGED_EVENT,
+  THREADS_CHANGED_EVENT,
+} from "~/api";
+import type { Ping, Session, Task, Thread } from "~/types";
+
+/** How often the remaining time of the ping timers is re-evaluated. */
+const PING_TICK_MS = 5000;
 
 export interface SessionGroup {
   name: string;
@@ -22,19 +34,43 @@ export function useBoard(dir: Ref<string | null>) {
   const threads = ref<Record<string, Thread>>({});
   /** Sessions registered from the peer list (in-memory roster on the Rust side). */
   const registered = ref<Session[]>([]);
+  /** Ping timers: task id → expiry (epoch ms). */
+  const pings = ref<Record<string, number>>({});
+  const now = ref(Date.now());
+  useIntervalFn(() => {
+    now.value = Date.now();
+  }, PING_TICK_MS);
+
+  function setPings(list: Ping[]) {
+    now.value = Date.now();
+    pings.value = Object.fromEntries(list.map((p) => [p.task_id, Date.parse(p.expires_at)]));
+  }
 
   async function refresh() {
     if (!dir.value) {
       tasks.value = [];
       threads.value = {};
+      pings.value = {};
       return;
     }
-    const [t, s, th, rs] = await Promise.all([listTasks(), getStatuses(), listThreads(), listSessions()]);
+    const [t, s, th, rs, ps] = await Promise.all([
+      listTasks(),
+      getStatuses(),
+      listThreads(),
+      listSessions(),
+      listPings(),
+    ]);
     registered.value = rs;
     tasks.value = t;
     statuses.value = s;
     threads.value = Object.fromEntries(th.map((x) => [x.task_id, x]));
+    setPings(ps);
   }
+
+  /** Task ids whose ping timer has time left. */
+  const running = computed<Record<string, boolean>>(() =>
+    Object.fromEntries(Object.entries(pings.value).map(([id, at]) => [id, at > now.value])),
+  );
 
   const sessions = computed<SessionGroup[]>(() => {
     const first = statuses.value[0];
@@ -69,12 +105,19 @@ export function useBoard(dir: Ref<string | null>) {
   );
 
   let unlisten: UnlistenFn | null = null;
+  let unlistenPings: UnlistenFn | null = null;
   onMounted(async () => {
     unlisten = await listen<string>(THREADS_CHANGED_EVENT, (e) => {
       if (e.payload === dir.value) void refresh();
     });
+    unlistenPings = await listen<string>(PINGS_CHANGED_EVENT, async (e) => {
+      if (e.payload === dir.value) setPings(await listPings());
+    });
   });
-  onBeforeUnmount(() => unlisten?.());
+  onBeforeUnmount(() => {
+    unlisten?.();
+    unlistenPings?.();
+  });
 
-  return { tasks, statuses, threads, registered, sessions, waitingCount, refresh };
+  return { tasks, statuses, threads, registered, sessions, waitingCount, running, refresh };
 }

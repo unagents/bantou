@@ -31,6 +31,11 @@ use tauri::{Emitter, Manager};
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 const HEARTBEAT_EVERY: u32 = 10; // polls → 20s, well inside the broker's 60s timeout
 
+/// How long one ping keeps a task marked as running.
+const PING_TTL: Duration = Duration::from_secs(5 * 60);
+
+pub const PINGS_CHANGED_EVENT: &str = "bantou://pings-changed";
+
 /// bantou's messenger name (fixed by the original requirement).
 pub const CORE_NAME: &str = "bantou-core";
 
@@ -176,6 +181,45 @@ impl Brokers {
     }
 }
 
+/// One live ping timer.
+#[derive(Clone, Debug, Serialize)]
+pub struct Ping {
+    pub task_id: String,
+    /// RFC3339, whole seconds.
+    pub expires_at: String,
+}
+
+/// Ping timers, in memory only: (workspace, task id) → expiry.
+#[derive(Default)]
+pub struct Pings {
+    inner: Mutex<HashMap<(PathBuf, String), time::OffsetDateTime>>,
+}
+
+impl Pings {
+    /// Start the timer of `task_id`, or reset it when it is running.
+    fn touch(&self, ws: &Path, task_id: &str) {
+        let at = time::OffsetDateTime::now_utc() + PING_TTL;
+        self.inner.lock().unwrap().insert((ws.to_path_buf(), task_id.to_string()), at);
+    }
+    /// Timers of `ws` that have not expired. Expired ones are dropped.
+    pub fn live(&self, ws: &Path) -> Vec<Ping> {
+        let now = time::OffsetDateTime::now_utc();
+        let mut all = self.inner.lock().unwrap();
+        all.retain(|_, at| *at > now);
+        all.iter()
+            .filter(|((w, _), _)| w == ws)
+            .map(|((_, id), at)| Ping {
+                task_id: id.clone(),
+                expires_at: at
+                    .replace_nanosecond(0)
+                    .unwrap_or(*at)
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_default(),
+            })
+            .collect()
+    }
+}
+
 // -- wire types ---------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -205,6 +249,9 @@ pub struct Message {
     /// "pull" | "push" | "ping" (messenger 0.6). Missing means "pull".
     #[serde(default)]
     pub mode: Option<String>,
+    /// Ping payload candidate (see `ping_subject`).
+    #[serde(default)]
+    pub subject: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -255,8 +302,8 @@ fn parse_envelope(text: &str) -> Option<Envelope> {
 /// Apply one incoming broker message to the workspace. Returns true when
 /// threads or tasks changed.
 pub fn handle_message(ws: &Path, msg: &Message) -> CmdResult<bool> {
-    // Liveness signal with no text: nothing to store.
-    if msg.mode.as_deref() == Some("ping") {
+    // Pings are applied by `handle_ping`: nothing to store.
+    if is_ping(msg) {
         return Ok(false);
     }
     // `from_name` is whatever the sender put on `/send-message`; fall back to
@@ -325,6 +372,35 @@ pub fn handle_message(ws: &Path, msg: &Message) -> CmdResult<bool> {
             Ok(true)
         }
     }
+}
+
+fn is_ping(msg: &Message) -> bool {
+    msg.mode.as_deref() == Some("ping")
+}
+
+/// What a ping is about: a task id or a task title. The messenger payload
+/// field is not final, so this is the one place that reads it.
+fn ping_subject(msg: &Message) -> Option<String> {
+    let text = msg.text.trim();
+    if !text.is_empty() {
+        return Some(text.to_string());
+    }
+    msg.subject.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+}
+
+/// Apply one ping: reset the timer of the task it names (by id, then by
+/// exact title). Returns true when a timer was set.
+pub fn handle_ping(ws: &Path, msg: &Message, pings: &Pings) -> CmdResult<bool> {
+    let Some(subject) = ping_subject(msg) else { return Ok(false) };
+    let tasks = task::scan_tasks(ws)?;
+    // Timers are keyed by task id, so a task without one cannot be tracked.
+    let found = tasks
+        .iter()
+        .find(|t| t.id == subject)
+        .or_else(|| tasks.iter().find(|t| t.title == subject && !t.id.is_empty()));
+    let Some(t) = found else { return Ok(false) };
+    pings.touch(ws, &t.id);
+    Ok(true)
 }
 
 /// Replace the md body of task `task_id`, keeping its frontmatter.
@@ -582,7 +658,15 @@ pub(crate) fn start_poller<R: tauri::Runtime>(app: tauri::AppHandle<R>, ws: Path
             match post::<PollResponse>(&url, "/poll-messages", serde_json::json!({ "id": id })).await {
                 Ok(r) => {
                     let mut changed = false;
+                    let mut pinged = false;
                     for m in &r.messages {
+                        if is_ping(m) {
+                            match handle_ping(&ws, m, &app.state::<Pings>()) {
+                                Ok(p) => pinged |= p,
+                                Err(e) => eprintln!("bantou: failed to apply ping: {e}"),
+                            }
+                            continue;
+                        }
                         match handle_message(&ws, m) {
                             Ok(c) => changed |= c,
                             Err(e) => {
@@ -600,6 +684,9 @@ pub(crate) fn start_poller<R: tauri::Runtime>(app: tauri::AppHandle<R>, ws: Path
                     }
                     if changed {
                         let _ = app.emit(THREADS_CHANGED_EVENT, ws.to_string_lossy().to_string());
+                    }
+                    if pinged {
+                        let _ = app.emit(PINGS_CHANGED_EVENT, ws.to_string_lossy().to_string());
                     }
                     brokers.set(&ws, BrokerStatus { connected: true, peer_id: Some(id.clone()), ..base.clone() });
                 }
@@ -638,6 +725,17 @@ pub fn broker_status(
     Ok(brokers.get(&ws).unwrap_or_else(|| BrokerStatus { name: CORE_NAME.into(), ..Default::default() }))
 }
 
+/// Live ping timers of this window's workspace.
+#[tauri::command]
+pub fn list_pings(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, AppState>,
+    pings: tauri::State<'_, Pings>,
+) -> CmdResult<Vec<Ping>> {
+    let ws = state.require_workspace(window.label())?;
+    Ok(pings.live(&ws))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -650,7 +748,74 @@ mod tests {
             text: text.into(),
             sent_at: String::new(),
             mode: None,
+            subject: None,
         }
+    }
+
+    fn ping(text: &str, subject: Option<&str>) -> Message {
+        Message { mode: Some("ping".into()), subject: subject.map(str::to_string), ..msg(text) }
+    }
+
+    fn live_ids(p: &Pings, ws: &Path) -> Vec<String> {
+        p.live(ws).into_iter().map(|x| x.task_id).collect()
+    }
+
+    #[test]
+    fn ping_with_task_id_sets_timer() {
+        let d = tempfile::tempdir().unwrap();
+        task::create_task_file(d.path(), "Build X", "Doing", &[], Some("t-1"), "").unwrap();
+        let p = Pings::default();
+        assert!(handle_ping(d.path(), &ping(" t-1 ", None), &p).unwrap());
+        let live = p.live(d.path());
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].task_id, "t-1");
+        let at = time::OffsetDateTime::parse(&live[0].expires_at, &time::format_description::well_known::Rfc3339)
+            .unwrap();
+        let left = at - time::OffsetDateTime::now_utc();
+        assert!(left > time::Duration::seconds(290) && left <= time::Duration::seconds(300), "{left}");
+        // other workspaces do not see it
+        assert!(p.live(tempfile::tempdir().unwrap().path()).is_empty());
+    }
+
+    #[test]
+    fn ping_with_title_sets_timer() {
+        let d = tempfile::tempdir().unwrap();
+        task::create_task_file(d.path(), "Build X", "Doing", &[], Some("t-1"), "").unwrap();
+        let p = Pings::default();
+        // payload in the `subject` field, text empty
+        assert!(handle_ping(d.path(), &ping("", Some("Build X")), &p).unwrap());
+        assert_eq!(live_ids(&p, d.path()), vec!["t-1".to_string()]);
+    }
+
+    #[test]
+    fn ping_with_unknown_subject_is_ignored() {
+        let d = tempfile::tempdir().unwrap();
+        task::create_task_file(d.path(), "Build X", "Doing", &[], Some("t-1"), "").unwrap();
+        let p = Pings::default();
+        assert!(!handle_ping(d.path(), &ping("Build", None), &p).unwrap());
+        assert!(p.live(d.path()).is_empty());
+    }
+
+    #[test]
+    fn empty_ping_is_ignored() {
+        let d = tempfile::tempdir().unwrap();
+        task::create_task_file(d.path(), "Build X", "Doing", &[], Some("t-1"), "").unwrap();
+        let p = Pings::default();
+        assert!(!handle_ping(d.path(), &ping("", None), &p).unwrap());
+        assert!(!handle_ping(d.path(), &ping("  ", Some(" ")), &p).unwrap());
+        assert!(p.live(d.path()).is_empty());
+    }
+
+    #[test]
+    fn expired_timer_is_dropped() {
+        let d = tempfile::tempdir().unwrap();
+        let p = Pings::default();
+        p.inner
+            .lock()
+            .unwrap()
+            .insert((d.path().to_path_buf(), "t-1".into()), time::OffsetDateTime::now_utc() - PING_TTL);
+        assert!(p.live(d.path()).is_empty());
+        assert!(p.inner.lock().unwrap().is_empty());
     }
 
     #[test]

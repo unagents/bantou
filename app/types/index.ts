@@ -50,6 +50,13 @@ export interface BrokerStatus {
   error: string | null;
 }
 
+/** Mirror of `src-tauri/src/broker.rs::Ping`. */
+export interface Ping {
+  task_id: string;
+  /** RFC3339. */
+  expires_at: string;
+}
+
 export interface AgentEvent {
   workspace: string;
   task_id: string;

@@ -4,7 +4,7 @@ import { brokerConnect, brokerStatus, instructAddTask } from "~/api";
 import type { BrokerStatus, RegisterResult, Task } from "~/types";
 
 const { dir, loaded, load, pickAndOpen } = useWorkspace();
-const { threads, registered, sessions, waitingCount, refresh } = useBoard(dir);
+const { threads, registered, sessions, waitingCount, running, refresh } = useBoard(dir);
 const toast = useToast();
 
 useWorkspaceWatcher(dir, () => void refresh());
@@ -108,6 +108,7 @@ async function onInstruct(session: string, title: string, body: string) {
           :key="g.name"
           :group="g"
           :threads="threads"
+          :running="running"
           @open-thread="openThread"
           @instruct="instructTarget = $event"
         />

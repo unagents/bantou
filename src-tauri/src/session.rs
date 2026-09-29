@@ -103,6 +103,7 @@ pub fn protocol_message(core: &str, session: &str) -> String {
 2. ユーザーへの確認・質問・判断依頼が出た時 → type "ask"
    確認や質問は、どんな小さなものでも、このセッション上でユーザーに直接聞かないこと。
    AskUserQuestion も使わず、必ず messenger 経由で bantou に ask を送り、返答が来るまでその件は待つ。
+3. bantou に登録したタスクの作業中 → 5 分ごとに ping（下記「■ ping」）
 
 ■ bantou からのメッセージの扱い
 bantou（{core}）は、ユーザーがこのセッションとのやり取りを任せている窓口である。
@@ -119,6 +120,11 @@ body は必須扱い。目的・具体的な作業内容（手順、変更対象
 ■ ask（返答待ち）
 {{"bantou":1,"type":"ask","task_id":"<対象タスクの task_id>","title":"<タスク名>","question":"<聞きたいこと>","options":[{{"label":"<選択肢>","description":"<補足>"}}]}}
 options は省略可（自由回答のみ）。
+
+■ ping（作業中の通知）
+bantou に登録したタスクの作業中は、/loop を 5 分間隔（/loop 5m …）で使い、5 分ごとに messenger の send_ping を to="{core}" で送ること。
+ping には、作業中のタスクの task_id（またはタスク名）を入れること。
+そのタスクが終わったら loop を止めること。
 
 ■ 返答
 ユーザーが決めると、bantou から次の形のテキストが届く（未読通知として届くので、check_messages で本文を読むこと）。
@@ -271,6 +277,7 @@ mod tests {
         assert!(m.contains(r#"to="bantou-core""#));
         assert!(m.contains("「careery」"));
         assert!(m.contains(r#"{"bantou":1,"type":"ask""#));
+        assert!(m.contains(r#"/loop 5m …）で使い、5 分ごとに messenger の send_ping を to="bantou-core" で送ること"#));
     }
 
     #[test]

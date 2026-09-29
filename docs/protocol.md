@@ -46,6 +46,23 @@ tool, `to = "bantou-core"`, and put **one JSON object** in the text.
 - The task shows a waiting icon. `options` may be empty (free answer only).
 - The user can always answer with free text instead of an option.
 
+## `ping` — work is running
+
+While it works on a task registered to bantou, the session runs `/loop` with a
+5 minute interval (`/loop 5m ...`) and calls the messenger `send_ping` tool,
+`to = "bantou-core"`, every 5 minutes. The ping carries the `task_id` (or the
+title) of the task being worked on. The session stops the loop when the task is
+done.
+
+- bantou finds the task by id, then by exact title, and sets a 5 minute timer
+  for it. Each new ping resets the timer to 5 minutes.
+- On the board, a working task with a live timer shows a spinning icon. The
+  icon stops when the timer runs out.
+- A ping without a task id / title, or naming no known task, is ignored.
+- Timers are kept in memory only; they are gone after bantou restarts.
+- The ping payload is read from the message `text`, then from `subject`
+  (messenger has not fixed the field name yet; `ping_subject` in `broker.rs`).
+
 ## Reply from bantou
 
 When the user decides, bantou sends plain text back to the asking peer
@@ -63,6 +80,7 @@ When the user decides, bantou sends plain text back to the asking peer
 
 Anything that is not a `bantou: 1` envelope is appended to
 `~/.local/share/bantou/<workspace-key>/inbox.jsonl` and not shown on the board (MVP).
+Pings (`mode: "ping"`) are never stored there.
 
 ## Storage
 

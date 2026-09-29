@@ -45,6 +45,7 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::default().build())
         .manage(AppState::new())
         .manage(broker::Brokers::default())
+        .manage(broker::Pings::default())
         .manage(agent::Agents::default())
         .manage(session::Sessions::default())
         .invoke_handler(tauri::generate_handler![
@@ -60,6 +61,7 @@ pub fn run() {
             thread::get_thread,
             broker::broker_connect,
             broker::broker_status,
+            broker::list_pings,
             agent::agent_open,
             agent::agent_close,
             agent::agent_say,
