@@ -2,9 +2,10 @@
 //!
 //! bantou registers itself with the broker as a plain HTTP peer (no MCP, no
 //! Claude Code session): `/register`, `/heartbeat`, `/poll-messages`,
-//! `/send-message` (agent-hand/messenger `packages/protocol/src/http.ts`).
-//! `/poll-messages` marks messages read on the broker, so every message is
-//! written to disk as soon as it arrives.
+//! `/send-message`, `/acknowledge-messages` (agent-hand/messenger
+//! `packages/protocol/src/http.ts`). `/poll-messages` marks messages delivered
+//! on the broker, so every message is written to disk as soon as it arrives,
+//! then acknowledged so the broker drops it.
 //!
 //! The broker is found with agent-messenger's own discovery order
 //! (messenger `packages/client/src/resolve.ts`), so bantou keeps no
@@ -191,6 +192,9 @@ struct OkResult {
 
 #[derive(Deserialize, Clone, Debug)]
 pub struct Message {
+    /// Broker-assigned id, used for `/acknowledge-messages`.
+    #[serde(default)]
+    pub id: Option<u64>,
     #[serde(default)]
     pub from_id: String,
     #[serde(default)]
@@ -198,6 +202,9 @@ pub struct Message {
     pub text: String,
     #[serde(default)]
     pub sent_at: String,
+    /// "pull" | "push" | "ping" (messenger 0.6). Missing means "pull".
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -248,6 +255,10 @@ fn parse_envelope(text: &str) -> Option<Envelope> {
 /// Apply one incoming broker message to the workspace. Returns true when
 /// threads or tasks changed.
 pub fn handle_message(ws: &Path, msg: &Message) -> CmdResult<bool> {
+    // Liveness signal with no text: nothing to store.
+    if msg.mode.as_deref() == Some("ping") {
+        return Ok(false);
+    }
     // `from_name` is whatever the sender put on `/send-message`; fall back to
     // the peer id so there is always a reply target.
     let sender = if msg.from_name.is_empty() { msg.from_id.clone() } else { msg.from_name.clone() };
@@ -486,6 +497,7 @@ pub(crate) async fn register(cfg: &BrokerConfig, ws: &Path, pid: u32) -> Result<
 
 /// Send `text` to a peer (by name or id) as `bantou-core`.
 pub async fn send(url: &str, from_id: &str, to: &str, text: &str) -> Result<(), String> {
+    // No `mode`: the broker defaults to "pull" (receiver sees an unread notice), which is intended.
     let r: OkResult = post(
         url,
         "/send-message",
@@ -496,6 +508,21 @@ pub async fn send(url: &str, from_id: &str, to: &str, text: &str) -> Result<(), 
         Ok(())
     } else {
         Err(r.error.unwrap_or_else(|| "send failed".into()))
+    }
+}
+
+/// Ids of polled messages to acknowledge (messages without an id are skipped).
+fn ack_ids(msgs: &[Message]) -> Vec<u64> {
+    msgs.iter().filter_map(|m| m.id).collect()
+}
+
+/// Drop handled messages from the broker store (`/poll-messages` only marks them delivered).
+async fn acknowledge(url: &str, id: &str, ids: &[u64]) -> Result<(), String> {
+    let r: OkResult = post(url, "/acknowledge-messages", serde_json::json!({ "id": id, "message_ids": ids })).await?;
+    if r.ok {
+        Ok(())
+    } else {
+        Err(r.error.unwrap_or_else(|| "acknowledge failed".into()))
     }
 }
 
@@ -565,6 +592,12 @@ pub(crate) fn start_poller<R: tauri::Runtime>(app: tauri::AppHandle<R>, ws: Path
                             }
                         }
                     }
+                    let ids = ack_ids(&r.messages);
+                    if !ids.is_empty() {
+                        if let Err(e) = acknowledge(&url, &id, &ids).await {
+                            eprintln!("bantou: failed to acknowledge messages: {e}");
+                        }
+                    }
                     if changed {
                         let _ = app.emit(THREADS_CHANGED_EVENT, ws.to_string_lossy().to_string());
                     }
@@ -610,7 +643,33 @@ mod tests {
     use super::*;
 
     fn msg(text: &str) -> Message {
-        Message { from_id: "p1".into(), from_name: "careery".into(), text: text.into(), sent_at: String::new() }
+        Message {
+            id: None,
+            from_id: "p1".into(),
+            from_name: "careery".into(),
+            text: text.into(),
+            sent_at: String::new(),
+            mode: None,
+        }
+    }
+
+    #[test]
+    fn ping_is_ignored() {
+        let d = tempfile::tempdir().unwrap();
+        let m = Message { mode: Some("ping".into()), ..msg("") };
+        assert!(!handle_message(d.path(), &m).unwrap());
+        assert!(!thread::bantou_dir(d.path()).join("inbox.jsonl").exists());
+    }
+
+    #[test]
+    fn mode_and_id_deserialize_and_ack_ids_skip_missing() {
+        let r: PollResponse = serde_json::from_str(
+            r#"{"messages":[{"id":3,"from_id":"a","from_name":"x","text":"","mode":"ping"},{"from_id":"b","text":"hi"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(r.messages[0].mode.as_deref(), Some("ping"));
+        assert_eq!(r.messages[1].mode, None);
+        assert_eq!(ack_ids(&r.messages), vec![3]);
     }
 
     #[test]
