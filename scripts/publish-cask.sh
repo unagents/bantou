@@ -48,8 +48,11 @@ NEW_CONTENT="$(printf '%s\n' "$CURRENT_CONTENT" \
   | sed -E "s/^([[:space:]]*version )\"[^\"]*\"/\1\"${VERSION}\"/" \
   | sed -E "s/^([[:space:]]*sha256 )\"[^\"]*\"/\1\"${SHA256}\"/")"
 
-mapfile -t OLD_LINES <<<"$CURRENT_CONTENT"
-mapfile -t NEW_LINES <<<"$NEW_CONTENT"
+# macOS 標準の bash 3.2 には mapfile が無いため while-read で配列化する
+OLD_LINES=()
+while IFS= read -r line; do OLD_LINES+=("$line"); done <<<"$CURRENT_CONTENT"
+NEW_LINES=()
+while IFS= read -r line; do NEW_LINES+=("$line"); done <<<"$NEW_CONTENT"
 
 if [[ "${#OLD_LINES[@]}" -ne "${#NEW_LINES[@]}" ]]; then
   echo "error: line count changed (${#OLD_LINES[@]} -> ${#NEW_LINES[@]}), aborting" >&2

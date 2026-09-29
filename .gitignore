@@ -1,19 +1,5 @@
-# careery
-# Personal sample data (skill sheets) must never be committed
-*.xlsx
-# Exception: synthetic, non-PII test fixture built from
-# docs/spec/xlsx-mapping-notes.md's documented column layout, and a
-# masked derivative of a real sample (client/title/work-content replaced
-# with placeholders — see docs/history/20260922-1650-xlsx-to-career-md/).
-# Neither contains real personal data.
-!src-tauri/careery-doc/tests/fixtures/*.xlsx
-*.pdf
+# bantou
 .claude/
-
-# Raw `--dry-run` output against the *unmasked* real samples
-# (docs/history/20260922-1650-xlsx-to-career-md/task.md, 2nd instruction,
-# 手順1). Contains real client/project names — never commit.
-docs/history/20260922-1650-xlsx-to-career-md/samples/
 
 # Nuxt
 node_modules
