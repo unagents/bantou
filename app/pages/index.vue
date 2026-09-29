@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useIntervalFn } from "@vueuse/core";
-import { brokerConnect, brokerStatus, createTask, instructAddTask, updateTaskStatus } from "~/api";
+import { brokerConnect, brokerStatus, instructAddTask, updateTaskStatus } from "~/api";
 import type { BrokerStatus, RegisterResult, Task } from "~/types";
 
 const { dir, loaded, load, pickAndOpen } = useWorkspace();
@@ -76,18 +76,6 @@ async function onSessionsAdded(results: RegisterResult[]) {
   }
 }
 
-// --- new task ----------------------------------------------------------------
-
-const createOpen = ref(false);
-async function onCreate(title: string, status: string, tags: string[]) {
-  try {
-    await createTask(title, status, tags);
-    await refresh();
-  } catch (e) {
-    toast.add({ title: "作成に失敗", description: String(e), color: "error" });
-  }
-}
-
 // --- instruct a session to add a task ------------------------------------------
 
 const instructTarget = ref<string | null>(null);
@@ -121,7 +109,6 @@ async function onInstruct(session: string, title: string, body: string) {
         :waiting-count="waitingCount"
         :broker="broker"
         @open="pickAndOpen"
-        @create="createOpen = true"
         @add-session="addSessionOpen = true"
       />
       <main class="mx-auto flex w-full max-w-5xl flex-col p-6">
@@ -164,12 +151,6 @@ async function onInstruct(session: string, title: string, body: string) {
       :registered="registered"
       :self-name="broker?.name ?? 'bantou-core'"
       @done="onSessionsAdded"
-    />
-    <NewTaskDialog
-      v-model:open="createOpen"
-      :statuses="statuses"
-      :sessions="sessions.map((s) => s.name)"
-      @create="onCreate"
     />
     <InstructTaskDialog
       :open="instructTarget !== null"

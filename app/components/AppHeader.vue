@@ -6,7 +6,7 @@ defineProps<{
   waitingCount: number;
   broker: BrokerStatus | null;
 }>();
-defineEmits<{ open: []; create: []; addSession: [] }>();
+defineEmits<{ open: []; addSession: [] }>();
 </script>
 
 <template>
@@ -48,7 +48,6 @@ defineEmits<{ open: []; create: []; addSession: [] }>();
         :disabled="!broker?.connected"
         @click="$emit('addSession')"
       />
-      <UButton size="sm" variant="ghost" color="neutral" icon="i-lucide-plus" label="タスク" @click="$emit('create')" />
       <UButton size="sm" variant="ghost" color="neutral" icon="i-lucide-folder-open" @click="$emit('open')" />
     </div>
   </header>

@@ -17,9 +17,10 @@ const showDone = ref(false);
       </span>
       <UButton
         size="xs"
-        variant="ghost"
-        color="neutral"
+        variant="soft"
+        color="primary"
         icon="i-lucide-list-plus"
+        label="タスク追加"
         :aria-label="`${group.name} にタスク追加を指示`"
         @click="$emit('instruct', group.name)"
       />

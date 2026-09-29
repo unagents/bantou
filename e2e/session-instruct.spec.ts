@@ -1,8 +1,15 @@
 import { expect, sentMessages, test } from "./fixtures";
 
+test("header has no standalone task button", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator("header").getByRole("button", { name: "タスク", exact: true })).toHaveCount(0);
+});
+
 test("session header button sends an add-task instruction to that session", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("button", { name: "stroke-board にタスク追加を指示" }).click();
+  const btn = page.getByRole("button", { name: "stroke-board にタスク追加を指示" });
+  await expect(btn).toContainText("タスク追加");
+  await btn.click();
   const dlg = page.locator('[role="dialog"]');
   await expect(dlg).toContainText("stroke-board にタスク追加を指示");
   const send = dlg.getByRole("button", { name: "指示を送信" });
