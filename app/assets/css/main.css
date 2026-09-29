@@ -1,0 +1,77 @@
+@import "tailwindcss";
+@import "@nuxt/ui";
+
+/* Ported from Cork's `src/style.css` `@theme` (koki-develop/Cork). Font faces
+   themselves are loaded by `unplugin-fonts` (see `nuxt.config.ts`'s `unfonts`
+   option), not by an `@import` here. */
+@theme {
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Space Grotesk Variable", ui-sans-serif, system-ui, sans-serif;
+
+  --color-cork-bg: #020617;
+  --color-cork-surface: #0f172a;
+  --color-cork-elevated: #1e293b;
+  --color-cork-border: #334155;
+  --color-cork-muted: #94a3b8;
+  --color-cork-text: #f1f5f9;
+  --color-cork-accent: #6366f1;
+  --color-cork-accent-hover: #818cf8;
+  --color-cork-danger-bg: #220808;
+  --color-cork-danger-border: #5c1a1a;
+  --color-cork-danger-text: #f87171;
+  --color-cork-success-text: #4ade80;
+  --color-cork-warning-text: #fbbf24;
+
+  /* Rendered height of the app chrome header. Kept in sync with the
+     `<header data-tauri-drag-region="deep">` in `app/pages/index.vue`. */
+  --cork-header-height: 3.25rem;
+}
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    @apply bg-cork-bg text-cork-text font-sans;
+  }
+
+  ::selection {
+    @apply bg-cork-accent/30 text-cork-text;
+  }
+
+  *:focus {
+    outline: none;
+  }
+
+  *:focus-visible {
+    outline: 2px solid color-mix(in oklab, var(--color-cork-accent) 50%, transparent);
+    outline-offset: 0;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms;
+      animation-iteration-count: 1;
+      transition-duration: 0.01ms;
+    }
+  }
+
+  [data-tauri-drag-region] {
+    app-region: drag;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  [data-tauri-drag-region] button,
+  [data-tauri-drag-region] input,
+  [data-tauri-drag-region] a,
+  [data-tauri-drag-region] select,
+  [data-tauri-drag-region] textarea {
+    app-region: no-drag;
+  }
+}

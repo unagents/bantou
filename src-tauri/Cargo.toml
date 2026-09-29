@@ -1,0 +1,63 @@
+[package]
+name = "bantou"
+version = "0.1.0"
+description = "Multi-agent task bridge for local Markdown task files"
+authors = ["grrow"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "bantou_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "=2.6.2", features = [] }
+
+[dependencies]
+gray_matter = "=0.3.2"
+yaml-rust2 = "=0.10.4"
+tauri = { version = "=2.11.2", features = [] }
+tauri-plugin-opener = "=2.5.4"
+tauri-plugin-fs = { version = "=2.5.1", features = ["watch"] }
+tauri-plugin-store = "=2.4.3"
+tauri-plugin-single-instance = "=2.4.2"
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = { version = "=1.0.150", features = ["preserve_order"] }
+rfd = "=0.17.2"
+rayon = "=1.12.0"
+rand = "=0.9.4"
+tokio = { version = "=1.52.3", features = ["sync", "time", "rt", "fs", "io-util", "process", "macros"] }
+time = { version = "=0.3.47", features = ["formatting"] }
+# The broker (agent-messenger) is reached over plain HTTP on the LAN.
+reqwest = { version = "=0.13.4", default-features = false, features = ["json"] }
+# Directed broadcast addresses for the messenger UDP discovery probe.
+if-addrs = "=0.15.0"
+
+[dev-dependencies]
+tempfile = "=3.27.0"
+# `tauri::test::mock_app` for the live responder test in `src/agent.rs`.
+tauri = { version = "=2.11.2", features = ["test"] }
+
+
+# AppKit window chrome (traffic-light repositioning, background colour) is
+# macOS-only — see `workspace.rs`. Keeping these out of the portable
+# `[dependencies]` table lets the crate build on Linux/Windows.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "=0.3.2", features = [
+  "NSColor",
+  "NSWindow",
+  "NSView",
+  "NSButton",
+  "NSControl",
+  "NSResponder",
+  "objc2-core-foundation",
+] }
+objc2-foundation = { version = "=0.3.2", features = [
+  "NSNotification",
+  "NSString",
+  "NSOperation",
+  "block2",
+] }
+objc2 = "=0.6.4"
+block2 = "=0.6.2"
