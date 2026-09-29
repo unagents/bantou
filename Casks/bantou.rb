@@ -1,6 +1,6 @@
 cask "bantou" do
-  version "0.1.5"
-  sha256 "5892273ae26a5784c9753f209e728bb74b0804300c4fa67a13b6ef25575aeb1f"
+  version "0.1.6"
+  sha256 "ed0a7383d61da2b5a28220af6e6bac5701b673de5b11f5c7edf2257565a6daaf"
 
   url "http://192.168.1.202/gitea/agent-hand/bantou/releases/download/v#{version}/bantou_#{version}_aarch64.dmg"
   name "bantou"
