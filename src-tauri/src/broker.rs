@@ -16,6 +16,7 @@
 //!   4. `127.0.0.1:7901`
 
 use crate::error::{CmdResult, CommandError};
+use crate::session;
 use crate::state::AppState;
 use crate::task;
 use crate::thread::{self, AskOption, Request, Thread, TimelineEntry, THREADS_CHANGED_EVENT};
@@ -30,6 +31,7 @@ use tauri::{Emitter, Manager};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 const HEARTBEAT_EVERY: u32 = 10; // polls → 20s, well inside the broker's 60s timeout
+const PRESENCE_EVERY: u32 = 15; // polls → 30s between checks for sessions that are gone
 
 /// How long one ping keeps a task marked as running.
 const PING_TTL: Duration = Duration::from_secs(5 * 60);
@@ -613,6 +615,7 @@ pub(crate) fn start_poller<R: tauri::Runtime>(app: tauri::AppHandle<R>, ws: Path
         let mut url = String::new();
         let pid = peer_pid();
         let mut tick: u32 = 0;
+        let mut absence = session::Absence::default();
         loop {
             let brokers = app.state::<Brokers>();
             if peer.is_none() {
@@ -654,6 +657,9 @@ pub(crate) fn start_poller<R: tauri::Runtime>(app: tauri::AppHandle<R>, ws: Path
                     }
                     _ => {}
                 }
+            }
+            if tick % PRESENCE_EVERY == 0 {
+                session::drop_absent(&app, &ws, &url, &id, &mut absence).await;
             }
             match post::<PollResponse>(&url, "/poll-messages", serde_json::json!({ "id": id })).await {
                 Ok(r) => {

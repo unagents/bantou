@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { Peer, RegisterResult, Session } from "~/types";
 
+export const SESSIONS_CHANGED_EVENT = "bantou://sessions-changed";
+
 export const listSessions = () => invoke<Session[]>("list_sessions");
 
 export const listPeers = () => invoke<Peer[]>("list_peers");

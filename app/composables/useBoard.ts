@@ -7,6 +7,7 @@ import {
   listTasks,
   listThreads,
   PINGS_CHANGED_EVENT,
+  SESSIONS_CHANGED_EVENT,
   THREADS_CHANGED_EVENT,
 } from "~/api";
 import type { Ping, Session, Task, Thread } from "~/types";
@@ -106,6 +107,7 @@ export function useBoard(dir: Ref<string | null>) {
 
   let unlisten: UnlistenFn | null = null;
   let unlistenPings: UnlistenFn | null = null;
+  let unlistenSessions: UnlistenFn | null = null;
   onMounted(async () => {
     unlisten = await listen<string>(THREADS_CHANGED_EVENT, (e) => {
       if (e.payload === dir.value) void refresh();
@@ -113,10 +115,14 @@ export function useBoard(dir: Ref<string | null>) {
     unlistenPings = await listen<string>(PINGS_CHANGED_EVENT, async (e) => {
       if (e.payload === dir.value) setPings(await listPings());
     });
+    unlistenSessions = await listen<string>(SESSIONS_CHANGED_EVENT, async (e) => {
+      if (e.payload === dir.value) registered.value = await listSessions();
+    });
   });
   onBeforeUnmount(() => {
     unlisten?.();
     unlistenPings?.();
+    unlistenSessions?.();
   });
 
   return { tasks, statuses, threads, registered, sessions, waitingCount, running, refresh };

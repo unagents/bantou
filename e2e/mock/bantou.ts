@@ -84,6 +84,12 @@ export class MockBantou {
     this.emitter("bantou://pings-changed", this.dir);
   }
 
+  /** Session `name` has been gone for the absence TTL: bantou drops it from the roster. */
+  dropAbsent(name: string) {
+    this.sessionsList = this.sessionsList.filter((s) => s.name !== name);
+    this.emitter("bantou://sessions-changed", this.dir);
+  }
+
   listenerIds(event: string) {
     return this.listeners.get(event) ?? [];
   }

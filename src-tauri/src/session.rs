@@ -3,15 +3,29 @@
 //! The user picks messenger peers from the broker's peer list; bantou keeps
 //! them as a per-workspace roster by name (peer ids change on every
 //! reconnect) in `bantou_dir(ws)/sessions.json`, and sends each one the
-//! bantou protocol over messenger.
+//! bantou protocol over messenger. A session that stays away from the
+//! broker's peer list for `SESSION_ABSENT_TTL` is dropped from the roster.
 
 use crate::broker::{self, Brokers};
 use crate::error::{CmdResult, CommandError};
 use crate::state::AppState;
 use crate::thread;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Duration;
+use tauri::{Emitter, Manager};
+use time::OffsetDateTime;
+
+pub const SESSIONS_CHANGED_EVENT: &str = "bantou://sessions-changed";
+
+/// A roster session absent from the broker's peer list this long is removed.
+pub const SESSION_ABSENT_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// Observations further apart than this are not continuous (machine asleep,
+/// broker unreachable): absence is counted again from the later one.
+const OBSERVE_MAX_GAP: Duration = Duration::from_secs(90);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Session {
@@ -88,6 +102,81 @@ impl Sessions {
         list.retain(|s| s.name != name);
         write_roster(ws, &list)
     }
+}
+
+/// Absence of the roster sessions of one workspace, in memory only.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Absence {
+    /// Time of the previous successful observation.
+    observed_at: Option<OffsetDateTime>,
+    /// Session name → since when it has been continuously absent.
+    since: HashMap<String, OffsetDateTime>,
+}
+
+/// A session is present when a live peer has its name, or its hostname and
+/// cwd (the peer name is lost on reconnect).
+fn present(s: &Session, live: &[Peer]) -> bool {
+    live.iter().any(|p| p.name == s.name || (p.hostname == s.hostname && p.cwd == s.cwd))
+}
+
+/// One observation of the peer list at `now`; `live` is `None` when it could
+/// not be fetched. Returns the names of the sessions to remove and the next
+/// state. Absence is counted between continuous observations only.
+pub fn observe(
+    roster: &[Session],
+    live: Option<&[Peer]>,
+    prev: &Absence,
+    now: OffsetDateTime,
+) -> (Vec<String>, Absence) {
+    let Some(live) = live else {
+        return (Vec::new(), Absence::default());
+    };
+    let continuous = prev.observed_at.is_some_and(|at| now - at <= OBSERVE_MAX_GAP);
+    let mut next = Absence { observed_at: Some(now), since: HashMap::new() };
+    let mut gone = Vec::new();
+    for s in roster.iter().filter(|s| !present(s, live)) {
+        let since = match prev.since.get(&s.name) {
+            Some(at) if continuous => *at,
+            _ => now,
+        };
+        if now - since >= SESSION_ABSENT_TTL {
+            gone.push(s.name.clone());
+        } else {
+            next.since.insert(s.name.clone(), since);
+        }
+    }
+    (gone, next)
+}
+
+/// Observe the peer list of the broker at `url` once and drop the sessions of
+/// `ws` that have been gone for `SESSION_ABSENT_TTL`. Roster only: task md
+/// files stay and nothing is sent to the session. `me` is bantou's own peer id.
+pub(crate) async fn drop_absent<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    ws: &Path,
+    url: &str,
+    me: &str,
+    absence: &mut Absence,
+) {
+    let Some(roster) = app.try_state::<Sessions>() else {
+        return;
+    };
+    let live = broker::post::<Vec<Peer>>(url, "/list-peers", serde_json::json!({ "scope": "all" }))
+        .await
+        .ok()
+        // bantou itself is a peer whose cwd is the workspace.
+        .map(|ps| ps.into_iter().filter(|p| p.id != me).collect::<Vec<_>>());
+    let (gone, next) = observe(&roster.list(ws), live.as_deref(), absence, OffsetDateTime::now_utc());
+    *absence = next;
+    if gone.is_empty() {
+        return;
+    }
+    for name in &gone {
+        if let Err(e) = roster.remove(ws, name) {
+            eprintln!("bantou: failed to drop absent session {name}: {e}");
+        }
+    }
+    let _ = app.emit(SESSIONS_CHANGED_EVENT, ws.to_string_lossy().to_string());
 }
 
 /// The protocol text sent to a newly registered session. `core` is this
@@ -307,5 +396,112 @@ mod tests {
         assert_eq!(std::fs::read_dir(a.path()).unwrap().count(), 0);
         r.remove(a.path(), "x").unwrap();
         assert!(r.list(a.path()).is_empty());
+    }
+
+    fn sess(name: &str) -> Session {
+        Session { name: name.into(), hostname: "mac".into(), cwd: format!("/w/{name}"), registered_at: String::new() }
+    }
+
+    fn peer(name: &str, hostname: &str, cwd: &str) -> Peer {
+        Peer {
+            id: format!("id-{name}-{cwd}"),
+            name: name.into(),
+            hostname: hostname.into(),
+            cwd: cwd.into(),
+            tty: None,
+            summary: String::new(),
+            last_seen: String::new(),
+            assign_name: None,
+        }
+    }
+
+    fn at(secs: i64) -> OffsetDateTime {
+        OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(secs)
+    }
+
+    /// Observe every 30 s from `from` to `to` (seconds); returns every name removed on the way.
+    fn watch(roster: &[Session], live: &[Peer], state: &mut Absence, from: i64, to: i64) -> Vec<String> {
+        let mut gone = Vec::new();
+        for t in (from..=to).step_by(30) {
+            let (g, next) = observe(roster, Some(live), state, at(t));
+            *state = next;
+            gone.extend(g);
+        }
+        gone
+    }
+
+    #[test]
+    fn present_by_host_and_cwd_without_name() {
+        let mut st = Absence::default();
+        let live = [peer("", "mac", "/w/careery")];
+        assert!(watch(&[sess("careery")], &live, &mut st, 0, 900).is_empty());
+        assert!(st.since.is_empty());
+        // same cwd on another host is someone else
+        let other = [peer("", "mac200", "/w/careery")];
+        watch(&[sess("careery")], &other, &mut st, 930, 930);
+        assert_eq!(st.since.get("careery"), Some(&at(930)));
+    }
+
+    #[test]
+    fn present_by_name() {
+        let mut st = Absence::default();
+        let live = [peer("careery", "mac200", "/elsewhere")];
+        assert!(watch(&[sess("careery")], &live, &mut st, 0, 900).is_empty());
+        assert!(st.since.is_empty());
+    }
+
+    #[test]
+    fn absent_below_ttl_is_kept() {
+        let mut st = Absence::default();
+        assert!(watch(&[sess("careery")], &[], &mut st, 0, 570).is_empty());
+        assert_eq!(st.since.get("careery"), Some(&at(0)));
+    }
+
+    #[test]
+    fn absent_for_ttl_is_removed() {
+        let mut st = Absence::default();
+        let roster = [sess("careery"), sess("stroke-board")];
+        let live = [peer("stroke-board", "mac", "/w/stroke-board")];
+        assert!(watch(&roster, &live, &mut st, 0, 570).is_empty());
+        let (gone, next) = observe(&roster, Some(&live), &st, at(600));
+        assert_eq!(gone, vec!["careery".to_string()]);
+        assert!(next.since.is_empty());
+    }
+
+    #[test]
+    fn seen_again_resets() {
+        let mut st = Absence::default();
+        let roster = [sess("careery")];
+        assert!(watch(&roster, &[], &mut st, 0, 300).is_empty());
+        assert!(watch(&roster, &[peer("careery", "mac", "/w/careery")], &mut st, 330, 330).is_empty());
+        assert!(st.since.is_empty());
+        assert!(watch(&roster, &[], &mut st, 360, 930).is_empty());
+        assert_eq!(watch(&roster, &[], &mut st, 960, 960), vec!["careery".to_string()]);
+    }
+
+    #[test]
+    fn observation_gap_resets() {
+        let mut st = Absence::default();
+        let roster = [sess("careery")];
+        assert!(watch(&roster, &[], &mut st, 0, 570).is_empty());
+        // machine asleep for an hour: the time in between was not observed
+        assert!(watch(&roster, &[], &mut st, 4170, 4170).is_empty());
+        assert_eq!(st.since.get("careery"), Some(&at(4170)));
+        assert!(watch(&roster, &[], &mut st, 4200, 4740).is_empty());
+        assert_eq!(watch(&roster, &[], &mut st, 4770, 4770), vec!["careery".to_string()]);
+    }
+
+    #[test]
+    fn failed_observation_resets() {
+        let mut st = Absence::default();
+        let roster = [sess("careery")];
+        assert!(watch(&roster, &[], &mut st, 0, 570).is_empty());
+        let (gone, next) = observe(&roster, None, &st, at(600));
+        assert!(gone.is_empty());
+        assert_eq!(next, Absence::default());
+        st = next;
+        assert!(watch(&roster, &[], &mut st, 630, 1200).is_empty());
+        assert_eq!(st.since.get("careery"), Some(&at(630)));
+        assert_eq!(watch(&roster, &[], &mut st, 1230, 1230), vec!["careery".to_string()]);
     }
 }

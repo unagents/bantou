@@ -109,6 +109,19 @@ test("unnamed peer: pick, name it (defaults to cwd basename), set_name instructi
   expect(sent[0]!.text).toContain("set_name「inet250」");
 });
 
+test("a session dropped from the roster disappears without a reload, other rows stay", async ({ page }) => {
+  await page.goto("/");
+  await expect(session(page, "careery")).toBeVisible();
+  await page.evaluate(() =>
+    (
+      window as unknown as { __BANTOU_MOCK__: { dropAbsent: (name: string) => void } }
+    ).__BANTOU_MOCK__.dropAbsent("careery"),
+  );
+  await expect(session(page, "careery")).toHaveCount(0);
+  await expect(session(page, "agent-messenger")).toBeVisible();
+  await expect(session(page, "stroke-board")).toBeVisible();
+});
+
 test("IME conversion Enter does not send; plain Enter does", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "返答待ち" }).click();
