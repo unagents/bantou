@@ -21,8 +21,8 @@ Tailwind CSS 4). The Rust app shell is derived from careery / [Cork](https://git
 Homebrew cask で配る。tap の実体はこのリポジトリ自身で、cask は `Casks/bantou.rb`。
 
 ```sh
-brew tap grrowapp/bantou http://192.168.1.202/gitea/grrowapp/bantou.git
-brew trust --tap grrowapp/bantou
+brew tap agent-hand/bantou http://192.168.1.202/gitea/agent-hand/bantou.git
+brew trust --tap agent-hand/bantou
 brew install --cask bantou
 ```
 

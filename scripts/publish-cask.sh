@@ -21,7 +21,7 @@ REPO_ROOT="$SCRIPT_DIR/.."
 
 GITEA_HOST="192.168.1.202"
 GITEA_API="http://${GITEA_HOST}/gitea/api/v1"
-OWNER="grrowapp"
+OWNER="agent-hand"
 REPO="bantou"
 CASK_PATH="Casks/bantou.rb"
 BRANCH="main"

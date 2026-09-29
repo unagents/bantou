@@ -1,6 +1,6 @@
 require "cask/auditor"
 require "cask/cask_loader"
-path = "/opt/homebrew/Library/Taps/grrowapp/homebrew-bantou/Casks/bantou.rb"
+path = "/opt/homebrew/Library/Taps/agent-hand/homebrew-bantou/Casks/bantou.rb"
 errors = Cask::Auditor.audit(
   Cask::CaskLoader.load(path),
   audit_strict:   true,
