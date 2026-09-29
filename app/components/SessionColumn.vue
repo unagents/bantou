@@ -2,8 +2,8 @@
 import type { SessionGroup } from "~/composables/useBoard";
 import type { Task, Thread } from "~/types";
 
-defineProps<{ group: SessionGroup; threads: Record<string, Thread>; statuses: string[] }>();
-defineEmits<{ openThread: [task: Task]; setStatus: [task: Task, status: string]; instruct: [session: string] }>();
+defineProps<{ group: SessionGroup; threads: Record<string, Thread> }>();
+defineEmits<{ openThread: [task: Task]; instruct: [session: string] }>();
 const showDone = ref(false);
 </script>
 
@@ -15,15 +15,16 @@ const showDone = ref(false);
       <span class="text-cork-muted ml-auto text-xs font-normal">
         {{ group.working.length }} / {{ group.queued.length }}
       </span>
-      <UButton
-        size="xs"
-        variant="soft"
-        color="primary"
-        icon="i-lucide-list-plus"
-        label="タスク追加"
-        :aria-label="`${group.name} にタスク追加を指示`"
-        @click="$emit('instruct', group.name)"
-      />
+      <UTooltip text="タスク追加を指示">
+        <UButton
+          size="xs"
+          variant="soft"
+          color="primary"
+          icon="i-lucide-circle-plus"
+          :aria-label="`${group.name} にタスク追加を指示`"
+          @click="$emit('instruct', group.name)"
+        />
+      </UTooltip>
     </h2>
     <ul class="divide-cork-border flex flex-col divide-y">
       <TaskRow
@@ -32,9 +33,7 @@ const showDone = ref(false);
         :task="t"
         :thread="threads[t.id]"
         kind="working"
-        :statuses="statuses"
         @open-thread="$emit('openThread', $event)"
-        @set-status="(t, s) => $emit('setStatus', t, s)"
       />
       <TaskRow
         v-for="t in group.queued"
@@ -42,9 +41,7 @@ const showDone = ref(false);
         :task="t"
         :thread="threads[t.id]"
         kind="queued"
-        :statuses="statuses"
         @open-thread="$emit('openThread', $event)"
-        @set-status="(t, s) => $emit('setStatus', t, s)"
       />
     </ul>
     <p
@@ -67,9 +64,7 @@ const showDone = ref(false);
         :task="t"
         :thread="threads[t.id]"
         kind="done"
-        :statuses="statuses"
         @open-thread="$emit('openThread', $event)"
-        @set-status="(t, s) => $emit('setStatus', t, s)"
       />
     </ul>
   </section>

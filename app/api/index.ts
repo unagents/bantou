@@ -1,7 +1,7 @@
 // Single entry point for every Tauri `invoke` — components import from
 // `~/api` and never call `invoke` directly.
 export { instructAddTask, listPeers, listSessions, registerSessions, unregisterSession } from "./sessions";
-export { getStatuses, listTasks, updateTaskStatus } from "./tasks";
+export { getStatuses, listTasks } from "./tasks";
 export {
   AGENT_EVENT,
   agentAnswer,

@@ -111,11 +111,6 @@ export class MockBantou {
         this.tasks.push(t);
         return t;
       }
-      case "update_task_status": {
-        const t = this.tasks.find((x) => x.path === args.path)!;
-        t.status = args.status as string;
-        return structuredClone(t);
-      }
       case "list_sessions":
         return structuredClone(this.sessionsList);
       case "list_peers":

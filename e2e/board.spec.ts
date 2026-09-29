@@ -64,18 +64,11 @@ test("free-text answer when no option fits", async ({ page }) => {
   await expect(dlg).toContainText("回答済み: 一旦保留、先にズーム修正");
 });
 
-test("status change moves a queued task up to working", async ({ page }) => {
+test("status is read-only text (no status combobox)", async ({ page }) => {
   await page.goto("/");
   const careery = session(page, "careery");
-  await careery.getByRole("combobox", { name: "ズーム時のレイアウト崩れ修正 のステータス" }).click();
-  await page.getByRole("option", { name: "Doing" }).click();
-  await expect(careery.locator("li")).toHaveCount(2);
-  const sel = careery.getByRole("combobox", { name: "ズーム時のレイアウト崩れ修正 のステータス" });
-  await expect(sel).toContainText("Doing");
-  await careery.getByRole("combobox", { name: "スキルシート xlsx 取込の列マッピング のステータス" }).click();
-  await page.getByRole("option", { name: "Done" }).click();
-  await expect(careery.locator("li")).toHaveCount(1);
-  await expect(careery).toContainText("完了 2 件");
+  await expect(careery).toContainText("Doing");
+  await expect(page.getByRole("combobox")).toHaveCount(0);
 });
 
 test("a tag that is not a registered session is not listed", async ({ page }) => {

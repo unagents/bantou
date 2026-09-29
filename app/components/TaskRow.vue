@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import type { Task, Thread } from "~/types";
 
-defineProps<{ task: Task; thread?: Thread; kind: "working" | "queued" | "done"; statuses: string[] }>();
-defineEmits<{ openThread: [task: Task]; setStatus: [task: Task, status: string] }>();
+defineProps<{ task: Task; thread?: Thread; kind: "working" | "queued" | "done" }>();
+defineEmits<{ openThread: [task: Task] }>();
 </script>
 
 <template>
@@ -16,15 +16,7 @@ defineEmits<{ openThread: [task: Task]; setStatus: [task: Task, status: string] 
       class="text-cork-muted size-4 shrink-0"
     />
     <span class="min-w-0 flex-1 truncate">{{ task.title }}</span>
-    <USelect
-      :model-value="task.status"
-      :items="statuses"
-      size="xs"
-      variant="ghost"
-      class="text-cork-muted w-24 shrink-0"
-      :aria-label="`${task.title} のステータス`"
-      @update:model-value="(v) => $emit('setStatus', task, String(v))"
-    />
+    <span class="text-cork-muted w-24 shrink-0 text-xs">{{ task.status }}</span>
     <UButton
       v-if="thread?.status === 'waiting'"
       size="xs"

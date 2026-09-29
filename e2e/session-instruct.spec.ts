@@ -8,7 +8,6 @@ test("header has no standalone task button", async ({ page }) => {
 test("session header button sends an add-task instruction to that session", async ({ page }) => {
   await page.goto("/");
   const btn = page.getByRole("button", { name: "stroke-board にタスク追加を指示" });
-  await expect(btn).toContainText("タスク追加");
   await btn.click();
   const dlg = page.locator('[role="dialog"]');
   await expect(dlg).toContainText("stroke-board にタスク追加を指示");

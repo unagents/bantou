@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { useIntervalFn } from "@vueuse/core";
-import { brokerConnect, brokerStatus, instructAddTask, updateTaskStatus } from "~/api";
+import { brokerConnect, brokerStatus, instructAddTask } from "~/api";
 import type { BrokerStatus, RegisterResult, Task } from "~/types";
 
 const { dir, loaded, load, pickAndOpen } = useWorkspace();
-const { statuses, threads, registered, sessions, waitingCount, refresh } = useBoard(dir);
+const { threads, registered, sessions, waitingCount, refresh } = useBoard(dir);
 const toast = useToast();
 
 useWorkspaceWatcher(dir, () => void refresh());
@@ -52,15 +52,6 @@ function openThread(t: Task) {
 watch(modalOpen, (v) => {
   if (!v) activeTask.value = null;
 });
-
-async function onSetStatus(t: Task, status: string) {
-  try {
-    await updateTaskStatus(t.path, status);
-    await refresh();
-  } catch (e) {
-    toast.add({ title: "ステータス変更に失敗", description: String(e), color: "error" });
-  }
-}
 
 // --- add session -----------------------------------------------------------
 
@@ -117,9 +108,7 @@ async function onInstruct(session: string, title: string, body: string) {
           :key="g.name"
           :group="g"
           :threads="threads"
-          :statuses="statuses"
           @open-thread="openThread"
-          @set-status="onSetStatus"
           @instruct="instructTarget = $event"
         />
         <div
