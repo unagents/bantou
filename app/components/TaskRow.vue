@@ -17,6 +17,7 @@ defineEmits<{ openThread: [task: Task] }>();
     />
     <span class="min-w-0 flex-1 truncate">{{ task.title }}</span>
     <span class="text-cork-muted w-24 shrink-0 text-xs">{{ task.status }}</span>
+    <span class="flex w-7 shrink-0 justify-end">
     <UButton
       v-if="thread?.status === 'waiting'"
       size="xs"
@@ -36,5 +37,6 @@ defineEmits<{ openThread: [task: Task] }>();
       aria-label="やり取り履歴"
       @click="$emit('openThread', task)"
     />
+    </span>
   </li>
 </template>
