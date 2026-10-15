@@ -1,22 +1,2 @@
-# bantou
 .claude/
-
-# Nuxt
-node_modules
-.nuxt
-.output
-.data
-dist
-.env
-.env.*
-!.env.example
-*.log
-
-# Editor / OS
-.vscode/*
-!.vscode/extensions.json
-.idea
 .DS_Store
-
-# Session
-.session_init/
