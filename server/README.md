@@ -1,6 +1,6 @@
 # bantou-server
 
-**実装未着手。** 役割フォルダのみ用意した状態。
+**雛形のみ（業務ロジック未実装）。** 起動・設定読込・workspace 準備・終了処理だけを持つ常駐プロセス。
 
 ## 役割
 
@@ -14,9 +14,27 @@ desktop/ から見た「リモートホストのセッション」を扱う窓�
 - desktop が司令塔。指示を出す側。
 - server は指示を受ける側。自律的に方針を決めない。
 
+## 確定事項
+
+- 技術スタック: Rust（edition 2021、Tauri なしの Linux 常駐プロセス）。lib（`bantou_server`）＋薄い bin 構成。
+- 設定: TOML。キーは `workspace`（workspace フォルダの絶対パス）。例: `workspace = "/path/to/workspace"`
+- 設定ファイルの場所: `--config <path>`。省略時は `$HOME/.config/bantou-server/config.toml`。
+- workspace 構成: `<workspace>/repos/` が repo の展開先。起動時に `<workspace>` と `<workspace>/repos/` を作成する。
+- 常駐: 起動後は常駐し、SIGTERM / SIGINT で後始末して終了コード 0 で終了する。
+- systemd user unit のテンプレート: `systemd/bantou-server.service`（未インストール）。
+
+## ビルド・実行
+
+`server/` で実行する。
+
+```
+cargo build
+cargo test
+cargo run -- --config /path/to/config.toml
+```
+
 ## 未決定事項
 
-- 技術スタック
 - desktop と server の通信方式
 - 配置先ホスト
 - work session との接続方式（既存 `protocol.md` の agent-messenger 経路（`bantou-core` 宛）をそのまま使うか）

@@ -3,7 +3,7 @@
 ## Map
 
 - `desktop/`: Mac 上で動く bantou-desktop（Tauri 2 + Nuxt 4）。司令塔。
-- `server/`: リモートサーバー側で動く bantou-server。desktop の指示を受けて orchestration を管理する。実装未着手。
+- `server/`: リモートサーバー側で動く bantou-server。desktop の指示を受けて orchestration を管理する。雛形のみ（業務ロジック未実装）。
 - `docs/`: 共通資料。`protocol.md` / `guardrail.md` / `handoff.md`。
 - `plugin/`: work session に配る Claude Code plugin `bantou`。
 - `Casks/`: Homebrew tap 用の生成物。正本は `desktop/Casks/`。手編集禁止。
