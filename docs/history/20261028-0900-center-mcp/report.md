@@ -59,7 +59,7 @@ E2E OK
 Error: You must be logged in to use Remote Control.
 ```
 
-- 試行時の center は子の env から `ANTHROPIC_API_KEY` と `TMUX` を除くだけで、`CLAUDE_CONFIG_DIR` は引き継ぐ。それでも未ログイン判定になった。`claude auth status` は同じ環境で loggedIn=true（max）。原因は未特定（sandbox 内実行で認証情報の扱いが異なる可能性。推測）。stub の結果で代替した。
+- 試行時の center は子の env から `ANTHROPIC_API_KEY` と `TMUX` を除くだけで、`CLAUDE_CONFIG_DIR` は引き継ぐ。それでも未ログイン判定になった。`claude auth status` は同じ環境で loggedIn=true（max）。原因は sandbox の network 制限の可能性が高い（推測、「範囲外の問題」参照）。stub の結果で代替した。
 
 ## commit
 
@@ -85,6 +85,6 @@ Error: You must be logged in to use Remote Control.
 ## 範囲外の問題
 
 - `server/` の変更は task.md で禁止だったが、`session.env` はユーザーの直接指示、error 返信への id 追加はレビューで見つけた不具合の修正（最小差分）。
-- center の remote-control の子にも任意の env を渡す設定は無い。本物の remote-control の未ログイン問題を解く手段として、`remoteControl.env` が要る可能性がある（未対応）。
+- 本物の remote-control の未ログイン判定は、sandbox の network 制限が原因の可能性が高い（推測）。`CLAUDE_CONFIG_DIR` は引き継がれており、sandbox 内の `claude -p` も Anthropic の接続先を許可するまで API に繋がらなかった。sandbox 外か接続先許可付きで再試行して切り分けるのがよい（未実施）。
 - root の `package.json` の workspaces は `packages/*` を含むが、`bun.lock` は更新していない（center は npm で依存を入れた）。
 - 再起動回数の上限（既定 5）は接続成功で戻らない。約 10 分の回線断で落ちる仕様のため、長期常駐ではいずれ `error` になる。
