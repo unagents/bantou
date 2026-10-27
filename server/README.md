@@ -4,43 +4,58 @@
 
 ## 役割
 
-bantou は multi-agent task bridge で、Mac 上で動く bantou-desktop（`../desktop/`、Tauri 2 + Nuxt 4）が司令塔となる。
-bantou-server はリモートサーバー側で動くコンポーネントで、bantou-desktop からの指示を受け、
-そのホスト上の orchestration（work session 群）を管理する。
-desktop/ から見た「リモートホストのセッション」を扱う窓口がここになる。
+- linux / mac で動く npm package（`@agent-hand/bantou-server`）。`npx` で起動する。
+- bantou-desktop（`../desktop/`、mac / windows のネイティブアプリ）からの指示を受ける。
+- 担当は 2 つ。remote session の起動（`src/session.ts`）と、remote cap（オーケストレーター）の起動（`src/cap.ts`）。
+- desktop が指示を出す側。server は受ける側で、自律的に方針を決めない。
 
-## desktop との関係
-
-- desktop が司令塔。指示を出す側。
-- server は指示を受ける側。自律的に方針を決めない。
-
-## 確定事項
-
-- 技術スタック: Rust（edition 2021、Tauri なしの Linux 常駐プロセス）。lib（`bantou_server`）＋薄い bin 構成。
-- 設定: TOML。キーは `workspace`（workspace フォルダの絶対パス）。例: `workspace = "/path/to/workspace"`
-- 設定ファイルの場所: `--config <path>`。省略時は `$HOME/.config/bantou-server/config.toml`。
-- workspace 構成: `<workspace>/repos/` が repo の展開先。起動時に `<workspace>` と `<workspace>/repos/` を作成する。
-- 常駐: 起動後は常駐し、SIGTERM / SIGINT で後始末して終了コード 0 で終了する。
-- systemd user unit のテンプレート: `systemd/bantou-server.service`（未インストール）。
-
-## ビルド・実行
-
-`server/` で実行する。
+## 起動方法
 
 ```
-cargo build
-cargo test
-cargo run -- --config /path/to/config.toml
+npx @agent-hand/bantou-server --config <path>
 ```
+
+- `--config` 省略時は `~/.config/bantou-server/config.json`。
+- それ以外の引数は exit 2。実行時エラーは exit 1。
+- SIGTERM / SIGINT で後始末して exit 0。
+
+開発時は `server/` で実行する。
+
+```
+npm install
+npm run typecheck
+npm run build
+npm test
+npm run dev -- --config <path>
+```
+
+dev / test は `node --import tsx` を使う。Node >=22 のみで動き、bun を要しない。
+
+## config.json
+
+```json
+{ "workspace": "/path/to/workspace" }
+```
+
+- `workspace`（必須）: workspace フォルダの絶対パス。
+
+## workspace レイアウト
+
+```
+<workspace>/
+  repos/    repo の展開先
+```
+
+起動時に `<workspace>/` と `<workspace>/repos/` が無ければ作る。
 
 ## 未決定事項
 
 - desktop と server の通信方式
+- remote session と remote cap の起動手順の詳細
 - 配置先ホスト
-- work session との接続方式（既存 `protocol.md` の agent-messenger 経路（`bantou-core` 宛）をそのまま使うか）
 
 ## 関連資料
 
-- [`../docs/protocol.md`](../docs/protocol.md) — work session と bantou のメッセージ仕様（agent-messenger 経由、`bantou-core` 宛）
-- [`../docs/guardrail.md`](../docs/guardrail.md) — Open questions 1「リモートホストの session が登録状態を知る手段」。server の守備範囲になりうる
-- [`../desktop/README.md`](../desktop/README.md) — bantou-desktop の概要
+- [`../docs/protocol.md`](../docs/protocol.md)
+- [`../docs/guardrail.md`](../docs/guardrail.md)
+- [`../desktop/README.md`](../desktop/README.md)

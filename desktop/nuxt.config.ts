@@ -3,6 +3,7 @@
 // `devServer.port` is fixed so `src-tauri/tauri.conf.json > build.devUrl` can point at it.
 export default defineNuxtConfig({
   compatibilityDate: "2025-05-15",
+  srcDir: "src/",
   devtools: { enabled: false },
   modules: ["@nuxt/ui", "unplugin-fonts/nuxt"],
   css: ["~/assets/css/main.css"],
@@ -17,7 +18,7 @@ export default defineNuxtConfig({
     fallback: "dark",
   },
   // Loads the Cork font stack (`--font-sans` / `--font-display` in
-  // app/assets/css/main.css) via the Fontsource provider; requires the
+  // src/assets/css/main.css) via the Fontsource provider; requires the
   // `@fontsource-variable/inter` / `@fontsource-variable/space-grotesk`
   // packages (see package.json).
   unfonts: {

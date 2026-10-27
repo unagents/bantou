@@ -1,0 +1,29 @@
+{
+  "name": "@agent-hand/bantou-server",
+  "version": "0.1.0",
+  "description": "bantou-server: remote session / remote cap launcher for bantou-desktop",
+  "type": "module",
+  "bin": {
+    "bantou-server": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "node --import tsx src/cli.ts",
+    "test": "node --import tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "registry": "http://192.168.1.202/gitea/api/packages/agent-hand/npm/"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

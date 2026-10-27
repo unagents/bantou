@@ -2,16 +2,17 @@
 
 ## Map
 
-- `desktop/`: Mac 上で動く bantou-desktop（Tauri 2 + Nuxt 4）。司令塔。
-- `server/`: リモートサーバー側で動く bantou-server。desktop の指示を受けて orchestration を管理する。雛形のみ（業務ロジック未実装）。
+- `desktop/`: Tauri 2 + Nuxt 4。`src/`（Nuxt、Cork の `src/` 相当）と `src-tauri/`（Rust）。
+- `server/`: TypeScript。npm package として npx で起動。desktop からの remote session 起動と remote cap の起動を担う。雛形のみ。
+- `packages/protocol/`: desktop・server・plugin 共通のメッセージ仕様と TS 型。雛形のみ。
 - `docs/`: 共通資料。`protocol.md` / `guardrail.md` / `handoff.md`。
 - `plugin/`: work session に配る Claude Code plugin `bantou`。
 - `Casks/`: Homebrew tap 用の生成物。正本は `desktop/Casks/`。手編集禁止。
 
 ## desktop と server の関係
 
-- desktop = 司令塔（Mac）。
-- server = リモート側で desktop の指示を受けて orchestration を管理する。
+- desktop = mac/windows のネイティブアプリ。リモート・ローカルのコーディングエージェントとのやり取りを束ねる窓口（マルチプレクサ）。
+- server = linux/mac で動く npm package。desktop からの remote session 起動と remote cap 起動を担当。
 - desktop と server の通信方式は未決定。
 
 ## 役割分離ルール

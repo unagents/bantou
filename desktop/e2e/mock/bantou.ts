@@ -1,4 +1,4 @@
-import type { BrokerStatus, Peer, Session, Task, Thread } from "../../app/types";
+import type { BrokerStatus, Peer, Session, Task, Thread } from "../../src/types";
 
 export interface Seed {
   dir: string | null;
