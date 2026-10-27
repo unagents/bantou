@@ -7,7 +7,6 @@
 - `packages/protocol/`: desktop・server・plugin 共通のメッセージ仕様と TS 型。雛形のみ。
 - `docs/`: 共通資料。`protocol.md` / `guardrail.md` / `handoff.md`。
 - `plugin/`: work session に配る Claude Code plugin `bantou`。
-- `Casks/`: Homebrew tap 用の生成物。正本は `desktop/Casks/`。手編集禁止。
 
 ## desktop と server の関係
 
@@ -31,10 +30,11 @@
 
 ## publish 方針（確定事項）
 
-- Gitea `agent-hand/bantou` を monorepo として継続する。
-- Homebrew は default branch の root `Casks/` しか読まない。
-- 正本 `desktop/Casks/bantou.rb` から `desktop/scripts/publish-cask.sh` が root `Casks/bantou.rb` を生成し、Gitea main へ PUT する。
-- tap URL・cask url・dmg の Releases は無変更。
+- 主リポは GitHub `unagents/bantou`。Gitea は pull mirror（読み取り専用）。
+- Homebrew tap は別リポ `unagents/homebrew-tap`（`brew tap unagents/tap`）。
+- 正本 `desktop/Casks/bantou.rb` から `desktop/scripts/publish-cask.sh` が tap リポの `Casks/bantou.rb` を API 更新する。
+- dmg は GitHub Releases に置く。
+- server は npm package `bantou` として公開 npm へ publish する。
 
 ## 注意
 

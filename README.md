@@ -9,7 +9,6 @@ Multi-agent task bridge の monorepo。
 - `packages/protocol/`: desktop・server・plugin 共通のメッセージ仕様と TS 型。雛形のみ。
 - `docs/`: 共通資料。`protocol.md`（work session と bantou のメッセージ仕様）、`guardrail.md`（Claude Code plugin による guardrail）、`handoff.md`（開発引き継ぎメモ）。
 - `plugin/`: work session に配る Claude Code plugin `bantou`。
-- `Casks/`: Homebrew tap 用の生成物。正本は `desktop/Casks/`。手編集禁止。
 
 ## 配布・リリース
 

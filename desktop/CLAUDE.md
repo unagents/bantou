@@ -19,14 +19,12 @@ Run E2E on mac200, never on this Mac.
 Do it without asking once the review check passes.
 
 1. Bump the version in `package.json` and `src-tauri/Cargo.toml`. Commit on develop.
-2. `git push origin develop`, fast-forward main (`git merge --ff-only develop`), `git push origin main`, back to develop.
+2. Push to GitHub (remote `github`, or `origin` once switched): `git push <remote> develop`, fast-forward main (`git merge --ff-only develop`), `git push <remote> main`, back to develop.
 3. Build: `CI=true bun run tauri build`. Output: `src-tauri/target/release/bundle/dmg/bantou_<ver>_aarch64.dmg`.
-4. Gitea release (basic auth from `git credential fill`, host 192.168.1.202):
-   - `POST /gitea/api/v1/repos/agent-hand/bantou/releases` with `{"tag_name":"v<ver>","target_commitish":"main","name":"v<ver>"}`
-   - `POST .../releases/<id>/assets?name=bantou_<ver>_aarch64.dmg` with `-F attachment=@<dmg>`
-5. Cask: `scripts/publish-cask.sh <ver> $(shasum -a 256 <dmg> | cut -d' ' -f1)`. Then `git pull origin main` on develop.
-   Generates `Casks/bantou.rb` at the repo root from `desktop/Casks/bantou.rb` and PUTs it to Gitea main.
-6. This Mac: `/opt/homebrew/bin/brew update` and `/opt/homebrew/bin/brew upgrade --cask bantou`. Use `/opt/homebrew/bin/brew`, never `/usr/local/bin/brew`.
+4. GitHub release: `gh release create v<ver> <dmg> --title v<ver> --notes ""`
+5. Cask: `scripts/publish-cask.sh <ver> $(shasum -a 256 <dmg> | cut -d' ' -f1)`.
+   Updates `desktop/Casks/bantou.rb` and updates `Casks/bantou.rb` in GitHub `unagents/homebrew-tap` via API.
+6. This Mac (tap `unagents/tap`): `/opt/homebrew/bin/brew update` and `/opt/homebrew/bin/brew upgrade --cask bantou`. Use `/opt/homebrew/bin/brew`, never `/usr/local/bin/brew`.
 7. Restart the app: `pgrep -fl 'bantou.app/Contents/MacOS'`, `kill <pid>` (by PID only), `open -a /Applications/bantou.app`. Check `CFBundleShortVersionString` in `/Applications/bantou.app/Contents/Info.plist`.
 
 Network commands (ssh, rsync, curl, cargo build, brew) need the Bash sandbox off.

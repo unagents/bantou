@@ -18,16 +18,15 @@ Tailwind CSS 4). The Rust app shell is derived from careery / [Cork](https://git
 
 ## インストール（macOS）
 
-Homebrew cask で配る。正本は `desktop/Casks/bantou.rb`。tap が読むリポ root の `Casks/bantou.rb` は `scripts/publish-cask.sh` が生成する。
+Homebrew cask で配る。正本は `desktop/Casks/bantou.rb`。tap の実体は別リポ `unagents/homebrew-tap`。
 
 ```sh
-brew tap agent-hand/bantou http://192.168.1.202/gitea/agent-hand/bantou.git
-brew trust --tap agent-hand/bantou
+brew tap unagents/tap
 brew install --cask bantou
 ```
 
 更新は `brew update && brew upgrade --cask bantou`。リリース時の cask 更新は
-`scripts/publish-cask.sh <version> <sha256>`（careery の `docs/distribute.md` §4 と同じ流れ）。
+`scripts/publish-cask.sh <version> <sha256>`。GitHub の tap リポ `unagents/homebrew-tap` の `Casks/bantou.rb` を API 更新する。
 
 ## Dev
 
