@@ -20,7 +20,7 @@ function parseArgs(argv: string[]): { config: string } | null {
 
 const args = parseArgs(process.argv.slice(2));
 if (!args) {
-  console.error("usage: bantou-server [--config <path>]");
+  console.error("usage: bantou [--config <path>]");
   process.exit(2);
 }
 
