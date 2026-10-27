@@ -28,6 +28,7 @@ test("config: 全項目指定はそのまま返る", async () => {
       allowedTools: ["Bash"],
       disallowedTools: ["Edit"],
       extraArgs: ["--model", "x"],
+      env: { CLAUDE_CONFIG_DIR: "/c" },
     },
   };
   assert.deepEqual(await load(full), full);
@@ -41,6 +42,7 @@ test("config: 既定値（bind は 127.0.0.1）", async () => {
   assert.equal(c.session.maxRetries, 1);
   assert.equal(c.session.permissionMode, "auto");
   assert.equal(c.session.claude, "claude");
+  assert.deepEqual(c.session.env, {});
 });
 
 test("config: broker / session 一部指定は残りが既定値", async () => {
@@ -74,6 +76,9 @@ const bad: [string, unknown, RegExp][] = [
   ["allowedTools 要素が数値", { workspace: "/w", session: { allowedTools: ["a", 1] } }, /session\.allowedTools/],
   ["disallowedTools 要素が数値", { workspace: "/w", session: { disallowedTools: [1] } }, /session\.disallowedTools/],
   ["extraArgs 要素が null", { workspace: "/w", session: { extraArgs: [null] } }, /session\.extraArgs/],
+  ["env 配列", { workspace: "/w", session: { env: ["A=1"] } }, /session\.env は文字列値のオブジェクト/],
+  ["env 値が数値", { workspace: "/w", session: { env: { A: 1 } } }, /session\.env は文字列値のオブジェクト/],
+  ["env キーが空", { workspace: "/w", session: { env: { "": "x" } } }, /session\.env は文字列値のオブジェクト/],
 ];
 for (const [label, cfg, re] of bad) {
   test(`config: ${label} は拒否`, async () => {

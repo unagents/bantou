@@ -194,6 +194,7 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
           disallowedTools: config.session.disallowedTools,
           extraArgs: config.session.extraArgs,
           timeoutMs: config.session.timeoutMs,
+          env: { ...process.env, ...config.session.env },
           logFile: join(runLogDir(dir), `${sessionId}.jsonl`),
           onSpawn: (child) => {
             const entry = { child, dir };

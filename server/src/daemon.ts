@@ -44,7 +44,7 @@ export function describeCommand(cmd: ServerCommand): string {
 }
 
 /** 指示を実行して返信内容を作る。失敗は ErrorReply にする。 */
-async function execute(cmd: ServerCommand, manager: AgentManager): Promise<ServerReply> {
+export async function execute(cmd: ServerCommand, manager: AgentManager): Promise<ServerReply> {
   try {
     if (cmd.type === "kick_cap") {
       const r = await manager.invoke("cap", cmd.cap_id, cmd);
@@ -59,7 +59,9 @@ async function execute(cmd: ServerCommand, manager: AgentManager): Promise<Serve
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     log(`エラー: ${cmd.type}: ${message}`);
-    return { bantou: PROTOCOL_VERSION, type: "error", ok: false, message, command: cmd.type };
+    const id =
+      cmd.type === "kick_cap" ? { cap_id: cmd.cap_id } : cmd.type === "resume_worker" ? { worker_id: cmd.worker_id } : {};
+    return { bantou: PROTOCOL_VERSION, type: "error", ok: false, message, command: cmd.type, ...id };
   }
 }
 

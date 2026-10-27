@@ -95,6 +95,17 @@ process.stdout.write(JSON.stringify({type:"result",subtype:"success",is_error:fa
   });
 });
 
+test("runClaude: env が子プロセスに渡る", async () => {
+  const script = `
+process.stdout.write(JSON.stringify({type:"result",subtype:"success",is_error:false,session_id:"sid-1",result:process.env.BANTOU_TEST_X}));
+`;
+  await withFake(script, async (exe, dir) => {
+    const r = await runClaude({ ...base, claude: exe, cwd: dir, env: { ...process.env, BANTOU_TEST_X: "hello" } });
+    assert.ok(r.ok);
+    if (r.ok) assert.equal(r.resultText, "hello");
+  });
+});
+
 test("runClaude: 非ゼロ終了は stderr を detail にする", async () => {
   await withFake(`console.error("boom"); process.exit(3);`, async (exe, dir) => {
     const r = await runClaude({ ...base, claude: exe, cwd: dir });

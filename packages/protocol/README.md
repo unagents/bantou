@@ -16,7 +16,7 @@ bantou の work session ↔ bantou メッセージの共通 TypeScript 型。
 
 ## 未定義
 
-server コマンドの型は `server.ts` で定義済み。その仕様文は `docs/protocol.md` に未記載（追記予定）。
+server コマンドの仕様文は `docs/protocol.md` の「bantou-server commands」節に記載済み。
 
 ## 利用側
 

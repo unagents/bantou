@@ -26,6 +26,7 @@ export const DEFAULT_SESSION = {
   allowedTools: [] as string[],
   disallowedTools: [] as string[],
   extraArgs: [] as string[],
+  env: {} as Record<string, string>,
 };
 
 export interface SessionConfig {
@@ -43,6 +44,8 @@ export interface SessionConfig {
   disallowedTools: string[];
   /** `--` の前にそのまま付ける追加引数。 */
   extraArgs: string[];
+  /** spawn する claude に追加で渡す環境変数。自身の環境変数に上書きで合成する。 */
+  env: Record<string, string>;
 }
 
 export interface Config {
@@ -88,6 +91,14 @@ function parseStringList(v: unknown, key: string, path: string): string[] {
   return [...(v as string[])];
 }
 
+function parseEnv(v: unknown, path: string): Record<string, string> {
+  if (v === undefined) return {};
+  if (!isRecord(v) || Object.entries(v).some(([k, x]) => k.length === 0 || typeof x !== "string")) {
+    throw new Error(`config の session.env は文字列値のオブジェクト: ${path}`);
+  }
+  return { ...(v as Record<string, string>) };
+}
+
 function parseSession(v: unknown, path: string): SessionConfig {
   if (v === undefined) return structuredClone(DEFAULT_SESSION);
   if (!isRecord(v)) throw new Error(`config の session はオブジェクト: ${path}`);
@@ -118,6 +129,7 @@ function parseSession(v: unknown, path: string): SessionConfig {
     allowedTools: parseStringList(v.allowedTools, "allowedTools", path),
     disallowedTools: parseStringList(v.disallowedTools, "disallowedTools", path),
     extraArgs: parseStringList(v.extraArgs, "extraArgs", path),
+    env: parseEnv(v.env, path),
   };
 }
 

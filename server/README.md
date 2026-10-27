@@ -39,7 +39,8 @@ npx bantou --config <path>
     "maxRetries": 1,
     "allowedTools": [],
     "disallowedTools": [],
-    "extraArgs": []
+    "extraArgs": [],
+    "env": {}
   }
 }
 ```
@@ -58,9 +59,11 @@ npx bantou --config <path>
 | `session.allowedTools` | 任意 | `[]` | 空でなければ `--allowedTools` に渡す。文字列の配列 |
 | `session.disallowedTools` | 任意 | `[]` | 空でなければ `--disallowedTools` に渡す。文字列の配列 |
 | `session.extraArgs` | 任意 | `[]` | `--` の前にそのまま付ける追加引数。文字列の配列 |
+| `session.env` | 任意 | `{}` | spawn する claude に追加で渡す環境変数。文字列値のオブジェクト。bantou-server 自身の環境変数に上書きで合成する |
 
 - `broker` と `session` は省略可。書く場合はオブジェクト。
 - LAN に公開するには `broker.bind`（例 `0.0.0.0`）を明示する。その場合は `broker.token` の設定を推奨する。
+- 例: 204 の claudeAgent ユーザーは `"env": { "CLAUDE_CONFIG_DIR": "/home/vagrant/.claude-agent" }` を指定する。
 - 旧 `session.command` は廃止。残っていると起動時にエラーになる。`session.claude` を使う。
 
 ## workspace レイアウト

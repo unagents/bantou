@@ -86,6 +86,8 @@ test("isServerReply accepts the four reply shapes", () => {
   assert.ok(isServerReply({ ...statusReply, caps: [], workers: [] }));
   assert.ok(isServerReply(errReply));
   assert.ok(isServerReply({ bantou: 1, type: "error", ok: false, message: "boom" }));
+  assert.ok(isServerReply({ ...errReply, cap_id: "c1" }));
+  assert.ok(isServerReply({ ...errReply, command: "resume_worker", worker_id: "w1" }));
 });
 
 test("isServerReply rejects mismatches", () => {
@@ -93,6 +95,8 @@ test("isServerReply rejects mismatches", () => {
   assert.equal(isServerReply({ ...statusReply, ok: false }), false);
   assert.equal(isServerReply({ ...errReply, command: "nope" }), false);
   assert.equal(isServerReply({ ...errReply, message: 1 }), false);
+  assert.equal(isServerReply({ ...errReply, cap_id: "a b" }), false);
+  assert.equal(isServerReply({ ...errReply, worker_id: 1 }), false);
   assert.equal(isServerReply({ ...capResult, bantou: 2 }), false);
   assert.equal(isServerReply({ ...capResult, session_id: undefined }), false);
   assert.equal(isServerReply({ ...capResult, cap_id: "a b" }), false);

@@ -78,6 +78,18 @@ test("agents: 初回は new で session_id を保存、2 回目は同じ id で 
   });
 });
 
+test("agents: session.env は process.env に合成して runner に渡す", async () => {
+  await withFixture(0, async (f) => {
+    f.config.session.env = { CLAUDE_CONFIG_DIR: "/c", PATH: "/only" };
+    const m = mgr(f, async () => ok("r"));
+    await m.invoke("cap", "c1", { prompt: "p" });
+    const env = f.calls[0].env;
+    assert.equal(env?.CLAUDE_CONFIG_DIR, "/c");
+    assert.equal(env?.PATH, "/only");
+    assert.equal(env?.HOME, process.env.HOME);
+  });
+});
+
 test("agents: resume で session 無しなら新しい id の new に切り替える", async () => {
   await withFixture(0, async (f) => {
     let n = 0;

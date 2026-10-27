@@ -113,6 +113,10 @@ export interface ErrorReply {
   message: string;
   /** `type` of the command that failed, when known. */
   command?: ServerCommandType;
+  /** `cap_id` of the failed `kick_cap`, when known. */
+  cap_id?: string;
+  /** `worker_id` of the failed `resume_worker`, when known. */
+  worker_id?: string;
 }
 
 export type ServerReply = CapResultReply | WorkerResultReply | StatusReply | ErrorReply;
@@ -253,7 +257,9 @@ export function isServerReply(v: unknown): v is ServerReply {
       return (
         v.ok === false &&
         typeof v.message === "string" &&
-        (v.command === undefined || isCommandType(v.command))
+        (v.command === undefined || isCommandType(v.command)) &&
+        (v.cap_id === undefined || isValidAgentId(v.cap_id)) &&
+        (v.worker_id === undefined || isValidAgentId(v.worker_id))
       );
     default:
       return false;
