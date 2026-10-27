@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig } from "../src/config.js";
+import { loadConfig, DEFAULT_SESSION_COMMAND } from "../src/config.js";
 import { prepareWorkspace } from "../src/workspace.js";
 
 test("config 読込: workspace を取得し、欠落は拒否する", async () => {
@@ -11,7 +11,11 @@ test("config 読込: workspace を取得し、欠落は拒否する", async () =
   try {
     const ok = join(dir, "config.json");
     await writeFile(ok, JSON.stringify({ workspace: "/x/ws" }));
-    assert.deepEqual(await loadConfig(ok), { workspace: "/x/ws" });
+    assert.deepEqual(await loadConfig(ok), {
+      workspace: "/x/ws",
+      broker: { port: 7901, bind: "0.0.0.0", discovery: "on", token: "" },
+      session: { command: DEFAULT_SESSION_COMMAND },
+    });
 
     const bad = join(dir, "bad.json");
     await writeFile(bad, "{}");

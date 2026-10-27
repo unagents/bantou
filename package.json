@@ -1,1 +1,1 @@
-{"name":"bantou-monorepo","private":true,"workspaces":["desktop","server","packages/*"]}
+{"name":"bantou-monorepo","private":true,"workspaces":["desktop","packages/*"]}

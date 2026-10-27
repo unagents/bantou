@@ -18,11 +18,17 @@
   "scripts": {
     "build": "tsc",
     "dev": "node --import tsx src/cli.ts",
+    "e2e": "node --import tsx scripts/e2e-launch.ts",
     "test": "node --import tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "engines": {
     "node": ">=22"
+  },
+  "dependencies": {
+    "@agent-hand/bantou-protocol": "file:../packages/protocol",
+    "@unagents/messenger-broker": "0.9.0",
+    "@unagents/messenger-client": "0.9.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
