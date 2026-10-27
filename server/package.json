@@ -1,10 +1,16 @@
 {
-  "name": "@agent-hand/bantou-server",
+  "name": "bantou",
   "version": "0.1.0",
-  "description": "bantou-server: remote session / remote cap launcher for bantou-desktop",
+  "description": "Remote session and remote cap launcher server for bantou-desktop",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/unagents/bantou.git",
+    "directory": "server"
+  },
   "type": "module",
   "bin": {
-    "bantou-server": "dist/cli.js"
+    "bantou": "dist/cli.js"
   },
   "files": [
     "dist"
@@ -17,9 +23,6 @@
   },
   "engines": {
     "node": ">=22"
-  },
-  "publishConfig": {
-    "registry": "http://192.168.1.202/gitea/api/packages/agent-hand/npm/"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

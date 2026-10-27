@@ -4,7 +4,7 @@
 
 ## 役割
 
-- linux / mac で動く npm package（`@agent-hand/bantou-server`）。`npx` で起動する。
+- linux / mac で動く npm package（`bantou`）。`npx` で起動する。
 - bantou-desktop（`../desktop/`、mac / windows のネイティブアプリ）からの指示を受ける。
 - 担当は 2 つ。remote session の起動（`src/session.ts`）と、remote cap（オーケストレーター）の起動（`src/cap.ts`）。
 - desktop が指示を出す側。server は受ける側で、自律的に方針を決めない。
@@ -12,7 +12,7 @@
 ## 起動方法
 
 ```
-npx @agent-hand/bantou-server --config <path>
+npx bantou --config <path>
 ```
 
 - `--config` 省略時は `~/.config/bantou-server/config.json`。
