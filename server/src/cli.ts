@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { runDaemon } from "./daemon.js";
 
-const DEFAULT_CONFIG = join(homedir(), ".config", "bantou-server", "config.json");
+const DEFAULT_CONFIG = join(homedir(), ".config", "bantou", "config.json");
 
 /** 引数を解釈する。不正な引数は null を返す。 */
 function parseArgs(argv: string[]): { config: string } | null {
@@ -25,6 +25,6 @@ if (!args) {
 }
 
 runDaemon(args.config).catch((e: unknown) => {
-  console.error(`bantou-server: ${e instanceof Error ? e.message : String(e)}`);
+  console.error(`bantou: ${e instanceof Error ? e.message : String(e)}`);
   process.exit(1);
 });

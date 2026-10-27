@@ -2,7 +2,7 @@ import { loadConfig } from "./config.js";
 import { prepareWorkspace } from "./workspace.js";
 
 const log = (msg: string): void => {
-  console.log(`${new Date().toISOString()} bantou-server: ${msg}`);
+  console.log(`${new Date().toISOString()} bantou: ${msg}`);
 };
 
 /** 起動して常駐する。SIGTERM / SIGINT で後始末して exit 0。 */

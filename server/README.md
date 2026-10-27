@@ -15,7 +15,7 @@
 npx bantou --config <path>
 ```
 
-- `--config` 省略時は `~/.config/bantou-server/config.json`。
+- `--config` 省略時は `~/.config/bantou/config.json`。
 - それ以外の引数は exit 2。実行時エラーは exit 1。
 - SIGTERM / SIGINT で後始末して exit 0。
 

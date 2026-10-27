@@ -1,6 +1,6 @@
 {
   "name": "bantou",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Remote session and remote cap launcher server for bantou-desktop",
   "license": "MIT",
   "repository": {
