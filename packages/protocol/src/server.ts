@@ -7,10 +7,15 @@ import { PROTOCOL_VERSION } from "./envelope.js";
 /** Messenger peer name of bantou-server. */
 export const SERVER_NAME = "bantou-server";
 
-/** Allowed session names (`name` of launch_session; also the tmux session name). */
-export const SESSION_NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
+/** Allowed cap / worker ids (also directory names under <workspace>/caps and <workspace>/workers). */
+export const AGENT_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
-export type ServerCommandType = "launch_session" | "list_sessions";
+export type AgentKind = "cap" | "worker";
+
+/** Lifecycle of one cap / worker as kept in its state.json. */
+export type AgentState = "idle" | "running" | "failed" | "error";
+
+export type ServerCommandType = "kick_cap" | "resume_worker" | "status";
 
 export interface ServerCommandBase {
   /** Protocol version, always 1. */
@@ -18,52 +23,87 @@ export interface ServerCommandBase {
   type: ServerCommandType;
 }
 
-/** Start a claude session in tmux on the server host. */
-export interface LaunchSessionCommand extends ServerCommandBase {
-  type: "launch_session";
-  /** Session name = tmux session name. SESSION_NAME_PATTERN. */
-  name: string;
-  /** Git URL. When given, cloned to `<workspace>/repos/<name>` (fetch only if it exists). */
+/** Start or resume the remote cap `cap_id` headlessly with `prompt`. */
+export interface KickCapCommand extends ServerCommandBase {
+  type: "kick_cap";
+  /** AGENT_ID_PATTERN. */
+  cap_id: string;
+  /** Git URL; cloned into the cap path on first use, fetched afterwards. */
   repo?: string;
   /** Branch for `git clone --branch`. */
   branch?: string;
-  /** Working directory relative to `<workspace>/repos/`. Defaults to `<name>`. */
-  cwd?: string;
+  /** Non-empty. */
+  prompt: string;
+  /** Free text, logged only. */
+  reason?: string;
 }
 
-/** List tmux sessions on the server host. */
-export interface ListSessionsCommand extends ServerCommandBase {
-  type: "list_sessions";
+/** Resume (or start) the worker `worker_id` with `prompt`. */
+export interface ResumeWorkerCommand extends ServerCommandBase {
+  type: "resume_worker";
+  /** AGENT_ID_PATTERN. */
+  worker_id: string;
+  repo?: string;
+  branch?: string;
+  /** Non-empty. */
+  prompt: string;
 }
 
-export type ServerCommand = LaunchSessionCommand | ListSessionsCommand;
+/** List caps and workers with their state. */
+export interface StatusCommand extends ServerCommandBase {
+  type: "status";
+}
 
-export type ServerReplyType = "session_launched" | "sessions" | "error";
+export type ServerCommand = KickCapCommand | ResumeWorkerCommand | StatusCommand;
 
-export interface SessionLaunchedReply {
+export type ServerReplyType = "cap_result" | "worker_result" | "status_result" | "error";
+
+/** Outcome of one headless run. */
+export interface RunOutcome {
+  /** Claude session id used (new or resumed). */
+  session_id: string;
+  ok: boolean;
+  /** Final `result` text of the run; "" when it failed before producing one. */
+  result_text: string;
+  /** Failure detail when ok is false. */
+  error?: string;
+}
+
+export interface CapResultReply extends RunOutcome {
   bantou: typeof PROTOCOL_VERSION;
-  type: "session_launched";
-  ok: true;
-  name: string;
-  /** tmux session name (same as name). */
-  tmux: string;
-  /** Absolute working directory of the session. */
-  cwd: string;
+  type: "cap_result";
+  cap_id: string;
 }
 
-export interface SessionInfo {
-  name: string;
-  windows: number;
-  /** ISO 8601 creation time. */
-  created: string;
-  attached: boolean;
-}
-
-export interface SessionsReply {
+export interface WorkerResultReply extends RunOutcome {
   bantou: typeof PROTOCOL_VERSION;
-  type: "sessions";
+  type: "worker_result";
+  worker_id: string;
+}
+
+export interface AgentStatus {
+  kind: AgentKind;
+  id: string;
+  /** Absolute directory. */
+  path: string;
+  session_id: string | null;
+  state: AgentState;
+  /** ISO 8601. */
+  last_started_at: string | null;
+  /** ISO 8601. */
+  last_finished_at: string | null;
+  last_error?: string;
+  retries: number;
+  /** Commands waiting in this agent's queue (the running one excluded). */
+  queued: number;
+}
+
+export interface StatusReply {
+  bantou: typeof PROTOCOL_VERSION;
+  type: "status_result";
   ok: true;
-  sessions: SessionInfo[];
+  caps: AgentStatus[];
+  workers: AgentStatus[];
 }
 
 export interface ErrorReply {
@@ -75,7 +115,7 @@ export interface ErrorReply {
   command?: ServerCommandType;
 }
 
-export type ServerReply = SessionLaunchedReply | SessionsReply | ErrorReply;
+export type ServerReply = CapResultReply | WorkerResultReply | StatusReply | ErrorReply;
 
 // -- guards -------------------------------------------------------------------
 
@@ -91,34 +131,72 @@ function optNonEmptyString(v: unknown): boolean {
   );
 }
 
-function isCommandType(v: unknown): v is ServerCommandType {
-  return v === "launch_session" || v === "list_sessions";
+function optString(v: unknown): boolean {
+  return v === undefined || typeof v === "string";
 }
 
-/** A string matching SESSION_NAME_PATTERN. */
-export function isValidSessionName(name: unknown): name is string {
-  return typeof name === "string" && SESSION_NAME_PATTERN.test(name);
+/** Absent, or a string without NUL. */
+function optPlainString(v: unknown): boolean {
+  return v === undefined || (typeof v === "string" && !v.includes("\0"));
+}
+
+/** A non-empty string without NUL. */
+function nonEmptyString(v: unknown): boolean {
+  return typeof v === "string" && v.length > 0 && !v.includes("\0");
+}
+
+function strOrNull(v: unknown): boolean {
+  return v === null || typeof v === "string";
+}
+
+function isCommandType(v: unknown): v is ServerCommandType {
+  return v === "kick_cap" || v === "resume_worker" || v === "status";
+}
+
+/** A string matching AGENT_ID_PATTERN. */
+export function isValidAgentId(v: unknown): v is string {
+  return typeof v === "string" && AGENT_ID_PATTERN.test(v);
+}
+
+export function isAgentState(v: unknown): v is AgentState {
+  return v === "idle" || v === "running" || v === "failed" || v === "error";
 }
 
 export function isServerCommand(v: unknown): v is ServerCommand {
   if (!isRecord(v) || v.bantou !== PROTOCOL_VERSION) return false;
-  if (v.type === "launch_session") {
-    return (
-      isValidSessionName(v.name) &&
-      optNonEmptyString(v.repo) &&
-      optNonEmptyString(v.branch) &&
-      optNonEmptyString(v.cwd)
-    );
+  switch (v.type) {
+    case "kick_cap":
+      return (
+        isValidAgentId(v.cap_id) &&
+        nonEmptyString(v.prompt) &&
+        optNonEmptyString(v.repo) &&
+        optNonEmptyString(v.branch) &&
+        optPlainString(v.reason)
+      );
+    case "resume_worker":
+      return (
+        isValidAgentId(v.worker_id) &&
+        nonEmptyString(v.prompt) &&
+        optNonEmptyString(v.repo) &&
+        optNonEmptyString(v.branch)
+      );
+    case "status":
+      return true;
+    default:
+      return false;
   }
-  return v.type === "list_sessions";
 }
 
-export function isLaunchSessionCommand(v: unknown): v is LaunchSessionCommand {
-  return isServerCommand(v) && v.type === "launch_session";
+export function isKickCapCommand(v: unknown): v is KickCapCommand {
+  return isServerCommand(v) && v.type === "kick_cap";
 }
 
-export function isListSessionsCommand(v: unknown): v is ListSessionsCommand {
-  return isServerCommand(v) && v.type === "list_sessions";
+export function isResumeWorkerCommand(v: unknown): v is ResumeWorkerCommand {
+  return isServerCommand(v) && v.type === "resume_worker";
+}
+
+export function isStatusCommand(v: unknown): v is StatusCommand {
+  return isServerCommand(v) && v.type === "status";
 }
 
 /** Parse message text as a server command; `undefined` for non-JSON or non-command. */
@@ -131,28 +209,46 @@ export function parseServerCommand(text: string): ServerCommand | undefined {
   }
 }
 
-function isSessionInfo(v: unknown): v is SessionInfo {
+function isRunOutcome(v: Record<string, unknown>): boolean {
+  return (
+    typeof v.session_id === "string" &&
+    typeof v.ok === "boolean" &&
+    typeof v.result_text === "string" &&
+    optString(v.error)
+  );
+}
+
+function isAgentStatus(v: unknown): v is AgentStatus {
   return (
     isRecord(v) &&
-    typeof v.name === "string" &&
-    typeof v.windows === "number" &&
-    typeof v.created === "string" &&
-    typeof v.attached === "boolean"
+    (v.kind === "cap" || v.kind === "worker") &&
+    typeof v.id === "string" &&
+    typeof v.path === "string" &&
+    strOrNull(v.session_id) &&
+    isAgentState(v.state) &&
+    strOrNull(v.last_started_at) &&
+    strOrNull(v.last_finished_at) &&
+    optString(v.last_error) &&
+    typeof v.retries === "number" &&
+    typeof v.queued === "number"
   );
 }
 
 export function isServerReply(v: unknown): v is ServerReply {
   if (!isRecord(v) || v.bantou !== PROTOCOL_VERSION) return false;
   switch (v.type) {
-    case "session_launched":
+    case "cap_result":
+      return isValidAgentId(v.cap_id) && isRunOutcome(v);
+    case "worker_result":
+      return isValidAgentId(v.worker_id) && isRunOutcome(v);
+    case "status_result":
       return (
         v.ok === true &&
-        typeof v.name === "string" &&
-        typeof v.tmux === "string" &&
-        typeof v.cwd === "string"
+        Array.isArray(v.caps) &&
+        v.caps.every(isAgentStatus) &&
+        Array.isArray(v.workers) &&
+        v.workers.every(isAgentStatus)
       );
-    case "sessions":
-      return v.ok === true && Array.isArray(v.sessions) && v.sessions.every(isSessionInfo);
     case "error":
       return (
         v.ok === false &&

@@ -10,9 +10,10 @@ import {
   type ServerCommand,
   type ServerReply,
 } from "@agent-hand/bantou-protocol";
-import { loadConfig, type Config } from "./config.js";
+import { createAgentManager, type AgentManager } from "./agents.js";
+import { loadConfig } from "./config.js";
 import { log } from "./log.js";
-import { launchSession, listSessions } from "./session.js";
+import { cliRunner } from "./runner.js";
 import { prepareWorkspace } from "./workspace.js";
 
 /** 無視ログ用に本文を 1 行・最大 120 文字へ整形する。 */
@@ -31,20 +32,30 @@ export function maskUserinfo(text: string): string {
   return text.replace(/:\/\/[^/\s"@]*@/g, "://***@");
 }
 
+/** 指示の概要。prompt は先頭 80 文字のみ、repo の userinfo は伏せる。 */
+export function describeCommand(cmd: ServerCommand): string {
+  if (cmd.type === "status") return "";
+  const parts = [cmd.type === "kick_cap" ? `cap_id=${cmd.cap_id}` : `worker_id=${cmd.worker_id}`];
+  if (cmd.repo) parts.push(`repo=${maskUserinfo(cmd.repo)}`);
+  if (cmd.branch) parts.push(`branch=${cmd.branch}`);
+  if (cmd.type === "kick_cap" && cmd.reason) parts.push(`reason=${ignoreText(cmd.reason)}`);
+  parts.push(`prompt=${ignoreText(cmd.prompt).slice(0, 80)}`);
+  return parts.join(" ");
+}
+
 /** 指示を実行して返信内容を作る。失敗は ErrorReply にする。 */
-async function execute(cmd: ServerCommand, config: Config): Promise<ServerReply> {
+async function execute(cmd: ServerCommand, manager: AgentManager): Promise<ServerReply> {
   try {
-    if (cmd.type === "launch_session") {
-      const r = await launchSession({
-        ...cmd,
-        repos: join(config.workspace, "repos"),
-        command: config.session.command,
-      });
-      log(`tmux 作成: ${r.name} cwd=${r.cwd}`);
-      return { bantou: PROTOCOL_VERSION, type: "session_launched", ok: true, ...r };
+    if (cmd.type === "kick_cap") {
+      const r = await manager.invoke("cap", cmd.cap_id, cmd);
+      return { bantou: PROTOCOL_VERSION, type: "cap_result", cap_id: cmd.cap_id, ...r };
     }
-    const sessions = await listSessions();
-    return { bantou: PROTOCOL_VERSION, type: "sessions", ok: true, sessions };
+    if (cmd.type === "resume_worker") {
+      const r = await manager.invoke("worker", cmd.worker_id, cmd);
+      return { bantou: PROTOCOL_VERSION, type: "worker_result", worker_id: cmd.worker_id, ...r };
+    }
+    const st = await manager.status();
+    return { bantou: PROTOCOL_VERSION, type: "status_result", ok: true, ...st };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     log(`エラー: ${cmd.type}: ${message}`);
@@ -57,8 +68,11 @@ export async function runDaemon(configPath: string): Promise<void> {
   log("起動");
   const config = await loadConfig(configPath);
   log(`設定読込: ${configPath} (workspace=${config.workspace})`);
-  const repos = await prepareWorkspace(config.workspace);
-  log(`workspace 準備完了: ${repos}`);
+  const dirs = await prepareWorkspace(config.workspace);
+  log(`workspace 準備完了: caps=${dirs.caps} workers=${dirs.workers}`);
+  const manager = createAgentManager({ config, runner: cliRunner, log });
+  const reaped = await manager.reapOrphans();
+  log(`孤児回収: killed=${reaped.killed} failed=${reaped.failed} error=${reaped.errored}`);
 
   const { port: wantPort, bind, discovery, token } = config.broker;
   const broker = await startBroker({
@@ -77,10 +91,11 @@ export async function runDaemon(configPath: string): Promise<void> {
   }
 
   let closing = false;
-  let chain: Promise<void> = Promise.resolve();
   let client!: MessengerClient;
+  // 実行中の指示。claude の実行は数分かかるので全体は直列にしない。
+  // 同一 agent の直列化は manager の queue が担い、別 agent は並行して走る
+  const inflight = new Set<Promise<void>>();
 
-  // 指示は 1 件ずつ直列に処理する
   const handle = async (m: InboundMessage): Promise<void> => {
     try {
       if (m.mode === "ping") return;
@@ -94,8 +109,8 @@ export async function runDaemon(configPath: string): Promise<void> {
         log(`終了中のため無視: from=${from} type=${cmd.type}`);
         return;
       }
-      log(`指示受信: type=${cmd.type} from=${from} ${maskUserinfo(JSON.stringify(cmd))}`);
-      const reply = await execute(cmd, config);
+      log(`指示受信: type=${cmd.type} from=${from} ${describeCommand(cmd)}`.trimEnd());
+      const reply = await execute(cmd, manager);
       try {
         await client.send(m.from_id, JSON.stringify(reply));
         log(`返信: to=${m.from_id} type=${reply.type}`);
@@ -128,7 +143,8 @@ export async function runDaemon(configPath: string): Promise<void> {
       log: (m) => log(`messenger: ${m}`),
     });
     client.onMessage((m) => {
-      chain = chain.then(() => handle(m));
+      const p: Promise<void> = handle(m).finally(() => inflight.delete(p));
+      inflight.add(p);
     });
     await client.connect();
     log(`peer 登録: name=${SERVER_NAME} id=${client.peer.id} broker=${url}`);
@@ -147,8 +163,12 @@ export async function runDaemon(configPath: string): Promise<void> {
     }, 5000);
     void (async () => {
       try {
-        // 実行中の指示は少し待つ
-        await Promise.race([chain, new Promise((r) => setTimeout(r, 4000))]);
+        // 実行中の claude を止め、中断の返信を出し切るのを少し待つ
+        await manager.shutdown();
+        await Promise.race([
+          Promise.allSettled([...inflight]),
+          new Promise((r) => setTimeout(r, 2500)),
+        ]);
         await client.close();
         await broker.close();
         log("broker 停止");

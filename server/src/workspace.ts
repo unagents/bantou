@@ -1,9 +1,13 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 
-/** `<workspace>/` と `<workspace>/repos/` を無ければ作る。repos のパスを返す。 */
-export async function prepareWorkspace(workspace: string): Promise<string> {
-  const repos = join(workspace, "repos");
-  await mkdir(repos, { recursive: true });
-  return repos;
+/** `<workspace>/caps` と `<workspace>/workers` を無ければ作る。 */
+export async function prepareWorkspace(
+  workspace: string,
+): Promise<{ caps: string; workers: string }> {
+  const caps = join(workspace, "caps");
+  const workers = join(workspace, "workers");
+  await mkdir(caps, { recursive: true });
+  await mkdir(workers, { recursive: true });
+  return { caps, workers };
 }

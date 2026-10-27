@@ -1,38 +1,39 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile, stat } from "node:fs/promises";
+import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, DEFAULT_SESSION_COMMAND } from "../src/config.js";
 import { prepareWorkspace } from "../src/workspace.js";
+import { describeCommand, maskUserinfo } from "../src/daemon.js";
 
-test("config 読込: workspace を取得し、欠落は拒否する", async () => {
+test("workspace 作成: caps と workers を作る", async () => {
   const dir = await mkdtemp(join(tmpdir(), "bantou-server-test-"));
   try {
-    const ok = join(dir, "config.json");
-    await writeFile(ok, JSON.stringify({ workspace: "/x/ws" }));
-    assert.deepEqual(await loadConfig(ok), {
-      workspace: "/x/ws",
-      broker: { port: 7901, bind: "0.0.0.0", discovery: "on", token: "" },
-      session: { command: DEFAULT_SESSION_COMMAND },
-    });
-
-    const bad = join(dir, "bad.json");
-    await writeFile(bad, "{}");
-    await assert.rejects(loadConfig(bad), /workspace/);
+    const ws = join(dir, "ws");
+    const r = await prepareWorkspace(ws);
+    assert.deepEqual(r, { caps: join(ws, "caps"), workers: join(ws, "workers") });
+    assert.ok((await stat(r.caps)).isDirectory());
+    assert.ok((await stat(r.workers)).isDirectory());
+    await assert.rejects(stat(join(ws, "repos")));
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 });
 
-test("workspace 作成: workspace と repos を作る", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "bantou-server-test-"));
-  try {
-    const ws = join(dir, "ws");
-    const repos = await prepareWorkspace(ws);
-    assert.equal(repos, join(ws, "repos"));
-    assert.ok((await stat(repos)).isDirectory());
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
+test("指示ログ: prompt は先頭 80 文字、repo の userinfo は伏せる", () => {
+  const long = "x".repeat(200);
+  const line = describeCommand({
+    bantou: 1,
+    type: "kick_cap",
+    cap_id: "c1",
+    repo: "https://user:pw@example.com/o/r.git",
+    prompt: long,
+  });
+  assert.ok(line.includes("cap_id=c1"));
+  assert.ok(line.includes("repo=https://***@example.com/o/r.git"));
+  assert.ok(!line.includes("pw"));
+  assert.ok(line.includes(`prompt=${"x".repeat(80)}`));
+  assert.ok(!line.includes("x".repeat(81)));
+  assert.equal(describeCommand({ bantou: 1, type: "status" }), "");
+  assert.equal(maskUserinfo("git@h"), "git@h");
 });

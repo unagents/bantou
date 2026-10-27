@@ -1,14 +1,20 @@
 # bantou-server
 
-tmux 上に claude session を起動する常駐プロセス。messenger 経由で指示を受ける。
+claude を headless（`claude -p`）で起動する常駐プロセス。messenger 経由で指示を受ける。
 
 ## 役割
 
 - linux / mac で動く npm package（`bantou`）。`npx` で起動する。
+- headless 実行層。端末多重化ツールは使わない。
 - messenger broker を内蔵し、peer `bantou-server` として指示を待つ。
 - bantou-desktop（`../desktop/`）など任意の messenger peer からの指示を受ける。
-- 指示は 2 種。session の起動（`launch_session`）と一覧（`list_sessions`）。
-- remote cap（オーケストレーター）の起動（`src/cap.ts`）は未実装のスタブ。
+- 実行モデルの全体は [`../docs/architecture.md`](../docs/architecture.md)。要約は次の通り。
+  - `kick_cap` で cap を起動する。初回は `claude -p --session-id <uuid>`、2 回目以降は `--resume <uuid>`。
+  - cap ごとに path（`<workspace>/caps/<cap_id>`）を持つ。worker も同様（`workers/<worker_id>`）。
+  - 同一 cap（worker）への指示は直列。別の cap（worker）は並行して走る。
+  - 状態は path 直下の `state.json` に残す。
+  - 起動時に、前回の実行が残した孤児 claude プロセスを回収する。
+  - 実行方式は差し替え口（`AgentRunner`）で抽象化。claudep 方式（Agent SDK）は interface のみで未実装。
 
 ## 起動方法
 
@@ -18,15 +24,23 @@ npx bantou --config <path>
 
 - `--config` 省略時は `~/.config/bantou/config.json`。
 - それ以外の引数は exit 2。実行時エラーは exit 1。
-- SIGTERM / SIGINT で peer 解除・broker 停止して exit 0（5 秒で打ち切り）。
+- SIGTERM / SIGINT で実行中の claude を止め、peer 解除・broker 停止して exit 0（5 秒で打ち切り）。
 
 ## config.json
 
 ```json
 {
   "workspace": "/path/to/workspace",
-  "broker": { "port": 7901, "bind": "0.0.0.0", "discovery": "on", "token": "" },
-  "session": { "command": "claude --permission-mode auto" }
+  "broker": { "port": 7901, "bind": "127.0.0.1", "discovery": "on", "token": "" },
+  "session": {
+    "claude": "claude",
+    "permissionMode": "auto",
+    "timeoutMs": 1800000,
+    "maxRetries": 1,
+    "allowedTools": [],
+    "disallowedTools": [],
+    "extraArgs": []
+  }
 }
 ```
 
@@ -34,22 +48,37 @@ npx bantou --config <path>
 |---|---|---|---|
 | `workspace` | 必須 | - | workspace フォルダの絶対パス |
 | `broker.port` | 任意 | `7901` | broker の HTTP port。0..65535 の整数。0 はランダム |
-| `broker.bind` | 任意 | `0.0.0.0` | broker の bind アドレス |
+| `broker.bind` | 任意 | `127.0.0.1` | broker の bind アドレス |
 | `broker.discovery` | 任意 | `"on"` | UDP discovery の応答。`"on"` か `"off"` |
 | `broker.token` | 任意 | `""` | Bearer token。空は認証なし |
-| `session.command` | 任意 | `claude --permission-mode auto` | tmux に渡す起動コマンド（shell 経由） |
+| `session.claude` | 任意 | `claude` | claude 実行ファイル |
+| `session.permissionMode` | 任意 | `auto` | `--permission-mode`。`acceptEdits` / `auto` / `bypassPermissions` / `manual` / `dontAsk` / `plan` |
+| `session.timeoutMs` | 任意 | `1800000`（30 分） | 1 回の実行の打ち切り時間。正の整数。超えたら SIGKILL |
+| `session.maxRetries` | 任意 | `1` | タイムアウト・起動失敗時の再試行回数。0 以上の整数 |
+| `session.allowedTools` | 任意 | `[]` | 空でなければ `--allowedTools` に渡す。文字列の配列 |
+| `session.disallowedTools` | 任意 | `[]` | 空でなければ `--disallowedTools` に渡す。文字列の配列 |
+| `session.extraArgs` | 任意 | `[]` | `--` の前にそのまま付ける追加引数。文字列の配列 |
 
-`broker` と `session` は省略可。書く場合はオブジェクト。
+- `broker` と `session` は省略可。書く場合はオブジェクト。
+- LAN に公開するには `broker.bind`（例 `0.0.0.0`）を明示する。その場合は `broker.token` の設定を推奨する。
+- 旧 `session.command` は廃止。残っていると起動時にエラーになる。`session.claude` を使う。
 
 ## workspace レイアウト
 
 ```
 <workspace>/
-  repos/        repo の展開先（session の cwd は既定で repos/<name>）
-  broker.json   broker の状態ファイル
+  broker.json                        broker の状態ファイル
+  caps/<cap-id>/                     cap の path（claude の cwd）
+    state.json                       状態
+    logs/<session_id>.jsonl          claude の生出力（stream-json）
+  workers/<worker-id>/               worker の path。構成は cap と同じ
 ```
 
-起動時に `<workspace>/` と `<workspace>/repos/` が無ければ作る。
+- 起動時に `<workspace>/caps` と `<workspace>/workers` が無ければ作る。
+- `cap_id` / `worker_id` は `[A-Za-z0-9_-]+`。
+- `repo` を指定した指示では、path を git repo として扱う。path が無ければ clone、`.git` があれば fetch、`.git` が無い既存 path はエラー。clone 後は `.git/info/exclude` に `state.json` と `logs/` を追記する。
+- 既存の `.git` がある場合は `fetch` だけ行う。`repo` / `branch` の違いは検知しない。
+- `repo` 無しなら path を作るだけ。
 
 ## 内蔵 broker と peer
 
@@ -65,25 +94,31 @@ npx bantou --config <path>
 
 | type | 内容 |
 |---|---|
-| `launch_session` | repo 取得（任意）→ tmux session 起動 |
-| `list_sessions` | tmux session 一覧 |
+| `kick_cap` | cap を起動する（初回は新規 session、以降は resume） |
+| `resume_worker` | worker を起動する（同上） |
+| `status` | cap / worker の状態一覧 |
 
-`launch_session`（`name` 以外は任意）:
+`kick_cap`（`cap_id` と `prompt` 以外は任意）:
 
 ```json
-{ "bantou": 1, "type": "launch_session", "name": "s1", "repo": "https://github.com/o/r.git", "branch": "main", "cwd": "r/sub" }
+{ "bantou": 1, "type": "kick_cap", "cap_id": "cap-a", "repo": "https://github.com/o/r.git", "branch": "main", "prompt": "Review the open issues.", "reason": "desktop から手動起動" }
 ```
 
-- `name`: tmux session 名。`[A-Za-z0-9_-]+`。
-- `repo`: git URL。`-` で始まる値は拒否（`branch` と `cwd` も同様）。指定時は `<workspace>/repos/<name>` へ clone。既にあれば fetch のみ。
-- `branch`: `git clone --branch` に渡す。
-- `cwd`: `repos/` からの相対。既定は `<name>`。`repos/` 外は拒否。無ければ作る。
-- 同名の tmux session があるとエラー。
+- `cap_id`: cap の識別子。`caps/<cap_id>` が path になる。
+- `repo` / `branch`: path の git 取得に使う。`-` で始まる値は拒否。
+- `prompt`: claude に渡す指示。
+- `reason`: 起動理由。ログ用で、claude には渡さない。
 
-`list_sessions`:
+`resume_worker`（`worker_id` と `prompt` 以外は任意）:
 
 ```json
-{ "bantou": 1, "type": "list_sessions" }
+{ "bantou": 1, "type": "resume_worker", "worker_id": "w-1", "repo": "https://github.com/o/r.git", "branch": "main", "prompt": "Continue the task." }
+```
+
+`status`:
+
+```json
+{ "bantou": 1, "type": "status" }
 ```
 
 ## 返信
@@ -91,27 +126,72 @@ npx bantou --config <path>
 指示の送信元 peer へ JSON で返す。
 
 ```json
-{ "bantou": 1, "type": "session_launched", "ok": true, "name": "s1", "tmux": "s1", "cwd": "/ws/repos/s1" }
-{ "bantou": 1, "type": "sessions", "ok": true, "sessions": [{ "name": "s1", "windows": 1, "created": "2026-10-28T05:00:00.000Z", "attached": false }] }
-{ "bantou": 1, "type": "error", "ok": false, "message": "tmux session \"s1\" は既に存在する", "command": "launch_session" }
+{ "bantou": 1, "type": "cap_result", "cap_id": "cap-a", "session_id": "0b6f...-uuid", "ok": true, "result_text": "kicked" }
+{ "bantou": 1, "type": "worker_result", "worker_id": "w-1", "session_id": "9c1d...-uuid", "ok": false, "result_text": "", "error": "タイムアウト (1800000ms)" }
+{ "bantou": 1, "type": "status_result", "ok": true, "caps": [{ "kind": "cap", "id": "cap-a", "path": "/ws/caps/cap-a", "session_id": "0b6f...-uuid", "state": "idle", "last_started_at": "2026-10-28T05:00:00.000Z", "last_finished_at": "2026-10-28T05:01:10.000Z", "retries": 0, "queued": 0 }], "workers": [] }
+{ "bantou": 1, "type": "error", "ok": false, "message": "git clone 失敗: ...", "command": "kick_cap" }
 ```
+
+- `cap_result` / `worker_result` は claude の実行が終わってから返る。数分かかることがある。
+- 実行が失敗しても `cap_result` / `worker_result` で返る（`ok: false` と `error`）。
+- `error` は実行に入る前の失敗（git 失敗、state が `running` / `error` で起動できない、state 破損など）。
+- `cap_id` / `worker_id` が不正（`[A-Za-z0-9_-]+` でない）な指示は `error` を返さず、指示でないメッセージとして無視する（ログに `無視:`）。
+- `status_result` の `state` は `idle` / `running` / `failed` / `error`。`queued` は待ち行列の件数。state.json が壊れていれば `error`。
+
+## state.json
+
+```json
+{
+  "session_id": "0b6f...-uuid",
+  "state": "idle",
+  "last_started_at": "2026-10-28T05:00:00.000Z",
+  "last_finished_at": "2026-10-28T05:01:10.000Z",
+  "retries": 0
+}
+```
+
+- `state`: `idle`（待機）/ `running`（実行中）/ `failed`（直近の実行が失敗）/ `error`（孤児回収で判定できなかった時など）。
+- `last_error`: 失敗の理由。成功時は無い。
+- `retries`: 直近の実行で使った再試行回数。
+- `error` の agent は起動しない（`state=error のため起動しない`）。解除は手動で、state.json を削除するか内容を直す。
+- 書き込みは tmp ファイルへ書いて rename する。
+
+## retry と session 消失
+
+- 再試行の対象はタイムアウトと claude の起動失敗。`session.maxRetries` 回まで。
+- 新規 session（`--session-id`）の再試行は、新しい session_id で行う。作成済みか不明な id を再利用しないため。
+- 継続（`--resume`）で `No conversation found with session ID` が出たら、新しい session_id で新規実行に切り替える。1 回だけで、再試行回数には数えない。
+- それ以外の失敗（非ゼロ終了、成功として読めない応答）は再試行せず `failed`。
+
+## 起動時の孤児回収
+
+- `state.json` が `running` の cap / worker を対象にする。前回 server が落ちた時の残りに当たる。
+- `ps` から argv に `--session-id <sid>` か `--resume <sid>` を含むプロセスを探す。
+  - 見つかれば SIGKILL して消えるのを確認し、`failed`（`起動時に孤児プロセスを回収`）にする。
+  - 見つからなければ `failed`（`前回の実行が終了しないまま server が落ちた`）にする。
+  - `ps` が使えなければ `error` にする。
+- 結果は `孤児回収: killed=<n> failed=<n> error=<n>` でログに出す。
+- 終了時（SIGTERM / SIGINT）は実行中の claude を SIGKILL し、`failed`（`server 終了により中断`）にする。
 
 ## 送り方
 
 - 任意の messenger peer から `send_message` で `bantou-server` 宛てに送る。
 - CLI の `send` は `from_id` が `cli` で peer ではないため、返信を受け取れない（サーバーは「返信失敗」をログに出して続行する）。
 - 指示でないメッセージ（非 JSON、他の JSON）は無視し、ログに `無視:` を出す。ping も無視する。
-- 指示は 1 件ずつ直列に処理する。
+- 指示は受信ごとに処理を始め、完了したら返信する。同一 id の指示は順番待ち、別 id は並行。`status` は実行中でも即答する。
 
 ## ログ
 
 標準出力に 1 行 1 件。
 
 ```
-2026-10-28T05:00:00.000Z bantou: 指示受信: type=launch_session from=...
+2026-10-28T05:00:00.000Z bantou: 指示受信: type=kick_cap from=... cap_id=cap-a prompt=Review the open issues.
 ```
 
-起動 / broker 起動 / peer 登録 / 指示受信 / tmux 作成 / 返信 / エラー / 終了処理 が出る。
+起動 / 孤児回収 / broker 起動 / peer 登録 / 指示受信 / claude 起動 / claude 終了 / 再試行 / 返信 / エラー / 終了処理 が出る。
+
+- `指示受信` は prompt の先頭 80 文字だけを出す。repo URL の userinfo は伏せる。
+- claude の生出力は `logs/<session_id>.jsonl` に追記する。1 回の実行ごとに `# <ISO> mode=<mode> session=<id>` の見出し行が付く。
 
 ## 開発
 
@@ -127,7 +207,7 @@ npm test
 npm run dev -- --config <path>
 ```
 
-dev / test は `node --import tsx` を使う。Node >=22 のみで動き、bun を要しない。unit test は tmux もネットワークも使わない。
+dev / test は `node --import tsx` を使う。Node >=22 のみで動き、bun を要しない。unit test は claude もネットワークも使わない。
 
 ## e2e
 
@@ -135,13 +215,15 @@ dev / test は `node --import tsx` を使う。Node >=22 のみで動き、bun �
 npm run e2e
 ```
 
-- 要: host に tmux と claude。`E2E_ROOT` で一時ディレクトリの親を変えられる（既定は OS の tmp）。
-- server を実起動し、`launch_session` → claude の起動画面確認 → `list_sessions` → 重複 launch のエラー → 非コマンドの無視、を検証する。
-- 後始末: tmux session、messenger client、server プロセス（SIGTERM、exit 0 と port 解放も確認）、一時ディレクトリ。
+- 要: host に claude。claude を実際に 3 回起動するため数分かかる。claude のログイン（claudeAgent）を使う。
+- `E2E_ROOT` で一時ディレクトリの親を変えられる（既定は OS の tmp）。
+- 検証内容: `kick_cap`（新規）→ `kick_cap`（resume、同じ session_id）→ `resume_worker` → `status` → 非コマンドの無視。
+- 後始末: messenger client、server プロセス（SIGTERM、exit 0 と port 解放も確認）、一時ディレクトリ。
 - 成功時は `E2E OK` と主要ログを出す。失敗時は理由を出して exit 1。
 
 ## 関連資料
 
+- [`../docs/architecture.md`](../docs/architecture.md)
 - [`../docs/protocol.md`](../docs/protocol.md)
 - [`../docs/guardrail.md`](../docs/guardrail.md)
 - [`../desktop/README.md`](../desktop/README.md)

@@ -2,6 +2,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { runDaemon } from "./daemon.js";
+import { fatalLine } from "./log.js";
 
 const DEFAULT_CONFIG = join(homedir(), ".config", "bantou", "config.json");
 
@@ -25,6 +26,6 @@ if (!args) {
 }
 
 runDaemon(args.config).catch((e: unknown) => {
-  console.error(`bantou: ${e instanceof Error ? e.message : String(e)}`);
+  console.error(fatalLine(e instanceof Error ? e.message : String(e)));
   process.exit(1);
 });

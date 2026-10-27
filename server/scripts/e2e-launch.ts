@@ -1,26 +1,23 @@
 /**
- * e2e: bantou-server を実起動し、messenger 経由で launch_session / list_sessions を検証する。
- * 要 tmux と claude。`E2E_ROOT` で一時ディレクトリの親を変更できる。
+ * e2e: bantou-server を実起動し、messenger 経由で kick_cap / resume_worker / status を検証する。
+ * claude を実際に 3 回起動する（数分かかる）。claude のログインを使う。
+ * `E2E_ROOT` で一時ディレクトリの親を変更できる。
  */
-import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { spawn, type ChildProcess } from "node:child_process";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 import { createMessengerClient } from "@unagents/messenger-client";
 import { parseServerReply, SERVER_NAME, type ServerReply } from "@agent-hand/bantou-protocol";
 
-const run = promisify(execFile);
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 const serverDir = fileURLToPath(new URL("..", import.meta.url));
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const RUN_TIMEOUT = 300_000;
 
 const serverLog: string[] = [];
 const replies: ServerReply[] = [];
-
-function sh(text: string): string {
-  return text.replace(/\n+$/, "");
-}
 
 async function waitFor<T>(what: string, ms: number, fn: () => T | undefined): Promise<T> {
   const end = Date.now() + ms;
@@ -36,37 +33,41 @@ function fail(msg: string): never {
   throw new Error(msg);
 }
 
+async function readStateFile(path: string): Promise<{ session_id: string | null; state: string }> {
+  return JSON.parse(await readFile(path, "utf8")) as { session_id: string | null; state: string };
+}
+
 async function main(): Promise<void> {
   const root = process.env.E2E_ROOT ?? tmpdir();
   const dir = await mkdtemp(join(root, "bantou-e2e-"));
   const ws = join(dir, "ws");
-  const name = `bantou-e2e-${process.pid}`;
   const cfgPath = join(dir, "config.json");
+  const capId = `e2e-cap-${process.pid}`;
+  const workerId = `e2e-worker-${process.pid}`;
   await writeFile(
     cfgPath,
     JSON.stringify({
       workspace: ws,
       broker: { port: 0, bind: "127.0.0.1", discovery: "off", token: "" },
+      session: { timeoutMs: RUN_TIMEOUT },
     }),
   );
 
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const k of Object.keys(env)) if (k.startsWith("AGENT_MESSENGER_")) delete env[k];
-  delete env.TMUX;
 
   let server: ChildProcess | undefined;
   let exitCode: number | null | undefined;
   let client: ReturnType<typeof createMessengerClient> | undefined;
   let port = 0;
-  let capture = "";
   let error: unknown;
 
   try {
-    server = spawn(
-      process.execPath,
-      ["--import", "tsx", "src/cli.ts", "--config", cfgPath],
-      { cwd: serverDir, env, stdio: ["ignore", "pipe", "pipe"] },
-    );
+    server = spawn(process.execPath, ["--import", "tsx", "src/cli.ts", "--config", cfgPath], {
+      cwd: serverDir,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
     server.on("exit", (code) => {
       exitCode = code;
     });
@@ -108,42 +109,66 @@ async function main(): Promise<void> {
     const nextReply = (what: string, ms: number): Promise<ServerReply> =>
       waitFor(what, ms, () => replies.shift());
 
-    // 1. launch
-    await send({ bantou: 1, type: "launch_session", name });
-    const launched = await nextReply("session_launched", 30_000);
-    if (launched.type !== "session_launched") fail(`session_launched でない: ${JSON.stringify(launched)}`);
-    if (!launched.ok) fail("ok でない");
-    if (launched.tmux !== name) fail(`tmux 名が不一致: ${launched.tmux}`);
-    if (launched.cwd !== join(ws, "repos", name)) fail(`cwd が不一致: ${launched.cwd}`);
+    // 1. kick_cap（new）
+    await send({
+      bantou: 1,
+      type: "kick_cap",
+      cap_id: capId,
+      prompt: "Run `echo kicked` in Bash and reply with only the command output on one line.",
+      reason: "e2e",
+    });
+    const c1 = await nextReply("cap_result (1 回目)", RUN_TIMEOUT + 30_000);
+    if (c1.type !== "cap_result") fail(`cap_result でない: ${JSON.stringify(c1)}`);
+    if (!c1.ok) fail(`cap_result が ok でない: ${JSON.stringify(c1)}`);
+    if (c1.cap_id !== capId) fail(`cap_id 不一致: ${c1.cap_id}`);
+    if (!c1.result_text.includes("kicked")) fail(`result_text に kicked が無い: ${c1.result_text}`);
+    if (!UUID.test(c1.session_id)) fail(`session_id が UUID でない: ${c1.session_id}`);
+    const capState = await readStateFile(join(ws, "caps", capId, "state.json"));
+    if (capState.session_id !== c1.session_id) fail(`state.json の session_id 不一致: ${capState.session_id}`);
+    if (capState.state !== "idle") fail(`cap の state が idle でない: ${capState.state}`);
 
-    // 2. claude の起動画面を待つ
-    const end = Date.now() + 60_000;
-    let matched = false;
-    while (Date.now() < end) {
-      try {
-        const { stdout } = await run("tmux", ["capture-pane", "-p", "-t", `=${name}:`]);
-        capture = stdout;
-        if (/❯/.test(stdout) || /trust/i.test(stdout)) {
-          matched = true;
-          break;
-        }
-      } catch (e) {
-        capture = `capture 失敗: ${(e as Error).message}`;
-      }
-      await sleep(1000);
+    // 2. kick_cap（resume）
+    await send({
+      bantou: 1,
+      type: "kick_cap",
+      cap_id: capId,
+      prompt: "Reply with only the word you echoed in the previous turn.",
+    });
+    const c2 = await nextReply("cap_result (2 回目)", RUN_TIMEOUT + 30_000);
+    if (c2.type !== "cap_result") fail(`cap_result でない: ${JSON.stringify(c2)}`);
+    if (!c2.ok) fail(`2 回目が ok でない: ${JSON.stringify(c2)}`);
+    if (c2.session_id !== c1.session_id) fail(`session_id が変わった: ${c1.session_id} -> ${c2.session_id}`);
+    if (!c2.result_text.includes("kicked")) fail(`2 回目の result_text に kicked が無い: ${c2.result_text}`);
+    if (!serverLog.some((l) => l.includes("mode=resume") && l.includes(c1.session_id))) {
+      fail("server ログに該当 session の mode=resume が無い");
     }
-    if (!matched) fail("claude の起動画面 (❯ / trust) を 60s 以内に確認できない");
 
-    // 3. list
-    await send({ bantou: 1, type: "list_sessions" });
-    const list = await nextReply("sessions", 15_000);
-    if (list.type !== "sessions") fail(`sessions でない: ${JSON.stringify(list)}`);
-    if (!list.sessions.some((s) => s.name === name)) fail("sessions に起動した session が無い");
+    // 3. resume_worker
+    await send({
+      bantou: 1,
+      type: "resume_worker",
+      worker_id: workerId,
+      prompt: "Reply with only the word pong.",
+    });
+    const w1 = await nextReply("worker_result", RUN_TIMEOUT + 30_000);
+    if (w1.type !== "worker_result") fail(`worker_result でない: ${JSON.stringify(w1)}`);
+    if (!w1.ok) fail(`worker_result が ok でない: ${JSON.stringify(w1)}`);
+    if (w1.worker_id !== workerId) fail(`worker_id 不一致: ${w1.worker_id}`);
+    if (!w1.result_text.toLowerCase().includes("pong")) fail(`result_text に pong が無い: ${w1.result_text}`);
+    const workerState = await readStateFile(join(ws, "workers", workerId, "state.json"));
+    if (workerState.session_id !== w1.session_id) fail(`worker の session_id 不一致: ${workerState.session_id}`);
 
-    // 4. 重複 launch は error
-    await send({ bantou: 1, type: "launch_session", name });
-    const dup = await nextReply("error (重複)", 30_000);
-    if (dup.type !== "error") fail(`error でない: ${JSON.stringify(dup)}`);
+    // 4. status
+    await send({ bantou: 1, type: "status" });
+    const st = await nextReply("status_result", 15_000);
+    if (st.type !== "status_result") fail(`status_result でない: ${JSON.stringify(st)}`);
+    const cap = st.caps.find((c) => c.id === capId);
+    const worker = st.workers.find((w) => w.id === workerId);
+    if (!cap || !worker) fail(`status に cap / worker が無い: ${JSON.stringify(st)}`);
+    for (const a of [cap, worker]) {
+      if (a.state !== "idle") fail(`status の ${a.id} が idle でない: ${a.state}`);
+      if (a.queued !== 0) fail(`status の ${a.id} の queued が 0 でない: ${a.queued}`);
+    }
 
     // 5. 非コマンドは無視される
     await client.send(SERVER_NAME, "hello");
@@ -153,7 +178,6 @@ async function main(): Promise<void> {
   } catch (e) {
     error = e;
   } finally {
-    await run("tmux", ["kill-session", "-t", `=${name}`]).catch(() => {});
     await client?.close().catch(() => {});
     if (server && exitCode === undefined) {
       server.kill("SIGTERM");
@@ -164,9 +188,9 @@ async function main(): Promise<void> {
         error ??= new Error("server が SIGTERM で 10s 以内に終了しない");
       }
     }
-    await rm(dir, { recursive: true, force: true }).catch(() => {});
   }
 
+  // 6. 終了確認
   if (!error) {
     try {
       if (exitCode !== 0) fail(`server の exit code が 0 でない: ${exitCode}`);
@@ -184,18 +208,16 @@ async function main(): Promise<void> {
       error = e;
     }
   }
+  await rm(dir, { recursive: true, force: true }).catch(() => {});
 
   if (error) {
     console.error(`E2E NG: ${error instanceof Error ? error.message : String(error)}`);
-    if (capture) console.error(`--- tmux capture (last)\n${sh(capture).split("\n").slice(-30).join("\n")}`);
     process.exit(1);
   }
 
   console.log("E2E OK");
-  const keys = ["起動", "broker 起動", "peer 登録", "指示受信", "tmux 作成", "返信", "SIGTERM", "broker 停止", "終了"];
-  const excerpt = serverLog.filter((l) => keys.some((k) => l.includes(`bantou: ${k}`) || l.includes(k)));
-  console.log(excerpt.join("\n"));
-  console.log(`--- tmux capture (last)\n${sh(capture).split("\n").slice(-30).join("\n")}`);
+  const keys = ["bantou: 起動", "broker 起動", "peer 登録", "孤児回収", "指示受信", "claude 起動", "claude 終了", "返信", "SIGTERM", "broker 停止", "bantou: 終了"];
+  console.log(serverLog.filter((l) => keys.some((k) => l.includes(k))).join("\n"));
   process.exit(0);
 }
 

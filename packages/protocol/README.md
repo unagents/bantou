@@ -12,7 +12,7 @@ bantou の work session ↔ bantou メッセージの共通 TypeScript 型。
 - `envelope.ts`: 共通フィールド、`TaskMessage` / `AskMessage`、ping の仕様、reply の見出し定数と `formatReply`。
 - `paths.ts`: 保存先規約（`~/.local/share/bantou/<workspace-key>/...`）。`workspaceKey` は `/` を `-` に置換。
 - `guards.ts`: `isEnvelope` / `isTaskMessage` / `isAskMessage` / `parseEnvelope`。
-- `server.ts`: desktop・peer → bantou-server のコマンド `launch_session` / `list_sessions` と reply の型、ガード（`isServerCommand` / `isServerReply` / `parseServerCommand` / `parseServerReply`）。
+- `server.ts`: desktop・peer → bantou-server のコマンド `kick_cap` / `resume_worker` / `status` と reply `cap_result` / `worker_result` / `status_result` / `error` の型、ガード（`isServerCommand` / `isServerReply` / `parseServerCommand` / `parseServerReply`）。
 
 ## 未定義
 
