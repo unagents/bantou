@@ -1,6 +1,6 @@
 # bantou-center
 
-素のエージェント（Claude Code など）が MCP tool 経由で cap 運用できるようにする MCP server。stdio で動く。
+素のエージェント（Claude Code など）が MCP tool 経由で cap 運用できるようにする MCP server。stdio と Streamable HTTP で動く。
 
 役割は 2 つ。
 
@@ -15,7 +15,31 @@ desktop が裏で起動する予定（アプリ設定で on/off）。現時点�
 npx bantou-center --config ~/.config/bantou/center.json
 ```
 
-`--config` の既定は `~/.config/bantou/center.json`。不正な引数は usage を stderr に出して exit 2。
+`--config` の既定は `~/.config/bantou/center.json`。
+
+```
+bantou-center [--config <path>] [--transport stdio|http] [--port <n>] [--bind <addr>]
+```
+
+| フラグ | 既定 | 説明 |
+|---|---|---|
+| `--transport` | `stdio` | `stdio` / `http` |
+| `--port` | `7910` | http の待受ポート。`0` は OS 任せ（実ポートは stderr のログに出る）。stdio では無視 |
+| `--bind` | `127.0.0.1` | http の bind アドレス。stdio では無視 |
+
+不明な引数・不正な値は usage を stderr に出して exit 2。
+
+### http transport
+
+- エンドポイントは `http://<bind>:<port>/mcp`（MCP Streamable HTTP。POST / GET / DELETE）。`/mcp` 以外は 404。
+- **認証は無い**。既定で loopback にだけ bind する。`--bind 0.0.0.0` 等で外に出すと、到達できる相手全員が rc_start / cap_kick を呼べる（認証は未実装）。
+- MCP session ごとに McpServer を作る。supervisor と server 接続は全 session で共有。
+- SIGTERM / SIGINT で http server・全 session・全 project を停止して exit 0。http では stdin を見ない（親が `/dev/null` を渡しても落ちない。親は SIGTERM で止める）。
+- 親プロセスが死んだら同じ手順で停止して exit 0。2 秒ごとに `ppid` を見て、起動時の値から変わったら（orphan で 1 / launchd に付け替わったら）終了する。
+- DNS rebinding 対策: Host ヘッダは `127.0.0.1:<port>` / `localhost:<port>` / `[::1]:<port>`（と、wildcard 以外の `--bind` 値 `:<port>`）だけ通し、それ以外は 403。ポート無しの Host も 403。Origin は付いていれば `http://<上記 Host>` だけ通す（ブラウザ以外のクライアントは Origin を付けないので影響なし）。`--bind 0.0.0.0` でも LAN の IP 宛 Host は通らない。
+- session は 30 分リクエストが無いと閉じる（処理中のリクエストや開いたままの SSE がある間は閉じない）。閉じた session への要求は 404 なので、クライアントは再 initialize する。
+- 同時 session は最大 32。超えた新規 initialize は 503（`Retry-After: 30`）。
+- POST ボディは 4 MiB まで。超えたら 413 を返して接続を閉じる。
 
 Claude Code への登録例:
 
@@ -30,9 +54,9 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 ```json
 {
   "projects": [
-    { "name": "bantou", "path": "/home/me/work/bantou", "spawn": "same-dir", "permissionMode": "auto", "capacity": 4, "autostart": true }
+    { "name": "bantou", "path": "/home/me/work/bantou", "spawn": "same-dir", "permissionMode": "auto", "capacity": 4, "autostart": true, "env": { "FOO": "bar" } }
   ],
-  "remoteControl": { "claude": "claude", "continueOnRestart": true, "restartDelayMs": 5000, "maxRestarts": 5, "stopGraceMs": 5000 },
+  "remoteControl": { "claude": "claude", "env": { "CLAUDE_CONFIG_DIR": "/home/me/.claude-rc" }, "continueOnRestart": true, "restartDelayMs": 5000, "maxRestarts": 5, "stopGraceMs": 5000 },
   "servers": [
     { "name": "linux204", "broker": "http://192.168.1.204:7901", "token": "secret", "timeoutMs": 2100000 }
   ],
@@ -48,7 +72,9 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 | `projects[].permissionMode` | `acceptEdits` / `auto` / `bypassPermissions` / `default` / `dontAsk` / `plan` | `auto` | `--permission-mode` |
 | `projects[].capacity` | 1 以上の整数 | 指定なし | `--capacity` |
 | `projects[].autostart` | boolean | `false` | center 起動時に remote-control も起動する |
+| `projects[].env` | `{ KEY: string }` | なし | この project の子プロセスに足す環境変数（`remoteControl.env` より優先） |
 | `remoteControl.claude` | string | `claude` | claude 実行ファイル |
+| `remoteControl.env` | `{ KEY: string }` | なし | 全 project の子プロセスに足す環境変数 |
 | `remoteControl.continueOnRestart` | boolean | `true` | 再起動時に `--continue` を付ける |
 | `remoteControl.autoConsent` | boolean | `true` | 起動時の確認プロンプト（`Enable Remote Control? (y/n)`）に自動で `y` を返す |
 | `remoteControl.restartDelayMs` | 0 以上の整数 | `5000` | 異常終了から再起動までの待ち |
@@ -105,8 +131,8 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 - 子プロセスが落ちると `restartDelayMs` 後に再起動する（`continueOnRestart` が `true` なら `--continue` 付き）。`restarts` が `maxRestarts` に達したら `error`（`lastError` は「再起動回数の上限」）。
 - `rc_stop` は再起動予約を取り消し、SIGTERM、`stopGraceMs` 後に SIGKILL。`restarts` は 0 に戻る。停止後の `rc_start` は `--continue` なしの新規起動。
 - 起動のたびに `claude remote-control` は `Enable Remote Control? (y/n)` を出して stdin の返答を待つ。`autoConsent`（既定 true）なら stdout に出た時点で `y` を 1 度送る。stdin は子の生存中ずっと開けておく（閉じると確認待ちで固まる）。
-- 子プロセスの環境変数から `ANTHROPIC_API_KEY`（あると remote-control が失敗する）と `TMUX` を除く。
-- center 終了時（SIGTERM / SIGINT / stdin の EOF）は全 project を停止してから exit 0。15 秒で強制終了。
+- 子プロセスの環境変数は `process.env` < `remoteControl.env` < `projects[].env` の順で合成する。合成後に `ANTHROPIC_API_KEY`（あると remote-control が失敗する）と `TMUX` を除く。この 2 つは config の `env` でも注入できない。
+- center 終了時（SIGTERM / SIGINT。stdio ではさらに stdin の EOF / 切断）は全 project を停止してから exit 0。15 秒で強制終了。
 
 ## 開発
 
@@ -117,6 +143,21 @@ npm run build
 npm test          # node:test。ネットワーク・claude・実 bantou-server は不要
 npm run dev -- --config <path>
 ```
+
+## 単体バイナリ
+
+`bun build --compile` で Node 無しで動く単体バイナリにする（`@agent-hand/bantou-protocol` などの依存も同梱）。先に protocol をビルドしておく（`file:../protocol` は `dist` を指す）。
+
+```bash
+(cd ../protocol && npm run build)
+npm run build:bin                      # dist-bin/bantou-center（実行ホスト向け）
+npm run build:bin -- --target=bun-darwin-arm64 --outfile dist-bin/bantou-center-darwin-arm64
+```
+
+- `--target`: `bun-darwin-arm64` / `bun-darwin-x64` / `bun-linux-x64` など bun の compile target。
+- `--outfile`: 既定は `dist-bin/bantou-center`。`dist-bin` は git 管理外。
+- 実行: `./dist-bin/bantou-center --transport http --port 7910 --config <path>`。
+- バイナリ内では package.json を読めないため、MCP の server version は `0.0.0` になる。
 
 ## e2e
 
@@ -132,7 +173,6 @@ npm run e2e
 
 ## 未決
 
-- desktop ↔ center の transport（MCP の Streamable HTTP が候補）。現状は stdio のみ。
 - 認証（desktop ↔ center、center ↔ server）。
 - desktop からの起動と接続先の切り替え。
 - 本物の `claude remote-control` での運用確認（出力形式の変化、`Connected` の検出、`--continue` の挙動）。e2e は stub のみ。

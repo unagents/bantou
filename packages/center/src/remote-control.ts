@@ -114,6 +114,21 @@ interface Entry {
   logStream: WriteStream | null;
 }
 
+/**
+ * 子プロセスの環境変数を合成する。優先順は base < remoteControl.env < project.env。
+ * 合成後に ANTHROPIC_API_KEY（remote-control が失敗する）と TMUX を除く（config からは注入できない）。
+ */
+export function mergeChildEnv(
+  base: NodeJS.ProcessEnv,
+  remoteControlEnv?: Record<string, string>,
+  projectEnv?: Record<string, string>,
+): NodeJS.ProcessEnv {
+  const env = { ...base, ...remoteControlEnv, ...projectEnv };
+  delete env.ANTHROPIC_API_KEY;
+  delete env.TMUX;
+  return env;
+}
+
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 export function createRemoteControlSupervisor(opts: {
@@ -157,12 +172,7 @@ export function createRemoteControlSupervisor(opts: {
   };
   const snapshot = (e: Entry): RcStatus => ({ ...e.status, args: e.status.args ? [...e.status.args] : null });
 
-  const childEnv = (): NodeJS.ProcessEnv => {
-    const env = { ...process.env };
-    delete env.ANTHROPIC_API_KEY;
-    delete env.TMUX;
-    return env;
-  };
+  const childEnv = (p: ProjectConfig): NodeJS.ProcessEnv => mergeChildEnv(process.env, rc.env, p.env);
 
   /** 子プロセスを 1 本起動して監視を付ける。 */
   const launch = (e: Entry, useContinue: boolean): void => {
@@ -187,7 +197,7 @@ export function createRemoteControlSupervisor(opts: {
 
     let child: ChildLike;
     try {
-      child = spawnImpl(rc.claude, args, { cwd: e.project.path, env: childEnv(), stdio: ["pipe", "pipe", "pipe"] });
+      child = spawnImpl(rc.claude, args, { cwd: e.project.path, env: childEnv(e.project), stdio: ["pipe", "pipe", "pipe"] });
     } catch (err) {
       e.status.state = "error";
       e.status.lastError = `起動失敗: ${(err as Error).message}`;

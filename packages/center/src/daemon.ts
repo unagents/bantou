@@ -1,6 +1,9 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import type { CliArgs } from "./args.js";
 import { loadConfig } from "./config.js";
+import { startHttpServer, type HttpHandle } from "./http.js";
 import { log } from "./log.js";
+import { watchParent } from "./parent-watch.js";
 import { createRemoteControlSupervisor } from "./remote-control.js";
 import { createCenterServer } from "./server.js";
 import { createServerLink } from "./server-link.js";
@@ -8,8 +11,12 @@ import { createServerLink } from "./server-link.js";
 /** 強制終了の猶予に足す余裕（stop は SIGTERM 待ち stopGraceMs の後、SIGKILL 待ちで最大 5 秒）。 */
 const HARD_EXIT_MARGIN_MS = 5_000;
 
-/** 起動して常駐する。SIGTERM / SIGINT / stdin EOF で後始末して exit 0。 */
-export async function runDaemon(configPath: string): Promise<void> {
+/**
+ * 起動して常駐する。SIGTERM / SIGINT で後始末して exit 0。
+ * stdio では stdin EOF / 切断でも終了する。http では stdin を見ず（親が /dev/null を渡しても落ちない）、親プロセスの死亡で終了する。
+ */
+export async function runDaemon(args: CliArgs): Promise<void> {
+  const configPath = args.config;
   log("起動");
   const config = await loadConfig(configPath);
   log(
@@ -19,6 +26,7 @@ export async function runDaemon(configPath: string): Promise<void> {
   const link = createServerLink({ config, log });
 
   let closing = false;
+  let http: HttpHandle | null = null;
   const shutdown = async (reason: string): Promise<void> => {
     if (closing) return;
     closing = true;
@@ -29,6 +37,7 @@ export async function runDaemon(configPath: string): Promise<void> {
     }, config.remoteControl.stopGraceMs + HARD_EXIT_MARGIN_MS);
     hard.unref();
     try {
+      await http?.close();
       await supervisor.shutdown();
       await link.close();
     } catch (e) {
@@ -40,15 +49,21 @@ export async function runDaemon(configPath: string): Promise<void> {
   process.once("SIGTERM", () => void shutdown("SIGTERM"));
   process.once("SIGINT", () => void shutdown("SIGINT"));
 
-  const server = createCenterServer({ config, supervisor, link });
-  const transport = new StdioServerTransport();
-  transport.onclose = () => void shutdown("MCP stdio 切断");
-  // SDK の stdio transport は stdin の EOF を検知しないので自前で見る
-  process.stdin.once("end", () => void shutdown("stdin EOF"));
-  await server.connect(transport);
-  log("MCP stdio 接続");
+  const makeServer = () => createCenterServer({ config, supervisor, link });
+  if (args.transport === "http") {
+    http = await startHttpServer({ createServer: makeServer, port: args.port, bind: args.bind, log });
+    watchParent({ onOrphan: (reason) => void shutdown(reason) });
+  } else {
+    const server = makeServer();
+    const transport = new StdioServerTransport();
+    transport.onclose = () => void shutdown("MCP stdio 切断");
+    // SDK の stdio transport は stdin の EOF を検知しないので自前で見る
+    process.stdin.once("end", () => void shutdown("stdin EOF"));
+    await server.connect(transport);
+    log("MCP stdio 接続");
+  }
 
-  // stdio を先に繋いでから、接続と autostart をバックグラウンドで進める
+  // transport を先に繋いでから、接続と autostart をバックグラウンドで進める
   void link.connectAll();
   for (const p of config.projects) {
     if (!p.autostart) continue;

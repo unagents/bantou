@@ -7,6 +7,7 @@
 - `packages/protocol/`: desktop・server・plugin 共通のメッセージ仕様と TS 型。雛形のみ。
 - `docs/`: 共通資料。`protocol.md` / `guardrail.md` / `handoff.md`。
 - `plugin/`: work session に配る Claude Code plugin `bantou`。
+- center は desktop に sidecar 同梱（packages/center を bun build --compile、desktop/scripts/build-sidecar.ts）。
 
 ## desktop と server の関係
 

@@ -1,4 +1,4 @@
-import type { BrokerStatus, Peer, Session, Task, Thread } from "../../src/types";
+import type { BrokerStatus, CenterSettings, Peer, Session, Task, Thread } from "../../src/types";
 
 export interface Seed {
   dir: string | null;
@@ -30,6 +30,7 @@ export class MockBantou {
   supplement: string;
   peers: Peer[];
   sessionsList: Session[];
+  center: CenterSettings = { enabled: false, port: 7910, bind: "127.0.0.1", projects: [] };
   calls: InvokeRecord[] = [];
   sent: { to: string; text: string }[] = [];
   /** Ping timers: task id → expiry (ISO). */
@@ -186,6 +187,13 @@ export class MockBantou {
         this.agentReply(id, "【作業セッションへの指示】\n回答どおり進めよ", "回答どおり進めよ");
         return null;
       }
+      case "center_get_settings":
+        return structuredClone(this.center);
+      case "center_set_settings":
+        this.center = structuredClone(args.settings as CenterSettings);
+        return structuredClone(this.center);
+      case "center_status":
+        return { state: this.center.enabled ? "running" : "stopped", pid: this.center.enabled ? 4242 : undefined, logs: [] };
       case "plugin:fs|watch":
         return 1;
       case "plugin:resources|close":

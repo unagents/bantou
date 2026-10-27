@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "bun run generate",
+    "beforeBuildCommand": "bun run build:sidecar && bun run generate",
     "frontendDist": "../.output/public"
   },
   "app": {
@@ -16,6 +16,9 @@
   },
   "bundle": {
     "active": true,
+    "externalBin": [
+      "binaries/bantou-center"
+    ],
     "targets": [
       "app",
       "dmg"

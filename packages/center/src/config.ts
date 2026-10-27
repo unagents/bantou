@@ -43,6 +43,7 @@ const projectSchema = z.object({
   permissionMode: z.enum(PERMISSION_MODES).default(DEFAULT_PROJECT.permissionMode),
   capacity: z.number().int().min(1).optional(),
   autostart: z.boolean().default(DEFAULT_PROJECT.autostart),
+  env: z.record(z.string(), z.string()).optional(),
 });
 
 const remoteControlSchema = z.object({
@@ -52,6 +53,7 @@ const remoteControlSchema = z.object({
   restartDelayMs: z.number().int().min(0).default(DEFAULT_REMOTE_CONTROL.restartDelayMs),
   maxRestarts: z.number().int().min(0).default(DEFAULT_REMOTE_CONTROL.maxRestarts),
   stopGraceMs: z.number().int().min(0).default(DEFAULT_REMOTE_CONTROL.stopGraceMs),
+  env: z.record(z.string(), z.string()).optional(),
 });
 
 const serverSchema = z.object({

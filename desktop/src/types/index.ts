@@ -90,3 +90,28 @@ export interface RegisterResult {
   delivered: boolean;
   error: string | null;
 }
+
+/** Mirror of `src-tauri/src/center.rs::CenterProject`. */
+export interface CenterProject {
+  name: string;
+  path: string;
+  spawn?: string;
+  permissionMode?: string;
+}
+
+/** Mirror of `src-tauri/src/center.rs::CenterSettings`. */
+export interface CenterSettings {
+  enabled: boolean;
+  port: number;
+  bind: string;
+  projects: CenterProject[];
+  remoteUrl?: string;
+}
+
+/** Mirror of `src-tauri/src/center.rs::CenterStatus`. */
+export interface CenterStatus {
+  state: "stopped" | "running" | "error";
+  pid?: number;
+  error?: string;
+  logs: string[];
+}

@@ -56,6 +56,7 @@ watch(modalOpen, (v) => {
 // --- add session -----------------------------------------------------------
 
 const addSessionOpen = ref(false);
+const settingsOpen = ref(false);
 async function onSessionsAdded(results: RegisterResult[]) {
   await refresh();
   for (const r of results) {
@@ -101,6 +102,7 @@ async function onInstruct(session: string, title: string, body: string) {
         :broker="broker"
         @open="pickAndOpen"
         @add-session="addSessionOpen = true"
+        @settings="settingsOpen = true"
       />
       <main class="mx-auto flex w-full max-w-5xl flex-col p-6">
         <SessionColumn
@@ -142,6 +144,7 @@ async function onInstruct(session: string, title: string, body: string) {
       :self-name="broker?.name ?? 'bantou-core'"
       @done="onSessionsAdded"
     />
+    <SettingsDialog v-if="settingsOpen" v-model:open="settingsOpen" />
     <InstructTaskDialog
       :open="instructTarget !== null"
       :session="instructTarget ?? ''"

@@ -12,6 +12,7 @@ import {
   createRemoteControlSupervisor,
   detectConnected,
   extractUrls,
+  mergeChildEnv,
   type ChildLike,
   type SpawnImpl,
 } from "../src/remote-control.js";
@@ -375,4 +376,31 @@ test("起動済みの child の error では追跡を続ける", async () => {
   assert.equal(st.lastError, undefined);
   c.die(0);
   await sup.stop("p1");
+});
+
+test("mergeChildEnv: base < remoteControl.env < project.env、API キーと TMUX は常に除く", () => {
+  const env = mergeChildEnv(
+    { A: "base", B: "base", C: "base", ANTHROPIC_API_KEY: "k", TMUX: "t" },
+    { B: "rc", C: "rc", D: "rc", ANTHROPIC_API_KEY: "inj", TMUX: "inj" },
+    { C: "proj", E: "proj" },
+  );
+  assert.deepEqual(env, { A: "base", B: "rc", C: "proj", D: "rc", E: "proj" });
+});
+
+test("子プロセスには remoteControl.env と project.env が合成されて渡る", async () => {
+  cfg = parseConfig(
+    {
+      projects: [{ name: "p1", path: "/tmp/p1", env: { X: "proj", Y: "proj" } }],
+      remoteControl: { claude: "fake-claude", env: { X: "rc", Z: "rc", TMUX: "inj" } },
+      logDir: join(dir, "logs"),
+    },
+    join(dir, "c.json"),
+  );
+  const sup = make();
+  await sup.start("p1");
+  assert.equal(children[0].env.X, "proj");
+  assert.equal(children[0].env.Y, "proj");
+  assert.equal(children[0].env.Z, "rc");
+  assert.equal(children[0].env.TMUX, undefined);
+  await sup.shutdown();
 });

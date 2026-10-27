@@ -13,6 +13,12 @@ Run E2E on mac200, never on this Mac.
    `scp claude-cli@192.168.1.200:work/bantou/node_modules/.cache/bantou-e2e/shots/board.png /tmp/claude/`
    Other shots: `modal.png`, `answered.png`, `session-added.png`.
 4. Rust: `cd src-tauri && cargo test`.
+   sidecar binary が無いとビルドが失敗する。先に `bun run build:sidecar`（`src-tauri/binaries/bantou-center-<triple>`）。
+
+## center sidecar
+
+- `bun run build:sidecar` は `tauri dev` / `cargo` の前に必須。universal mac ビルドは両 darwin triple（`--target`）が要る。`tauri build` は `beforeBuildCommand` で実行する。
+- 設定は設定ダイアログ（ヘッダーの歯車）。`settings.json` の `center` キーに保存し、`~/.local/share/bantou/center.json` を書き出す。項目は README 参照。
 
 ## Release / deploy
 

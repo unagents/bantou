@@ -9,6 +9,7 @@
     "generate": "nuxt generate",
     "preview": "nuxt preview",
     "postinstall": "nuxt prepare",
+    "build:sidecar": "bun scripts/build-sidecar.ts",
     "tauri": "tauri",
     "typecheck": "nuxt typecheck",
     "e2e": "playwright test"

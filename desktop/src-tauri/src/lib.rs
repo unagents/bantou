@@ -1,5 +1,6 @@
 mod agent;
 mod broker;
+mod center;
 mod error;
 mod frontmatter;
 mod menu;
@@ -43,11 +44,13 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_store::Builder::default().build())
+        .plugin(tauri_plugin_shell::init())
         .manage(AppState::new())
         .manage(broker::Brokers::default())
         .manage(broker::Pings::default())
         .manage(agent::Agents::default())
         .manage(session::Sessions::default())
+        .manage(center::Center::default())
         .invoke_handler(tauri::generate_handler![
             workspace::pick_directory,
             workspace::set_workspace_directory,
@@ -71,6 +74,9 @@ pub fn run() {
             session::register_sessions,
             session::unregister_session,
             session::instruct_add_task,
+            center::center_get_settings,
+            center::center_set_settings,
+            center::center_status,
         ])
         .on_window_event(|window, event| {
             // `Destroyed` (not `CloseRequested`) is the right hook:
@@ -101,6 +107,7 @@ pub fn run() {
 
             menu::setup(app)?;
 
+            center::autostart(app.handle());
 
             Ok(())
         })
@@ -124,6 +131,10 @@ pub fn run() {
                 // convention). Programmatic exits carry `code: Some(N)` and
                 // terminate as requested.
                 api.prevent_exit();
+            }
+            tauri::RunEvent::Exit => {
+                // SIGTERM the center so it can stop its remote-control children.
+                tauri::async_runtime::block_on(app_handle.state::<center::Center>().stop());
             }
             _ => {}
         }

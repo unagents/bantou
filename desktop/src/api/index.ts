@@ -1,5 +1,6 @@
 // Single entry point for every Tauri `invoke` — components import from
 // `~/api` and never call `invoke` directly.
+export { centerGetSettings, centerSetSettings, centerStatus } from "./center";
 export {
   instructAddTask,
   listPeers,
