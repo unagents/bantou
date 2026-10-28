@@ -24,6 +24,11 @@ tauri-plugin-store = "=2.4.3"
 # 2.3.6 is the newest release that accepts tauri 2.11 (2.4+ needs tauri ^2.12).
 tauri-plugin-shell = "=2.3.6"
 tauri-plugin-single-instance = "=2.4.2"
+tauri-plugin-updater = "=2.10.1"
+tauri-plugin-process = "=2.3.1"
+# tauri-plugin-updater turns on reqwest/rustls-no-provider (no crypto provider), so any
+# `reqwest::Client` build panics until one is installed. See `lib.rs::ensure_crypto_provider`.
+rustls = { version = "=0.23.46", default-features = false, features = ["ring"] }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = { version = "=1.0.150", features = ["preserve_order"] }
 rfd = "=0.17.2"

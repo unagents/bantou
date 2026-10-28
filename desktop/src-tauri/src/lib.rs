@@ -26,7 +26,20 @@ use tauri::Manager;
 /// `"workspace-*"` glob to cover this naming convention.
 const MAIN_WINDOW_LABEL: &str = "main";
 
+/// Install the rustls crypto provider once. reqwest (feature `rustls-no-provider`, enabled by
+/// `tauri-plugin-updater`) panics on `Client::build` while none is installed; the updater only
+/// installs one lazily on its first check. Call before building any `reqwest::Client`.
+pub(crate) fn ensure_crypto_provider() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if rustls::crypto::CryptoProvider::get_default().is_none() {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        }
+    });
+}
+
 pub fn run() {
+    ensure_crypto_provider();
     let app = tauri::Builder::default()
         // MUST be the first plugin registered (per the plugin's contract). When
         // the `bantou` CLI launches the app binary while an instance is
@@ -47,6 +60,8 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(AppState::new())
         .manage(broker::Brokers::default())
         .manage(broker::Pings::default())
@@ -148,4 +163,42 @@ pub fn run() {
             _ => {}
         }
     });
+}
+
+#[cfg(test)]
+mod updater_config_tests {
+    //! The updater settings live in `tauri.conf.json` (`plugins.updater`) and are
+    //! only parsed at runtime, so a typo would otherwise surface in a release build.
+    use serde_json::Value;
+
+    fn conf() -> Value {
+        serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json is valid JSON")
+    }
+
+    #[test]
+    fn updater_plugin_config_loads() {
+        let conf = conf();
+        let updater = conf["plugins"]["updater"].clone();
+        let cfg: tauri_plugin_updater::Config =
+            serde_json::from_value(updater).expect("plugins.updater deserializes into the plugin Config");
+        assert_eq!(
+            cfg.endpoints.iter().map(|u| u.as_str()).collect::<Vec<_>>(),
+            ["https://github.com/unagents/bantou/releases/latest/download/latest.json"]
+        );
+        assert!(!cfg.pubkey.is_empty());
+        assert_eq!(conf["bundle"]["createUpdaterArtifacts"], Value::Bool(true));
+    }
+
+    #[test]
+    fn capabilities_allow_updater_and_relaunch() {
+        let caps: Value = serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        let perms: Vec<&str> = caps["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(perms.contains(&"updater:default"));
+        assert!(perms.contains(&"process:default"));
+    }
 }

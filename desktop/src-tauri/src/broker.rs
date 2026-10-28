@@ -81,6 +81,7 @@ fn config_brokers(port: u16) -> Vec<String> {
 }
 
 async fn healthy(url: &str) -> bool {
+    crate::ensure_crypto_provider();
     let Ok(c) = reqwest::Client::builder().timeout(Duration::from_millis(1500)).build() else {
         return false;
     };
@@ -489,6 +490,7 @@ fn append_inbox(ws: &Path, msg: &Message) -> CmdResult<()> {
 // -- HTTP -----------------------------------------------------------------------
 
 fn client() -> reqwest::Client {
+    crate::ensure_crypto_provider();
     reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()

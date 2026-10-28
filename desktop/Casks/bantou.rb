@@ -7,6 +7,8 @@ cask "bantou" do
   desc "Multi-agent task bridge on a Cork-format task board"
   homepage "https://github.com/unagents/bantou"
 
+  auto_updates true
+
   depends_on arch: :arm64
   depends_on macos: :sequoia
 

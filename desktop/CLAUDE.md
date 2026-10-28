@@ -29,8 +29,11 @@ Do it without asking once the review check passes.
 
 1. Bump the version in `package.json`, `src-tauri/Cargo.toml` and `Cargo.lock`. Commit on develop. Do not edit `Casks/bantou.rb` by hand; step 5 rewrites it.
 2. Push to GitHub (`origin`; Gitea `gitea` is a read-only pull mirror, never push there): `git push origin develop`, fast-forward main (`git merge --ff-only develop`), `git push origin main`, back to develop.
-3. Build (in `desktop/`): `CI=true bun run tauri build`. `beforeBuildCommand` runs `bun run build:sidecar && bun run generate`. Output: `src-tauri/target/release/bundle/dmg/bantou_<ver>_aarch64.dmg`.
-4. GitHub release: `gh release create v<ver> <dmg> --title v<ver> --notes ""`
+3. Build (in `desktop/`). The updater artifacts are signed at build time with the key on this Mac (`~/.tauri/bantou-updater.key`, no password; never copy it elsewhere):
+   `TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/bantou-updater.key)" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" CI=true bun run tauri build`
+   `beforeBuildCommand` runs `bun run build:sidecar && bun run generate`. Output under `src-tauri/target/release/bundle/`: `dmg/bantou_<ver>_aarch64.dmg`, `macos/bantou.app.tar.gz`, `macos/bantou.app.tar.gz.sig`.
+   Generate the updater manifest: `scripts/make-latest-json.sh <ver> src-tauri/target/release/bundle/macos/bantou.app.tar.gz.sig latest.json` (platform `darwin-aarch64`; needs `jq`).
+4. GitHub release: `gh release create v<ver> <dmg> src-tauri/target/release/bundle/macos/bantou.app.tar.gz src-tauri/target/release/bundle/macos/bantou.app.tar.gz.sig latest.json --title v<ver> --notes ""`. The installed app checks `releases/latest/download/latest.json`, so attach all three updater files.
 5. Cask (in `desktop/`): `scripts/publish-cask.sh [--dry-run] <ver> $(shasum -a 256 <dmg> | cut -d' ' -f1)`. Needs authenticated `gh` and `jq`; no env vars.
    Rewrites `version`/`sha256` in `desktop/Casks/bantou.rb` (commit the result) and updates `Casks/bantou.rb` in GitHub `unagents/homebrew-tap` via API.
 6. This Mac (tap `unagents/tap`): `/opt/homebrew/bin/brew update` and `/opt/homebrew/bin/brew upgrade --cask bantou`. Use `/opt/homebrew/bin/brew`, never `/usr/local/bin/brew`.

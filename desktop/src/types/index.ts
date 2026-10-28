@@ -185,3 +185,12 @@ export interface CenterServerStatus {
   caps: CenterAgentState[];
   workers: CenterAgentState[];
 }
+
+/** State machine of the in-app updater (`useUpdater`). Mirrors Cork's `UpdaterState`. */
+export type UpdaterState =
+  | { kind: "idle" }
+  | { kind: "checking" }
+  | { kind: "available"; update: import("@tauri-apps/plugin-updater").Update; version: string }
+  | { kind: "downloading"; version: string; downloaded: number; contentLength: number | null }
+  | { kind: "installing"; version: string }
+  | { kind: "error"; message: string; version: string };

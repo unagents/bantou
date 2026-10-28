@@ -9,6 +9,8 @@ export interface Seed {
   supplement?: string;
   peers?: Peer[];
   sessions?: Session[];
+  /** When set, `plugin:updater|check` reports this release as available. */
+  update?: { version: string; currentVersion?: string; body?: string };
 }
 
 export interface InvokeRecord {
@@ -30,6 +32,7 @@ export class MockBantou {
   supplement: string;
   peers: Peer[];
   sessionsList: Session[];
+  update: Seed["update"];
   center: CenterSettings = { enabled: false, port: 7910, bind: "127.0.0.1", workspace: "~/.bantou", token: "mock-token-000000000000000000000001" };
   /** Number of tokens minted by center_regenerate_token (the next one is mock-token-<n>). */
   private tokenSeq = 1;
@@ -63,6 +66,7 @@ export class MockBantou {
     this.supplement = seed.supplement ?? "補足: 判断材料のモック。";
     this.peers = seed.peers ?? [];
     this.sessionsList = seed.sessions ?? [];
+    this.update = seed.update;
   }
 
   private now() {
@@ -258,6 +262,20 @@ export class MockBantou {
             throw new Error(`unknown tool: ${String(args.name)}`);
         }
       }
+      case "plugin:updater|check":
+        return this.update
+          ? {
+              rid: 4242,
+              currentVersion: this.update.currentVersion ?? "0.0.0",
+              version: this.update.version,
+              date: null,
+              body: this.update.body ?? null,
+              rawJson: {},
+            }
+          : null;
+      case "plugin:updater|download_and_install":
+      case "plugin:process|restart":
+        return null;
       case "plugin:fs|watch":
         return 1;
       case "plugin:resources|close":

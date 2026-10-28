@@ -20,6 +20,15 @@ export {
   SESSIONS_CHANGED_EVENT,
   unregisterSession,
 } from "./sessions";
+export {
+  CHECK_FOR_UPDATES_EVENT,
+  checkForUpdate,
+  downloadAndInstall,
+  openReleaseNotes,
+  relaunchApp,
+  type DownloadProgress,
+  type Update,
+} from "./updater";
 export { getStatuses, listTasks } from "./tasks";
 export {
   AGENT_EVENT,

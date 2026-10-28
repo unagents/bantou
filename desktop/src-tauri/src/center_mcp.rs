@@ -184,6 +184,7 @@ pub struct CenterClient {
 
 impl Default for CenterClient {
     fn default() -> Self {
+        crate::ensure_crypto_provider();
         Self {
             http: reqwest::Client::builder().connect_timeout(CONNECT_TIMEOUT).build().expect("reqwest client"),
             session: tokio::sync::Mutex::new(None),

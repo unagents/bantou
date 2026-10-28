@@ -19,6 +19,9 @@ pub fn setup(app: &mut App) -> tauri::Result<()> {
         .short_version(Some(String::new()))
         .build();
 
+    let check_for_updates_item =
+        MenuItemBuilder::with_id("check_for_updates", "アップデートを確認...").build(app)?;
+
     let settings_item = MenuItemBuilder::with_id("settings", "Settings...")
         .accelerator("CmdOrCtrl+,")
         .build(app)?;
@@ -37,6 +40,7 @@ pub fn setup(app: &mut App) -> tauri::Result<()> {
 
     let app_menu = SubmenuBuilder::new(app, "bantou")
         .about(Some(about_metadata))
+        .item(&check_for_updates_item)
         .separator()
         .item(&settings_item)
         .separator()
@@ -85,6 +89,12 @@ pub fn setup(app: &mut App) -> tauri::Result<()> {
     // listen through `getCurrentWebviewWindow().listen` for the target
     // filter to discriminate.
     app.on_menu_event(|app, event| match event.id().0.as_str() {
+        "check_for_updates" => {
+            if let Some(window) = focused_webview_window(app) {
+                let target = EventTarget::webview_window(window.label());
+                let _ = app.emit_to(target, "menu:check-for-updates", ());
+            }
+        }
         "settings" => {
             if let Some(window) = focused_webview_window(app) {
                 let target = EventTarget::webview_window(window.label());
