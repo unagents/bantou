@@ -2,7 +2,7 @@
 
 - 日付: 2026-10-28（204 remote cap の worker）
 - cargo は `CARGO_BUILD_JOBS=2 cargo test -j 2`、コマンドは逐次実行。
-- commit: f93c885（develop）。push はしていない（cap が行う）。
+- commit: 54eea72（develop）。push はしていない（cap が行う）。
 
 ## 変更点
 
