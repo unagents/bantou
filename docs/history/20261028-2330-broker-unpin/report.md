@@ -4,7 +4,7 @@
 
 ## commit
 
-- b5ea20d Stop pinning the broker URL in center and server（task.md・report.md を含む 1 commit）
+- ff8d560 Stop pinning the broker URL in center and server（task.md・report.md を含む 1 commit）
 
 ## 変更点
 
