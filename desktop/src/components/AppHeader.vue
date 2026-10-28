@@ -6,7 +6,7 @@ defineProps<{
   waitingCount: number;
   broker: BrokerStatus | null;
 }>();
-defineEmits<{ open: []; addSession: []; settings: [] }>();
+defineEmits<{ open: []; addSession: []; center: []; settings: [] }>();
 </script>
 
 <template>
@@ -49,6 +49,15 @@ defineEmits<{ open: []; addSession: []; settings: [] }>();
         @click="$emit('addSession')"
       />
       <UButton size="sm" variant="ghost" color="neutral" icon="i-lucide-folder-open" @click="$emit('open')" />
+      <UButton
+        size="sm"
+        variant="ghost"
+        color="neutral"
+        icon="i-lucide-server"
+        aria-label="center"
+        data-testid="open-center"
+        @click="$emit('center')"
+      />
       <UButton
         size="sm"
         variant="ghost"

@@ -126,3 +126,52 @@ export interface CenterStatus {
   lastExit?: string;
   logs: string[];
 }
+
+/** Mirror of `src-tauri/src/center_mcp.rs::CenterConnection`. */
+export interface CenterConnection {
+  /** MCP endpoint in use. Unset: no target (center disabled and no remoteUrl). */
+  url?: string;
+  source?: "remote" | "sidecar";
+  connected: boolean;
+  lastError?: string;
+}
+
+/** MCP `tools/call` result as returned by `center_call`. */
+export interface McpToolResult {
+  content: { type: string; text?: string }[];
+  isError?: boolean;
+}
+
+/** `rc_list` entry (`packages/center` `RcStatus`, the part shown). */
+export interface CenterRcStatus {
+  project: string;
+  path: string;
+  state: "stopped" | "starting" | "connected" | "error";
+  pid: number | null;
+  sessionUrl: string | null;
+  restarts: number;
+  lastError?: string;
+}
+
+/** `server_list` entry (`packages/center` `ServerInfo`). */
+export interface CenterServerInfo {
+  name: string;
+  connected: boolean;
+  reachable: boolean;
+  peerId: string | null;
+  serverPeer: string | null;
+}
+
+export interface CenterAgentState {
+  kind: "cap" | "worker";
+  id: string;
+  state: string;
+  [key: string]: unknown;
+}
+
+/** `server_status` result (bantou-server `status_result`, the part shown). */
+export interface CenterServerStatus {
+  ok?: boolean;
+  caps: CenterAgentState[];
+  workers: CenterAgentState[];
+}

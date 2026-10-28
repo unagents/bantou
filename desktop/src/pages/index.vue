@@ -57,6 +57,7 @@ watch(modalOpen, (v) => {
 
 const addSessionOpen = ref(false);
 const settingsOpen = ref(false);
+const centerOpen = ref(false);
 async function onSessionsAdded(results: RegisterResult[]) {
   await refresh();
   for (const r of results) {
@@ -102,6 +103,7 @@ async function onInstruct(session: string, title: string, body: string) {
         :broker="broker"
         @open="pickAndOpen"
         @add-session="addSessionOpen = true"
+        @center="centerOpen = true"
         @settings="settingsOpen = true"
       />
       <main class="mx-auto flex w-full max-w-5xl flex-col p-6">
@@ -145,6 +147,7 @@ async function onInstruct(session: string, title: string, body: string) {
       @done="onSessionsAdded"
     />
     <SettingsDialog v-if="settingsOpen" v-model:open="settingsOpen" />
+    <CenterDialog v-if="centerOpen" v-model:open="centerOpen" />
     <InstructTaskDialog
       :open="instructTarget !== null"
       :session="instructTarget ?? ''"

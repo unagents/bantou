@@ -84,7 +84,7 @@ pub struct CenterSettings {
     /// Absolute path of the claude executable. Unset: the center resolves it via a login shell.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub claude_path: Option<String>,
-    /// Center on another host this desktop will connect to (stored only for now).
+    /// Center on another host this desktop connects to (used instead of the sidecar when set).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_url: Option<String>,
 }
@@ -638,7 +638,7 @@ fn terminate(_pid: u32) -> bool {
     false
 }
 
-fn load_settings(app: &tauri::AppHandle) -> CmdResult<CenterSettings> {
+pub(crate) fn load_settings(app: &tauri::AppHandle) -> CmdResult<CenterSettings> {
     let store = app.store(SETTINGS_FILE).map_err(CommandError::other)?;
     // A stored value that no longer parses falls back to the defaults.
     Ok(store

@@ -36,9 +36,14 @@
 - stroke（Gitea `grrowapp/stroke`）: `server/utils/stroke/claude.ts`（`runClaude`、単独 import 可）、`invoke.ts` / `ai.ts`（retry と状態遷移）、`running.ts`（多重起動防止）、`reap*.ts` / `live-processes.ts`（孤児回収）
 - claudep（`stroke-plugin/.origin/tools/claudep`）: Agent SDK `query()` のループ、JSONL ログ、exit 判定
 
+## desktop ↔ center（確定）
+
+- transport は MCP（center の Streamable HTTP `/mcp`）。agent-messenger は使わない。desktop の Rust 側が MCP client を持ち（`desktop/src-tauri/src/center_mcp.rs`）、webview は Tauri command（`center_call` / `center_connection`）経由でのみ center に触れる
+- 接続先: 設定 `remoteUrl` があればその center、無ければ sidecar の center（center 有効時のみ）
+- 認証は未実装（後回し）
+
 ## 未決
 
 - 認証（desktop ↔ center、center ↔ server）は後回し
-- desktop ↔ center の transport（MCP の Streamable HTTP が候補）
 - cap / worker の path 規約の詳細、state.json の schema
 - server を Nuxt（Nitro）に寄せる件は大枠合意済み。`npx bantou` の配布形（Nitro の `.output/`）は実機検証が要る

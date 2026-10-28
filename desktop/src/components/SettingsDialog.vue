@@ -192,7 +192,7 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
           />
         </UFormField>
 
-        <UFormField label="remoteUrl" description="別ホストの center の URL。今回は保存のみ（connect: next version）">
+        <UFormField label="remoteUrl" description="別ホストの center の MCP URL。設定すると sidecar ではなくこちらに接続する（パス省略時は /mcp）">
           <UInput
             :model-value="settings.remoteUrl ?? ''"
             placeholder="http://mac200:7910"

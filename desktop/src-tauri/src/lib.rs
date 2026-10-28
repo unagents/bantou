@@ -1,6 +1,7 @@
 mod agent;
 mod broker;
 mod center;
+mod center_mcp;
 mod error;
 mod frontmatter;
 mod menu;
@@ -51,6 +52,7 @@ pub fn run() {
         .manage(agent::Agents::default())
         .manage(session::Sessions::default())
         .manage(center::Center::default())
+        .manage(center_mcp::CenterClient::default())
         .invoke_handler(tauri::generate_handler![
             workspace::pick_directory,
             workspace::set_workspace_directory,
@@ -77,6 +79,8 @@ pub fn run() {
             center::center_get_settings,
             center::center_set_settings,
             center::center_status,
+            center_mcp::center_call,
+            center_mcp::center_connection,
         ])
         .on_window_event(|window, event| {
             // `Destroyed` (not `CloseRequested`) is the right hook:

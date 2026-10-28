@@ -31,6 +31,20 @@ export class MockBantou {
   peers: Peer[];
   sessionsList: Session[];
   center: CenterSettings = { enabled: false, port: 7910, bind: "127.0.0.1", projects: [], servers: [] };
+  /** Whether the mocked center answers (center_connection). */
+  centerReachable = true;
+  centerRc = [
+    { project: "alpha", path: "/ws/alpha", state: "connected", pid: 4301, sessionUrl: "https://claude.ai/code/session_mock", restarts: 0 },
+    { project: "beta", path: "/ws/beta", state: "stopped", pid: null, sessionUrl: null, restarts: 2 },
+  ];
+  centerServers = [{ name: "srv1", connected: true, reachable: true, peerId: "p1", serverPeer: "p2" }];
+  centerAgents: Record<string, unknown> = {
+    srv1: {
+      ok: true,
+      caps: [{ kind: "cap", id: "cap-a", state: "idle" }],
+      workers: [{ kind: "worker", id: "w1", state: "running" }],
+    },
+  };
   calls: InvokeRecord[] = [];
   sent: { to: string; text: string }[] = [];
   /** Ping timers: task id → expiry (ISO). */
@@ -194,6 +208,33 @@ export class MockBantou {
         return structuredClone(this.center);
       case "center_status":
         return { state: this.center.enabled ? "running" : "stopped", pid: this.center.enabled ? 4242 : undefined, restartCount: 0, logs: [] };
+      case "center_connection": {
+        const url = this.center.remoteUrl
+          ? this.center.remoteUrl.replace(/\/?$/, "/mcp").replace(/\/mcp\/mcp$/, "/mcp")
+          : this.center.enabled
+            ? `http://127.0.0.1:${this.center.port}/mcp`
+            : undefined;
+        if (!url) return { connected: false, lastError: "接続先が無い（center を有効にするか remoteUrl を設定する）" };
+        const source = this.center.remoteUrl ? "remote" : "sidecar";
+        return this.centerReachable
+          ? { url, source, connected: true }
+          : { url, source, connected: false, lastError: `${url} に接続できない: mock` };
+      }
+      case "center_call": {
+        const text = (v: unknown) => ({ content: [{ type: "text", text: JSON.stringify(v, null, 2) }] });
+        switch (args.name) {
+          case "rc_list":
+            return text(this.centerRc);
+          case "server_list":
+            return text(this.centerServers);
+          case "server_status": {
+            const name = (args.arguments as { server: string }).server;
+            return text(this.centerAgents[name] ?? { ok: true, caps: [], workers: [] });
+          }
+          default:
+            throw new Error(`unknown tool: ${String(args.name)}`);
+        }
+      }
       case "plugin:fs|watch":
         return 1;
       case "plugin:resources|close":
