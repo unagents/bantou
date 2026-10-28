@@ -113,7 +113,7 @@ The reply is sent back to the sender peer as one JSON object.
 | key | required | meaning |
 |---|---|---|
 | `bantou` | yes | protocol version, always `1` |
-| `type` | yes | `kick_cap`, `resume_worker` or `status` |
+| `type` | yes | `kick_cap`, `resume_worker`, `spawn_worker`, `worker_report` or `status` |
 
 ### `kick_cap` — start or resume a cap
 
@@ -146,6 +146,54 @@ Reply: `cap_result` or `error`.
 
 Reply: `worker_result` or `error`.
 
+### `spawn_worker` — cap starts a worker
+
+Sent by a cap (through its injected messenger MCP, see below) to start a worker
+and to record which cap owns it.
+
+```json
+{"bantou":1,"type":"spawn_worker","worker_id":"w-1","cap_id":"cap-a","prompt":"Run `echo hi` and report done."}
+```
+
+| key | required | meaning |
+|---|---|---|
+| `worker_id` | yes | worker id, `[A-Za-z0-9_-]+`. Path is `<workspace>/workers/<worker_id>` |
+| `cap_id` | yes | owning cap id. This cap is resumed with the worker's reports |
+| `prompt` | yes | non-empty instruction passed to the worker |
+| `repo` | no | same as `kick_cap` |
+| `branch` | no | same as `kick_cap` |
+
+- The server writes `workers/<worker_id>/owner.json` (`{"cap_id":"..."}`) and starts the worker (new session, or resume if it already has one).
+- **No reply is sent**, not even on success: the sending cap is a headless run that has usually ended. If the worker cannot start or its run fails (`ok: false`), the server resumes the owning cap with a prompt that describes the failure.
+
+### `worker_report` — worker reports to its cap
+
+Sent by a worker (through its injected messenger MCP).
+
+```json
+{"bantou":1,"type":"worker_report","worker_id":"w-1","kind":"done","text":"hi"}
+```
+
+| key | required | meaning |
+|---|---|---|
+| `worker_id` | yes | the worker's own id |
+| `kind` | yes | `done` (finished) or `ask` (needs a decision) |
+| `text` | yes | non-empty report text |
+
+- The server reads `workers/<worker_id>/owner.json` and resumes that cap (`--resume`) with the report in its prompt. If the cap is running, the resume waits in the cap's queue.
+- When that resumed run ends, the server sends a `cap_result` to the peer that last sent `kick_cap` for this cap (kept in `caps/<cap_id>/reply_to.json`).
+- The cap gives a decision back to the worker with the existing `resume_worker`.
+- Reply: none on success. `error` (with `command: "worker_report"` and `worker_id`) when `owner.json` is missing or broken, i.e. the worker was not started by `spawn_worker`.
+
+Flow:
+
+```
+external --kick_cap--> server --claude -p--> cap
+cap --spawn_worker (send_message)--> server --claude -p--> worker
+worker --worker_report (send_message)--> server --claude -p --resume--> cap
+server --cap_result--> external   (once per cap run, to the last kick_cap sender)
+```
+
 ### `status` — list caps and workers
 
 ```json
@@ -176,6 +224,10 @@ Every reply carries `bantou: 1`.
 
 Sent only after the run ends, which can take minutes. A failed run is still a
 `cap_result` / `worker_result` with `ok: false`.
+
+A `cap_result` is also sent when a cap run started by the server itself (resume after
+`worker_report` or after a worker failure) ends. It goes to the last `kick_cap` sender of that cap.
+`worker_result` is only sent for `resume_worker`; a worker started by `spawn_worker` produces none.
 
 `status_result`:
 
@@ -224,7 +276,7 @@ Sent only after the run ends, which can take minutes. A failed run is still a
 | `message` | failure reason |
 | `command` | `type` of the failed command, when known |
 | `cap_id` | `cap_id` of the failed `kick_cap`, when known |
-| `worker_id` | `worker_id` of the failed `resume_worker`, when known |
+| `worker_id` | `worker_id` of the failed `resume_worker` / `worker_report`, when known |
 
 Typical causes: git failure, agent state `running` / `error`, broken `state.json`.
 
@@ -247,12 +299,14 @@ Typical causes: git failure, agent state `running` / `error`, broken `state.json
 | `<workspace>/caps/<cap_id>/` | cap path = cwd of claude |
 | `<workspace>/workers/<worker_id>/` | worker path, same layout as a cap |
 | `<path>/state.json` | agent state (shape below) |
+| `<workspace>/workers/<worker_id>/owner.json` | `{"cap_id":"..."}`, written by `spawn_worker` |
+| `<workspace>/caps/<cap_id>/reply_to.json` | `{"id":"<peer id>","name":"<peer name>"}`, the last `kick_cap` sender. Destination of `cap_result` after server-started resumes |
 | `<path>/logs/<session_id>.jsonl` | raw claude output (stream-json), appended per run with a `# <ISO> mode=<mode> session=<id>` header line |
 | `<workspace>/broker.json` | state file of the built-in broker |
 
 With `repo`, the path is a git repo: cloned if absent, fetched if `.git`
 exists, an error if the path exists without `.git`. After a clone,
-`state.json` and `logs/` are added to `.git/info/exclude`. Without `repo`, the
+`state.json`, `logs/`, `owner.json` and `reply_to.json` are added to `.git/info/exclude`. Without `repo`, the
 path is only created.
 
 `state.json`:
@@ -268,6 +322,17 @@ path is only created.
 | `last_started_at` / `last_finished_at` | ISO 8601 |
 | `last_error` | failure reason. Absent on success |
 | `retries` | retries used by the latest run |
+
+## Messenger MCP injected into caps and workers
+
+For every `claude -p` it starts, bantou-server adds:
+
+- `--mcp-config <json>` with one stdio server `bantou-messenger` (default `npx -y @unagents/messenger@0.9.0 mcp`). Its env points at the built-in broker (`AGENT_MESSENGER_HOST` / `PORT` / `TOKEN`, `DISCOVERY=off`, `NAME=bantou-<cap|worker>-<id>`, `BROKER_CMD=false`, empty `CLAUDE_CODE_MESSAGING_*`, writable `npm_config_cache` and `AGENT_MESSENGER_PKGS_DIR` under the workspace).
+- `--strict-mcp-config` (no other MCP server is loaded) and `--allowedTools mcp__bantou-messenger__send_message`.
+- `--append-system-prompt` on new sessions only: the agent's own kind and id, the target `bantou-server`, the types it may send with a one-line JSON example each, and "send with send_message, do not wait for a reply". Fixed per id.
+- A child env without inherited `AGENT_MESSENGER_*` and `CLAUDE_CODE_MESSAGING_*`.
+
+A cap sends `spawn_worker` / `resume_worker`; a worker sends `worker_report`; all with `send_message`, `to = "bantou-server"`.
 
 ## bantou-center tools
 

@@ -41,6 +41,11 @@ npx bantou --config <path>
     "disallowedTools": [],
     "extraArgs": [],
     "env": {}
+  },
+  "messenger": {
+    "command": "npx",
+    "args": ["-y", "@unagents/messenger@0.9.0", "mcp"],
+    "env": {}
   }
 }
 ```
@@ -60,8 +65,11 @@ npx bantou --config <path>
 | `session.disallowedTools` | 任意 | `[]` | 空でなければ `--disallowedTools` に渡す。文字列の配列 |
 | `session.extraArgs` | 任意 | `[]` | `--` の前にそのまま付ける追加引数。文字列の配列 |
 | `session.env` | 任意 | `{}` | spawn する claude に追加で渡す環境変数。文字列値のオブジェクト。bantou-server 自身の環境変数に上書きで合成する |
+| `messenger.command` | 任意 | `npx` | cap / worker に注入する messenger MCP の実行ファイル |
+| `messenger.args` | 任意 | `["-y", "@unagents/messenger@0.9.0", "mcp"]` | その引数。文字列の配列 |
+| `messenger.env` | 任意 | `{}` | MCP の env に追加・上書きする値。文字列値のオブジェクト（既定の `npm_config_cache` などもここで上書きできる） |
 
-- `broker` と `session` は省略可。書く場合はオブジェクト。
+- `broker` / `session` / `messenger` は省略可。書く場合はオブジェクト。
 - LAN に公開するには `broker.bind`（例 `0.0.0.0`）を明示する。その場合は `broker.token` の設定を推奨する。
 - 例: 204 の claudeAgent ユーザーは `"env": { "CLAUDE_CONFIG_DIR": "/home/vagrant/.claude-agent" }` を指定する。
 - 旧 `session.command` は廃止。残っていると起動時にエラーになる。`session.claude` を使う。
@@ -74,12 +82,16 @@ npx bantou --config <path>
   caps/<cap-id>/                     cap の path（claude の cwd）
     state.json                       状態
     logs/<session_id>.jsonl          claude の生出力（stream-json）
+    reply_to.json                    最後に kick_cap を送った peer（cap_result の宛先）
   workers/<worker-id>/               worker の path。構成は cap と同じ
+    owner.json                       この worker を持つ cap（spawn_worker が書く）
+  .npm-cache/                        注入する messenger MCP の npx cache（既定）
+  .messenger-pkgs/                   同 MCP の loader が入れる platform client（既定）
 ```
 
 - 起動時に `<workspace>/caps` と `<workspace>/workers` が無ければ作る。
 - `cap_id` / `worker_id` は `[A-Za-z0-9_-]+`。
-- `repo` を指定した指示では、path を git repo として扱う。path が無ければ clone、`.git` があれば fetch、`.git` が無い既存 path はエラー。clone 後は `.git/info/exclude` に `state.json` と `logs/` を追記する。
+- `repo` を指定した指示では、path を git repo として扱う。path が無ければ clone、`.git` があれば fetch、`.git` が無い既存 path はエラー。clone 後は `.git/info/exclude` に `state.json` / `logs/` / `owner.json` / `reply_to.json` を追記する。
 - 既存の `.git` がある場合は `fetch` だけ行う。`repo` / `branch` の違いは検知しない。
 - `repo` 無しなら path を作るだけ。
 
@@ -98,7 +110,9 @@ npx bantou --config <path>
 | type | 内容 |
 |---|---|
 | `kick_cap` | cap を起動する（初回は新規 session、以降は resume） |
-| `resume_worker` | worker を起動する（同上） |
+| `resume_worker` | worker を起動する（同上）。cap が worker へ判断を返す時にも使う |
+| `spawn_worker` | cap → server。worker の path を作って新規起動し、worker と cap の対応を `owner.json` に残す。返信なし |
+| `worker_report` | worker → server。`kind` は `done` / `ask`。対応する cap を `--resume` で起動し、prompt に report を渡す。返信なし（owner 不明時のみ `error`） |
 | `status` | cap / worker の状態一覧 |
 
 `kick_cap`（`cap_id` と `prompt` 以外は任意）:
@@ -124,6 +138,33 @@ npx bantou --config <path>
 { "bantou": 1, "type": "status" }
 ```
 
+`spawn_worker` / `worker_report`（cap / worker が自分の MCP から送る）:
+
+```json
+{ "bantou": 1, "type": "spawn_worker", "worker_id": "w-1", "cap_id": "cap-a", "prompt": "Run `echo hi` and report done." }
+{ "bantou": 1, "type": "worker_report", "worker_id": "w-1", "kind": "done", "text": "hi" }
+```
+
+## cap / worker 連携
+
+```
+外部 --kick_cap--> server --claude -p--> cap
+cap --spawn_worker--> server --claude -p--> worker
+worker --worker_report--> server --claude -p --resume--> cap --(cap_result)--> 外部
+```
+
+- server が起動する全ての claude（cap / worker）に messenger MCP を注入する。
+  - `--mcp-config <json>`: stdio server `bantou-messenger`（`messenger.command` / `args`）。env は内蔵 broker の host / port / token、`AGENT_MESSENGER_DISCOVERY=off`、`AGENT_MESSENGER_NAME=bantou-<cap|worker>-<id>`、`AGENT_MESSENGER_BROKER_CMD=false`、空の `CLAUDE_CODE_MESSAGING_SOCKET` / `TOKEN`、workspace 配下の `npm_config_cache` と `AGENT_MESSENGER_PKGS_DIR`。
+  - `--strict-mcp-config`（plugin 由来など他の MCP は読まない）と `--allowedTools mcp__bantou-messenger__send_message`（`session.allowedTools` に追加）。
+  - `--append-system-prompt`（新規 session のみ。id ごとに固定）: 自分の kind と id、送り先 `bantou-server`、使う type と JSON 例、「send_message で送る。返信は待たない」。
+  - 子の claude の env から継承した `AGENT_MESSENGER_*` / `CLAUDE_CODE_MESSAGING_*` を除く（本番 broker へ繋がらないようにするため）。
+  - 注入フラグは `--session-id` / `--resume` の後ろ、`--` の前に置く（孤児回収の判定を壊さないため）。
+- cap の判断は cap 自身が `resume_worker` を送って worker に返す。
+- `kick_cap` の送り主は `caps/<cap_id>/reply_to.json` に残す。worker_report や worker 失敗で server が cap を再開した時も、その実行の終了時に `cap_result` をこの peer へ送る。
+- worker の起動失敗・実行失敗（`ok: false`）は、cap を再開して失敗内容を prompt で伝える。
+- worker が `worker_report` を送らずに終わった場合、server は何もしない（cap は再開されない）。
+- token がある broker では token が `--mcp-config` の引数に載る（`ps` で見える）。
+
 ## 返信
 
 指示の送信元 peer へ JSON で返す。
@@ -136,6 +177,7 @@ npx bantou --config <path>
 ```
 
 - `cap_result` / `worker_result` は claude の実行が終わってから返る。数分かかることがある。
+- `cap_result` は、server が worker_report などで cap を再開した実行の終了時にも `reply_to.json` の peer へ届く（1 つの `kick_cap` に複数届き得る）。
 - 実行が失敗しても `cap_result` / `worker_result` で返る（`ok: false` と `error`）。
 - `error` は実行に入る前の失敗（git 失敗、state が `running` / `error` で起動できない、state 破損など）。
 - `cap_id` / `worker_id` が不正（`[A-Za-z0-9_-]+` でない）な指示は `error` を返さず、指示でないメッセージとして無視する（ログに `無視:`）。
@@ -222,9 +264,10 @@ npm run dev -- --config <path>
 npm run e2e
 ```
 
-- 要: host に claude。claude を実際に 3 回起動するため数分かかる。claude のログイン（claudeAgent）を使う。
+- 要: host に claude と、messenger MCP を npx で取れるネットワーク（registry.npmjs.org）。claude を実際に 6 回起動するため数分かかる。claude のログイン（claudeAgent）を使う。
+- `CLAUDE_CONFIG_DIR` が環境変数にあれば config の `session.env` で server へ渡す。
 - `E2E_ROOT` で一時ディレクトリの親を変えられる（既定は OS の tmp）。
-- 検証内容: `kick_cap`（新規）→ `kick_cap`（resume、同じ session_id）→ `resume_worker` → `status` → 非コマンドの無視。
+- 検証内容: `kick_cap`（新規）→ `kick_cap`（resume、同じ session_id）→ `resume_worker` → cap が `spawn_worker` → worker が `echo hi` を実行して `worker_report` done → server が cap を resume → `cap_result`（`owner.json` と server ログも確認）→ `status` → 非コマンドの無視。
 - 後始末: messenger client、server プロセス（SIGTERM、exit 0 と port 解放も確認）、一時ディレクトリ。
 - 成功時は `E2E OK` と主要ログを出す。失敗時は理由を出して exit 1。
 
