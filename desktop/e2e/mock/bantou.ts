@@ -30,7 +30,7 @@ export class MockBantou {
   supplement: string;
   peers: Peer[];
   sessionsList: Session[];
-  center: CenterSettings = { enabled: false, port: 7910, bind: "127.0.0.1", projects: [], servers: [], token: "mock-token-000000000000000000000001" };
+  center: CenterSettings = { enabled: false, port: 7910, bind: "127.0.0.1", workspace: "~/.bantou", token: "mock-token-000000000000000000000001" };
   /** Number of tokens minted by center_regenerate_token (the next one is mock-token-<n>). */
   private tokenSeq = 1;
   /** Whether the mocked center answers (center_connection). */

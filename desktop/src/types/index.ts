@@ -91,26 +91,13 @@ export interface RegisterResult {
   error: string | null;
 }
 
-/** Mirror of `src-tauri/src/center.rs::CenterProject`. */
-export interface CenterProject {
-  name: string;
-  path: string;
-  spawn?: string;
-  permissionMode?: string;
-}
-
-/** Mirror of `src-tauri/src/center.rs::CenterServer`. */
-export interface CenterServer {
-  name: string;
-}
-
 /** Mirror of `src-tauri/src/center.rs::CenterSettings`. */
 export interface CenterSettings {
   enabled: boolean;
   port: number;
   bind: string;
-  projects: CenterProject[];
-  servers: CenterServer[];
+  /** The one workspace directory (default `~/.bantou`). */
+  workspace: string;
   claudePath?: string;
   /** Bearer token the sidecar center requires on /mcp. Minted by the backend when empty. */
   token: string;

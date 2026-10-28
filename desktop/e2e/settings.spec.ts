@@ -158,8 +158,7 @@ test("center off hides this host's center settings, keeps paste-to-connect, and 
       port: 7955,
       bind: "100.64.0.9",
       claudePath: "/opt/claude",
-      projects: [{ name: "saved-proj", path: "/work/saved" }],
-      servers: [{ name: "saved-srv" }],
+      workspace: "/work/saved",
     });
   });
   await page.getByTestId("open-settings").click();
@@ -168,8 +167,7 @@ test("center off hides this host's center settings, keeps paste-to-connect, and 
     "center-port",
     "center-bind",
     "center-claude-path",
-    "center-project",
-    "center-server",
+    "center-workspace",
     "center-token",
     "center-snippet",
   ];
@@ -187,8 +185,7 @@ test("center off hides this host's center settings, keeps paste-to-connect, and 
   await expect(page.getByTestId("center-port")).toHaveValue("7955");
   await expect(page.getByTestId("center-bind")).toContainText("100.64.0.9");
   await expect(page.getByTestId("center-claude-path")).toHaveValue("/opt/claude");
-  await expect(page.getByTestId("center-project").locator("input").first()).toHaveValue("saved-proj");
-  await expect(page.getByTestId("center-server").locator("input").first()).toHaveValue("saved-srv");
+  await expect(page.getByTestId("center-workspace")).toHaveValue("/work/saved");
 
   // OFF again and ON again: nothing was reset
   await page.getByTestId("center-enabled").click();
@@ -196,6 +193,5 @@ test("center off hides this host's center settings, keeps paste-to-connect, and 
   await expect(page.getByTestId("center-remote-section")).toBeVisible();
   await page.getByTestId("center-enabled").click();
   await expect(page.getByTestId("center-port")).toHaveValue("7955");
-  await expect(page.getByTestId("center-project").locator("input").first()).toHaveValue("saved-proj");
-  await expect(page.getByTestId("center-server").locator("input").first()).toHaveValue("saved-srv");
+  await expect(page.getByTestId("center-workspace")).toHaveValue("/work/saved");
 });

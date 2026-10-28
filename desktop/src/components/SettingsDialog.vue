@@ -13,10 +13,6 @@ import type { CenterConnectSnippets, CenterParsedConnect, CenterSettings, Center
 const open = defineModel<boolean>("open", { required: true });
 const toast = useToast();
 
-const UNSET = "-";
-const SPAWN_ITEMS = [UNSET, "same-dir", "worktree", "session"];
-const PERMISSION_ITEMS = [UNSET, "acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"];
-
 const settings = ref<CenterSettings | null>(null);
 const status = ref<CenterStatus | null>(null);
 const error = ref<string | null>(null);
@@ -184,18 +180,6 @@ function clearRemote() {
   parseSeq++;
 }
 
-function addProject() {
-  settings.value?.projects.push({ name: "", path: "" });
-}
-
-function addServer() {
-  settings.value?.servers.push({ name: "" });
-}
-
-const setOpt = (p: { spawn?: string; permissionMode?: string }, key: "spawn" | "permissionMode", v: string) => {
-  p[key] = v === UNSET ? undefined : v;
-};
-
 async function save() {
   if (!settings.value || portError.value || tokenError.value) return;
   saving.value = true;
@@ -282,70 +266,14 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
           </UFormField>
         </div>
 
-        <div class="flex flex-col gap-2">
-          <div class="flex items-center justify-between">
-            <span class="text-sm font-medium">projects</span>
-            <UButton size="xs" variant="ghost" color="neutral" icon="i-lucide-plus" label="追加" @click="addProject" />
-          </div>
-          <div
-            v-for="(p, i) in settings.projects"
-            :key="i"
-            class="flex items-center gap-2"
-            data-testid="center-project"
-          >
-            <UInput v-model="p.name" size="sm" placeholder="name" class="w-32" aria-label="name" />
-            <UInput v-model="p.path" size="sm" placeholder="/abs/path" class="flex-1" aria-label="path" />
-            <USelect
-              :model-value="p.spawn ?? UNSET"
-              :items="SPAWN_ITEMS"
-              size="sm"
-              class="w-32"
-              aria-label="spawn"
-              @update:model-value="setOpt(p, 'spawn', $event as string)"
-            />
-            <USelect
-              :model-value="p.permissionMode ?? UNSET"
-              :items="PERMISSION_ITEMS"
-              size="sm"
-              class="w-40"
-              aria-label="permissionMode"
-              @update:model-value="setOpt(p, 'permissionMode', $event as string)"
-            />
-            <UButton
-              size="xs"
-              variant="ghost"
-              color="neutral"
-              icon="i-lucide-trash-2"
-              aria-label="削除"
-              @click="settings.projects.splice(i, 1)"
-            />
-          </div>
-          <p v-if="!settings.projects.length" class="text-cork-muted text-xs">未登録（spawn / permissionMode の「-」は既定）</p>
-        </div>
-
-        <div class="flex flex-col gap-2">
-          <div class="flex items-center justify-between">
-            <span class="text-sm font-medium">servers</span>
-            <UButton size="xs" variant="ghost" color="neutral" icon="i-lucide-plus" label="追加" @click="addServer" />
-          </div>
-          <div
-            v-for="(v, i) in settings.servers"
-            :key="i"
-            class="flex items-center gap-2"
-            data-testid="center-server"
-          >
-            <UInput v-model="v.name" size="sm" placeholder="name" class="w-32" aria-label="server name" />
-            <UButton
-              size="xs"
-              variant="ghost"
-              color="neutral"
-              icon="i-lucide-trash-2"
-              aria-label="削除"
-              @click="settings.servers.splice(i, 1)"
-            />
-          </div>
-          <p v-if="!settings.servers.length" class="text-cork-muted text-xs">未登録（名前だけ指定。broker は agent-messenger の通常の解決、bantou-server の peer は自動発見）</p>
-        </div>
+        <UFormField label="workspace" description="center が扱う作業ディレクトリ（1 つ）。無ければ作る。~ 始まりも可">
+          <UInput
+            v-model="settings.workspace"
+            placeholder="~/.bantou"
+            class="w-full"
+            data-testid="center-workspace"
+          />
+        </UFormField>
 
         <UFormField label="claudePath" description="空なら login shell から自動解決">
           <UInput

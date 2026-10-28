@@ -10,7 +10,7 @@ use crate::error::{CmdResult, CommandError};
 use crate::workspace::SETTINGS_FILE;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -48,34 +48,10 @@ const HEALTHY_AFTER: Duration = Duration::from_secs(300);
 /// Log lines quoted in the error once the retrying is given up.
 const ERROR_TAIL_LINES: usize = 5;
 
-const SPAWN_MODES: [&str; 3] = ["same-dir", "worktree", "session"];
-const PERMISSION_MODES: [&str; 6] = [
-    "acceptEdits",
-    "auto",
-    "bypassPermissions",
-    "default",
-    "dontAsk",
-    "plan",
-];
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CenterProject {
-    pub name: String,
-    pub path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub spawn: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub permission_mode: Option<String>,
-}
-
-/// A bantou-server the center talks to: a name only. The center connects with the normal
-/// agent-messenger resolution and discovers the server's peer by the bantou protocol.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CenterServer {
-    pub name: String,
-}
+/// Default workspace (`~` is the home directory, resolved when the config is written).
+const DEFAULT_WORKSPACE: &str = "~/.bantou";
+/// Name of the single project handed to the center for the workspace.
+const WORKSPACE_PROJECT: &str = "workspace";
 
 /// A center on another host, taken from a pasted connection snippet.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -93,9 +69,8 @@ pub struct CenterSettings {
     pub enabled: bool,
     pub port: u32,
     pub bind: String,
-    pub projects: Vec<CenterProject>,
-    /// bantou-servers (name + broker URL). Written to center.json as `servers`.
-    pub servers: Vec<CenterServer>,
+    /// The one workspace directory handed to the center as its single project. `~` / `~/x` or absolute.
+    pub workspace: String,
     /// Absolute path of the claude executable. Unset: the center resolves it via a login shell.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub claude_path: Option<String>,
@@ -118,8 +93,7 @@ impl Default for CenterSettings {
             enabled: false,
             port: DEFAULT_PORT,
             bind: DEFAULT_BIND.to_string(),
-            projects: Vec::new(),
-            servers: Vec::new(),
+            workspace: DEFAULT_WORKSPACE.to_string(),
             claude_path: None,
             token: String::new(),
             connect_host: String::new(),
@@ -156,41 +130,12 @@ pub fn validate_settings(mut s: CenterSettings) -> Result<CenterSettings, String
     if s.bind.is_empty() || s.bind.chars().any(char::is_whitespace) {
         return Err("bind が不正".to_string());
     }
-    let mut seen = HashSet::new();
-    for p in &mut s.projects {
-        p.name = p.name.trim().to_string();
-        p.path = p.path.trim().to_string();
-        if p.name.is_empty() || !p.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
-            return Err(format!("project 名は英数字と _ - のみ: \"{}\"", p.name));
-        }
-        if !seen.insert(p.name.clone()) {
-            return Err(format!("project 名が重複: {}", p.name));
-        }
-        if !Path::new(&p.path).is_absolute() {
-            return Err(format!("project {} の path は絶対パスで指定する", p.name));
-        }
-        p.spawn = p.spawn.take().filter(|v| !v.is_empty());
-        if let Some(v) = &p.spawn {
-            if !SPAWN_MODES.contains(&v.as_str()) {
-                return Err(format!("project {} の spawn が不正: {v}", p.name));
-            }
-        }
-        p.permission_mode = p.permission_mode.take().filter(|v| !v.is_empty());
-        if let Some(v) = &p.permission_mode {
-            if !PERMISSION_MODES.contains(&v.as_str()) {
-                return Err(format!("project {} の permissionMode が不正: {v}", p.name));
-            }
-        }
+    s.workspace = s.workspace.trim().to_string();
+    if s.workspace.is_empty() {
+        s.workspace = DEFAULT_WORKSPACE.to_string();
     }
-    let mut seen = HashSet::new();
-    for v in &mut s.servers {
-        v.name = v.name.trim().to_string();
-        if v.name.is_empty() || !v.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
-            return Err(format!("server 名は英数字と _ - のみ: \"{}\"", v.name));
-        }
-        if !seen.insert(v.name.clone()) {
-            return Err(format!("server 名が重複: {}", v.name));
-        }
+    if !(s.workspace == "~" || s.workspace.starts_with("~/") || Path::new(&s.workspace).is_absolute()) {
+        return Err(format!("workspace は絶対パスか ~ 始まりで指定する: {}", s.workspace));
     }
     s.claude_path = s.claude_path.take().map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
     if let Some(p) = &s.claude_path {
@@ -211,33 +156,30 @@ pub fn validate_settings(mut s: CenterSettings) -> Result<CenterSettings, String
     Ok(s)
 }
 
-/// Config file for the center. Every project autostarts: remote-control is
-/// started by the center when the desktop starts it.
-pub fn build_config(s: &CenterSettings) -> serde_json::Value {
-    let projects: Vec<_> = s
-        .projects
-        .iter()
-        .map(|p| {
-            let mut o = serde_json::json!({ "name": p.name, "path": p.path, "autostart": true });
-            if let Some(v) = &p.spawn {
-                o["spawn"] = v.clone().into();
-            }
-            if let Some(v) = &p.permission_mode {
-                o["permissionMode"] = v.clone().into();
-            }
-            o
-        })
-        .collect();
+/// `~` / `~/x` against `home`; anything else as is.
+pub fn resolve_workspace(workspace: &str, home: &Path) -> PathBuf {
+    if workspace == "~" {
+        home.to_path_buf()
+    } else if let Some(rest) = workspace.strip_prefix("~/") {
+        home.join(rest)
+    } else {
+        PathBuf::from(workspace)
+    }
+}
+
+/// Config file for the center: the workspace as its single project. It autostarts: remote-control is
+/// started by the center when the desktop starts it. spawn / permissionMode are left to the center's defaults.
+pub fn build_config(s: &CenterSettings, home: &Path) -> serde_json::Value {
+    let projects = vec![serde_json::json!({
+        "name": WORKSPACE_PROJECT,
+        "path": resolve_workspace(&s.workspace, home).to_string_lossy(),
+        "autostart": true,
+    })];
     let mut remote_control = serde_json::json!({});
     if let Some(v) = &s.claude_path {
         remote_control["claude"] = v.clone().into();
     }
-    let servers: Vec<_> = s
-        .servers
-        .iter()
-        .map(|v| serde_json::json!({ "name": v.name }))
-        .collect();
-    let mut cfg = serde_json::json!({ "projects": projects, "remoteControl": remote_control, "servers": servers });
+    let mut cfg = serde_json::json!({ "projects": projects, "remoteControl": remote_control });
     if !s.token.is_empty() {
         cfg["token"] = s.token.clone().into();
     }
@@ -270,8 +212,7 @@ pub fn needs_restart(running_with: Option<&CenterSettings>, new: &CenterSettings
     match running_with {
         Some(old) => {
             !new.enabled || old.port != new.port || old.bind != new.bind
-                || old.projects != new.projects
-                || old.servers != new.servers
+                || old.workspace != new.workspace
                 || old.claude_path != new.claude_path
                 || old.token != new.token
         }
@@ -279,11 +220,13 @@ pub fn needs_restart(running_with: Option<&CenterSettings>, new: &CenterSettings
     }
 }
 
-fn write_config(s: &CenterSettings, path: &Path) -> Result<(), String> {
+fn write_config(s: &CenterSettings, path: &Path, home: &Path) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
-    let text = serde_json::to_string_pretty(&build_config(s)).map_err(|e| e.to_string())?;
+    let ws = resolve_workspace(&s.workspace, home);
+    std::fs::create_dir_all(&ws).map_err(|e| format!("{}: {e}", ws.display()))?;
+    let text = serde_json::to_string_pretty(&build_config(s, home)).map_err(|e| e.to_string())?;
     std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
@@ -574,7 +517,8 @@ impl Center {
 
     fn start_locked(&self, app: &tauri::AppHandle, s: &CenterSettings) -> Result<(), String> {
         let path = config_path(app)?;
-        write_config(s, &path)?;
+        let home = app.path().home_dir().map_err(|e| format!("HOME を解決できない: {e}"))?;
+        write_config(s, &path, &home)?;
         let cmd = app
             .shell()
             .sidecar(SIDECAR_NAME)
@@ -786,19 +730,6 @@ pub fn center_status(center: tauri::State<'_, Center>) -> CenterStatus {
 mod tests {
     use super::*;
 
-    fn server(name: &str) -> CenterServer {
-        CenterServer { name: name.into() }
-    }
-
-    fn project(name: &str, path: &str) -> CenterProject {
-        CenterProject {
-            name: name.into(),
-            path: path.into(),
-            spawn: None,
-            permission_mode: None,
-        }
-    }
-
     #[test]
     fn autostart_skip_message_has_path_and_reason() {
         let s = CenterSettings::default();
@@ -814,6 +745,7 @@ mod tests {
         assert!(!s.enabled);
         assert_eq!(s.port, 7910);
         assert_eq!(s.bind, "127.0.0.1");
+        assert_eq!(s.workspace, "~/.bantou");
         assert!(validate_settings(s).is_ok());
     }
 
@@ -852,7 +784,7 @@ mod tests {
         let t = mint_token();
         assert_eq!(t.len(), 32);
         assert!(t.chars().all(|c| c.is_ascii_alphanumeric()), "{t}");
-        let many: HashSet<String> = (0..50).map(|_| mint_token()).collect();
+        let many: std::collections::HashSet<String> = (0..50).map(|_| mint_token()).collect();
         assert_eq!(many.len(), 50);
     }
 
@@ -888,39 +820,35 @@ mod tests {
     #[test]
     fn config_json_writes_token_only_when_set() {
         let s = CenterSettings { token: "abcdefghijkl".into(), ..Default::default() };
-        assert_eq!(build_config(&s)["token"], "abcdefghijkl");
-        assert!(build_config(&CenterSettings::default()).get("token").is_none());
+        assert_eq!(build_config(&s, Path::new("/h"))["token"], "abcdefghijkl");
+        assert!(build_config(&CenterSettings::default(), Path::new("/h")).get("token").is_none());
     }
 
     #[test]
-    fn rejects_bad_projects() {
-        let with = |projects| validate_settings(CenterSettings { projects, ..Default::default() });
-        assert!(with(vec![project("a b", "/x")]).is_err());
-        assert!(with(vec![project("a", "rel/path")]).is_err());
-        assert!(with(vec![project("a", "/x"), project("a", "/y")]).is_err());
-        let mut p = project("a", "/x");
-        p.spawn = Some("nope".into());
-        assert!(with(vec![p]).is_err());
-        let mut p = project("a", "/x");
-        p.permission_mode = Some("nope".into());
-        assert!(with(vec![p]).is_err());
+    fn workspace_validation() {
+        let with = |w: &str| validate_settings(CenterSettings { workspace: w.into(), ..Default::default() });
+        assert_eq!(with(" /a/ws ").unwrap().workspace, "/a/ws");
+        assert_eq!(with("~/x").unwrap().workspace, "~/x");
+        assert_eq!(with("~").unwrap().workspace, "~");
+        // blank means the default
+        assert_eq!(with("  ").unwrap().workspace, "~/.bantou");
+        assert!(with("rel/path").is_err());
+        assert!(with("~other/x").is_err());
     }
 
     #[test]
-    fn empty_optionals_become_none() {
-        let mut p = project("a", "/x");
-        p.spawn = Some(String::new());
-        p.permission_mode = Some(String::new());
-        let s = validate_settings(CenterSettings { projects: vec![p], ..Default::default() }).unwrap();
-        assert_eq!(s.projects[0].spawn, None);
-        assert_eq!(s.projects[0].permission_mode, None);
+    fn resolves_workspace_against_home() {
+        let h = Path::new("/home/u");
+        assert_eq!(resolve_workspace("~/.bantou", h), PathBuf::from("/home/u/.bantou"));
+        assert_eq!(resolve_workspace("~", h), PathBuf::from("/home/u"));
+        assert_eq!(resolve_workspace("/w/x", h), PathBuf::from("/w/x"));
     }
 
     #[test]
     fn config_json_writes_claude_path_only_when_set() {
         let s = CenterSettings { claude_path: Some("/opt/claude".into()), ..Default::default() };
-        assert_eq!(build_config(&s)["remoteControl"], serde_json::json!({ "claude": "/opt/claude" }));
-        assert_eq!(build_config(&CenterSettings::default())["remoteControl"], serde_json::json!({}));
+        assert_eq!(build_config(&s, Path::new("/h"))["remoteControl"], serde_json::json!({ "claude": "/opt/claude" }));
+        assert_eq!(build_config(&CenterSettings::default(), Path::new("/h"))["remoteControl"], serde_json::json!({}));
     }
 
     #[test]
@@ -934,63 +862,71 @@ mod tests {
     }
 
     #[test]
-    fn config_json_marks_projects_autostart() {
-        let mut p = project("a", "/x");
-        p.spawn = Some("worktree".into());
-        p.permission_mode = Some("plan".into());
-        let s = CenterSettings { projects: vec![p, project("b", "/y")], ..Default::default() };
+    fn config_json_has_the_workspace_as_single_project() {
+        let s = CenterSettings { workspace: "~/.bantou".into(), ..Default::default() };
         assert_eq!(
-            build_config(&s),
+            build_config(&s, Path::new("/home/u")),
             serde_json::json!({
                 "projects": [
-                    { "name": "a", "path": "/x", "spawn": "worktree", "permissionMode": "plan", "autostart": true },
-                    { "name": "b", "path": "/y", "autostart": true },
+                    { "name": "workspace", "path": "/home/u/.bantou", "autostart": true },
                 ],
                 "remoteControl": {},
-                "servers": [],
             })
         );
+        let s = CenterSettings { workspace: "/w/x".into(), ..Default::default() };
+        assert_eq!(build_config(&s, Path::new("/home/u"))["projects"].as_array().unwrap().len(), 1);
+    }
+
+    fn tmp_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("bantou-ws-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
     }
 
     #[test]
-    fn config_json_writes_servers() {
-        let s = CenterSettings {
-            servers: vec![server("s1"), server("s2")],
-            ..Default::default()
-        };
-        assert_eq!(
-            build_config(&s)["servers"],
-            serde_json::json!([
-                { "name": "s1" },
-                { "name": "s2" },
-            ])
-        );
+    fn write_config_creates_the_workspace_directory() {
+        let home = tmp_dir("create");
+        let cfg = home.join(".local/share/bantou/center.json");
+        let s = CenterSettings::default();
+        write_config(&s, &cfg, &home).unwrap();
+        assert!(home.join(".bantou").is_dir());
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(v["projects"].as_array().unwrap().len(), 1);
+        assert_eq!(v["projects"][0]["path"], home.join(".bantou").to_string_lossy().as_ref());
+        // existing directory (with content) is left alone, rewrite is the same
+        std::fs::write(home.join(".bantou/keep"), "x").unwrap();
+        write_config(&s, &cfg, &home).unwrap();
+        assert!(home.join(".bantou/keep").is_file());
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
-    fn servers_default_for_old_saved_settings() {
-        let s: CenterSettings = serde_json::from_str(r#"{"enabled":true,"projects":[]}"#).unwrap();
-        assert!(s.servers.is_empty());
-        // old saved settings still carrying "broker" are read (the field is ignored)
-        let s: CenterSettings =
-            serde_json::from_str(r#"{"servers":[{"name":"a","broker":"http://h:1"}]}"#).unwrap();
-        assert_eq!(s.servers, vec![server("a")]);
+    fn old_projects_and_servers_keys_are_ignored_not_errors() {
+        // A settings.json still carrying the removed keys (and whatever else) reads without error;
+        // the keys are not part of the settings, so they are never written back.
+        let s: CenterSettings = serde_json::from_str(
+            r#"{"enabled":true,"workspace":"/w/z","projects":[{"name":"a","path":"/w/a","spawn":"worktree"}],
+                "servers":[{"name":"a","broker":"http://h:1"}],"somethingElse":1}"#,
+        )
+        .unwrap();
+        assert!(s.enabled);
+        assert_eq!(s.workspace, "/w/z");
+        let v = serde_json::to_value(&s).unwrap();
+        assert!(v.get("projects").is_none() && v.get("servers").is_none());
+        // no workspace stored: the default
+        let s: CenterSettings = serde_json::from_str(r#"{"projects":[],"servers":[]}"#).unwrap();
+        assert_eq!(s.workspace, "~/.bantou");
+        assert!(validate_settings(s).is_ok());
     }
 
     #[test]
-    fn validates_servers() {
-        let with = |servers| validate_settings(CenterSettings { servers, ..Default::default() });
-        // trimmed
-        let ok = with(vec![server(" a ")]).unwrap();
-        assert_eq!(ok.servers, vec![server("a")]);
-        assert!(with(vec![server("")]).is_err());
-        assert!(with(vec![server("a b")]).is_err());
-        assert!(with(vec![server("a"), server("a")]).is_err());
+    fn config_json_has_no_servers() {
+        assert!(build_config(&CenterSettings::default(), Path::new("/h")).get("servers").is_none());
     }
 
     #[test]
     fn restart_only_on_effective_change() {
-        let on = CenterSettings { enabled: true, projects: vec![project("a", "/x")], ..Default::default() };
+        let on = CenterSettings { enabled: true, workspace: "/x".into(), ..Default::default() };
         // running, identical or remote-only change: no restart
         assert!(!needs_restart(Some(&on), &on));
         let remote = CenterSettings {
@@ -1003,8 +939,7 @@ mod tests {
         // running, effective change: restart
         assert!(needs_restart(Some(&on), &CenterSettings { port: 7911, ..on.clone() }));
         assert!(needs_restart(Some(&on), &CenterSettings { bind: "0.0.0.0".into(), ..on.clone() }));
-        assert!(needs_restart(Some(&on), &CenterSettings { projects: vec![], ..on.clone() }));
-        assert!(needs_restart(Some(&on), &CenterSettings { servers: vec![server("s")], ..on.clone() }));
+        assert!(needs_restart(Some(&on), &CenterSettings { workspace: "/y".into(), ..on.clone() }));
         assert!(needs_restart(Some(&on), &CenterSettings { claude_path: Some("/x/claude".into()), ..on.clone() }));
         // running, disabled: stop
         assert!(needs_restart(Some(&on), &CenterSettings { enabled: false, ..on.clone() }));
