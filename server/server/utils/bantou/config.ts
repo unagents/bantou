@@ -8,6 +8,12 @@ export const DEFAULT_BROKER = {
   token: "",
 } as const;
 
+/** worker 報告の受け口（MCP）。既定は固定 port（worker は cap より長く生きるため、再起動で変わらない値にする）。 */
+export const DEFAULT_MCP = {
+  port: 7902,
+  bind: "127.0.0.1",
+} as const;
+
 /** `claude --permission-mode` の選択肢。 */
 export const PERMISSION_MODES = [
   "acceptEdits",
@@ -53,6 +59,8 @@ export interface Config {
   workspace: string;
   /** 内蔵 messenger broker の設定。 */
   broker: { port: number; bind: string; discovery: "on" | "off"; token: string };
+  /** worker 報告の受け口（MCP over HTTP、/mcp）。 */
+  mcp: { port: number; bind: string };
   /** headless 実行（claude -p）の設定。 */
   session: SessionConfig;
 }
@@ -81,6 +89,20 @@ function parseBroker(v: unknown, path: string): Config["broker"] {
     throw new Error(`config の broker.token は文字列: ${path}`);
   }
   return { port, bind, discovery, token };
+}
+
+function parseMcp(v: unknown, path: string): Config["mcp"] {
+  if (v === undefined) return { ...DEFAULT_MCP };
+  if (!isRecord(v)) throw new Error(`config の mcp はオブジェクト: ${path}`);
+  const port = v.port ?? DEFAULT_MCP.port;
+  if (typeof port !== "number" || !Number.isInteger(port) || port < 0 || port > 65535) {
+    throw new Error(`config の mcp.port は 0..65535 の整数: ${path}`);
+  }
+  const bind = v.bind ?? DEFAULT_MCP.bind;
+  if (typeof bind !== "string" || bind.length === 0) {
+    throw new Error(`config の mcp.bind は空でない文字列: ${path}`);
+  }
+  return { port, bind };
 }
 
 function parseStringList(v: unknown, key: string, path: string): string[] {
@@ -158,6 +180,7 @@ export async function loadConfig(path: string): Promise<Config> {
   return {
     workspace: ws,
     broker: parseBroker(obj.broker, path),
+    mcp: parseMcp(obj.mcp, path),
     session: parseSession(obj.session, path),
   };
 }

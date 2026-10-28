@@ -37,6 +37,7 @@ async function withFixture(
     const config: Config = {
       workspace: ws,
       broker: { port: 0, bind: "127.0.0.1", discovery: "off", token: "" },
+      mcp: { port: 0, bind: "127.0.0.1" },
       session: { ...structuredClone(DEFAULT_SESSION), maxRetries },
     };
     await fn({ ws, config, calls: [], logs: [] });

@@ -13,6 +13,8 @@ import {
 import { createAgentManager, type AgentManager } from "./agents";
 import { loadConfig } from "./config";
 import { log } from "./log";
+import type { McpListener } from "./mcp";
+import { createReportHub, setReportHandler } from "./reports";
 import { cliRunner } from "./runner";
 import { prepareWorkspace } from "./workspace";
 
@@ -69,8 +71,13 @@ export interface Daemon {
   stop(): Promise<void>;
 }
 
+/** daemon が使う外部資源。/mcp の listener は Nitro の h3App が要るので plugin から渡す。 */
+export interface DaemonDeps {
+  startMcp: (opts: { port: number; bind: string }) => Promise<McpListener>;
+}
+
 /** 設定を読み込んで起動し、常駐物を返す。シグナルと exit は呼び出し側（plugin）が担う。 */
-export async function startDaemon(configPath: string): Promise<Daemon> {
+export async function startDaemon(configPath: string, deps: DaemonDeps): Promise<Daemon> {
   log("起動");
   const config = await loadConfig(configPath);
   log(`設定読込: ${configPath} (workspace=${config.workspace})`);
@@ -96,8 +103,27 @@ export async function startDaemon(configPath: string): Promise<Daemon> {
     log(`警告: token 無しで ${bind} に bind。LAN から誰でも指示を送れる`);
   }
 
+  let mcp: McpListener;
+  try {
+    mcp = await deps.startMcp(config.mcp);
+  } catch (e) {
+    await broker.close().catch(() => {});
+    throw e;
+  }
+  const mcpUrl = `${brokerUrl(config.mcp.bind, mcp.port)}/mcp`;
+  log(`mcp 起動: url=${mcpUrl} bind=${config.mcp.bind}`);
+
   let closing = false;
   let client!: MessengerClient;
+  const hub = createReportHub({
+    workspace: config.workspace,
+    invoke: (capId, input) => manager.invoke("cap", capId, input),
+    send: async (to, reply) => {
+      await client.send(to, JSON.stringify(reply));
+    },
+    mcpUrl,
+    log,
+  });
   // 実行中の指示。claude の実行は数分かかるので全体は直列にしない。
   // 同一 agent の直列化は manager の queue が担い、別 agent は並行して走る
   const inflight = new Set<Promise<void>>();
@@ -116,6 +142,8 @@ export async function startDaemon(configPath: string): Promise<Daemon> {
         return;
       }
       log(`指示受信: type=${cmd.type} from=${from} ${describeCommand(cmd)}`.trimEnd());
+      // 以降この cap の結果（report 起因の resume を含む）はこの center へ返す
+      if (cmd.type === "kick_cap") await hub.rememberCenter(cmd.cap_id, m.from_id);
       const reply = await execute(cmd, manager);
       try {
         await client.send(m.from_id, JSON.stringify(reply));
@@ -155,21 +183,27 @@ export async function startDaemon(configPath: string): Promise<Daemon> {
     await client.connect();
     log(`peer 登録: name=${SERVER_NAME} id=${client.peer.id} broker=${url}`);
   } catch (e) {
+    await mcp.close().catch(() => {});
     await broker.close().catch(() => {});
     throw e;
   }
+  setReportHandler((capId, workerId, kind, text) => hub.report(capId, workerId, kind, text));
 
   const stop = async (): Promise<void> => {
     if (closing) return;
     closing = true;
     try {
       // 実行中の claude を止め、中断の返信を出し切るのを少し待つ
+      setReportHandler(undefined);
+      hub.close();
       await manager.shutdown();
       await Promise.race([
-        Promise.allSettled([...inflight]),
+        Promise.allSettled([...inflight, hub.drain()]),
         new Promise((r) => setTimeout(r, 2500)),
       ]);
       await client.close();
+      await mcp.close();
+      log("mcp 停止");
       await broker.close();
       log("broker 停止");
     } catch (e) {

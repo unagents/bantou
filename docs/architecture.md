@@ -25,8 +25,8 @@
 3. center ↔ server は agent-messenger の protocol 方式でつなぐ。server は `set_protocol` で bantou protocol の待受として登録する（peer は `bantou-server` 1 つ）。仕様の正本は `unagents/agent-messenger` branch `feature/protocol` の `docs/design/protocol.md`（0.10.0、未公開・実装中）。center から「起動する cap の情報」を含む protocol メッセージが届く。server は「どの cap が、どの center（送信元 peer）の依頼で動いているか」を state で管理する
 4. cap の起動と resume は stroke 方式。cap 用の path（`<workspace>/caps/<cap-id>/`）を作り、そこで `claude -p --session-id|--resume <id> -- <prompt>` を実行し、stream-json の stdout で結果を受ける
 5. worker は cap の責務。cap は作業をせず、ユーザー指示を解釈して worker に作業させる。軽い作業は cap 内のサブエージェント（Agent tool）、worktree を切る作業は cap が claudep 方式で別 session を起動する。worker への返答も cap が claudep の resume で渡す
-6. worker → server: worker は server を MCP（HTTP）として持つ。cap が worker を起動する時の MCP 設定に、header（または環境変数）で `cap_id` と `worker_id` を入れる。token は使わない（認証は全体で後回し）。worker は MCP tool で進捗・質問・承認依頼・完了を送る。tool はすぐ「受け付けた」を返し、worker はそこでターンを終える
-7. server → cap: 報告を受けたら、該当 cap を `--resume` で起動し、prompt に報告内容を渡す。cap ごとにキューを持ち、1 つずつ処理する（実行中の cap には、終わってから渡す）
+6. worker → server: worker は server を MCP（HTTP）として持つ。cap が worker を起動する時の MCP 設定に、header（または環境変数）で `cap_id` と `worker_id` を入れる。token は使わない（認証は全体で後回し）。worker は MCP tool で進捗・質問・承認依頼・完了を送る。tool はすぐ「受け付けた」を返し、worker はそこでターンを終える。実装は Nitro の `/mcp`（Streamable HTTP、stateless）。listener は server が自前で立て（config `mcp.port` / `mcp.bind`、既定 `7902` / `127.0.0.1`）、tool は `report`（`kind`: progress / ask / approve / done、`text`）、header は `x-bantou-cap-id` / `x-bantou-worker-id`
+7. server → cap: 報告を受けたら、該当 cap を `--resume` で起動し、prompt に報告内容を渡す。cap ごとにキューを持ち、1 つずつ処理する（実行中の cap には、終わってから渡す）。prompt は `worker <id> から <kind>: <text>`。cap を依頼した center は cap ごとに記録し、report 起因の resume の結果も同じ center へ返す
 8. cap → center: cap の結果（stdout の result）を server が state を見て該当 center へ messenger で返す
 9. 状態は path ごとの state.json に保存する。起動時に `ps` 照合で孤児プロセスを回収する
 

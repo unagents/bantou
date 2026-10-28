@@ -140,6 +140,41 @@ Reply: `cap_result` or `error`.
 No other fields. Reply: `status_result` or `error`. Answered immediately, even
 while agents are running.
 
+### Worker reports (MCP `/mcp`)
+
+A worker session reports to `bantou-server` over MCP (Streamable HTTP, stateless,
+JSON responses) at `http://<mcp.bind>:<mcp.port>/mcp` (config `mcp`, default
+`127.0.0.1:7902`). The cap that starts the worker passes this in the worker's
+`--mcp-config` (needed on every resume), with `--strict-mcp-config` and
+`--allowedTools mcp__bantou__report`:
+
+```json
+{"mcpServers":{"bantou":{"type":"http","url":"http://127.0.0.1:7902/mcp","headers":{"x-bantou-cap-id":"cap-a","x-bantou-worker-id":"w1"}}}}
+```
+
+| header | meaning |
+|---|---|
+| `x-bantou-cap-id` | cap that started the worker. Must be an existing cap |
+| `x-bantou-worker-id` | worker id, `[A-Za-z0-9_-]+` |
+
+Tool `report`:
+
+| argument | meaning |
+|---|---|
+| `kind` | `progress`, `ask`, `approve` or `done` |
+| `text` | report body, 1..20000 characters |
+
+The tool returns `accepted` as soon as the report is recorded and queued; the
+worker should end its turn. An invalid id, an unknown cap or a stopping server
+returns an MCP error result (`isError`). No token is used (authentication is
+deferred).
+
+The server then resumes the cap (`--resume`) with the prompt
+`worker <id> から <kind>: <text>` plus the MCP URL and header names. Runs are
+serialized per cap. The result goes back as `cap_result` to the peer that sent
+the cap's `kick_cap`, same as for `kick_cap`. If the resume fails, an `error`
+reply (`command: "kick_cap"`, `cap_id`) is sent instead.
+
 ### Replies
 
 Every reply carries `bantou: 1`.

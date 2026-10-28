@@ -7,6 +7,7 @@ claude を headless（`claude -p`）で起動する常駐プロセス。messenge
 - linux / mac で動く npm package（`bantou`）。`npx` で起動する。
 - headless 実行層。端末多重化ツールは使わない。
 - messenger broker を内蔵し、peer `bantou-server` として指示を待つ。
+- worker からの報告の受け口として MCP（HTTP）の `/mcp` を持つ（下記「worker 報告（MCP）」）。
 - bantou-desktop（`../desktop/`）など任意の messenger peer からの指示を受ける。
 - 実行モデルの全体は [`../docs/architecture.md`](../docs/architecture.md)。要約は次の通り。
   - `kick_cap` で cap を起動する。初回は `claude -p --session-id <uuid>`、2 回目以降は `--resume <uuid>`。
@@ -32,6 +33,7 @@ npx bantou --config <path>
 {
   "workspace": "/path/to/workspace",
   "broker": { "port": 7901, "bind": "127.0.0.1", "discovery": "on", "token": "" },
+  "mcp": { "port": 7902, "bind": "127.0.0.1" },
   "session": {
     "claude": "claude",
     "permissionMode": "auto",
@@ -52,6 +54,8 @@ npx bantou --config <path>
 | `broker.bind` | 任意 | `127.0.0.1` | broker の bind アドレス |
 | `broker.discovery` | 任意 | `"on"` | UDP discovery の応答。`"on"` か `"off"` |
 | `broker.token` | 任意 | `""` | Bearer token。空は認証なし |
+| `mcp.port` | 任意 | `7902` | `/mcp` の HTTP port。0..65535 の整数。0 はランダム（e2e 専用。worker は起動時に URL を受け取り cap より長く生きるため、通常は固定 port） |
+| `mcp.bind` | 任意 | `127.0.0.1` | `/mcp` の bind アドレス |
 | `session.claude` | 任意 | `claude` | claude 実行ファイル |
 | `session.permissionMode` | 任意 | `auto` | `--permission-mode`。`acceptEdits` / `auto` / `bypassPermissions` / `manual` / `dontAsk` / `plan` |
 | `session.timeoutMs` | 任意 | `1800000`（30 分） | 1 回の実行の打ち切り時間。正の整数。超えたら SIGKILL |
@@ -61,7 +65,7 @@ npx bantou --config <path>
 | `session.extraArgs` | 任意 | `[]` | `--` の前にそのまま付ける追加引数。文字列の配列 |
 | `session.env` | 任意 | `{}` | spawn する claude に追加で渡す環境変数。文字列値のオブジェクト。bantou-server 自身の環境変数に上書きで合成する |
 
-- `broker` と `session` は省略可。書く場合はオブジェクト。
+- `broker` / `mcp` / `session` は省略可。書く場合はオブジェクト。
 - LAN に公開するには `broker.bind`（例 `0.0.0.0`）を明示する。その場合は `broker.token` の設定を推奨する。
 - 例: 204 の claudeAgent ユーザーは `"env": { "CLAUDE_CONFIG_DIR": "/home/vagrant/.claude-agent" }` を指定する。
 - 旧 `session.command` は廃止。残っていると起動時にエラーになる。`session.claude` を使う。
@@ -74,6 +78,8 @@ npx bantou --config <path>
   caps/<cap-id>/                     cap の path（claude の cwd）
     state.json                       状態
     logs/<session_id>.jsonl          claude の生出力（stream-json）
+    logs/center.json                 この cap を依頼した center（messenger の peer id）
+    logs/reports.jsonl               worker から受けた report の記録（1 行 1 件）
   workers/<worker-id>/               worker の path。構成は cap と同じ
 ```
 
@@ -90,6 +96,23 @@ npx bantou --config <path>
 - 自分は loopback（bind が全 IF の時）経由で接続し、peer `bantou-server` として登録する。
 - summary は `<host> <workspace>`。
 - loopback 以外に bind して token が空だと、起動直後に `警告: token 無しで ...` をログに出す。
+
+## worker 報告（MCP）
+
+- Nitro の `/mcp`（Streamable HTTP、stateless、JSON 応答）。listener は `mcp.bind` / `mcp.port` で server が自前で立てる（preset `node-listener` は listen しないため）。起動ログ `mcp 起動: url=http://<host>:<port>/mcp` に実 URL が出る。
+- tool は `report` 1 つ。引数は `kind`（`progress` / `ask` / `approve` / `done`）と `text`（1..20000 文字）。
+- 送信元は header `x-bantou-cap-id` / `x-bantou-worker-id` で判定する（token は使わない。認証は全体で後回し）。
+- tool は記録して queue に積んだ時点で `accepted` を返す。worker はそこでターンを終える。不正な id・存在しない cap・終了中は `isError` で返す。
+- 受けた report は `logs/reports.jsonl` に追記し、該当 cap の queue に積んで `--resume` で起動する。prompt は `worker <id> から <kind>: <text>` と、worker へ返す時の MCP 情報（URL・header 名）。実行中の cap には、終わってから渡す。
+- cap の結果（stdout の result）は、`kick_cap` の送信元 center へ `cap_result` で返す。report 起因の resume の結果も同じ。center は cap ごとに `logs/center.json` へ保存する（再起動後も復元）。resume が失敗した時は `error`（`command: "kick_cap"`、`cap_id`）を返す。
+- worker の MCP 設定（cap が `claude -p` に渡す `--mcp-config`。resume のたびに渡す）:
+
+```json
+{"mcpServers":{"bantou":{"type":"http","url":"http://127.0.0.1:7902/mcp","headers":{"x-bantou-cap-id":"cap-a","x-bantou-worker-id":"w1"}}}}
+```
+
+- 併せて `--strict-mcp-config --allowedTools mcp__bantou__report` を付ける。`--allowedTools` / `--mcp-config` は可変長引数なので、prompt はそれらより前に置く。
+- cap の `claude -p` が起動した子プロセスの生存は環境依存（claude の sandbox が有効だと、cap の終了で子も消える）。実測は `docs/history/20261028-1600-server-nuxt-flow/report.md`。worker を cap の外で生かすには、cap の claude で Bash の sandbox を切る（例 `session.extraArgs` に `["--settings","{\"sandbox\":{\"enabled\":false}}"]`）。
 
 ## 指示
 
@@ -183,7 +206,7 @@ npx bantou --config <path>
 2026-10-28T05:00:00.000Z bantou: 指示受信: type=kick_cap from=... cap_id=cap-a prompt=Review the open issues.
 ```
 
-起動 / 孤児回収 / broker 起動 / peer 登録 / 指示受信 / claude 起動 / claude 終了 / 再試行 / 返信 / エラー / 終了処理 が出る。
+起動 / 孤児回収 / broker 起動 / mcp 起動 / peer 登録 / report 受信 / 指示受信 / claude 起動 / claude 終了 / 再試行 / 返信 / エラー / 終了処理 が出る。
 
 - `指示受信` は prompt の先頭 80 文字だけを出す。repo URL の userinfo は伏せる。
 - claude の生出力は `logs/<session_id>.jsonl` に追記する。1 回の実行ごとに `# <ISO> mode=<mode> session=<id>` の見出し行が付く。
@@ -214,9 +237,12 @@ npm run dev -- --config <path>
 npm run e2e
 ```
 
-- 要: host に claude。claude を実際に 2 回起動するため数分かかる。claude のログイン（claudeAgent）を使う。
-- `E2E_ROOT` で一時ディレクトリの親を変えられる（既定は OS の tmp）。
-- 検証内容: `kick_cap`（新規）→ `kick_cap`（resume、同じ session_id）→ `status` → 非コマンドの無視。
+- 要: host に claude。claude を実際に複数回起動するため数分かかる。claude のログイン（claudeAgent）を使う。
+- `E2E_ROOT` で一時ディレクトリの親を変えられる（既定は OS の tmp）。`E2E_CLAUDE_CONFIG_DIR` で `CLAUDE_CONFIG_DIR` を渡す。`E2E_MODEL` で `--model` を指定する（worker の model は未指定なら `sonnet`）。`E2E_NO_BASH_SANDBOX=0` で cap の Bash sandbox を切らない（既定は切る。切らないと worker が cap の終了で消えて失敗する）。
+- 内蔵 broker は port 0 / 127.0.0.1 / discovery off、`/mcp` も port 0。server・cap・worker に本番 broker を使わせない（`AGENT_MESSENGER_*` / `CLAUDE_CODE_MESSAGING_*` を除去、cap と worker は `--strict-mcp-config`）。
+- 検証内容: `kick_cap`（新規）→ `kick_cap`（resume、同じ session_id）→ worker 報告（cap が worker を `setsid claude -p` で起動 → worker が `report` done → server が受信 → cap が resume → 結果が送信元へ返る。worker と cap の `system/init` の `mcp_servers` も確認）→ `status` → 非コマンドの無視。
+- 失敗時は一時ディレクトリを残し、パスを `E2E_DIR=` に出す。
+- `npx tsx scripts/probe-survival.ts`（`E2E_*` は同じ）: cap が起動したプロセスが cap の終了後も残るかを `kick_cap` 経由で計測する。`PROBE_SIGTERM=1` で server の SIGTERM 経路も測る。
 - 後始末: messenger client、server プロセス（SIGTERM、exit 0 と port 解放も確認）、一時ディレクトリ。
 - 成功時は `E2E OK` と主要ログを出す。失敗時は理由を出して exit 1。
 

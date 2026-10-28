@@ -1,10 +1,13 @@
+import { toNodeListener } from "h3";
 import { defineNitroPlugin, useRuntimeConfig } from "nitropack/runtime";
 import { startDaemon, type Daemon } from "../utils/bantou/daemon";
 import { fatalLine, log } from "../utils/bantou/log";
+import { startMcpListener } from "../utils/bantou/mcp";
 
 /**
  * bantou-server の常駐本体。broker・peer 登録・指示の処理を 1 つの plugin で async 直列に起動する。
- * node-listener preset のため listen はしない。signal と exit はここで握る。
+ * node-listener preset は listen しないので、/mcp 用の listener だけ daemon 経由で自前で立てる。
+ * signal と exit はここで握る。
  */
 export default defineNitroPlugin((nitro) => {
   const configPath = useRuntimeConfig().bantou.configPath;
@@ -34,7 +37,7 @@ export default defineNitroPlugin((nitro) => {
   process.on("SIGTERM", () => shutdown("SIGTERM"));
   process.on("SIGINT", () => shutdown("SIGINT"));
 
-  void startDaemon(configPath)
+  void startDaemon(configPath, { startMcp: (opts) => startMcpListener(toNodeListener(nitro.h3App), opts) })
     .then((d) => {
       daemon = d;
     })

@@ -20,6 +20,7 @@ test("config: 全項目指定はそのまま返る", async () => {
   const full = {
     workspace: "/w",
     broker: { port: 0, bind: "0.0.0.0", discovery: "off", token: "t" },
+    mcp: { port: 0, bind: "::1" },
     session: {
       claude: "/usr/bin/claude",
       permissionMode: "acceptEdits",
@@ -37,6 +38,7 @@ test("config: 全項目指定はそのまま返る", async () => {
 test("config: 既定値（bind は 127.0.0.1）", async () => {
   const c = await load({ workspace: "/w" });
   assert.deepEqual(c.broker, { port: 7901, bind: "127.0.0.1", discovery: "on", token: "" });
+  assert.deepEqual(c.mcp, { port: 7902, bind: "127.0.0.1" });
   assert.deepEqual(c.session, DEFAULT_SESSION);
   assert.equal(c.session.timeoutMs, 1_800_000);
   assert.equal(c.session.maxRetries, 1);
@@ -63,6 +65,10 @@ const bad: [string, unknown, RegExp][] = [
   ["bind 空", { workspace: "/w", broker: { bind: "" } }, /broker\.bind/],
   ["bind 非文字列", { workspace: "/w", broker: { bind: 1 } }, /broker\.bind/],
   ["discovery 不正", { workspace: "/w", broker: { discovery: "yes" } }, /broker\.discovery/],
+  ["mcp 非オブジェクト", { workspace: "/w", mcp: 1 }, /mcp はオブジェクト/],
+  ["mcp.port 範囲超", { workspace: "/w", mcp: { port: 65536 } }, /mcp\.port/],
+  ["mcp.port 文字列", { workspace: "/w", mcp: { port: "1" } }, /mcp\.port/],
+  ["mcp.bind 空", { workspace: "/w", mcp: { bind: "" } }, /mcp\.bind/],
   ["token 非文字列", { workspace: "/w", broker: { token: 1 } }, /broker\.token/],
   ["session.command は廃止", { workspace: "/w", session: { command: "claude" } }, /session\.command は廃止。session\.claude を使う/],
   ["claude 空", { workspace: "/w", session: { claude: "" } }, /session\.claude/],
