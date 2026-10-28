@@ -64,7 +64,8 @@ pub fn local_ip_strings() -> Vec<String> {
 }
 
 /// The bind to use given what was saved: the bind itself if this machine has that address, else
-/// the old `connectHost` (the pre-unification snippet IP) if it does, else the first address.
+/// the old `connectHost` (the pre-unification snippet IP) if it does, else `127.0.0.1` (never widen
+/// the exposure by guessing a LAN address).
 /// A loopback alias (`localhost`, `::1`) maps to `127.0.0.1` so a loopback-only center never
 /// widens by migration. Idempotent.
 pub fn pick_bind(bind: &str, connect_host: &str, ips: &[IpAddr]) -> String {
@@ -78,7 +79,7 @@ pub fn pick_bind(bind: &str, connect_host: &str, ips: &[IpAddr]) -> String {
             return cand.to_string();
         }
     }
-    choices.into_iter().next().unwrap_or_else(|| "127.0.0.1".to_string())
+    "127.0.0.1".to_string()
 }
 
 /// Host the snippets name for `bind`: the bind itself. A leftover wildcard bind (not offered any
@@ -373,14 +374,14 @@ mod tests {
     }
 
     #[test]
-    fn pick_bind_falls_back_to_connect_host_then_first() {
+    fn pick_bind_falls_back_to_connect_host_then_loopback() {
         let all = ips(&["192.168.1.204", "100.64.0.9"]);
         // old wildcard bind: the snippet IP the user had picked
         assert_eq!(pick_bind("0.0.0.0", "100.64.0.9", &all), "100.64.0.9");
-        // neither is on this machine: the first address
-        assert_eq!(pick_bind("0.0.0.0", "", &all), "192.168.1.204");
-        assert_eq!(pick_bind("10.9.9.9", "10.8.8.8", &all), "192.168.1.204");
-        assert_eq!(pick_bind("mac204.local", "", &all), "192.168.1.204");
+        // neither is on this machine: 127.0.0.1 (do not widen exposure)
+        assert_eq!(pick_bind("0.0.0.0", "", &all), "127.0.0.1");
+        assert_eq!(pick_bind("10.9.9.9", "10.8.8.8", &all), "127.0.0.1");
+        assert_eq!(pick_bind("mac204.local", "", &all), "127.0.0.1");
         // nothing known at all
         assert_eq!(pick_bind("0.0.0.0", "", &[]), "127.0.0.1");
     }

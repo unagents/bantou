@@ -67,16 +67,17 @@ fn sidecar_host(bind: &str) -> String {
     }
 }
 
-/// Where to connect: `remote` if set, else the sidecar when enabled, else nowhere.
+/// Where to connect: our own sidecar when the center is enabled (a stored `remote` is kept but
+/// ignored), else the stored `remote` if any, else nowhere.
 pub fn select_target(s: &CenterSettings) -> Option<Target> {
-    if let Some(r) = &s.remote {
-        return Some(Target { url: normalize_remote(&r.url), token: r.token.clone(), source: TargetSource::Remote });
+    if s.enabled {
+        return Some(Target {
+            url: format!("http://{}:{}{MCP_PATH}", sidecar_host(&s.bind), s.port),
+            token: Some(s.token.clone()).filter(|t| !t.is_empty()),
+            source: TargetSource::Sidecar,
+        });
     }
-    s.enabled.then(|| Target {
-        url: format!("http://{}:{}{MCP_PATH}", sidecar_host(&s.bind), s.port),
-        token: Some(s.token.clone()).filter(|t| !t.is_empty()),
-        source: TargetSource::Sidecar,
-    })
+    s.remote.as_ref().map(|r| Target { url: normalize_remote(&r.url), token: r.token.clone(), source: TargetSource::Remote })
 }
 
 #[derive(Debug, PartialEq)]
@@ -478,11 +479,20 @@ mod tests {
     }
 
     #[test]
-    fn target_remote_wins_even_when_sidecar_enabled() {
-        let t = select_target(&settings(true, Some("http://mac200:7910/mcp"))).unwrap();
+    fn target_sidecar_wins_over_stored_remote_when_enabled() {
+        let s = settings(true, Some("http://mac200:7910/mcp"));
+        let t = select_target(&s).unwrap();
+        assert_eq!(t.source, TargetSource::Sidecar);
+        assert_eq!(t.url, "http://127.0.0.1:7910/mcp");
+        assert_eq!(t.token.as_deref(), Some("sidecar-token-123"));
+        // the stored remote is untouched, and OFF uses it again
+        assert_eq!(s.remote.as_ref().map(|r| r.url.as_str()), Some("http://mac200:7910/mcp"));
+        let off = CenterSettings { enabled: false, ..s };
+        let t = select_target(&off).unwrap();
         assert_eq!(t.source, TargetSource::Remote);
         assert_eq!(t.url, "http://mac200:7910/mcp");
         assert_eq!(t.token.as_deref(), Some("remote-token-123"));
+        assert!(off.remote.is_some());
     }
 
     #[test]

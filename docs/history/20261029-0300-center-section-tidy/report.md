@@ -41,3 +41,10 @@
 - e2e と型チェックを実機（mac200 等）で実行して確認すること。
 - 隣接する挙動（未変更・要判断）: `settings.remote` が保存されたまま center を ON にすると、貼り付け欄は隠れるが `select_target` は remote を優先するので、desktop は自分の sidecar ではなく remote に接続し続ける。ON にした時に remote を解除するか、cap の判断を仰ぎたい。
 - 既存の stale な nuxt dev ロック（PID 44、存在しないプロセス）があり、起動には `NUXT_IGNORE_LOCK=1` が必要だった。
+
+## 追記（2026-10-28 main cap 判断）
+
+- 規則 3 を変更: 保存 bind も旧 `connectHost` も IP 一覧に無い時は、一覧の先頭ではなく `127.0.0.1`（公開範囲を勝手に広げない）。規則 1・2、loopback 別名の扱い、冪等性は不変。`center_snippet.rs` の `pick_bind`。
+- center ON 時の接続先: 保存済み `settings.remote` を使わず自分の sidecar に接続。OFF に戻すと保存済み remote を使う。remote の保存値は消さない・書き換えない。`center_mcp.rs` の `select_target`（接続先は呼び出しごとに設定から決まるので、ON/OFF 切替の再接続経路は追加変更なし）。
+- テスト: `CARGO_BUILD_JOBS=2 cargo test -j 2` で 205 passed / 0 failed / 5 ignored。規則 3 の期待値を 127.0.0.1 に更新、ON で remote 無視・OFF で remote 使用・remote 保存値が残ることの unit を更新。
+- 上記「移行の判断」の規則 3 と「残課題」の隣接挙動は、この追記で解消。

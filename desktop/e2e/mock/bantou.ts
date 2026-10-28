@@ -231,7 +231,7 @@ export class MockBantou {
       case "center_parse_connect":
         return parseConnect((args as { text: string }).text);
       case "center_connection": {
-        const remote = this.center.remote;
+        const remote = this.center.enabled ? undefined : this.center.remote;
         const url = remote
           ? remote.url.replace(/\/?$/, "/mcp").replace(/\/mcp\/mcp$/, "/mcp")
           : this.center.enabled
