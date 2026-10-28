@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createMessengerClient } from "@unagents/messenger-client";
-import { parseServerReply, SERVER_NAME, type ServerReply } from "@agent-hand/bantou-protocol";
+import { MESSENGER_PROTOCOL, parseServerReply, SERVER_NAME, type ServerReply } from "@agent-hand/bantou-protocol";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 const serverDir = fileURLToPath(new URL("..", import.meta.url));
@@ -20,6 +20,7 @@ const RUN_TIMEOUT = 300_000;
 
 const serverLog: string[] = [];
 const replies: ServerReply[] = [];
+const replyMetas: Array<{ protocol: string; version: string } | null | undefined> = [];
 
 async function waitFor<T>(what: string, ms: number, fn: () => T | undefined): Promise<T> {
   const end = Date.now() + ms;
@@ -105,6 +106,10 @@ async function main(): Promise<void> {
     const mcpUrl = /mcp 起動: url=(\S+)/.exec(mcpLine)?.[1] ?? fail(`mcp url を取れない: ${mcpLine}`);
     if (!mcpUrl.startsWith("http://127.0.0.1:") || mcpUrl.endsWith(":0/mcp")) fail(`mcp url が不正: ${mcpUrl}`);
     await waitFor("peer 登録", 20_000, () => serverLog.find((l) => l.includes("peer 登録:")));
+    const protoLine = await waitFor("protocol 登録", 20_000, () => serverLog.find((l) => l.includes("protocol 登録")));
+    if (!protoLine.includes(`protocol 登録: ${MESSENGER_PROTOCOL.protocol}@${MESSENGER_PROTOCOL.version}`)) {
+      fail(`protocol 登録に失敗: ${protoLine}`);
+    }
 
     client = createMessengerClient({
       env: { AGENT_MESSENGER_DISCOVERY: "off" },
@@ -115,13 +120,34 @@ async function main(): Promise<void> {
     });
     client.onMessage((m) => {
       const r = parseServerReply(m.text);
-      if (r) replies.push(r);
+      if (r) {
+        replies.push(r);
+        replyMetas.push(m.meta);
+      }
     });
     await client.connect();
 
-    const send = (cmd: object): Promise<unknown> => client!.send(SERVER_NAME, JSON.stringify(cmd));
-    const nextReply = (what: string, ms: number): Promise<ServerReply> =>
-      waitFor(what, ms, () => replies.shift());
+    // center 相当: protocol で server を発見する（peer 名には頼らない）
+    const found = await client.listPeers("all", { protocol: MESSENGER_PROTOCOL.protocol });
+    console.log(`[e2e] listPeers(protocol=bantou) = ${JSON.stringify(found.map((p) => ({ id: p.id, name: p.name, protocols: p.protocols })))}`);
+    if (found.length !== 1 || found[0].name !== SERVER_NAME) fail(`protocol 発見が想定外: ${JSON.stringify(found)}`);
+    if (!found[0].protocols?.some((p) => p.name === MESSENGER_PROTOCOL.protocol && p.version === MESSENGER_PROTOCOL.version)) {
+      fail(`発見した peer の protocols が不正: ${JSON.stringify(found[0].protocols)}`);
+    }
+    const serverId = found[0].id;
+    const meta = { protocol: MESSENGER_PROTOCOL.protocol, version: found[0].protocols[0].version };
+
+    // meta 付きで発見した id へ送る。返信にも meta が付くことを nextReply で確認する
+    const send = (cmd: object): Promise<unknown> => client!.send(serverId, JSON.stringify(cmd), "pull", meta);
+    const nextReply = async (what: string, ms: number): Promise<ServerReply> => {
+      const r = await waitFor(what, ms, () => replies.shift());
+      const rm = replyMetas.shift();
+      console.log(`[e2e] ${what}: type=${r.type} meta=${JSON.stringify(rm)}`);
+      if (rm?.protocol !== MESSENGER_PROTOCOL.protocol || rm.version !== MESSENGER_PROTOCOL.version) {
+        fail(`${what}: 返信の meta が不正: ${JSON.stringify(rm)}`);
+      }
+      return r;
+    };
 
     // 1. kick_cap（new）
     await send({
@@ -240,6 +266,17 @@ async function main(): Promise<void> {
     if (cap.state !== "idle") fail(`status の ${cap.id} が idle でない: ${cap.state}`);
     if (cap.queued !== 0) fail(`status の ${cap.id} の queued が 0 でない: ${cap.queued}`);
 
+    // 4b. meta 無しの旧形式（名前宛て）も受ける。返信には meta が付く
+    await client.send(SERVER_NAME, JSON.stringify({ bantou: 1, type: "status" }));
+    const stLegacy = await nextReply("status_result (meta 無しの旧形式)", 15_000);
+    if (stLegacy.type !== "status_result") fail(`旧形式の status_result でない: ${JSON.stringify(stLegacy)}`);
+
+    // 4c. 他 protocol の meta は無視される
+    await client.send(serverId, JSON.stringify({ bantou: 1, type: "status" }), "pull", { protocol: "other-proto", version: "1.0.0" });
+    await sleep(3000);
+    if (replies.length > 0) fail(`他 protocol に返信が来た: ${JSON.stringify(replies)}`);
+    await waitFor("他 protocol の無視ログ", 5000, () => serverLog.find((l) => l.includes("無視(他 protocol)")));
+
     // 5. 非コマンドは無視される
     await client.send(SERVER_NAME, "hello");
     await sleep(3000);
@@ -264,7 +301,7 @@ async function main(): Promise<void> {
   if (!error) {
     try {
       if (exitCode !== 0) fail(`server の exit code が 0 でない: ${exitCode}`);
-      for (const w of ["mcp 停止", "broker 停止", "終了"]) {
+      for (const w of ["protocol 解除", "mcp 停止", "broker 停止", "終了"]) {
         if (!serverLog.some((l) => l.includes(w))) fail(`server ログに "${w}" が無い`);
       }
       const closed = await fetch(`http://127.0.0.1:${port}/health`, {
@@ -291,7 +328,7 @@ async function main(): Promise<void> {
   }
 
   console.log("E2E OK");
-  const keys = ["bantou: 起動", "broker 起動", "mcp 起動", "report 受信", "mcp 停止", "peer 登録", "孤児回収", "指示受信", "claude 起動", "claude 終了", "返信", "SIGTERM", "broker 停止", "bantou: 終了"];
+  const keys = ["bantou: 起動", "broker 起動", "mcp 起動", "report 受信", "mcp 停止", "peer 登録", "protocol 登録", "protocol 解除", "孤児回収", "指示受信", "claude 起動", "claude 終了", "返信", "SIGTERM", "broker 停止", "bantou: 終了"];
   console.log(serverLog.filter((l) => keys.some((k) => l.includes(k))).join("\n"));
   process.exit(0);
 }

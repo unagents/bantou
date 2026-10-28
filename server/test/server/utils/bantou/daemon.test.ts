@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { prepareWorkspace } from "../../../../server/utils/bantou/workspace";
-import { describeCommand, execute, maskUserinfo } from "../../../../server/utils/bantou/daemon";
+import { REPLY_META, classifyMeta, describeCommand, execute, maskUserinfo } from "../../../../server/utils/bantou/daemon";
 import type { AgentManager } from "../../../../server/utils/bantou/agents";
 
 test("workspace 作成: caps と workers を作る", async () => {
@@ -54,4 +54,18 @@ test("error 返信: 失敗した指示の cap_id を含める。resume_worker �
   assert.deepEqual(w, { bantou: 1, type: "error", ok: false, message: "resume_worker は未対応", command: "resume_worker" });
   const st = await execute({ bantou: 1, type: "status" }, manager);
   assert.deepEqual(st, { bantou: 1, type: "error", ok: false, message: "boom", command: "status" });
+});
+
+test("meta の分類: 無し=旧形式、bantou=処理、他 protocol=無視", () => {
+  assert.equal(classifyMeta(undefined), "legacy");
+  assert.equal(classifyMeta(null), "legacy");
+  assert.equal(classifyMeta({ protocol: "bantou", version: "1.0.0" }), "bantou");
+  assert.equal(classifyMeta({ protocol: "bantou", version: "9.9.9" }), "bantou");
+  assert.equal(classifyMeta({ protocol: "other", version: "1.0.0" }), "other");
+});
+
+test("返信 meta は protocol.json の name / version と一致する", async () => {
+  const dir = new URL("../../../../../packages/protocol/messenger/", import.meta.url);
+  const m = JSON.parse(await readFile(new URL("protocol.json", dir), "utf8")) as { name: string; version: string };
+  assert.deepEqual(REPLY_META, { protocol: m.name, version: m.version });
 });

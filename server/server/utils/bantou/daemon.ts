@@ -4,6 +4,7 @@ import { startBroker } from "@unagents/messenger-broker";
 import { createBrokerClient, createMessengerClient } from "@unagents/messenger-client";
 import type { InboundMessage, MessengerClient } from "@unagents/messenger-client";
 import {
+  MESSENGER_PROTOCOL,
   PROTOCOL_VERSION,
   SERVER_NAME,
   parseServerCommand,
@@ -17,6 +18,15 @@ import type { McpListener } from "./mcp";
 import { createReportHub, setReportHandler } from "./reports";
 import { cliRunner } from "./runner";
 import { prepareWorkspace } from "./workspace";
+
+/** 返信に付ける messenger の meta（bantou protocol の登録と同じ値）。 */
+export const REPLY_META = { protocol: MESSENGER_PROTOCOL.protocol, version: MESSENGER_PROTOCOL.version };
+
+/** 受信 message の meta の扱い。bantou = bantou protocol、legacy = meta 無し（旧形式）、other = 他 protocol。 */
+export function classifyMeta(meta: { protocol?: unknown; version?: unknown } | null | undefined): "bantou" | "legacy" | "other" {
+  if (meta === undefined || meta === null) return "legacy";
+  return meta.protocol === MESSENGER_PROTOCOL.protocol ? "bantou" : "other";
+}
 
 /** 無視ログ用に本文を 1 行・最大 120 文字へ整形する。 */
 export function ignoreText(text: string): string {
@@ -73,6 +83,8 @@ export interface Daemon {
 
 /** daemon が使う外部資源。/mcp の listener は Nitro の h3App が要るので plugin から渡す。 */
 export interface DaemonDeps {
+  /** bantou protocol 定義（protocol.json を含む dir）。空なら protocol 登録を行わず名前待受のみ。 */
+  protocolDir?: string;
   startMcp: (opts: { port: number; bind: string }) => Promise<McpListener>;
 }
 
@@ -115,11 +127,12 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
 
   let closing = false;
   let client!: MessengerClient;
+  let protocolSet = false;
   const hub = createReportHub({
     workspace: config.workspace,
     invoke: (capId, input) => manager.invoke("cap", capId, input),
     send: async (to, reply) => {
-      await client.send(to, JSON.stringify(reply));
+      await client.send(to, JSON.stringify(reply), "pull", REPLY_META);
     },
     mcpUrl,
     log,
@@ -132,6 +145,10 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
     try {
       if (m.mode === "ping") return;
       const from = `${m.from_name}(${m.from_id})`;
+      if (classifyMeta(m.meta) === "other") {
+        log(`無視(他 protocol): from=${from} protocol=${String(m.meta?.protocol)}`);
+        return;
+      }
       const cmd = parseServerCommand(m.text);
       if (!cmd) {
         log(`無視: from=${from} text=${ignoreText(m.text)}`);
@@ -146,8 +163,8 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
       if (cmd.type === "kick_cap") await hub.rememberCenter(cmd.cap_id, m.from_id);
       const reply = await execute(cmd, manager);
       try {
-        await client.send(m.from_id, JSON.stringify(reply));
-        log(`返信: to=${m.from_id} type=${reply.type}`);
+        await client.send(m.from_id, JSON.stringify(reply), "pull", REPLY_META);
+        log(`返信: to=${m.from_id} type=${reply.type} meta=${REPLY_META.protocol}@${REPLY_META.version}`);
       } catch (e) {
         log(`返信失敗: to=${m.from_id} ${e instanceof Error ? e.message : String(e)}`);
       }
@@ -182,6 +199,18 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
     });
     await client.connect();
     log(`peer 登録: name=${SERVER_NAME} id=${client.peer.id} broker=${url}`);
+    if (deps.protocolDir) {
+      // 失敗しても致命にしない（従来の名前待受 bantou-server で継続する）
+      try {
+        const info = await client.setProtocol(deps.protocolDir);
+        protocolSet = true;
+        log(`protocol 登録: ${info.name}@${info.version} hash=${info.hash} dir=${deps.protocolDir}`);
+      } catch (e) {
+        log(`protocol 登録失敗（名前待受 ${SERVER_NAME} で継続）: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    } else {
+      log(`protocol 未指定のため登録しない（名前待受 ${SERVER_NAME} のみ）`);
+    }
   } catch (e) {
     await mcp.close().catch(() => {});
     await broker.close().catch(() => {});
@@ -201,6 +230,12 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
         Promise.allSettled([...inflight, hub.drain()]),
         new Promise((r) => setTimeout(r, 2500)),
       ]);
+      if (protocolSet) {
+        await client.unsetProtocol().then(
+          () => log("protocol 解除"),
+          (e: unknown) => log(`protocol 解除失敗: ${e instanceof Error ? e.message : String(e)}`),
+        );
+      }
       await client.close();
       await mcp.close();
       log("mcp 停止");

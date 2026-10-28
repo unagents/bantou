@@ -26,5 +26,8 @@ if (!args) {
 
 // config の中身（token 等）は env に載せない。パスだけを Nitro の runtimeConfig へ渡す
 process.env.NUXT_BANTOU_CONFIG_PATH = resolve(args.config);
-const entry = join(dirname(fileURLToPath(import.meta.url)), "..", ".output", "server", "index.mjs");
+const binDir = dirname(fileURLToPath(import.meta.url));
+// npm package に同梱した protocol 定義（server/protocol/、scripts/copy-protocol.mjs が作る）
+process.env.NUXT_BANTOU_PROTOCOL_DIR = join(binDir, "..", "protocol");
+const entry = join(binDir, "..", ".output", "server", "index.mjs");
 await import(entry);

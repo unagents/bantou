@@ -6,7 +6,7 @@ claude を headless（`claude -p`）で起動する常駐プロセス。messenge
 
 - linux / mac で動く npm package（`bantou`）。`npx` で起動する。
 - headless 実行層。端末多重化ツールは使わない。
-- messenger broker を内蔵し、peer `bantou-server` として指示を待つ。
+- messenger broker を内蔵し、peer `bantou-server` として指示を待つ。起動時に agent-messenger の protocol `bantou` の待受としても登録する（下記「protocol 登録」）。
 - worker からの報告の受け口として MCP（HTTP）の `/mcp` を持つ（下記「worker 報告（MCP）」）。
 - bantou-desktop（`../desktop/`）など任意の messenger peer からの指示を受ける。
 - 実行モデルの全体は [`../docs/architecture.md`](../docs/architecture.md)。要約は次の通り。
@@ -96,6 +96,14 @@ npx bantou --config <path>
 - 起動時に broker を `broker.port` / `broker.bind` で立てる。discovery と token は config の通り。
 - 前回異常終了で残った自分の peer（name `bantou-server`、同一 host）は起動時に解除する。
 - 自分は loopback（bind が全 IF の時）経由で接続し、peer `bantou-server` として登録する。
+
+## protocol 登録
+
+- 接続後に `setProtocol(<protocol dir>)` で bantou protocol（name `bantou`、version は `packages/protocol/messenger/protocol.json` の通り）を登録する。ログ: `protocol 登録: bantou@1.0.0 hash=...`。終了時に `unsetProtocol`（`protocol 解除`）。
+- protocol dir は npm package の `protocol/`（`scripts/copy-protocol.mjs` が `../packages/protocol/messenger/` をコピー。build / dev / e2e / prepack の先頭で実行、`server/protocol` は git 管理外）。`bin/bantou.mjs` が `NUXT_BANTOU_PROTOCOL_DIR`（runtimeConfig `bantou.protocolDir`）に設定する。
+- 登録に失敗しても致命にしない。ログに出して従来の名前待受（peer `bantou-server`）で続ける。
+- 受信 message の `meta.protocol` が `bantou` なら処理、meta 無しは旧形式として処理、他 protocol は無視（`無視(他 protocol)`）。返信は送信元の peer id へ `meta: {protocol: "bantou", version}` 付きで返す（report 起因の `cap_result` も同じ）。
+- center は `list_peers`（`protocol: "bantou"`）で server を発見できる。
 - summary は `<host> <workspace>`。
 - loopback 以外に bind して token が空だと、起動直後に `警告: token 無しで ...` をログに出す。
 
@@ -215,7 +223,7 @@ npx bantou --config <path>
 
 ## 開発
 
-依存は `@unagents/messenger-broker` / `@unagents/messenger-client`（0.9.0、npmjs）と、`file:../packages/protocol` 経由の `@agent-hand/bantou-protocol`。
+依存は `@unagents/messenger-broker` / `@unagents/messenger-client`（0.10.0、npmjs）と、`file:../packages/protocol` 経由の `@agent-hand/bantou-protocol`。
 `../packages/protocol` を先にビルドする。npm publish はプロトコル package の公開まで保留している。
 
 ```
@@ -242,7 +250,7 @@ npm run e2e
 - 要: host に claude。claude を実際に複数回起動するため数分かかる。claude のログイン（claudeAgent）を使う。
 - `E2E_ROOT` で一時ディレクトリの親を変えられる（既定は OS の tmp）。`E2E_CLAUDE_CONFIG_DIR` で `CLAUDE_CONFIG_DIR` を渡す。`E2E_MODEL` で `--model` を指定する（worker の model は未指定なら `sonnet`）。cap の Bash sandbox は server の既定（`session.capBashSandbox: false`）で切れる。probe-survival は `E2E_CAP_BASH_SANDBOX=1` で sandbox 有効のまま計測する。
 - 内蔵 broker は port 0 / 127.0.0.1 / discovery off、`/mcp` も port 0。server・cap・worker に本番 broker を使わせない（`AGENT_MESSENGER_*` / `CLAUDE_CODE_MESSAGING_*` を除去、cap と worker は `--strict-mcp-config`）。
-- 検証内容: `kick_cap`（新規）→ `kick_cap`（resume、同じ session_id）→ worker 報告（cap が worker を `setsid claude -p` で起動 → worker が `report` done → server が受信 → cap が resume → 結果が送信元へ返る。worker と cap の `system/init` の `mcp_servers` も確認）→ `status` → 非コマンドの無視。
+- 検証内容: protocol 登録（`protocol 登録` ログ）→ center 相当の client が `listPeers("all", {protocol: "bantou"})` で発見 → meta 付きで送り、返信（`cap_result` / `status_result` / report 起因の `cap_result`）に meta が付くことを確認 → `kick_cap`（新規）→ `kick_cap`（resume、同じ session_id）→ worker 報告（cap が worker を `setsid claude -p` で起動 → worker が `report` done → server が受信 → cap が resume → 結果が送信元へ返る。worker と cap の `system/init` の `mcp_servers` も確認）→ `status` → meta 無しの旧形式 `status` も受ける → 他 protocol の meta は無視 → 非コマンドの無視 → 終了時の `protocol 解除`。
 - 失敗時は一時ディレクトリを残し、パスを `E2E_DIR=` に出す。
 - `npx tsx scripts/probe-survival.ts`（`E2E_*` は同じ）: cap が起動したプロセスが cap の終了後も残るかを `kick_cap` 経由で計測する。`PROBE_SIGTERM=1` で server の SIGTERM 経路も測る。
 - 後始末: messenger client、server プロセス（SIGTERM、exit 0 と port 解放も確認）、一時ディレクトリ。

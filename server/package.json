@@ -1,6 +1,6 @@
 {
   "name": "bantou",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Remote session and remote cap launcher server for bantou-desktop",
   "license": "MIT",
   "repository": {
@@ -14,13 +14,14 @@
   },
   "files": [
     "bin",
-    ".output"
+    ".output",
+    "protocol"
   ],
   "scripts": {
-    "build": "nuxt build",
-    "dev": "nuxt build && node bin/bantou.mjs",
-    "e2e": "nuxt build && node --import tsx scripts/e2e-launch.ts",
-    "prepack": "nuxt build",
+    "build": "node scripts/copy-protocol.mjs && nuxt build",
+    "dev": "node scripts/copy-protocol.mjs && nuxt build && node bin/bantou.mjs",
+    "e2e": "node scripts/copy-protocol.mjs && nuxt build && node --import tsx scripts/e2e-launch.ts",
+    "prepack": "node scripts/copy-protocol.mjs && nuxt build",
     "test": "node --import tsx --test \"test/**/*.test.ts\"",
     "typecheck": "nuxt prepare && tsc --noEmit -p tsconfig.json"
   },
@@ -31,8 +32,8 @@
     "@agent-hand/bantou-protocol": "file:../packages/protocol",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@types/node": "^22.0.0",
-    "@unagents/messenger-broker": "0.9.0",
-    "@unagents/messenger-client": "0.9.0",
+    "@unagents/messenger-broker": "0.10.0",
+    "@unagents/messenger-client": "0.10.0",
     "nuxt": "~4.5.2",
     "tsx": "^4.19.0",
     "typescript": "~5.9.0",

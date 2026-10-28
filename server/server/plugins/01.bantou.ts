@@ -10,7 +10,7 @@ import { startMcpListener } from "../utils/bantou/mcp";
  * signal と exit はここで握る。
  */
 export default defineNitroPlugin((nitro) => {
-  const configPath = useRuntimeConfig().bantou.configPath;
+  const { configPath, protocolDir } = useRuntimeConfig().bantou;
   let daemon: Daemon | undefined;
   let stopping = false;
 
@@ -37,7 +37,7 @@ export default defineNitroPlugin((nitro) => {
   process.on("SIGTERM", () => shutdown("SIGTERM"));
   process.on("SIGINT", () => shutdown("SIGINT"));
 
-  void startDaemon(configPath, { startMcp: (opts) => startMcpListener(toNodeListener(nitro.h3App), opts) })
+  void startDaemon(configPath, { protocolDir, startMcp: (opts) => startMcpListener(toNodeListener(nitro.h3App), opts) })
     .then((d) => {
       daemon = d;
     })

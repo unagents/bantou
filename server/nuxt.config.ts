@@ -14,6 +14,8 @@ export default defineNuxtConfig({
     bantou: {
       // NUXT_BANTOU_CONFIG_PATH（bin wrapper が設定）で上書きされる
       configPath: "",
+      // NUXT_BANTOU_PROTOCOL_DIR（bin wrapper が設定）で上書きされる。bantou protocol 定義（protocol.json）の dir
+      protocolDir: "",
     },
   },
 });
