@@ -4,15 +4,18 @@
 
 Run E2E on mac200, never on this Mac.
 
-1. Sync the tree:
-   `rsync -a --exclude node_modules --exclude target --exclude .nuxt --exclude .output --exclude .git ./ claude-cli@192.168.1.200:work/bantou/`
-2. Run the tests there:
-   `ssh claude-cli@192.168.1.200 'cd work/bantou && bun run e2e'`
+1. Sync the whole repo (run from the repo root, not `desktop/`):
+   `rsync -a --delete --exclude node_modules --exclude target --exclude .nuxt --exclude .output --exclude .git --exclude src-tauri/binaries ./ claude-cli@192.168.1.200:work/bantou-mono/`
+2. Build and install there:
+   `ssh claude-cli@192.168.1.200 'cd work/bantou-mono/packages/protocol && npm run build'`
+   `ssh claude-cli@192.168.1.200 'cd work/bantou-mono && bun install'`
+3. Run the tests there (in `desktop/`):
+   `ssh claude-cli@192.168.1.200 'cd work/bantou-mono/desktop && bun run e2e'`
    Chrome launch failures show as `flaky` and are absorbed by retries. Only `failed` counts.
-3. Copy the screenshots back and look at them yourself before reporting:
-   `scp claude-cli@192.168.1.200:work/bantou/node_modules/.cache/bantou-e2e/shots/board.png /tmp/claude/`
+4. Copy the screenshots back and look at them yourself before reporting:
+   `scp claude-cli@192.168.1.200:work/bantou-mono/desktop/node_modules/.cache/bantou-e2e/shots/board.png /tmp/claude/`
    Other shots: `modal.png`, `answered.png`, `session-added.png`.
-4. Rust: `cd src-tauri && cargo test`.
+5. Rust (in `desktop/`): `cd src-tauri && cargo test`.
    sidecar binary が無いとビルドが失敗する。先に `bun run build:sidecar`（`src-tauri/binaries/bantou-center-<triple>`）。
 
 ## center sidecar
@@ -24,12 +27,12 @@ Run E2E on mac200, never on this Mac.
 
 Do it without asking once the review check passes.
 
-1. Bump the version in `package.json` and `src-tauri/Cargo.toml`. Commit on develop.
-2. Push to GitHub (remote `github`, or `origin` once switched): `git push <remote> develop`, fast-forward main (`git merge --ff-only develop`), `git push <remote> main`, back to develop.
-3. Build: `CI=true bun run tauri build`. Output: `src-tauri/target/release/bundle/dmg/bantou_<ver>_aarch64.dmg`.
+1. Bump the version in `package.json`, `src-tauri/Cargo.toml` and `Cargo.lock`. Commit on develop. Do not edit `Casks/bantou.rb` by hand; step 5 rewrites it.
+2. Push to GitHub (`origin`; Gitea `gitea` is a read-only pull mirror, never push there): `git push origin develop`, fast-forward main (`git merge --ff-only develop`), `git push origin main`, back to develop.
+3. Build (in `desktop/`): `CI=true bun run tauri build`. `beforeBuildCommand` runs `bun run build:sidecar && bun run generate`. Output: `src-tauri/target/release/bundle/dmg/bantou_<ver>_aarch64.dmg`.
 4. GitHub release: `gh release create v<ver> <dmg> --title v<ver> --notes ""`
-5. Cask: `scripts/publish-cask.sh <ver> $(shasum -a 256 <dmg> | cut -d' ' -f1)`.
-   Updates `desktop/Casks/bantou.rb` and updates `Casks/bantou.rb` in GitHub `unagents/homebrew-tap` via API.
+5. Cask (in `desktop/`): `scripts/publish-cask.sh [--dry-run] <ver> $(shasum -a 256 <dmg> | cut -d' ' -f1)`. Needs authenticated `gh` and `jq`; no env vars.
+   Rewrites `version`/`sha256` in `desktop/Casks/bantou.rb` (commit the result) and updates `Casks/bantou.rb` in GitHub `unagents/homebrew-tap` via API.
 6. This Mac (tap `unagents/tap`): `/opt/homebrew/bin/brew update` and `/opt/homebrew/bin/brew upgrade --cask bantou`. Use `/opt/homebrew/bin/brew`, never `/usr/local/bin/brew`.
 7. Restart the app: `pgrep -fl 'bantou.app/Contents/MacOS'`, `kill <pid>` (by PID only), `open -a /Applications/bantou.app`. Check `CFBundleShortVersionString` in `/Applications/bantou.app/Contents/Info.plist`.
 

@@ -58,6 +58,9 @@ pub struct CenterSettings {
     pub port: u32,
     pub bind: String,
     pub projects: Vec<CenterProject>,
+    /// Absolute path of the claude executable. Unset: the center resolves it via a login shell.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claude_path: Option<String>,
     /// Center on another host this desktop will connect to (stored only for now).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_url: Option<String>,
@@ -70,6 +73,7 @@ impl Default for CenterSettings {
             port: DEFAULT_PORT,
             bind: DEFAULT_BIND.to_string(),
             projects: Vec::new(),
+            claude_path: None,
             remote_url: None,
         }
     }
@@ -111,6 +115,12 @@ pub fn validate_settings(mut s: CenterSettings) -> Result<CenterSettings, String
             }
         }
     }
+    s.claude_path = s.claude_path.take().map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
+    if let Some(p) = &s.claude_path {
+        if !Path::new(p).is_absolute() {
+            return Err("claudePath は絶対パスで指定する".to_string());
+        }
+    }
     s.remote_url = s.remote_url.take().map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
     if let Some(u) = &s.remote_url {
         if !(u.starts_with("http://") || u.starts_with("https://")) {
@@ -137,7 +147,11 @@ pub fn build_config(s: &CenterSettings) -> serde_json::Value {
             o
         })
         .collect();
-    serde_json::json!({ "projects": projects, "remoteControl": {}, "servers": [] })
+    let mut remote_control = serde_json::json!({});
+    if let Some(v) = &s.claude_path {
+        remote_control["claude"] = v.clone().into();
+    }
+    serde_json::json!({ "projects": projects, "remoteControl": remote_control, "servers": [] })
 }
 
 pub fn sidecar_args(s: &CenterSettings, config: &Path) -> Vec<String> {
@@ -160,11 +174,13 @@ fn config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 
 /// Whether applying `new` needs a stop/start. `running_with` is the settings the live
 /// center was started with (None when not running). `remote_url` is not passed to the
-/// center, so it never forces a restart.
+/// center, so it never forces a restart. `claude_path` changes the child, so it does.
 pub fn needs_restart(running_with: Option<&CenterSettings>, new: &CenterSettings) -> bool {
     match running_with {
         Some(old) => {
-            !new.enabled || old.port != new.port || old.bind != new.bind || old.projects != new.projects
+            !new.enabled || old.port != new.port || old.bind != new.bind
+                || old.projects != new.projects
+                || old.claude_path != new.claude_path
         }
         None => new.enabled,
     }
@@ -501,6 +517,23 @@ mod tests {
     }
 
     #[test]
+    fn config_json_writes_claude_path_only_when_set() {
+        let s = CenterSettings { claude_path: Some("/opt/claude".into()), ..Default::default() };
+        assert_eq!(build_config(&s)["remoteControl"], serde_json::json!({ "claude": "/opt/claude" }));
+        assert_eq!(build_config(&CenterSettings::default())["remoteControl"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn claude_path_validation() {
+        let with = |p: &str| validate_settings(CenterSettings { claude_path: Some(p.into()), ..Default::default() });
+        assert!(with("claude").is_err());
+        assert!(with("./claude").is_err());
+        assert_eq!(with(" /a/claude ").unwrap().claude_path.as_deref(), Some("/a/claude"));
+        // empty / blank means unset
+        assert_eq!(with("  ").unwrap().claude_path, None);
+    }
+
+    #[test]
     fn config_json_marks_projects_autostart() {
         let mut p = project("a", "/x");
         p.spawn = Some("worktree".into());
@@ -530,6 +563,7 @@ mod tests {
         assert!(needs_restart(Some(&on), &CenterSettings { port: 7911, ..on.clone() }));
         assert!(needs_restart(Some(&on), &CenterSettings { bind: "0.0.0.0".into(), ..on.clone() }));
         assert!(needs_restart(Some(&on), &CenterSettings { projects: vec![], ..on.clone() }));
+        assert!(needs_restart(Some(&on), &CenterSettings { claude_path: Some("/x/claude".into()), ..on.clone() }));
         // running, disabled: stop
         assert!(needs_restart(Some(&on), &CenterSettings { enabled: false, ..on.clone() }));
         // not running: start only when enabled

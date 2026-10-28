@@ -3,6 +3,7 @@ import { createWriteStream, type WriteStream } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { Readable, Writable } from "node:stream";
+import type { ResolvedClaude } from "./claude-path.js";
 import type { Config, ProjectConfig } from "./config.js";
 import type { Logger } from "./log.js";
 
@@ -20,6 +21,8 @@ export interface RcStatus {
   lastError?: string;
   startedAt: string | null;
   args: string[] | null;
+  /** 起動に使う claude 実行ファイルとその決定元。 */
+  claude: ResolvedClaude;
 }
 
 /** supervisor が子プロセスに要求する最小の形（テストで偽物に差し替える）。 */
@@ -135,10 +138,14 @@ export function createRemoteControlSupervisor(opts: {
   config: Config;
   log: Logger;
   spawnImpl?: SpawnImpl;
+  /** 解決済みの claude。省略時は config 指定、なければ PATH 任せの `claude`。 */
+  claude?: ResolvedClaude;
 }): RemoteControlSupervisor {
   const { config, log } = opts;
   const spawnImpl: SpawnImpl = opts.spawnImpl ?? ((c, a, o) => nodeSpawn(c, a, o) as unknown as ChildLike);
   const rc = config.remoteControl;
+  const claude: ResolvedClaude =
+    opts.claude ?? (rc.claude ? { path: rc.claude, source: "config" } : { path: "claude", source: "PATH" });
   const entries = new Map<string, Entry>();
   for (const p of config.projects) {
     entries.set(p.name, {
@@ -154,6 +161,7 @@ export function createRemoteControlSupervisor(opts: {
         lastExit: null,
         startedAt: null,
         args: null,
+        claude,
       },
       child: null,
       timer: null,
@@ -197,7 +205,7 @@ export function createRemoteControlSupervisor(opts: {
 
     let child: ChildLike;
     try {
-      child = spawnImpl(rc.claude, args, { cwd: e.project.path, env: childEnv(e.project), stdio: ["pipe", "pipe", "pipe"] });
+      child = spawnImpl(claude.path, args, { cwd: e.project.path, env: childEnv(e.project), stdio: ["pipe", "pipe", "pipe"] });
     } catch (err) {
       e.status.state = "error";
       e.status.lastError = `起動失敗: ${(err as Error).message}`;

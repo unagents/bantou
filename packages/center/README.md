@@ -56,7 +56,7 @@ stdout は MCP の通信路。ログは全て stderr に出る。
   "projects": [
     { "name": "bantou", "path": "/home/me/work/bantou", "spawn": "same-dir", "permissionMode": "auto", "capacity": 4, "autostart": true, "env": { "FOO": "bar" } }
   ],
-  "remoteControl": { "claude": "claude", "env": { "CLAUDE_CONFIG_DIR": "/home/me/.claude-rc" }, "continueOnRestart": true, "restartDelayMs": 5000, "maxRestarts": 5, "stopGraceMs": 5000 },
+  "remoteControl": { "env": { "CLAUDE_CONFIG_DIR": "/home/me/.claude-rc" }, "continueOnRestart": true, "restartDelayMs": 5000, "maxRestarts": 5, "stopGraceMs": 5000 },
   "servers": [
     { "name": "linux204", "broker": "http://192.168.1.204:7901", "token": "secret", "timeoutMs": 2100000 }
   ],
@@ -73,7 +73,7 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 | `projects[].capacity` | 1 以上の整数 | 指定なし | `--capacity` |
 | `projects[].autostart` | boolean | `false` | center 起動時に remote-control も起動する |
 | `projects[].env` | `{ KEY: string }` | なし | この project の子プロセスに足す環境変数（`remoteControl.env` より優先） |
-| `remoteControl.claude` | string | `claude` | claude 実行ファイル |
+| `remoteControl.claude` | string | 未指定 | claude 実行ファイル。未指定なら起動時に自動解決（「claude の解決」節） |
 | `remoteControl.env` | `{ KEY: string }` | なし | 全 project の子プロセスに足す環境変数 |
 | `remoteControl.continueOnRestart` | boolean | `true` | 再起動時に `--continue` を付ける |
 | `remoteControl.autoConsent` | boolean | `true` | 起動時の確認プロンプト（`Enable Remote Control? (y/n)`）に自動で `y` を返す |
@@ -119,6 +119,17 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 | `lastExit` | 直近の終了 `{ code, signal, at }` |
 | `lastError` | `error` 状態の理由 |
 | `startedAt` / `args` | 直近の起動時刻と引数 |
+| `claude` | 起動に使う実行ファイル `{ path, source }`。`source` は `config` / `login-shell` / `fallback-path` / `PATH` |
+
+## claude の解決
+
+`remoteControl.claude` 未指定なら、center 起動時に次の順で解決する（GUI 起動の app は PATH が最小のため）。
+
+1. `$SHELL -lc 'command -v claude'`（`SHELL` 未設定は `/bin/sh`、5 秒で打ち切り）。最終の非空行が実在する実行可能な絶対パスなら採用（`login-shell`）
+2. `~/.local/bin/claude`、`/opt/homebrew/bin/claude` の順に実在・実行可能なものを採用（`fallback-path`）
+3. どれも無ければ PATH 任せの `claude`（`PATH`）。警告をログに出す
+
+`remoteControl.claude` 指定時はそのまま使う（`config`、検証しない）。結果はログと `rc_status` / `rc_list` の `claude` に出る。
 
 ## ログ
 

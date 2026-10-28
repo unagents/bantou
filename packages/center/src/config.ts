@@ -15,7 +15,6 @@ export const PERMISSION_MODES = [
 export const SPAWN_MODES = ["same-dir", "worktree", "session"] as const;
 
 export const DEFAULT_REMOTE_CONTROL = {
-  claude: "claude",
   continueOnRestart: true,
   autoConsent: true,
   restartDelayMs: 5000,
@@ -47,7 +46,8 @@ const projectSchema = z.object({
 });
 
 const remoteControlSchema = z.object({
-  claude: z.string().min(1).default(DEFAULT_REMOTE_CONTROL.claude),
+  /** 未指定なら起動時に解決する（claude-path.ts）。 */
+  claude: z.string().min(1).optional(),
   continueOnRestart: z.boolean().default(DEFAULT_REMOTE_CONTROL.continueOnRestart),
   autoConsent: z.boolean().default(DEFAULT_REMOTE_CONTROL.autoConsent),
   restartDelayMs: z.number().int().min(0).default(DEFAULT_REMOTE_CONTROL.restartDelayMs),

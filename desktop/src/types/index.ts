@@ -105,6 +105,7 @@ export interface CenterSettings {
   port: number;
   bind: string;
   projects: CenterProject[];
+  claudePath?: string;
   remoteUrl?: string;
 }
 

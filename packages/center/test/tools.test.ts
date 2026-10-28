@@ -10,6 +10,7 @@ import type { ServerLink } from "../src/server-link.js";
 const rc = (project: string): RcStatus => ({
   project, path: "/p", state: "connected", pid: 1, sessionUrl: null, environmentUrl: null,
   restarts: 0, lastExit: null, startedAt: null, args: null,
+  claude: { path: "claude", source: "PATH" },
 });
 
 async function connect(link: Partial<ServerLink> = {}) {

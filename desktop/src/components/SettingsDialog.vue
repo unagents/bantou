@@ -154,6 +154,16 @@ const stateColor = { stopped: "neutral", running: "success", error: "error" } as
           <p v-if="!settings.projects.length" class="text-cork-muted text-xs">未登録（spawn / permissionMode の「-」は既定）</p>
         </div>
 
+        <UFormField label="claudePath" description="空なら login shell から自動解決">
+          <UInput
+            :model-value="settings.claudePath ?? ''"
+            placeholder="/Users/me/.local/bin/claude"
+            class="w-full"
+            data-testid="center-claude-path"
+            @update:model-value="settings.claudePath = String($event) || undefined"
+          />
+        </UFormField>
+
         <UFormField label="remoteUrl" description="別ホストの center の URL。今回は保存のみ（connect: next version）">
           <UInput
             :model-value="settings.remoteUrl ?? ''"

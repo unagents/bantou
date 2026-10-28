@@ -11,7 +11,6 @@ test("最小 config に既定値が入る", () => {
   const c = parseConfig({ projects: [{ name: "a", path: P }] }, "/etc/bantou/center.json");
   assert.deepEqual(c.projects[0], { name: "a", path: P, spawn: "same-dir", permissionMode: "auto", autostart: false });
   assert.deepEqual(c.remoteControl, {
-    claude: "claude",
     continueOnRestart: true,
     autoConsent: true,
     restartDelayMs: 5000,
@@ -86,4 +85,8 @@ test("loadConfig: 読めない / JSON 不正 / 正常", async () => {
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("remoteControl.claude 未指定は undefined（既定値を入れない）", () => {
+  assert.equal(parseConfig({}, "/x/c.json").remoteControl.claude, undefined);
 });

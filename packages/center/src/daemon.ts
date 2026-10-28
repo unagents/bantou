@@ -1,5 +1,6 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { CliArgs } from "./args.js";
+import { resolveClaude } from "./claude-path.js";
 import { loadConfig } from "./config.js";
 import { startHttpServer, type HttpHandle } from "./http.js";
 import { log } from "./log.js";
@@ -22,7 +23,8 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   log(
     `設定読込: ${configPath} (projects=${config.projects.length} servers=${config.servers.length} logDir=${config.logDir})`,
   );
-  const supervisor = createRemoteControlSupervisor({ config, log });
+  const claude = await resolveClaude(config.remoteControl.claude, log);
+  const supervisor = createRemoteControlSupervisor({ config, log, claude });
   const link = createServerLink({ config, log });
 
   let closing = false;

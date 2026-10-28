@@ -52,7 +52,7 @@ second `bantou-core` on the shared broker.
 - ビルド: `bun run build:sidecar`。出力は `src-tauri/binaries/bantou-center-<rust-triple>`（git 管理外）。`--target <rust-triple>` で指定、無ければ環境変数 `TAURI_ENV_TARGET_TRIPLE`、それも無ければ `rustc -vV` の host。`tauri build` は `beforeBuildCommand` で自動実行する。
 - `bundle.externalBin` により、binary が無いと `cargo check` / `tauri dev` のビルドスクリプトも失敗する。先に `build:sidecar` を実行する。
 - universal mac ビルドは `aarch64-apple-darwin` と `x86_64-apple-darwin` の両方を `--target` で作る。
-- 設定: ヘッダーの歯車から開く設定ダイアログ。項目は enabled / port（既定 7910）/ bind（既定 127.0.0.1）/ projects（name, path, spawn, permissionMode）/ remoteUrl（保存のみ。接続は次版）。保存先は `settings.json`（tauri-plugin-store）の `center` キー。
-- 保存すると `~/.local/share/bantou/center.json` を書き出し、起動中で enabled / port / bind / projects のいずれかが変わった時だけ再起動する（remoteUrl のみの変更は再起動しない）。enabled を外すと停止する。アプリ起動時に enabled なら自動起動。
+- 設定: ヘッダーの歯車から開く設定ダイアログ。項目は enabled / port（既定 7910）/ bind（既定 127.0.0.1）/ projects（name, path, spawn, permissionMode）/ claudePath（任意・絶対パス。空なら center が login shell から自動解決し、`center.json` の `remoteControl.claude` には設定時のみ書く）/ remoteUrl（保存のみ。接続は次版）。保存先は `settings.json`（tauri-plugin-store）の `center` キー。
+- 保存すると `~/.local/share/bantou/center.json` を書き出し、起動中で enabled / port / bind / projects / claudePath のいずれかが変わった時だけ再起動する（remoteUrl のみの変更は再起動しない）。enabled を外すと停止する。アプリ起動時に enabled なら自動起動。
 - 停止は SIGTERM（center が自身の remote-control 子プロセスを止める。最大 15 秒待って SIGKILL）。Windows は graceful stop が無く center を強制終了するため、子プロセスが孤児として残る場合がある。
 - 状態（stopped / running / error、pid、直近ログ）は設定ダイアログに表示する。
