@@ -2,6 +2,7 @@ mod agent;
 mod broker;
 mod center;
 mod center_mcp;
+mod center_snippet;
 mod error;
 mod frontmatter;
 mod menu;
@@ -79,6 +80,9 @@ pub fn run() {
             center::center_get_settings,
             center::center_set_settings,
             center::center_status,
+            center::center_regenerate_token,
+            center_snippet::center_connect_snippets,
+            center_snippet::center_parse_connect,
             center_mcp::center_call,
             center_mcp::center_connection,
         ])

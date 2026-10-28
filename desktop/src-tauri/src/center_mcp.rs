@@ -5,7 +5,9 @@
 //! MCP SDK crate; the surface needed is `initialize`, `ping` and `tools/call`.
 //!
 //! The target is chosen on every call from the stored settings (`select_target`), so changing
-//! `remoteUrl` / port / enabled takes effect on the next call. A session is bound to its URL; when
+//! `remote` / port / token / enabled takes effect on the next call. Every request carries
+//! `Authorization: Bearer <token>` (the sidecar's own token, or the one pasted with the remote
+//! connection snippet). A session is bound to its URL and token; when
 //! the center restarts (or drops the session) it answers 404 to our session id and we initialize
 //! again once and retry.
 
@@ -30,7 +32,7 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(600);
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TargetSource {
-    /// `remoteUrl` from the settings.
+    /// `remote` (a pasted connection snippet) from the settings.
     Remote,
     /// The sidecar center this app starts.
     Sidecar,
@@ -39,11 +41,13 @@ pub enum TargetSource {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Target {
     pub url: String,
+    /// Bearer token to send. None: send no Authorization header.
+    pub token: Option<String>,
     pub source: TargetSource,
 }
 
-/// `remoteUrl` as given; an empty path (`http://host:7910`) gets `/mcp` appended.
-fn normalize_remote(u: &str) -> String {
+/// A URL as given; an empty path (`http://host:7910`) gets `/mcp` appended.
+pub(crate) fn normalize_remote(u: &str) -> String {
     match reqwest::Url::parse(u) {
         Ok(mut url) if url.path() == "/" || url.path().is_empty() => {
             url.set_path(MCP_PATH);
@@ -63,13 +67,14 @@ fn sidecar_host(bind: &str) -> String {
     }
 }
 
-/// Where to connect: `remoteUrl` if set, else the sidecar when enabled, else nowhere.
+/// Where to connect: `remote` if set, else the sidecar when enabled, else nowhere.
 pub fn select_target(s: &CenterSettings) -> Option<Target> {
-    if let Some(u) = &s.remote_url {
-        return Some(Target { url: normalize_remote(u), source: TargetSource::Remote });
+    if let Some(r) = &s.remote {
+        return Some(Target { url: normalize_remote(&r.url), token: r.token.clone(), source: TargetSource::Remote });
     }
     s.enabled.then(|| Target {
         url: format!("http://{}:{}{MCP_PATH}", sidecar_host(&s.bind), s.port),
+        token: Some(s.token.clone()).filter(|t| !t.is_empty()),
         source: TargetSource::Sidecar,
     })
 }
@@ -98,6 +103,7 @@ impl McpError {
 #[derive(Clone, Debug)]
 struct Session {
     url: String,
+    token: Option<String>,
     /// None when the server is stateless (no `mcp-session-id` header issued).
     id: Option<String>,
     protocol: String,
@@ -194,6 +200,7 @@ impl CenterClient {
     async fn post(
         &self,
         url: &str,
+        token: Option<&str>,
         session: Option<&Session>,
         body: &Value,
         timeout: Duration,
@@ -205,6 +212,9 @@ impl CenterClient {
             .header("content-type", "application/json")
             .header("accept", "application/json, text/event-stream")
             .body(body.to_string());
+        if let Some(t) = token {
+            req = req.header("authorization", format!("Bearer {t}"));
+        }
         if let Some(s) = session {
             if let Some(id) = &s.id {
                 req = req.header(SESSION_HEADER, id);
@@ -221,7 +231,7 @@ impl CenterClient {
     }
 
     /// `initialize` + `notifications/initialized`. The new session replaces any previous one.
-    async fn initialize(&self, url: &str) -> Result<Session, McpError> {
+    async fn initialize(&self, url: &str, token: Option<&str>) -> Result<Session, McpError> {
         let id = self.id();
         let req = json!({
             "jsonrpc": "2.0", "id": id, "method": "initialize",
@@ -231,13 +241,17 @@ impl CenterClient {
                 "clientInfo": { "name": "bantou-desktop", "version": env!("CARGO_PKG_VERSION") },
             },
         });
-        let r = self.post(url, None, &req, SHORT_TIMEOUT).await?;
+        let r = self.post(url, token, None, &req, SHORT_TIMEOUT).await?;
+        if r.status == 401 {
+            return Err(McpError::failed(unauthorized(url, token)));
+        }
         if !(200..300).contains(&r.status) {
             return Err(McpError::failed(format!("initialize が HTTP {} で失敗: {}", r.status, snippet(&r.body))));
         }
         let result = pick_response(&parse_messages(&r.content_type, &r.body), id)?;
         let session = Session {
             url: url.to_string(),
+            token: token.map(str::to_string),
             id: r.session_id,
             protocol: result
                 .get("protocolVersion")
@@ -246,23 +260,24 @@ impl CenterClient {
                 .to_string(),
         };
         let note = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
-        let n = self.post(url, Some(&session), &note, SHORT_TIMEOUT).await?;
+        let n = self.post(url, token, Some(&session), &note, SHORT_TIMEOUT).await?;
         if !(200..300).contains(&n.status) {
             return Err(McpError::failed(format!("initialized 通知が HTTP {} で失敗: {}", n.status, snippet(&n.body))));
         }
         Ok(session)
     }
 
-    /// The live session for `url`, initializing when there is none (or it belongs to another URL).
-    async fn ensure(&self, url: &str) -> Result<Session, McpError> {
+    /// The live session for `url` + `token`, initializing when there is none (or it belongs to
+    /// another URL or token).
+    async fn ensure(&self, url: &str, token: Option<&str>) -> Result<Session, McpError> {
         let mut g = self.session.lock().await;
         if let Some(s) = g.as_ref() {
-            if s.url == url {
+            if s.url == url && s.token.as_deref() == token {
                 return Ok(s.clone());
             }
         }
         *g = None;
-        let s = self.initialize(url).await?;
+        let s = self.initialize(url, token).await?;
         *g = Some(s.clone());
         Ok(s)
     }
@@ -275,11 +290,21 @@ impl CenterClient {
         }
     }
 
-    async fn request_once(&self, url: &str, method: &str, params: &Value, timeout: Duration) -> Result<Value, McpError> {
-        let session = self.ensure(url).await?;
+    async fn request_once(
+        &self,
+        url: &str,
+        token: Option<&str>,
+        method: &str,
+        params: &Value,
+        timeout: Duration,
+    ) -> Result<Value, McpError> {
+        let session = self.ensure(url, token).await?;
         let id = self.id();
         let req = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
-        let r = self.post(url, Some(&session), &req, timeout).await?;
+        let r = self.post(url, token, Some(&session), &req, timeout).await?;
+        if r.status == 401 {
+            return Err(McpError::failed(unauthorized(url, token)));
+        }
         if r.status == 404 && session.id.is_some() {
             self.invalidate(&session).await;
             return Err(McpError::SessionGone);
@@ -291,9 +316,16 @@ impl CenterClient {
     }
 
     /// One JSON-RPC request; a lost session is re-established once.
-    async fn request(&self, url: &str, method: &str, params: &Value, timeout: Duration) -> Result<Value, McpError> {
-        match self.request_once(url, method, params, timeout).await {
-            Err(McpError::SessionGone) => self.request_once(url, method, params, timeout).await,
+    async fn request(
+        &self,
+        url: &str,
+        token: Option<&str>,
+        method: &str,
+        params: &Value,
+        timeout: Duration,
+    ) -> Result<Value, McpError> {
+        match self.request_once(url, token, method, params, timeout).await {
+            Err(McpError::SessionGone) => self.request_once(url, token, method, params, timeout).await,
             other => other,
         }
     }
@@ -315,9 +347,15 @@ impl CenterClient {
 
     /// `tools/call`. Returns the MCP tool result (`content`, `isError`, ...) as is; a result with
     /// `isError: true` becomes an `Err` carrying the tool's text.
-    pub async fn call_tool(&self, url: &str, name: &str, arguments: Option<Value>) -> Result<Value, String> {
+    pub async fn call_tool(
+        &self,
+        url: &str,
+        token: Option<&str>,
+        name: &str,
+        arguments: Option<Value>,
+    ) -> Result<Value, String> {
         let params = json!({ "name": name, "arguments": arguments.unwrap_or_else(|| json!({})) });
-        let r = self.request(url, "tools/call", &params, CALL_TIMEOUT).await;
+        let r = self.request(url, token, "tools/call", &params, CALL_TIMEOUT).await;
         let result = self.record(r).map_err(|e| format!("{name}: {e}"))?;
         if result.get("isError").and_then(Value::as_bool) == Some(true) {
             let text = tool_text(&result);
@@ -329,13 +367,21 @@ impl CenterClient {
     }
 
     /// `ping` against `url` (re-establishing the session if needed): whether the center answers.
-    pub async fn probe(&self, url: &str) -> Result<(), String> {
-        let r = self.request(url, "ping", &json!({}), SHORT_TIMEOUT).await.map(|_| ());
+    pub async fn probe(&self, url: &str, token: Option<&str>) -> Result<(), String> {
+        let r = self.request(url, token, "ping", &json!({}), SHORT_TIMEOUT).await.map(|_| ());
         self.record(r)
     }
 
     fn last_error(&self) -> Option<String> {
         self.last_error.lock().unwrap().clone()
+    }
+}
+
+/// Phrased for the user: the center refused our credentials (HTTP 401).
+fn unauthorized(url: &str, token: Option<&str>) -> String {
+    match token {
+        Some(_) => format!("{url} が token を受け付けない (HTTP 401)。token が違う可能性がある"),
+        None => format!("{url} は token が必要 (HTTP 401)。接続設定に Authorization が無い"),
     }
 }
 
@@ -347,7 +393,7 @@ fn snippet(body: &str) -> String {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CenterConnection {
-    /// MCP endpoint in use. None: no target (center disabled and no `remoteUrl`).
+    /// MCP endpoint in use. None: no target (center disabled and no `remote`).
     #[serde(skip_serializing_if = "Option::is_none")]
     url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -357,7 +403,7 @@ pub struct CenterConnection {
     last_error: Option<String>,
 }
 
-const NO_TARGET: &str = "接続先が無い（center を有効にするか remoteUrl を設定する）";
+const NO_TARGET: &str = "接続先が無い（center を有効にするか、別ホストの接続設定を貼る）";
 
 fn target(app: &tauri::AppHandle) -> CmdResult<Target> {
     select_target(&load_settings(app)?).ok_or_else(|| CommandError::other(NO_TARGET))
@@ -372,7 +418,7 @@ pub async fn center_call(
 ) -> CmdResult<Value> {
     let t = target(&app)?;
     app.state::<CenterClient>()
-        .call_tool(&t.url, &name, arguments)
+        .call_tool(&t.url, t.token.as_deref(), &name, arguments)
         .await
         .map_err(CommandError::Other)
 }
@@ -389,7 +435,7 @@ pub async fn center_connection(app: tauri::AppHandle) -> CmdResult<CenterConnect
             last_error: Some(NO_TARGET.to_string()),
         });
     };
-    let connected = client.probe(&t.url).await.is_ok();
+    let connected = client.probe(&t.url, t.token.as_deref()).await.is_ok();
     Ok(CenterConnection {
         url: Some(t.url),
         source: Some(t.source),
@@ -409,7 +455,12 @@ mod tests {
     // -- target selection ------------------------------------------------------------
 
     fn settings(enabled: bool, remote: Option<&str>) -> CenterSettings {
-        CenterSettings { enabled, remote_url: remote.map(str::to_string), ..CenterSettings::default() }
+        CenterSettings {
+            enabled,
+            remote: remote.map(|u| crate::center::CenterRemote { url: u.to_string(), token: Some("remote-token-123".into()) }),
+            token: "sidecar-token-123".into(),
+            ..CenterSettings::default()
+        }
     }
 
     #[test]
@@ -420,7 +471,10 @@ mod tests {
     #[test]
     fn target_sidecar_when_enabled() {
         let t = select_target(&CenterSettings { port: 7920, ..settings(true, None) }).unwrap();
-        assert_eq!(t, Target { url: "http://127.0.0.1:7920/mcp".into(), source: TargetSource::Sidecar });
+        assert_eq!(
+            t,
+            Target { url: "http://127.0.0.1:7920/mcp".into(), token: Some("sidecar-token-123".into()), source: TargetSource::Sidecar }
+        );
     }
 
     #[test]
@@ -428,6 +482,13 @@ mod tests {
         let t = select_target(&settings(true, Some("http://mac200:7910/mcp"))).unwrap();
         assert_eq!(t.source, TargetSource::Remote);
         assert_eq!(t.url, "http://mac200:7910/mcp");
+        assert_eq!(t.token.as_deref(), Some("remote-token-123"));
+    }
+
+    #[test]
+    fn target_without_any_token_sends_none() {
+        let s = CenterSettings { token: String::new(), ..settings(true, None) };
+        assert_eq!(select_target(&s).unwrap().token, None);
     }
 
     #[test]
@@ -480,6 +541,8 @@ mod tests {
     /// requests need a known one (404 otherwise), tools/call answers over SSE.
     #[derive(Default)]
     struct MockState {
+        /// When set, every request must carry `Authorization: Bearer <this>` (401 otherwise).
+        required_token: Option<String>,
         sessions: HashSet<String>,
         issued: u32,
         log: Vec<MockReq>,
@@ -492,9 +555,16 @@ mod tests {
 
     impl Mock {
         fn start() -> Self {
+            Self::start_with(None)
+        }
+
+        fn start_with(token: Option<&str>) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let url = format!("http://{}/mcp", listener.local_addr().unwrap());
-            let state = Arc::new(Mutex::new(MockState::default()));
+            let state = Arc::new(Mutex::new(MockState {
+                required_token: token.map(str::to_string),
+                ..MockState::default()
+            }));
             let st = state.clone();
             std::thread::spawn(move || {
                 for conn in listener.incoming() {
@@ -574,6 +644,16 @@ mod tests {
         let id = req.body["id"].clone();
         let sid = req.headers.get(SESSION_HEADER).cloned();
         let mut g = state.lock().unwrap();
+        let authorized = match &g.required_token {
+            Some(t) => req.headers.get("authorization").map(String::as_str) == Some(format!("Bearer {t}").as_str()),
+            None => true,
+        };
+        if !authorized {
+            g.log.push(req);
+            drop(g);
+            respond(&mut conn, 401, &[("www-authenticate", "Bearer".into())], "unauthorized");
+            return;
+        }
         let known = sid.as_ref().is_some_and(|s| g.sessions.contains(s));
         let params = req.body["params"].clone();
         g.log.push(req);
@@ -616,7 +696,7 @@ mod tests {
     async fn initialize_then_tools_call_returns_result_as_is() {
         let mock = Mock::start();
         let client = CenterClient::default();
-        let r = client.call_tool(&mock.url, "rc_list", Some(json!({"project": "p"}))).await.unwrap();
+        let r = client.call_tool(&mock.url, None, "rc_list", Some(json!({"project": "p"}))).await.unwrap();
         assert_eq!(r["content"][0]["text"], r#"{"tool":"rc_list","args":{"project":"p"}}"#);
         assert_eq!(mock.methods(), ["initialize", "notifications/initialized", "tools/call"]);
         let g = mock.state.lock().unwrap();
@@ -630,8 +710,8 @@ mod tests {
     async fn session_is_reused_across_calls() {
         let mock = Mock::start();
         let client = CenterClient::default();
-        client.call_tool(&mock.url, "rc_list", None).await.unwrap();
-        client.call_tool(&mock.url, "server_list", None).await.unwrap();
+        client.call_tool(&mock.url, None, "rc_list", None).await.unwrap();
+        client.call_tool(&mock.url, None, "server_list", None).await.unwrap();
         assert_eq!(mock.count("initialize"), 1);
         assert_eq!(mock.count("tools/call"), 2);
         // no arguments are sent as an empty object
@@ -642,15 +722,15 @@ mod tests {
     async fn lost_session_is_reestablished_on_the_next_call() {
         let mock = Mock::start();
         let client = CenterClient::default();
-        client.call_tool(&mock.url, "rc_list", None).await.unwrap();
+        client.call_tool(&mock.url, None, "rc_list", None).await.unwrap();
         mock.restart();
-        let r = client.call_tool(&mock.url, "rc_list", None).await.unwrap();
+        let r = client.call_tool(&mock.url, None, "rc_list", None).await.unwrap();
         assert_eq!(r["content"][0]["text"], r#"{"tool":"rc_list","args":{}}"#);
         assert_eq!(mock.count("initialize"), 2);
         // the failed attempt, then the retry on the new session
         assert_eq!(mock.count("tools/call"), 3);
         // and the new session is kept
-        client.call_tool(&mock.url, "rc_list", None).await.unwrap();
+        client.call_tool(&mock.url, None, "rc_list", None).await.unwrap();
         assert_eq!(mock.count("initialize"), 2);
     }
 
@@ -658,9 +738,9 @@ mod tests {
     async fn changing_the_url_opens_a_new_session() {
         let (a, b) = (Mock::start(), Mock::start());
         let client = CenterClient::default();
-        client.call_tool(&a.url, "rc_list", None).await.unwrap();
-        client.call_tool(&b.url, "rc_list", None).await.unwrap();
-        client.call_tool(&a.url, "rc_list", None).await.unwrap();
+        client.call_tool(&a.url, None, "rc_list", None).await.unwrap();
+        client.call_tool(&b.url, None, "rc_list", None).await.unwrap();
+        client.call_tool(&a.url, None, "rc_list", None).await.unwrap();
         assert_eq!((a.count("initialize"), b.count("initialize")), (2, 1));
     }
 
@@ -668,7 +748,7 @@ mod tests {
     async fn tool_error_result_becomes_an_error_with_its_text() {
         let mock = Mock::start();
         let client = CenterClient::default();
-        let e = client.call_tool(&mock.url, "boom", None).await.unwrap_err();
+        let e = client.call_tool(&mock.url, None, "boom", None).await.unwrap_err();
         assert!(e.contains("boom") && e.contains("kaboom"), "{e}");
         assert_eq!(client.last_error(), Some(e));
     }
@@ -680,12 +760,12 @@ mod tests {
             format!("http://{}/mcp", l.local_addr().unwrap())
         };
         let client = CenterClient::default();
-        let e = client.call_tool(&dead, "rc_list", None).await.unwrap_err();
+        let e = client.call_tool(&dead, None, "rc_list", None).await.unwrap_err();
         assert!(e.contains("接続できない"), "{e}");
-        assert!(client.probe(&dead).await.is_err());
+        assert!(client.probe(&dead, None).await.is_err());
         assert!(client.last_error().is_some());
         let mock = Mock::start();
-        client.probe(&mock.url).await.unwrap();
+        client.probe(&mock.url, None).await.unwrap();
         assert_eq!(client.last_error(), None);
     }
 
@@ -693,24 +773,65 @@ mod tests {
     async fn probe_after_center_restart_reconnects() {
         let mock = Mock::start();
         let client = CenterClient::default();
-        client.probe(&mock.url).await.unwrap();
+        client.probe(&mock.url, None).await.unwrap();
         mock.restart();
-        client.probe(&mock.url).await.unwrap();
+        client.probe(&mock.url, None).await.unwrap();
         assert_eq!(mock.count("initialize"), 2);
     }
 
-    /// Against a real center: `BANTOU_CENTER_URL=http://127.0.0.1:<port>/mcp cargo test live_center -- --ignored`.
+    #[tokio::test]
+    async fn every_request_carries_the_bearer_token() {
+        let mock = Mock::start_with(Some("tok-abcdefghij"));
+        let client = CenterClient::default();
+        client.call_tool(&mock.url, Some("tok-abcdefghij"), "rc_list", None).await.unwrap();
+        let g = mock.state.lock().unwrap();
+        let methods: Vec<_> = g.log.iter().map(|r| r.body["method"].as_str().unwrap_or("")).collect();
+        assert_eq!(methods, ["initialize", "notifications/initialized", "tools/call"]);
+        for r in &g.log {
+            assert_eq!(r.headers.get("authorization").map(String::as_str), Some("Bearer tok-abcdefghij"));
+        }
+    }
+
+    #[tokio::test]
+    async fn wrong_or_missing_token_is_a_readable_401() {
+        let mock = Mock::start_with(Some("tok-abcdefghij"));
+        let client = CenterClient::default();
+        let e = client.call_tool(&mock.url, Some("wrong-token-xyz"), "rc_list", None).await.unwrap_err();
+        assert!(e.contains("401") && e.contains("token が違う"), "{e}");
+        let e = client.call_tool(&mock.url, None, "rc_list", None).await.unwrap_err();
+        assert!(e.contains("401") && e.contains("token が必要"), "{e}");
+        assert!(client.probe(&mock.url, None).await.is_err());
+        assert!(client.last_error().unwrap().contains("401"));
+        // the right token still works afterwards
+        client.probe(&mock.url, Some("tok-abcdefghij")).await.unwrap();
+        assert_eq!(client.last_error(), None);
+    }
+
+    #[tokio::test]
+    async fn changing_the_token_opens_a_new_session() {
+        let mock = Mock::start();
+        let client = CenterClient::default();
+        client.call_tool(&mock.url, Some("first-token-123"), "rc_list", None).await.unwrap();
+        client.call_tool(&mock.url, Some("first-token-123"), "rc_list", None).await.unwrap();
+        assert_eq!(mock.count("initialize"), 1);
+        client.call_tool(&mock.url, Some("second-token-45"), "rc_list", None).await.unwrap();
+        assert_eq!(mock.count("initialize"), 2);
+    }
+
+    /// Against a real center: `BANTOU_CENTER_URL=http://127.0.0.1:<port>/mcp BANTOU_CENTER_TOKEN=<token> cargo test live_center -- --ignored`.
     #[tokio::test]
     #[ignore]
     async fn live_center() {
         let url = std::env::var("BANTOU_CENTER_URL").expect("BANTOU_CENTER_URL");
+        let token = std::env::var("BANTOU_CENTER_TOKEN").ok();
+        let token = token.as_deref();
         let client = CenterClient::default();
-        client.probe(&url).await.unwrap();
-        let r = client.call_tool(&url, "rc_list", None).await.unwrap();
+        client.probe(&url, token).await.unwrap();
+        let r = client.call_tool(&url, token, "rc_list", None).await.unwrap();
         println!("rc_list: {}", tool_text(&r));
-        let r = client.call_tool(&url, "server_list", None).await.unwrap();
+        let r = client.call_tool(&url, token, "server_list", None).await.unwrap();
         println!("server_list: {}", tool_text(&r));
-        let e = client.call_tool(&url, "rc_status", Some(json!({"project": "nope"}))).await.unwrap_err();
+        let e = client.call_tool(&url, token, "rc_status", Some(json!({"project": "nope"}))).await.unwrap_err();
         println!("rc_status(nope): {e}");
     }
 }

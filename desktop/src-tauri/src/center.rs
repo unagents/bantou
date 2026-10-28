@@ -8,6 +8,7 @@
 
 use crate::error::{CmdResult, CommandError};
 use crate::workspace::SETTINGS_FILE;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -22,6 +23,10 @@ const CENTER_KEY: &str = "center";
 const SIDECAR_NAME: &str = "bantou-center";
 const DEFAULT_PORT: u32 = 7910;
 const DEFAULT_BIND: &str = "127.0.0.1";
+/// Shortest token the center accepts (mirrors `MIN_TOKEN_LEN` in `packages/center/src/config.ts`).
+pub const MIN_TOKEN_LEN: usize = 12;
+const GENERATED_TOKEN_LEN: usize = 32;
+const BASE62: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 /// Lines kept for the status panel.
 const LOG_LINES: usize = 20;
 /// Grace for SIGTERM before SIGKILL. The center's own shutdown waits stopGraceMs (5 s)
@@ -72,6 +77,16 @@ pub struct CenterServer {
     pub name: String,
 }
 
+/// A center on another host, taken from a pasted connection snippet.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CenterRemote {
+    pub url: String,
+    /// Bearer token from the snippet. None: the snippet had none (the center will answer 401).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct CenterSettings {
@@ -84,9 +99,13 @@ pub struct CenterSettings {
     /// Absolute path of the claude executable. Unset: the center resolves it via a login shell.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub claude_path: Option<String>,
+    /// Bearer token the sidecar center requires on `/mcp`. Minted on first load when empty.
+    pub token: String,
     /// Center on another host this desktop connects to (used instead of the sidecar when set).
+    /// The old `remoteUrl` key of earlier versions is not read: serde drops unknown keys and
+    /// the next save writes the new shape.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub remote_url: Option<String>,
+    pub remote: Option<CenterRemote>,
 }
 
 impl Default for CenterSettings {
@@ -98,9 +117,28 @@ impl Default for CenterSettings {
             projects: Vec::new(),
             servers: Vec::new(),
             claude_path: None,
-            remote_url: None,
+            token: String::new(),
+            remote: None,
         }
     }
+}
+
+/// A fresh random Bearer token (32-char base62 from the thread CSPRNG, like Cork's `mint_token`).
+pub fn mint_token() -> String {
+    let mut rng = rand::rng();
+    (0..GENERATED_TOKEN_LEN)
+        .map(|_| BASE62[rng.random_range(0..BASE62.len())] as char)
+        .collect()
+}
+
+/// Settings with a usable token: an empty or too-short stored token is replaced by a fresh one.
+/// The flag says whether it was replaced (so the caller persists it).
+pub fn ensure_token(mut s: CenterSettings) -> (CenterSettings, bool) {
+    if s.token.chars().count() >= MIN_TOKEN_LEN {
+        return (s, false);
+    }
+    s.token = mint_token();
+    (s, true)
 }
 
 /// Reject settings the center would refuse (mirrors `packages/center/src/config.ts`),
@@ -155,11 +193,15 @@ pub fn validate_settings(mut s: CenterSettings) -> Result<CenterSettings, String
             return Err("claudePath は絶対パスで指定する".to_string());
         }
     }
-    s.remote_url = s.remote_url.take().map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
-    if let Some(u) = &s.remote_url {
-        if !(u.starts_with("http://") || u.starts_with("https://")) {
-            return Err("remoteUrl は http(s):// で始める".to_string());
+    if !s.token.is_empty() && s.token.chars().count() < MIN_TOKEN_LEN {
+        return Err(format!("token は {MIN_TOKEN_LEN} 文字以上"));
+    }
+    if let Some(r) = &mut s.remote {
+        r.url = r.url.trim().to_string();
+        if !(r.url.starts_with("http://") || r.url.starts_with("https://")) {
+            return Err("remote の url は http(s):// で始める".to_string());
         }
+        r.token = r.token.take().map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
     }
     Ok(s)
 }
@@ -190,7 +232,11 @@ pub fn build_config(s: &CenterSettings) -> serde_json::Value {
         .iter()
         .map(|v| serde_json::json!({ "name": v.name }))
         .collect();
-    serde_json::json!({ "projects": projects, "remoteControl": remote_control, "servers": servers })
+    let mut cfg = serde_json::json!({ "projects": projects, "remoteControl": remote_control, "servers": servers });
+    if !s.token.is_empty() {
+        cfg["token"] = s.token.clone().into();
+    }
+    cfg
 }
 
 pub fn sidecar_args(s: &CenterSettings, config: &Path) -> Vec<String> {
@@ -212,8 +258,9 @@ fn config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 }
 
 /// Whether applying `new` needs a stop/start. `running_with` is the settings the live
-/// center was started with (None when not running). `remote_url` is not passed to the
-/// center, so it never forces a restart. `claude_path` changes the child, so it does.
+/// center was started with (None when not running). `remote` is not passed to the
+/// center, so it never forces a restart. `claude_path` and `token` change what the child
+/// gets, so they do.
 pub fn needs_restart(running_with: Option<&CenterSettings>, new: &CenterSettings) -> bool {
     match running_with {
         Some(old) => {
@@ -221,6 +268,7 @@ pub fn needs_restart(running_with: Option<&CenterSettings>, new: &CenterSettings
                 || old.projects != new.projects
                 || old.servers != new.servers
                 || old.claude_path != new.claude_path
+                || old.token != new.token
         }
         None => new.enabled,
     }
@@ -638,13 +686,21 @@ fn terminate(_pid: u32) -> bool {
     false
 }
 
+/// Stored settings, with a token guaranteed: when none is stored a fresh one is minted and saved
+/// (so the snippets the user copies stay valid across restarts).
 pub(crate) fn load_settings(app: &tauri::AppHandle) -> CmdResult<CenterSettings> {
     let store = app.store(SETTINGS_FILE).map_err(CommandError::other)?;
     // A stored value that no longer parses falls back to the defaults.
-    Ok(store
+    let stored: CenterSettings = store
         .get(CENTER_KEY)
         .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default())
+        .unwrap_or_default();
+    let (s, minted) = ensure_token(stored);
+    if minted {
+        store.set(CENTER_KEY, serde_json::to_value(&s).map_err(CommandError::other)?);
+        store.save().map_err(CommandError::other)?;
+    }
+    Ok(s)
 }
 
 /// One-line reason logged when autostart does nothing. `path` is the resolved settings store.
@@ -689,12 +745,25 @@ pub async fn center_set_settings(
     app: tauri::AppHandle,
     settings: CenterSettings,
 ) -> CmdResult<CenterSettings> {
-    let s = validate_settings(settings).map_err(CommandError::Other)?;
+    let (s, _) = ensure_token(validate_settings(settings).map_err(CommandError::Other)?);
     let store = app.store(SETTINGS_FILE).map_err(CommandError::other)?;
     store.set(CENTER_KEY, serde_json::to_value(&s).map_err(CommandError::other)?);
     store.save().map_err(CommandError::other)?;
     app.state::<Center>().apply(&app, &s).await;
     Ok(s)
+}
+
+/// Mint a new token, store it (nothing else in the settings changes) and restart a running
+/// center with it. Returns the new token.
+#[tauri::command]
+pub async fn center_regenerate_token(app: tauri::AppHandle) -> CmdResult<String> {
+    let mut s = load_settings(&app)?;
+    s.token = mint_token();
+    let store = app.store(SETTINGS_FILE).map_err(CommandError::other)?;
+    store.set(CENTER_KEY, serde_json::to_value(&s).map_err(CommandError::other)?);
+    store.save().map_err(CommandError::other)?;
+    app.state::<Center>().apply(&app, &s).await;
+    Ok(s.token)
 }
 
 #[tauri::command]
@@ -745,15 +814,61 @@ mod tests {
     }
 
     #[test]
-    fn rejects_bad_port_bind_and_remote_url() {
+    fn rejects_bad_port_bind_and_remote() {
         let ok = CenterSettings::default();
         for port in [0, 65536] {
             assert!(validate_settings(CenterSettings { port, ..ok.clone() }).is_err());
         }
         assert!(validate_settings(CenterSettings { bind: " ".into(), ..ok.clone() }).is_err());
-        assert!(validate_settings(CenterSettings { remote_url: Some("ftp://x".into()), ..ok.clone() }).is_err());
-        let s = validate_settings(CenterSettings { remote_url: Some("  ".into()), ..ok }).unwrap();
-        assert_eq!(s.remote_url, None);
+        let remote = |url: &str, token: Option<&str>| CenterSettings {
+            remote: Some(CenterRemote { url: url.into(), token: token.map(str::to_string) }),
+            ..ok.clone()
+        };
+        assert!(validate_settings(remote("ftp://x", None)).is_err());
+        // a blank token means "none"; the url is trimmed
+        let s = validate_settings(remote(" http://h:1/mcp ", Some("  "))).unwrap();
+        assert_eq!(s.remote, Some(CenterRemote { url: "http://h:1/mcp".into(), token: None }));
+    }
+
+    #[test]
+    fn token_validation_and_minting() {
+        let with = |t: &str| validate_settings(CenterSettings { token: t.into(), ..Default::default() });
+        // empty is allowed here (it is minted on load); non-empty must reach the minimum
+        assert!(with("").is_ok());
+        assert!(with(&"x".repeat(MIN_TOKEN_LEN - 1)).is_err());
+        assert!(with(&"x".repeat(MIN_TOKEN_LEN)).is_ok());
+
+        let t = mint_token();
+        assert_eq!(t.len(), 32);
+        assert!(t.chars().all(|c| c.is_ascii_alphanumeric()), "{t}");
+        let many: HashSet<String> = (0..50).map(|_| mint_token()).collect();
+        assert_eq!(many.len(), 50);
+    }
+
+    #[test]
+    fn ensure_token_mints_only_when_missing_or_short() {
+        let (s, minted) = ensure_token(CenterSettings::default());
+        assert!(minted && s.token.len() == 32);
+        let (kept, minted) = ensure_token(s.clone());
+        assert!(!minted);
+        assert_eq!(kept.token, s.token);
+        let (s2, minted) = ensure_token(CenterSettings { token: "short".into(), ..Default::default() });
+        assert!(minted && s2.token != "short");
+    }
+
+    #[test]
+    fn old_remote_url_key_is_dropped_on_read() {
+        let s: CenterSettings =
+            serde_json::from_str(r#"{"enabled":true,"remoteUrl":"http://old:7910","token":"abcdefghijkl"}"#).unwrap();
+        assert_eq!(s.remote, None);
+        assert!(!serde_json::to_string(&s).unwrap().contains("remoteUrl"));
+    }
+
+    #[test]
+    fn config_json_writes_token_only_when_set() {
+        let s = CenterSettings { token: "abcdefghijkl".into(), ..Default::default() };
+        assert_eq!(build_config(&s)["token"], "abcdefghijkl");
+        assert!(build_config(&CenterSettings::default()).get("token").is_none());
     }
 
     #[test]
@@ -855,10 +970,15 @@ mod tests {
     #[test]
     fn restart_only_on_effective_change() {
         let on = CenterSettings { enabled: true, projects: vec![project("a", "/x")], ..Default::default() };
-        // running, identical or remoteUrl-only change: no restart
+        // running, identical or remote-only change: no restart
         assert!(!needs_restart(Some(&on), &on));
-        let remote = CenterSettings { remote_url: Some("http://h:1".into()), ..on.clone() };
+        let remote = CenterSettings {
+            remote: Some(CenterRemote { url: "http://h:1/mcp".into(), token: Some("t".into()) }),
+            ..on.clone()
+        };
         assert!(!needs_restart(Some(&on), &remote));
+        // a new token restarts the center so it picks the token up
+        assert!(needs_restart(Some(&on), &CenterSettings { token: "another-token-1".into(), ..on.clone() }));
         // running, effective change: restart
         assert!(needs_restart(Some(&on), &CenterSettings { port: 7911, ..on.clone() }));
         assert!(needs_restart(Some(&on), &CenterSettings { bind: "0.0.0.0".into(), ..on.clone() }));
