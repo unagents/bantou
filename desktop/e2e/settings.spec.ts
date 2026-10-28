@@ -32,14 +32,14 @@ test("regenerating the token changes the token field and the connection snippets
   await expect(snippet).toContainText("Bearer mock-token-000000000000000000000001");
 
   await page.getByTestId("center-token-regenerate").click();
-  await expect(token).toHaveValue("mock-token-00000000000000000000000002");
-  await expect(snippet).toContainText("Bearer mock-token-00000000000000000000000002");
+  await expect(token).toHaveValue("mock-token-00000000000000000000000000000002");
+  await expect(snippet).toContainText("Bearer mock-token-00000000000000000000000000000002");
   await expect(snippet).not.toContainText("000000000000000000000001");
 
   // the second tab is the claude mcp add command, with the same new token
   await page.getByRole("tab", { name: "claude mcp add" }).click();
   await expect(snippet).toContainText("claude mcp add --transport http bantou-center http://127.0.0.1:7910/mcp");
-  await expect(snippet).toContainText("Authorization: Bearer mock-token-00000000000000000000000002");
+  await expect(snippet).toContainText("Authorization: Bearer mock-token-00000000000000000000000000000002");
 
   // the snippet follows the port draft too
   await page.getByTestId("center-port").fill("7920");
