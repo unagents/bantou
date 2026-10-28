@@ -1,7 +1,7 @@
 # desktop と center を MCP でつなぐ: report
 
 ## commit
-- COMMIT_HASH（develop。push はしていない。cap が行う）
+- 98f4e01 Connect desktop to the center over MCP and add a center status dialog（develop。push はしていない。cap が行う）
 
 ## 変更ファイルと要点
 - `desktop/src-tauri/src/center_mcp.rs`（新規）: center への MCP client。reqwest で JSON-RPC を直接組む。`initialize` → `notifications/initialized` → `tools/call` / `ping`。応答は JSON と SSE の両方を解釈。session は URL に紐づけ、404 なら initialize し直して 1 回だけ再試行。Tauri command `center_call`（tool 名＋引数、結果は MCP tool result のまま、`isError:true` は Err）と `center_connection`（url / source / connected / lastError）。
