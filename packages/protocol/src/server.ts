@@ -15,7 +15,12 @@ export type AgentKind = "cap" | "worker";
 /** Lifecycle of one cap / worker as kept in its state.json. */
 export type AgentState = "idle" | "running" | "failed" | "error";
 
-export type ServerCommandType = "kick_cap" | "resume_worker" | "status";
+export type ServerCommandType =
+  | "kick_cap"
+  | "resume_worker"
+  | "spawn_worker"
+  | "worker_report"
+  | "status";
 
 export interface ServerCommandBase {
   /** Protocol version, always 1. */
@@ -49,12 +54,48 @@ export interface ResumeWorkerCommand extends ServerCommandBase {
   prompt: string;
 }
 
+/**
+ * cap -> server: create the worker path and start worker `worker_id` (new session, or resume when it exists).
+ * The worker -> cap relation is kept in `workers/<worker_id>/owner.json`. No success reply is sent
+ * (the sender is a headless cap that has usually exited). A failed worker start / run is delivered
+ * to the cap by resuming it with a prompt that describes the failure.
+ */
+export interface SpawnWorkerCommand extends ServerCommandBase {
+  type: "spawn_worker";
+  /** AGENT_ID_PATTERN. */
+  worker_id: string;
+  /** Non-empty. */
+  prompt: string;
+  repo?: string;
+  branch?: string;
+  /** The cap that owns this worker and is resumed with its reports. AGENT_ID_PATTERN. */
+  cap_id: string;
+}
+
+/**
+ * worker -> server: the worker finished (`done`) or needs a decision (`ask`).
+ * The owning cap is resumed with `text` in its prompt. The cap answers with `resume_worker`.
+ */
+export interface WorkerReportCommand extends ServerCommandBase {
+  type: "worker_report";
+  /** AGENT_ID_PATTERN. */
+  worker_id: string;
+  kind: "done" | "ask";
+  /** Non-empty. */
+  text: string;
+}
+
 /** List caps and workers with their state. */
 export interface StatusCommand extends ServerCommandBase {
   type: "status";
 }
 
-export type ServerCommand = KickCapCommand | ResumeWorkerCommand | StatusCommand;
+export type ServerCommand =
+  | KickCapCommand
+  | ResumeWorkerCommand
+  | SpawnWorkerCommand
+  | WorkerReportCommand
+  | StatusCommand;
 
 export type ServerReplyType = "cap_result" | "worker_result" | "status_result" | "error";
 
@@ -115,7 +156,7 @@ export interface ErrorReply {
   command?: ServerCommandType;
   /** `cap_id` of the failed `kick_cap`, when known. */
   cap_id?: string;
-  /** `worker_id` of the failed `resume_worker`, when known. */
+  /** `worker_id` of the failed `resume_worker` / `worker_report`, when known. */
   worker_id?: string;
 }
 
@@ -154,7 +195,13 @@ function strOrNull(v: unknown): boolean {
 }
 
 function isCommandType(v: unknown): v is ServerCommandType {
-  return v === "kick_cap" || v === "resume_worker" || v === "status";
+  return (
+    v === "kick_cap" ||
+    v === "resume_worker" ||
+    v === "spawn_worker" ||
+    v === "worker_report" ||
+    v === "status"
+  );
 }
 
 /** A string matching AGENT_ID_PATTERN. */
@@ -184,6 +231,20 @@ export function isServerCommand(v: unknown): v is ServerCommand {
         optNonEmptyString(v.repo) &&
         optNonEmptyString(v.branch)
       );
+    case "spawn_worker":
+      return (
+        isValidAgentId(v.worker_id) &&
+        isValidAgentId(v.cap_id) &&
+        nonEmptyString(v.prompt) &&
+        optNonEmptyString(v.repo) &&
+        optNonEmptyString(v.branch)
+      );
+    case "worker_report":
+      return (
+        isValidAgentId(v.worker_id) &&
+        (v.kind === "done" || v.kind === "ask") &&
+        nonEmptyString(v.text)
+      );
     case "status":
       return true;
     default:
@@ -197,6 +258,14 @@ export function isKickCapCommand(v: unknown): v is KickCapCommand {
 
 export function isResumeWorkerCommand(v: unknown): v is ResumeWorkerCommand {
   return isServerCommand(v) && v.type === "resume_worker";
+}
+
+export function isSpawnWorkerCommand(v: unknown): v is SpawnWorkerCommand {
+  return isServerCommand(v) && v.type === "spawn_worker";
+}
+
+export function isWorkerReportCommand(v: unknown): v is WorkerReportCommand {
+  return isServerCommand(v) && v.type === "worker_report";
 }
 
 export function isStatusCommand(v: unknown): v is StatusCommand {

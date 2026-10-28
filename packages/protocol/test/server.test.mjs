@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   isServerCommand, isKickCapCommand, isResumeWorkerCommand, isStatusCommand,
+  isSpawnWorkerCommand, isWorkerReportCommand,
   parseServerCommand, isServerReply, parseServerReply,
   isValidAgentId, isAgentState, SERVER_NAME,
 } from "../dist/index.js";
@@ -132,4 +133,25 @@ test("prompt / reason に NUL を含む指示は拒否", () => {
   assert.equal(isServerCommand({ ...kickMin, prompt: "a\0b" }), false);
   assert.equal(isServerCommand({ ...kickMin, reason: "a\0b" }), false);
   assert.equal(isServerCommand({ ...resumeMin, prompt: "a\0b" }), false);
+});
+
+const spawnMin = { bantou: 1, type: "spawn_worker", worker_id: "w1", cap_id: "c1", prompt: "run echo hi" };
+const reportDone = { bantou: 1, type: "worker_report", worker_id: "w1", kind: "done", text: "ok" };
+
+test("spawn_worker / worker_report commands", () => {
+  assert.ok(isServerCommand(spawnMin) && isSpawnWorkerCommand(spawnMin) && !isWorkerReportCommand(spawnMin));
+  assert.ok(isServerCommand({ ...spawnMin, repo: "https://example.com/r.git", branch: "main" }));
+  assert.ok(isServerCommand(reportDone) && isWorkerReportCommand(reportDone));
+  assert.ok(isServerCommand({ ...reportDone, kind: "ask" }));
+  assert.ok(parseServerCommand(JSON.stringify(spawnMin)));
+  for (const bad of [
+    { ...spawnMin, cap_id: undefined }, { ...spawnMin, cap_id: "a b" }, { ...spawnMin, worker_id: "../x" },
+    { ...spawnMin, prompt: "" }, { ...spawnMin, repo: "-x" }, { ...spawnMin, branch: "" },
+    { ...reportDone, kind: "other" }, { ...reportDone, kind: undefined }, { ...reportDone, text: "" },
+    { ...reportDone, worker_id: "a/b" }, { ...reportDone, text: 1 },
+  ]) {
+    assert.equal(isServerCommand(bad), false, JSON.stringify(bad));
+  }
+  assert.ok(isServerReply({ bantou: 1, type: "error", ok: false, message: "m", command: "spawn_worker", cap_id: "c1", worker_id: "w1" }));
+  assert.ok(isServerReply({ bantou: 1, type: "error", ok: false, message: "m", command: "worker_report", worker_id: "w1" }));
 });
