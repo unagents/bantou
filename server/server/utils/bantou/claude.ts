@@ -18,8 +18,6 @@ export interface ClaudeRunOptions {
   disallowedTools: string[];
   /** `--` の前にそのまま付ける。 */
   extraArgs: string[];
-  /** `--session-id` / `--resume` の後ろ、`--` の前に付ける注入フラグ（messenger MCP など）。 */
-  injectArgs?: string[];
   timeoutMs: number;
   /** 生出力（stream-json 全行）の追記先。省けば書かない。 */
   logFile?: string;
@@ -49,7 +47,6 @@ export function buildClaudeArgs(o: ClaudeRunOptions): string[] {
     ...o.extraArgs,
     o.mode === "new" ? "--session-id" : "--resume",
     o.sessionId,
-    ...(o.injectArgs ?? []),
     "--",
     o.prompt,
   ];

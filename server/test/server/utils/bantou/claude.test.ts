@@ -47,17 +47,6 @@ test("claude: buildClaudeArgs resume + ツール + extraArgs", () => {
   );
 });
 
-test("claude: injectArgs は session-id / resume の後ろ、-- の前", () => {
-  const inject = ["--mcp-config", "{}", "--strict-mcp-config"];
-  assert.deepEqual(buildClaudeArgs({ ...base, injectArgs: inject }), [
-    "-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "auto",
-    "--session-id", "sid-1", ...inject, "--", "do it",
-  ]);
-  const r = buildClaudeArgs({ ...base, mode: "resume", injectArgs: inject });
-  assert.ok(r.indexOf("--resume") < r.indexOf("--mcp-config"));
-  assert.ok(r.indexOf("--mcp-config") < r.indexOf("--"));
-});
-
 test("claude: readResultEnvelope", () => {
   assert.deepEqual(
     readResultEnvelope('{"type":"result","subtype":"success","is_error":false,"session_id":"s","result":"hi"}'),
