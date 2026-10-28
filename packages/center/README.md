@@ -32,11 +32,11 @@ bantou-center [--config <path>] [--transport stdio|http] [--port <n>] [--bind <a
 ### http transport
 
 - エンドポイントは `http://<bind>:<port>/mcp`（MCP Streamable HTTP。POST / GET / DELETE）。`/mcp` 以外は 404。
-- **認証は無い**。既定で loopback にだけ bind する。`--bind 0.0.0.0` 等で外に出すと、到達できる相手全員が rc_start / cap_kick を呼べる（認証は未実装）。
+- **認証は Bearer token**。`/mcp` へのリクエスト（POST / GET / DELETE すべて）は `Authorization: Bearer <config の token>` が必要で、欠落・形式違い・不一致は 401（`WWW-Authenticate: Bearer`）。比較は定時間。token が無い・12 文字未満だと http は起動しない。既定は loopback にだけ bind する。`--bind 0.0.0.0` 等で外に出しても、token を知らない相手は rc_start / cap_kick を呼べない（ただし TLS は無いので平文。信頼できる LAN だけで使う）。
 - MCP session ごとに McpServer を作る。supervisor と server 接続は全 session で共有。
 - SIGTERM / SIGINT で http server・全 session・全 project を停止して exit 0。http では stdin を見ない（親が `/dev/null` を渡しても落ちない。親は SIGTERM で止める）。
 - 親プロセスが死んだら同じ手順で停止して exit 0。2 秒ごとに `ppid` を見て、起動時の値から変わったら（orphan で 1 / launchd に付け替わったら）終了する。
-- DNS rebinding 対策: Host ヘッダは `127.0.0.1:<port>` / `localhost:<port>` / `[::1]:<port>`（と、wildcard 以外の `--bind` 値 `:<port>`）だけ通し、それ以外は 403。ポート無しの Host も 403。Origin は付いていれば `http://<上記 Host>` だけ通す（ブラウザ以外のクライアントは Origin を付けないので影響なし）。`--bind 0.0.0.0` でも LAN の IP 宛 Host は通らない。
+- DNS rebinding 対策（Host / Origin 検査）は `--bind` が loopback（`127.0.0.1` / `localhost` / `::1`）の時だけ効く: Host は `127.0.0.1:<port>` / `localhost:<port>` / `[::1]:<port>` だけ通し、それ以外は 403（ポート無しも 403）。Origin は付いていれば `http://<上記 Host>` だけ通す。loopback 以外の bind（`0.0.0.0` / `::` / LAN の IP）では別ホストから届く前提なので Host / Origin は絞らず、Bearer token だけで守る。
 - session は 30 分リクエストが無いと閉じる（処理中のリクエストや開いたままの SSE がある間は閉じない）。閉じた session への要求は 404 なので、クライアントは再 initialize する。
 - 同時 session は最大 32。超えた新規 initialize は 503（`Retry-After: 30`）。
 - POST ボディは 4 MiB まで。超えたら 413 を返して接続を閉じる。
@@ -61,7 +61,8 @@ stdout は MCP の通信路。ログは全て stderr に出る。
     { "name": "linux204", "timeoutMs": 2100000 },
     { "name": "named", "peer": "my-bantou-server" }
   ],
-  "logDir": "/home/me/.config/bantou/center-logs"
+  "logDir": "/home/me/.config/bantou/center-logs",
+  "token": "（http transport で必須。12 文字以上のランダム文字列）"
 }
 ```
 
@@ -85,6 +86,7 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 | `servers[].peer` | string | なし | server の peer 名または id。指定すると発見せずその名前へ送る（従来の名前指定）。省略すると `list_peers`（`protocol: "bantou"`）で自動発見する |
 | `servers[].timeoutMs` | 正の整数 | `2100000`（35 分） | 返信待ちの打ち切り |
 | `logDir` | 絶対パス | config と同じ場所の `center-logs/` | remote-control の出力ログ置き場 |
+| `token` | 12 文字以上の文字列 | なし | http transport の `/mcp` が要求する Bearer token。http では必須（無い・12 文字未満だと起動せずエラー終了。Cork の MCP Server が 12 文字未満の token を拒否し、保存値が不正なら作り直すのに合わせた）。stdio では使わない。desktop は sidecar 起動時に `center.json` へ書く |
 
 ### server の発見（protocol 方式）
 
@@ -193,6 +195,6 @@ npm run e2e
 
 ## 未決
 
-- 認証（desktop ↔ center、center ↔ server）。
+- 認証（center ↔ server）。desktop ↔ center は Bearer token（上記）。
 - desktop からの起動と接続先の切り替え。
 - 本物の `claude remote-control` での運用確認（出力形式の変化、`Connected` の検出、`--continue` の挙動）。e2e は stub のみ。
