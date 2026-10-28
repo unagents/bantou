@@ -38,7 +38,7 @@ const NAME = /^[A-Za-z0-9_-]+$/;
 
 const absPath = z.string().min(1).refine((p) => isAbsolute(p), { message: "絶対パスで指定する" });
 
-const projectSchema = z.object({
+export const projectSchema = z.object({
   name: z.string().regex(NAME, "英数字と _ - のみ"),
   path: absPath,
   spawn: z.enum(SPAWN_MODES).default(DEFAULT_PROJECT.spawn),

@@ -185,3 +185,21 @@ test("runClaude: 起動できない実行ファイルは reject せず失敗", a
   assert.ok(!r.ok);
   if (!r.ok) assert.match(r.detail, /^claude を起動できない/);
 });
+
+test("killGroup: pid 無しの子は child.kill に落ちる。実プロセスは process group ごと止める", async () => {
+  const { killGroup } = await import("../../../../server/utils/bantou/claude");
+  const sent: string[] = [];
+  killGroup({ pid: undefined, kill: (s?: NodeJS.Signals | number) => (sent.push(String(s)), true) }, "SIGTERM");
+  assert.deepEqual(sent, ["SIGTERM"]);
+
+  // sh が孫の sleep を起動する。detached（setsid）で起動し group kill で孫まで消えることを確認する
+  const { spawn } = await import("node:child_process");
+  const sh = spawn("sh", ["-c", "sleep 30 & echo $!; wait"], { detached: true, stdio: ["ignore", "pipe", "ignore"] });
+  const grand = await new Promise<number>((res) => sh.stdout.once("data", (d: Buffer) => res(Number(String(d).trim()))));
+  process.kill(grand, 0); // 生きている
+  const closed = new Promise<void>((r) => sh.once("close", () => r()));
+  killGroup(sh, "SIGKILL");
+  await closed;
+  await new Promise((r) => setTimeout(r, 100));
+  assert.throws(() => process.kill(grand, 0), /ESRCH/);
+});

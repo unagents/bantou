@@ -516,3 +516,86 @@ test("stop: SIGTERM で終わらなければ killImpl に SIGKILL を送る", as
   assert.deepEqual(sent, ["SIGTERM", "SIGKILL"]);
   await sup.shutdown();
 });
+
+test("add / remove: 実行中に project を足して起動でき、remove で止めて外す。config 由来は外せない", async () => {
+  const sup = make();
+  sup.add({ name: "dyn", path: "/tmp/dyn", spawn: "same-dir", permissionMode: "plan", autostart: false });
+  assert.throws(() => sup.add({ name: "dyn", path: "/tmp/x", spawn: "same-dir", permissionMode: "auto", autostart: false }), /既に存在/);
+  assert.throws(() => sup.add({ name: "p1", path: "/tmp/x", spawn: "same-dir", permissionMode: "auto", autostart: false }), /既に存在/);
+  assert.deepEqual(sup.list().map((s) => s.project), ["p1", "dyn"]);
+  await sup.start("dyn");
+  assert.deepEqual(children[0].args, ["remote-control", "--name", "dyn", "--permission-mode", "plan"]);
+  assert.equal(children[0].cwd, "/tmp/dyn");
+  await assert.rejects(sup.remove("p1"), /config 由来/);
+  await sup.remove("dyn");
+  assert.deepEqual(children[0].child.signals, ["SIGTERM"]);
+  assert.deepEqual(sup.list().map((s) => s.project), ["p1"]);
+  assert.throws(() => sup.status("dyn"), /未定義/);
+  await sup.shutdown();
+});
+
+test("start resume: --continue で起動し、接続前の早期終了なら素の起動へ fallback（再起動回数は増えない）", async () => {
+  const sup = make();
+  await sup.start("p1", { resume: true });
+  assert.ok(children[0].args.includes("--continue"));
+  children[0].child.die(1);
+  await until(() => children.length === 2);
+  assert.ok(!children[1].args.includes("--continue"));
+  assert.equal(sup.status("p1").restarts, 0);
+  assert.equal(sup.status("p1").state, "starting");
+  await sup.shutdown();
+});
+
+test("start resume: 接続後の終了は fallback せず通常の再起動（--continue のまま）", async () => {
+  const sup = make();
+  await sup.start("p1", { resume: true });
+  children[0].child.stdout.write("Remote Control: Connected\n");
+  await until(() => sup.status("p1").state === "connected");
+  children[0].child.die(1);
+  await until(() => children.length === 2);
+  assert.ok(children[1].args.includes("--continue"));
+  assert.equal(sup.status("p1").restarts, 1);
+  await sup.shutdown();
+});
+
+test("start（resume 無し）: 早期終了でも fallback ではなく通常の再起動予約", async () => {
+  const sup = make();
+  await sup.start("p1");
+  assert.ok(!children[0].args.includes("--continue"));
+  children[0].child.die(1);
+  await until(() => children.length === 2);
+  assert.equal(sup.status("p1").restarts, 1);
+  await sup.shutdown();
+});
+
+test("接続前に終了したら直近の出力を lastError に残し、再起動上限でも原因が見える", async () => {
+  cfg = parseConfig(
+    { projects: [{ name: "p1", path: "/tmp/p1" }], remoteControl: { claude: "fake-claude", restartDelayMs: 10, maxRestarts: 1, stopGraceMs: 80 }, logDir: join(dir, "logs") },
+    join(dir, "c.json"),
+  );
+  const sup = make();
+  await sup.start("p1");
+  children[0].child.stderr.write("Error: Workspace not trusted. Please run `claude` in /x first\n");
+  await sleep(10);
+  children[0].child.die(1);
+  await until(() => sup.status("p1").lastExit !== null);
+  assert.match(sup.status("p1").lastError ?? "", /^接続前に終了: Error: Workspace not trusted/);
+  await until(() => children.length === 2);
+  children[1].child.stderr.write("Error: Workspace not trusted. again\n");
+  await sleep(10);
+  children[1].child.die(1);
+  await until(() => sup.status("p1").state === "error");
+  assert.match(sup.status("p1").lastError ?? "", /^再起動回数の上限（接続前に終了: Error: Workspace not trusted\. again）$/);
+  await sup.shutdown();
+});
+
+test("接続後の終了は lastError を付けない", async () => {
+  const sup = make();
+  await sup.start("p1");
+  children[0].child.stdout.write("Remote Control: Connected\n");
+  await until(() => sup.status("p1").state === "connected");
+  children[0].child.die(1);
+  await until(() => sup.status("p1").lastExit !== null);
+  assert.equal(sup.status("p1").lastError, undefined);
+  await sup.shutdown();
+});

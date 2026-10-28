@@ -99,7 +99,7 @@ npx bantou --config <path>
 
 ## protocol 登録
 
-- 接続後に `setProtocol(<protocol dir>)` で bantou protocol（name `bantou`、version は `packages/protocol/messenger/protocol.json` の通り）を登録する。ログ: `protocol 登録: bantou@1.0.0 hash=...`。終了時に `unsetProtocol`（`protocol 解除`）。
+- 接続後に `setProtocol(<protocol dir>)` で bantou protocol（name `bantou`、version は `packages/protocol/messenger/protocol.json` の通り）を登録する。ログ: `protocol 登録: bantou@1.1.0 hash=...`。終了時に `unsetProtocol`（`protocol 解除`）。
 - protocol dir は npm package の `protocol/`（`scripts/copy-protocol.mjs` が `../packages/protocol/messenger/` をコピー。build / dev / e2e / prepack の先頭で実行、`server/protocol` は git 管理外）。`bin/bantou.mjs` が `NUXT_BANTOU_PROTOCOL_DIR`（runtimeConfig `bantou.protocolDir`）に設定する。
 - 登録に失敗しても致命にしない。ログに出して従来の名前待受（peer `bantou-server`）で続ける。
 - 受信 message の `meta.protocol` が `bantou` なら処理、meta 無しは旧形式として処理、他 protocol は無視（`無視(他 protocol)`）。返信は送信元の peer id へ `meta: {protocol: "bantou", version}` 付きで返す（report 起因の `cap_result` も同じ）。
@@ -131,6 +131,7 @@ npx bantou --config <path>
 | type | 内容 |
 |---|---|
 | `kick_cap` | cap を起動する（初回は新規 session、以降は resume） |
+| `stop_cap` | 実行中の cap（`claude -p`）を止める |
 | `status` | cap / worker の状態一覧 |
 
 `kick_cap`（`cap_id` と `prompt` 以外は任意）:
@@ -143,6 +144,18 @@ npx bantou --config <path>
 - `repo` / `branch`: path の git 取得に使う。`-` で始まる値は拒否。
 - `prompt`: claude に渡す指示。
 - `reason`: 起動理由。ログ用で、claude には渡さない。
+
+`stop_cap`（protocol `bantou` 1.1.0 で追加）:
+
+```json
+{ "bantou": 1, "type": "stop_cap", "cap_id": "cap-a" }
+```
+
+- 走っている `claude -p` を process group ごと SIGTERM し、3 秒以内に終わらなければ SIGKILL する。子は `detached`（setsid）で起動しているので、cap の Bash が起動した孫もこの group にいる限り止まる。
+- 中断された `kick_cap` は `cap_result`（`ok: false`, `error: "stop_cap により停止"`、再試行しない）で返り、state は `failed`。
+- その cap に待っている指示（直列待ち）も、実行されずに同じ `cap_result` で返る。spawn 前（git 準備中）に届いた stop も、claude を起動せずに中断する。
+- 実行も待ちも無ければ `stopped: false` の `stop_result`。cap の dir と state.json は消さない（state の削除はしない）。
+- 限界: 孫が setsid などで別 group に出ていれば止まらない（`capBashSandbox` の注記と同じ事情で、worker の生存は cap の責務）。stop 要求は inflight の間だけ有効で、全ての指示が片付くと消える（その間に届いた新しい指示も中断される）。
 
 `status`:
 
@@ -160,6 +173,7 @@ npx bantou --config <path>
 { "bantou": 1, "type": "error", "ok": false, "message": "git clone 失敗: ...", "command": "kick_cap" }
 ```
 
+- `stop_result`: `{ "bantou": 1, "type": "stop_result", "ok": true, "cap_id": "cap-a", "stopped": true }`。stop_cap の失敗（`cap_id` が不正でない限り通常は無い）は `error`（`command: "stop_cap"`, `cap_id` 付き）。
 - `cap_result` は claude の実行が終わってから返る。数分かかることがある。
 - 実行が失敗しても `cap_result` で返る（`ok: false` と `error`）。
 - `error` は実行に入る前の失敗（git 失敗、state が `running` / `error` で起動できない、state 破損など）。
@@ -199,7 +213,7 @@ npx bantou --config <path>
   - 見つからなければ `failed`（`前回の実行が終了しないまま server が落ちた`）にする。
   - `ps` が使えなければ `error` にする。
 - 結果は `孤児回収: killed=<n> failed=<n> error=<n>` でログに出す。
-- 終了時（SIGTERM / SIGINT）は実行中の claude を SIGKILL し、`failed`（`server 終了により中断`）にする。
+- 終了時（SIGTERM / SIGINT）は実行中の claude を process group ごと SIGKILL し、`failed`（`server 終了により中断`）にする。
 
 ## 送り方
 

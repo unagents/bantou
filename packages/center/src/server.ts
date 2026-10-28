@@ -1,7 +1,9 @@
 import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Config } from "./config.js";
+import type { RemoteManager } from "./remotes.js";
 import type { RemoteControlSupervisor } from "./remote-control.js";
+import type { SessionManager } from "./sessions.js";
 import type { ServerLink } from "./server-link.js";
 import { registerTools } from "./tools.js";
 
@@ -20,8 +22,10 @@ export function createCenterServer(deps: {
   config: Config;
   supervisor: RemoteControlSupervisor;
   link: ServerLink;
+  sessions: SessionManager;
+  remotes: RemoteManager;
 }): McpServer {
   const server = new McpServer({ name: "bantou-center", version: packageVersion() });
-  registerTools(server, { supervisor: deps.supervisor, link: deps.link });
+  registerTools(server, { supervisor: deps.supervisor, link: deps.link, sessions: deps.sessions, remotes: deps.remotes });
   return server;
 }

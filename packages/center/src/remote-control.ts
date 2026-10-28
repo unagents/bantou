@@ -66,7 +66,15 @@ export const groupKill: KillImpl = (child, signal) => {
 };
 
 export interface RemoteControlSupervisor {
-  start(project: string): Promise<RcStatus>;
+  /**
+   * 起動する。resume: true なら `--continue` で前回の会話に復帰を試み、接続前に早期終了したら素の起動へ fallback する
+   * （claude は約 4 時間以内の記録が無いと --continue で error exit する）。
+   */
+  start(project: string, opts?: { resume?: boolean }): Promise<RcStatus>;
+  /** 実行中に project を足す（起動はしない）。同名は拒否。remove で外せるのはこの add で足したものだけ。 */
+  add(project: ProjectConfig): void;
+  /** add で足した project を停止して外す。config 由来の project は外せない。 */
+  remove(name: string): Promise<void>;
   stop(project: string): Promise<RcStatus>;
   status(project: string): RcStatus;
   list(): RcStatus[];
@@ -126,6 +134,9 @@ export function detectConnected(line: string): boolean {
 /** 初回起動時に claude remote-control が出す有効化確認。改行なしで入力待ちになる。 */
 export const CONSENT_PROMPT = "Enable Remote Control? (y/n)";
 
+/** --continue の起動がこの時間内に接続前で終了したら「復帰できなかった」とみなし、素の起動へ fallback する。 */
+export const CONTINUE_FALLBACK_WINDOW_MS = 30_000;
+
 /** exit 後に close が来ない（孫プロセスが pipe を握っている等）場合にログを閉じるまでの待ち。 */
 const CLOSE_WAIT_MS = 2000;
 
@@ -183,8 +194,9 @@ export function createRemoteControlSupervisor(opts: {
   const claude: ResolvedClaude =
     opts.claude ?? (rc.claude ? { path: rc.claude, source: "config" } : { path: "claude", source: "PATH" });
   const entries = new Map<string, Entry>();
-  for (const p of config.projects) {
-    entries.set(p.name, {
+  /** add() で足した project の名前（remove できるのはこれだけ）。 */
+  const dynamic = new Set<string>();
+  const newEntry = (p: ProjectConfig): Entry => ({
       project: p,
       status: {
         project: p.name,
@@ -206,8 +218,8 @@ export function createRemoteControlSupervisor(opts: {
       gen: 0,
       exited: null,
       logStream: null,
-    });
-  }
+  });
+  for (const p of config.projects) entries.set(p.name, newEntry(p));
 
   const get = (name: string): Entry => {
     const e = entries.get(name);
@@ -219,7 +231,7 @@ export function createRemoteControlSupervisor(opts: {
   const childEnv = (p: ProjectConfig): NodeJS.ProcessEnv => mergeChildEnv(process.env, rc.env, p.env);
 
   /** 子プロセスを 1 本起動して監視を付ける。 */
-  const launch = (e: Entry, useContinue: boolean): void => {
+  const launch = (e: Entry, useContinue: boolean, fallback = false): void => {
     const name = e.project.name;
     const args = buildRcArgs(e.project, rc, { continue: useContinue });
     e.stopRequested = false;
@@ -257,6 +269,10 @@ export function createRemoteControlSupervisor(opts: {
     let resolveExited!: () => void;
     e.exited = new Promise<void>((r) => (resolveExited = r));
 
+    const launchedAt = Date.now();
+    let connectedSeen = false;
+    /** 直近の非空行（stdout / stderr）。接続前に終了した時の原因表示に使う（例: Workspace not trusted）。 */
+    let lastLine = "";
     const onLine = (line: string): void => {
       const clean = line.replace(ANSI, "");
       const urls = extractUrls(clean);
@@ -264,6 +280,7 @@ export function createRemoteControlSupervisor(opts: {
       if (urls.environmentUrl) e.status.environmentUrl = urls.environmentUrl;
       if (e.status.state === "starting" && detectConnected(clean)) {
         e.status.state = "connected";
+        connectedSeen = true;
         log(`remote-control 接続: project=${name}`);
       }
     };
@@ -285,6 +302,8 @@ export function createRemoteControlSupervisor(opts: {
       s.setEncoding("utf8");
       s.on("data", (chunk: string) => {
         if (!logStream.writableEnded) logStream.write(chunk);
+        const tail = chunk.replace(ANSI, "").split("\n").map((l) => l.trim()).filter(Boolean).pop();
+        if (tail) lastLine = tail.slice(0, 300);
         if (!parse) return;
         answerConsent(chunk);
         buf += chunk;
@@ -347,9 +366,15 @@ export function createRemoteControlSupervisor(opts: {
         return;
       }
       e.status.lastExit = { code, signal: signal ?? null, at: new Date().toISOString() };
+      if (!connectedSeen && !e.stopRequested && lastLine) e.status.lastError = `接続前に終了: ${lastLine}`;
       log(`remote-control 終了: project=${name} code=${code ?? "null"} signal=${signal ?? "null"}`);
       if (e.stopRequested) {
         e.status.state = "stopped";
+        return;
+      }
+      if (fallback && useContinue && !connectedSeen && Date.now() - launchedAt < CONTINUE_FALLBACK_WINDOW_MS) {
+        log(`--continue で復帰できず早期終了、素の起動へ fallback: project=${name}`);
+        launch(e, false);
         return;
       }
       if (e.status.restarts < rc.maxRestarts) {
@@ -362,7 +387,7 @@ export function createRemoteControlSupervisor(opts: {
         }, rc.restartDelayMs);
       } else {
         e.status.state = "error";
-        e.status.lastError = "再起動回数の上限";
+        e.status.lastError = e.status.lastError ? `再起動回数の上限（${e.status.lastError}）` : "再起動回数の上限";
         log(`remote-control 再起動上限: project=${name}`);
       }
     });
@@ -374,7 +399,7 @@ export function createRemoteControlSupervisor(opts: {
 
   let closing = false;
 
-  const start = async (name: string): Promise<RcStatus> => {
+  const start = async (name: string, startOpts: { resume?: boolean } = {}): Promise<RcStatus> => {
     const e = get(name);
     if (isActive(e) || closing) return snapshot(e);
     const stopSeq = e.stopSeq;
@@ -398,7 +423,7 @@ export function createRemoteControlSupervisor(opts: {
       return snapshot(e);
     }
     e.status.restarts = 0;
-    launch(e, false);
+    launch(e, startOpts.resume === true, startOpts.resume === true);
     return snapshot(e);
   };
 
@@ -427,8 +452,24 @@ export function createRemoteControlSupervisor(opts: {
     return snapshot(e);
   };
 
+  const add = (project: ProjectConfig): void => {
+    if (entries.has(project.name)) throw new Error(`project が既に存在: ${project.name}`);
+    entries.set(project.name, newEntry(project));
+    dynamic.add(project.name);
+  };
+
+  const remove = async (name: string): Promise<void> => {
+    get(name);
+    if (!dynamic.has(name)) throw new Error(`config 由来の project は外せない: ${name}`);
+    await stop(name);
+    entries.delete(name);
+    dynamic.delete(name);
+  };
+
   return {
     start,
+    add,
+    remove,
     stop,
     status: (name) => snapshot(get(name)),
     list: () => [...entries.values()].map(snapshot),

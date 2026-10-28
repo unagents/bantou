@@ -54,6 +54,8 @@ test("error 返信: 失敗した指示の cap_id を含める。resume_worker �
   assert.deepEqual(w, { bantou: 1, type: "error", ok: false, message: "resume_worker は未対応", command: "resume_worker" });
   const st = await execute({ bantou: 1, type: "status" }, manager);
   assert.deepEqual(st, { bantou: 1, type: "error", ok: false, message: "boom", command: "status" });
+  const stop = await execute({ bantou: 1, type: "stop_cap", cap_id: "c1" }, { stop: async () => { throw new Error("boom"); } } as unknown as AgentManager);
+  assert.deepEqual(stop, { bantou: 1, type: "error", ok: false, message: "boom", command: "stop_cap", cap_id: "c1" });
 });
 
 test("meta の分類: 無し=旧形式、bantou=処理、他 protocol=無視", () => {
@@ -68,4 +70,13 @@ test("返信 meta は protocol.json の name / version と一致する", async (
   const dir = new URL("../../../../../packages/protocol/messenger/", import.meta.url);
   const m = JSON.parse(await readFile(new URL("protocol.json", dir), "utf8")) as { name: string; version: string };
   assert.deepEqual(REPLY_META, { protocol: m.name, version: m.version });
+});
+
+test("stop_cap: manager.stop の結果を stop_result で返し、ログ概要は cap_id", async () => {
+  const calls: unknown[] = [];
+  const manager = { stop: async (k: string, id: string) => (calls.push([k, id]), { stopped: true }) } as unknown as AgentManager;
+  const r = await execute({ bantou: 1, type: "stop_cap", cap_id: "c9" }, manager);
+  assert.deepEqual(r, { bantou: 1, type: "stop_result", ok: true, cap_id: "c9", stopped: true });
+  assert.deepEqual(calls, [["cap", "c9"]]);
+  assert.equal(describeCommand({ bantou: 1, type: "stop_cap", cap_id: "c9" }), "cap_id=c9");
 });

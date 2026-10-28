@@ -4,7 +4,10 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { parseConfig } from "../src/config.js";
 import type { RcStatus, RemoteControlSupervisor } from "../src/remote-control.js";
+import type { RemoteManager } from "../src/remotes.js";
 import { createCenterServer } from "../src/server.js";
+import type { SessionManager } from "../src/sessions.js";
+import { resolveOwner } from "../src/tools.js";
 import type { ServerLink } from "../src/server-link.js";
 
 const rc = (project: string): RcStatus => ({
@@ -13,7 +16,7 @@ const rc = (project: string): RcStatus => ({
   claude: { path: "claude", source: "PATH" },
 });
 
-async function connect(link: Partial<ServerLink> = {}) {
+async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partial<SessionManager>; remotes?: Partial<RemoteManager> } = {}) {
   const calls: unknown[] = [];
   const supervisor: RemoteControlSupervisor = {
     start: async (p) => rc(p),
@@ -39,7 +42,14 @@ async function connect(link: Partial<ServerLink> = {}) {
     close: async () => {},
     ...link,
   };
-  const server = createCenterServer({ config: parseConfig({}, "/x/c.json"), supervisor, link: fullLink });
+  const sessions = { create: async (i: unknown) => ({ called: "create", i }), delete: async (n: string) => ({ name: n, deleted: true }), list: () => [], ...mgrs.sessions } as unknown as SessionManager;
+  const remotes = {
+    create: async (i: unknown) => (calls.push({ remoteCreate: i }), { remote_id: "r-1", server: "id", serverName: "n", state: "running", owner: "x", createdAt: "t" }),
+    delete: async (i: unknown) => (calls.push({ remoteDelete: i }), { remote_id: "r-1", deleted: true, stopped: true }),
+    list: (f: unknown) => (calls.push({ remoteList: f }), []),
+    ...mgrs.remotes,
+  } as unknown as RemoteManager;
+  const server = createCenterServer({ config: parseConfig({}, "/x/c.json"), supervisor, link: fullLink, sessions, remotes });
   const [ct, st] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "t", version: "0" });
   await Promise.all([server.connect(st), client.connect(ct)]);
@@ -48,11 +58,12 @@ async function connect(link: Partial<ServerLink> = {}) {
 
 const text = (r: unknown): string => (r as { content: { text: string }[] }).content[0].text;
 
-test("8 つの tool が登録される", async () => {
+test("14 個の tool が登録される", async () => {
   const { client, close } = await connect();
   const names = (await client.listTools()).tools.map((t) => t.name).sort();
   assert.deepEqual(names, [
-    "cap_kick", "rc_list", "rc_start", "rc_status", "rc_stop", "server_list", "server_status", "worker_resume",
+    "cap_kick", "rc_list", "rc_start", "rc_status", "rc_stop", "remote_create", "remote_delete", "remote_list",
+    "server_list", "server_status", "session_create", "session_delete", "session_list", "worker_resume",
   ]);
   await close();
 });
@@ -144,4 +155,54 @@ test("server_list / rc_start / rc_stop", async () => {
   const b = await client.callTool({ name: "rc_stop", arguments: { project: "a" } });
   assert.equal((JSON.parse(text(b)) as RcStatus).state, "stopped");
   await close();
+});
+
+test("session_create / session_delete / session_list は SessionManager に委譲し、例外は isError", async () => {
+  const { client, close } = await connect({}, {
+    sessions: { create: async (i) => { if (i.name === "dup") throw new Error("name が既に使われている: dup"); return { name: i.name, path: "/p", state: "starting" } as never; } },
+  });
+  const ok = await client.callTool({ name: "session_create", arguments: { name: "pm1", permissionMode: "plan" } });
+  assert.deepEqual(JSON.parse(text(ok)), { name: "pm1", path: "/p", state: "starting" });
+  const dup = await client.callTool({ name: "session_create", arguments: { name: "dup" } });
+  assert.equal(dup.isError, true);
+  assert.deepEqual(JSON.parse(text(dup)), { error: "name が既に使われている: dup" });
+  const bad = await client.callTool({ name: "session_create", arguments: { name: "a b" } }).catch((e: unknown) => e);
+  assert.ok(bad instanceof Error || (bad as { isError?: boolean }).isError === true);
+  assert.deepEqual(JSON.parse(text(await client.callTool({ name: "session_delete", arguments: { name: "pm1" } }))), { name: "pm1", deleted: true });
+  assert.deepEqual(JSON.parse(text(await client.callTool({ name: "session_list", arguments: {} }))), []);
+  await close();
+});
+
+test("remote_create: stdio（header 無し）では引数 owner が必須。返り値は remote_id / server / state", async () => {
+  const { client, calls, close } = await connect();
+  const no = await client.callTool({ name: "remote_create", arguments: { prompt: "go" } });
+  assert.equal(no.isError, true);
+  assert.match(text(no), /owner が分からない/);
+  const ok = await client.callTool({ name: "remote_create", arguments: { prompt: "go", owner: "pm1", server: "id", repo: "https://x/y.git" } });
+  assert.deepEqual(JSON.parse(text(ok)), { remote_id: "r-1", server: "id", serverName: "n", state: "running" });
+  assert.deepEqual(calls, [{ remoteCreate: { owner: "pm1", prompt: "go", server: "id", repo: "https://x/y.git" } }]);
+  await close();
+});
+
+test("remote_delete / remote_list は owner を渡す（無ければ絞らない）", async () => {
+  const { client, calls, close } = await connect();
+  await client.callTool({ name: "remote_list", arguments: {} });
+  await client.callTool({ name: "remote_list", arguments: { owner: "pm1" } });
+  await client.callTool({ name: "remote_delete", arguments: { remote_id: "r-1" } });
+  await client.callTool({ name: "remote_delete", arguments: { remote_id: "r-1", owner: "pm1", force: true } });
+  assert.deepEqual(calls, [
+    { remoteList: {} }, { remoteList: { owner: "pm1" } },
+    { remoteDelete: { remote_id: "r-1" } }, { remoteDelete: { remote_id: "r-1", owner: "pm1", force: true } },
+  ]);
+  await close();
+});
+
+test("resolveOwner: header > query > 引数。不正な形式は投げる", () => {
+  const url = (q: string) => new URL(`http://h/mcp${q}`);
+  assert.equal(resolveOwner({ requestInfo: { headers: { "x-bantou-session": "h" }, url: url("?session=q") } }, "a"), "h");
+  assert.equal(resolveOwner({ requestInfo: { headers: { "x-bantou-session": ["h1", "h2"] } } }), "h1");
+  assert.equal(resolveOwner({ requestInfo: { headers: {}, url: url("?session=q") } }, "a"), "q");
+  assert.equal(resolveOwner({ requestInfo: { headers: {} } }, "a"), "a");
+  assert.equal(resolveOwner(undefined), undefined);
+  assert.throws(() => resolveOwner({ requestInfo: { headers: { "x-bantou-session": "a b" } } }), /owner/);
 });

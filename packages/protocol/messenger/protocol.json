@@ -1,7 +1,7 @@
 {
   "name": "bantou",
-  "version": "1.0.0",
-  "description": "bantou-server commands (kick_cap, status) and replies (cap_result, status_result, error). Message body is one JSON object in the text; `bantou: 1` is the body schema version.",
+  "version": "1.1.0",
+  "description": "bantou-server commands (kick_cap, stop_cap, status) and replies (cap_result, stop_result, status_result, error). Message body is one JSON object in the text; `bantou: 1` is the body schema version.",
   "messages": {
     "kick_cap": {
       "type": "object",
@@ -15,6 +15,29 @@
         "branch": { "type": "string", "minLength": 1, "description": "Branch for git clone --branch. Must not start with '-'." },
         "prompt": { "type": "string", "minLength": 1 },
         "reason": { "type": "string", "description": "Free text, logged only." }
+      },
+      "additionalProperties": true
+    },
+    "stop_cap": {
+      "type": "object",
+      "description": "Stop the running remote cap `cap_id` (kills its claude process group). Reply: stop_result or error. The interrupted kick_cap still gets its own cap_result with ok=false.",
+      "required": ["bantou", "type", "cap_id"],
+      "properties": {
+        "bantou": { "const": 1 },
+        "type": { "const": "stop_cap" },
+        "cap_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" }
+      },
+      "additionalProperties": true
+    },
+    "stop_result": {
+      "type": "object",
+      "required": ["bantou", "type", "ok", "cap_id", "stopped"],
+      "properties": {
+        "bantou": { "const": 1 },
+        "type": { "const": "stop_result" },
+        "ok": { "const": true },
+        "cap_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
+        "stopped": { "type": "boolean", "description": "true when a running (or about to start) run was stopped; false when the cap was not running." }
       },
       "additionalProperties": true
     },
@@ -82,7 +105,7 @@
         "type": { "const": "error" },
         "ok": { "const": false },
         "message": { "type": "string" },
-        "command": { "enum": ["kick_cap", "resume_worker", "status"], "description": "type of the failed command, when known." },
+        "command": { "enum": ["kick_cap", "resume_worker", "stop_cap", "status"], "description": "type of the failed command, when known." },
         "cap_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
         "worker_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" }
       },

@@ -46,6 +46,7 @@ export function maskUserinfo(text: string): string {
 
 /** 指示の概要。prompt は先頭 80 文字のみ、repo の userinfo は伏せる。 */
 export function describeCommand(cmd: ServerCommand): string {
+  if (cmd.type === "stop_cap") return `cap_id=${cmd.cap_id}`;
   if (cmd.type !== "kick_cap") return "";
   const parts = [`cap_id=${cmd.cap_id}`];
   if (cmd.repo) parts.push(`repo=${maskUserinfo(cmd.repo)}`);
@@ -62,6 +63,10 @@ export async function execute(cmd: ServerCommand, manager: AgentManager): Promis
       const r = await manager.invoke("cap", cmd.cap_id, cmd);
       return { bantou: PROTOCOL_VERSION, type: "cap_result", cap_id: cmd.cap_id, ...r };
     }
+    if (cmd.type === "stop_cap") {
+      const r = await manager.stop("cap", cmd.cap_id);
+      return { bantou: PROTOCOL_VERSION, type: "stop_result", ok: true, cap_id: cmd.cap_id, stopped: r.stopped };
+    }
     if (cmd.type === "resume_worker") {
       // server は worker を起動しない（worker は cap の責務）。型は protocol に残るが処理しない
       throw new Error("resume_worker は未対応");
@@ -71,7 +76,7 @@ export async function execute(cmd: ServerCommand, manager: AgentManager): Promis
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     log(`エラー: ${cmd.type}: ${message}`);
-    const id = cmd.type === "kick_cap" ? { cap_id: cmd.cap_id } : {};
+    const id = cmd.type === "kick_cap" || cmd.type === "stop_cap" ? { cap_id: cmd.cap_id } : {};
     return { bantou: PROTOCOL_VERSION, type: "error", ok: false, message, command: cmd.type, ...id };
   }
 }

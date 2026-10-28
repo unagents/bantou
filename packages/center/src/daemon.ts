@@ -4,10 +4,13 @@ import { resolveClaude } from "./claude-path.js";
 import { loadConfig, MIN_TOKEN_LEN } from "./config.js";
 import { startHttpServer, type HttpHandle } from "./http.js";
 import { mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { log, setLogFile } from "./log.js";
 import { watchParent } from "./parent-watch.js";
+import { createRemoteManager } from "./remotes.js";
 import { createRemoteControlSupervisor } from "./remote-control.js";
+import { createSessionManager } from "./sessions.js";
+import { createJsonListStore } from "./store.js";
 import { createCenterServer } from "./server.js";
 import { createServerLink } from "./server-link.js";
 
@@ -39,6 +42,15 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   const claude = await resolveClaude(config.remoteControl.claude, log);
   const supervisor = createRemoteControlSupervisor({ config, log, claude });
   const link = createServerLink({ config, log });
+  // session / remote の保存先は config と同じ dir（config の projects には書かない）
+  const stateDir = dirname(resolve(configPath));
+  const sessions = createSessionManager({
+    config,
+    supervisor,
+    store: createJsonListStore(join(stateDir, "sessions.json"), log),
+    log,
+  });
+  const remotes = createRemoteManager({ link, store: createJsonListStore(join(stateDir, "remotes.json"), log), log });
 
   let closing = false;
   let http: HttpHandle | null = null;
@@ -82,7 +94,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   process.stderr.on("error", () => {});
   process.stdout.on("error", () => {});
 
-  const makeServer = () => createCenterServer({ config, supervisor, link });
+  const makeServer = () => createCenterServer({ config, supervisor, link, sessions, remotes });
   if (args.transport === "http") {
     if (!config.token || config.token.length < MIN_TOKEN_LEN) {
       throw new Error(`http transport には config の token（${MIN_TOKEN_LEN} 文字以上）が必要: ${configPath}`);
@@ -101,6 +113,8 @@ export async function runDaemon(args: CliArgs): Promise<void> {
 
   // transport を先に繋いでから、接続と autostart をバックグラウンドで進める
   void link.connectAll();
+  void remotes.restore().catch((e: unknown) => log(`remote 記録の復元失敗: ${e instanceof Error ? e.message : String(e)}`));
+  void sessions.restore().catch((e: unknown) => log(`session の復帰失敗: ${e instanceof Error ? e.message : String(e)}`));
   for (const p of config.projects) {
     if (!p.autostart) continue;
     supervisor.start(p.name).catch((e: unknown) => {

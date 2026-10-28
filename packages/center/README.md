@@ -2,8 +2,10 @@
 
 素のエージェント（Claude Code など）が MCP tool 経由で cap 運用できるようにする MCP server。stdio と Streamable HTTP で動く。
 
-役割は 2 つ。
+役割は 3 つ。
 
+- center 上の session（master-cap）の起動・削除（`session_*`、下記「session」）。
+- master-cap に持たせる remote session（remote-cap）の起動・削除（`remote_*`、下記「remote」）。
 - project ごとの `claude remote-control`（server mode、1 project 1 本）の起動・監視・切断復帰。
 - リモートホストの bantou-server への指示（kick_cap / resume_worker / status）の中継。
 
@@ -97,10 +99,18 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 
 ## tools
 
+概念は `docs/concept.md`、設計の経緯は `docs/design/center-tools.md`。`session_*` が A（番頭が使う、center 上の master-cap）、`remote_*` が B（center が master-cap に持たせる、server への指示の道具）。`rc_*` `server_*` `cap_kick` `worker_resume` は従来の tool で、そのまま残している（A・B との重複は設計資料の表）。
+
 出力は全て JSON 文字列を 1 つの text content に入れて返す。例外・失敗は `isError: true`（例外は `{ "error": "..." }`）。
 
 | tool | 入力 | 出力 |
 |---|---|---|
+| `session_create` | `name`, `path?`, `permissionMode?` | `SessionInfo`（下記） |
+| `session_delete` | `name` | `{ name, deleted }` |
+| `session_list` | なし | `SessionInfo[]` |
+| `remote_create` | `prompt`, `server?`, `repo?`, `branch?`, `owner?` | `{ remote_id, server, serverName, state }`（返信を待たない） |
+| `remote_delete` | `remote_id`, `owner?`, `force?` | `{ remote_id, deleted, stopped, warning? }` |
+| `remote_list` | `owner?` | `RemoteRecord[]` |
 | `rc_list` | なし | `RcStatus[]` |
 | `rc_start` | `project` | `RcStatus`（起動済みなら現状を返す） |
 | `rc_stop` | `project` | `RcStatus` |
@@ -126,9 +136,31 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 | `sessionUrl` / `environmentUrl` | 出力から拾った URL（`claude.ai/code/session_...`、`environment=env_...`） |
 | `restarts` | 自動再起動の回数 |
 | `lastExit` | 直近の終了 `{ code, signal, at }` |
-| `lastError` | `error` 状態の理由 |
+| `lastError` | `error` 状態の理由。接続前に終了した時は `接続前に終了: <直近の出力 1 行>` |
 | `startedAt` / `args` | 直近の起動時刻と引数 |
 | `claude` | 起動に使う実行ファイル `{ path, source }`。`source` は `config` / `login-shell` / `fallback-path` / `PATH` |
+
+### session（A）
+
+- `session_create`: `claude remote-control --name <name> --permission-mode <permissionMode>` を `path` で起動し、supervisor に動的に足す。`path` 省略時は config の project `workspace`（desktop が渡す 1 件）の path の下の `<name>`（無ければ作る）。`workspace` が無ければ `path` が必須。`permissionMode` の既定は `auto`。`name` の重複、既存 project 名（`workspace` を含む）との衝突、他の project / session と同じ path は拒否。接続（URL 取得）か早期終了まで最大 15 秒待って状態を返す（待ちきれなければ `starting`）。
+- `session_delete`: `session_create` で作ったものだけ。remote-control を停止（SIGTERM → `stopGraceMs` 後 SIGKILL）して監視と保存から外す。path は消さない。config 由来の project は拒否。
+- `session_list`: config の project と session の全部。`source` が `config` / `session`。
+- 保存: config と同じ dir の `sessions.json`（`name`, `path`, `permissionMode`, `createdAt`）。config の projects には書かない。center 起動時に復元して `--continue` で起動する。`--continue` で接続前に 30 秒以内に終了した場合（約 4 時間以内の記録が無い、など）は、素の起動へ fallback する（再起動回数は増やさない）。
+- 新規 path の trust: **trust プロンプトは出ず、remote-control が `Error: Workspace not trusted. Please run `claude` in <path> first ...` で即 exit 1 する**（claude 2.1.312 で実測）。親 dir が trust 済みなら配下は通る（実測: trust 済みの repo 配下の dir で `connected`）。そのため、未 trust の path では `session_create` は `state: starting` と `lastError`（`接続前に終了: Error: Workspace not trusted...`）を返し、supervisor は再起動を繰り返して上限で `error` になる。対処は、workspace（または path の親）で一度 `claude` を起動して trust を承認しておくこと。center が claude の設定ファイルを書き換えて trust を付けることはしない（今は）。
+- 同じ folder を別の `claude remote-control` が直前まで握っていると、`This folder is already served by a terminal \`claude remote-control\` on this device. Stop it first.` で約 1 分待たされて終了する（実測、直前の center を強制終了した後など）。
+
+`SessionInfo`: `name`, `path`, `state`（`stopped` / `starting` / `connected` / `error`）, `pid`, `sessionUrl`, `startedAt`, `source`, `lastError?`。
+
+### remote（B）
+
+- `remote_create`: center が `remote_id`（= server 上の cap_id、`r-<hex10>`）を採番し、発見した server に `kick_cap`（`reason: remote_create owner=<owner>`）を送る。**返信を待たず**`{ remote_id, server, serverName, state: "running" }` を返す。返信（`cap_result` / `error`）が来たら記録の `state` を `done` / `failed` にし、`result`（結果本文、8000 文字まで）と `error` を入れる。
+- `remote_delete`: server へ `stop_cap`（protocol `bantou` 1.1.0）を送って走行中の `claude -p` を止め、記録から外す。止められない（server が見つからない・error 返信）時、記録が `running` なら error（`force: true` なら記録だけ消し、`warning` に理由）。終わった記録は警告付きで消える。別の owner の remote は消せない。
+- `remote_list`: `owner` が分かればその owner の分だけ、分からなければ全件。`RemoteRecord` = `remote_id`, `owner`, `server`（作成時の peer id）, `serverName`, `state`, `createdAt`, `finishedAt?`, `result?`, `error?`。
+- 保存: メモリ + config と同じ dir の `remotes.json`。center 再起動で返信を受け取れなくなった `running` は復元時に `failed`（server 側は続行している可能性）にする。center 終了時に返信待ちだったものも `failed`（`center 終了`）。
+- **server 選択**（概念: server は master-cap から見えなくてよい。今は発見ベース）: `config.servers` に依存しない。messenger の `listPeers("all", {protocol: "bantou"})` で見つかった peer の先頭（既定）。`server` 引数は peer id、一致しなければ name。見つからなければ候補付きで error。既存の `cap_kick` などは `servers[]` のまま（挙動は変えない）。`servers[]` があれば先頭の messenger client を共有し、無ければ内部の client を 1 本使う。broker に古い peer が残っていると先頭がそれになり得る（実測: broker.json を引き継いだ再起動で古い peer が先頭に来て、指示が届かず待ち続けた）。
+- **owner**（呼んだ master-cap の識別）: http では header `X-Bantou-Session: <session 名>`（または URL query `?session=<名>`）があればそれ、無ければ tool 引数 `owner`。優先順は header > query > 引数。`remote_create` はどれも無ければ error。`remote_delete` は owner が分かる時だけ記録の owner と照合する。`remote_list` は分からなければ絞らない。stdio には header が無いので引数のみ。
+  - **今は**: master-cap 側に header 付きの接続を自動で持たせる仕組みは入れていない。理由: `claude remote-control` は `--mcp-config` / `--settings` を受けず（remote-control の前の global flag は spawn した session に引き継がれない）、`~/.claude.json` の書換えはユーザー設定の変更、`.mcp.json` の配置は承認プロンプト・未 trust・token 平文の問題がある。そのため、master-cap が center に繋ぐ MCP 設定（header 付き）を用意する側（番頭など）が `X-Bantou-Session` を付けるか、master-cap が `owner` 引数を渡す。
+  - owner は自己申告で、認証はしない（Bearer token は center 全体で 1 つ）。
 
 ## claude の解決
 
@@ -151,6 +183,7 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 - 子プロセスが落ちると `restartDelayMs` 後に再起動する（`continueOnRestart` が `true` なら `--continue` 付き）。`restarts` が `maxRestarts` に達したら `error`（`lastError` は「再起動回数の上限」）。
 - 引数の組み立て（claude 2.1.312 の制約）: `--continue` は `--spawn` / `--capacity` と併用するとエラー終了する（`Error: --session-id and --continue cannot be used with --spawn, --capacity, or --create-session-in-dir.`）。そのため `spawn` が未指定または `same-dir` で `capacity` も未指定の project は `--spawn` / `--capacity` を付けず（`--spawn` の既定が `same-dir`）、再起動は `--continue` 付き。`spawn` が `worktree` / `session`、または `capacity` を指定した project は `--spawn` / `--capacity` を付け、再起動でも `--continue` は付けない（`continueOnRestart` は無視される）。
 - 起動時、projects が 0 件、または autostart の project が 0 件で何も起動しない場合は、理由を 1 行ログに出す（config が読めない場合は致命エラーとして理由が出る）。
+- `session_create` / 復元で起動した session も同じ supervisor で動くので、再起動・停止は上記と同じ。
 - `rc_stop` は再起動予約を取り消し、SIGTERM、`stopGraceMs` 後に SIGKILL。`restarts` は 0 に戻る。停止後の `rc_start` は `--continue` なしの新規起動。
 - 起動のたびに `claude remote-control` は `Enable Remote Control? (y/n)` を出して stdin の返答を待つ。`autoConsent`（既定 true）なら stdout に出た時点で `y` を 1 度送る。stdin は子の生存中ずっと開けておく（閉じると確認待ちで固まる）。
 - 子プロセスの環境変数は `process.env` < `remoteControl.env` < `projects[].env` の順で合成する。合成後に `ANTHROPIC_API_KEY`（あると remote-control が失敗する）と `TMUX` を除く。この 2 つは config の `env` でも注入できない。
@@ -194,6 +227,11 @@ npm run e2e
 - 確認内容: tool 一覧、`rc_start` → `connected`、stub の異常終了 → `--continue` 付き再起動、`rc_stop`、`server_list`、`cap_kick`、`server_status`、stdin EOF での自己終了。
 
 ## 未決
+
+- B の owner を master-cap の接続に自動で載せる仕組み（上記「今は」の限界）。center が master-cap を起動する時に MCP 設定を渡せる手段が `claude remote-control` に無い。
+- 未 trust の path の扱い（center が trust を付ける手段）。
+- remote の長期運用（`running` のまま返信が失われた時の再同期。server の `status` と突き合わせる案）。
+- session 削除後に claude.ai に残る remote-control の environment / session 表示は、CLI からは消せない（確認した範囲で手段を見つけていない）。
 
 - 認証（center ↔ server）。desktop ↔ center は Bearer token（上記）。
 - desktop からの起動と接続先の切り替え。

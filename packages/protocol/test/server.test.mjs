@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  isServerCommand, isKickCapCommand, isResumeWorkerCommand, isStatusCommand,
+  isServerCommand, isKickCapCommand, isStopCapCommand, isResumeWorkerCommand, isStatusCommand,
   parseServerCommand, isServerReply, parseServerReply,
   isValidAgentId, isAgentState, SERVER_NAME, MESSENGER_PROTOCOL, AGENT_ID_PATTERN,
 } from "../dist/index.js";
@@ -15,6 +15,8 @@ const kickFull = {
 const resumeMin = { bantou: 1, type: "resume_worker", worker_id: "w1", prompt: "continue" };
 const resumeRepo = { ...resumeMin, repo: "https://example.com/r.git", branch: "main" };
 const status = { bantou: 1, type: "status" };
+const stopCap = { bantou: 1, type: "stop_cap", cap_id: "c1" };
+const stopResult = { bantou: 1, type: "stop_result", ok: true, cap_id: "c1", stopped: true };
 
 test("server name", () => {
   assert.equal(SERVER_NAME, "bantou-server");
@@ -142,7 +144,7 @@ test("messenger/protocol.json matches MESSENGER_PROTOCOL and the message set", (
   assert.equal(manifest.version, MESSENGER_PROTOCOL.version);
   assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
   assert.equal(typeof manifest.description, "string");
-  assert.deepEqual(Object.keys(manifest.messages).sort(), ["cap_result", "error", "kick_cap", "status", "status_result"]);
+  assert.deepEqual(Object.keys(manifest.messages).sort(), ["cap_result", "error", "kick_cap", "status", "status_result", "stop_cap", "stop_result"]);
   for (const [k, schema] of Object.entries(manifest.messages)) {
     assert.equal(schema.type, "object", k);
     assert.equal(schema.properties.type.const, k, k);
@@ -153,7 +155,7 @@ test("messenger/protocol.json matches MESSENGER_PROTOCOL and the message set", (
 test("protocol.json required fields agree with the guards", () => {
   const m = manifest.messages;
   // every sample accepted by the guards carries all required fields of its schema
-  const samples = { kick_cap: kickMin, status, cap_result: capResult, status_result: statusReply, error: errReply };
+  const samples = { kick_cap: kickMin, stop_cap: stopCap, stop_result: stopResult, status, cap_result: capResult, status_result: statusReply, error: errReply };
   for (const [k, v] of Object.entries(samples)) {
     for (const f of m[k].required) assert.ok(f in v, `${k} sample lacks required ${f}`);
     for (const f of Object.keys(v)) assert.ok(f in m[k].properties, `${k}.${f} not in schema`);
@@ -161,4 +163,20 @@ test("protocol.json required fields agree with the guards", () => {
   assert.deepEqual([...m.kick_cap.required].sort(), ["bantou", "cap_id", "prompt", "type"]);
   for (const f of Object.keys(kickFull)) assert.ok(f in m.kick_cap.properties, f);
   assert.equal(m.kick_cap.properties.cap_id.pattern, AGENT_ID_PATTERN.source);
+});
+
+test("stop_cap / stop_result", () => {
+  assert.ok(isServerCommand(stopCap) && isStopCapCommand(stopCap) && !isKickCapCommand(stopCap));
+  assert.deepEqual(parseServerCommand(JSON.stringify(stopCap)), stopCap);
+  for (const id of ["", "a b", "../x", undefined, 1]) {
+    assert.equal(isServerCommand({ ...stopCap, cap_id: id }), false, String(id));
+  }
+  assert.ok(isServerReply(stopResult));
+  assert.deepEqual(parseServerReply(JSON.stringify(stopResult)), stopResult);
+  assert.equal(isServerReply({ ...stopResult, stopped: "yes" }), false);
+  assert.equal(isServerReply({ ...stopResult, ok: false }), false);
+  assert.equal(isServerReply({ ...stopResult, cap_id: "a b" }), false);
+  assert.ok(isServerReply({ bantou: 1, type: "error", ok: false, message: "x", command: "stop_cap", cap_id: "c1" }));
+  assert.deepEqual(manifest.messages.error.properties.command.enum, ["kick_cap", "resume_worker", "stop_cap", "status"]);
+  assert.equal(MESSENGER_PROTOCOL.version, "1.1.0");
 });

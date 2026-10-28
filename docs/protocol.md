@@ -114,8 +114,8 @@ sender peer as one JSON object.
 ### Messenger protocol `bantou`
 
 The protocol definition is `packages/protocol/messenger/protocol.json` (JSON
-Schemas of `kick_cap`, `status`, `cap_result`, `status_result`, `error`)
-and `PROTOCOL.md`. It is the agent-messenger protocol version (`1.0.0`,
+Schemas of `kick_cap`, `stop_cap`, `status`, `cap_result`, `stop_result`, `status_result`, `error`)
+and `PROTOCOL.md`. It is the agent-messenger protocol version (`1.1.0`,
 `MESSENGER_PROTOCOL` in `server.ts`); the body field `bantou: 1` is a separate
 version of the JSON bodies below. Changing the definition needs a new protocol
 `version` (same name and version with other content is `PROTOCOL_CONFLICT`).
@@ -138,7 +138,7 @@ version of the JSON bodies below. Changing the definition needs a new protocol
 | key | required | meaning |
 |---|---|---|
 | `bantou` | yes | protocol version, always `1` |
-| `type` | yes | `kick_cap` or `status` |
+| `type` | yes | `kick_cap`, `stop_cap` or `status` |
 
 ### `kick_cap` — start or resume a cap
 
@@ -155,6 +155,19 @@ version of the JSON bodies below. Changing the definition needs a new protocol
 | `reason` | no | free text, logged only, not passed to claude |
 
 Reply: `cap_result` or `error`.
+
+### `stop_cap` — stop a running cap
+
+```json
+{"bantou":1,"type":"stop_cap","cap_id":"cap-a"}
+```
+
+Kills the process group of the cap's running `claude -p` (SIGTERM, then
+SIGKILL after a short grace). Reply: `stop_result` `{"bantou":1,"type":"stop_result","ok":true,"cap_id":"cap-a","stopped":true}`
+(`stopped` is false when the cap is not running) or `error`. The interrupted
+`kick_cap` gets its own `cap_result` with `ok:false`. Not stopped: queued
+commands behind the running one, and workers the cap started outside its own
+process group (see server README).
 
 ### `status` — list caps and workers
 

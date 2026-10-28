@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { MESSENGER_PROTOCOL } from "@agent-hand/bantou-protocol";
 import { parseConfig } from "../src/config.js";
 import {
   createClient,
@@ -381,7 +382,7 @@ test("meta: 名前宛て（発見できない時）でも meta {protocol: bantou
   const p = link.status("s1");
   await sleep(20);
   assert.deepEqual(clients[0].sentTo, ["bantou-server"]);
-  assert.deepEqual(clients[0].sentMeta, [{ protocol: "bantou", version: "1.0.0" }]);
+  assert.deepEqual(clients[0].sentMeta, [{ protocol: "bantou", version: MESSENGER_PROTOCOL.version }]);
   clients[0].reply(statusResult(1));
   await p;
   await link.close();
@@ -447,7 +448,7 @@ test("servers[].peer 指定があれば発見せずその名前へ送る（従�
   await sleep(20);
   assert.deepEqual(clients[0].listCalls, []);
   assert.deepEqual(clients[0].sentTo, ["my-named-server"]);
-  assert.deepEqual(clients[0].sentMeta, [{ protocol: "bantou", version: "1.0.0" }]);
+  assert.deepEqual(clients[0].sentMeta, [{ protocol: "bantou", version: MESSENGER_PROTOCOL.version }]);
   clients[0].reply(statusResult(1), "my-named-server");
   assert.equal((await p).type, "status_result");
   await link.close();
@@ -511,4 +512,116 @@ test("reachable の既定は接続を確保できるか（listPeers 非対応の
   const link2 = createServerLink({ config: cfg, log: () => {}, clientFactory: () => Object.assign(new FakeClient(), { failConnect: true }) });
   assert.equal((await link2.list())[0].reachable, false);
   await link2.close();
+});
+
+// -- 発見ベース（config.servers に依存しない）: peers / selectPeer / kickCapOn / stopCapOn --
+
+function setupNoServers(peers?: LinkPeer[]) {
+  const cfg = parseConfig({}, "/x/c.json");
+  const clients: FakeClient[] = [];
+  const link = createServerLink({
+    config: cfg,
+    log: () => {},
+    clientFactory: () => {
+      const c = new FakeClient();
+      c.peers = peers;
+      clients.push(c);
+      return c;
+    },
+  });
+  return { link, clients };
+}
+
+test("発見ベース: servers が空でも peers / selectPeer が protocol 絞り込みで動く。list / connectAll には出ない", async () => {
+  const { link, clients } = setupNoServers([peerOf("id-a", "bantou-server", "1.1.0"), peerOf("id-b", "other")]);
+  assert.deepEqual(await link.list(), []);
+  await link.connectAll();
+  assert.equal(clients.length, 0);
+  assert.deepEqual(await link.peers(), [
+    { id: "id-a", name: "bantou-server", version: "1.1.0" },
+    { id: "id-b", name: "other", version: "1.0.0" },
+  ]);
+  assert.deepEqual(clients[0].listCalls, [{ scope: "all", filter: { protocol: "bantou" } }]);
+  assert.equal((await link.selectPeer()).id, "id-a");
+  assert.equal((await link.selectPeer("id-b")).name, "other");
+  assert.equal((await link.selectPeer("other")).id, "id-b");
+  await assert.rejects(link.selectPeer("zzz"), /見つからない.*bantou-server\(id-a\)/);
+  assert.equal(clients.length, 1);
+  await link.close();
+});
+
+test("発見ベース: 0 件・発見不能（0.9 broker）・接続失敗は selectPeer が説明付きで投げる", async () => {
+  const empty = setupNoServers([]);
+  await assert.rejects(empty.link.selectPeer(), /見つからない/);
+  await empty.link.close();
+  const old = setupNoServers(undefined);
+  await assert.rejects(old.link.selectPeer(), /BROKER_UNSUPPORTED/);
+  await old.link.close();
+  const cfg = parseConfig({}, "/x/c.json");
+  const down = createServerLink({ config: cfg, log: () => {}, clientFactory: () => Object.assign(new FakeClient(), { failConnect: true }) });
+  await assert.rejects(down.selectPeer(), /messenger に接続できない/);
+  await down.close();
+});
+
+test("発見ベース: kickCapOn は選んだ peer id 宛てに declared version の meta 付きで送り、cap_result を返す", async () => {
+  const peer = { id: "id-a", name: "bantou-server", version: "1.1.0" };
+  const { link, clients } = setupNoServers([peerOf("id-a", "bantou-server", "1.1.0")]);
+  const p = link.kickCapOn(peer, { cap_id: "r-1", prompt: "go" });
+  await sleep(20);
+  assert.deepEqual(clients[0].sentTo, ["id-a"]);
+  assert.deepEqual(clients[0].sentMeta, [{ protocol: "bantou", version: "1.1.0" }]);
+  assert.deepEqual(clients[0].sent[0], { bantou: 1, type: "kick_cap", cap_id: "r-1", prompt: "go" });
+  clients[0].reply(capResult("r-1", "ok"), "bantou-server", { from_id: "id-a" });
+  assert.equal(((await p) as { result_text: string }).result_text, "ok");
+  await link.close();
+});
+
+test("stop_cap: stop_result は stop の待ちだけを解決し、同じ cap_id の kick_cap の待ちは続く", async () => {
+  const peer = { id: "id-a", name: "bantou-server" };
+  const { link, clients } = setupNoServers([peerOf("id-a", "bantou-server")]);
+  const kick = link.kickCapOn(peer, { cap_id: "r-1", prompt: "go" });
+  await sleep(20);
+  const stop = link.stopCapOn(peer, { cap_id: "r-1" }); // kick の実行中でも直列待ちにならない
+  await sleep(20);
+  assert.deepEqual(clients[0].sent.map((m) => m.type), ["kick_cap", "stop_cap"]);
+  clients[0].reply({ bantou: 1, type: "stop_result", ok: true, cap_id: "r-1", stopped: true });
+  assert.deepEqual(await stop, { bantou: 1, type: "stop_result", ok: true, cap_id: "r-1", stopped: true });
+  let kickDone = false;
+  void kick.then(() => (kickDone = true));
+  await sleep(20);
+  assert.equal(kickDone, false);
+  clients[0].reply({ ...capResult("r-1", ""), ok: false, error: "stop_cap により停止" });
+  assert.equal(((await kick) as { ok: boolean }).ok, false);
+  await link.close();
+});
+
+test("stop_cap の error（command=stop_cap, cap_id 付き）は kick_cap の待ちと取り違えず stop の待ちへ", async () => {
+  const peer = { id: "id-a", name: "bantou-server" };
+  const { link, clients } = setupNoServers([peerOf("id-a", "bantou-server")]);
+  const kick = link.kickCapOn(peer, { cap_id: "r-1", prompt: "go" });
+  await sleep(20);
+  const stop = link.stopCapOn(peer, { cap_id: "r-1" });
+  await sleep(20);
+  clients[0].reply({ bantou: 1, type: "error", ok: false, message: "ng", command: "stop_cap", cap_id: "r-1" });
+  assert.equal((await stop).type, "error");
+  let kickDone = false;
+  void kick.then(() => (kickDone = true));
+  await sleep(20);
+  assert.equal(kickDone, false);
+  await link.close();
+  assert.equal((await kick).type, "error"); // close で中断
+});
+
+test("config.servers があれば発見ベースは先頭 server の client を共有する（接続は 1 本）", async () => {
+  const cfg = parseConfig({ servers: [{ name: "s1" }] }, "/x/c.json");
+  const clients: FakeClient[] = [];
+  const link = createServerLink({
+    config: cfg, log: () => {},
+    clientFactory: () => { const c = new FakeClient(); c.peers = [peerOf("id-a", "bantou-server")]; clients.push(c); return c; },
+  });
+  await link.connectAll();
+  assert.equal((await link.selectPeer()).id, "id-a");
+  assert.equal(clients.length, 1);
+  assert.deepEqual((await link.list()).map((s) => s.name), ["s1"]);
+  await link.close();
 });

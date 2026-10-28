@@ -11,7 +11,7 @@ export const SERVER_NAME = "bantou-server";
  * agent-messenger protocol registration (messenger/protocol.json) used in `meta` of send / listPeers.
  * Not the body schema version (`bantou: 1`, PROTOCOL_VERSION). Keep in sync with messenger/protocol.json.
  */
-export const MESSENGER_PROTOCOL = { protocol: "bantou", version: "1.0.0" } as const;
+export const MESSENGER_PROTOCOL = { protocol: "bantou", version: "1.1.0" } as const;
 
 /** Allowed cap / worker ids (also directory names under <workspace>/caps and <workspace>/workers). */
 export const AGENT_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
@@ -21,7 +21,7 @@ export type AgentKind = "cap" | "worker";
 /** Lifecycle of one cap / worker as kept in its state.json. */
 export type AgentState = "idle" | "running" | "failed" | "error";
 
-export type ServerCommandType = "kick_cap" | "resume_worker" | "status";
+export type ServerCommandType = "kick_cap" | "resume_worker" | "stop_cap" | "status";
 
 export interface ServerCommandBase {
   /** Protocol version, always 1. */
@@ -55,14 +55,24 @@ export interface ResumeWorkerCommand extends ServerCommandBase {
   prompt: string;
 }
 
+/**
+ * Stop the running remote cap `cap_id` (its `claude -p` process group). Reply: stop_result, or error.
+ * The interrupted kick_cap still gets its own cap_result with ok=false.
+ */
+export interface StopCapCommand extends ServerCommandBase {
+  type: "stop_cap";
+  /** AGENT_ID_PATTERN. */
+  cap_id: string;
+}
+
 /** List caps and workers with their state. */
 export interface StatusCommand extends ServerCommandBase {
   type: "status";
 }
 
-export type ServerCommand = KickCapCommand | ResumeWorkerCommand | StatusCommand;
+export type ServerCommand = KickCapCommand | ResumeWorkerCommand | StopCapCommand | StatusCommand;
 
-export type ServerReplyType = "cap_result" | "worker_result" | "status_result" | "error";
+export type ServerReplyType = "cap_result" | "worker_result" | "stop_result" | "status_result" | "error";
 
 /** Outcome of one headless run. */
 export interface RunOutcome {
@@ -85,6 +95,16 @@ export interface WorkerResultReply extends RunOutcome {
   bantou: typeof PROTOCOL_VERSION;
   type: "worker_result";
   worker_id: string;
+}
+
+/** Outcome of stop_cap. */
+export interface StopResultReply {
+  bantou: typeof PROTOCOL_VERSION;
+  type: "stop_result";
+  ok: true;
+  cap_id: string;
+  /** true when a running (or about to start) run was found and stopped; false when the cap was not running. */
+  stopped: boolean;
 }
 
 export interface AgentStatus {
@@ -125,7 +145,7 @@ export interface ErrorReply {
   worker_id?: string;
 }
 
-export type ServerReply = CapResultReply | WorkerResultReply | StatusReply | ErrorReply;
+export type ServerReply = CapResultReply | WorkerResultReply | StopResultReply | StatusReply | ErrorReply;
 
 // -- guards -------------------------------------------------------------------
 
@@ -160,7 +180,7 @@ function strOrNull(v: unknown): boolean {
 }
 
 function isCommandType(v: unknown): v is ServerCommandType {
-  return v === "kick_cap" || v === "resume_worker" || v === "status";
+  return v === "kick_cap" || v === "resume_worker" || v === "stop_cap" || v === "status";
 }
 
 /** A string matching AGENT_ID_PATTERN. */
@@ -190,6 +210,8 @@ export function isServerCommand(v: unknown): v is ServerCommand {
         optNonEmptyString(v.repo) &&
         optNonEmptyString(v.branch)
       );
+    case "stop_cap":
+      return isValidAgentId(v.cap_id);
     case "status":
       return true;
     default:
@@ -203,6 +225,10 @@ export function isKickCapCommand(v: unknown): v is KickCapCommand {
 
 export function isResumeWorkerCommand(v: unknown): v is ResumeWorkerCommand {
   return isServerCommand(v) && v.type === "resume_worker";
+}
+
+export function isStopCapCommand(v: unknown): v is StopCapCommand {
+  return isServerCommand(v) && v.type === "stop_cap";
 }
 
 export function isStatusCommand(v: unknown): v is StatusCommand {
@@ -251,6 +277,8 @@ export function isServerReply(v: unknown): v is ServerReply {
       return isValidAgentId(v.cap_id) && isRunOutcome(v);
     case "worker_result":
       return isValidAgentId(v.worker_id) && isRunOutcome(v);
+    case "stop_result":
+      return v.ok === true && isValidAgentId(v.cap_id) && typeof v.stopped === "boolean";
     case "status_result":
       return (
         v.ok === true &&

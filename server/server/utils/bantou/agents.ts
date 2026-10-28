@@ -10,7 +10,7 @@ import {
   type RunOutcome,
 } from "@agent-hand/bantou-protocol";
 import type { Config } from "./config";
-import type { RunMode } from "./claude";
+import { killGroup, type ClaudeRunResult, type RunMode } from "./claude";
 import { agentDir, runLogDir } from "./paths";
 import { listLiveProcesses, matchesSession, type LiveProcess } from "./processes";
 import type { AgentRunner } from "./runner";
@@ -39,14 +39,26 @@ export interface AgentManagerDeps {
   listProcesses?: () => Promise<LiveProcess[] | null>;
   /** pid を殺して消えるまで待つ。消えたら true（テストで差し替える）。 */
   terminate?: (pid: number) => Promise<boolean>;
+  /** stop の SIGTERM から SIGKILL までの猶予（テストで短くする）。既定 3 秒。 */
+  stopGraceMs?: number;
 }
 
 export interface AgentManager {
   invoke(kind: AgentKind, id: string, input: InvokeInput): Promise<RunOutcome>;
+  /**
+   * 実行中（または待ち）の指示を止める。走っている claude -p は process group ごと SIGTERM し、
+   * 猶予内に終了しなければ SIGKILL する。待ちの指示は実行されずに失敗で返る。何も無ければ stopped=false。
+   */
+  stop(kind: AgentKind, id: string): Promise<{ stopped: boolean }>;
   status(): Promise<{ caps: AgentStatus[]; workers: AgentStatus[] }>;
   reapOrphans(): Promise<ReapSummary>;
   shutdown(): Promise<void>;
 }
+
+/** stop_cap で中断された指示の error 文言。 */
+export const STOP_MSG = "stop_cap により停止";
+/** stop の SIGTERM から SIGKILL までの既定の猶予。 */
+const STOP_GRACE_MS = 3000;
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -105,7 +117,11 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
 
   const chains = new Map<string, Promise<unknown>>();
   const waiting = new Map<string, number>();
-  const live = new Set<{ child: ChildProcess; dir: string }>();
+  const live = new Set<{ child: ChildProcess; dir: string; key: string }>();
+  /** invoke 中（待ち + 実行）の件数。stop の対象判定と、stop 要求の後始末に使う。 */
+  const inflight = new Map<string, number>();
+  /** stop 要求済みの key。inflight が 0 になったら消す。 */
+  const stopRequests = new Set<string>();
   let shuttingDown = false;
   const SHUTDOWN_MSG = "server 終了により中断";
 
@@ -151,7 +167,11 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
 
   async function execute(kind: AgentKind, id: string, input: InvokeInput): Promise<RunOutcome> {
     if (shuttingDown) throw new Error("server 終了中");
+    const key = `${kind}:${id}`;
     const dir = agentDir(config.workspace, kind, id);
+    if (stopRequests.has(key)) {
+      return { session_id: (await readState(dir).catch(() => null))?.session_id ?? "", ok: false, result_text: "", error: STOP_MSG };
+    }
     try {
       await prepareDir(kind, dir, input);
     } catch (e) {
@@ -180,9 +200,13 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
 
       let retriesUsed = 0;
       let switched = false;
-      let r;
+      let r: ClaudeRunResult;
       for (;;) {
         if (shuttingDown) throw new Error(SHUTDOWN_MSG);
+        if (stopRequests.has(key)) {
+          r = { ok: false, sessionMissing: false, timedOut: false, detail: STOP_MSG, durationMs: 0 };
+          break;
+        }
         r = await runner.run({
           claude: config.session.claude,
           sessionId,
@@ -198,13 +222,17 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
           env: { ...process.env, ...config.session.env },
           logFile: join(runLogDir(dir), `${sessionId}.jsonl`),
           onSpawn: (child) => {
-            const entry = { child, dir };
+            const entry = { child, dir, key };
             live.add(entry);
-            if (shuttingDown) child.kill("SIGKILL");
+            if (shuttingDown) killGroup(child, "SIGKILL");
             child.once("close", () => live.delete(entry));
           },
         });
         if (r.ok || shuttingDown) break;
+        if (stopRequests.has(key)) {
+          r = { ...r, detail: STOP_MSG };
+          break;
+        }
         if (r.sessionMissing && mode === "resume" && !switched) {
           switched = true;
           log(`session が無いので新規に切り替え: kind=${kind} id=${id} old=${sessionId}`);
@@ -255,17 +283,56 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
     }
   }
 
+  function settled(key: string): void {
+    const n = (inflight.get(key) ?? 1) - 1;
+    if (n > 0) {
+      inflight.set(key, n);
+      return;
+    }
+    inflight.delete(key);
+    stopRequests.delete(key);
+  }
+
+  async function stop(kind: AgentKind, id: string): Promise<{ stopped: boolean }> {
+    if (!isValidAgentId(id)) throw new Error(kind === "cap" ? `cap_id が不正: ${id}` : `worker_id が不正: ${id}`);
+    const key = `${kind}:${id}`;
+    if (!inflight.has(key)) return { stopped: false };
+    stopRequests.add(key);
+    const targets = [...live].filter((t) => t.key === key);
+    log(`stop 要求: ${key} 実行中の子=${targets.length} 待ち=${waiting.get(key) ?? 0}`);
+    const closed = (c: ChildProcess): Promise<boolean> =>
+      c.exitCode !== null || c.signalCode !== null
+        ? Promise.resolve(true)
+        : new Promise<boolean>((resolve) => {
+            c.once("close", () => resolve(true));
+            setTimeout(() => resolve(false), deps.stopGraceMs ?? STOP_GRACE_MS);
+          });
+    for (const t of targets) killGroup(t.child, "SIGTERM");
+    const results = await Promise.all(targets.map((t) => closed(t.child)));
+    targets.forEach((t, i) => {
+      if (results[i]) return;
+      log(`stop: SIGKILL ${key} pid=${t.child.pid ?? "?"}`);
+      killGroup(t.child, "SIGKILL");
+    });
+    return { stopped: true };
+  }
+
   function invoke(kind: AgentKind, id: string, input: InvokeInput): Promise<RunOutcome> {
     if (!isValidAgentId(id)) {
       return Promise.reject(new Error(kind === "cap" ? `cap_id が不正: ${id}` : `worker_id が不正: ${id}`));
     }
     const key = `${kind}:${id}`;
+    inflight.set(key, (inflight.get(key) ?? 0) + 1);
     waiting.set(key, (waiting.get(key) ?? 0) + 1);
     const prev = chains.get(key) ?? Promise.resolve();
     const run = prev.then(() => {
       waiting.set(key, (waiting.get(key) ?? 1) - 1);
       return execute(kind, id, input);
     });
+    void run.then(
+      () => settled(key),
+      () => settled(key),
+    );
     const tail = run.catch(() => undefined);
     chains.set(key, tail);
     void tail.then(() => {
@@ -396,10 +463,10 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
   async function shutdown(): Promise<void> {
     shuttingDown = true;
     const targets = [...live];
-    for (const t of targets) t.child.kill("SIGKILL");
+    for (const t of targets) killGroup(t.child, "SIGKILL");
     for (const t of targets) await markFailed(t.dir, SHUTDOWN_MSG);
     await Promise.allSettled([...chains.values()]);
   }
 
-  return { invoke, status, reapOrphans, shutdown };
+  return { invoke, stop, status, reapOrphans, shutdown };
 }

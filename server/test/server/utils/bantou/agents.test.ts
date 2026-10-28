@@ -353,3 +353,105 @@ test("agents: reapOrphans は agent ごとの失敗を errored にして続行�
     assert.equal((await readState(dir2)).state, sum.killed === 1 ? "failed" : "error");
   });
 });
+
+/** kill / once("close") / exitCode を持つ偽の子。SIGTERM で止まるか（stubborn で無視）を選べる。 */
+function fakeChild(stubborn = false) {
+  const sent: string[] = [];
+  const handlers: Array<() => void> = [];
+  const child = {
+    pid: undefined,
+    exitCode: null as number | null,
+    signalCode: null as string | null,
+    kill: (sig: string) => {
+      sent.push(sig);
+      if (sig === "SIGKILL" || !stubborn) {
+        child.signalCode = sig;
+        for (const h of handlers.splice(0)) h();
+      }
+      return true;
+    },
+    once: (_ev: string, h: () => void) => void handlers.push(h),
+  };
+  return { child, sent };
+}
+
+test("agents: stop は実行中の子に SIGTERM し、指示は STOP_MSG の失敗で返る（再試行しない）", async () => {
+  await withFixture(2, async (f) => {
+    const fc = fakeChild();
+    let release!: () => void;
+    const m = mgr(f, (o) => {
+      o.onSpawn?.(fc.child as never);
+      return new Promise<ClaudeRunResult>((r) => (release = () => r(ng("終了コード null"))));
+    });
+    const p = m.invoke("cap", "c1", { prompt: "p" });
+    await new Promise((r) => setTimeout(r, 30));
+    const s = m.stop("cap", "c1");
+    await new Promise((r) => setTimeout(r, 10));
+    release();
+    assert.deepEqual(await s, { stopped: true });
+    const r = await p;
+    assert.deepEqual(fc.sent, ["SIGTERM"]);
+    assert.equal(r.ok, false);
+    assert.equal(r.error, "stop_cap により停止");
+    assert.equal(f.calls.length, 1);
+    const st = await readState(join(f.ws, "caps", "c1"));
+    assert.equal(st.state, "failed");
+    assert.equal(st.last_error, "stop_cap により停止");
+  });
+});
+
+test("agents: SIGTERM で止まらない子は猶予後に SIGKILL", async () => {
+  await withFixture(0, async (f) => {
+    const fc = fakeChild(true);
+    let release!: () => void;
+    const m = mgr(f, (o) => {
+      o.onSpawn?.(fc.child as never);
+      return new Promise<ClaudeRunResult>((r) => (release = () => r(ng("x"))));
+    }, { stopGraceMs: 50 });
+    const p = m.invoke("cap", "c1", { prompt: "p" });
+    await new Promise((r) => setTimeout(r, 30));
+    const s = await m.stop("cap", "c1");
+    assert.equal(s.stopped, true);
+    assert.deepEqual(fc.sent, ["SIGTERM", "SIGKILL"]);
+    release();
+    assert.equal((await p).error, "stop_cap により停止");
+  });
+});
+
+test("agents: 実行していない cap の stop は stopped=false。不正 id は拒否", async () => {
+  await withFixture(0, async (f) => {
+    const m = mgr(f, async () => ok("r"));
+    assert.deepEqual(await m.stop("cap", "nothing"), { stopped: false });
+    await m.invoke("cap", "c1", { prompt: "p" });
+    assert.deepEqual(await m.stop("cap", "c1"), { stopped: false });
+    await assert.rejects(m.stop("cap", "a b"), /不正/);
+  });
+});
+
+test("agents: spawn 前（git 準備中など）の stop でも claude を起動せず、待ちの指示も止まる。後始末で次は動く", async () => {
+  await withFixture(0, async (f) => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let n = 0;
+    const m = mgr(f, async (o) => {
+      n++;
+      if (n === 1) await gate;
+      return ok("r");
+    });
+    const p1 = m.invoke("cap", "c1", { prompt: "1" });
+    await new Promise((r) => setTimeout(r, 30));
+    const p2 = m.invoke("cap", "c1", { prompt: "2" });
+    // p1 は runner 内（gate 待ち、子は未登録）。stop は子が無いので signal 無しで要求だけ立てる
+    const s = await m.stop("cap", "c1");
+    assert.equal(s.stopped, true);
+    release();
+    const r1 = await p1;
+    const r2 = await p2;
+    assert.equal(r1.ok, true); // 既に走っていた run は結果を返す（kill 対象の子が無かった）
+    assert.equal(r2.error, "stop_cap により停止"); // 待ちは実行されない
+    assert.equal(n, 1);
+    const r3 = await m.invoke("cap", "c1", { prompt: "3" });
+    assert.equal(r3.ok, true);
+    assert.equal(n, 2);
+  });
+});

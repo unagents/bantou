@@ -4,7 +4,9 @@ import { test } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { allowedHostsFor, startHttpServer } from "../src/http.js";
+import type { RemoteManager } from "../src/remotes.js";
 import { createCenterServer } from "../src/server.js";
+import type { SessionManager } from "../src/sessions.js";
 import { parseConfig } from "../src/config.js";
 import type { RemoteControlSupervisor } from "../src/remote-control.js";
 import type { ServerLink } from "../src/server-link.js";
@@ -12,7 +14,10 @@ import type { ServerLink } from "../src/server-link.js";
 const TOKEN = "test-token-0123456789";
 const AUTH = { authorization: `Bearer ${TOKEN}` };
 
-const TOOLS = ["cap_kick", "rc_list", "rc_start", "rc_status", "rc_stop", "server_list", "server_status", "worker_resume"];
+const TOOLS = [
+  "cap_kick", "rc_list", "rc_start", "rc_status", "rc_stop", "remote_create", "remote_delete", "remote_list",
+  "server_list", "server_status", "session_create", "session_delete", "session_list", "worker_resume",
+];
 
 async function boot(
   extra: { sessionIdleTtlMs?: number; sweepIntervalMs?: number; maxSessions?: number; bind?: string; token?: string } = {},
@@ -23,8 +28,13 @@ async function boot(
     shutdown: async () => {},
   } as unknown as RemoteControlSupervisor;
   const link = { list: async () => [] } as unknown as ServerLink;
+  const sessions = {} as unknown as SessionManager;
+  const remotes = {
+    list: (f?: { owner?: string }) => [{ remote_id: "r-1", owner: f?.owner ?? "(all)" }],
+    create: async (i: { owner: string }) => ({ remote_id: "r-9", server: "s", serverName: "n", state: "running", owner: i.owner }),
+  } as unknown as RemoteManager;
   const h = await startHttpServer({
-    createServer: () => createCenterServer({ config, supervisor, link }),
+    createServer: () => createCenterServer({ config, supervisor, link, sessions, remotes }),
     port: 0,
     log: () => {},
     ...extra,
@@ -240,6 +250,43 @@ test("http: wildcard bind では別ホスト名宛ての Host / Origin も token
     assert.equal((await rawPost(h.port, { ...noAuth, ...lan }, body)).status, 401);
     assert.equal((await rawPost(h.port, { ...MCP_HEADERS, ...lan, authorization: "Bearer nope-nope-nope-nope" }, body)).status, 401);
   } finally {
+    await h.close();
+  }
+});
+
+test("http: owner は header X-Bantou-Session > URL query session > 引数 owner の順で解決される", async () => {
+  const { h, url } = await boot();
+  const connect = async (u: URL, headers: Record<string, string> = {}) => {
+    const c = new Client({ name: "o", version: "0" });
+    await c.connect(new StreamableHTTPClientTransport(u, { requestInit: { headers: { ...AUTH, ...headers } } }));
+    return c;
+  };
+  const owner = async (c: Client, args: Record<string, unknown> = {}): Promise<string> => {
+    const r = await c.callTool({ name: "remote_list", arguments: args });
+    return (JSON.parse((r.content as { text: string }[])[0].text) as { owner: string }[])[0].owner;
+  };
+  const clients: Client[] = [];
+  try {
+    const hdr = await connect(url, { "X-Bantou-Session": "pm-h" });
+    const q = new URL(url);
+    q.searchParams.set("session", "pm-q");
+    const qry = await connect(q);
+    const both = await connect(q, { "X-Bantou-Session": "pm-h" });
+    const none = await connect(url);
+    clients.push(hdr, qry, both, none);
+    assert.equal(await owner(hdr), "pm-h");
+    assert.equal(await owner(hdr, { owner: "arg" }), "pm-h"); // header が引数より優先
+    assert.equal(await owner(qry), "pm-q");
+    assert.equal(await owner(both), "pm-h"); // header が query より優先
+    assert.equal(await owner(none, { owner: "arg" }), "arg");
+    assert.equal(await owner(none), "(all)"); // 分からなければ全件
+    // create は owner 必須（header / query / 引数のどれか）
+    const noOwner = await none.callTool({ name: "remote_create", arguments: { prompt: "p" } });
+    assert.equal(noOwner.isError, true);
+    const viaHdr = await hdr.callTool({ name: "remote_create", arguments: { prompt: "p" } });
+    assert.equal((JSON.parse((viaHdr.content as { text: string }[])[0].text) as { state: string }).state, "running");
+  } finally {
+    await Promise.all(clients.map((c) => c.close().catch(() => {})));
     await h.close();
   }
 });

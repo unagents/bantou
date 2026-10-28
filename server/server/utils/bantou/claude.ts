@@ -79,6 +79,23 @@ export function readResultEnvelope(
   };
 }
 
+/**
+ * 子へ signal を送る。子は detached（setsid、pgid = pid）で起動するので process group ごと送り、
+ * 孫まで止める。group が無い・pid が無い場合は子 1 本へ送る。
+ */
+export function killGroup(child: Pick<ChildProcess, "pid" | "kill">, signal: NodeJS.Signals): void {
+  if (child.pid !== undefined && child.pid > 1) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== "ESRCH" && code !== "EPERM") throw e;
+    }
+  }
+  child.kill(signal);
+}
+
 /** claude -p を 1 回起動する。reject しない。 */
 export function runClaude(o: ClaudeRunOptions): Promise<ClaudeRunResult> {
   const started = Date.now();
@@ -103,7 +120,7 @@ export function runClaude(o: ClaudeRunOptions): Promise<ClaudeRunResult> {
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      child?.kill("SIGKILL");
+      if (child) killGroup(child, "SIGKILL");
     }, o.timeoutMs);
 
     try {
@@ -111,6 +128,7 @@ export function runClaude(o: ClaudeRunOptions): Promise<ClaudeRunResult> {
         cwd: o.cwd,
         stdio: ["ignore", "pipe", "pipe"],
         env: o.env ?? process.env,
+        detached: true,
       });
     } catch (e) {
       fail(`claude を起動できない: ${e instanceof Error ? e.message : String(e)}`);

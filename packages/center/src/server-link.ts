@@ -11,9 +11,11 @@ import {
   type ResumeWorkerCommand,
   type ServerCommandType,
   type StatusReply,
+  type StopCapCommand,
+  type StopResultReply,
   type WorkerResultReply,
 } from "@agent-hand/bantou-protocol";
-import type { Config, ServerConfig } from "./config.js";
+import { DEFAULT_SERVER_TIMEOUT_MS, type Config, type ServerConfig } from "./config.js";
 import type { Logger } from "./log.js";
 
 /** messenger の meta（protocol 名と version）。 */
@@ -62,6 +64,18 @@ export interface ServerInfo {
 
 export type KickCapInput = Omit<KickCapCommand, "bantou" | "type">;
 export type ResumeWorkerInput = Omit<ResumeWorkerCommand, "bantou" | "type">;
+export type StopCapInput = Omit<StopCapCommand, "bantou" | "type">;
+
+/** config.servers に依存せず、messenger の発見（protocol bantou）で選んだ server の peer。 */
+export interface ServerPeer {
+  id: string;
+  name: string;
+  /** peer が宣言している bantou protocol の version（無ければ undefined）。 */
+  version?: string;
+}
+
+/** stop_cap の返信待ち（server は kill を待つので、通常の指示より短く切る）。 */
+export const STOP_TIMEOUT_MS = 30_000;
 
 export interface ServerLink {
   connectAll(): Promise<void>;
@@ -69,10 +83,21 @@ export interface ServerLink {
   kickCap(server: string, cmd: KickCapInput): Promise<CapResultReply | ErrorReply>;
   resumeWorker(server: string, cmd: ResumeWorkerInput): Promise<WorkerResultReply | ErrorReply>;
   status(server: string): Promise<StatusReply | ErrorReply>;
+  /** config.servers を使わず、protocol bantou で発見できる server の一覧。0.9 broker など発見不能なら空。 */
+  peers(): Promise<ServerPeer[]>;
+  /**
+   * 発見ベースの server 選択。sel があれば peer id、無ければ name が一致するもの、省略時は先頭。
+   * 見つからなければ投げる。
+   */
+  selectPeer(sel?: string): Promise<ServerPeer>;
+  /** 指定 peer へ kick_cap を送り、返信（cap_result / error）まで待つ。 */
+  kickCapOn(peer: ServerPeer, cmd: KickCapInput): Promise<CapResultReply | ErrorReply>;
+  /** 指定 peer へ stop_cap を送り、返信（stop_result / error）まで待つ。 */
+  stopCapOn(peer: ServerPeer, cmd: StopCapInput): Promise<StopResultReply | ErrorReply>;
   close(): Promise<void>;
 }
 
-type ReplyKind = "cap_result" | "worker_result" | "status_result";
+type ReplyKind = "cap_result" | "worker_result" | "stop_result" | "status_result";
 
 interface Pending {
   kind: ReplyKind;
@@ -110,8 +135,12 @@ export interface Target {
 const KIND_COMMAND: Record<ReplyKind, ServerCommandType> = {
   cap_result: "kick_cap",
   worker_result: "resume_worker",
+  stop_result: "stop_cap",
   status_result: "status",
 };
+
+/** config.servers に無い、発見ベースの要求に使う内部 slot の名前。list / connectAll には出さない。 */
+const DISCOVERY_SLOT = "(discovery)";
 
 /** version 不一致時に messenger が text 先頭へ付ける警告行（JSON を壊すので除く）。 */
 const WARNING_LINE = /^\[agent-messenger warning\][^\n]*\n?/;
@@ -165,7 +194,7 @@ export function createServerLink(opts: {
 
   let closed = false;
   const slots = new Map<string, Slot>();
-  for (const s of config.servers) {
+  for (const s of config.servers.length > 0 ? config.servers : [{ name: DISCOVERY_SLOT, timeoutMs: DEFAULT_SERVER_TIMEOUT_MS } as ServerConfig]) {
     slots.set(s.name, { cfg: s, client: null, unsubscribe: null, connected: false, peerId: null, connecting: null, pending: [], chains: new Map(), serverId: null, serverPeer: null });
   }
   const slotOf = (name: string): Slot => {
@@ -173,6 +202,14 @@ export function createServerLink(opts: {
     if (!s) throw new Error(`未定義の server: ${name}`);
     return s;
   };
+
+  /** 発見ベースの要求に使う slot。config.servers があれば先頭の client を共有し、無ければ内部 slot を使う。 */
+  const discoveryName = config.servers[0]?.name ?? DISCOVERY_SLOT;
+  const isConfigured = (slot: Slot): boolean => slot.cfg.name !== DISCOVERY_SLOT;
+  const peerTarget = (peer: ServerPeer): Target => ({
+    to: peer.id,
+    meta: { protocol: MESSENGER_PROTOCOL.protocol, version: peer.version ?? MESSENGER_PROTOCOL.version },
+  });
 
   /** pending を取り出して解決する。 */
   const settle = (slot: Slot, p: Pending, value: unknown): void => {
@@ -201,8 +238,13 @@ export function createServerLink(opts: {
       target = slot.pending.find((p) => p.kind === "cap_result" && p.key === r.cap_id);
     } else if (r.type === "worker_result") {
       target = slot.pending.find((p) => p.kind === "worker_result" && p.key === r.worker_id);
+    } else if (r.type === "stop_result") {
+      target = slot.pending.find((p) => p.kind === "stop_result" && p.key === r.cap_id);
     } else if (r.type === "status_result") {
       target = slot.pending.find((p) => p.kind === "status_result");
+    } else if (r.command === "stop_cap" && r.cap_id !== undefined) {
+      // stop_cap の error は、同じ cap_id の kick_cap の待ちと取り違えない
+      target = slot.pending.find((p) => p.kind === "stop_result" && p.key === r.cap_id);
     } else if (r.cap_id !== undefined || r.worker_id !== undefined) {
       // id 付きの error は id で照合する（同じ command の別 id と取り違えない）
       target = slot.pending.find((p) =>
@@ -305,6 +347,7 @@ export function createServerLink(opts: {
     kind: ReplyKind,
     key: string | undefined,
     payload: object,
+    opts: { target?: Target; timeoutMs?: number } = {},
   ): Promise<R | ErrorReply> => {
     let slot: Slot;
     try {
@@ -322,9 +365,10 @@ export function createServerLink(opts: {
         return errorReply(`server に接続できない: ${server} (${(e as Error).message})`, command);
       }
       if (closed) return errorReply("center 終了", command);
-      const target = await resolveTarget(slot, client);
+      const target = opts.target ?? (await resolveTarget(slot, client));
       if (closed) return errorReply("center 終了", command);
       return new Promise<R | ErrorReply>((resolve) => {
+        const timeoutMs = opts.timeoutMs ?? slot.cfg.timeoutMs;
         const p: Pending = {
           kind,
           command,
@@ -332,8 +376,8 @@ export function createServerLink(opts: {
           resolve: resolve as (r: unknown) => void,
           timer: setTimeout(() => {
             log(`タイムアウト: server=${server} type=${command}${key ? ` id=${key}` : ""}`);
-            settle(slot, p, errorReply(`タイムアウト (${slot.cfg.timeoutMs}ms)`, command));
-          }, slot.cfg.timeoutMs),
+            settle(slot, p, errorReply(`タイムアウト (${timeoutMs}ms)`, command));
+          }, timeoutMs),
         };
         slot.pending.push(p);
         client
@@ -359,6 +403,21 @@ export function createServerLink(opts: {
     return next;
   };
 
+  const discoverPeers = async (): Promise<ServerPeer[]> => {
+    let client: LinkClient;
+    try {
+      client = await ensure(slotOf(discoveryName));
+    } catch (e) {
+      throw new Error(`messenger に接続できない: ${(e as Error).message}`);
+    }
+    if (!client.listPeers) return [];
+    const peers = await client.listPeers("all", { protocol: MESSENGER_PROTOCOL.protocol });
+    return peers.map((p) => {
+      const version = p.protocols?.find((x) => x.name === MESSENGER_PROTOCOL.protocol)?.version;
+      return { id: p.id, name: p.name, ...(version ? { version } : {}) };
+    });
+  };
+
   // 再登録などで peer id が変わると、旧 id 宛ての返信は届かない。待ちを即エラーにして作り直す
   const watcher = setInterval(() => {
     for (const slot of slots.values()) {
@@ -374,7 +433,7 @@ export function createServerLink(opts: {
   return {
     async connectAll() {
       await Promise.all(
-        [...slots.values()].map((slot) =>
+        [...slots.values()].filter(isConfigured).map((slot) =>
           ensure(slot).then(
             () => undefined,
             (e: unknown) => log(`server 接続失敗: ${slot.cfg.name} ${e instanceof Error ? e.message : String(e)}`),
@@ -384,7 +443,7 @@ export function createServerLink(opts: {
     },
     async list() {
       return Promise.all(
-        [...slots.values()].map(async (slot) => ({
+        [...slots.values()].filter(isConfigured).map(async (slot) => ({
           name: slot.cfg.name,
           connected: slot.connected,
           reachable: await healthCheck(slot.cfg).catch(() => false),
@@ -396,6 +455,19 @@ export function createServerLink(opts: {
     kickCap: (server, cmd) => request<CapResultReply>(server, "cap_result", cmd.cap_id, cmd),
     resumeWorker: (server, cmd) => request<WorkerResultReply>(server, "worker_result", cmd.worker_id, cmd),
     status: (server) => request<StatusReply>(server, "status_result", undefined, {}),
+    peers: discoverPeers,
+    async selectPeer(sel) {
+      const peers = await discoverPeers();
+      if (peers.length === 0) throw new Error("protocol bantou の server が見つからない（server が起動・protocol 登録済みか、同じ broker につながっているか確認）");
+      if (sel === undefined) return peers[0];
+      const hit = peers.find((p) => p.id === sel) ?? peers.find((p) => p.name === sel);
+      if (!hit) throw new Error(`server が見つからない: ${sel}（候補: ${peers.map((p) => `${p.name}(${p.id})`).join(", ")}）`);
+      return hit;
+    },
+    kickCapOn: (peer, cmd) =>
+      request<CapResultReply>(discoveryName, "cap_result", cmd.cap_id, cmd, { target: peerTarget(peer) }),
+    stopCapOn: (peer, cmd) =>
+      request<StopResultReply>(discoveryName, "stop_result", cmd.cap_id, cmd, { target: peerTarget(peer), timeoutMs: STOP_TIMEOUT_MS }),
     async close() {
       closed = true;
       clearInterval(watcher);
