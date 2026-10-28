@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readState, writeState, type AgentStateFile } from "../src/state.js";
+import { readState, writeState, type AgentStateFile } from "../../../../server/utils/bantou/state";
 
 async function withDir(fn: (dir: string) => Promise<void>): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "bantou-state-test-"));

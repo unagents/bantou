@@ -9,12 +9,12 @@ import {
   type AgentStatus,
   type RunOutcome,
 } from "@agent-hand/bantou-protocol";
-import type { Config } from "./config.js";
-import type { RunMode } from "./claude.js";
-import { agentDir, runLogDir } from "./paths.js";
-import { listLiveProcesses, matchesSession, type LiveProcess } from "./processes.js";
-import type { AgentRunner } from "./runner.js";
-import { readState, writeState, type AgentStateFile } from "./state.js";
+import type { Config } from "./config";
+import type { RunMode } from "./claude";
+import { agentDir, runLogDir } from "./paths";
+import { listLiveProcesses, matchesSession, type LiveProcess } from "./processes";
+import type { AgentRunner } from "./runner";
+import { readState, writeState, type AgentStateFile } from "./state";
 
 const execFileAsync = promisify(execFile);
 

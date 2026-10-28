@@ -8,7 +8,7 @@ import {
   readResultEnvelope,
   runClaude,
   type ClaudeRunOptions,
-} from "../src/claude.js";
+} from "../../../../server/utils/bantou/claude";
 
 const base: ClaudeRunOptions = {
   claude: "claude",

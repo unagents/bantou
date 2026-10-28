@@ -3,9 +3,9 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { prepareWorkspace } from "../src/workspace.js";
-import { describeCommand, execute, maskUserinfo } from "../src/daemon.js";
-import type { AgentManager } from "../src/agents.js";
+import { prepareWorkspace } from "../../../../server/utils/bantou/workspace";
+import { describeCommand, execute, maskUserinfo } from "../../../../server/utils/bantou/daemon";
+import type { AgentManager } from "../../../../server/utils/bantou/agents";
 
 test("workspace 作成: caps と workers を作る", async () => {
   const dir = await mkdtemp(join(tmpdir(), "bantou-server-test-"));

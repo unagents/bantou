@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, DEFAULT_SESSION } from "../src/config.js";
+import { loadConfig, DEFAULT_SESSION } from "../../../../server/utils/bantou/config";
 
 async function load(obj: unknown) {
   const dir = await mkdtemp(join(tmpdir(), "bantou-config-test-"));

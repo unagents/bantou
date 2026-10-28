@@ -1,13 +1,12 @@
 #!/usr/bin/env node
 import { homedir } from "node:os";
-import { join } from "node:path";
-import { runDaemon } from "./daemon.js";
-import { fatalLine } from "./log.js";
+import { join, resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const DEFAULT_CONFIG = join(homedir(), ".config", "bantou", "config.json");
 
 /** 引数を解釈する。不正な引数は null を返す。 */
-function parseArgs(argv: string[]): { config: string } | null {
+function parseArgs(argv) {
   let config = DEFAULT_CONFIG;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--config" && i + 1 < argv.length) {
@@ -25,7 +24,7 @@ if (!args) {
   process.exit(2);
 }
 
-runDaemon(args.config).catch((e: unknown) => {
-  console.error(fatalLine(e instanceof Error ? e.message : String(e)));
-  process.exit(1);
-});
+// config の中身（token 等）は env に載せない。パスだけを Nitro の runtimeConfig へ渡す
+process.env.NUXT_BANTOU_CONFIG_PATH = resolve(args.config);
+const entry = join(dirname(fileURLToPath(import.meta.url)), "..", ".output", "server", "index.mjs");
+await import(entry);

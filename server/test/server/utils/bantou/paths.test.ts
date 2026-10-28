@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { agentDir, runLogDir, stateFile } from "../src/paths.js";
+import { agentDir, runLogDir, stateFile } from "../../../../server/utils/bantou/paths";
 
 test("paths: agentDir は cap / worker の配下", () => {
   assert.equal(agentDir("/ws", "cap", "c-1"), "/ws/caps/c-1");

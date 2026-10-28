@@ -63,7 +63,7 @@ async function main(): Promise<void> {
   let error: unknown;
 
   try {
-    server = spawn(process.execPath, ["--import", "tsx", "src/cli.ts", "--config", cfgPath], {
+    server = spawn(process.execPath, ["bin/bantou.mjs", "--config", cfgPath], {
       cwd: serverDir,
       env,
       stdio: ["ignore", "pipe", "pipe"],

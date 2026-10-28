@@ -1,14 +1,5 @@
 {
-  "compilerOptions": {
-    "target": "ES2023",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "strict": true,
-    "outDir": "dist",
-    "rootDir": "src",
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "types": ["node"]
-  },
-  "include": ["src"]
+  "extends": "./.nuxt/tsconfig.server.json",
+  "compilerOptions": { "noUncheckedIndexedAccess": false },
+  "include": ["./.nuxt/types/nitro-nuxt.d.ts", "./server/**/*", "./test/**/*", "./scripts/**/*"]
 }

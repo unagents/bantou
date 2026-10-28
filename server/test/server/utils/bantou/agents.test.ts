@@ -3,11 +3,11 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createAgentManager } from "../src/agents.js";
-import type { ClaudeRunOptions, ClaudeRunResult } from "../src/claude.js";
-import { DEFAULT_SESSION, type Config } from "../src/config.js";
-import type { AgentRunner } from "../src/runner.js";
-import { readState, writeState } from "../src/state.js";
+import { createAgentManager } from "../../../../server/utils/bantou/agents";
+import type { ClaudeRunOptions, ClaudeRunResult } from "../../../../server/utils/bantou/claude";
+import { DEFAULT_SESSION, type Config } from "../../../../server/utils/bantou/config";
+import type { AgentRunner } from "../../../../server/utils/bantou/runner";
+import { readState, writeState } from "../../../../server/utils/bantou/state";
 
 const ok = (text: string): ClaudeRunResult => ({ ok: true, sessionId: "x", resultText: text, durationMs: 1 });
 const ng = (detail: string, extra: { sessionMissing?: boolean; timedOut?: boolean } = {}): ClaudeRunResult => ({

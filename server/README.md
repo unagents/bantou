@@ -210,7 +210,11 @@ npm test
 npm run dev -- --config <path>
 ```
 
-dev / test は `node --import tsx` を使う。Node >=22 のみで動き、bun を要しない。unit test は claude もネットワークも使わない。
+- server は Nuxt 4（Nitro のみ、UI なし、preset `node-listener`）。`npm run build`（`nuxt build`）が `.output/server/index.mjs` を作り、`bin/bantou.mjs` がそれを import して起動する（Nitro は listen しない）。
+- 実装は `server/utils/bantou/`（Nitro 非依存の純 TS）と `server/plugins/01.bantou.ts`（起動・signal・exit）。
+- `--config` は `bin/bantou.mjs` が解釈し、パスだけを `NUXT_BANTOU_CONFIG_PATH`（runtimeConfig `bantou.configPath`）へ渡す。config の中身は env に載せない。
+- `npm pack` は `prepack` で build し、`bin` と `.output` を同梱する。runtime 依存は `.output/server/node_modules` に含まれる。
+- test は `node --import tsx --test`。Node >=22 のみで動き、bun を要しない。unit test は claude もネットワークも使わない。
 
 ## e2e
 

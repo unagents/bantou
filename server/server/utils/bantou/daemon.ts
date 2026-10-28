@@ -10,11 +10,11 @@ import {
   type ServerCommand,
   type ServerReply,
 } from "@agent-hand/bantou-protocol";
-import { createAgentManager, type AgentManager } from "./agents.js";
-import { loadConfig } from "./config.js";
-import { log } from "./log.js";
-import { cliRunner } from "./runner.js";
-import { prepareWorkspace } from "./workspace.js";
+import { createAgentManager, type AgentManager } from "./agents";
+import { loadConfig } from "./config";
+import { log } from "./log";
+import { cliRunner } from "./runner";
+import { prepareWorkspace } from "./workspace";
 
 /** 無視ログ用に本文を 1 行・最大 120 文字へ整形する。 */
 export function ignoreText(text: string): string {
@@ -65,8 +65,13 @@ export async function execute(cmd: ServerCommand, manager: AgentManager): Promis
   }
 }
 
-/** 起動して常駐する。SIGTERM / SIGINT で後始末して exit 0。 */
-export async function runDaemon(configPath: string): Promise<void> {
+/** 起動済みの daemon。stop は実行中の claude・peer・broker を止める（プロセス終了は呼び出し側）。 */
+export interface Daemon {
+  stop(): Promise<void>;
+}
+
+/** 設定を読み込んで起動し、常駐物を返す。シグナルと exit は呼び出し側（plugin）が担う。 */
+export async function startDaemon(configPath: string): Promise<Daemon> {
   log("起動");
   const config = await loadConfig(configPath);
   log(`設定読込: ${configPath} (workspace=${config.workspace})`);
@@ -155,34 +160,23 @@ export async function runDaemon(configPath: string): Promise<void> {
     throw e;
   }
 
-  const shutdown = (signal: string): void => {
+  const stop = async (): Promise<void> => {
     if (closing) return;
     closing = true;
-    log(`${signal} 受信、終了処理`);
-    const hard = setTimeout(() => {
-      log("終了処理タイムアウト");
-      process.exit(0);
-    }, 5000);
-    void (async () => {
-      try {
-        // 実行中の claude を止め、中断の返信を出し切るのを少し待つ
-        await manager.shutdown();
-        await Promise.race([
-          Promise.allSettled([...inflight]),
-          new Promise((r) => setTimeout(r, 2500)),
-        ]);
-        await client.close();
-        await broker.close();
-        log("broker 停止");
-      } catch (e) {
-        log(`終了処理エラー: ${e instanceof Error ? e.message : String(e)}`);
-      }
-      clearTimeout(hard);
-      log("終了");
-      process.exit(0);
-    })();
+    try {
+      // 実行中の claude を止め、中断の返信を出し切るのを少し待つ
+      await manager.shutdown();
+      await Promise.race([
+        Promise.allSettled([...inflight]),
+        new Promise((r) => setTimeout(r, 2500)),
+      ]);
+      await client.close();
+      await broker.close();
+      log("broker 停止");
+    } catch (e) {
+      log(`終了処理エラー: ${e instanceof Error ? e.message : String(e)}`);
+    }
   };
-  process.on("SIGTERM", () => shutdown("SIGTERM"));
-  process.on("SIGINT", () => shutdown("SIGINT"));
   log("常駐開始");
+  return { stop };
 }

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { matchesSession, parsePsOutput } from "../src/processes.js";
+import { matchesSession, parsePsOutput } from "../../../../server/utils/bantou/processes";
 
 test("processes: parsePsOutput は pid と argv に分ける", () => {
   const out = "    1 /sbin/init splash\n 4242 claude -p --resume abc -- hi there\n\nbad line\n";

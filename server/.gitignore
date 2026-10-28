@@ -1,2 +1,7 @@
+.claude/
+.DS_Store
 node_modules
-dist
+*.log
+.output
+.nuxt
+.data

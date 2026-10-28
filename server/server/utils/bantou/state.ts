@@ -2,7 +2,7 @@ import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { isAgentState, type AgentState } from "@agent-hand/bantou-protocol";
-import { stateFile } from "./paths.js";
+import { stateFile } from "./paths";
 
 export interface AgentStateFile {
   session_id: string | null;
