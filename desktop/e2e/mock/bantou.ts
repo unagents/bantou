@@ -30,7 +30,7 @@ export class MockBantou {
   supplement: string;
   peers: Peer[];
   sessionsList: Session[];
-  center: CenterSettings = { enabled: false, port: 7910, bind: "127.0.0.1", projects: [], servers: [], token: "mock-token-000000000000000000000001" };
+  center: CenterSettings = { enabled: false, port: 7910, bind: "127.0.0.1", projects: [], servers: [], token: "mock-token-000000000000000000000001", connectHost: "" };
   /** Number of tokens minted by center_regenerate_token (the next one is mock-token-<n>). */
   private tokenSeq = 1;
   /** Whether the mocked center answers (center_connection). */
@@ -215,10 +215,13 @@ export class MockBantou {
         this.center.token = `mock-token-${String(this.tokenSeq).padStart(32, "0")}`;
         return this.center.token;
       }
+      case "center_connect_hosts":
+        return mockHostChoices((args as { bind: string }).bind);
       case "center_connect_snippets": {
-        const { bind, port, token } = args as { bind: string; port: number; token: string };
-        const host = ["0.0.0.0", "::", ""].includes(bind) ? "192.168.1.204" : bind === "localhost" ? "127.0.0.1" : bind;
-        const url = `http://${host}:${port}/mcp`;
+        const { bind, port, token, host: saved } = args as { bind: string; port: number; token: string; host?: string };
+        const choices = mockHostChoices(bind);
+        const host = choices.hosts.includes(saved ?? "") ? (saved as string) : choices.hosts[0]!;
+        const url = `http://${host.includes(":") ? `[${host}]` : host}:${port}/mcp`;
         const auth = `Bearer ${token}`;
         return {
           url,
@@ -273,6 +276,15 @@ export class MockBantou {
 }
 
 /** Mock of `center_parse_connect`: mcp.json or `claude mcp add`; rejects with a message like the Rust side. */
+/** Simplified mirror of `center_snippet.rs::host_choices` over a fixed set of this machine's addresses. */
+const MOCK_IPS = ["192.168.1.204", "100.64.0.9", "127.0.0.1", "fd7a::5"];
+function mockHostChoices(bind: string): { hosts: string[]; fixed: boolean } {
+  const b = bind.trim();
+  if (["127.0.0.1", "::1", "[::1]", "localhost"].includes(b)) return { hosts: ["127.0.0.1"], fixed: true };
+  if (["", "0.0.0.0", "::"].includes(b)) return { hosts: b === "0.0.0.0" ? MOCK_IPS.filter((ip) => !ip.includes(":")) : MOCK_IPS, fixed: false };
+  return { hosts: [b.replace(/^\[|\]$/g, "")], fixed: true };
+}
+
 function parseConnect(text: string): { url: string; token?: string } {
   const t = text.trim();
   if (!t) throw "接続設定が空";

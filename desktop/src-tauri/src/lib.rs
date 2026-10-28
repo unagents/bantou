@@ -81,6 +81,7 @@ pub fn run() {
             center::center_set_settings,
             center::center_status,
             center::center_regenerate_token,
+            center_snippet::center_connect_hosts,
             center_snippet::center_connect_snippets,
             center_snippet::center_parse_connect,
             center_mcp::center_call,

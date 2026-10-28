@@ -79,3 +79,41 @@ test("pasting a connection snippet shows the parsed URL and token, or a readable
   await page.getByTestId("center-remote-clear").click();
   await expect(page.getByTestId("center-remote-current")).toBeHidden();
 });
+
+test("switching the connection IP changes both connection snippet formats", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTestId("open-settings").click();
+  await page.getByTestId("center-enabled").click();
+  const host = page.getByTestId("center-connect-host");
+  const snippet = page.getByTestId("center-snippet");
+
+  // a loopback bind pins 127.0.0.1: nothing to choose
+  await expect(host).toBeDisabled();
+  await expect(snippet).toContainText("http://127.0.0.1:7910/mcp");
+
+  // 0.0.0.0 offers this machine's IPs; the first one is the default
+  await page.getByTestId("center-bind").fill("0.0.0.0");
+  await expect(host).toBeEnabled();
+  await expect(snippet).toContainText("http://192.168.1.204:7910/mcp");
+
+  await host.click();
+  await page.getByRole("option", { name: "100.64.0.9" }).click();
+  await expect(snippet).toContainText("http://100.64.0.9:7910/mcp");
+  await expect(snippet).not.toContainText("192.168.1.204");
+
+  // the second tab follows the same IP
+  await page.getByRole("tab", { name: "claude mcp add" }).click();
+  await expect(snippet).toContainText("claude mcp add --transport http bantou-center http://100.64.0.9:7910/mcp");
+
+  // the choice is saved and comes back
+  await page.getByTestId("settings-save").click();
+  await expect(page.getByText("設定を保存した")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await page.getByTestId("open-settings").click();
+  await expect(snippet).toContainText("http://100.64.0.9:7910/mcp");
+
+  // a specific bind pins that address
+  await page.getByTestId("center-bind").fill("192.168.1.5");
+  await expect(host).toBeDisabled();
+  await expect(snippet).toContainText("http://192.168.1.5:7910/mcp");
+});

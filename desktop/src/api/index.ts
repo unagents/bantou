@@ -3,6 +3,7 @@
 export {
   centerCall,
   centerConnection,
+  centerConnectHosts,
   centerConnectSnippets,
   centerParseConnect,
   centerRegenerateToken,

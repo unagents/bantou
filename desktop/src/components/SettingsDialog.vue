@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import {
+  centerConnectHosts,
   centerConnectSnippets,
   centerGetSettings,
   centerParseConnect,
@@ -7,7 +8,7 @@ import {
   centerSetSettings,
   centerStatus,
 } from "~/api";
-import type { CenterConnectSnippets, CenterParsedConnect, CenterSettings, CenterStatus } from "~/types";
+import type { CenterConnectSnippets, CenterHostChoices, CenterParsedConnect, CenterSettings, CenterStatus } from "~/types";
 
 const open = defineModel<boolean>("open", { required: true });
 const toast = useToast();
@@ -81,7 +82,35 @@ const bindExposed = computed(() => {
   return !!b && !LOOPBACK.includes(b);
 });
 
-// Connection snippets follow the draft port / bind / token, so a regenerated token shows up at once.
+// Addresses of this machine the snippets can name; the draft bind decides whether there is a choice.
+const hostChoices = ref<CenterHostChoices | null>(null);
+let hostSeq = 0;
+watch(
+  () => [settings.value?.enabled, settings.value?.bind] as const,
+  async ([enabled, bind]) => {
+    const seq = ++hostSeq;
+    if (!enabled || bind === undefined) {
+      hostChoices.value = null;
+      return;
+    }
+    try {
+      const r = await centerConnectHosts(bind);
+      if (seq === hostSeq) hostChoices.value = r;
+    } catch (e) {
+      if (seq === hostSeq) error.value = String(e);
+    }
+  },
+  { immediate: true },
+);
+// The saved choice when still offered, else the first entry (the backend resolves the same way).
+const connectHost = computed(() => {
+  const c = hostChoices.value;
+  if (!c) return null;
+  const saved = settings.value?.connectHost ?? "";
+  return c.hosts.includes(saved) ? saved : (c.hosts[0] ?? null);
+});
+
+// Connection snippets follow the draft port / bind / token / host, so a regenerated token shows up at once.
 const snippets = ref<CenterConnectSnippets | null>(null);
 const snippetTab = ref<"mcpJson" | "claudeCode">("mcpJson");
 const SNIPPET_TABS = [
@@ -90,15 +119,15 @@ const SNIPPET_TABS = [
 ];
 let snippetSeq = 0;
 watch(
-  () => [settings.value?.enabled, settings.value?.bind, settings.value?.port, settings.value?.token] as const,
-  async ([enabled, bind, port, token]) => {
+  () => [settings.value?.enabled, settings.value?.bind, settings.value?.port, settings.value?.token, connectHost.value] as const,
+  async ([enabled, bind, port, token, host]) => {
     const seq = ++snippetSeq;
-    if (!enabled || bind === undefined || token === undefined || portError.value || tokenError.value) {
+    if (!enabled || bind === undefined || token === undefined || host === null || portError.value || tokenError.value) {
       snippets.value = null;
       return;
     }
     try {
-      const r = await centerConnectSnippets(bind, Number(port), token);
+      const r = await centerConnectSnippets(bind, Number(port), token, host);
       if (seq === snippetSeq) snippets.value = r;
     } catch (e) {
       if (seq === snippetSeq) error.value = String(e);
@@ -239,6 +268,19 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
                 @click="regenerateToken"
               />
             </div>
+          </UFormField>
+          <UFormField
+            label="接続先 IP"
+            :description="hostChoices?.fixed ? 'bind が固定されているため選べない' : 'この PC の IP から、接続設定に書くものを選ぶ'"
+          >
+            <USelect
+              :model-value="connectHost ?? undefined"
+              :items="hostChoices?.hosts ?? []"
+              :disabled="!hostChoices || hostChoices.fixed"
+              class="w-full"
+              data-testid="center-connect-host"
+              @update:model-value="settings.connectHost = $event as string"
+            />
           </UFormField>
           <UFormField label="接続設定" description="MCP クライアント（別ホストの bantou desktop や Claude Code）に貼る。token 入り">
             <UTabs v-model="snippetTab" :items="SNIPPET_TABS" size="sm" :content="false" class="w-full" data-testid="center-snippet-tabs" />

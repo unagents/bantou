@@ -101,6 +101,9 @@ pub struct CenterSettings {
     pub claude_path: Option<String>,
     /// Bearer token the sidecar center requires on `/mcp`. Minted on first load when empty.
     pub token: String,
+    /// Address the connection snippets name, picked from this machine's addresses. Empty (or no
+    /// longer offered for the bind): the first one.
+    pub connect_host: String,
     /// Center on another host this desktop connects to (used instead of the sidecar when set).
     /// The old `remoteUrl` key of earlier versions is not read: serde drops unknown keys and
     /// the next save writes the new shape.
@@ -118,6 +121,7 @@ impl Default for CenterSettings {
             servers: Vec::new(),
             claude_path: None,
             token: String::new(),
+            connect_host: String::new(),
             remote: None,
         }
     }
@@ -862,6 +866,16 @@ mod tests {
             serde_json::from_str(r#"{"enabled":true,"remoteUrl":"http://old:7910","token":"abcdefghijkl"}"#).unwrap();
         assert_eq!(s.remote, None);
         assert!(!serde_json::to_string(&s).unwrap().contains("remoteUrl"));
+    }
+
+    #[test]
+    fn connect_host_defaults_to_empty_and_round_trips() {
+        let old: CenterSettings = serde_json::from_str(r#"{"enabled":true,"token":"abcdefghijkl"}"#).unwrap();
+        assert_eq!(old.connect_host, "");
+        let s = CenterSettings { connect_host: "192.168.1.204".into(), ..Default::default() };
+        let back: CenterSettings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.connect_host, "192.168.1.204");
+        assert!(serde_json::to_string(&s).unwrap().contains("connectHost"));
     }
 
     #[test]
