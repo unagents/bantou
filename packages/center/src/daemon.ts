@@ -1,7 +1,7 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { CliArgs } from "./args.js";
 import { resolveClaude } from "./claude-path.js";
-import { loadConfig } from "./config.js";
+import { loadConfig, MIN_TOKEN_LEN } from "./config.js";
 import { startHttpServer, type HttpHandle } from "./http.js";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -84,7 +84,10 @@ export async function runDaemon(args: CliArgs): Promise<void> {
 
   const makeServer = () => createCenterServer({ config, supervisor, link });
   if (args.transport === "http") {
-    http = await startHttpServer({ createServer: makeServer, port: args.port, bind: args.bind, log });
+    if (!config.token || config.token.length < MIN_TOKEN_LEN) {
+      throw new Error(`http transport には config の token（${MIN_TOKEN_LEN} 文字以上）が必要: ${configPath}`);
+    }
+    http = await startHttpServer({ createServer: makeServer, port: args.port, bind: args.bind, token: config.token, log });
     watchParent({ onOrphan: (reason) => void shutdown(reason) });
   } else {
     const server = makeServer();

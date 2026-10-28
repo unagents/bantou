@@ -97,6 +97,7 @@ test("center を SIGKILL すると rc が孤児で残り、次の center の起�
       projects: [{ name: project, path: projPath, autostart: true }],
       remoteControl: { claude: stub, stopGraceMs: 1000, env: { STUB_SIGLOG: sigLog, STUB_GCLOG: gcLog } },
       logDir: join(root, "logs"),
+      token: "orphan-test-token-0123",
     }),
   );
 

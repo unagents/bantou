@@ -28,6 +28,9 @@ export const DEFAULT_PROJECT = {
   autostart: false,
 } as const;
 
+/** http transport の Bearer token の最小長（Cork の MIN_TOKEN_LEN に合わせる）。 */
+export const MIN_TOKEN_LEN = 12;
+
 /** server からの返信待ちの既定（35 分。server 側 session.timeoutMs の既定 30 分 + 余裕）。 */
 export const DEFAULT_SERVER_TIMEOUT_MS = 2_100_000;
 
@@ -69,6 +72,8 @@ export const configSchema = z
     remoteControl: remoteControlSchema.default(() => remoteControlSchema.parse({})),
     servers: z.array(serverSchema).default([]),
     logDir: absPath.optional(),
+    /** http transport の `/mcp` が要求する Bearer token。stdio では使わない。無い・短い時は http が起動しない。 */
+    token: z.string().optional(),
   })
   .superRefine((cfg, ctx) => {
     for (const key of ["projects", "servers"] as const) {
@@ -92,6 +97,8 @@ export interface Config {
   servers: ServerConfig[];
   /** remote-control の出力ログ置き場（絶対パス）。 */
   logDir: string;
+  /** http transport の Bearer token（未設定なら undefined）。 */
+  token?: string;
 }
 
 /** zod の検証結果から Config を作る（logDir の既定は config と同じ場所の center-logs）。 */
@@ -103,8 +110,12 @@ export function parseConfig(data: unknown, configPath: string): Config {
       .join("; ");
     throw new Error(`config が不正: ${issues}`);
   }
-  const { logDir, ...rest } = r.data;
-  return { ...rest, logDir: logDir ?? join(dirname(resolve(configPath)), "center-logs") };
+  const { logDir, token, ...rest } = r.data;
+  return {
+    ...rest,
+    logDir: logDir ?? join(dirname(resolve(configPath)), "center-logs"),
+    ...(token ? { token } : {}),
+  };
 }
 
 /** config.json を読み込んで検証する。 */

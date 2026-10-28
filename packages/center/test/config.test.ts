@@ -96,3 +96,9 @@ test("server の peer は任意（省略すると protocol 発見）", () => {
   assert.equal(c.servers[1].peer, "my-server");
   assert.throws(() => parseConfig({ servers: [{ name: "a", peer: "" }] }, "/x/c.json"));
 });
+
+test("token: 指定すれば保持、空文字・未指定は undefined", () => {
+  assert.equal(parseConfig({ token: "abcdefghijkl" }, "/x/c.json").token, "abcdefghijkl");
+  assert.equal(parseConfig({ token: "" }, "/x/c.json").token, undefined);
+  assert.equal(parseConfig({}, "/x/c.json").token, undefined);
+});

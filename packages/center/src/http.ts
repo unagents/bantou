@@ -1,9 +1,10 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import { MIN_TOKEN_LEN } from "./config.js";
 import type { Logger } from "./log.js";
 
 export const MCP_PATH = "/mcp";
@@ -45,12 +46,26 @@ class HttpError extends Error {
 /** wildcard bind か（どのホスト名宛でも受ける待受）。 */
 const isWildcard = (bind: string): boolean => bind === "" || bind === "0.0.0.0" || bind === "::";
 
-/** DNS rebinding 対策で許可する Host ヘッダ値と Origin。bind が wildcard 以外ならその名前も許可する。 */
-export function allowedHostsFor(bind: string, port: number): { hosts: string[]; origins: string[] } {
+/** loopback だけに待ち受ける bind か。 */
+const isLoopback = (bind: string): boolean => ["127.0.0.1", "localhost", "::1", "[::1]"].includes(bind);
+
+/**
+ * DNS rebinding 対策で許可する Host ヘッダ値と Origin。bind が wildcard 以外ならその名前も許可する。
+ * loopback 以外に bind する時は別ホストから届く前提なので、Host / Origin の絞り込みはせず null を返す（Bearer token で守る）。
+ */
+export function allowedHostsFor(bind: string, port: number): { hosts: string[]; origins: string[] } | null {
+  if (!isLoopback(bind)) return null;
   const names = ["127.0.0.1", "localhost", "[::1]"];
   if (!isWildcard(bind)) names.push(bind.includes(":") && !bind.startsWith("[") ? `[${bind}]` : bind);
   const hosts = [...new Set(names)].map((n) => `${n}:${port}`);
   return { hosts, origins: hosts.map((h) => `http://${h}`) };
+}
+
+/** Authorization ヘッダが `Bearer <token>` で token と一致するか（定時間比較）。 */
+export function bearerMatches(header: string | undefined, token: string): boolean {
+  if (!header?.startsWith("Bearer ")) return false;
+  const digest = (s: string) => createHash("sha256").update(s).digest();
+  return timingSafeEqual(digest(header.slice("Bearer ".length)), digest(token));
 }
 
 const sendJson = (res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void => {
@@ -94,13 +109,15 @@ function readJson(req: IncomingMessage): Promise<unknown> {
 }
 
 /**
- * Streamable HTTP で MCP を提供する（`/mcp`、認証なし）。
+ * Streamable HTTP で MCP を提供する（`/mcp`、`Authorization: Bearer <token>` 必須）。
  * McpServer は transport を 1 つしか持てないので、MCP session ごとに McpServer と transport を作る。
  */
 export async function startHttpServer(opts: {
   createServer: () => McpServer;
   port: number;
   bind: string;
+  /** Bearer token（MIN_TOKEN_LEN 文字以上）。合わない・無いリクエストは 401。 */
+  token: string;
   log: Logger;
   /** 放置 session を閉じるまでの時間。 */
   sessionIdleTtlMs?: number;
@@ -109,7 +126,8 @@ export async function startHttpServer(opts: {
   /** 同時 session 数の上限。 */
   maxSessions?: number;
 }): Promise<HttpHandle> {
-  const { log } = opts;
+  const { log, token } = opts;
+  if (token.length < MIN_TOKEN_LEN) throw new Error(`token は ${MIN_TOKEN_LEN} 文字以上が必要`);
   const idleTtlMs = opts.sessionIdleTtlMs ?? SESSION_IDLE_TTL_MS;
   const maxSessions = opts.maxSessions ?? MAX_SESSIONS;
   const sessions = new Map<string, Session>();
@@ -141,6 +159,10 @@ export async function startHttpServer(opts: {
     const path = (req.url ?? "").split("?")[0];
     if (path !== MCP_PATH) {
       sendJson(res, 404, { error: "not found" });
+      return;
+    }
+    if (!bearerMatches(req.headers.authorization, token)) {
+      sendJson(res, 401, { error: "unauthorized" }, { "www-authenticate": "Bearer" });
       return;
     }
     const method = req.method ?? "";
@@ -194,9 +216,9 @@ export async function startHttpServer(opts: {
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         // DNS rebinding 対策: Host（ポート込み）と、Origin があればそれも自分宛のものだけ通す
-        enableDnsRebindingProtection: true,
-        allowedHosts: allowed.hosts,
-        allowedOrigins: allowed.origins,
+        ...(allowed
+          ? { enableDnsRebindingProtection: true, allowedHosts: allowed.hosts, allowedOrigins: allowed.origins }
+          : {}),
         onsessioninitialized: (id) => {
           sessions.set(id, { transport, server, lastActive: Date.now(), inflight: 0 });
           log(`MCP session 開始: ${id} (計 ${sessions.size})`);
@@ -228,7 +250,7 @@ export async function startHttpServer(opts: {
   });
   const port = (http.address() as AddressInfo).port;
   allowed = allowedHostsFor(opts.bind, port);
-  log(`MCP http 待受: http://${opts.bind.includes(":") ? `[${opts.bind}]` : opts.bind}:${port}${MCP_PATH} (認証なし)`);
+  log(`MCP http 待受: http://${opts.bind.includes(":") ? `[${opts.bind}]` : opts.bind}:${port}${MCP_PATH} (Bearer 認証${allowed ? "" : "、Host 検査なし"})`);
 
   const sweep = setInterval(() => {
     const now = Date.now();
