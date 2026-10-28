@@ -73,6 +73,10 @@ function addProject() {
   settings.value?.projects.push({ name: "", path: "" });
 }
 
+function addServer() {
+  settings.value?.servers.push({ name: "", broker: "" });
+}
+
 const setOpt = (p: { spawn?: string; permissionMode?: string }, key: "spawn" | "permissionMode", v: string) => {
   p[key] = v === UNSET ? undefined : v;
 };
@@ -152,6 +156,31 @@ const stateColor = { stopped: "neutral", running: "success", error: "error" } as
             />
           </div>
           <p v-if="!settings.projects.length" class="text-cork-muted text-xs">未登録（spawn / permissionMode の「-」は既定）</p>
+        </div>
+
+        <div class="flex flex-col gap-2">
+          <div class="flex items-center justify-between">
+            <span class="text-sm font-medium">servers</span>
+            <UButton size="xs" variant="ghost" color="neutral" icon="i-lucide-plus" label="追加" @click="addServer" />
+          </div>
+          <div
+            v-for="(v, i) in settings.servers"
+            :key="i"
+            class="flex items-center gap-2"
+            data-testid="center-server"
+          >
+            <UInput v-model="v.name" size="sm" placeholder="name" class="w-32" aria-label="server name" />
+            <UInput v-model="v.broker" size="sm" placeholder="http://host:7901" class="flex-1" aria-label="broker URL" />
+            <UButton
+              size="xs"
+              variant="ghost"
+              color="neutral"
+              icon="i-lucide-trash-2"
+              aria-label="削除"
+              @click="settings.servers.splice(i, 1)"
+            />
+          </div>
+          <p v-if="!settings.servers.length" class="text-cork-muted text-xs">未登録（broker の URL を指定。bantou-server の peer は自動発見）</p>
         </div>
 
         <UFormField label="claudePath" description="空なら login shell から自動解決">

@@ -99,12 +99,20 @@ export interface CenterProject {
   permissionMode?: string;
 }
 
+/** Mirror of `src-tauri/src/center.rs::CenterServer`. */
+export interface CenterServer {
+  name: string;
+  /** http URL of the broker the bantou-server is on. The server's peer is discovered by the center. */
+  broker: string;
+}
+
 /** Mirror of `src-tauri/src/center.rs::CenterSettings`. */
 export interface CenterSettings {
   enabled: boolean;
   port: number;
   bind: string;
   projects: CenterProject[];
+  servers: CenterServer[];
   claudePath?: string;
   remoteUrl?: string;
 }

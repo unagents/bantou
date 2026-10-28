@@ -51,6 +51,15 @@ pub struct CenterProject {
     pub permission_mode: Option<String>,
 }
 
+/// A bantou-server the center talks to: a name and the URL of the broker it is on.
+/// The server's peer is discovered by the center (bantou protocol), so no peer name here.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CenterServer {
+    pub name: String,
+    pub broker: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct CenterSettings {
@@ -58,6 +67,8 @@ pub struct CenterSettings {
     pub port: u32,
     pub bind: String,
     pub projects: Vec<CenterProject>,
+    /// bantou-servers (name + broker URL). Written to center.json as `servers`.
+    pub servers: Vec<CenterServer>,
     /// Absolute path of the claude executable. Unset: the center resolves it via a login shell.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub claude_path: Option<String>,
@@ -73,6 +84,7 @@ impl Default for CenterSettings {
             port: DEFAULT_PORT,
             bind: DEFAULT_BIND.to_string(),
             projects: Vec::new(),
+            servers: Vec::new(),
             claude_path: None,
             remote_url: None,
         }
@@ -115,6 +127,21 @@ pub fn validate_settings(mut s: CenterSettings) -> Result<CenterSettings, String
             }
         }
     }
+    let mut seen = HashSet::new();
+    for v in &mut s.servers {
+        v.name = v.name.trim().to_string();
+        v.broker = v.broker.trim().trim_end_matches('/').to_string();
+        if v.name.is_empty() || !v.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+            return Err(format!("server 名は英数字と _ - のみ: \"{}\"", v.name));
+        }
+        if !seen.insert(v.name.clone()) {
+            return Err(format!("server 名が重複: {}", v.name));
+        }
+        // the center's messenger client does not support https
+        if !v.broker.starts_with("http://") || v.broker.len() == "http://".len() || v.broker.chars().any(char::is_whitespace) {
+            return Err(format!("server {} の broker は http://host:port の形で指定する", v.name));
+        }
+    }
     s.claude_path = s.claude_path.take().map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
     if let Some(p) = &s.claude_path {
         if !Path::new(p).is_absolute() {
@@ -151,7 +178,12 @@ pub fn build_config(s: &CenterSettings) -> serde_json::Value {
     if let Some(v) = &s.claude_path {
         remote_control["claude"] = v.clone().into();
     }
-    serde_json::json!({ "projects": projects, "remoteControl": remote_control, "servers": [] })
+    let servers: Vec<_> = s
+        .servers
+        .iter()
+        .map(|v| serde_json::json!({ "name": v.name, "broker": v.broker }))
+        .collect();
+    serde_json::json!({ "projects": projects, "remoteControl": remote_control, "servers": servers })
 }
 
 pub fn sidecar_args(s: &CenterSettings, config: &Path) -> Vec<String> {
@@ -180,6 +212,7 @@ pub fn needs_restart(running_with: Option<&CenterSettings>, new: &CenterSettings
         Some(old) => {
             !new.enabled || old.port != new.port || old.bind != new.bind
                 || old.projects != new.projects
+                || old.servers != new.servers
                 || old.claude_path != new.claude_path
         }
         None => new.enabled,
@@ -475,6 +508,10 @@ pub fn center_status(center: tauri::State<'_, Center>) -> CenterStatus {
 mod tests {
     use super::*;
 
+    fn server(name: &str, broker: &str) -> CenterServer {
+        CenterServer { name: name.into(), broker: broker.into() }
+    }
+
     fn project(name: &str, path: &str) -> CenterProject {
         CenterProject {
             name: name.into(),
@@ -582,6 +619,45 @@ mod tests {
     }
 
     #[test]
+    fn config_json_writes_servers() {
+        let s = CenterSettings {
+            servers: vec![server("s1", "http://127.0.0.1:7901"), server("s2", "http://h:1")],
+            ..Default::default()
+        };
+        assert_eq!(
+            build_config(&s)["servers"],
+            serde_json::json!([
+                { "name": "s1", "broker": "http://127.0.0.1:7901" },
+                { "name": "s2", "broker": "http://h:1" },
+            ])
+        );
+    }
+
+    #[test]
+    fn servers_default_for_old_saved_settings() {
+        let s: CenterSettings = serde_json::from_str(r#"{"enabled":true,"projects":[]}"#).unwrap();
+        assert!(s.servers.is_empty());
+        let s: CenterSettings =
+            serde_json::from_str(r#"{"servers":[{"name":"a","broker":"http://h:1"}]}"#).unwrap();
+        assert_eq!(s.servers, vec![server("a", "http://h:1")]);
+    }
+
+    #[test]
+    fn validates_servers() {
+        let with = |servers| validate_settings(CenterSettings { servers, ..Default::default() });
+        // trimmed, trailing slash removed
+        let ok = with(vec![server(" a ", " http://h:7901/ ")]).unwrap();
+        assert_eq!(ok.servers, vec![server("a", "http://h:7901")]);
+        assert!(with(vec![server("", "http://h:1")]).is_err());
+        assert!(with(vec![server("a b", "http://h:1")]).is_err());
+        assert!(with(vec![server("a", "http://h:1"), server("a", "http://h:2")]).is_err());
+        assert!(with(vec![server("a", "https://h:1")]).is_err());
+        assert!(with(vec![server("a", "h:1")]).is_err());
+        assert!(with(vec![server("a", "http://")]).is_err());
+        assert!(with(vec![server("a", "http://h :1")]).is_err());
+    }
+
+    #[test]
     fn restart_only_on_effective_change() {
         let on = CenterSettings { enabled: true, projects: vec![project("a", "/x")], ..Default::default() };
         // running, identical or remoteUrl-only change: no restart
@@ -592,6 +668,7 @@ mod tests {
         assert!(needs_restart(Some(&on), &CenterSettings { port: 7911, ..on.clone() }));
         assert!(needs_restart(Some(&on), &CenterSettings { bind: "0.0.0.0".into(), ..on.clone() }));
         assert!(needs_restart(Some(&on), &CenterSettings { projects: vec![], ..on.clone() }));
+        assert!(needs_restart(Some(&on), &CenterSettings { servers: vec![server("s", "http://h:1")], ..on.clone() }));
         assert!(needs_restart(Some(&on), &CenterSettings { claude_path: Some("/x/claude".into()), ..on.clone() }));
         // running, disabled: stop
         assert!(needs_restart(Some(&on), &CenterSettings { enabled: false, ..on.clone() }));

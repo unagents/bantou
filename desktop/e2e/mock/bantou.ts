@@ -30,7 +30,7 @@ export class MockBantou {
   supplement: string;
   peers: Peer[];
   sessionsList: Session[];
-  center: CenterSettings = { enabled: false, port: 7910, bind: "127.0.0.1", projects: [] };
+  center: CenterSettings = { enabled: false, port: 7910, bind: "127.0.0.1", projects: [], servers: [] };
   calls: InvokeRecord[] = [];
   sent: { to: string; text: string }[] = [];
   /** Ping timers: task id → expiry (ISO). */
