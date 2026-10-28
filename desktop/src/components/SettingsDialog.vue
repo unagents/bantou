@@ -97,7 +97,7 @@ async function save() {
   }
 }
 
-const stateColor = { stopped: "neutral", running: "success", error: "error" } as const;
+const stateColor = { stopped: "neutral", running: "success", restarting: "warning", error: "error" } as const;
 </script>
 
 <template>
@@ -214,6 +214,9 @@ const stateColor = { stopped: "neutral", running: "success", error: "error" } as
               data-testid="center-state"
             />
             <span v-if="status?.pid" class="text-cork-muted text-xs">pid {{ status.pid }}</span>
+            <span v-if="status?.restartCount" class="text-cork-muted text-xs" data-testid="center-restart-count"
+              >自動再起動 {{ status.restartCount }} 回</span
+            >
             <UButton
               class="ml-auto"
               size="xs"
@@ -225,7 +228,10 @@ const stateColor = { stopped: "neutral", running: "success", error: "error" } as
               @click="refreshStatus"
             />
           </div>
-          <p v-if="status?.error" class="text-cork-danger-text text-xs">{{ status.error }}</p>
+          <p v-if="status?.lastExit" class="text-cork-muted text-xs" data-testid="center-last-exit">
+            最終の終了理由: {{ status.lastExit }}
+          </p>
+          <p v-if="status?.error" class="text-cork-danger-text text-xs whitespace-pre-wrap">{{ status.error }}</p>
           <pre
             v-if="status?.logs.length"
             class="bg-cork-elevated max-h-40 overflow-auto p-2 text-xs"

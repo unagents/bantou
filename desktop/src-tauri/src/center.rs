@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::Manager;
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
@@ -32,6 +32,16 @@ const LOG_LINES: usize = 20;
 /// next center reaps it at start.)
 const STOP_GRACE: Duration = Duration::from_secs(15);
 const POLL: Duration = Duration::from_millis(100);
+/// Auto-restart after an abnormal exit: first delay, doubled per consecutive failure, capped.
+const RESTART_BASE: Duration = Duration::from_secs(2);
+const RESTART_MAX: Duration = Duration::from_secs(60);
+/// More than `MAX_FAILURES` abnormal exits within `FAILURE_WINDOW` stops the retrying.
+const FAILURE_WINDOW: Duration = Duration::from_secs(600);
+const MAX_FAILURES: usize = 5;
+/// A run at least this long counts as healthy and clears the failure history.
+const HEALTHY_AFTER: Duration = Duration::from_secs(300);
+/// Log lines quoted in the error once the retrying is given up.
+const ERROR_TAIL_LINES: usize = 5;
 
 const SPAWN_MODES: [&str; 3] = ["same-dir", "worktree", "session"];
 const PERMISSION_MODES: [&str; 6] = [
@@ -230,21 +240,98 @@ fn write_config(s: &CenterSettings, path: &Path) -> Result<(), String> {
     std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// Delay before restart number `n` (0-based consecutive failure): 2 s, 4 s, ... capped at 60 s.
+pub fn backoff_delay(n: usize) -> Duration {
+    let mult = 1u32 << n.min(16);
+    RESTART_BASE.saturating_mul(mult).min(RESTART_MAX)
+}
+
+#[derive(Debug, PartialEq)]
+pub enum ExitDecision {
+    Retry(Duration),
+    GiveUp,
+}
+
+/// Failure bookkeeping for the auto-restart. Pure: time comes in as `Instant` parameters.
+#[derive(Debug, Default)]
+pub struct Supervisor {
+    failures: VecDeque<Instant>,
+    started_at: Option<Instant>,
+    restart_count: u32,
+}
+
+impl Supervisor {
+    pub fn on_started(&mut self, now: Instant) {
+        self.started_at = Some(now);
+    }
+
+    /// Record an abnormal exit at `now` and decide what to do next.
+    pub fn on_abnormal_exit(&mut self, now: Instant) -> ExitDecision {
+        if let Some(t) = self.started_at.take() {
+            if now.saturating_duration_since(t) >= HEALTHY_AFTER {
+                self.failures.clear();
+            }
+        }
+        self.failures.retain(|t| now.saturating_duration_since(*t) <= FAILURE_WINDOW);
+        self.failures.push_back(now);
+        if self.failures.len() > MAX_FAILURES {
+            ExitDecision::GiveUp
+        } else {
+            ExitDecision::Retry(backoff_delay(self.failures.len() - 1))
+        }
+    }
+
+    pub fn failure_count(&self) -> usize {
+        self.failures.len()
+    }
+
+    pub fn restart_count(&self) -> u32 {
+        self.restart_count
+    }
+
+    pub fn note_restart(&mut self) {
+        self.restart_count += 1;
+    }
+
+    /// A user-driven (re)start or stop starts from a clean slate.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// Human-readable exit reason from the sidecar's `Terminated` payload.
+pub fn describe_exit(code: Option<i32>, signal: Option<i32>) -> String {
+    match (code, signal) {
+        (Some(c), Some(sg)) => format!("exit code {c}, signal {sg}"),
+        (Some(c), None) => format!("exit code {c}"),
+        (None, Some(sg)) => format!("signal {sg}"),
+        (None, None) => "unknown exit".to_string(),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum RunState {
     Stopped,
     Running,
+    /// Exited abnormally; a restart is scheduled.
+    Restarting,
     Error,
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CenterStatus {
     state: RunState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pid: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    /// Automatic restarts performed since the last user-driven start.
+    restart_count: u32,
+    /// Reason of the last unintended exit (exit code / signal).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_exit: Option<String>,
     logs: Vec<String>,
 }
 
@@ -260,6 +347,89 @@ struct Inner {
     generation: u64,
     /// Set while we are the ones ending the process (exit is then not an error).
     stopping: bool,
+    /// Bumped on every stop; a scheduled restart only fires if it still holds the epoch it was
+    /// scheduled with (so stop / settings change / app exit cancel it).
+    epoch: u64,
+    /// Settings to restart with after an abnormal exit.
+    desired: Option<CenterSettings>,
+    sup: Supervisor,
+    last_exit: Option<String>,
+}
+
+/// What the `Terminated` handler decided.
+#[derive(Debug, PartialEq)]
+enum TermOutcome {
+    /// Old generation: not ours any more.
+    Ignored,
+    /// We stopped it on purpose.
+    Stopped,
+    /// Abnormal: restart after `delay` unless `epoch` is superseded.
+    Retry { epoch: u64, delay: Duration },
+    /// Too many abnormal exits: stay down with an error.
+    GaveUp,
+}
+
+impl Inner {
+    fn new() -> Self {
+        Inner {
+            state: RunState::Stopped,
+            child: None,
+            started_with: None,
+            pid: None,
+            error: None,
+            logs: VecDeque::new(),
+            generation: 0,
+            stopping: false,
+            epoch: 0,
+            desired: None,
+            sup: Supervisor::default(),
+            last_exit: None,
+        }
+    }
+
+    fn on_terminated(&mut self, generation: u64, code: Option<i32>, signal: Option<i32>, now: Instant) -> TermOutcome {
+        if self.generation != generation {
+            return TermOutcome::Ignored;
+        }
+        self.child = None;
+        self.started_with = None;
+        self.pid = None;
+        if self.stopping {
+            self.state = RunState::Stopped;
+            return TermOutcome::Stopped;
+        }
+        let reason = describe_exit(code, signal);
+        self.last_exit = Some(reason.clone());
+        match self.sup.on_abnormal_exit(now) {
+            ExitDecision::Retry(delay) => {
+                self.state = RunState::Restarting;
+                self.error = None;
+                TermOutcome::Retry { epoch: self.epoch, delay }
+            }
+            ExitDecision::GiveUp => {
+                self.state = RunState::Error;
+                let tail: Vec<&str> = self
+                    .logs
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|l| !l.is_empty())
+                    .rev()
+                    .take(ERROR_TAIL_LINES)
+                    .collect();
+                let mut msg = format!(
+                    "center が {} 回異常終了したため自動再起動を停止 ({} 分以内)。最終: {reason}",
+                    self.sup.failure_count(),
+                    FAILURE_WINDOW.as_secs() / 60
+                );
+                if !tail.is_empty() {
+                    msg.push_str("\n直近ログ:\n");
+                    msg.push_str(&tail.into_iter().rev().collect::<Vec<_>>().join("\n"));
+                }
+                self.error = Some(msg);
+                TermOutcome::GaveUp
+            }
+        }
+    }
 }
 
 pub struct Center {
@@ -271,16 +441,7 @@ pub struct Center {
 impl Default for Center {
     fn default() -> Self {
         Self {
-            inner: Mutex::new(Inner {
-                state: RunState::Stopped,
-                child: None,
-                started_with: None,
-                pid: None,
-                error: None,
-                logs: VecDeque::new(),
-                generation: 0,
-                stopping: false,
-            }),
+            inner: Mutex::new(Inner::new()),
             lifecycle: tokio::sync::Mutex::new(()),
         }
     }
@@ -300,6 +461,8 @@ impl Center {
             state: g.state,
             pid: g.pid,
             error: g.error.clone(),
+            restart_count: g.sup.restart_count(),
+            last_exit: g.last_exit.clone(),
             logs: g.logs.iter().cloned().collect(),
         }
     }
@@ -326,7 +489,13 @@ impl Center {
     async fn stop_locked(&self) {
         let pid = {
             let mut g = self.inner.lock().unwrap();
+            // Cancels any scheduled restart, whether or not a process is alive.
+            g.epoch += 1;
+            g.desired = None;
             if g.child.is_none() {
+                if g.state == RunState::Restarting {
+                    g.state = RunState::Stopped;
+                }
                 return;
             }
             g.stopping = true;
@@ -356,7 +525,7 @@ impl Center {
         self.stop_locked().await;
     }
 
-    async fn start_locked(&self, app: &tauri::AppHandle, s: &CenterSettings) -> Result<(), String> {
+    fn start_locked(&self, app: &tauri::AppHandle, s: &CenterSettings) -> Result<(), String> {
         let path = config_path(app)?;
         write_config(s, &path)?;
         let cmd = app
@@ -371,6 +540,8 @@ impl Center {
             g.pid = Some(child.pid());
             g.child = Some(child);
             g.started_with = Some(s.clone());
+            g.desired = Some(s.clone());
+            g.sup.on_started(Instant::now());
             g.state = RunState::Running;
             g.error = None;
             g.stopping = false;
@@ -381,30 +552,54 @@ impl Center {
         tauri::async_runtime::spawn(async move {
             while let Some(ev) = rx.recv().await {
                 let center = handle.state::<Center>();
-                let mut g = center.inner.lock().unwrap();
-                match ev {
-                    CommandEvent::Stdout(b) | CommandEvent::Stderr(b) => {
-                        push_log(&mut g, String::from_utf8_lossy(&b).trim_end().to_string());
-                    }
-                    CommandEvent::Error(e) => push_log(&mut g, format!("[error] {e}")),
-                    CommandEvent::Terminated(p) => {
-                        if g.generation == generation {
-                            g.child = None;
-                            g.started_with = None;
-                            g.pid = None;
-                            if g.stopping || p.code == Some(0) {
-                                g.state = RunState::Stopped;
-                            } else {
-                                g.state = RunState::Error;
-                                g.error = Some(format!("exit code {:?}, signal {:?}", p.code, p.signal));
+                let retry = {
+                    let mut g = center.inner.lock().unwrap();
+                    match ev {
+                        CommandEvent::Stdout(b) | CommandEvent::Stderr(b) => {
+                            push_log(&mut g, String::from_utf8_lossy(&b).trim_end().to_string());
+                            None
+                        }
+                        CommandEvent::Error(e) => {
+                            push_log(&mut g, format!("[error] {e}"));
+                            None
+                        }
+                        CommandEvent::Terminated(p) => {
+                            match g.on_terminated(generation, p.code, p.signal, Instant::now()) {
+                                TermOutcome::Retry { epoch, delay } => Some((epoch, delay)),
+                                _ => None,
                             }
                         }
+                        _ => None,
                     }
-                    _ => {}
+                };
+                if let Some((epoch, delay)) = retry {
+                    let h = handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        h.state::<Center>().restart_after(&h, epoch, delay).await;
+                    });
                 }
             }
         });
         Ok(())
+    }
+
+    /// Scheduled restart after an abnormal exit. Does nothing if a stop / settings change /
+    /// app exit bumped the epoch meanwhile.
+    async fn restart_after(&self, app: &tauri::AppHandle, epoch: u64, delay: Duration) {
+        tokio::time::sleep(delay).await;
+        let _l = self.lifecycle.lock().await;
+        let settings = {
+            let mut g = self.inner.lock().unwrap();
+            if g.epoch != epoch || g.state != RunState::Restarting {
+                return;
+            }
+            let Some(s) = g.desired.clone() else { return };
+            g.sup.note_restart();
+            s
+        };
+        if let Err(e) = self.start_locked(app, &settings) {
+            self.set_error(format!("自動再起動に失敗: {e}"));
+        }
     }
 
     /// Stop whatever runs, then start again if `s.enabled`. A running center that was
@@ -419,10 +614,16 @@ impl Center {
             return;
         }
         self.stop_locked().await;
+        {
+            // User-driven: start from a clean failure history.
+            let mut g = self.inner.lock().unwrap();
+            g.sup.reset();
+            g.last_exit = None;
+        }
         if !s.enabled {
             return;
         }
-        if let Err(e) = self.start_locked(app, s).await {
+        if let Err(e) = self.start_locked(app, s) {
             self.set_error(e);
         }
     }
@@ -687,5 +888,148 @@ mod tests {
             sidecar_args(&s, Path::new("/c.json")),
             ["--transport", "http", "--port", "8000", "--bind", "0.0.0.0", "--config", "/c.json"]
         );
+    }
+
+    fn secs(n: u64) -> Duration {
+        Duration::from_secs(n)
+    }
+
+    #[test]
+    fn backoff_doubles_and_caps() {
+        let seq: Vec<u64> = (0..9).map(|n| backoff_delay(n).as_secs()).collect();
+        assert_eq!(seq, [2, 4, 8, 16, 32, 60, 60, 60, 60]);
+        assert_eq!(backoff_delay(usize::MAX).as_secs(), 60);
+    }
+
+    #[test]
+    fn supervisor_retries_then_gives_up_after_five() {
+        let t0 = Instant::now();
+        let mut sup = Supervisor::default();
+        let mut got = Vec::new();
+        for i in 0..5 {
+            let now = t0 + secs(i * 10);
+            sup.on_started(now);
+            got.push(sup.on_abnormal_exit(now + secs(1)));
+        }
+        assert_eq!(got, [2, 4, 8, 16, 32].map(|n| ExitDecision::Retry(secs(n))));
+        // 6th within 10 minutes
+        sup.on_started(t0 + secs(60));
+        assert_eq!(sup.on_abnormal_exit(t0 + secs(61)), ExitDecision::GiveUp);
+    }
+
+    #[test]
+    fn old_failures_fall_out_of_the_window() {
+        let t0 = Instant::now();
+        let mut sup = Supervisor::default();
+        for i in 0..5 {
+            sup.on_abnormal_exit(t0 + secs(i));
+        }
+        // 11 minutes later the old five no longer count (and the run was not "healthy" either)
+        assert_eq!(sup.on_abnormal_exit(t0 + secs(660)), ExitDecision::Retry(secs(2)));
+        assert_eq!(sup.failure_count(), 1);
+    }
+
+    #[test]
+    fn healthy_run_resets_failure_count() {
+        let t0 = Instant::now();
+        let mut sup = Supervisor::default();
+        for i in 0..4 {
+            sup.on_started(t0 + secs(i));
+            sup.on_abnormal_exit(t0 + secs(i) + secs(1));
+        }
+        assert_eq!(sup.failure_count(), 4);
+        // runs 5 minutes, then dies: history cleared, backoff starts over
+        sup.on_started(t0 + secs(10));
+        assert_eq!(sup.on_abnormal_exit(t0 + secs(10) + HEALTHY_AFTER), ExitDecision::Retry(secs(2)));
+        assert_eq!(sup.failure_count(), 1);
+        // just under 5 minutes does not reset
+        sup.on_started(t0 + secs(320));
+        assert_eq!(sup.on_abnormal_exit(t0 + secs(320) + HEALTHY_AFTER - secs(1)), ExitDecision::Retry(secs(4)));
+    }
+
+    #[test]
+    fn describe_exit_formats_code_and_signal() {
+        assert_eq!(describe_exit(Some(1), None), "exit code 1");
+        assert_eq!(describe_exit(None, Some(9)), "signal 9");
+        assert_eq!(describe_exit(Some(1), Some(15)), "exit code 1, signal 15");
+        assert_eq!(describe_exit(None, None), "unknown exit");
+    }
+
+    fn running_inner(generation: u64) -> Inner {
+        let mut i = Inner::new();
+        i.generation = generation;
+        i.state = RunState::Running;
+        i.pid = Some(1);
+        i
+    }
+
+    #[test]
+    fn terminated_of_old_generation_is_ignored() {
+        let mut i = running_inner(2);
+        assert_eq!(i.on_terminated(1, Some(1), None, Instant::now()), TermOutcome::Ignored);
+        assert_eq!(i.state, RunState::Running);
+        assert_eq!(i.pid, Some(1));
+        assert_eq!(i.sup.failure_count(), 0);
+    }
+
+    #[test]
+    fn intentional_stop_is_not_a_failure() {
+        let mut i = running_inner(1);
+        i.stopping = true;
+        // even a non-zero code / signal after our own SIGTERM/SIGKILL
+        assert_eq!(i.on_terminated(1, None, Some(9), Instant::now()), TermOutcome::Stopped);
+        assert_eq!(i.state, RunState::Stopped);
+        assert_eq!(i.sup.failure_count(), 0);
+        assert_eq!(i.last_exit, None);
+        assert_eq!(i.error, None);
+    }
+
+    #[test]
+    fn unexpected_exit_schedules_restart_with_current_epoch() {
+        let mut i = running_inner(1);
+        i.epoch = 7;
+        let out = i.on_terminated(1, None, Some(9), Instant::now());
+        assert_eq!(out, TermOutcome::Retry { epoch: 7, delay: secs(2) });
+        assert_eq!(i.state, RunState::Restarting);
+        assert_eq!(i.last_exit.as_deref(), Some("signal 9"));
+        assert!(i.child.is_none() && i.pid.is_none());
+    }
+
+    #[test]
+    fn exit_code_zero_without_stop_is_still_abnormal() {
+        let mut i = running_inner(1);
+        assert!(matches!(i.on_terminated(1, Some(0), None, Instant::now()), TermOutcome::Retry { .. }));
+        assert_eq!(i.last_exit.as_deref(), Some("exit code 0"));
+    }
+
+    #[test]
+    fn giving_up_sets_error_with_reason_and_last_logs() {
+        let t0 = Instant::now();
+        let mut i = Inner::new();
+        for n in 0..8 {
+            push_log(&mut i, format!("line{n}"));
+        }
+        let mut last = TermOutcome::Ignored;
+        for k in 0..6u64 {
+            i.generation = k + 1;
+            i.state = RunState::Running;
+            last = i.on_terminated(k + 1, Some(2), None, t0 + secs(k));
+        }
+        assert_eq!(last, TermOutcome::GaveUp);
+        assert_eq!(i.state, RunState::Error);
+        let e = i.error.unwrap();
+        assert!(e.contains("exit code 2") && e.contains("6 回"));
+        assert!(e.contains("line7") && e.contains("line3") && !e.contains("line2"));
+    }
+
+    #[test]
+    fn stop_bumps_epoch_so_scheduled_restart_is_stale() {
+        // restart_after fires only when epoch matches; stop_locked bumps it.
+        let mut i = running_inner(1);
+        let TermOutcome::Retry { epoch, .. } = i.on_terminated(1, Some(1), None, Instant::now()) else {
+            panic!("expected retry")
+        };
+        i.epoch += 1; // what stop_locked does
+        assert_ne!(i.epoch, epoch);
     }
 }

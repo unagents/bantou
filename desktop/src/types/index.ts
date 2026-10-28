@@ -119,8 +119,12 @@ export interface CenterSettings {
 
 /** Mirror of `src-tauri/src/center.rs::CenterStatus`. */
 export interface CenterStatus {
-  state: "stopped" | "running" | "error";
+  state: "stopped" | "running" | "restarting" | "error";
   pid?: number;
   error?: string;
+  /** Automatic restarts since the last user-driven start. */
+  restartCount: number;
+  /** Reason of the last unintended exit (exit code / signal). */
+  lastExit?: string;
   logs: string[];
 }

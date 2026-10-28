@@ -193,7 +193,7 @@ export class MockBantou {
         this.center = JSON.parse(JSON.stringify(args.settings)) as CenterSettings;
         return structuredClone(this.center);
       case "center_status":
-        return { state: this.center.enabled ? "running" : "stopped", pid: this.center.enabled ? 4242 : undefined, logs: [] };
+        return { state: this.center.enabled ? "running" : "stopped", pid: this.center.enabled ? 4242 : undefined, restartCount: 0, logs: [] };
       case "plugin:fs|watch":
         return 1;
       case "plugin:resources|close":
