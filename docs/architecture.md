@@ -21,11 +21,14 @@
 ## server の実行モデル（stroke 方式の発展）
 
 1. 人の操作は不要（tmux に attach する運用は想定しない）。全エージェントは headless（`claude -p`）
-2. remote cap は kick を受けた時だけ起動する。起動前に cap 用の path（`<workspace>/caps/<cap-id>/`）を作り、そこで `claude -p --session-id|--resume <id> -- <prompt>` を実行する。同じ cap への kick は直列化する
-3. cap は作業を worker（サブエージェント、または worktree 上の別エージェント）に委譲する
-4. worker は完了時や指示を仰ぐ時に server を kick する。server はその cap を resume 起動して判断させる
-5. cap が worker へ返答する時は、claudep 方式（Agent SDK / `claude -p --resume <worker-session>`）で worker を継続させる
-6. 状態は path ごとの state.json に保存する。起動時に `ps` 照合で孤児プロセスを回収する
+2. server の責務は 3 つだけ: (1) center との窓口、(2) cap の起動と resume、(3) worker からの報告の受け口。server は worker を起動しない
+3. center ↔ server は agent-messenger の protocol 方式でつなぐ。server は `set_protocol` で bantou protocol の待受として登録する（peer は `bantou-server` 1 つ）。仕様の正本は `unagents/agent-messenger` branch `feature/protocol` の `docs/design/protocol.md`（0.10.0、未公開・実装中）。center から「起動する cap の情報」を含む protocol メッセージが届く。server は「どの cap が、どの center（送信元 peer）の依頼で動いているか」を state で管理する
+4. cap の起動と resume は stroke 方式。cap 用の path（`<workspace>/caps/<cap-id>/`）を作り、そこで `claude -p --session-id|--resume <id> -- <prompt>` を実行し、stream-json の stdout で結果を受ける
+5. worker は cap の責務。cap は作業をせず、ユーザー指示を解釈して worker に作業させる。軽い作業は cap 内のサブエージェント（Agent tool）、worktree を切る作業は cap が claudep 方式で別 session を起動する。worker への返答も cap が claudep の resume で渡す
+6. worker → server: worker は server を MCP（HTTP）として持つ。cap が worker を起動する時の MCP 設定に、header（または環境変数）で `cap_id` と `worker_id` を入れる。token は使わない（認証は全体で後回し）。worker は MCP tool で進捗・質問・承認依頼・完了を送る。tool はすぐ「受け付けた」を返し、worker はそこでターンを終える
+7. server → cap: 報告を受けたら、該当 cap を `--resume` で起動し、prompt に報告内容を渡す。cap ごとにキューを持ち、1 つずつ処理する（実行中の cap には、終わってから渡す）
+8. cap → center: cap の結果（stdout の result）を server が state を見て該当 center へ messenger で返す
+9. 状態は path ごとの state.json に保存する。起動時に `ps` 照合で孤児プロセスを回収する
 
 ## 参考実装
 
@@ -36,6 +39,6 @@
 
 - 認証（desktop ↔ center、center ↔ server）は後回し
 - desktop ↔ center の transport（MCP の Streamable HTTP が候補）
-- center と server の連携方法（messenger か MCP か HTTP か）
+- center ↔ server の protocol 方式（agent-messenger 0.10.0）への移行時期。それまでは現行の messenger 直接送信
 - cap / worker の path 規約の詳細、state.json の schema
 - server を Nuxt（Nitro）に寄せる件は大枠合意済み。`npx bantou` の配布形（Nitro の `.output/`）は実機検証が要る
