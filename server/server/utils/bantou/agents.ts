@@ -11,6 +11,8 @@ import {
 } from "@agent-hand/bantou-protocol";
 import type { Config } from "./config";
 import type { RunMode } from "./claude";
+import { writeJsonFile } from "./links";
+import { buildInjectArgs, childEnv, SEND_MESSAGE_TOOL, type BrokerInfo } from "./messenger";
 import { agentDir, runLogDir } from "./paths";
 import { listLiveProcesses, matchesSession, type LiveProcess } from "./processes";
 import type { AgentRunner } from "./runner";
@@ -23,6 +25,8 @@ export interface InvokeInput {
   branch?: string;
   prompt: string;
   reason?: string;
+  /** dir の準備後、起動前に dir へ書く JSON（owner.json / reply_to.json）。 */
+  sidecar?: { name: string; data: unknown };
 }
 
 export interface ReapSummary {
@@ -39,6 +43,8 @@ export interface AgentManagerDeps {
   listProcesses?: () => Promise<LiveProcess[] | null>;
   /** pid を殺して消えるまで待つ。消えたら true（テストで差し替える）。 */
   terminate?: (pid: number) => Promise<boolean>;
+  /** 内蔵 broker の接続情報。返せば messenger MCP を注入する（broker 起動前は undefined）。 */
+  broker?: () => BrokerInfo | undefined;
 }
 
 export interface AgentManager {
@@ -143,7 +149,7 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
       await git(["clone", ...(branch ? [`--branch=${branch}`] : []), "--", repo, dir], "clone");
       const info = join(dir, ".git", "info");
       await mkdir(info, { recursive: true });
-      await appendFile(join(info, "exclude"), "state.json\nlogs/\n");
+      await appendFile(join(info, "exclude"), "state.json\nlogs/\nowner.json\nreply_to.json\n");
     } else {
       throw new Error(`${kind} の path は git repo でない: ${dir}`);
     }
@@ -157,6 +163,14 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
     } catch (e) {
       await markFailed(dir, errMsg(e));
       throw e;
+    }
+    if (input.sidecar) {
+      try {
+        await writeJsonFile(dir, input.sidecar.name, input.sidecar.data);
+      } catch (e) {
+        await markFailed(dir, errMsg(e));
+        throw e;
+      }
     }
     const st = await readState(dir);
     if (st.state === "running") throw new Error(`${id} は実行中`);
@@ -183,6 +197,7 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
       let r;
       for (;;) {
         if (shuttingDown) throw new Error(SHUTDOWN_MSG);
+        const broker = deps.broker?.();
         r = await runner.run({
           claude: config.session.claude,
           sessionId,
@@ -190,11 +205,16 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
           prompt: input.prompt,
           cwd: dir,
           permissionMode: config.session.permissionMode,
-          allowedTools: config.session.allowedTools,
+          allowedTools: broker
+            ? [...config.session.allowedTools, SEND_MESSAGE_TOOL]
+            : config.session.allowedTools,
           disallowedTools: config.session.disallowedTools,
           extraArgs: config.session.extraArgs,
+          injectArgs: broker
+            ? buildInjectArgs(kind, id, mode, broker, config.messenger, config.workspace)
+            : [],
           timeoutMs: config.session.timeoutMs,
-          env: { ...process.env, ...config.session.env },
+          env: childEnv(process.env, config.session.env),
           logFile: join(runLogDir(dir), `${sessionId}.jsonl`),
           onSpawn: (child) => {
             const entry = { child, dir };

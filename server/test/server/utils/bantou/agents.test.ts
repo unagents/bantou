@@ -1,11 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAgentManager } from "../../../../server/utils/bantou/agents";
 import type { ClaudeRunOptions, ClaudeRunResult } from "../../../../server/utils/bantou/claude";
-import { DEFAULT_SESSION, type Config } from "../../../../server/utils/bantou/config";
+import { DEFAULT_MESSENGER, DEFAULT_SESSION, type Config } from "../../../../server/utils/bantou/config";
 import type { AgentRunner } from "../../../../server/utils/bantou/runner";
 import { readState, writeState } from "../../../../server/utils/bantou/state";
 
@@ -38,6 +38,7 @@ async function withFixture(
       workspace: ws,
       broker: { port: 0, bind: "127.0.0.1", discovery: "off", token: "" },
       session: { ...structuredClone(DEFAULT_SESSION), maxRetries },
+      messenger: structuredClone(DEFAULT_MESSENGER),
     };
     await fn({ ws, config, calls: [], logs: [] });
   } finally {
@@ -350,5 +351,52 @@ test("agents: reapOrphans は agent ごとの失敗を errored にして続行�
     const sum = await m.reapOrphans();
     assert.equal(sum.killed + sum.errored, 2);
     assert.equal((await readState(dir2)).state, sum.killed === 1 ? "failed" : "error");
+  });
+});
+
+test("agents: broker があれば messenger MCP を注入する（new は system prompt 付き、resume は無し）", async () => {
+  await withFixture(0, async (f) => {
+    const m = mgr(f, async () => ok("hi"), { broker: () => ({ host: "127.0.0.1", port: 4321, token: "" }) });
+    f.config.session.allowedTools = ["Bash"];
+    await m.invoke("cap", "c1", { prompt: "p1" });
+    const n = f.calls[0];
+    assert.deepEqual(n.allowedTools, ["Bash", "mcp__bantou-messenger__send_message"]);
+    assert.equal(n.injectArgs?.[0], "--mcp-config");
+    assert.ok(n.injectArgs?.includes("--strict-mcp-config"));
+    assert.ok(n.injectArgs?.includes("--append-system-prompt"));
+    assert.equal(JSON.parse(n.injectArgs?.[1] ?? "{}").mcpServers["bantou-messenger"].env.AGENT_MESSENGER_PORT, "4321");
+    await m.invoke("cap", "c1", { prompt: "p2" });
+    const r = f.calls[1];
+    assert.equal(r.mode, "resume");
+    assert.equal(r.injectArgs?.[0], "--mcp-config");
+    assert.equal(r.injectArgs?.includes("--append-system-prompt"), false);
+  });
+});
+
+test("agents: broker 未設定なら注入しない。子 env から AGENT_MESSENGER_* を除く", async () => {
+  await withFixture(0, async (f) => {
+    process.env.AGENT_MESSENGER_HOST = "prod.example";
+    process.env.CLAUDE_CODE_MESSAGING_SOCKET = "/s";
+    try {
+      const m = mgr(f, async () => ok("hi"));
+      await m.invoke("worker", "w1", { prompt: "p" });
+      assert.deepEqual(f.calls[0].injectArgs, []);
+      assert.deepEqual(f.calls[0].allowedTools, []);
+      assert.equal(f.calls[0].env?.AGENT_MESSENGER_HOST, undefined);
+      assert.equal(f.calls[0].env?.CLAUDE_CODE_MESSAGING_SOCKET, undefined);
+    } finally {
+      delete process.env.AGENT_MESSENGER_HOST;
+      delete process.env.CLAUDE_CODE_MESSAGING_SOCKET;
+    }
+  });
+});
+
+test("agents: sidecar は起動前に dir へ書かれる", async () => {
+  await withFixture(0, async (f) => {
+    const m = mgr(f, async () => ok("hi"));
+    await m.invoke("worker", "w1", { prompt: "p", sidecar: { name: "owner.json", data: { cap_id: "c1" } } });
+    const dir = join(f.ws, "workers", "w1");
+    assert.deepEqual(JSON.parse(await readFile(join(dir, "owner.json"), "utf8")), { cap_id: "c1" });
+    assert.equal((await readState(dir)).state, "idle");
   });
 });

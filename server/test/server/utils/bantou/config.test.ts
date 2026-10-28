@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, DEFAULT_SESSION } from "../../../../server/utils/bantou/config";
+import { loadConfig, DEFAULT_MESSENGER, DEFAULT_SESSION } from "../../../../server/utils/bantou/config";
 
 async function load(obj: unknown) {
   const dir = await mkdtemp(join(tmpdir(), "bantou-config-test-"));
@@ -30,6 +30,7 @@ test("config: 全項目指定はそのまま返る", async () => {
       extraArgs: ["--model", "x"],
       env: { CLAUDE_CONFIG_DIR: "/c" },
     },
+    messenger: { command: "node", args: ["mcp.js"], env: { npm_config_cache: "/c" } },
   };
   assert.deepEqual(await load(full), full);
 });
@@ -43,6 +44,17 @@ test("config: 既定値（bind は 127.0.0.1）", async () => {
   assert.equal(c.session.permissionMode, "auto");
   assert.equal(c.session.claude, "claude");
   assert.deepEqual(c.session.env, {});
+  assert.deepEqual(c.messenger, DEFAULT_MESSENGER);
+  assert.deepEqual(DEFAULT_MESSENGER.args, ["-y", "@unagents/messenger@0.9.0", "mcp"]);
+});
+
+test("config: messenger の不正値", async () => {
+  await assert.rejects(load({ workspace: "/w", messenger: "x" }), /messenger はオブジェクト/);
+  await assert.rejects(load({ workspace: "/w", messenger: { command: "" } }), /messenger.command/);
+  await assert.rejects(load({ workspace: "/w", messenger: { args: [1] } }), /messenger.args/);
+  await assert.rejects(load({ workspace: "/w", messenger: { env: { A: 1 } } }), /messenger.env/);
+  const c = await load({ workspace: "/w", messenger: { args: [] } });
+  assert.deepEqual(c.messenger, { command: "npx", args: [], env: {} });
 });
 
 test("config: broker / session 一部指定は残りが既定値", async () => {

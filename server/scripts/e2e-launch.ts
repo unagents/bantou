@@ -1,6 +1,7 @@
 /**
- * e2e: bantou-server を実起動し、messenger 経由で kick_cap / resume_worker / status を検証する。
- * claude を実際に 3 回起動する（数分かかる）。claude のログインを使う。
+ * e2e: bantou-server を実起動し、messenger 経由で kick_cap / resume_worker / spawn_worker / worker_report / status を検証する。
+ * claude を実際に 6 回起動する（数分かかる）。claude のログインを使う。
+ * CLAUDE_CONFIG_DIR は config の session.env で渡す（環境変数にあれば同じ値）。
  * `E2E_ROOT` で一時ディレクトリの親を変更できる。
  */
 import { spawn, type ChildProcess } from "node:child_process";
@@ -44,17 +45,21 @@ async function main(): Promise<void> {
   const cfgPath = join(dir, "config.json");
   const capId = `e2e-cap-${process.pid}`;
   const workerId = `e2e-worker-${process.pid}`;
+  const flowCapId = `e2e-flowcap-${process.pid}`;
+  const flowWorkerId = `e2e-flowworker-${process.pid}`;
+  const sessionEnv: Record<string, string> = {};
+  if (process.env.CLAUDE_CONFIG_DIR) sessionEnv.CLAUDE_CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR;
   await writeFile(
     cfgPath,
     JSON.stringify({
       workspace: ws,
       broker: { port: 0, bind: "127.0.0.1", discovery: "off", token: "" },
-      session: { timeoutMs: RUN_TIMEOUT },
+      session: { timeoutMs: RUN_TIMEOUT, env: sessionEnv },
     }),
   );
 
   const env: NodeJS.ProcessEnv = { ...process.env };
-  for (const k of Object.keys(env)) if (k.startsWith("AGENT_MESSENGER_")) delete env[k];
+  for (const k of Object.keys(env)) if (k.startsWith("AGENT_MESSENGER_") || k.startsWith("CLAUDE_CODE_MESSAGING_")) delete env[k];
 
   let server: ChildProcess | undefined;
   let exitCode: number | null | undefined;
@@ -158,14 +163,46 @@ async function main(): Promise<void> {
     const workerState = await readStateFile(join(ws, "workers", workerId, "state.json"));
     if (workerState.session_id !== w1.session_id) fail(`worker の session_id 不一致: ${workerState.session_id}`);
 
+    // 3b. cap -> spawn_worker -> worker -> worker_report -> cap 再開 -> cap_result
+    await send({
+      bantou: 1,
+      type: "kick_cap",
+      cap_id: flowCapId,
+      prompt:
+        `Spawn exactly one worker. Send bantou-server a spawn_worker with worker_id "${flowWorkerId}" and cap_id "${flowCapId}". ` +
+        'The worker prompt must tell it: run `echo hi` in Bash, then send a worker_report with kind "done" and the command output as text. ' +
+        "After you sent spawn_worker, end your turn at once. " +
+        "When you are later resumed with a worker report, reply with only: REPORT=<the report text>.",
+      reason: "e2e flow",
+    });
+    const f1 = await nextReply("cap_result (flow 1 回目)", RUN_TIMEOUT + 30_000);
+    if (f1.type !== "cap_result" || !f1.ok || f1.cap_id !== flowCapId) fail(`flow 1 回目が不正: ${JSON.stringify(f1)}`);
+    const f2 = await nextReply("cap_result (worker_report 後の cap 再開)", 2 * RUN_TIMEOUT + 30_000);
+    if (f2.type !== "cap_result" || !f2.ok || f2.cap_id !== flowCapId) fail(`flow 2 回目が不正: ${JSON.stringify(f2)}`);
+    if (f2.session_id !== f1.session_id) fail(`cap の session_id が変わった: ${f1.session_id} -> ${f2.session_id}`);
+    if (!f2.result_text.includes("hi")) fail(`再開した cap の result_text に hi が無い: ${f2.result_text}`);
+    const owner = JSON.parse(await readFile(join(ws, "workers", flowWorkerId, "owner.json"), "utf8")) as { cap_id: string };
+    if (owner.cap_id !== flowCapId) fail(`owner.json の cap_id 不一致: ${owner.cap_id}`);
+    for (const w of [
+      "指示受信: type=spawn_worker",
+      "指示受信: type=worker_report",
+      `claude 起動: kind=worker id=${flowWorkerId} mode=new`,
+      `claude 起動: kind=cap id=${flowCapId} mode=resume`,
+    ]) {
+      if (!serverLog.some((l) => l.includes(w))) fail(`server ログに "${w}" が無い`);
+    }
+    if (replies.length > 0) fail(`flow 後に想定外の返信: ${JSON.stringify(replies)}`);
+
     // 4. status
     await send({ bantou: 1, type: "status" });
     const st = await nextReply("status_result", 15_000);
     if (st.type !== "status_result") fail(`status_result でない: ${JSON.stringify(st)}`);
     const cap = st.caps.find((c) => c.id === capId);
     const worker = st.workers.find((w) => w.id === workerId);
-    if (!cap || !worker) fail(`status に cap / worker が無い: ${JSON.stringify(st)}`);
-    for (const a of [cap, worker]) {
+    const flowCap = st.caps.find((c) => c.id === flowCapId);
+    const flowWorker = st.workers.find((w) => w.id === flowWorkerId);
+    if (!cap || !worker || !flowCap || !flowWorker) fail(`status に cap / worker が無い: ${JSON.stringify(st)}`);
+    for (const a of [cap, worker, flowCap, flowWorker]) {
       if (a.state !== "idle") fail(`status の ${a.id} が idle でない: ${a.state}`);
       if (a.queued !== 0) fail(`status の ${a.id} の queued が 0 でない: ${a.queued}`);
     }
@@ -216,7 +253,7 @@ async function main(): Promise<void> {
   }
 
   console.log("E2E OK");
-  const keys = ["bantou: 起動", "broker 起動", "peer 登録", "孤児回収", "指示受信", "claude 起動", "claude 終了", "返信", "SIGTERM", "broker 停止", "bantou: 終了"];
+  const keys = ["spawn_worker", "worker_report", "bantou: 起動", "broker 起動", "peer 登録", "孤児回収", "指示受信", "claude 起動", "claude 終了", "返信", "SIGTERM", "broker 停止", "bantou: 終了"];
   console.log(serverLog.filter((l) => keys.some((k) => l.includes(k))).join("\n"));
   process.exit(0);
 }

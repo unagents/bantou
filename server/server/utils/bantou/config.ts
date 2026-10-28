@@ -48,6 +48,22 @@ export interface SessionConfig {
   env: Record<string, string>;
 }
 
+/** cap / worker に注入する messenger MCP の起動方法の既定。 */
+export const DEFAULT_MESSENGER = {
+  command: "npx",
+  args: ["-y", "@unagents/messenger@0.9.0", "mcp"] as string[],
+  env: {} as Record<string, string>,
+};
+
+export interface MessengerMcpConfig {
+  /** MCP server の実行ファイル。 */
+  command: string;
+  /** その引数。 */
+  args: string[];
+  /** MCP server の env に追加・上書きする値（npm_config_cache など）。 */
+  env: Record<string, string>;
+}
+
 export interface Config {
   /** workspace フォルダの絶対パス。 */
   workspace: string;
@@ -55,6 +71,8 @@ export interface Config {
   broker: { port: number; bind: string; discovery: "on" | "off"; token: string };
   /** headless 実行（claude -p）の設定。 */
   session: SessionConfig;
+  /** cap / worker に注入する messenger MCP の起動方法。 */
+  messenger: MessengerMcpConfig;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -133,6 +151,30 @@ function parseSession(v: unknown, path: string): SessionConfig {
   };
 }
 
+function parseMessenger(v: unknown, path: string): MessengerMcpConfig {
+  if (v === undefined) return structuredClone(DEFAULT_MESSENGER);
+  if (!isRecord(v)) throw new Error(`config の messenger はオブジェクト: ${path}`);
+  const command = v.command ?? DEFAULT_MESSENGER.command;
+  if (typeof command !== "string" || command.length === 0) {
+    throw new Error(`config の messenger.command は空でない文字列: ${path}`);
+  }
+  let args = [...DEFAULT_MESSENGER.args];
+  if (v.args !== undefined) {
+    if (!Array.isArray(v.args) || v.args.some((x) => typeof x !== "string")) {
+      throw new Error(`config の messenger.args は文字列の配列: ${path}`);
+    }
+    args = [...(v.args as string[])];
+  }
+  let env: Record<string, string> = {};
+  if (v.env !== undefined) {
+    if (!isRecord(v.env) || Object.entries(v.env).some(([k, x]) => k.length === 0 || typeof x !== "string")) {
+      throw new Error(`config の messenger.env は文字列値のオブジェクト: ${path}`);
+    }
+    env = { ...(v.env as Record<string, string>) };
+  }
+  return { command, args, env };
+}
+
 /** config.json を読み込んで検証する。 */
 export async function loadConfig(path: string): Promise<Config> {
   let raw: string;
@@ -159,5 +201,6 @@ export async function loadConfig(path: string): Promise<Config> {
     workspace: ws,
     broker: parseBroker(obj.broker, path),
     session: parseSession(obj.session, path),
+    messenger: parseMessenger(obj.messenger, path),
   };
 }

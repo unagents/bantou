@@ -12,6 +12,9 @@ import {
 } from "@agent-hand/bantou-protocol";
 import { createAgentManager, type AgentManager } from "./agents";
 import { loadConfig } from "./config";
+import { createFlow } from "./flow";
+import { REPLY_TO_FILE } from "./links";
+import type { BrokerInfo } from "./messenger";
 import { log } from "./log";
 import { cliRunner } from "./runner";
 import { prepareWorkspace } from "./workspace";
@@ -21,9 +24,14 @@ export function ignoreText(text: string): string {
   return text.replace(/\s+/g, " ").trim().slice(0, 120);
 }
 
+/** 自分の broker へ接続する host。全 IF bind の時は loopback。 */
+export function brokerHost(bind: string): string {
+  return bind === "" || bind === "0.0.0.0" ? "127.0.0.1" : bind === "::" ? "::1" : bind;
+}
+
 /** 自分の broker へ接続する URL。全 IF bind の時は loopback。 */
 export function brokerUrl(bind: string, port: number): string {
-  const host = bind === "" || bind === "0.0.0.0" ? "127.0.0.1" : bind === "::" ? "::1" : bind;
+  const host = brokerHost(bind);
   return `http://${host.includes(":") ? `[${host}]` : host}:${port}`;
 }
 
@@ -35,7 +43,11 @@ export function maskUserinfo(text: string): string {
 /** 指示の概要。prompt は先頭 80 文字のみ、repo の userinfo は伏せる。 */
 export function describeCommand(cmd: ServerCommand): string {
   if (cmd.type === "status") return "";
+  if (cmd.type === "worker_report") {
+    return `worker_id=${cmd.worker_id} kind=${cmd.kind} text=${ignoreText(cmd.text).slice(0, 80)}`;
+  }
   const parts = [cmd.type === "kick_cap" ? `cap_id=${cmd.cap_id}` : `worker_id=${cmd.worker_id}`];
+  if (cmd.type === "spawn_worker") parts.push(`cap_id=${cmd.cap_id}`);
   if (cmd.repo) parts.push(`repo=${maskUserinfo(cmd.repo)}`);
   if (cmd.branch) parts.push(`branch=${cmd.branch}`);
   if (cmd.type === "kick_cap" && cmd.reason) parts.push(`reason=${ignoreText(cmd.reason)}`);
@@ -44,10 +56,22 @@ export function describeCommand(cmd: ServerCommand): string {
 }
 
 /** 指示を実行して返信内容を作る。失敗は ErrorReply にする。 */
-export async function execute(cmd: ServerCommand, manager: AgentManager): Promise<ServerReply> {
+export async function execute(
+  cmd: ServerCommand,
+  manager: AgentManager,
+  /** kick_cap の送り主。cap の reply_to.json に残し、resume 後の cap_result の宛先にする。 */
+  from?: { id: string; name: string },
+): Promise<ServerReply> {
   try {
+    if (cmd.type === "spawn_worker" || cmd.type === "worker_report") {
+      throw new Error(`${cmd.type} は execute では扱わない`);
+    }
     if (cmd.type === "kick_cap") {
-      const r = await manager.invoke("cap", cmd.cap_id, cmd);
+      const r = await manager.invoke(
+        "cap",
+        cmd.cap_id,
+        from ? { ...cmd, sidecar: { name: REPLY_TO_FILE, data: { id: from.id, name: from.name } } } : cmd,
+      );
       return { bantou: PROTOCOL_VERSION, type: "cap_result", cap_id: cmd.cap_id, ...r };
     }
     if (cmd.type === "resume_worker") {
@@ -60,7 +84,13 @@ export async function execute(cmd: ServerCommand, manager: AgentManager): Promis
     const message = e instanceof Error ? e.message : String(e);
     log(`エラー: ${cmd.type}: ${message}`);
     const id =
-      cmd.type === "kick_cap" ? { cap_id: cmd.cap_id } : cmd.type === "resume_worker" ? { worker_id: cmd.worker_id } : {};
+      cmd.type === "kick_cap"
+        ? { cap_id: cmd.cap_id }
+        : cmd.type === "spawn_worker"
+          ? { cap_id: cmd.cap_id, worker_id: cmd.worker_id }
+          : cmd.type === "resume_worker" || cmd.type === "worker_report"
+            ? { worker_id: cmd.worker_id }
+            : {};
     return { bantou: PROTOCOL_VERSION, type: "error", ok: false, message, command: cmd.type, ...id };
   }
 }
@@ -77,7 +107,9 @@ export async function startDaemon(configPath: string): Promise<Daemon> {
   log(`設定読込: ${configPath} (workspace=${config.workspace})`);
   const dirs = await prepareWorkspace(config.workspace);
   log(`workspace 準備完了: caps=${dirs.caps} workers=${dirs.workers}`);
-  const manager = createAgentManager({ config, runner: cliRunner, log });
+  // 内蔵 broker は孤児回収の後に起動する。起動後に接続情報を差す
+  let brokerInfo: BrokerInfo | undefined;
+  const manager = createAgentManager({ config, runner: cliRunner, log, broker: () => brokerInfo });
   const reaped = await manager.reapOrphans();
   log(`孤児回収: killed=${reaped.killed} failed=${reaped.failed} error=${reaped.errored}`);
 
@@ -93,6 +125,7 @@ export async function startDaemon(configPath: string): Promise<Daemon> {
     `broker 起動: port=${broker.port} bind=${bind} discovery=${discovery} token=${token ? "有" : "無"} id=${broker.id}`,
   );
   const url = brokerUrl(bind, broker.port);
+  brokerInfo = { host: brokerHost(bind), port: broker.port, token };
   if (!["127.0.0.1", "::1", "localhost"].includes(bind) && token === "") {
     log(`警告: token 無しで ${bind} に bind。LAN から誰でも指示を送れる`);
   }
@@ -102,6 +135,28 @@ export async function startDaemon(configPath: string): Promise<Daemon> {
   // 実行中の指示。claude の実行は数分かかるので全体は直列にしない。
   // 同一 agent の直列化は manager の queue が担い、別 agent は並行して走る
   const inflight = new Set<Promise<void>>();
+
+  const sendReply = async (to: string, reply: ServerReply): Promise<void> => {
+    try {
+      await client.send(to, JSON.stringify(reply));
+      log(`返信: to=${to} type=${reply.type}`);
+    } catch (e) {
+      log(`返信失敗: to=${to} ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+  const flow = createFlow({
+    manager,
+    workspace: config.workspace,
+    log,
+    send: async (to, reply) => {
+      await sendReply(to, reply);
+    },
+    isClosing: () => closing,
+    track: (p) => {
+      const q: Promise<void> = p.finally(() => inflight.delete(q));
+      inflight.add(q);
+    },
+  });
 
   const handle = async (m: InboundMessage): Promise<void> => {
     try {
@@ -117,13 +172,18 @@ export async function startDaemon(configPath: string): Promise<Daemon> {
         return;
       }
       log(`指示受信: type=${cmd.type} from=${from} ${describeCommand(cmd)}`.trimEnd());
-      const reply = await execute(cmd, manager);
-      try {
-        await client.send(m.from_id, JSON.stringify(reply));
-        log(`返信: to=${m.from_id} type=${reply.type}`);
-      } catch (e) {
-        log(`返信失敗: to=${m.from_id} ${e instanceof Error ? e.message : String(e)}`);
+      if (cmd.type === "spawn_worker") {
+        // 成功の返信は無い。cap は返信を待たずに終わっていることが多い
+        flow.spawnWorker(cmd);
+        return;
       }
+      if (cmd.type === "worker_report") {
+        const err = await flow.workerReport(cmd);
+        if (err) await sendReply(m.from_id, err);
+        return;
+      }
+      const reply = await execute(cmd, manager, { id: m.from_id, name: m.from_name });
+      await sendReply(m.from_id, reply);
     } catch (e) {
       log(`エラー: ${e instanceof Error ? e.message : String(e)}`);
     }
