@@ -231,7 +231,10 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
   <UModal v-model:open="open" title="設定" description="center（sidecar）の起動、token、接続設定" :ui="{ content: 'max-w-3xl' }">
     <template #body>
       <div v-if="settings" class="flex flex-col gap-4" data-testid="settings-dialog">
+        <span class="text-sm font-semibold">この PC の center</span>
         <USwitch v-model="settings.enabled" label="center を起動する" data-testid="center-enabled" />
+        <!-- Everything below is this host's center: hidden (not reset) while it is off. -->
+        <div v-if="settings.enabled" class="flex flex-col gap-4" data-testid="center-own-section">
         <div class="flex gap-3">
           <UFormField label="port" class="w-32" :error="portError ?? undefined">
             <UInput v-model="settings.port" type="number" class="w-full" data-testid="center-port" />
@@ -378,9 +381,10 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
             @update:model-value="settings.claudePath = String($event) || undefined"
           />
         </UFormField>
+        </div>
 
-        <div class="flex flex-col gap-2" data-testid="center-remote-section">
-          <span class="text-sm font-medium">別ホストの center につなぐ</span>
+        <div class="border-cork-border flex flex-col gap-2 border-t pt-3" data-testid="center-remote-section">
+          <span class="text-sm font-semibold">別ホストの center に接続（貼り付け）</span>
           <p class="text-cork-muted text-xs">
             相手の設定画面でコピーした接続設定（mcp.json か claude mcp add）を貼る。保存すると sidecar ではなくこちらに接続する
           </p>

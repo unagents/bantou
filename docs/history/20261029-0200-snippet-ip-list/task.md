@@ -26,3 +26,17 @@
 ## 報告
 
 - 同 dir に `report.md`。develop に commit・push（push まで必ず行う）。
+
+## 追加指示
+
+- 設定画面の "projects" は center が ON の時だけ表示する。OFF の時は隠すが、保存済みの projects の値は削除・リセットしない。
+- e2e mock / settings.spec も合わせる（OFF: projects 非表示、ON: 表示、ON に戻すと保存値が見える）。
+
+## 追加指示2（追加指示を置き換えて拡張）
+
+- 原則: 「迷わない UI」（何が表示されているか推測させない）。
+- center が OFF の時、center 自身の設定を全て隠す: port, bind, claudePath, projects, servers, token, 接続設定（mcp.json / `claude mcp add`）, IP 選択。center については ON/OFF トグルのみ表示する。
+- 別ホストの center への貼り付け接続の欄は表示したままにする（center OFF でも使うため）。
+- 見出しとレイアウトで、各状態に何が出るか分かるようにする。例: 貼り付け接続を「この PC の center」とは別の見出しにする。見出し名・レイアウトは worker 判断で、report.md に記録する。
+- center の ON/OFF を切り替えても保存値は削除・リセットしない。ON に戻すと以前の保存値が見える。
+- e2e mock と settings.spec で次を確認する: OFF（隠す項目が全て無く、貼り付け接続は見える）、ON（全項目が見える）、OFF→ON（保存値が保たれる）。

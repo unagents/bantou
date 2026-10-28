@@ -5,8 +5,10 @@ test("the settings dialog saves the center port and shows it again", async ({ pa
   await page.getByTestId("open-settings").click();
   const dialog = page.getByTestId("settings-dialog");
   await expect(dialog).toBeVisible();
-  await expect(page.getByTestId("center-port")).toHaveValue("7910");
   await expect(page.getByTestId("center-state")).toHaveText("stopped");
+  // the port belongs to the center section, which shows only while the center is on
+  await page.getByTestId("center-enabled").click();
+  await expect(page.getByTestId("center-port")).toHaveValue("7910");
 
   await page.getByTestId("center-port").fill("7920");
   await page.getByTestId("settings-save").click();
@@ -116,4 +118,56 @@ test("switching the connection IP changes both connection snippet formats", asyn
   await page.getByTestId("center-bind").fill("192.168.1.5");
   await expect(host).toBeDisabled();
   await expect(snippet).toContainText("http://192.168.1.5:7910/mcp");
+});
+
+test("center off hides this host's center settings, keeps paste-to-connect, and keeps saved values", async ({ page }) => {
+  await page.goto("/");
+  // saved values in the backend while the center is off
+  await page.evaluate(() => {
+    const m = (window as unknown as { __BANTOU_MOCK__: { center: Record<string, unknown> } }).__BANTOU_MOCK__;
+    Object.assign(m.center, {
+      port: 7955,
+      bind: "0.0.0.0",
+      claudePath: "/opt/claude",
+      projects: [{ name: "saved-proj", path: "/work/saved" }],
+      servers: [{ name: "saved-srv" }],
+    });
+  });
+  await page.getByTestId("open-settings").click();
+  const own = [
+    "center-own-section",
+    "center-port",
+    "center-bind",
+    "center-claude-path",
+    "center-project",
+    "center-server",
+    "center-token",
+    "center-connect-host",
+    "center-snippet",
+  ];
+
+  // OFF: only the toggle for this host's center, plus paste-to-connect
+  await expect(page.getByTestId("center-enabled")).toBeVisible();
+  for (const id of own) await expect(page.getByTestId(id)).toHaveCount(0);
+  await expect(page.getByTestId("center-remote-section")).toBeVisible();
+  await expect(page.getByTestId("center-remote-paste")).toBeVisible();
+
+  // ON: everything shows, with the saved values
+  await page.getByTestId("center-enabled").click();
+  for (const id of own) await expect(page.getByTestId(id).first()).toBeVisible();
+  await expect(page.getByTestId("center-remote-section")).toBeVisible();
+  await expect(page.getByTestId("center-port")).toHaveValue("7955");
+  await expect(page.getByTestId("center-bind")).toHaveValue("0.0.0.0");
+  await expect(page.getByTestId("center-claude-path")).toHaveValue("/opt/claude");
+  await expect(page.getByTestId("center-project").locator("input").first()).toHaveValue("saved-proj");
+  await expect(page.getByTestId("center-server").locator("input").first()).toHaveValue("saved-srv");
+
+  // OFF again and ON again: nothing was reset
+  await page.getByTestId("center-enabled").click();
+  for (const id of own) await expect(page.getByTestId(id)).toHaveCount(0);
+  await expect(page.getByTestId("center-remote-section")).toBeVisible();
+  await page.getByTestId("center-enabled").click();
+  await expect(page.getByTestId("center-port")).toHaveValue("7955");
+  await expect(page.getByTestId("center-project").locator("input").first()).toHaveValue("saved-proj");
+  await expect(page.getByTestId("center-server").locator("input").first()).toHaveValue("saved-srv");
 });
