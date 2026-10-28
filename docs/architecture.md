@@ -28,7 +28,8 @@
 6. worker → server: worker は server を MCP（HTTP）として持つ。cap が worker を起動する時の MCP 設定に、header（または環境変数）で `cap_id` と `worker_id` を入れる。token は使わない（認証は全体で後回し）。worker は MCP tool で進捗・質問・承認依頼・完了を送る。tool はすぐ「受け付けた」を返し、worker はそこでターンを終える。実装は Nitro の `/mcp`（Streamable HTTP、stateless）。listener は server が自前で立て（config `mcp.port` / `mcp.bind`、既定 `7902` / `127.0.0.1`）、tool は `report`（`kind`: progress / ask / approve / done、`text`）、header は `x-bantou-cap-id` / `x-bantou-worker-id`
 7. server → cap: 報告を受けたら、該当 cap を `--resume` で起動し、prompt に報告内容を渡す。cap ごとにキューを持ち、1 つずつ処理する（実行中の cap には、終わってから渡す）。prompt は `worker <id> から <kind>: <text>`。cap を依頼した center は cap ごとに記録し、report 起因の resume の結果も同じ center へ返す
 8. cap → center: cap の結果（stdout の result）を server が state を見て該当 center へ messenger で返す
-9. 状態は path ごとの state.json に保存する。起動時に `ps` 照合で孤児プロセスを回収する
+9. cap の `claude -p` は Bash の sandbox を既定で切って起動する（新規・resume とも `--settings {"sandbox":{"enabled":false}}`。config `session.capBashSandbox`、既定 false、true で従来どおり claude の設定のまま）。理由: 204 の既定は `sandbox.enabled: true` で、sandbox 下の cap の Bash が起動した worker は setsid しても cap の終了で消える。worker を cap の外で生かすために切る。server は worker を起動しないので、worker 側の生存は cap の起動方法に依存する
+10. 状態は path ごとの state.json に保存する。起動時に `ps` 照合で孤児プロセスを回収する
 
 ## 参考実装
 

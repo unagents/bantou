@@ -29,10 +29,18 @@ test("config: 全項目指定はそのまま返る", async () => {
       allowedTools: ["Bash"],
       disallowedTools: ["Edit"],
       extraArgs: ["--model", "x"],
+      capBashSandbox: true,
       env: { CLAUDE_CONFIG_DIR: "/c" },
     },
   };
   assert.deepEqual(await load(full), full);
+});
+
+test("config: capBashSandbox は既定 false、true / false を受ける", async () => {
+  assert.equal((await load({ workspace: "/w" })).session.capBashSandbox, false);
+  assert.equal((await load({ workspace: "/w", session: {} })).session.capBashSandbox, false);
+  assert.equal((await load({ workspace: "/w", session: { capBashSandbox: true } })).session.capBashSandbox, true);
+  assert.equal((await load({ workspace: "/w", session: { capBashSandbox: false } })).session.capBashSandbox, false);
 });
 
 test("config: 既定値（bind は 127.0.0.1）", async () => {
@@ -82,6 +90,8 @@ const bad: [string, unknown, RegExp][] = [
   ["allowedTools 要素が数値", { workspace: "/w", session: { allowedTools: ["a", 1] } }, /session\.allowedTools/],
   ["disallowedTools 要素が数値", { workspace: "/w", session: { disallowedTools: [1] } }, /session\.disallowedTools/],
   ["extraArgs 要素が null", { workspace: "/w", session: { extraArgs: [null] } }, /session\.extraArgs/],
+  ["capBashSandbox 文字列", { workspace: "/w", session: { capBashSandbox: "true" } }, /session\.capBashSandbox/],
+  ["capBashSandbox 数値", { workspace: "/w", session: { capBashSandbox: 0 } }, /session\.capBashSandbox/],
   ["env 配列", { workspace: "/w", session: { env: ["A=1"] } }, /session\.env は文字列値のオブジェクト/],
   ["env 値が数値", { workspace: "/w", session: { env: { A: 1 } } }, /session\.env は文字列値のオブジェクト/],
   ["env キーが空", { workspace: "/w", session: { env: { "": "x" } } }, /session\.env は文字列値のオブジェクト/],

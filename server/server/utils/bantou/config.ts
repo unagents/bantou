@@ -32,6 +32,7 @@ export const DEFAULT_SESSION = {
   allowedTools: [] as string[],
   disallowedTools: [] as string[],
   extraArgs: [] as string[],
+  capBashSandbox: false,
   env: {} as Record<string, string>,
 };
 
@@ -50,6 +51,8 @@ export interface SessionConfig {
   disallowedTools: string[];
   /** `--` の前にそのまま付ける追加引数。 */
   extraArgs: string[];
+  /** true なら cap の Bash sandbox を claude の設定のまま（有効なら worker が cap と共に死ぬ）。false（既定）は `--settings {"sandbox":{"enabled":false}}` を付けて切る。 */
+  capBashSandbox: boolean;
   /** spawn する claude に追加で渡す環境変数。自身の環境変数に上書きで合成する。 */
   env: Record<string, string>;
 }
@@ -143,6 +146,10 @@ function parseSession(v: unknown, path: string): SessionConfig {
   if (typeof maxRetries !== "number" || !Number.isInteger(maxRetries) || maxRetries < 0) {
     throw new Error(`config の session.maxRetries は 0 以上の整数: ${path}`);
   }
+  const capBashSandbox = v.capBashSandbox ?? DEFAULT_SESSION.capBashSandbox;
+  if (typeof capBashSandbox !== "boolean") {
+    throw new Error(`config の session.capBashSandbox は真偽値: ${path}`);
+  }
   return {
     claude,
     permissionMode,
@@ -151,6 +158,7 @@ function parseSession(v: unknown, path: string): SessionConfig {
     allowedTools: parseStringList(v.allowedTools, "allowedTools", path),
     disallowedTools: parseStringList(v.disallowedTools, "disallowedTools", path),
     extraArgs: parseStringList(v.extraArgs, "extraArgs", path),
+    capBashSandbox,
     env: parseEnv(v.env, path),
   };
 }

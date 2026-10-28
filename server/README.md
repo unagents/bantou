@@ -42,6 +42,7 @@ npx bantou --config <path>
     "allowedTools": [],
     "disallowedTools": [],
     "extraArgs": [],
+    "capBashSandbox": false,
     "env": {}
   }
 }
@@ -62,7 +63,8 @@ npx bantou --config <path>
 | `session.maxRetries` | 任意 | `1` | タイムアウト・起動失敗時の再試行回数。0 以上の整数 |
 | `session.allowedTools` | 任意 | `[]` | 空でなければ `--allowedTools` に渡す。文字列の配列 |
 | `session.disallowedTools` | 任意 | `[]` | 空でなければ `--disallowedTools` に渡す。文字列の配列 |
-| `session.extraArgs` | 任意 | `[]` | `--` の前にそのまま付ける追加引数。文字列の配列 |
+| `session.extraArgs` | 任意 | `[]` | `--` の前にそのまま付ける追加引数。文字列の配列。`--settings` の後ろに並ぶため、同じ指定が重なれば extraArgs が後勝ち |
+| `session.capBashSandbox` | 任意 | `false` | cap の `claude -p` の Bash sandbox。`false` は `--settings {"sandbox":{"enabled":false}}` を付けて切る（新規・resume とも）。`true` は付けず claude の設定のまま（sandbox が有効だと worker が cap の終了で消える）。真偽値 |
 | `session.env` | 任意 | `{}` | spawn する claude に追加で渡す環境変数。文字列値のオブジェクト。bantou-server 自身の環境変数に上書きで合成する |
 
 - `broker` / `mcp` / `session` は省略可。書く場合はオブジェクト。
@@ -112,7 +114,7 @@ npx bantou --config <path>
 ```
 
 - 併せて `--strict-mcp-config --allowedTools mcp__bantou__report` を付ける。`--allowedTools` / `--mcp-config` は可変長引数なので、prompt はそれらより前に置く。
-- cap の `claude -p` が起動した子プロセスの生存は環境依存（claude の sandbox が有効だと、cap の終了で子も消える）。実測は `docs/history/20261028-1600-server-nuxt-flow/report.md`。worker を cap の外で生かすには、cap の claude で Bash の sandbox を切る（例 `session.extraArgs` に `["--settings","{\"sandbox\":{\"enabled\":false}}"]`）。
+- cap の `claude -p` の Bash sandbox は既定で切る（`session.capBashSandbox: false`）。claude の sandbox が有効だと、cap の Bash が起動した子（worker）は setsid しても cap の終了で消える（204 の user settings は `sandbox.enabled: true`）。実測は `docs/history/20261028-1600-server-nuxt-flow/report.md`。`--settings` の値は user settings より優先される。sandbox を残したい環境は `capBashSandbox: true`（その場合 worker の生存は保証されない）。worker 自体は server が起動しない（cap の責務）。
 
 ## 指示
 
@@ -238,7 +240,7 @@ npm run e2e
 ```
 
 - 要: host に claude。claude を実際に複数回起動するため数分かかる。claude のログイン（claudeAgent）を使う。
-- `E2E_ROOT` で一時ディレクトリの親を変えられる（既定は OS の tmp）。`E2E_CLAUDE_CONFIG_DIR` で `CLAUDE_CONFIG_DIR` を渡す。`E2E_MODEL` で `--model` を指定する（worker の model は未指定なら `sonnet`）。`E2E_NO_BASH_SANDBOX=0` で cap の Bash sandbox を切らない（既定は切る。切らないと worker が cap の終了で消えて失敗する）。
+- `E2E_ROOT` で一時ディレクトリの親を変えられる（既定は OS の tmp）。`E2E_CLAUDE_CONFIG_DIR` で `CLAUDE_CONFIG_DIR` を渡す。`E2E_MODEL` で `--model` を指定する（worker の model は未指定なら `sonnet`）。cap の Bash sandbox は server の既定（`session.capBashSandbox: false`）で切れる。probe-survival は `E2E_CAP_BASH_SANDBOX=1` で sandbox 有効のまま計測する。
 - 内蔵 broker は port 0 / 127.0.0.1 / discovery off、`/mcp` も port 0。server・cap・worker に本番 broker を使わせない（`AGENT_MESSENGER_*` / `CLAUDE_CODE_MESSAGING_*` を除去、cap と worker は `--strict-mcp-config`）。
 - 検証内容: `kick_cap`（新規）→ `kick_cap`（resume、同じ session_id）→ worker 報告（cap が worker を `setsid claude -p` で起動 → worker が `report` done → server が受信 → cap が resume → 結果が送信元へ返る。worker と cap の `system/init` の `mcp_servers` も確認）→ `status` → 非コマンドの無視。
 - 失敗時は一時ディレクトリを残し、パスを `E2E_DIR=` に出す。

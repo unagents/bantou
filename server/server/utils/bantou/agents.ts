@@ -192,6 +192,7 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
           permissionMode: config.session.permissionMode,
           allowedTools: config.session.allowedTools,
           disallowedTools: config.session.disallowedTools,
+          capBashSandbox: config.session.capBashSandbox,
           extraArgs: config.session.extraArgs,
           timeoutMs: config.session.timeoutMs,
           env: { ...process.env, ...config.session.env },

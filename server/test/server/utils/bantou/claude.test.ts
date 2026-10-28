@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { matchesSession } from "../../../../server/utils/bantou/processes";
 import {
+  BASH_SANDBOX_OFF_SETTINGS,
   buildClaudeArgs,
   readResultEnvelope,
   runClaude,
@@ -26,8 +28,32 @@ const base: ClaudeRunOptions = {
 test("claude: buildClaudeArgs new（ツール指定なし）", () => {
   assert.deepEqual(buildClaudeArgs(base), [
     "-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "auto",
+    "--settings", "{\"sandbox\":{\"enabled\":false}}",
     "--session-id", "sid-1", "--", "do it",
   ]);
+});
+
+test("claude: capBashSandbox true は --settings を付けない（new / resume）", () => {
+  for (const mode of ["new", "resume"] as const) {
+    const args = buildClaudeArgs({ ...base, mode, capBashSandbox: true });
+    assert.equal(args.includes("--settings"), false);
+  }
+});
+
+test("claude: --settings は new / resume とも既定で付き、id と -- の前・値は 1 つ", () => {
+  for (const mode of ["new", "resume"] as const) {
+    const args = buildClaudeArgs({ ...base, mode, allowedTools: ["Bash"], extraArgs: ["--model", "m"] });
+    const i = args.indexOf("--settings");
+    assert.ok(i > 0);
+    assert.equal(args[i + 1], BASH_SANDBOX_OFF_SETTINGS);
+    assert.deepEqual(JSON.parse(args[i + 1]), { sandbox: { enabled: false } });
+    assert.ok(i < args.indexOf(mode === "new" ? "--session-id" : "--resume"));
+    assert.ok(i < args.indexOf("--"));
+    // 値の直後は次のフラグ（extraArgs）で、可変長引数に飲まれない
+    assert.equal(args[i + 2], "--model");
+    // 孤児回収の argv 照合に影響しない
+    assert.equal(matchesSession(["claude", ...args].join(" "), "sid-1"), true);
+  }
 });
 
 test("claude: buildClaudeArgs resume + ツール + extraArgs", () => {
@@ -41,7 +67,8 @@ test("claude: buildClaudeArgs resume + ツール + extraArgs", () => {
     }),
     [
       "-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "auto",
-      "--allowedTools", "Bash", "Read", "--disallowedTools", "Edit", "--model", "m",
+      "--allowedTools", "Bash", "Read", "--disallowedTools", "Edit",
+      "--settings", "{\"sandbox\":{\"enabled\":false}}", "--model", "m",
       "--resume", "sid-1", "--", "do it",
     ],
   );

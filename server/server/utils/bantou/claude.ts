@@ -16,6 +16,8 @@ export interface ClaudeRunOptions {
   permissionMode: string;
   allowedTools: string[];
   disallowedTools: string[];
+  /** true なら `--settings` を足さない（claude の sandbox 設定のまま）。省略は false = sandbox を切る。 */
+  capBashSandbox?: boolean;
   /** `--` の前にそのまま付ける。 */
   extraArgs: string[];
   timeoutMs: number;
@@ -33,6 +35,9 @@ export type ClaudeRunResult =
 /** claude が継続先 session を見つけられない時の文言（実測）。 */
 const SESSION_MISSING = "No conversation found with session ID";
 
+/** cap の Bash sandbox を切る `--settings` の値（空白を含めない。argv の " -- " 分割に影響しない）。 */
+export const BASH_SANDBOX_OFF_SETTINGS = JSON.stringify({ sandbox: { enabled: false } });
+
 /** claude の引数を組み立てる。 */
 export function buildClaudeArgs(o: ClaudeRunOptions): string[] {
   return [
@@ -44,6 +49,8 @@ export function buildClaudeArgs(o: ClaudeRunOptions): string[] {
     o.permissionMode,
     ...(o.allowedTools.length > 0 ? ["--allowedTools", ...o.allowedTools] : []),
     ...(o.disallowedTools.length > 0 ? ["--disallowedTools", ...o.disallowedTools] : []),
+    // --settings は値 1 つ。可変長引数（--allowedTools 等）の後でも次のフラグで区切れる。extraArgs の前に置き、同じ指定が extraArgs にあればそちらを後勝ちにする
+    ...(o.capBashSandbox === true ? [] : ["--settings", BASH_SANDBOX_OFF_SETTINGS]),
     ...o.extraArgs,
     o.mode === "new" ? "--session-id" : "--resume",
     o.sessionId,

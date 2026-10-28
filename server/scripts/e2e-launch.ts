@@ -56,9 +56,6 @@ async function main(): Promise<void> {
         extraArgs: [
           "--strict-mcp-config",
           ...(process.env.E2E_MODEL ? ["--model", process.env.E2E_MODEL] : []),
-          // cap の Bash は既定で claude の sandbox 下で動き、cap の終了で子も消える（計測済み）。
-          // 既定で sandbox を切る（0 で切らない）（--settings は user settings より優先される）
-          ...(process.env.E2E_NO_BASH_SANDBOX !== "0" ? ["--settings", JSON.stringify({ sandbox: { enabled: false } })] : []),
         ],
         env: process.env.E2E_CLAUDE_CONFIG_DIR ? { CLAUDE_CONFIG_DIR: process.env.E2E_CLAUDE_CONFIG_DIR } : {},
       },
