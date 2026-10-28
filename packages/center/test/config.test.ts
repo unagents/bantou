@@ -90,3 +90,13 @@ test("loadConfig: 読めない / JSON 不正 / 正常", async () => {
 test("remoteControl.claude 未指定は undefined（既定値を入れない）", () => {
   assert.equal(parseConfig({}, "/x/c.json").remoteControl.claude, undefined);
 });
+
+test("server の peer は任意（省略すると protocol 発見）", () => {
+  const c = parseConfig(
+    { servers: [{ name: "a", broker: "http://h:1" }, { name: "b", broker: "http://h:2", peer: "my-server" }] },
+    "/x/c.json",
+  );
+  assert.equal(c.servers[0].peer, undefined);
+  assert.equal(c.servers[1].peer, "my-server");
+  assert.throws(() => parseConfig({ servers: [{ name: "a", broker: "http://h:1", peer: "" }] }, "/x/c.json"));
+});

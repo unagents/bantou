@@ -1,12 +1,25 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseConfig } from "../src/config.js";
-import { createPinnedClient, createServerLink, type LinkClient } from "../src/server-link.js";
+import {
+  createPinnedClient,
+  createServerLink,
+  stripWarning,
+  type LinkClient,
+  type LinkInbound,
+  type LinkMeta,
+  type LinkPeer,
+} from "../src/server-link.js";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 class FakeClient implements LinkClient {
   sent: Record<string, unknown>[] = [];
+  sentTo: string[] = [];
+  sentMeta: Array<LinkMeta | undefined> = [];
+  /** listPeers の返す peer。undefined なら 0.9 broker 相当（BROKER_UNSUPPORTED）。 */
+  peers: LinkPeer[] | undefined = undefined;
+  listCalls: Array<{ scope?: string; filter?: { protocol?: string; version?: string } }> = [];
   handler: Parameters<LinkClient["onMessage"]>[0] = () => {};
   connectCalls = 0;
   failConnect = false;
@@ -20,11 +33,17 @@ class FakeClient implements LinkClient {
   async close(): Promise<void> {
     this.closed = true;
   }
-  async send(to: string, text: string): Promise<unknown> {
-    assert.equal(to, "bantou-server");
+  async send(to: string, text: string, _delivery?: "pull" | "push", meta?: LinkMeta): Promise<unknown> {
     if (this.failSend) throw new Error("send failed");
+    this.sentTo.push(to);
+    this.sentMeta.push(meta);
     this.sent.push(JSON.parse(text) as Record<string, unknown>);
     return {};
+  }
+  async listPeers(scope?: "all" | "host" | "directory" | "repo", filter?: { protocol?: string; version?: string }): Promise<LinkPeer[]> {
+    this.listCalls.push({ scope, filter });
+    if (!this.peers) throw new Error("BROKER_UNSUPPORTED");
+    return this.peers;
   }
   onMessage(h: Parameters<LinkClient["onMessage"]>[0]): () => void {
     this.handler = h;
@@ -32,8 +51,11 @@ class FakeClient implements LinkClient {
       this.handler = () => {};
     };
   }
-  reply(obj: object, from = "bantou-server"): void {
-    void this.handler({ from_name: from, text: JSON.stringify(obj) });
+  reply(obj: object, from = "bantou-server", extra: Partial<LinkInbound> = {}): void {
+    void this.handler({ from_name: from, text: JSON.stringify(obj), ...extra });
+  }
+  replyText(text: string, extra: Partial<LinkInbound> = {}): void {
+    void this.handler({ from_name: "bantou-server", text, ...extra });
   }
 }
 
@@ -190,7 +212,7 @@ test("接続失敗はクラッシュせず、次回使用時に再接続", async
   });
   await link.connectAll();
   let l = await link.list();
-  assert.deepEqual(l, [{ name: "s1", broker: "http://127.0.0.1:1", connected: false, reachable: false, peerId: null }]);
+  assert.deepEqual(l, [{ name: "s1", broker: "http://127.0.0.1:1", connected: false, reachable: false, peerId: null, serverPeer: null }]);
 
   const p = link.status("s1");
   await sleep(30);
@@ -323,4 +345,143 @@ test("実 client は設定の broker だけに接続し、7901 へフォール�
   });
   assert.ok(!logs.some((l) => l.includes("7901")), logs.join("\n"));
   await client.close();
+});
+
+const peerOf = (id: string, name: string, version = "1.0.0"): LinkPeer => ({
+  id, name, protocols: [{ name: "bantou", version }],
+});
+
+function setupDiscovery(server: object = {}, peers?: LinkPeer[]) {
+  const cfg = parseConfig({ servers: [{ name: "s1", broker: "http://127.0.0.1:1", timeoutMs: 2000, ...server }] }, "/x/c.json");
+  const clients: FakeClient[] = [];
+  const logs: string[] = [];
+  const link = createServerLink({
+    config: cfg,
+    log: (m) => logs.push(m),
+    clientFactory: () => {
+      const c = new FakeClient();
+      c.peers = peers;
+      clients.push(c);
+      return c;
+    },
+    healthCheck: async () => true,
+  });
+  return { link, clients, logs };
+}
+
+test("meta: 名前宛て（発見できない時）でも meta {protocol: bantou, version} を付ける", async () => {
+  const { link, clients } = setup();
+  const p = link.status("s1");
+  await sleep(20);
+  assert.deepEqual(clients[0].sentTo, ["bantou-server"]);
+  assert.deepEqual(clients[0].sentMeta, [{ protocol: "bantou", version: "1.0.0" }]);
+  clients[0].reply(statusResult(1));
+  await p;
+  await link.close();
+});
+
+test("発見: listPeers(all, {protocol: bantou}) の peer id へ送り、meta の version は peer の宣言を使う", async () => {
+  const { link, clients } = setupDiscovery({}, [peerOf("srv-id-1", "my-host", "1.2.0")]);
+  const p = link.kickCap("s1", { cap_id: "c1", prompt: "go" });
+  await sleep(20);
+  assert.deepEqual(clients[0].listCalls, [{ scope: "all", filter: { protocol: "bantou" } }]);
+  assert.deepEqual(clients[0].sentTo, ["srv-id-1"]);
+  assert.deepEqual(clients[0].sentMeta, [{ protocol: "bantou", version: "1.2.0" }]);
+  // 発見した id からの返信（meta 無し）も受ける
+  clients[0].reply(capResult("c1", "found"), "my-host", { from_id: "srv-id-1" });
+  const r = await p;
+  assert.equal((r as { result_text: string }).result_text, "found");
+  const l = await link.list();
+  assert.equal(l[0].serverPeer, "srv-id-1");
+  await link.close();
+});
+
+test("発見: 複数なら name が bantou-server を優先、無ければ先頭", async () => {
+  const a = setupDiscovery({}, [peerOf("id-a", "other"), peerOf("id-b", "bantou-server"), peerOf("id-c", "zzz")]);
+  const p = a.link.status("s1");
+  await sleep(20);
+  assert.deepEqual(a.clients[0].sentTo, ["id-b"]);
+  a.clients[0].reply(statusResult(1));
+  await p;
+  await a.link.close();
+
+  const b = setupDiscovery({}, [peerOf("id-x", "first"), peerOf("id-y", "second")]);
+  const q = b.link.status("s1");
+  await sleep(20);
+  assert.deepEqual(b.clients[0].sentTo, ["id-x"]);
+  b.clients[0].reply(statusResult(1));
+  await q;
+  await b.link.close();
+});
+
+test("発見: 0 件・BROKER_UNSUPPORTED は bantou-server 宛てへフォールバック", async () => {
+  const zero = setupDiscovery({}, []);
+  const p = zero.link.status("s1");
+  await sleep(20);
+  assert.deepEqual(zero.clients[0].sentTo, ["bantou-server"]);
+  assert.ok(zero.logs.some((m) => m.includes("0 件")));
+  zero.clients[0].reply(statusResult(1));
+  await p;
+  await zero.link.close();
+
+  const old = setupDiscovery({}, undefined);
+  const q = old.link.status("s1");
+  await sleep(20);
+  assert.deepEqual(old.clients[0].sentTo, ["bantou-server"]);
+  assert.ok(old.logs.some((m) => m.includes("BROKER_UNSUPPORTED")));
+  old.clients[0].reply(statusResult(1));
+  await q;
+  await old.link.close();
+});
+
+test("servers[].peer 指定があれば発見せずその名前へ送る（従来の名前指定）", async () => {
+  const { link, clients } = setupDiscovery({ peer: "my-named-server" }, [peerOf("srv-id-1", "bantou-server")]);
+  const p = link.status("s1");
+  await sleep(20);
+  assert.deepEqual(clients[0].listCalls, []);
+  assert.deepEqual(clients[0].sentTo, ["my-named-server"]);
+  assert.deepEqual(clients[0].sentMeta, [{ protocol: "bantou", version: "1.0.0" }]);
+  clients[0].reply(statusResult(1), "my-named-server");
+  assert.equal((await p).type, "status_result");
+  await link.close();
+});
+
+test("peer id は再登録で変わるので、リクエストごとに解決し直す", async () => {
+  const { link, clients } = setupDiscovery({}, [peerOf("id-1", "bantou-server")]);
+  const p1 = link.status("s1");
+  await sleep(20);
+  clients[0].reply(statusResult(1));
+  await p1;
+  clients[0].peers = [peerOf("id-2", "bantou-server")];
+  const p2 = link.status("s1");
+  await sleep(20);
+  assert.deepEqual(clients[0].sentTo, ["id-1", "id-2"]);
+  clients[0].reply(statusResult(2));
+  await p2;
+  await link.close();
+});
+
+test("受信: meta が bantou なら名前が違っても受け、他 protocol・他名前は無視", async () => {
+  const { link, clients, logs } = setup();
+  const p = link.kickCap("s1", { cap_id: "c1", prompt: "go" });
+  await sleep(20);
+  clients[0].reply(capResult("c1", "x"), "stranger");
+  clients[0].reply(capResult("c1", "x"), "stranger", { meta: { protocol: "other", version: "1" } });
+  await sleep(20);
+  assert.ok(logs.some((m) => m.startsWith("無視:")));
+  clients[0].reply(capResult("c1", "by-meta"), "renamed", { meta: { protocol: "bantou", version: "1.0.0" } });
+  assert.equal(((await p) as { result_text: string }).result_text, "by-meta");
+  await link.close();
+});
+
+test("version 不一致の警告行が先頭に付いても本文を解釈する", async () => {
+  assert.equal(stripWarning("[agent-messenger warning] protocol version mismatch: a\n{\"x\":1}"), '{"x":1}');
+  assert.equal(stripWarning("[agent-messenger warning] a\n[agent-messenger warning] b\n{}"), "{}");
+  assert.equal(stripWarning("{}"), "{}");
+  const { link, clients } = setup();
+  const p = link.status("s1");
+  await sleep(20);
+  clients[0].replyText(`[agent-messenger warning] protocol version mismatch: x\n${JSON.stringify(statusResult(1))}`);
+  assert.equal((await p).type, "status_result");
+  await link.close();
 });

@@ -1,6 +1,7 @@
 import { hostname } from "node:os";
 import { createBrokerClient, createMessengerClient } from "@unagents/messenger-client";
 import {
+  MESSENGER_PROTOCOL,
   PROTOCOL_VERSION,
   SERVER_NAME,
   parseServerReply,
@@ -15,12 +16,36 @@ import {
 import type { Config, ServerConfig } from "./config.js";
 import type { Logger } from "./log.js";
 
+/** messenger の meta（protocol 名と version）。 */
+export interface LinkMeta {
+  protocol: string;
+  version: string;
+}
+
+/** listPeers が返す peer のうち link が使う部分。 */
+export interface LinkPeer {
+  id: string;
+  name: string;
+  protocols?: Array<{ name: string; version: string }>;
+}
+
+/** 受信 message のうち link が使う部分。 */
+export interface LinkInbound {
+  from_id?: string;
+  from_name: string;
+  text: string;
+  mode?: string;
+  meta?: LinkMeta | null;
+}
+
 /** link が使う messenger client の最小形（テストで偽物に差し替える）。 */
 export interface LinkClient {
   connect(): Promise<void>;
   close(): Promise<void>;
-  send(to: string, text: string): Promise<unknown>;
-  onMessage(handler: (m: { from_name: string; text: string; mode?: string }) => void | Promise<void>): () => void;
+  send(to: string, text: string, delivery?: "pull" | "push", meta?: LinkMeta): Promise<unknown>;
+  /** protocol で peer を絞って列挙する（0.10.0 broker のみ。無い・失敗は名前宛てにフォールバックする）。 */
+  listPeers?(scope?: "all" | "host" | "directory" | "repo", filter?: { protocol?: string; version?: string }): Promise<LinkPeer[]>;
+  onMessage(handler: (m: LinkInbound) => void | Promise<void>): () => void;
   /** 自分の peer 状態（実 client のみ）。 */
   peer?: { id: string | null };
 }
@@ -32,6 +57,8 @@ export interface ServerInfo {
   reachable: boolean;
   /** その broker 上での center 自身の peer id。 */
   peerId: string | null;
+  /** 直近に解決した server の送信先（peer id または名前）。未解決は null。 */
+  serverPeer: string | null;
 }
 
 export type KickCapInput = Omit<KickCapCommand, "bantou" | "type">;
@@ -69,6 +96,16 @@ interface Slot {
   pending: Pending[];
   /** 同じ cap_id / worker_id への指示を直列にするための末尾 promise。 */
   chains: Map<string, Promise<unknown>>;
+  /** 直近に解決した server の peer id（返信の送信元照合に使う）。 */
+  serverId: string | null;
+  /** 直近に解決した送信先（id か名前）。list 表示用。 */
+  serverPeer: string | null;
+}
+
+/** server の送信先と、meta に載せる version。 */
+export interface Target {
+  to: string;
+  meta: LinkMeta;
 }
 
 const KIND_COMMAND: Record<ReplyKind, ServerCommandType> = {
@@ -76,6 +113,16 @@ const KIND_COMMAND: Record<ReplyKind, ServerCommandType> = {
   worker_result: "resume_worker",
   status_result: "status",
 };
+
+/** version 不一致時に messenger が text 先頭へ付ける警告行（JSON を壊すので除く）。 */
+const WARNING_LINE = /^\[agent-messenger warning\][^\n]*\n?/;
+
+/** text 先頭の messenger 警告行を取り除く。 */
+export function stripWarning(text: string): string {
+  let t = text;
+  while (WARNING_LINE.test(t)) t = t.replace(WARNING_LINE, "");
+  return t;
+}
 
 const errorReply = (message: string, command?: ServerCommandType): ErrorReply => ({
   bantou: PROTOCOL_VERSION,
@@ -127,7 +174,7 @@ export function createServerLink(opts: {
   let closed = false;
   const slots = new Map<string, Slot>();
   for (const s of config.servers) {
-    slots.set(s.name, { cfg: s, client: null, unsubscribe: null, connected: false, peerId: null, connecting: null, pending: [], chains: new Map() });
+    slots.set(s.name, { cfg: s, client: null, unsubscribe: null, connected: false, peerId: null, connecting: null, pending: [], chains: new Map(), serverId: null, serverPeer: null });
   }
   const slotOf = (name: string): Slot => {
     const s = slots.get(name);
@@ -143,10 +190,17 @@ export function createServerLink(opts: {
     p.resolve(value);
   };
 
-  const onInbound = (slot: Slot, m: { from_name: string; text: string; mode?: string }): void => {
+  /** 送信元が server か。解決済みの peer id、bantou protocol の meta、SERVER_NAME、servers[].peer のいずれか。 */
+  const fromServer = (slot: Slot, m: LinkInbound): boolean =>
+    (m.from_id !== undefined && m.from_id === slot.serverId) ||
+    m.meta?.protocol === MESSENGER_PROTOCOL.protocol ||
+    m.from_name === SERVER_NAME ||
+    (slot.cfg.peer !== undefined && (m.from_name === slot.cfg.peer || m.from_id === slot.cfg.peer));
+
+  const onInbound = (slot: Slot, m: LinkInbound): void => {
     if (m.mode === "ping") return;
-    const r = parseServerReply(m.text);
-    if (!r || m.from_name !== SERVER_NAME) {
+    const r = parseServerReply(stripWarning(m.text));
+    if (!r || !fromServer(slot, m)) {
       log(`無視: server=${slot.cfg.name} from=${m.from_name} text=${m.text.replace(/\s+/g, " ").slice(0, 120)}`);
       return;
     }
@@ -219,6 +273,40 @@ export function createServerLink(opts: {
     if (c) await c.close().catch(() => {});
   };
 
+  /**
+   * 送信先を解決する（リクエストごと。peer id は再登録で変わるため）。
+   * servers[].peer 指定があればそれ（名前指定）。無ければ listPeers の protocol 絞り込みで発見し、
+   * 複数なら name が SERVER_NAME のものを優先、次に先頭。0 件・失敗（0.9 broker など）は SERVER_NAME へ。
+   * meta の version は発見した peer の宣言を使う（不一致警告を避ける）。
+   */
+  const resolveTarget = async (slot: Slot, client: LinkClient): Promise<Target> => {
+    const meta: LinkMeta = { protocol: MESSENGER_PROTOCOL.protocol, version: MESSENGER_PROTOCOL.version };
+    if (slot.cfg.peer) {
+      slot.serverId = null;
+      slot.serverPeer = slot.cfg.peer;
+      return { to: slot.cfg.peer, meta };
+    }
+    if (client.listPeers) {
+      try {
+        const peers = await client.listPeers("all", { protocol: MESSENGER_PROTOCOL.protocol });
+        const pick = peers.find((p) => p.name === SERVER_NAME) ?? peers[0];
+        if (pick) {
+          if (peers.length > 1) log(`bantou server が複数: server=${slot.cfg.name} ${peers.map((p) => `${p.name}(${p.id})`).join(",")} -> ${pick.name}(${pick.id})`);
+          const v = pick.protocols?.find((p) => p.name === MESSENGER_PROTOCOL.protocol)?.version;
+          slot.serverId = pick.id;
+          slot.serverPeer = pick.id;
+          return { to: pick.id, meta: { protocol: meta.protocol, version: v ?? meta.version } };
+        }
+        log(`protocol 発見 0 件、名前宛てにフォールバック: server=${slot.cfg.name}`);
+      } catch (e) {
+        log(`protocol 発見失敗、名前宛てにフォールバック: server=${slot.cfg.name} ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    slot.serverId = null;
+    slot.serverPeer = SERVER_NAME;
+    return { to: SERVER_NAME, meta };
+  };
+
   /** 同じ key の指示を直列化し、返信（またはタイムアウト）まで待つ。 */
   const request = <R>(
     server: string,
@@ -242,6 +330,8 @@ export function createServerLink(opts: {
         return errorReply(`server に接続できない: ${server} (${(e as Error).message})`, command);
       }
       if (closed) return errorReply("center 終了", command);
+      const target = await resolveTarget(slot, client);
+      if (closed) return errorReply("center 終了", command);
       return new Promise<R | ErrorReply>((resolve) => {
         const p: Pending = {
           kind,
@@ -255,9 +345,9 @@ export function createServerLink(opts: {
         };
         slot.pending.push(p);
         client
-          .send(SERVER_NAME, JSON.stringify({ bantou: PROTOCOL_VERSION, type: command, ...payload }))
+          .send(target.to, JSON.stringify({ bantou: PROTOCOL_VERSION, type: command, ...payload }), "pull", target.meta)
           .then(
-            () => log(`指示送信: server=${server} type=${command}${key ? ` id=${key}` : ""}`),
+            () => log(`指示送信: server=${server} to=${target.to} type=${command}${key ? ` id=${key}` : ""} meta=${target.meta.protocol}@${target.meta.version}`),
             (e: unknown) => {
               // 送信失敗は接続が壊れている可能性が高いので、次回使用時に作り直す
               if (slot.client === client) slot.connected = false;
@@ -308,6 +398,7 @@ export function createServerLink(opts: {
           connected: slot.connected,
           reachable: await healthCheck(slot.cfg).catch(() => false),
           peerId: slot.connected ? (slot.client?.peer?.id ?? null) : null,
+          serverPeer: slot.serverPeer,
         })),
       );
     },
