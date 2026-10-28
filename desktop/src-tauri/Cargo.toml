@@ -1,6 +1,6 @@
 [package]
 name = "bantou"
-version = "0.1.13"
+version = "0.1.14"
 description = "Multi-agent task bridge for local Markdown task files"
 authors = ["grrow"]
 edition = "2021"
