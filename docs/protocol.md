@@ -102,11 +102,34 @@ nothing into the workspace except Cork task md files.
 
 ## bantou-server commands
 
-`bantou-server` is a headless execution layer. It runs its own broker and is
-registered as the messenger peer `bantou-server`. Send a command with the
-messenger `send_message` tool, `to = "bantou-server"`, and put **one JSON
-object** in the text. The sender is `bantou-center` or any other messenger peer.
-The reply is sent back to the sender peer as one JSON object.
+`bantou-server` is a headless execution layer. It runs its own broker and
+serves the agent-messenger protocol `bantou` (agent-messenger 0.10.0
+`set_protocol`). It is also registered as the messenger peer `bantou-server`.
+Put **one JSON object** in the text of a messenger message. The sender is
+`bantou-center` or any other messenger peer. The reply is sent back to the
+sender peer as one JSON object.
+
+### Messenger protocol `bantou`
+
+The protocol definition is `packages/protocol/messenger/protocol.json` (JSON
+Schemas of `kick_cap`, `status`, `cap_result`, `status_result`, `error`)
+and `PROTOCOL.md`. It is the agent-messenger protocol version (`1.0.0`,
+`MESSENGER_PROTOCOL` in `server.ts`); the body field `bantou: 1` is a separate
+version of the JSON bodies below. Changing the definition needs a new protocol
+`version` (same name and version with other content is `PROTOCOL_CONFLICT`).
+
+- Registration: on start the server calls `setProtocol(<dir>)` with the
+  `protocol/` directory shipped in the npm package, and `unsetProtocol` on exit.
+  If the registration fails, the server logs it and keeps serving by name.
+- Discovery: `list_peers` with `protocol: "bantou"` returns the server. Peer
+  ids change on re-registration, so resolve before each send.
+- `meta`: send with `meta: {protocol: "bantou", version}` (version = the
+  version the discovered peer declares). The server replies to the sender with
+  the same meta. The server processes messages whose `meta.protocol` is
+  `bantou`, still accepts messages without `meta` (old format, sent to the peer
+  name `bantou-server`), and ignores messages with another protocol.
+- If the versions differ, agent-messenger prefixes the text with a line
+  `[agent-messenger warning] ...`; the center strips such lines before parsing.
 
 ### Common fields
 
@@ -300,7 +323,7 @@ Tool outputs are JSON text. A failure sets `isError`.
 | `rc_start` | `project` | remote-control record |
 | `rc_stop` | `project` | remote-control record |
 | `rc_status` | `project` | remote-control record |
-| `server_list` | none | `[{ name, broker, connected, reachable, peerId }]` |
+| `server_list` | none | `[{ name, broker, connected, reachable, peerId, serverPeer }]` |
 | `cap_kick` | `server`, `cap_id`, `prompt`, `repo?`, `branch?`, `reason?` | `cap_result` or `error` reply, verbatim JSON |
 | `worker_resume` | `server`, `worker_id`, `prompt`, `repo?`, `branch?` | `worker_result` or `error` reply, verbatim JSON |
 | `server_status` | `server` | `status_result` or `error` reply, verbatim JSON |
@@ -329,7 +352,11 @@ Remote-control record:
 ### Reply correlation and timeout
 
 The center connects to each configured bantou-server broker as the messenger
-peer `bantou-center`. It sends the command and matches the reply by `cap_id`
+peer `bantou-center`. It finds the server with `list_peers` (`protocol: "bantou"`)
+for every request (a `name` of `bantou-server` is preferred when several match;
+0 matches or an old broker fall back to the peer name `bantou-server`; a
+`servers[].peer` setting skips discovery and uses that name). It sends the
+command with `meta: {protocol: "bantou", version}` and matches the reply by `cap_id`
 (`cap_result`), by `worker_id` (`worker_result`), and in FIFO order for
 `status_result`. An `error` reply is matched by its `cap_id` / `worker_id` when
 present, otherwise to the oldest pending request with the same `command`. If no reply arrives within the configured timeout (default 35
