@@ -27,6 +27,9 @@ const LOG_LINES: usize = 20;
 /// Grace for SIGTERM before SIGKILL. The center's own shutdown waits stopGraceMs (5 s)
 /// for its remote-control children and then hard-exits after another 5 s, so we must
 /// outlast that (10 s) with margin or we would SIGKILL a center that is still cleaning up.
+/// (The center's hard-exit timer also SIGKILLs its children's process groups first, so a
+/// center that is allowed to reach it leaves no orphan; a center SIGKILLed by us does, and the
+/// next center reaps it at start.)
 const STOP_GRACE: Duration = Duration::from_secs(15);
 const POLL: Duration = Duration::from_millis(100);
 

@@ -426,3 +426,93 @@ test("子プロセスには remoteControl.env と project.env が合成されて
   assert.equal(children[0].env.TMUX, undefined);
   await sup.shutdown();
 });
+
+test("start: launch の前に reap を 1 回呼ぶ（再起動では呼ばない）", async () => {
+  const order: string[] = [];
+  const sup = createRemoteControlSupervisor({
+    config: cfg,
+    log: () => {},
+    spawnImpl: (c, a, o) => {
+      order.push("spawn");
+      return spawnImpl(c, a, o);
+    },
+    reap: async (p) => {
+      order.push(`reap:${p}`);
+    },
+  });
+  await sup.start("p1");
+  assert.deepEqual(order, ["reap:p1", "spawn"]);
+  children[0].child.die(1);
+  await until(() => children.length === 2);
+  assert.deepEqual(order, ["reap:p1", "spawn", "spawn"]);
+  await sup.shutdown();
+});
+
+test("start: reap が失敗しても起動する", async () => {
+  const sup = createRemoteControlSupervisor({
+    config: cfg,
+    log: () => {},
+    spawnImpl,
+    reap: async () => {
+      throw new Error("boom");
+    },
+  });
+  await sup.start("p1");
+  assert.equal(children.length, 1);
+  await sup.shutdown();
+});
+
+test("spawn は detached: true で呼ぶ", async () => {
+  let detached: boolean | undefined;
+  const sup = createRemoteControlSupervisor({
+    config: cfg,
+    log: () => {},
+    spawnImpl: (c, a, o) => {
+      detached = o.detached;
+      return spawnImpl(c, a, o);
+    },
+  });
+  await sup.start("p1");
+  assert.equal(detached, true);
+  await sup.shutdown();
+});
+
+test("killAllSync は killImpl を通して生きている子へ送る", async () => {
+  const sent: string[] = [];
+  const sup = createRemoteControlSupervisor({
+    config: cfg,
+    log: () => {},
+    spawnImpl,
+    killImpl: (c, sig) => {
+      sent.push(sig);
+      c.kill(sig);
+    },
+  });
+  await sup.start("p1");
+  sup.killAllSync("SIGKILL");
+  assert.deepEqual(sent, ["SIGKILL"]);
+  await sup.shutdown();
+  // 子が居なくなった後は何も送らない
+  const n = sent.length;
+  sup.killAllSync("SIGKILL");
+  assert.equal(sent.length, n);
+  assert.equal(sent[0], "SIGKILL");
+});
+
+test("stop: SIGTERM で終わらなければ killImpl に SIGKILL を送る", async () => {
+  const sent: string[] = [];
+  const sup = createRemoteControlSupervisor({
+    config: cfg,
+    log: () => {},
+    spawnImpl,
+    killImpl: (c, sig) => {
+      sent.push(sig);
+      c.kill(sig);
+    },
+  });
+  await sup.start("p1");
+  children[0].child.exitOnTerm = false;
+  await sup.stop("p1");
+  assert.deepEqual(sent, ["SIGTERM", "SIGKILL"]);
+  await sup.shutdown();
+});

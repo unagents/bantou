@@ -6,6 +6,7 @@ import type { Readable, Writable } from "node:stream";
 import type { ResolvedClaude } from "./claude-path.js";
 import type { Config, ProjectConfig } from "./config.js";
 import type { Logger } from "./log.js";
+import { reapOrphans } from "./reap.js";
 
 export type RcState = "stopped" | "starting" | "connected" | "error";
 
@@ -41,8 +42,28 @@ export interface ChildLike {
 export type SpawnImpl = (
   command: string,
   args: string[],
-  options: { cwd: string; env: NodeJS.ProcessEnv; stdio: ["pipe", "pipe", "pipe"] },
+  options: { cwd: string; env: NodeJS.ProcessEnv; stdio: ["pipe", "pipe", "pipe"]; detached: boolean },
 ) => ChildLike;
+
+/** 子へ signal を送る。既定は process group ごと（孫まで止める）。 */
+export type KillImpl = (child: ChildLike, signal: NodeJS.Signals) => void;
+
+/**
+ * 実 spawn（detached: true = setsid、pgid = 子の pid）用の kill。
+ * process group 全体へ送り、group が無い / 権限が無い場合は子 1 本へ送る。
+ */
+export const groupKill: KillImpl = (child, signal) => {
+  if (child.pid !== undefined && child.pid > 1) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "ESRCH" && code !== "EPERM") throw err;
+    }
+  }
+  child.kill(signal);
+};
 
 export interface RemoteControlSupervisor {
   start(project: string): Promise<RcStatus>;
@@ -50,6 +71,8 @@ export interface RemoteControlSupervisor {
   status(project: string): RcStatus;
   list(): RcStatus[];
   shutdown(): Promise<void>;
+  /** 生きている子全てへ同期で signal を送る（exit handler / 強制終了タイマー用。待たない）。 */
+  killAllSync(signal: NodeJS.Signals): void;
 }
 
 /**
@@ -144,11 +167,18 @@ export function createRemoteControlSupervisor(opts: {
   config: Config;
   log: Logger;
   spawnImpl?: SpawnImpl;
+  /** 子への signal 送信。省略時は、実 spawn なら process group 宛て、spawnImpl 注入時は child.kill。 */
+  killImpl?: KillImpl;
+  /** start 前に同じ project の孤児を回収する処理。省略時は reapOrphans（ps 照合）。spawnImpl 注入時は何もしない。 */
+  reap?: (project: string) => Promise<unknown>;
   /** 解決済みの claude。省略時は config 指定、なければ PATH 任せの `claude`。 */
   claude?: ResolvedClaude;
 }): RemoteControlSupervisor {
   const { config, log } = opts;
   const spawnImpl: SpawnImpl = opts.spawnImpl ?? ((c, a, o) => nodeSpawn(c, a, o) as unknown as ChildLike);
+  const killImpl: KillImpl = opts.killImpl ?? (opts.spawnImpl ? (c, sig) => void c.kill(sig) : groupKill);
+  const reap =
+    opts.reap ?? (opts.spawnImpl ? async () => {} : (project: string) => reapOrphans(project, { log }));
   const rc = config.remoteControl;
   const claude: ResolvedClaude =
     opts.claude ?? (rc.claude ? { path: rc.claude, source: "config" } : { path: "claude", source: "PATH" });
@@ -211,7 +241,7 @@ export function createRemoteControlSupervisor(opts: {
 
     let child: ChildLike;
     try {
-      child = spawnImpl(claude.path, args, { cwd: e.project.path, env: childEnv(e.project), stdio: ["pipe", "pipe", "pipe"] });
+      child = spawnImpl(claude.path, args, { cwd: e.project.path, env: childEnv(e.project), stdio: ["pipe", "pipe", "pipe"], detached: true });
     } catch (err) {
       e.status.state = "error";
       e.status.lastError = `起動失敗: ${(err as Error).message}`;
@@ -356,6 +386,17 @@ export function createRemoteControlSupervisor(opts: {
       log(`remote-control 起動中止（停止要求あり）: project=${name}`);
       return snapshot(e);
     }
+    // 前の center が残した同名の孤児を止めてから起動する（重複起動を避ける）
+    try {
+      await reap(name);
+    } catch (err) {
+      log(`孤児回収に失敗（起動は続行）: project=${name} ${(err as Error).message}`);
+    }
+    if (isActive(e)) return snapshot(e);
+    if (closing || e.stopSeq !== stopSeq) {
+      log(`remote-control 起動中止（停止要求あり）: project=${name}`);
+      return snapshot(e);
+    }
     e.status.restarts = 0;
     launch(e, false);
     return snapshot(e);
@@ -373,11 +414,11 @@ export function createRemoteControlSupervisor(opts: {
     if (child && e.exited) {
       const exited = e.exited;
       log(`remote-control 停止要求: project=${name} SIGTERM`);
-      child.kill("SIGTERM");
+      killImpl(child, "SIGTERM");
       const graceful = await Promise.race([exited.then(() => true), sleep(rc.stopGraceMs).then(() => false)]);
       if (!graceful) {
         log(`remote-control SIGKILL: project=${name} (${rc.stopGraceMs}ms 以内に終了せず)`);
-        child.kill("SIGKILL");
+        killImpl(child, "SIGKILL");
         await Promise.race([exited, sleep(5000)]);
       }
     }
@@ -394,6 +435,16 @@ export function createRemoteControlSupervisor(opts: {
     shutdown: async () => {
       closing = true;
       await Promise.all([...entries.keys()].map((n) => stop(n)));
+    },
+    killAllSync: (signal) => {
+      for (const e of entries.values()) {
+        if (!e.child) continue;
+        try {
+          killImpl(e.child, signal);
+        } catch {
+          // 既に終了している等。最後の砦なので握りつぶす
+        }
+      }
     },
   };
 }

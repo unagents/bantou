@@ -3,7 +3,9 @@ import type { CliArgs } from "./args.js";
 import { resolveClaude } from "./claude-path.js";
 import { loadConfig } from "./config.js";
 import { startHttpServer, type HttpHandle } from "./http.js";
-import { log } from "./log.js";
+import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
+import { log, setLogFile } from "./log.js";
 import { watchParent } from "./parent-watch.js";
 import { createRemoteControlSupervisor } from "./remote-control.js";
 import { createCenterServer } from "./server.js";
@@ -28,6 +30,12 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   } else if (!config.projects.some((p) => p.autostart)) {
     log(`remote-control は自動起動しない: autostart の project が 0 件 (projects=${config.projects.length}, ${configPath})`);
   }
+  try {
+    await mkdir(config.logDir, { recursive: true });
+    setLogFile(join(config.logDir, "center.log"));
+  } catch (e) {
+    log(`center.log を開けない（stderr のみ）: ${e instanceof Error ? e.message : String(e)}`);
+  }
   const claude = await resolveClaude(config.remoteControl.claude, log);
   const supervisor = createRemoteControlSupervisor({ config, log, claude });
   const link = createServerLink({ config, log });
@@ -40,13 +48,16 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     log(`終了開始: ${reason}`);
     const hard = setTimeout(() => {
       log("終了処理が間に合わず強制終了");
+      supervisor.killAllSync("SIGKILL");
       process.exit(1);
     }, config.remoteControl.stopGraceMs + HARD_EXIT_MARGIN_MS);
     hard.unref();
     try {
-      await http?.close();
-      await supervisor.shutdown();
-      await link.close();
+      // 子の停止を最優先にする（http.close が長引いても子に signal が届くように）
+      const results = await Promise.allSettled([supervisor.shutdown(), http?.close(), link.close()]);
+      for (const r of results) {
+        if (r.status === "rejected") throw r.reason;
+      }
     } catch (e) {
       log(`終了処理エラー: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -55,6 +66,21 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   };
   process.once("SIGTERM", () => void shutdown("SIGTERM"));
   process.once("SIGINT", () => void shutdown("SIGINT"));
+  process.once("SIGHUP", () => void shutdown("SIGHUP"));
+  // 例外で落ちる場合も子を残さない
+  process.on("uncaughtException", (e) => {
+    log(`uncaughtException: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`);
+    void shutdown("uncaughtException");
+  });
+  process.on("unhandledRejection", (e) => {
+    log(`unhandledRejection: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`);
+    void shutdown("unhandledRejection");
+  });
+  // どの経路で exit しても、残っている子には SIGKILL を送る（最後の砦。SIGKILL された時は走らない）
+  process.on("exit", () => supervisor.killAllSync("SIGKILL"));
+  // 読み手の消えた pipe への書込（EPIPE）で落ちない
+  process.stderr.on("error", () => {});
+  process.stdout.on("error", () => {});
 
   const makeServer = () => createCenterServer({ config, supervisor, link });
   if (args.transport === "http") {
