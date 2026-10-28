@@ -1,0 +1,92 @@
+{
+  "name": "bantou",
+  "version": "1.0.0",
+  "description": "bantou-server commands (kick_cap, status) and replies (cap_result, status_result, error). Message body is one JSON object in the text; `bantou: 1` is the body schema version.",
+  "messages": {
+    "kick_cap": {
+      "type": "object",
+      "description": "Start or resume the remote cap `cap_id` headlessly with `prompt`. Reply: cap_result or error.",
+      "required": ["bantou", "type", "cap_id", "prompt"],
+      "properties": {
+        "bantou": { "const": 1 },
+        "type": { "const": "kick_cap" },
+        "cap_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
+        "repo": { "type": "string", "minLength": 1, "description": "Git URL; cloned into the cap path on first use, fetched afterwards. Must not start with '-'." },
+        "branch": { "type": "string", "minLength": 1, "description": "Branch for git clone --branch. Must not start with '-'." },
+        "prompt": { "type": "string", "minLength": 1 },
+        "reason": { "type": "string", "description": "Free text, logged only." }
+      },
+      "additionalProperties": true
+    },
+    "status": {
+      "type": "object",
+      "description": "List caps and workers with their state. Reply: status_result.",
+      "required": ["bantou", "type"],
+      "properties": {
+        "bantou": { "const": 1 },
+        "type": { "const": "status" }
+      },
+      "additionalProperties": true
+    },
+    "cap_result": {
+      "type": "object",
+      "description": "Outcome of one headless cap run (also sent when a worker report resumes the cap).",
+      "required": ["bantou", "type", "cap_id", "session_id", "ok", "result_text"],
+      "properties": {
+        "bantou": { "const": 1 },
+        "type": { "const": "cap_result" },
+        "cap_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
+        "session_id": { "type": "string", "description": "Claude session id used (new or resumed)." },
+        "ok": { "type": "boolean" },
+        "result_text": { "type": "string", "description": "Final result text; empty when the run failed before producing one." },
+        "error": { "type": "string", "description": "Failure detail when ok is false." }
+      },
+      "additionalProperties": true
+    },
+    "status_result": {
+      "type": "object",
+      "required": ["bantou", "type", "ok", "caps", "workers"],
+      "properties": {
+        "bantou": { "const": 1 },
+        "type": { "const": "status_result" },
+        "ok": { "const": true },
+        "caps": { "type": "array", "items": { "$ref": "#/$defs/agent_status" } },
+        "workers": { "type": "array", "items": { "$ref": "#/$defs/agent_status" } }
+      },
+      "$defs": {
+        "agent_status": {
+          "type": "object",
+          "required": ["kind", "id", "path", "session_id", "state", "last_started_at", "last_finished_at", "retries", "queued"],
+          "properties": {
+            "kind": { "enum": ["cap", "worker"] },
+            "id": { "type": "string" },
+            "path": { "type": "string", "description": "Absolute directory." },
+            "session_id": { "type": ["string", "null"] },
+            "state": { "enum": ["idle", "running", "failed", "error"] },
+            "last_started_at": { "type": ["string", "null"], "description": "ISO 8601." },
+            "last_finished_at": { "type": ["string", "null"], "description": "ISO 8601." },
+            "last_error": { "type": "string" },
+            "retries": { "type": "number" },
+            "queued": { "type": "number", "description": "Commands waiting in this agent's queue (the running one excluded)." }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "error": {
+      "type": "object",
+      "required": ["bantou", "type", "ok", "message"],
+      "properties": {
+        "bantou": { "const": 1 },
+        "type": { "const": "error" },
+        "ok": { "const": false },
+        "message": { "type": "string" },
+        "command": { "enum": ["kick_cap", "resume_worker", "status"], "description": "type of the failed command, when known." },
+        "cap_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
+        "worker_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   isServerCommand, isKickCapCommand, isResumeWorkerCommand, isStatusCommand,
   parseServerCommand, isServerReply, parseServerReply,
-  isValidAgentId, isAgentState, SERVER_NAME,
+  isValidAgentId, isAgentState, SERVER_NAME, MESSENGER_PROTOCOL, AGENT_ID_PATTERN,
 } from "../dist/index.js";
 
 const kickMin = { bantou: 1, type: "kick_cap", cap_id: "c1", prompt: "go" };
@@ -132,4 +133,32 @@ test("prompt / reason に NUL を含む指示は拒否", () => {
   assert.equal(isServerCommand({ ...kickMin, prompt: "a\0b" }), false);
   assert.equal(isServerCommand({ ...kickMin, reason: "a\0b" }), false);
   assert.equal(isServerCommand({ ...resumeMin, prompt: "a\0b" }), false);
+});
+
+const manifest = JSON.parse(readFileSync(new URL("../messenger/protocol.json", import.meta.url), "utf8"));
+
+test("messenger/protocol.json matches MESSENGER_PROTOCOL and the message set", () => {
+  assert.equal(manifest.name, MESSENGER_PROTOCOL.protocol);
+  assert.equal(manifest.version, MESSENGER_PROTOCOL.version);
+  assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
+  assert.equal(typeof manifest.description, "string");
+  assert.deepEqual(Object.keys(manifest.messages).sort(), ["cap_result", "error", "kick_cap", "status", "status_result"]);
+  for (const [k, schema] of Object.entries(manifest.messages)) {
+    assert.equal(schema.type, "object", k);
+    assert.equal(schema.properties.type.const, k, k);
+    assert.equal(schema.properties.bantou.const, 1, k);
+  }
+});
+
+test("protocol.json required fields agree with the guards", () => {
+  const m = manifest.messages;
+  // every sample accepted by the guards carries all required fields of its schema
+  const samples = { kick_cap: kickMin, status, cap_result: capResult, status_result: statusReply, error: errReply };
+  for (const [k, v] of Object.entries(samples)) {
+    for (const f of m[k].required) assert.ok(f in v, `${k} sample lacks required ${f}`);
+    for (const f of Object.keys(v)) assert.ok(f in m[k].properties, `${k}.${f} not in schema`);
+  }
+  assert.deepEqual([...m.kick_cap.required].sort(), ["bantou", "cap_id", "prompt", "type"]);
+  for (const f of Object.keys(kickFull)) assert.ok(f in m.kick_cap.properties, f);
+  assert.equal(m.kick_cap.properties.cap_id.pattern, AGENT_ID_PATTERN.source);
 });

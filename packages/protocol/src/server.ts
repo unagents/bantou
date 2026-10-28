@@ -7,6 +7,12 @@ import { PROTOCOL_VERSION } from "./envelope.js";
 /** Messenger peer name of bantou-server. */
 export const SERVER_NAME = "bantou-server";
 
+/**
+ * agent-messenger protocol registration (messenger/protocol.json) used in `meta` of send / listPeers.
+ * Not the body schema version (`bantou: 1`, PROTOCOL_VERSION). Keep in sync with messenger/protocol.json.
+ */
+export const MESSENGER_PROTOCOL = { protocol: "bantou", version: "1.0.0" } as const;
+
 /** Allowed cap / worker ids (also directory names under <workspace>/caps and <workspace>/workers). */
 export const AGENT_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
