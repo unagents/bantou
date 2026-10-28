@@ -94,8 +94,8 @@ npx bantou --config <path>
 ## 内蔵 broker と peer
 
 - 起動時に broker を `broker.port` / `broker.bind` で立てる。discovery と token は config の通り。
-- 前回異常終了で残った自分の peer（name `bantou-server`、同一 host）は起動時に解除する。
-- 自分は loopback（bind が全 IF の時）経由で接続し、peer `bantou-server` として登録する。
+- server 自身の messenger client は、自前 broker の URL を指名せず、agent-messenger の通常の解決（env `AGENT_MESSENGER_HOST` → `~/.agent-messenger/config.json` → UDP 発見 → ローカル fallback）でつないだ broker に peer `bantou-server` として登録する。LAN の常設 broker があればそれで動き、自前 broker には依存しない。どの broker にどの段階でつないだかは、ログの `messenger: ... broker=... (..., via ...)` に出る。
+- 前回異常終了で残った自分の peer の解除は行わない（つないだ broker が heartbeat 切れの peer を自分で掃除する）。
 
 ## protocol 登録
 
@@ -249,7 +249,7 @@ npm run e2e
 
 - 要: host に claude。claude を実際に複数回起動するため数分かかる。claude のログイン（claudeAgent）を使う。
 - `E2E_ROOT` で一時ディレクトリの親を変えられる（既定は OS の tmp）。`E2E_CLAUDE_CONFIG_DIR` で `CLAUDE_CONFIG_DIR` を渡す。`E2E_MODEL` で `--model` を指定する（worker の model は未指定なら `sonnet`）。cap の Bash sandbox は server の既定（`session.capBashSandbox: false`）で切れる。probe-survival は `E2E_CAP_BASH_SANDBOX=1` で sandbox 有効のまま計測する。
-- 内蔵 broker は port 0 / 127.0.0.1 / discovery off、`/mcp` も port 0。server・cap・worker に本番 broker を使わせない（`AGENT_MESSENGER_*` / `CLAUDE_CODE_MESSAGING_*` を除去、cap と worker は `--strict-mcp-config`）。
+- 内蔵 broker は 127.0.0.1 / discovery off の空き port（スクリプトが先に決める）、`/mcp` は port 0。server の messenger client はその broker へ向けるため、テスト専用に env（`AGENT_MESSENGER_HOST` / `PORT` / `DISCOVERY=off`）で上書きする。server・cap・worker に本番 broker を使わせない（`AGENT_MESSENGER_*` / `CLAUDE_CODE_MESSAGING_*` を除去、cap と worker は `--strict-mcp-config`）。
 - 検証内容: protocol 登録（`protocol 登録` ログ）→ center 相当の client が `listPeers("all", {protocol: "bantou"})` で発見 → meta 付きで送り、返信（`cap_result` / `status_result` / report 起因の `cap_result`）に meta が付くことを確認 → `kick_cap`（新規）→ `kick_cap`（resume、同じ session_id）→ worker 報告（cap が worker を `setsid claude -p` で起動 → worker が `report` done → server が受信 → cap が resume → 結果が送信元へ返る。worker と cap の `system/init` の `mcp_servers` も確認）→ `status` → meta 無しの旧形式 `status` も受ける → 他 protocol の meta は無視 → 非コマンドの無視 → 終了時の `protocol 解除`。
 - 失敗時は一時ディレクトリを残し、パスを `E2E_DIR=` に出す。
 - `npx tsx scripts/probe-survival.ts`（`E2E_*` は同じ）: cap が起動したプロセスが cap の終了後も残るかを `kick_cap` 経由で計測する。`PROBE_SIGTERM=1` で server の SIGTERM 経路も測る。

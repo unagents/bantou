@@ -58,20 +58,8 @@ const remoteControlSchema = z.object({
 
 const serverSchema = z.object({
   name: z.string().regex(NAME, "英数字と _ - のみ"),
-  broker: z
-    .string()
-    .refine((u) => {
-      try {
-        return new URL(u).protocol === "http:";
-      } catch {
-        return false;
-      }
-    }, { message: "http の URL で指定する（messenger-client は https 非対応）" })
-    // 末尾 / を除く（/health が //health にならないように）
-    .transform((u) => u.replace(/\/+$/, "")),
   /** server の peer 名または id。省略すると listPeers の protocol 絞り込み（bantou）で自動発見する。 */
   peer: z.string().min(1).optional(),
-  token: z.string().optional(),
   timeoutMs: z.number().int().positive().default(DEFAULT_SERVER_TIMEOUT_MS),
 });
 

@@ -8,6 +8,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { createServer, type AddressInfo } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createMessengerClient } from "@unagents/messenger-client";
@@ -45,12 +46,20 @@ async function main(): Promise<void> {
   const dir = await mkdtemp(join(root, "bantou-e2e-"));
   const ws = join(dir, "ws");
   const cfgPath = join(dir, "config.json");
+  // server は URL を指名せず通常の解決で繋ぐ。テストでは自前 broker の空き port を先に決め、env（解決の 1 段目）でそこへ向ける（テスト専用の上書き）
+  const brokerPort = await new Promise<number>((res) => {
+    const s = createServer();
+    s.listen(0, "127.0.0.1", () => {
+      const p = (s.address() as AddressInfo).port;
+      s.close(() => res(p));
+    });
+  });
   const capId = `e2e-cap-${process.pid}`;
   await writeFile(
     cfgPath,
     JSON.stringify({
       workspace: ws,
-      broker: { port: 0, bind: "127.0.0.1", discovery: "off", token: "" },
+      broker: { port: brokerPort, bind: "127.0.0.1", discovery: "off", token: "" },
       mcp: { port: 0, bind: "127.0.0.1" },
       session: {
         timeoutMs: RUN_TIMEOUT,
@@ -67,6 +76,9 @@ async function main(): Promise<void> {
   for (const k of Object.keys(env)) {
     if (k.startsWith("AGENT_MESSENGER_") || k.startsWith("CLAUDE_CODE_MESSAGING_")) delete env[k];
   }
+  env.AGENT_MESSENGER_HOST = "127.0.0.1";
+  env.AGENT_MESSENGER_PORT = String(brokerPort);
+  env.AGENT_MESSENGER_DISCOVERY = "off";
 
   let server: ChildProcess | undefined;
   let exitCode: number | null | undefined;

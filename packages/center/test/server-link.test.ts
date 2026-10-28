@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseConfig } from "../src/config.js";
 import {
-  createPinnedClient,
+  createClient,
   createServerLink,
   stripWarning,
   type LinkClient,
@@ -60,7 +60,7 @@ class FakeClient implements LinkClient {
 }
 
 function setup(timeoutMs = 2000, peerWatchMs?: number) {
-  const cfg = parseConfig({ servers: [{ name: "s1", broker: "http://127.0.0.1:1", timeoutMs }] }, "/x/c.json");
+  const cfg = parseConfig({ servers: [{ name: "s1", timeoutMs }] }, "/x/c.json");
   const clients: FakeClient[] = [];
   const logs: string[] = [];
   const link = createServerLink({
@@ -197,7 +197,7 @@ test("未定義 server は例外", async () => {
 });
 
 test("接続失敗はクラッシュせず、次回使用時に再接続", async () => {
-  const cfg = parseConfig({ servers: [{ name: "s1", broker: "http://127.0.0.1:1", timeoutMs: 500 }] }, "/x/c.json");
+  const cfg = parseConfig({ servers: [{ name: "s1", timeoutMs: 500 }] }, "/x/c.json");
   const clients: FakeClient[] = [];
   const link = createServerLink({
     config: cfg,
@@ -212,7 +212,7 @@ test("接続失敗はクラッシュせず、次回使用時に再接続", async
   });
   await link.connectAll();
   let l = await link.list();
-  assert.deepEqual(l, [{ name: "s1", broker: "http://127.0.0.1:1", connected: false, reachable: false, peerId: null, serverPeer: null }]);
+  assert.deepEqual(l, [{ name: "s1", connected: false, reachable: false, peerId: null, serverPeer: null }]);
 
   const p = link.status("s1");
   await sleep(30);
@@ -226,7 +226,7 @@ test("接続失敗はクラッシュせず、次回使用時に再接続", async
 });
 
 test("接続できない時は error 返信", async () => {
-  const cfg = parseConfig({ servers: [{ name: "s1", broker: "http://127.0.0.1:1" }] }, "/x/c.json");
+  const cfg = parseConfig({ servers: [{ name: "s1" }] }, "/x/c.json");
   const link = createServerLink({
     config: cfg,
     log: () => {},
@@ -334,17 +334,24 @@ test("接続中に close されたら client を捨てて指示はエラー", as
   assert.ok(clients.every((c) => c.closed));
 });
 
-test("実 client は設定の broker だけに接続し、7901 へフォールバックしない", async () => {
-  const cfg = parseConfig({ servers: [{ name: "s1", broker: "http://127.0.0.1:1/" }] }, "/x/c.json");
+test("実 client は通常の解決に従う（env の HOST/PORT が効く。URL を固定しない）", async () => {
+  const cfg = parseConfig({ servers: [{ name: "s1" }] }, "/x/c.json");
+  const keys = ["AGENT_MESSENGER_HOST", "AGENT_MESSENGER_PORT"] as const;
+  const saved = keys.map((k) => process.env[k]);
+  // テスト専用の env 上書き（通常解決の 1 段目）。到達不能な 127.0.0.1:1 を指して失敗メッセージで解決先を確かめる
+  process.env.AGENT_MESSENGER_HOST = "127.0.0.1";
+  process.env.AGENT_MESSENGER_PORT = "1";
   const logs: string[] = [];
-  const client = createPinnedClient(cfg.servers[0], (m) => logs.push(m));
-  await assert.rejects(client.connect(), (e: Error) => {
-    assert.match(e.message, /http:\/\/127\.0\.0\.1:1 is not reachable/);
-    assert.doesNotMatch(e.message, /7901/);
-    return true;
-  });
-  assert.ok(!logs.some((l) => l.includes("7901")), logs.join("\n"));
-  await client.close();
+  const client = createClient(cfg.servers[0], (m) => logs.push(m));
+  try {
+    await assert.rejects(client.connect(), /http:\/\/127\.0\.0\.1:1 is not reachable/);
+  } finally {
+    keys.forEach((k, i) => {
+      if (saved[i] === undefined) delete process.env[k];
+      else process.env[k] = saved[i];
+    });
+    await client.close();
+  }
 });
 
 const peerOf = (id: string, name: string, version = "1.0.0"): LinkPeer => ({
@@ -352,7 +359,7 @@ const peerOf = (id: string, name: string, version = "1.0.0"): LinkPeer => ({
 });
 
 function setupDiscovery(server: object = {}, peers?: LinkPeer[]) {
-  const cfg = parseConfig({ servers: [{ name: "s1", broker: "http://127.0.0.1:1", timeoutMs: 2000, ...server }] }, "/x/c.json");
+  const cfg = parseConfig({ servers: [{ name: "s1", timeoutMs: 2000, ...server }] }, "/x/c.json");
   const clients: FakeClient[] = [];
   const logs: string[] = [];
   const link = createServerLink({
@@ -484,4 +491,24 @@ test("version 不一致の警告行が先頭に付いても本文を解釈する
   clients[0].replyText(`[agent-messenger warning] protocol version mismatch: x\n${JSON.stringify(statusResult(1))}`);
   assert.equal((await p).type, "status_result");
   await link.close();
+});
+
+test("reachable の既定は接続を確保できるか（listPeers 非対応の 0.9 broker でも true）", async () => {
+  const cfg = parseConfig({ servers: [{ name: "s1" }] }, "/x/c.json");
+  let fail = false;
+  const link = createServerLink({
+    config: cfg,
+    log: () => {},
+    clientFactory: () => {
+      const c = new FakeClient();
+      c.failConnect = fail;
+      return c;
+    },
+  });
+  assert.equal((await link.list())[0].reachable, true);
+  await link.close();
+  fail = true;
+  const link2 = createServerLink({ config: cfg, log: () => {}, clientFactory: () => Object.assign(new FakeClient(), { failConnect: true }) });
+  assert.equal((await link2.list())[0].reachable, false);
+  await link2.close();
 });

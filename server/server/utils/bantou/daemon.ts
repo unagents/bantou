@@ -1,7 +1,7 @@
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { startBroker } from "@unagents/messenger-broker";
-import { createBrokerClient, createMessengerClient } from "@unagents/messenger-client";
+import { createMessengerClient } from "@unagents/messenger-client";
 import type { InboundMessage, MessengerClient } from "@unagents/messenger-client";
 import {
   MESSENGER_PROTOCOL,
@@ -110,7 +110,6 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
   log(
     `broker 起動: port=${broker.port} bind=${bind} discovery=${discovery} token=${token ? "有" : "無"} id=${broker.id}`,
   );
-  const url = brokerUrl(bind, broker.port);
   if (!["127.0.0.1", "::1", "localhost"].includes(bind) && token === "") {
     log(`警告: token 無しで ${bind} に bind。LAN から誰でも指示を送れる`);
   }
@@ -174,22 +173,11 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
   };
 
   try {
-    // 前回異常終了で残った自分の peer を解除する
-    const admin = createBrokerClient(token);
-    admin.setUrl(url);
-    const peers = await admin.post("/list-peers", {});
-    for (const p of peers) {
-      if (p.name === SERVER_NAME && p.hostname === hostname()) {
-        await admin.post("/unregister", { id: p.id });
-        log(`古い peer を解除: ${p.id}`);
-      }
-    }
-
+    // 接続先は agent-messenger の通常の解決（env → config → UDP 発見 → ローカル fallback）に任せる。
+    // 自前 broker の URL は指名しない。解決結果は messenger のログ（broker=... via ...）に出る
     client = createMessengerClient({
-      env: { AGENT_MESSENGER_DISCOVERY: "off", AGENT_MESSENGER_TOKEN: token },
       name: SERVER_NAME,
       summary: `${hostname()} ${config.workspace}`,
-      brokers: [url],
       autoStartBroker: false,
       log: (m) => log(`messenger: ${m}`),
     });
@@ -198,7 +186,7 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
       inflight.add(p);
     });
     await client.connect();
-    log(`peer 登録: name=${SERVER_NAME} id=${client.peer.id} broker=${url}`);
+    log(`peer 登録: name=${SERVER_NAME} id=${client.peer.id}`);
     if (deps.protocolDir) {
       // 失敗しても致命にしない（従来の名前待受 bantou-server で継続する）
       try {

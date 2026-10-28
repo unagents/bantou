@@ -102,7 +102,9 @@ nothing into the workspace except Cork task md files.
 
 ## bantou-server commands
 
-`bantou-server` is a headless execution layer. It runs its own broker and
+`bantou-server` is a headless execution layer. It runs its own broker (it does not depend on it: the
+server itself connects to whichever broker the normal agent-messenger resolution
+finds, such as the LAN's standing broker) and
 serves the agent-messenger protocol `bantou` (agent-messenger 0.10.0
 `set_protocol`). It is also registered as the messenger peer `bantou-server`.
 Put **one JSON object** in the text of a messenger message. The sender is
@@ -323,7 +325,7 @@ Tool outputs are JSON text. A failure sets `isError`.
 | `rc_start` | `project` | remote-control record |
 | `rc_stop` | `project` | remote-control record |
 | `rc_status` | `project` | remote-control record |
-| `server_list` | none | `[{ name, broker, connected, reachable, peerId, serverPeer }]` |
+| `server_list` | none | `[{ name, connected, reachable, peerId, serverPeer }]` |
 | `cap_kick` | `server`, `cap_id`, `prompt`, `repo?`, `branch?`, `reason?` | `cap_result` or `error` reply, verbatim JSON |
 | `worker_resume` | `server`, `worker_id`, `prompt`, `repo?`, `branch?` | `worker_result` or `error` reply, verbatim JSON |
 | `server_status` | `server` | `status_result` or `error` reply, verbatim JSON |
@@ -351,8 +353,9 @@ Remote-control record:
 
 ### Reply correlation and timeout
 
-The center connects to each configured bantou-server broker as the messenger
-peer `bantou-center`. It finds the server with `list_peers` (`protocol: "bantou"`)
+The center connects as the messenger peer `bantou-center`, a plain agent-messenger
+client: the broker is found by the normal resolution (env, config file, UDP
+discovery, local fallback) and no broker URL is configured. It finds the server with `list_peers` (`protocol: "bantou"`)
 for every request (a `name` of `bantou-server` is preferred when several match;
 0 matches or an old broker fall back to the peer name `bantou-server`; a
 `servers[].peer` setting skips discovery and uses that name). It sends the

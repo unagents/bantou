@@ -75,7 +75,7 @@ export function registerTools(
     "server_list",
     {
       title: "server 一覧",
-      description: "設定済みの bantou-server（broker URL）と、その接続・到達状況を返す。server の peer は bantou protocol で自動発見し（servers[].peer 指定があればその名前）、serverPeer に直近の送信先を返す",
+      description: "設定済みの bantou-server と、その接続・到達状況を返す。server の peer は bantou protocol で自動発見し（servers[].peer 指定があればその名前）、serverPeer に直近の送信先を返す",
     },
     () => guard(async () => json(await link.list())),
   );

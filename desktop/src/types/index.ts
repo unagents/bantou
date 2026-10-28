@@ -102,8 +102,6 @@ export interface CenterProject {
 /** Mirror of `src-tauri/src/center.rs::CenterServer`. */
 export interface CenterServer {
   name: string;
-  /** http URL of the broker the bantou-server is on. The server's peer is discovered by the center. */
-  broker: string;
 }
 
 /** Mirror of `src-tauri/src/center.rs::CenterSettings`. */

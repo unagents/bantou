@@ -8,6 +8,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { createServer, type AddressInfo } from "node:net";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
@@ -88,6 +89,15 @@ async function main(): Promise<void> {
   let error: unknown;
   let port = 0;
 
+  // server は URL を指名せず通常の解決で繋ぐ。テストでは自前 broker の空き port を先に決め、env（解決の 1 段目）でそこへ向ける（テスト専用の上書き）
+  const brokerPort = await new Promise<number>((res) => {
+    const s = createServer();
+    s.listen(0, "127.0.0.1", () => {
+      const p = (s.address() as AddressInfo).port;
+      s.close(() => res(p));
+    });
+  });
+
   try {
     await mkdir(proj, { recursive: true });
     await writeFile(stub, STUB);
@@ -98,12 +108,15 @@ async function main(): Promise<void> {
       serverCfg,
       JSON.stringify({
         workspace: ws,
-        broker: { port: 0, bind: "127.0.0.1", discovery: "off" },
+        broker: { port: brokerPort, bind: "127.0.0.1", discovery: "off" },
         session: { timeoutMs: RUN_TIMEOUT },
       }),
     );
     const env: NodeJS.ProcessEnv = { ...process.env };
     for (const k of Object.keys(env)) if (k.startsWith("AGENT_MESSENGER_")) delete env[k];
+    env.AGENT_MESSENGER_HOST = "127.0.0.1";
+    env.AGENT_MESSENGER_PORT = String(brokerPort);
+    env.AGENT_MESSENGER_DISCOVERY = "off";
     server = spawn(process.execPath, ["--import", "tsx", "src/cli.ts", "--config", serverCfg], {
       cwd: serverDir,
       env,
@@ -138,7 +151,7 @@ async function main(): Promise<void> {
       JSON.stringify({
         projects: [{ name: "e2e-proj", path: proj, autostart: false }],
         remoteControl: { claude: stub, restartDelayMs: 500, maxRestarts: 2, stopGraceMs: 2000 },
-        servers: [{ name: "local", broker: `http://127.0.0.1:${port}` }],
+        servers: [{ name: "local" }],
         logDir: logs,
       }),
     );
@@ -146,7 +159,7 @@ async function main(): Promise<void> {
       command: process.execPath,
       args: ["--import", "tsx", "src/cli.ts", "--config", centerCfg],
       cwd: centerDir,
-      env: { ...(process.env as Record<string, string>), RC_STUB_EXIT_AFTER_MS: "3000" },
+      env: { ...(process.env as Record<string, string>), RC_STUB_EXIT_AFTER_MS: "3000", AGENT_MESSENGER_HOST: "127.0.0.1", AGENT_MESSENGER_PORT: String(brokerPort), AGENT_MESSENGER_DISCOVERY: "off" },
       stderr: "pipe",
     });
     let cbuf = "";

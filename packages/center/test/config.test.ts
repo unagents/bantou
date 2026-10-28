@@ -31,7 +31,7 @@ test("全項目指定", () => {
     {
       projects: [{ name: "a-1", path: P, spawn: "worktree", permissionMode: "plan", capacity: 3, autostart: true }],
       remoteControl: { claude: "/bin/c", continueOnRestart: false, autoConsent: false, restartDelayMs: 0, maxRestarts: 0, stopGraceMs: 10 },
-      servers: [{ name: "s_1", broker: "http://h:7901", token: "t", timeoutMs: 1000 }],
+      servers: [{ name: "s_1", timeoutMs: 1000 }],
       logDir: "/var/log/x",
     },
     "/x/c.json",
@@ -40,12 +40,11 @@ test("全項目指定", () => {
   assert.equal(c.remoteControl.claude, "/bin/c");
   assert.equal(c.remoteControl.autoConsent, false);
   assert.equal(c.servers[0].timeoutMs, 1000);
-  assert.equal(c.servers[0].token, "t");
   assert.equal(c.logDir, "/var/log/x");
 });
 
 test("server の timeoutMs 既定は 35 分", () => {
-  const c = parseConfig({ servers: [{ name: "s", broker: "http://127.0.0.1:1" }] }, "/x/c.json");
+  const c = parseConfig({ servers: [{ name: "s" }] }, "/x/c.json");
   assert.equal(c.servers[0].timeoutMs, 2_100_000);
 });
 
@@ -58,15 +57,12 @@ test("project 名の重複", () =>
   bad({ projects: [{ name: "a", path: P }, { name: "a", path: P }] }, /名前が重複: a/));
 test("server 名の重複", () =>
   bad(
-    { servers: [{ name: "s", broker: "http://h:1" }, { name: "s", broker: "http://h:2" }] },
+    { servers: [{ name: "s" }, { name: "s" }] },
     /servers\.1\.name/,
   ));
-test("broker が URL でない", () => bad({ servers: [{ name: "s", broker: "not a url" }] }, /servers\.0\.broker/));
-test("broker が http でない", () => bad({ servers: [{ name: "s", broker: "ftp://h" }] }, /servers\.0\.broker/));
-test("broker は https 不可", () => bad({ servers: [{ name: "s", broker: "https://h:7901" }] }, /servers\.0\.broker/));
-test("broker の末尾 / は除く", () => {
-  const c = parseConfig({ servers: [{ name: "s", broker: "http://h:7901/" }] }, "/x/c.json");
-  assert.equal(c.servers[0].broker, "http://h:7901");
+test("server に broker / token を書いても無視される（URL は固定しない）", () => {
+  const c = parseConfig({ servers: [{ name: "s", broker: "http://h:7901", token: "t" }] }, "/x/c.json");
+  assert.deepEqual(Object.keys(c.servers[0]).sort(), ["name", "timeoutMs"]);
 });
 test("不正な permissionMode", () =>
   bad({ projects: [{ name: "a", path: P, permissionMode: "yolo" }] }, /projects\.0\.permissionMode/));
@@ -93,10 +89,10 @@ test("remoteControl.claude 未指定は undefined（既定値を入れない）"
 
 test("server の peer は任意（省略すると protocol 発見）", () => {
   const c = parseConfig(
-    { servers: [{ name: "a", broker: "http://h:1" }, { name: "b", broker: "http://h:2", peer: "my-server" }] },
+    { servers: [{ name: "a" }, { name: "b", peer: "my-server" }] },
     "/x/c.json",
   );
   assert.equal(c.servers[0].peer, undefined);
   assert.equal(c.servers[1].peer, "my-server");
-  assert.throws(() => parseConfig({ servers: [{ name: "a", broker: "http://h:1", peer: "" }] }, "/x/c.json"));
+  assert.throws(() => parseConfig({ servers: [{ name: "a", peer: "" }] }, "/x/c.json"));
 });

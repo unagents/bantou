@@ -64,13 +64,12 @@ pub struct CenterProject {
     pub permission_mode: Option<String>,
 }
 
-/// A bantou-server the center talks to: a name and the URL of the broker it is on.
-/// The server's peer is discovered by the center (bantou protocol), so no peer name here.
+/// A bantou-server the center talks to: a name only. The center connects with the normal
+/// agent-messenger resolution and discovers the server's peer by the bantou protocol.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CenterServer {
     pub name: String,
-    pub broker: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -143,16 +142,11 @@ pub fn validate_settings(mut s: CenterSettings) -> Result<CenterSettings, String
     let mut seen = HashSet::new();
     for v in &mut s.servers {
         v.name = v.name.trim().to_string();
-        v.broker = v.broker.trim().trim_end_matches('/').to_string();
         if v.name.is_empty() || !v.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
             return Err(format!("server 名は英数字と _ - のみ: \"{}\"", v.name));
         }
         if !seen.insert(v.name.clone()) {
             return Err(format!("server 名が重複: {}", v.name));
-        }
-        // the center's messenger client does not support https
-        if !v.broker.starts_with("http://") || v.broker.len() == "http://".len() || v.broker.chars().any(char::is_whitespace) {
-            return Err(format!("server {} の broker は http://host:port の形で指定する", v.name));
         }
     }
     s.claude_path = s.claude_path.take().map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
@@ -194,7 +188,7 @@ pub fn build_config(s: &CenterSettings) -> serde_json::Value {
     let servers: Vec<_> = s
         .servers
         .iter()
-        .map(|v| serde_json::json!({ "name": v.name, "broker": v.broker }))
+        .map(|v| serde_json::json!({ "name": v.name }))
         .collect();
     serde_json::json!({ "projects": projects, "remoteControl": remote_control, "servers": servers })
 }
@@ -712,8 +706,8 @@ pub fn center_status(center: tauri::State<'_, Center>) -> CenterStatus {
 mod tests {
     use super::*;
 
-    fn server(name: &str, broker: &str) -> CenterServer {
-        CenterServer { name: name.into(), broker: broker.into() }
+    fn server(name: &str) -> CenterServer {
+        CenterServer { name: name.into() }
     }
 
     fn project(name: &str, path: &str) -> CenterProject {
@@ -825,14 +819,14 @@ mod tests {
     #[test]
     fn config_json_writes_servers() {
         let s = CenterSettings {
-            servers: vec![server("s1", "http://127.0.0.1:7901"), server("s2", "http://h:1")],
+            servers: vec![server("s1"), server("s2")],
             ..Default::default()
         };
         assert_eq!(
             build_config(&s)["servers"],
             serde_json::json!([
-                { "name": "s1", "broker": "http://127.0.0.1:7901" },
-                { "name": "s2", "broker": "http://h:1" },
+                { "name": "s1" },
+                { "name": "s2" },
             ])
         );
     }
@@ -841,24 +835,21 @@ mod tests {
     fn servers_default_for_old_saved_settings() {
         let s: CenterSettings = serde_json::from_str(r#"{"enabled":true,"projects":[]}"#).unwrap();
         assert!(s.servers.is_empty());
+        // old saved settings still carrying "broker" are read (the field is ignored)
         let s: CenterSettings =
             serde_json::from_str(r#"{"servers":[{"name":"a","broker":"http://h:1"}]}"#).unwrap();
-        assert_eq!(s.servers, vec![server("a", "http://h:1")]);
+        assert_eq!(s.servers, vec![server("a")]);
     }
 
     #[test]
     fn validates_servers() {
         let with = |servers| validate_settings(CenterSettings { servers, ..Default::default() });
-        // trimmed, trailing slash removed
-        let ok = with(vec![server(" a ", " http://h:7901/ ")]).unwrap();
-        assert_eq!(ok.servers, vec![server("a", "http://h:7901")]);
-        assert!(with(vec![server("", "http://h:1")]).is_err());
-        assert!(with(vec![server("a b", "http://h:1")]).is_err());
-        assert!(with(vec![server("a", "http://h:1"), server("a", "http://h:2")]).is_err());
-        assert!(with(vec![server("a", "https://h:1")]).is_err());
-        assert!(with(vec![server("a", "h:1")]).is_err());
-        assert!(with(vec![server("a", "http://")]).is_err());
-        assert!(with(vec![server("a", "http://h :1")]).is_err());
+        // trimmed
+        let ok = with(vec![server(" a ")]).unwrap();
+        assert_eq!(ok.servers, vec![server("a")]);
+        assert!(with(vec![server("")]).is_err());
+        assert!(with(vec![server("a b")]).is_err());
+        assert!(with(vec![server("a"), server("a")]).is_err());
     }
 
     #[test]
@@ -872,7 +863,7 @@ mod tests {
         assert!(needs_restart(Some(&on), &CenterSettings { port: 7911, ..on.clone() }));
         assert!(needs_restart(Some(&on), &CenterSettings { bind: "0.0.0.0".into(), ..on.clone() }));
         assert!(needs_restart(Some(&on), &CenterSettings { projects: vec![], ..on.clone() }));
-        assert!(needs_restart(Some(&on), &CenterSettings { servers: vec![server("s", "http://h:1")], ..on.clone() }));
+        assert!(needs_restart(Some(&on), &CenterSettings { servers: vec![server("s")], ..on.clone() }));
         assert!(needs_restart(Some(&on), &CenterSettings { claude_path: Some("/x/claude".into()), ..on.clone() }));
         // running, disabled: stop
         assert!(needs_restart(Some(&on), &CenterSettings { enabled: false, ..on.clone() }));

@@ -27,7 +27,7 @@ async function connect(link: Partial<ServerLink> = {}) {
   };
   const fullLink: ServerLink = {
     connectAll: async () => {},
-    list: async () => [{ name: "s", broker: "http://h", connected: true, reachable: true, peerId: "x" }],
+    list: async () => [{ name: "s", connected: true, reachable: true, peerId: "x" }],
     kickCap: async (s, cmd) => {
       calls.push({ s, cmd });
       return { bantou: 1, type: "cap_result", cap_id: cmd.cap_id, session_id: "sid", ok: true, result_text: "done" };

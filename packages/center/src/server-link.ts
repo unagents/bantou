@@ -1,5 +1,5 @@
 import { hostname } from "node:os";
-import { createBrokerClient, createMessengerClient } from "@unagents/messenger-client";
+import { createMessengerClient } from "@unagents/messenger-client";
 import {
   MESSENGER_PROTOCOL,
   PROTOCOL_VERSION,
@@ -52,7 +52,6 @@ export interface LinkClient {
 
 export interface ServerInfo {
   name: string;
-  broker: string;
   connected: boolean;
   reachable: boolean;
   /** その broker 上での center 自身の peer id。 */
@@ -133,19 +132,12 @@ const errorReply = (message: string, command?: ServerCommandType): ErrorReply =>
 });
 
 /**
- * 実 client を作る。接続先は設定の broker に固定する。
- * messenger-client は brokers の疎通に失敗すると 127.0.0.1:7901 へ黙ってフォールバックするので、
- * フォールバックの無い HOST/PORT 指定（env）で渡す。
+ * 実 client を作る。普通の agent-messenger client として、通常の解決
+ * （env → config → UDP 発見 → ローカル fallback）で broker につなぐ。broker の URL は指名しない。
+ * 解決結果は messenger のログ（broker=... via ...）に出る。
  */
-export function createPinnedClient(s: ServerConfig, log: Logger): LinkClient {
-  const u = new URL(s.broker);
+export function createClient(s: ServerConfig, log: Logger): LinkClient {
   return createMessengerClient({
-    env: {
-      AGENT_MESSENGER_HOST: u.hostname,
-      AGENT_MESSENGER_PORT: u.port || "80",
-      AGENT_MESSENGER_DISCOVERY: "off",
-      AGENT_MESSENGER_TOKEN: s.token ?? "",
-    },
     name: "bantou-center",
     summary: `center ${hostname()}`,
     autoStartBroker: false,
@@ -157,18 +149,18 @@ export function createServerLink(opts: {
   config: Config;
   log: Logger;
   clientFactory?: (server: ServerConfig) => LinkClient;
-  /** broker の到達確認（既定は /health）。 */
+  /** broker への到達確認（既定は接続を確保できるか）。 */
   healthCheck?: (server: ServerConfig) => Promise<boolean>;
   /** peer id の変化を見る間隔（既定 5 秒）。 */
   peerWatchMs?: number;
 }): ServerLink {
   const { config, log } = opts;
-  const clientFactory = opts.clientFactory ?? ((s: ServerConfig): LinkClient => createPinnedClient(s, log));
+  const clientFactory = opts.clientFactory ?? ((s: ServerConfig): LinkClient => createClient(s, log));
   const healthCheck =
     opts.healthCheck ??
     (async (s: ServerConfig): Promise<boolean> => {
-      const h = await createBrokerClient(s.token ?? "").health(s.broker);
-      return h !== null;
+      await ensure(slotOf(s.name));
+      return true;
     });
 
   let closed = false;
@@ -257,7 +249,7 @@ export function createServerLink(opts: {
     }
     slot.connected = true;
     slot.peerId = client.peer?.id ?? null;
-    log(`server 接続: ${slot.cfg.name} broker=${slot.cfg.broker} peer=${client.peer?.id ?? "?"}`);
+    log(`server 接続: ${slot.cfg.name} peer=${client.peer?.id ?? "?"}`);
     return client;
   };
 
@@ -394,7 +386,6 @@ export function createServerLink(opts: {
       return Promise.all(
         [...slots.values()].map(async (slot) => ({
           name: slot.cfg.name,
-          broker: slot.cfg.broker,
           connected: slot.connected,
           reachable: await healthCheck(slot.cfg).catch(() => false),
           peerId: slot.connected ? (slot.client?.peer?.id ?? null) : null,

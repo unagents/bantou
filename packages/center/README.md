@@ -58,8 +58,8 @@ stdout は MCP の通信路。ログは全て stderr に出る。
   ],
   "remoteControl": { "env": { "CLAUDE_CONFIG_DIR": "/home/me/.claude-rc" }, "continueOnRestart": true, "restartDelayMs": 5000, "maxRestarts": 5, "stopGraceMs": 5000 },
   "servers": [
-    { "name": "linux204", "broker": "http://192.168.1.204:7901", "token": "secret", "timeoutMs": 2100000 },
-    { "name": "named", "broker": "http://192.168.1.205:7901", "peer": "my-bantou-server" }
+    { "name": "linux204", "timeoutMs": 2100000 },
+    { "name": "named", "peer": "my-bantou-server" }
   ],
   "logDir": "/home/me/.config/bantou/center-logs"
 }
@@ -82,15 +82,13 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 | `remoteControl.maxRestarts` | 0 以上の整数 | `5` | 再起動回数の上限 |
 | `remoteControl.stopGraceMs` | 0 以上の整数 | `5000` | SIGTERM から SIGKILL までの猶予 |
 | `servers[].name` | `[A-Za-z0-9_-]+` | 必須 | server 名。重複不可。tool の `server` 引数で使う |
-| `servers[].broker` | http URL | 必須 | bantou-server の内蔵 messenger broker（https 不可。末尾 `/` は除かれる。到達不能でも他の broker へは接続しない） |
 | `servers[].peer` | string | なし | server の peer 名または id。指定すると発見せずその名前へ送る（従来の名前指定）。省略すると `list_peers`（`protocol: "bantou"`）で自動発見する |
-| `servers[].token` | string | なし | broker の token |
 | `servers[].timeoutMs` | 正の整数 | `2100000`（35 分） | 返信待ちの打ち切り |
 | `logDir` | 絶対パス | config と同じ場所の `center-logs/` | remote-control の出力ログ置き場 |
 
 ### server の発見（protocol 方式）
 
-- `servers[]` は broker の URL だけでよい。server の peer は、リクエストごとに `listPeers("all", {protocol: "bantou"})` で発見する（peer id は再登録で変わるため）。複数見つかれば name が `bantou-server` のものを優先し、無ければ先頭。0 件、または 0.9 系 broker（`BROKER_UNSUPPORTED`）の時は peer 名 `bantou-server` 宛てにフォールバックする。`servers[].peer` を指定すると発見せずその名前へ送る。
+- center は普通の agent-messenger client として、通常の解決（env `AGENT_MESSENGER_HOST` → `~/.agent-messenger/config.json` → UDP 発見 → ローカル fallback）で broker につなぐ。broker の URL は指名しない（旧 `servers[].broker` / `servers[].token` は廃止。書いても無視される。token が要る場合は `AGENT_MESSENGER_TOKEN`）。server の peer は、リクエストごとに `listPeers("all", {protocol: "bantou"})` で発見する（peer id は再登録で変わるため）。複数見つかれば name が `bantou-server` のものを優先し、無ければ先頭。0 件、または 0.9 系 broker（`BROKER_UNSUPPORTED`）の時は peer 名 `bantou-server` 宛てにフォールバックする。`servers[].peer` を指定すると発見せずその名前へ送る。
 - 送信は `send(to, text, "pull", {protocol: "bantou", version})`。version は発見した peer が宣言している値（名前宛ての時は `MESSENGER_PROTOCOL.version`）。
 - 受信は、送信元が解決済みの peer id、meta の protocol が `bantou`、name が `bantou-server`、`servers[].peer` のいずれかなら server の返信として扱う。text 先頭の `[agent-messenger warning]` 行（version 不一致時に付く）は除いてから JSON として解釈する。
 - 仕様は `../protocol/messenger/protocol.json` と `../../docs/protocol.md`。
@@ -105,7 +103,7 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 | `rc_start` | `project` | `RcStatus`（起動済みなら現状を返す） |
 | `rc_stop` | `project` | `RcStatus` |
 | `rc_status` | `project` | `RcStatus` |
-| `server_list` | なし | `{ name, broker, connected, reachable, peerId, serverPeer }[]`（`peerId` はその broker 上の center 自身の peer id、`serverPeer` は直近に解決した server の送信先（peer id か名前、未解決は null）） |
+| `server_list` | なし | `{ name, connected, reachable, peerId, serverPeer }[]`（`reachable` は broker への接続を確保できたか、`peerId` は center 自身の peer id、`serverPeer` は直近に解決した server の送信先（peer id か名前、未解決は null）） |
 | `cap_kick` | `server`, `cap_id`, `prompt`, `repo?`, `branch?`, `reason?` | bantou-server の `cap_result` / `error` 返信そのまま |
 | `worker_resume` | `server`, `worker_id`, `prompt`, `repo?`, `branch?` | `worker_result` / `error` 返信そのまま |
 | `server_status` | `server` | `status_result` / `error` 返信そのまま |
