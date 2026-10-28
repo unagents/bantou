@@ -34,11 +34,11 @@ export function maskUserinfo(text: string): string {
 
 /** 指示の概要。prompt は先頭 80 文字のみ、repo の userinfo は伏せる。 */
 export function describeCommand(cmd: ServerCommand): string {
-  if (cmd.type === "status") return "";
-  const parts = [cmd.type === "kick_cap" ? `cap_id=${cmd.cap_id}` : `worker_id=${cmd.worker_id}`];
+  if (cmd.type !== "kick_cap") return "";
+  const parts = [`cap_id=${cmd.cap_id}`];
   if (cmd.repo) parts.push(`repo=${maskUserinfo(cmd.repo)}`);
   if (cmd.branch) parts.push(`branch=${cmd.branch}`);
-  if (cmd.type === "kick_cap" && cmd.reason) parts.push(`reason=${ignoreText(cmd.reason)}`);
+  if (cmd.reason) parts.push(`reason=${ignoreText(cmd.reason)}`);
   parts.push(`prompt=${ignoreText(cmd.prompt).slice(0, 80)}`);
   return parts.join(" ");
 }
@@ -51,16 +51,15 @@ export async function execute(cmd: ServerCommand, manager: AgentManager): Promis
       return { bantou: PROTOCOL_VERSION, type: "cap_result", cap_id: cmd.cap_id, ...r };
     }
     if (cmd.type === "resume_worker") {
-      const r = await manager.invoke("worker", cmd.worker_id, cmd);
-      return { bantou: PROTOCOL_VERSION, type: "worker_result", worker_id: cmd.worker_id, ...r };
+      // server は worker を起動しない（worker は cap の責務）。型は protocol に残るが処理しない
+      throw new Error("resume_worker は未対応");
     }
     const st = await manager.status();
     return { bantou: PROTOCOL_VERSION, type: "status_result", ok: true, ...st };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     log(`エラー: ${cmd.type}: ${message}`);
-    const id =
-      cmd.type === "kick_cap" ? { cap_id: cmd.cap_id } : cmd.type === "resume_worker" ? { worker_id: cmd.worker_id } : {};
+    const id = cmd.type === "kick_cap" ? { cap_id: cmd.cap_id } : {};
     return { bantou: PROTOCOL_VERSION, type: "error", ok: false, message, command: cmd.type, ...id };
   }
 }

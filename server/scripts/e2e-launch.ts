@@ -1,6 +1,6 @@
 /**
- * e2e: bantou-server を実起動し、messenger 経由で kick_cap / resume_worker / status を検証する。
- * claude を実際に 3 回起動する（数分かかる）。claude のログインを使う。
+ * e2e: bantou-server を実起動し、messenger 経由で kick_cap / status を検証する。
+ * claude を実際に 2 回起動する（数分かかる）。claude のログインを使う。
  * `E2E_ROOT` で一時ディレクトリの親を変更できる。
  */
 import { spawn, type ChildProcess } from "node:child_process";
@@ -43,7 +43,6 @@ async function main(): Promise<void> {
   const ws = join(dir, "ws");
   const cfgPath = join(dir, "config.json");
   const capId = `e2e-cap-${process.pid}`;
-  const workerId = `e2e-worker-${process.pid}`;
   await writeFile(
     cfgPath,
     JSON.stringify({
@@ -143,34 +142,16 @@ async function main(): Promise<void> {
       fail("server ログに該当 session の mode=resume が無い");
     }
 
-    // 3. resume_worker
-    await send({
-      bantou: 1,
-      type: "resume_worker",
-      worker_id: workerId,
-      prompt: "Reply with only the word pong.",
-    });
-    const w1 = await nextReply("worker_result", RUN_TIMEOUT + 30_000);
-    if (w1.type !== "worker_result") fail(`worker_result でない: ${JSON.stringify(w1)}`);
-    if (!w1.ok) fail(`worker_result が ok でない: ${JSON.stringify(w1)}`);
-    if (w1.worker_id !== workerId) fail(`worker_id 不一致: ${w1.worker_id}`);
-    if (!w1.result_text.toLowerCase().includes("pong")) fail(`result_text に pong が無い: ${w1.result_text}`);
-    const workerState = await readStateFile(join(ws, "workers", workerId, "state.json"));
-    if (workerState.session_id !== w1.session_id) fail(`worker の session_id 不一致: ${workerState.session_id}`);
-
-    // 4. status
+    // 3. status
     await send({ bantou: 1, type: "status" });
     const st = await nextReply("status_result", 15_000);
     if (st.type !== "status_result") fail(`status_result でない: ${JSON.stringify(st)}`);
     const cap = st.caps.find((c) => c.id === capId);
-    const worker = st.workers.find((w) => w.id === workerId);
-    if (!cap || !worker) fail(`status に cap / worker が無い: ${JSON.stringify(st)}`);
-    for (const a of [cap, worker]) {
-      if (a.state !== "idle") fail(`status の ${a.id} が idle でない: ${a.state}`);
-      if (a.queued !== 0) fail(`status の ${a.id} の queued が 0 でない: ${a.queued}`);
-    }
+    if (!cap) fail(`status に cap が無い: ${JSON.stringify(st)}`);
+    if (cap.state !== "idle") fail(`status の ${cap.id} が idle でない: ${cap.state}`);
+    if (cap.queued !== 0) fail(`status の ${cap.id} の queued が 0 でない: ${cap.queued}`);
 
-    // 5. 非コマンドは無視される
+    // 4. 非コマンドは無視される
     await client.send(SERVER_NAME, "hello");
     await sleep(3000);
     if (replies.length > 0) fail(`非コマンドに返信が来た: ${JSON.stringify(replies)}`);
@@ -190,7 +171,7 @@ async function main(): Promise<void> {
     }
   }
 
-  // 6. 終了確認
+  // 5. 終了確認
   if (!error) {
     try {
       if (exitCode !== 0) fail(`server の exit code が 0 でない: ${exitCode}`);

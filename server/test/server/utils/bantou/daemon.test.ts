@@ -39,7 +39,7 @@ test("指示ログ: prompt は先頭 80 文字、repo の userinfo は伏せる"
   assert.equal(maskUserinfo("git@h"), "git@h");
 });
 
-test("error 返信: 失敗した指示の cap_id / worker_id を含める", async () => {
+test("error 返信: 失敗した指示の cap_id を含める。resume_worker は未対応", async () => {
   const manager = {
     invoke: async () => {
       throw new Error("boom");
@@ -51,7 +51,7 @@ test("error 返信: 失敗した指示の cap_id / worker_id を含める", asyn
   const cap = await execute({ bantou: 1, type: "kick_cap", cap_id: "c1", prompt: "p" }, manager);
   assert.deepEqual(cap, { bantou: 1, type: "error", ok: false, message: "boom", command: "kick_cap", cap_id: "c1" });
   const w = await execute({ bantou: 1, type: "resume_worker", worker_id: "w1", prompt: "p" }, manager);
-  assert.deepEqual(w, { bantou: 1, type: "error", ok: false, message: "boom", command: "resume_worker", worker_id: "w1" });
+  assert.deepEqual(w, { bantou: 1, type: "error", ok: false, message: "resume_worker は未対応", command: "resume_worker" });
   const st = await execute({ bantou: 1, type: "status" }, manager);
   assert.deepEqual(st, { bantou: 1, type: "error", ok: false, message: "boom", command: "status" });
 });

@@ -113,7 +113,7 @@ The reply is sent back to the sender peer as one JSON object.
 | key | required | meaning |
 |---|---|---|
 | `bantou` | yes | protocol version, always `1` |
-| `type` | yes | `kick_cap`, `resume_worker` or `status` |
+| `type` | yes | `kick_cap` or `status` |
 
 ### `kick_cap` — start or resume a cap
 
@@ -131,21 +131,6 @@ The reply is sent back to the sender peer as one JSON object.
 
 Reply: `cap_result` or `error`.
 
-### `resume_worker` — start or resume a worker
-
-```json
-{"bantou":1,"type":"resume_worker","worker_id":"w-1","repo":"https://github.com/o/r.git","branch":"main","prompt":"Continue the task."}
-```
-
-| key | required | meaning |
-|---|---|---|
-| `worker_id` | yes | worker id, `[A-Za-z0-9_-]+`. Path is `<workspace>/workers/<worker_id>` |
-| `prompt` | yes | non-empty instruction passed to claude |
-| `repo` | no | same as `kick_cap` |
-| `branch` | no | same as `kick_cap` |
-
-Reply: `worker_result` or `error`.
-
 ### `status` — list caps and workers
 
 ```json
@@ -159,23 +144,22 @@ while agents are running.
 
 Every reply carries `bantou: 1`.
 
-`cap_result` / `worker_result` — one headless run finished (success or failure):
+`cap_result` — one headless run finished (success or failure):
 
 ```json
 {"bantou":1,"type":"cap_result","cap_id":"cap-a","session_id":"0b6f...-uuid","ok":true,"result_text":"kicked"}
-{"bantou":1,"type":"worker_result","worker_id":"w-1","session_id":"9c1d...-uuid","ok":false,"result_text":"","error":"タイムアウト (1800000ms)"}
 ```
 
 | key | meaning |
 |---|---|
-| `cap_id` / `worker_id` | id from the command (`cap_result` has `cap_id`, `worker_result` has `worker_id`) |
+| `cap_id` | id from the command |
 | `session_id` | claude session id used (new or resumed) |
 | `ok` | `true` if the run succeeded |
 | `result_text` | final `result` text of the run. `""` when it failed before producing one |
 | `error` | failure detail when `ok` is `false` |
 
 Sent only after the run ends, which can take minutes. A failed run is still a
-`cap_result` / `worker_result` with `ok: false`.
+`cap_result` with `ok: false`.
 
 `status_result`:
 
@@ -224,13 +208,12 @@ Sent only after the run ends, which can take minutes. A failed run is still a
 | `message` | failure reason |
 | `command` | `type` of the failed command, when known |
 | `cap_id` | `cap_id` of the failed `kick_cap`, when known |
-| `worker_id` | `worker_id` of the failed `resume_worker`, when known |
 
 Typical causes: git failure, agent state `running` / `error`, broken `state.json`.
 
 ### Rules
 
-- `cap_id` / `worker_id` match `[A-Za-z0-9_-]+`. A command with an invalid id is not answered with `error`; it is ignored as a non-command.
+- `cap_id` matches `[A-Za-z0-9_-]+`. A command with an invalid id is not answered with `error`; it is ignored as a non-command.
 - `repo` / `branch` must not start with `-` and must not contain NUL.
 - Commands to the same agent are serialized. Different agents run concurrently.
 - First run of an agent uses `claude -p --session-id <uuid>`. Later runs use `--resume <uuid>`.
@@ -303,8 +286,10 @@ Remote-control record:
 | `args` | arguments of the process |
 
 `server` is a server name from `center.json`. `cap_kick`, `worker_resume` and
-`server_status` fields match the `kick_cap`, `resume_worker` and `status`
-commands.
+`server_status` fields match the `kick_cap` and `status` commands.
+`worker_resume` is kept for the protocol type only; the server does not handle
+`resume_worker` (workers are the cap's responsibility) and answers it with an
+`error` reply.
 
 ### Reply correlation and timeout
 

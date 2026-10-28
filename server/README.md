@@ -98,7 +98,6 @@ npx bantou --config <path>
 | type | 内容 |
 |---|---|
 | `kick_cap` | cap を起動する（初回は新規 session、以降は resume） |
-| `resume_worker` | worker を起動する（同上） |
 | `status` | cap / worker の状態一覧 |
 
 `kick_cap`（`cap_id` と `prompt` 以外は任意）:
@@ -112,12 +111,6 @@ npx bantou --config <path>
 - `prompt`: claude に渡す指示。
 - `reason`: 起動理由。ログ用で、claude には渡さない。
 
-`resume_worker`（`worker_id` と `prompt` 以外は任意）:
-
-```json
-{ "bantou": 1, "type": "resume_worker", "worker_id": "w-1", "repo": "https://github.com/o/r.git", "branch": "main", "prompt": "Continue the task." }
-```
-
 `status`:
 
 ```json
@@ -130,13 +123,12 @@ npx bantou --config <path>
 
 ```json
 { "bantou": 1, "type": "cap_result", "cap_id": "cap-a", "session_id": "0b6f...-uuid", "ok": true, "result_text": "kicked" }
-{ "bantou": 1, "type": "worker_result", "worker_id": "w-1", "session_id": "9c1d...-uuid", "ok": false, "result_text": "", "error": "タイムアウト (1800000ms)" }
 { "bantou": 1, "type": "status_result", "ok": true, "caps": [{ "kind": "cap", "id": "cap-a", "path": "/ws/caps/cap-a", "session_id": "0b6f...-uuid", "state": "idle", "last_started_at": "2026-10-28T05:00:00.000Z", "last_finished_at": "2026-10-28T05:01:10.000Z", "retries": 0, "queued": 0 }], "workers": [] }
 { "bantou": 1, "type": "error", "ok": false, "message": "git clone 失敗: ...", "command": "kick_cap" }
 ```
 
-- `cap_result` / `worker_result` は claude の実行が終わってから返る。数分かかることがある。
-- 実行が失敗しても `cap_result` / `worker_result` で返る（`ok: false` と `error`）。
+- `cap_result` は claude の実行が終わってから返る。数分かかることがある。
+- 実行が失敗しても `cap_result` で返る（`ok: false` と `error`）。
 - `error` は実行に入る前の失敗（git 失敗、state が `running` / `error` で起動できない、state 破損など）。
 - `cap_id` / `worker_id` が不正（`[A-Za-z0-9_-]+` でない）な指示は `error` を返さず、指示でないメッセージとして無視する（ログに `無視:`）。
 - `status_result` の `state` は `idle` / `running` / `failed` / `error`。`queued` は待ち行列の件数。state.json が壊れていれば `error`。
@@ -222,9 +214,9 @@ npm run dev -- --config <path>
 npm run e2e
 ```
 
-- 要: host に claude。claude を実際に 3 回起動するため数分かかる。claude のログイン（claudeAgent）を使う。
+- 要: host に claude。claude を実際に 2 回起動するため数分かかる。claude のログイン（claudeAgent）を使う。
 - `E2E_ROOT` で一時ディレクトリの親を変えられる（既定は OS の tmp）。
-- 検証内容: `kick_cap`（新規）→ `kick_cap`（resume、同じ session_id）→ `resume_worker` → `status` → 非コマンドの無視。
+- 検証内容: `kick_cap`（新規）→ `kick_cap`（resume、同じ session_id）→ `status` → 非コマンドの無視。
 - 後始末: messenger client、server プロセス（SIGTERM、exit 0 と port 解放も確認）、一時ディレクトリ。
 - 成功時は `E2E OK` と主要ログを出す。失敗時は理由を出して exit 1。
 
