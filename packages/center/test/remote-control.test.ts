@@ -69,7 +69,7 @@ beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "center-rc-"));
   cfg = parseConfig(
     {
-      projects: [{ name: "p1", path: "/tmp/p1", capacity: 2 }],
+      projects: [{ name: "p1", path: "/tmp/p1" }],
       remoteControl: { claude: "fake-claude", restartDelayMs: 30, maxRestarts: 2, stopGraceMs: 80 },
       logDir: join(dir, "logs"),
     },
@@ -89,15 +89,37 @@ afterEach(async () => {
 const make = (): ReturnType<typeof createRemoteControlSupervisor> =>
   createRemoteControlSupervisor({ config: cfg, log: () => {}, spawnImpl });
 
-test("buildRcArgs: capacity / continue の有無", () => {
+test("buildRcArgs: same-dir / 未指定は --spawn / --capacity を付けず --continue を許す", () => {
   const p = cfg.projects[0];
+  assert.equal(p.spawn, "same-dir");
   assert.deepEqual(buildRcArgs(p, cfg.remoteControl, { continue: false }), [
-    "remote-control", "--name", "p1", "--spawn", "same-dir", "--permission-mode", "auto", "--capacity", "2",
+    "remote-control", "--name", "p1", "--permission-mode", "auto",
   ]);
-  const q = { ...p, capacity: undefined, spawn: "worktree" as const, permissionMode: "plan" as const };
-  assert.deepEqual(buildRcArgs(q, cfg.remoteControl, { continue: true }), [
-    "remote-control", "--name", "p1", "--spawn", "worktree", "--permission-mode", "plan", "--continue",
+  assert.deepEqual(buildRcArgs(p, cfg.remoteControl, { continue: true }), [
+    "remote-control", "--name", "p1", "--permission-mode", "auto", "--continue",
   ]);
+  const u = { ...p, spawn: undefined } as unknown as typeof p;
+  assert.deepEqual(buildRcArgs(u, cfg.remoteControl, { continue: true }), [
+    "remote-control", "--name", "p1", "--permission-mode", "auto", "--continue",
+  ]);
+});
+
+test("buildRcArgs: worktree / session / capacity 指定は --spawn / --capacity を付け --continue を付けない", () => {
+  const p = cfg.projects[0];
+  const w = { ...p, spawn: "worktree" as const, permissionMode: "plan" as const };
+  assert.deepEqual(buildRcArgs(w, cfg.remoteControl, { continue: true }), [
+    "remote-control", "--name", "p1", "--spawn", "worktree", "--permission-mode", "plan",
+  ]);
+  const s = { ...p, spawn: "session" as const };
+  assert.deepEqual(buildRcArgs(s, cfg.remoteControl, { continue: true }), [
+    "remote-control", "--name", "p1", "--spawn", "session", "--permission-mode", "auto",
+  ]);
+  const c = { ...p, capacity: 2 };
+  for (const cont of [true, false]) {
+    assert.deepEqual(buildRcArgs(c, cfg.remoteControl, { continue: cont }), [
+      "remote-control", "--name", "p1", "--spawn", "same-dir", "--permission-mode", "auto", "--capacity", "2",
+    ]);
+  }
 });
 
 test("extractUrls / detectConnected", () => {

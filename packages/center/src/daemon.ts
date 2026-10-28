@@ -23,6 +23,11 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   log(
     `設定読込: ${configPath} (projects=${config.projects.length} servers=${config.servers.length} logDir=${config.logDir})`,
   );
+  if (config.projects.length === 0) {
+    log(`remote-control は起動しない: projects が 0 件 (${configPath})`);
+  } else if (!config.projects.some((p) => p.autostart)) {
+    log(`remote-control は自動起動しない: autostart の project が 0 件 (projects=${config.projects.length}, ${configPath})`);
+  }
   const claude = await resolveClaude(config.remoteControl.claude, log);
   const supervisor = createRemoteControlSupervisor({ config, log, claude });
   const link = createServerLink({ config, log });

@@ -416,10 +416,30 @@ fn load_settings(app: &tauri::AppHandle) -> CmdResult<CenterSettings> {
         .unwrap_or_default())
 }
 
+/// One-line reason logged when autostart does nothing. `path` is the resolved settings store.
+fn autostart_skip_message(path: &str, loaded: Result<&CenterSettings, &str>) -> String {
+    match loaded {
+        Err(e) => format!("center autostart skipped: cannot read settings ({path}): {e}"),
+        Ok(_) => format!("center autostart skipped: center.enabled=false in settings ({path})"),
+    }
+}
+
 /// Called from `setup`: start the sidecar if enabled.
 pub fn autostart(app: &tauri::AppHandle) {
-    let Ok(s) = load_settings(app) else { return };
+    let store_path = app
+        .path()
+        .app_data_dir()
+        .map(|d| d.join(SETTINGS_FILE).display().to_string())
+        .unwrap_or_else(|e| format!("{SETTINGS_FILE} (app data dir unresolved: {e})"));
+    let s = match load_settings(app) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{}", autostart_skip_message(&store_path, Err(&e.to_string())));
+            return;
+        }
+    };
     if !s.enabled {
+        eprintln!("{}", autostart_skip_message(&store_path, Ok(&s)));
         return;
     }
     let handle = app.clone();
@@ -462,6 +482,15 @@ mod tests {
             spawn: None,
             permission_mode: None,
         }
+    }
+
+    #[test]
+    fn autostart_skip_message_has_path_and_reason() {
+        let s = CenterSettings::default();
+        let m = autostart_skip_message("/d/settings.json", Ok(&s));
+        assert!(m.contains("/d/settings.json") && m.contains("enabled=false"));
+        let m = autostart_skip_message("/d/settings.json", Err("boom"));
+        assert!(m.contains("/d/settings.json") && m.contains("cannot read settings") && m.contains("boom"));
     }
 
     #[test]

@@ -52,22 +52,28 @@ export interface RemoteControlSupervisor {
   shutdown(): Promise<void>;
 }
 
-/** `claude remote-control` の引数を組み立てる。 */
+/**
+ * `claude remote-control` の引数を組み立てる。
+ * claude 2.1.312 は --continue を --spawn / --capacity と併用するとエラー終了する
+ * ("--session-id and --continue cannot be used with --spawn, --capacity, or --create-session-in-dir.")。
+ * そのため spawn が未指定 / same-dir かつ capacity 未指定の時は --spawn / --capacity を付けず、--continue を許す。
+ * spawn が worktree / session、または capacity 指定がある時は --spawn / --capacity を付け、--continue は付けない。
+ */
 export function buildRcArgs(
   project: ProjectConfig,
   _cfg: Config["remoteControl"],
   opts: { continue: boolean },
 ): string[] {
+  const plain = (project.spawn === undefined || project.spawn === "same-dir") && !project.capacity;
   return [
     "remote-control",
     "--name",
     project.name,
-    "--spawn",
-    project.spawn,
+    ...(plain ? [] : ["--spawn", project.spawn ?? "same-dir"]),
     "--permission-mode",
     project.permissionMode,
     ...(project.capacity ? ["--capacity", String(project.capacity)] : []),
-    ...(opts.continue ? ["--continue"] : []),
+    ...(plain && opts.continue ? ["--continue"] : []),
   ];
 }
 
