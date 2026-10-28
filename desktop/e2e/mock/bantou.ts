@@ -190,7 +190,7 @@ export class MockBantou {
       case "center_get_settings":
         return structuredClone(this.center);
       case "center_set_settings":
-        this.center = structuredClone(args.settings as CenterSettings);
+        this.center = JSON.parse(JSON.stringify(args.settings)) as CenterSettings;
         return structuredClone(this.center);
       case "center_status":
         return { state: this.center.enabled ? "running" : "stopped", pid: this.center.enabled ? 4242 : undefined, logs: [] };
