@@ -30,7 +30,9 @@ export class MockBantou {
   supplement: string;
   peers: Peer[];
   sessionsList: Session[];
-  center: CenterSettings = { enabled: false, port: 7910, bind: "127.0.0.1", projects: [], servers: [] };
+  center: CenterSettings = { enabled: false, port: 7910, bind: "127.0.0.1", projects: [], servers: [], token: "mock-token-000000000000000000000001" };
+  /** Number of tokens minted by center_regenerate_token (the next one is mock-token-<n>). */
+  private tokenSeq = 1;
   /** Whether the mocked center answers (center_connection). */
   centerReachable = true;
   centerRc = [
@@ -208,14 +210,33 @@ export class MockBantou {
         return structuredClone(this.center);
       case "center_status":
         return { state: this.center.enabled ? "running" : "stopped", pid: this.center.enabled ? 4242 : undefined, restartCount: 0, logs: [] };
+      case "center_regenerate_token": {
+        this.tokenSeq += 1;
+        this.center.token = `mock-token-${String(this.tokenSeq).padStart(32, "0")}`;
+        return this.center.token;
+      }
+      case "center_connect_snippets": {
+        const { bind, port, token } = args as { bind: string; port: number; token: string };
+        const host = ["0.0.0.0", "::", ""].includes(bind) ? "192.168.1.204" : bind === "localhost" ? "127.0.0.1" : bind;
+        const url = `http://${host}:${port}/mcp`;
+        const auth = `Bearer ${token}`;
+        return {
+          url,
+          mcpJson: JSON.stringify({ mcpServers: { "bantou-center": { type: "http", url, headers: { Authorization: auth } } } }, null, 2),
+          claudeCode: `claude mcp add --transport http bantou-center ${url} \\\n  --header 'Authorization: ${auth}'`,
+        };
+      }
+      case "center_parse_connect":
+        return parseConnect((args as { text: string }).text);
       case "center_connection": {
-        const url = this.center.remoteUrl
-          ? this.center.remoteUrl.replace(/\/?$/, "/mcp").replace(/\/mcp\/mcp$/, "/mcp")
+        const remote = this.center.remote;
+        const url = remote
+          ? remote.url.replace(/\/?$/, "/mcp").replace(/\/mcp\/mcp$/, "/mcp")
           : this.center.enabled
             ? `http://127.0.0.1:${this.center.port}/mcp`
             : undefined;
-        if (!url) return { connected: false, lastError: "接続先が無い（center を有効にするか remoteUrl を設定する）" };
-        const source = this.center.remoteUrl ? "remote" : "sidecar";
+        if (!url) return { connected: false, lastError: "接続先が無い（center を有効にするか、別ホストの接続設定を貼る）" };
+        const source = remote ? "remote" : "sidecar";
         return this.centerReachable
           ? { url, source, connected: true }
           : { url, source, connected: false, lastError: `${url} に接続できない: mock` };
@@ -249,4 +270,38 @@ export class MockBantou {
         return null;
     }
   }
+}
+
+/** Mock of `center_parse_connect`: mcp.json or `claude mcp add`; rejects with a message like the Rust side. */
+function parseConnect(text: string): { url: string; token?: string } {
+  const t = text.trim();
+  if (!t) throw "接続設定が空";
+  const bearer = (v: unknown) => {
+    const m = /^bearer\s+(.+)$/i.exec(String(v ?? "").trim());
+    return m ? m[1].trim() : undefined;
+  };
+  const url = (u: string) => {
+    if (!/^https?:\/\/[^/]+/.test(u)) throw `url は http(s):// で始まるホスト付きのものだけ: ${u}`;
+    return /^https?:\/\/[^/]+\/?$/.test(u) ? u.replace(/\/?$/, "/mcp") : u;
+  };
+  if (t.startsWith("{")) {
+    let v: Record<string, any>;
+    try {
+      v = JSON.parse(t);
+    } catch (e) {
+      throw `JSON として読めない: ${String(e)}`;
+    }
+    const servers = (v.mcpServers ?? v.servers ?? {}) as Record<string, any>;
+    const entry = servers["bantou-center"] ?? Object.values(servers).find((e) => e?.url) ?? (v.url ? v : undefined);
+    if (!entry?.url) throw "接続設定に url を持つサーバーが見つからない";
+    const h = Object.entries((entry.headers ?? {}) as Record<string, unknown>).find(([k]) => k.toLowerCase() === "authorization");
+    return { url: url(String(entry.url)), token: bearer(h?.[1]) };
+  }
+  if (t.startsWith("claude") || t.includes("mcp add")) {
+    const u = /https?:\/\/[^\s'"]+/.exec(t)?.[0];
+    if (!u) throw "コマンドに url（http:// か https://）が見つからない";
+    const a = /Authorization:\s*Bearer\s+([^'"\s]+)/i.exec(t);
+    return { url: url(u), token: a?.[1] };
+  }
+  throw "mcp.json 形式（{ \"mcpServers\": ... }）か claude mcp add コマンドを貼る";
 }

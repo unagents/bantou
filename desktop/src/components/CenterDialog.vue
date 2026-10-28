@@ -54,7 +54,7 @@ async function refresh() {
 watch(open, (v) => v && void refresh(), { immediate: true });
 
 const rcColor = { stopped: "neutral", starting: "warning", connected: "success", error: "error" } as const;
-const sourceLabel = { remote: "remoteUrl", sidecar: "sidecar" } as const;
+const sourceLabel = { remote: "remote", sidecar: "sidecar" } as const;
 </script>
 
 <template>

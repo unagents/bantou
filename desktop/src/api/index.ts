@@ -3,6 +3,9 @@
 export {
   centerCall,
   centerConnection,
+  centerConnectSnippets,
+  centerParseConnect,
+  centerRegenerateToken,
   centerGetSettings,
   centerSetSettings,
   centerStatus,

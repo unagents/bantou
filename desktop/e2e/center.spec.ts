@@ -2,16 +2,16 @@ import type { Page } from "@playwright/test";
 
 import { expect, test } from "./fixtures";
 
-type Mock = { center: { enabled: boolean; remoteUrl?: string }; centerReachable: boolean };
+type Mock = { center: { enabled: boolean; remote?: { url: string; token?: string } }; centerReachable: boolean };
 
-type Change = { enabled?: boolean; remoteUrl?: string; reachable?: boolean };
+type Change = { enabled?: boolean; remote?: { url: string; token?: string }; reachable?: boolean };
 
 /** Change the mocked backend: center settings and whether the center answers. */
 const mock = (page: Page, change: Change) =>
   page.evaluate((c) => {
     const m = (window as unknown as { __BANTOU_MOCK__: Mock }).__BANTOU_MOCK__;
     if (c.enabled !== undefined) m.center.enabled = c.enabled;
-    if (c.remoteUrl !== undefined) m.center.remoteUrl = c.remoteUrl;
+    if (c.remote !== undefined) m.center.remote = c.remote;
     if (c.reachable !== undefined) m.centerReachable = c.reachable;
   }, change);
 
@@ -41,12 +41,12 @@ test("the center dialog shows the connection, rc_list and server_status", async 
   await expect(agents.nth(1)).toContainText("w1");
 });
 
-test("remoteUrl is used as the connection target and refresh re-reads the state", async ({ page }) => {
+test("a pasted remote connection is used as the connection target and refresh re-reads the state", async ({ page }) => {
   await page.goto("/");
-  await mock(page, { remoteUrl: "http://mac200:7910" });
+  await mock(page, { remote: { url: "http://mac200:7910", token: "tok-remote-0123456789" } });
   await page.getByTestId("open-center").click();
   await expect(page.getByTestId("center-conn-url")).toContainText("http://mac200:7910/mcp");
-  await expect(page.getByTestId("center-conn-url")).toContainText("remoteUrl");
+  await expect(page.getByTestId("center-conn-url")).toContainText("remote");
   await expect(page.getByTestId("center-rc")).toHaveCount(2);
 
   await mock(page, { reachable: false });

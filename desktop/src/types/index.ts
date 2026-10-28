@@ -112,7 +112,30 @@ export interface CenterSettings {
   projects: CenterProject[];
   servers: CenterServer[];
   claudePath?: string;
-  remoteUrl?: string;
+  /** Bearer token the sidecar center requires on /mcp. Minted by the backend when empty. */
+  token: string;
+  /** Center on another host, taken from a pasted connection snippet (used instead of the sidecar). */
+  remote?: CenterRemote;
+}
+
+/** Mirror of `src-tauri/src/center.rs::CenterRemote`. */
+export interface CenterRemote {
+  url: string;
+  /** Unset: the snippet had no token (the center answers 401). */
+  token?: string;
+}
+
+/** Mirror of `src-tauri/src/center_snippet.rs::ConnectSnippets`. */
+export interface CenterConnectSnippets {
+  url: string;
+  mcpJson: string;
+  claudeCode: string;
+}
+
+/** Mirror of `src-tauri/src/center_snippet.rs::ParsedConnect`. */
+export interface CenterParsedConnect {
+  url: string;
+  token?: string;
 }
 
 /** Mirror of `src-tauri/src/center.rs::CenterStatus`. */
@@ -129,7 +152,7 @@ export interface CenterStatus {
 
 /** Mirror of `src-tauri/src/center_mcp.rs::CenterConnection`. */
 export interface CenterConnection {
-  /** MCP endpoint in use. Unset: no target (center disabled and no remoteUrl). */
+  /** MCP endpoint in use. Unset: no target (center disabled and no remote). */
   url?: string;
   source?: "remote" | "sidecar";
   connected: boolean;
