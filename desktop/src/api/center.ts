@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { CenterConnection, CenterConnectSnippets, CenterHostChoices, CenterParsedConnect, CenterSettings, CenterStatus, McpToolResult } from "~/types";
+import type { CenterConnection, CenterConnectSnippets, CenterParsedConnect, CenterSettings, CenterStatus, McpToolResult } from "~/types";
 
 export const centerGetSettings = () => invoke<CenterSettings>("center_get_settings");
 
@@ -9,12 +9,12 @@ export const centerSetSettings = (settings: CenterSettings) =>
 /** Mint a new token, store it and restart a running center with it. Returns the token. */
 export const centerRegenerateToken = () => invoke<string>("center_regenerate_token");
 
-/** Addresses of this machine the connection snippets can name for the given bind. */
-export const centerConnectHosts = (bind: string) => invoke<CenterHostChoices>("center_connect_hosts", { bind });
+/** Addresses of this machine (IPv4 first, then IPv6): the choices for the center's bind. */
+export const centerLocalIps = () => invoke<string[]>("center_local_ips");
 
-/** Connection snippets (mcp.json / claude mcp add) for the given bind, port, token and host. */
-export const centerConnectSnippets = (bind: string, port: number, token: string, host: string) =>
-  invoke<CenterConnectSnippets>("center_connect_snippets", { bind, port, token, host });
+/** Connection snippets (mcp.json / claude mcp add) for the given bind, port and token. The bind is the host they name. */
+export const centerConnectSnippets = (bind: string, port: number, token: string) =>
+  invoke<CenterConnectSnippets>("center_connect_snippets", { bind, port, token });
 
 /** Read a pasted connection snippet (either format) into URL and token. Rejects with a readable message. */
 export const centerParseConnect = (text: string) => invoke<CenterParsedConnect>("center_parse_connect", { text });

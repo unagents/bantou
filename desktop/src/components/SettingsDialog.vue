@@ -1,14 +1,14 @@
 <script setup lang="ts">
 import {
-  centerConnectHosts,
   centerConnectSnippets,
+  centerLocalIps,
   centerGetSettings,
   centerParseConnect,
   centerRegenerateToken,
   centerSetSettings,
   centerStatus,
 } from "~/api";
-import type { CenterConnectSnippets, CenterHostChoices, CenterParsedConnect, CenterSettings, CenterStatus } from "~/types";
+import type { CenterConnectSnippets, CenterParsedConnect, CenterSettings, CenterStatus } from "~/types";
 
 const open = defineModel<boolean>("open", { required: true });
 const toast = useToast();
@@ -41,7 +41,7 @@ async function load() {
   } catch (e) {
     error.value = String(e);
   }
-  await refreshStatus();
+  await Promise.all([refreshStatus(), loadLocalIps()]);
 }
 
 const POLL_MS = 1000;
@@ -82,35 +82,23 @@ const bindExposed = computed(() => {
   return !!b && !LOOPBACK.includes(b);
 });
 
-// Addresses of this machine the snippets can name; the draft bind decides whether there is a choice.
-const hostChoices = ref<CenterHostChoices | null>(null);
-let hostSeq = 0;
-watch(
-  () => [settings.value?.enabled, settings.value?.bind] as const,
-  async ([enabled, bind]) => {
-    const seq = ++hostSeq;
-    if (!enabled || bind === undefined) {
-      hostChoices.value = null;
-      return;
-    }
-    try {
-      const r = await centerConnectHosts(bind);
-      if (seq === hostSeq) hostChoices.value = r;
-    } catch (e) {
-      if (seq === hostSeq) error.value = String(e);
-    }
-  },
-  { immediate: true },
-);
-// The saved choice when still offered, else the first entry (the backend resolves the same way).
-const connectHost = computed(() => {
-  const c = hostChoices.value;
-  if (!c) return null;
-  const saved = settings.value?.connectHost ?? "";
-  return c.hosts.includes(saved) ? saved : (c.hosts[0] ?? null);
+// This machine's addresses. The chosen one is the center's bind and the host the snippets name.
+const localIps = ref<string[]>([]);
+async function loadLocalIps() {
+  try {
+    localIps.value = await centerLocalIps();
+  } catch (e) {
+    error.value = String(e);
+  }
+}
+// Items for the select: this machine's addresses, plus the saved bind when it is not among them
+// (an address that went away), so the current value is never hidden.
+const bindItems = computed(() => {
+  const b = settings.value?.bind ?? "";
+  return b && !localIps.value.includes(b) ? [...localIps.value, b] : localIps.value;
 });
 
-// Connection snippets follow the draft port / bind / token / host, so a regenerated token shows up at once.
+// Connection snippets follow the draft port / bind / token, so a regenerated token shows up at once.
 const snippets = ref<CenterConnectSnippets | null>(null);
 const snippetTab = ref<"mcpJson" | "claudeCode">("mcpJson");
 const SNIPPET_TABS = [
@@ -119,15 +107,15 @@ const SNIPPET_TABS = [
 ];
 let snippetSeq = 0;
 watch(
-  () => [settings.value?.enabled, settings.value?.bind, settings.value?.port, settings.value?.token, connectHost.value] as const,
-  async ([enabled, bind, port, token, host]) => {
+  () => [settings.value?.enabled, settings.value?.bind, settings.value?.port, settings.value?.token] as const,
+  async ([enabled, bind, port, token]) => {
     const seq = ++snippetSeq;
-    if (!enabled || bind === undefined || token === undefined || host === null || portError.value || tokenError.value) {
+    if (!enabled || !bind || token === undefined || portError.value || tokenError.value) {
       snippets.value = null;
       return;
     }
     try {
-      const r = await centerConnectSnippets(bind, Number(port), token, host);
+      const r = await centerConnectSnippets(bind, Number(port), token);
       if (seq === snippetSeq) snippets.value = r;
     } catch (e) {
       if (seq === snippetSeq) error.value = String(e);
@@ -239,8 +227,8 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
           <UFormField label="port" class="w-32" :error="portError ?? undefined">
             <UInput v-model="settings.port" type="number" class="w-full" data-testid="center-port" />
           </UFormField>
-          <UFormField label="bind" class="flex-1">
-            <UInput v-model="settings.bind" class="w-full" data-testid="center-bind" />
+          <UFormField label="bind（この PC の IP）" class="flex-1" description="center はこの IP で待ち受け、接続設定にも同じ IP を書く">
+            <USelect v-model="settings.bind" :items="bindItems" class="w-full" data-testid="center-bind" />
           </UFormField>
         </div>
         <p v-if="bindExposed" class="text-cork-danger-text text-xs" data-testid="center-bind-warning">
@@ -271,19 +259,6 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
                 @click="regenerateToken"
               />
             </div>
-          </UFormField>
-          <UFormField
-            label="接続先 IP"
-            :description="hostChoices?.fixed ? 'bind が固定されているため選べない' : 'この PC の IP から、接続設定に書くものを選ぶ'"
-          >
-            <USelect
-              :model-value="connectHost ?? undefined"
-              :items="hostChoices?.hosts ?? []"
-              :disabled="!hostChoices || hostChoices.fixed"
-              class="w-full"
-              data-testid="center-connect-host"
-              @update:model-value="settings.connectHost = $event as string"
-            />
           </UFormField>
           <UFormField label="接続設定" description="MCP クライアント（別ホストの bantou desktop や Claude Code）に貼る。token 入り">
             <UTabs v-model="snippetTab" :items="SNIPPET_TABS" size="sm" :content="false" class="w-full" data-testid="center-snippet-tabs" />
@@ -383,7 +358,7 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
         </UFormField>
         </div>
 
-        <div class="border-cork-border flex flex-col gap-2 border-t pt-3" data-testid="center-remote-section">
+        <div v-else class="flex flex-col gap-2" data-testid="center-remote-section">
           <span class="text-sm font-semibold">別ホストの center に接続（貼り付け）</span>
           <p class="text-cork-muted text-xs">
             相手の設定画面でコピーした接続設定（mcp.json か claude mcp add）を貼る。保存すると sidecar ではなくこちらに接続する

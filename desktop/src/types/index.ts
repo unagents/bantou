@@ -114,8 +114,6 @@ export interface CenterSettings {
   claudePath?: string;
   /** Bearer token the sidecar center requires on /mcp. Minted by the backend when empty. */
   token: string;
-  /** Address the connection snippets name. Empty (or no longer offered for the bind): the first one. */
-  connectHost: string;
   /** Center on another host, taken from a pasted connection snippet (used instead of the sidecar). */
   remote?: CenterRemote;
 }
@@ -125,14 +123,6 @@ export interface CenterRemote {
   url: string;
   /** Unset: the snippet had no token (the center answers 401). */
   token?: string;
-}
-
-/** Mirror of `src-tauri/src/center_snippet.rs::HostChoices`. */
-export interface CenterHostChoices {
-  /** Bare addresses of this machine (IPv4 first, then IPv6). The first one is the default. */
-  hosts: string[];
-  /** The bind pins the host (loopback or one specific address): nothing to choose. */
-  fixed: boolean;
 }
 
 /** Mirror of `src-tauri/src/center_snippet.rs::ConnectSnippets`. */

@@ -14,18 +14,7 @@ use std::net::{IpAddr, Ipv4Addr};
 /// Name the snippets register the server under.
 pub const SERVER_NAME: &str = "bantou-center";
 
-const WILDCARD_BINDS: [&str; 3] = ["", "0.0.0.0", "::"];
-const LOOPBACK_BINDS: [&str; 4] = ["127.0.0.1", "::1", "[::1]", "localhost"];
-
-/// Hosts a snippet can name, and whether the bind leaves any choice.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HostChoices {
-    /// Bare addresses (IPv6 without brackets). The first one is the default.
-    pub hosts: Vec<String>,
-    /// True when the bind pins the host (loopback or one specific address): `hosts` has one entry.
-    pub fixed: bool,
-}
+const LOOPBACK_ALIASES: [&str; 3] = ["[::1]", "::1", "localhost"];
 
 /// This machine's addresses: IPv4 first (LAN etc. in interface order, then 127.0.0.1), then IPv6.
 /// Unspecified, multicast, link-local IPv6 (`fe80::/10`, unusable in a URL without a zone id)
@@ -69,33 +58,37 @@ fn bare(host: &str) -> &str {
     host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host)
 }
 
-/// Hosts the snippets may name for `bind`. Loopback binds pin `127.0.0.1`. `0.0.0.0` offers the
-/// IPv4 addresses (an IPv6 address would not reach an IPv4-only listener); `::` and an empty bind
-/// offer all. Any other bind is the address itself.
-pub fn host_choices(bind: &str, ips: &[IpAddr]) -> HostChoices {
-    let bind = bind.trim();
-    if LOOPBACK_BINDS.contains(&bind) {
-        return HostChoices { hosts: vec!["127.0.0.1".to_string()], fixed: true };
-    }
-    if WILDCARD_BINDS.contains(&bind) {
-        let hosts = order_ips(ips)
-            .into_iter()
-            .filter(|ip| bind != "0.0.0.0" || ip.is_ipv4())
-            .map(|ip| ip.to_string())
-            .collect();
-        return HostChoices { hosts, fixed: false };
-    }
-    HostChoices { hosts: vec![bare(bind).to_string()], fixed: true }
+/// Addresses of this machine as strings, in `order_ips` order: the choices for the center's bind.
+pub fn local_ip_strings() -> Vec<String> {
+    local_ips().iter().map(ToString::to_string).collect()
 }
 
-/// The saved choice when it is still offered, else the first entry.
-pub fn resolve_host(choices: &HostChoices, selected: &str) -> String {
-    let selected = bare(selected.trim());
-    if choices.hosts.iter().any(|h| h == selected) {
-        selected.to_string()
-    } else {
-        choices.hosts.first().cloned().unwrap_or_else(|| "127.0.0.1".to_string())
+/// The bind to use given what was saved: the bind itself if this machine has that address, else
+/// the old `connectHost` (the pre-unification snippet IP) if it does, else the first address.
+/// A loopback alias (`localhost`, `::1`) maps to `127.0.0.1` so a loopback-only center never
+/// widens by migration. Idempotent.
+pub fn pick_bind(bind: &str, connect_host: &str, ips: &[IpAddr]) -> String {
+    let choices: Vec<String> = order_ips(ips).iter().map(ToString::to_string).collect();
+    let bind = bare(bind.trim());
+    if LOOPBACK_ALIASES.contains(&bind) {
+        return "127.0.0.1".to_string();
     }
+    for cand in [bind, bare(connect_host.trim())] {
+        if choices.iter().any(|c| c == cand) {
+            return cand.to_string();
+        }
+    }
+    choices.into_iter().next().unwrap_or_else(|| "127.0.0.1".to_string())
+}
+
+/// Host the snippets name for `bind`: the bind itself. A leftover wildcard bind (not offered any
+/// more) names the first address of this machine.
+fn snippet_host(bind: &str, ips: &[IpAddr]) -> String {
+    let b = bare(bind.trim());
+    if ["", "0.0.0.0", "::"].contains(&b) {
+        return order_ips(ips).first().map_or_else(|| "127.0.0.1".to_string(), ToString::to_string);
+    }
+    b.to_string()
 }
 
 /// Host part of a URL: IPv6 literals in brackets.
@@ -320,18 +313,16 @@ pub fn parse_connect(text: &str) -> Result<ParsedConnect, String> {
     Err("mcp.json 形式（{ \"mcpServers\": ... }）か claude mcp add コマンドを貼る".to_string())
 }
 
-/// Addresses of this machine the snippets can name for the draft bind.
+/// This machine's addresses: the choices for the center's bind (and the snippets' host).
 #[tauri::command]
-pub fn center_connect_hosts(bind: String) -> HostChoices {
-    host_choices(&bind, &local_ips())
+pub fn center_local_ips() -> Vec<String> {
+    local_ip_strings()
 }
 
-/// Snippets for the given draft values (bind / port / token / chosen host). A `host` that is
-/// unset or no longer offered gives the first entry.
+/// Snippets for the given draft values. The bind is the host the snippets name.
 #[tauri::command]
-pub fn center_connect_snippets(bind: String, port: u32, token: String, host: Option<String>) -> ConnectSnippets {
-    let choices = host_choices(&bind, &local_ips());
-    build_snippets(&resolve_host(&choices, host.as_deref().unwrap_or("")), port, &token)
+pub fn center_connect_snippets(bind: String, port: u32, token: String) -> ConnectSnippets {
+    build_snippets(&snippet_host(&bind, &local_ips()), port, &token)
 }
 
 #[tauri::command]
@@ -347,10 +338,6 @@ mod tests {
 
     fn ips(l: &[&str]) -> Vec<IpAddr> {
         l.iter().map(|s| s.parse().unwrap()).collect()
-    }
-
-    fn strs(v: &[&str]) -> Vec<String> {
-        v.iter().map(|s| s.to_string()).collect()
     }
 
     #[test]
@@ -378,56 +365,50 @@ mod tests {
     }
 
     #[test]
-    fn loopback_bind_pins_127() {
-        let all = ips(&["192.168.1.204", "fd7a::5"]);
-        for b in ["127.0.0.1", "localhost", "::1", "[::1]"] {
-            assert_eq!(host_choices(b, &all), HostChoices { hosts: strs(&["127.0.0.1"]), fixed: true }, "{b}");
+    fn pick_bind_keeps_a_bind_this_machine_has() {
+        let all = ips(&["192.168.1.204", "100.64.0.9", "fd7a::5"]);
+        for b in ["100.64.0.9", "127.0.0.1", "fd7a::5", "[fd7a::5]"] {
+            assert_eq!(pick_bind(b, "192.168.1.204", &all), b.trim_matches(|c| c == '[' || c == ']'), "{b}");
         }
     }
 
     #[test]
-    fn wildcard_bind_offers_the_addresses() {
-        let all = ips(&["fd7a::5", "192.168.1.204", "fe80::2"]);
-        // IPv4-only listener: no IPv6 offered
-        assert_eq!(
-            host_choices("0.0.0.0", &all),
-            HostChoices { hosts: strs(&["192.168.1.204", "127.0.0.1"]), fixed: false }
-        );
-        for b in ["::", ""] {
-            assert_eq!(
-                host_choices(b, &all),
-                HostChoices { hosts: strs(&["192.168.1.204", "127.0.0.1", "fd7a::5"]), fixed: false },
-                "{b:?}"
-            );
-        }
+    fn pick_bind_falls_back_to_connect_host_then_first() {
+        let all = ips(&["192.168.1.204", "100.64.0.9"]);
+        // old wildcard bind: the snippet IP the user had picked
+        assert_eq!(pick_bind("0.0.0.0", "100.64.0.9", &all), "100.64.0.9");
+        // neither is on this machine: the first address
+        assert_eq!(pick_bind("0.0.0.0", "", &all), "192.168.1.204");
+        assert_eq!(pick_bind("10.9.9.9", "10.8.8.8", &all), "192.168.1.204");
+        assert_eq!(pick_bind("mac204.local", "", &all), "192.168.1.204");
+        // nothing known at all
+        assert_eq!(pick_bind("0.0.0.0", "", &[]), "127.0.0.1");
     }
 
     #[test]
-    fn specific_bind_pins_that_address() {
+    fn pick_bind_maps_loopback_aliases_to_127() {
         let all = ips(&["192.168.1.204"]);
-        assert_eq!(host_choices("192.168.1.5", &all), HostChoices { hosts: strs(&["192.168.1.5"]), fixed: true });
-        assert_eq!(host_choices("fd7a::5", &all), HostChoices { hosts: strs(&["fd7a::5"]), fixed: true });
-        assert_eq!(host_choices("[fd7a::5]", &all), HostChoices { hosts: strs(&["fd7a::5"]), fixed: true });
-        assert_eq!(host_choices("mac204.local", &all), HostChoices { hosts: strs(&["mac204.local"]), fixed: true });
+        for b in ["localhost", "::1", "[::1]"] {
+            assert_eq!(pick_bind(b, "192.168.1.204", &all), "127.0.0.1", "{b}");
+        }
     }
 
     #[test]
-    fn resolve_keeps_a_saved_host_that_is_still_offered() {
-        let c = host_choices("0.0.0.0", &ips(&["192.168.1.204", "100.64.0.9"]));
-        assert_eq!(resolve_host(&c, "100.64.0.9"), "100.64.0.9");
-        assert_eq!(resolve_host(&c, "127.0.0.1"), "127.0.0.1");
+    fn pick_bind_is_idempotent() {
+        let all = ips(&["192.168.1.204", "100.64.0.9"]);
+        let once = pick_bind("0.0.0.0", "100.64.0.9", &all);
+        assert_eq!(pick_bind(&once, "", &all), once);
     }
 
     #[test]
-    fn resolve_falls_back_to_the_first_when_unset_or_gone() {
-        let c = host_choices("0.0.0.0", &ips(&["192.168.1.204", "100.64.0.9"]));
-        assert_eq!(resolve_host(&c, ""), "192.168.1.204");
-        assert_eq!(resolve_host(&c, "10.9.9.9"), "192.168.1.204");
-        // a saved IPv6 is gone once the bind is IPv4-only
-        assert_eq!(resolve_host(&c, "fd7a::5"), "192.168.1.204");
-        // a pinned bind ignores the saved host
-        let pinned = host_choices("127.0.0.1", &[]);
-        assert_eq!(resolve_host(&pinned, "192.168.1.204"), "127.0.0.1");
+    fn snippet_host_is_the_bind() {
+        let all = ips(&["192.168.1.204"]);
+        assert_eq!(snippet_host("100.64.0.9", &all), "100.64.0.9");
+        assert_eq!(snippet_host("[fd7a::5]", &all), "fd7a::5");
+        assert_eq!(snippet_host("127.0.0.1", &all), "127.0.0.1");
+        // leftover wildcard binds name the first address
+        assert_eq!(snippet_host("0.0.0.0", &all), "192.168.1.204");
+        assert_eq!(snippet_host("", &[]), "127.0.0.1");
     }
 
     #[test]

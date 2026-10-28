@@ -101,8 +101,9 @@ pub struct CenterSettings {
     pub claude_path: Option<String>,
     /// Bearer token the sidecar center requires on `/mcp`. Minted on first load when empty.
     pub token: String,
-    /// Address the connection snippets name, picked from this machine's addresses. Empty (or no
-    /// longer offered for the bind): the first one.
+    /// Legacy: the snippet IP of versions that kept it apart from `bind`. Read only, to migrate
+    /// the bind (see `load_settings`); never written back. The bind is now the single choice.
+    #[serde(skip_serializing)]
     pub connect_host: String,
     /// Center on another host this desktop connects to (used instead of the sidecar when set).
     /// The old `remoteUrl` key of earlier versions is not read: serde drops unknown keys and
@@ -699,8 +700,14 @@ pub(crate) fn load_settings(app: &tauri::AppHandle) -> CmdResult<CenterSettings>
         .get(CENTER_KEY)
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default();
-    let (s, minted) = ensure_token(stored);
-    if minted {
+    let (mut s, minted) = ensure_token(stored);
+    // The bind is one of this machine's addresses (it is also the host the snippets name). Older
+    // stores may hold a wildcard / unknown bind plus a separate connectHost: migrate once.
+    let migrated = crate::center_snippet::pick_bind(&s.bind, &s.connect_host, &crate::center_snippet::local_ips());
+    let moved = migrated != s.bind || !s.connect_host.is_empty();
+    s.bind = migrated;
+    s.connect_host.clear();
+    if minted || moved {
         store.set(CENTER_KEY, serde_json::to_value(&s).map_err(CommandError::other)?);
         store.save().map_err(CommandError::other)?;
     }
@@ -869,13 +876,13 @@ mod tests {
     }
 
     #[test]
-    fn connect_host_defaults_to_empty_and_round_trips() {
+    fn connect_host_is_read_for_migration_but_never_written() {
         let old: CenterSettings = serde_json::from_str(r#"{"enabled":true,"token":"abcdefghijkl"}"#).unwrap();
         assert_eq!(old.connect_host, "");
-        let s = CenterSettings { connect_host: "192.168.1.204".into(), ..Default::default() };
-        let back: CenterSettings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
-        assert_eq!(back.connect_host, "192.168.1.204");
-        assert!(serde_json::to_string(&s).unwrap().contains("connectHost"));
+        let old: CenterSettings =
+            serde_json::from_str(r#"{"bind":"0.0.0.0","connectHost":"192.168.1.204","token":"abcdefghijkl"}"#).unwrap();
+        assert_eq!(old.connect_host, "192.168.1.204");
+        assert!(!serde_json::to_string(&old).unwrap().contains("connectHost"));
     }
 
     #[test]
