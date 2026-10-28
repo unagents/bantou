@@ -2,7 +2,7 @@
 import type { BrokerStatus } from "~/types";
 
 defineProps<{
-  workspacePath: string;
+  workspacePath: string | null;
   waitingCount: number;
   broker: BrokerStatus | null;
 }>();
@@ -15,7 +15,7 @@ defineEmits<{ open: []; addSession: []; center: []; settings: [] }>();
     class="border-cork-border bg-cork-surface sticky top-0 z-10 flex h-(--cork-header-height) items-center gap-3 border-b pr-4 pl-20"
   >
     <h1 class="font-display text-lg font-semibold">bantou</h1>
-    <span class="text-cork-muted min-w-0 truncate text-xs">{{ workspacePath }}</span>
+    <span v-if="workspacePath" class="text-cork-muted min-w-0 truncate text-xs">{{ workspacePath }}</span>
     <div class="ml-auto flex items-center gap-3">
       <UBadge
         v-if="waitingCount > 0"
@@ -25,6 +25,7 @@ defineEmits<{ open: []; addSession: []; center: []; settings: [] }>();
         :label="`返答待ち ${waitingCount}`"
       />
       <UTooltip
+        v-if="workspacePath"
         :text="
           broker?.connected
             ? `${broker.name} @ ${broker.broker_url}`
@@ -40,6 +41,7 @@ defineEmits<{ open: []; addSession: []; center: []; settings: [] }>();
         </span>
       </UTooltip>
       <UButton
+        v-if="workspacePath"
         size="sm"
         variant="ghost"
         color="neutral"

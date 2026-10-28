@@ -84,10 +84,20 @@ async function onInstruct(session: string, title: string, body: string) {
 
 <template>
   <div class="min-h-screen bg-default text-default">
+    <AppHeader
+      v-if="loaded"
+      :workspace-path="dir"
+      :waiting-count="waitingCount"
+      :broker="broker"
+      @open="pickAndOpen"
+      @add-session="addSessionOpen = true"
+      @center="centerOpen = true"
+      @settings="settingsOpen = true"
+    />
     <div
       v-if="loaded && !dir"
       data-tauri-drag-region="deep"
-      class="flex min-h-screen flex-col items-center justify-center gap-6 p-8"
+      class="flex min-h-[calc(100vh-var(--cork-header-height))] flex-col items-center justify-center gap-6 p-8"
     >
       <div class="text-center">
         <h1 class="font-display text-2xl font-semibold">bantou</h1>
@@ -97,15 +107,6 @@ async function onInstruct(session: string, title: string, body: string) {
     </div>
 
     <template v-else-if="dir">
-      <AppHeader
-        :workspace-path="dir"
-        :waiting-count="waitingCount"
-        :broker="broker"
-        @open="pickAndOpen"
-        @add-session="addSessionOpen = true"
-        @center="centerOpen = true"
-        @settings="settingsOpen = true"
-      />
       <main class="mx-auto flex w-full max-w-5xl flex-col p-6">
         <SessionColumn
           v-for="g in sessions"
