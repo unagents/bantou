@@ -2,15 +2,21 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 [--dry-run] <version> <sha256>" >&2
+  echo "Usage: $0 [--dry-run] [--force] <version> <sha256>" >&2
   exit 1
 }
 
 DRY_RUN=0
-if [[ "${1:-}" == "--dry-run" ]]; then
-  DRY_RUN=1
+# --force は正本の構造変更（行の追加・削除）を tap に反映する時だけ使う。差分は表示する
+FORCE=0
+while [[ "${1:-}" == --* ]]; do
+  case "$1" in
+    --dry-run) DRY_RUN=1 ;;
+    --force) FORCE=1 ;;
+    *) usage ;;
+  esac
   shift
-fi
+done
 
 VERSION="${1:-}"
 SHA256="${2:-}"
@@ -55,7 +61,7 @@ if [[ -n "$CURRENT_SHA" ]]; then
   OLD_LINES=()
   while IFS= read -r line; do OLD_LINES+=("$line"); done <<<"$CURRENT_CONTENT"
 
-  if [[ "${#OLD_LINES[@]}" -ne "${#NEW_LINES[@]}" ]]; then
+  if [[ "$FORCE" -eq 0 && "${#OLD_LINES[@]}" -ne "${#NEW_LINES[@]}" ]]; then
     echo "error: line count changed (${#OLD_LINES[@]} -> ${#NEW_LINES[@]}), aborting" >&2
     exit 1
   fi
@@ -72,7 +78,7 @@ if [[ -n "$CURRENT_SHA" ]]; then
 
   if [[ "$CHANGED" -eq 0 ]]; then
     echo "no change (version/sha256 already match)"
-  elif [[ "$CHANGED" -gt 2 ]]; then
+  elif [[ "$FORCE" -eq 0 && "$CHANGED" -gt 2 ]]; then
     echo "error: more than 2 lines differ (${CHANGED}), aborting without PUT" >&2
     exit 1
   fi

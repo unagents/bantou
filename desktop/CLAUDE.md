@@ -34,8 +34,9 @@ Do it without asking once the review check passes.
    `beforeBuildCommand` runs `bun run build:sidecar && bun run generate`. Output under `src-tauri/target/release/bundle/`: `dmg/bantou_<ver>_aarch64.dmg`, `macos/bantou.app.tar.gz`, `macos/bantou.app.tar.gz.sig`.
    Generate the updater manifest: `scripts/make-latest-json.sh <ver> src-tauri/target/release/bundle/macos/bantou.app.tar.gz.sig latest.json` (platform `darwin-aarch64`; needs `jq`).
 4. GitHub release: `gh release create v<ver> <dmg> src-tauri/target/release/bundle/macos/bantou.app.tar.gz src-tauri/target/release/bundle/macos/bantou.app.tar.gz.sig latest.json --title v<ver> --notes ""`. The installed app checks `releases/latest/download/latest.json`, so attach all three updater files.
-5. Cask (in `desktop/`): `scripts/publish-cask.sh [--dry-run] <ver> $(shasum -a 256 <dmg> | cut -d' ' -f1)`. Needs authenticated `gh` and `jq`; no env vars.
+5. Cask (in `desktop/`): `scripts/publish-cask.sh [--dry-run] [--force] <ver> $(shasum -a 256 <dmg> | cut -d' ' -f1)`. Needs authenticated `gh` and `jq`; no env vars.
    Rewrites `version`/`sha256` in `desktop/Casks/bantou.rb` (commit the result) and updates `Casks/bantou.rb` in GitHub `unagents/homebrew-tap` via API.
+   It aborts when the tap file differs by more than version/sha256. Use `--force` only when `Casks/bantou.rb` itself changed (lines added or removed); check the printed diff.
 6. This Mac (tap `unagents/tap`): `/opt/homebrew/bin/brew update` and `/opt/homebrew/bin/brew upgrade --cask bantou`. Use `/opt/homebrew/bin/brew`, never `/usr/local/bin/brew`.
 7. Restart the app: `pgrep -fl 'bantou.app/Contents/MacOS'`, `kill <pid>` (by PID only), `open -a /Applications/bantou.app`. Check `CFBundleShortVersionString` in `/Applications/bantou.app/Contents/Info.plist`.
 
