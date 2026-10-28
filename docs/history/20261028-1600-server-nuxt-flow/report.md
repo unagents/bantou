@@ -218,3 +218,27 @@ claude 終了: ... ok=true ms=3117 retries=0
   - pid 1564597 / 1564699。
   - コマンドは `~/.npm/_npx/.../bantou --config /home/vagrant/work/bantou-npx-smoke/config.json`。
   - 起動は 2026-10-27 19:34。
+
+## 追加指示: cap の Bash sandbox を既定で外す（6311fdd）
+
+- 決定（ユーザー）: server が起動する cap は、Bash の sandbox を外して動かす。worker 側は対象外。
+- 理由: 段階 2 の 8 の実測のとおり、204 の既定（`sandbox.enabled: true`）では、cap の Bash が起動した worker は setsid を付けても cap と一緒に終わるため。
+- 実装:
+  - config に `session.capBashSandbox`（boolean、既定 false）を追加した。boolean 以外は起動時に拒否する。
+  - false の時は、cap の新規・resume とも `--settings {"sandbox":{"enabled":false}}` を付ける。true の時は付けない（従来どおり）。
+- 引数の位置:
+  - `--permission-mode` と `--allowedTools` / `--disallowedTools` の後ろに置く。
+  - `session.extraArgs`、`--session-id|--resume <id>`、`--` より前に置く。
+  - JSON に空白が無いので、孤児回収の `matchesSession` には影響しない。
+  - `extraArgs` に `--settings` を重ねた場合は、後ろの `extraArgs` が勝つ想定。実機では未検証。
+- e2e / probe:
+  - e2e 専用の `E2E_NO_BASH_SANDBOX` を廃止した。e2e は server の既定設定で動く。
+  - probe-survival は `E2E_CAP_BASH_SANDBOX=1` を付けると、sandbox を有効にしたまま計測する。
+- 文書: `server/README.md`（config 表・例・根拠）と `docs/architecture.md`（実行モデルの項目 9）を更新した。
+- 検証:
+  - unit は 95 / 95 pass。typecheck と build は OK。
+  - cap の argv に、新規・resume とも `--settings {"sandbox":{"enabled":false}}` が付くことを `ps` で確認した。
+- e2e は未完了。
+  - sandbox 内の実行は、resume で session が保存されておらず NG だった（`session が無いので新規に切り替え`、既知の環境差）。
+  - sandbox 外での再実行は権限ゲートに拒否されたため、まだ行っていない。
+  - worker report フローの完走と、init `mcp_servers` の安全確認は未確認。
