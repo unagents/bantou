@@ -11,7 +11,7 @@ export const SERVER_NAME = "bantou-server";
  * agent-messenger protocol registration (messenger/protocol.json) used in `meta` of send / listPeers.
  * Not the body schema version (`bantou: 1`, PROTOCOL_VERSION). Keep in sync with messenger/protocol.json.
  */
-export const MESSENGER_PROTOCOL = { protocol: "bantou", version: "1.1.0" } as const;
+export const MESSENGER_PROTOCOL = { protocol: "bantou", version: "1.2.0" } as const;
 
 /** Allowed cap / worker ids (also directory names under <workspace>/caps and <workspace>/workers). */
 export const AGENT_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
@@ -147,6 +147,45 @@ export interface ErrorReply {
 
 export type ServerReply = CapResultReply | WorkerResultReply | StopResultReply | StatusReply | ErrorReply;
 
+/** Liveness of one cap / worker as seen from its `claude -p` stream-json output. */
+export type ActivityState = "running" | "stalled" | "idle" | "done" | "failed" | "lost";
+
+export const ACTIVITY_STATES: readonly ActivityState[] = ["running", "stalled", "idle", "done", "failed", "lost"];
+
+/** Summary of one cap / worker run. Never carries the full output. */
+export interface AgentActivity {
+  kind: AgentKind;
+  id: string;
+  /** The cap itself for a cap, the owning cap for a worker. */
+  cap_id: string;
+  state: ActivityState;
+  /** Head of the last kick_cap / worker_start prompt (one line, at most 200 chars). */
+  task: string;
+  /** Short summary of the latest activity (at most 120 chars); null when there is none yet. */
+  last_activity: string | null;
+  /** When the last stdout line arrived (server clock, ISO 8601). */
+  last_output_at: string | null;
+  /** Milliseconds since the last output (or started_at) at send time. Use this, not clock differences, to show elapsed time. */
+  silent_ms: number;
+  started_at: string | null;
+  finished_at: string | null;
+  /** Why the agent is failed / lost (at most 200 chars). */
+  error?: string;
+}
+
+/** Notice from server to center (not a reply: it is never matched with a pending command). */
+export interface ActivityNotice {
+  bantou: typeof PROTOCOL_VERSION;
+  type: "activity";
+  cap_id: string;
+  /** Send time (server clock, ISO 8601). */
+  at: string;
+  /** The cap first, then its workers by id. */
+  agents: AgentActivity[];
+}
+
+export type ServerNotice = ActivityNotice;
+
 // -- guards -------------------------------------------------------------------
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -190,6 +229,10 @@ export function isValidAgentId(v: unknown): v is string {
 
 export function isAgentState(v: unknown): v is AgentState {
   return v === "idle" || v === "running" || v === "failed" || v === "error";
+}
+
+export function isActivityState(v: unknown): v is ActivityState {
+  return typeof v === "string" && (ACTIVITY_STATES as readonly string[]).includes(v);
 }
 
 export function isServerCommand(v: unknown): v is ServerCommand {
@@ -305,6 +348,44 @@ export function parseServerReply(text: string): ServerReply | undefined {
   try {
     const v: unknown = JSON.parse(text.trim());
     return isServerReply(v) ? v : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isAgentActivity(v: unknown): v is AgentActivity {
+  return (
+    isRecord(v) &&
+    (v.kind === "cap" || v.kind === "worker") &&
+    isValidAgentId(v.id) &&
+    isValidAgentId(v.cap_id) &&
+    isActivityState(v.state) &&
+    typeof v.task === "string" &&
+    strOrNull(v.last_activity) &&
+    strOrNull(v.last_output_at) &&
+    typeof v.silent_ms === "number" &&
+    strOrNull(v.started_at) &&
+    strOrNull(v.finished_at) &&
+    optString(v.error)
+  );
+}
+
+export function isServerNotice(v: unknown): v is ServerNotice {
+  if (!isRecord(v) || v.bantou !== PROTOCOL_VERSION) return false;
+  return (
+    v.type === "activity" &&
+    isValidAgentId(v.cap_id) &&
+    typeof v.at === "string" &&
+    Array.isArray(v.agents) &&
+    v.agents.every(isAgentActivity)
+  );
+}
+
+/** Parse message text as a server notice; `undefined` for non-JSON or non-notice. */
+export function parseServerNotice(text: string): ServerNotice | undefined {
+  try {
+    const v: unknown = JSON.parse(text.trim());
+    return isServerNotice(v) ? v : undefined;
   } catch {
     return undefined;
   }

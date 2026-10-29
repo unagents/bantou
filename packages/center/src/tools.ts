@@ -126,7 +126,9 @@ export function registerTools(
     "remote_list",
     {
       title: "remote 一覧",
-      description: "center が保持する remote（remote_id, server, state, owner, 時刻, 結果）の一覧。owner が分かれば（header / query / 引数）その owner のものだけ、分からなければ全件",
+      description:
+        "center が保持する remote（remote_id, server, state, owner, 時刻, 結果）の一覧。owner が分かれば（header / query / 引数）その owner のものだけ、分からなければ全件。" +
+        "server から通知を受けた remote には activity が付く: agents（cap → worker。state は running / stalled / idle / done / failed / lost、task、last_activity、last_output_at、silent_ms = 最後の出力からの経過 ms）、received_ms_ago（最後の通知から）、stale（running の agent がいるのに通知が途絶えた）",
       inputSchema: { owner: ownerArg },
     },
     ({ owner }, extra) =>

@@ -30,6 +30,8 @@
 - 通信基盤: agent-messenger（protocol `bantou`）。インフラとしては長く使うかもしれない。
 - 目指す形: agent-messenger の通信部分（client、broker との接続）は center が持つ。master-cap には protocol と、それを使う MCP tool の function だけを持たせる。master-cap ごとに agent-messenger の MCP を抱えさせない。
 - master-cap から server への指示は protocol `bantou` で送る。送る道具は center が master-cap に持たせる。
+- worker の実プロセスは server が remote-cap の依頼（server の `/mcp` の tool）で起動する。起動すると決めるのは remote-cap（登場者の定義は変わらない）。
+- 生存は `claude -p --output-format stream-json` の出力が続いているかで見る。server が remote-cap と worker の出力を要約し、protocol `bantou` の `activity` 通知で center に送る。center が保持して desktop に見せる。
 
 ## 判断の手順
 

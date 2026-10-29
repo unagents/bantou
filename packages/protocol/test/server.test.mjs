@@ -4,9 +4,18 @@ import { readFileSync } from "node:fs";
 import {
   isServerCommand, isKickCapCommand, isStopCapCommand, isResumeWorkerCommand, isStatusCommand,
   parseServerCommand, isServerReply, parseServerReply,
+  isActivityState, isServerNotice, parseServerNotice, ACTIVITY_STATES,
   isValidAgentId, isAgentState, SERVER_NAME, MESSENGER_PROTOCOL, AGENT_ID_PATTERN,
 } from "../dist/index.js";
 
+const activityAgent = {
+  kind: "worker", id: "w-1", cap_id: "r-1", state: "running", task: "do it", last_activity: "Bash: ls",
+  last_output_at: "2026-10-29T00:00:00.000Z", silent_ms: 1200, started_at: "2026-10-29T00:00:00.000Z", finished_at: null,
+};
+const activityNotice = {
+  bantou: 1, type: "activity", cap_id: "r-1", at: "2026-10-29T00:00:05.000Z",
+  agents: [{ ...activityAgent, kind: "cap", id: "r-1", state: "idle", last_activity: null, last_output_at: null }, activityAgent],
+};
 const kickMin = { bantou: 1, type: "kick_cap", cap_id: "c1", prompt: "go" };
 const kickFull = {
   bantou: 1, type: "kick_cap", cap_id: "my-cap_2", prompt: "do it",
@@ -144,7 +153,7 @@ test("messenger/protocol.json matches MESSENGER_PROTOCOL and the message set", (
   assert.equal(manifest.version, MESSENGER_PROTOCOL.version);
   assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
   assert.equal(typeof manifest.description, "string");
-  assert.deepEqual(Object.keys(manifest.messages).sort(), ["cap_result", "error", "kick_cap", "status", "status_result", "stop_cap", "stop_result"]);
+  assert.deepEqual(Object.keys(manifest.messages).sort(), ["activity", "cap_result", "error", "kick_cap", "status", "status_result", "stop_cap", "stop_result"]);
   for (const [k, schema] of Object.entries(manifest.messages)) {
     assert.equal(schema.type, "object", k);
     assert.equal(schema.properties.type.const, k, k);
@@ -155,7 +164,7 @@ test("messenger/protocol.json matches MESSENGER_PROTOCOL and the message set", (
 test("protocol.json required fields agree with the guards", () => {
   const m = manifest.messages;
   // every sample accepted by the guards carries all required fields of its schema
-  const samples = { kick_cap: kickMin, stop_cap: stopCap, stop_result: stopResult, status, cap_result: capResult, status_result: statusReply, error: errReply };
+  const samples = { activity: activityNotice, kick_cap: kickMin, stop_cap: stopCap, stop_result: stopResult, status, cap_result: capResult, status_result: statusReply, error: errReply };
   for (const [k, v] of Object.entries(samples)) {
     for (const f of m[k].required) assert.ok(f in v, `${k} sample lacks required ${f}`);
     for (const f of Object.keys(v)) assert.ok(f in m[k].properties, `${k}.${f} not in schema`);
@@ -178,5 +187,31 @@ test("stop_cap / stop_result", () => {
   assert.equal(isServerReply({ ...stopResult, cap_id: "a b" }), false);
   assert.ok(isServerReply({ bantou: 1, type: "error", ok: false, message: "x", command: "stop_cap", cap_id: "c1" }));
   assert.deepEqual(manifest.messages.error.properties.command.enum, ["kick_cap", "resume_worker", "stop_cap", "status"]);
-  assert.equal(MESSENGER_PROTOCOL.version, "1.1.0");
+  assert.equal(MESSENGER_PROTOCOL.version, "1.2.0");
+});
+
+test("activity notice guard", () => {
+  assert.deepEqual([...ACTIVITY_STATES], ["running", "stalled", "idle", "done", "failed", "lost"]);
+  for (const st of ACTIVITY_STATES) assert.ok(isActivityState(st), st);
+  assert.equal(isActivityState("error"), false);
+  assert.ok(isServerNotice(activityNotice));
+  assert.deepEqual(parseServerNotice(JSON.stringify(activityNotice)), activityNotice);
+  assert.ok(isServerNotice({ ...activityNotice, agents: [] }));
+  assert.ok(isServerNotice({ ...activityNotice, agents: [{ ...activityAgent, state: "lost", error: "signal SIGKILL" }] }));
+  assert.equal(isServerNotice({ ...activityNotice, agents: [{ ...activityAgent, state: "dead" }] }), false);
+  assert.equal(isServerNotice({ ...activityNotice, agents: [{ ...activityAgent, silent_ms: "1" }] }), false);
+  assert.equal(isServerNotice({ ...activityNotice, agents: [{ ...activityAgent, id: "a b" }] }), false);
+  assert.equal(isServerNotice({ ...activityNotice, cap_id: "a b" }), false);
+  assert.equal(isServerNotice({ ...activityNotice, at: 1 }), false);
+  assert.equal(isServerNotice({ ...activityNotice, bantou: 2 }), false);
+  assert.equal(isServerNotice({ ...activityNotice, agents: "x" }), false);
+  assert.equal(parseServerNotice("nope"), undefined);
+  assert.equal(parseServerNotice(JSON.stringify(capResult)), undefined);
+});
+
+test("an activity notice is not a reply or a command", () => {
+  assert.equal(isServerReply(activityNotice), false);
+  assert.equal(parseServerReply(JSON.stringify(activityNotice)), undefined);
+  assert.equal(isServerCommand(activityNotice), false);
+  assert.equal(isServerNotice(capResult), false);
 });

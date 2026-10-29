@@ -21,6 +21,10 @@ bantou-server is the listener of this protocol. A center (or any peer) sends a c
 - `status_result`: `{"bantou":1,"type":"status_result","ok":true,"caps":[...],"workers":[...]}`.
 - `error`: `{"bantou":1,"type":"error","ok":false,"message","command"?,"cap_id"?,"worker_id"?}`.
 
+## Notices (server to peer)
+
+- `activity`: `{"bantou":1,"type":"activity","cap_id","at","agents":[...]}`. Not a reply: it is never matched with a pending command. Sent to the center that kicked `cap_id`, as a snapshot of the cap and its workers (cap first, then workers by id). Each agent has `kind`, `id`, `cap_id`, `state` (running | stalled | idle | done | failed | lost), `task`, `last_activity`, `last_output_at`, `silent_ms`, `started_at`, `finished_at`, `error`?. Sent every 5 seconds while any agent is running or stalled, and at each state change. Use `silent_ms` for elapsed time, not clock differences. A peer that does not know `activity` ignores it.
+
 ## Notes
 
 - The server ignores messages that are not commands. Messages without `meta` are still accepted as the old format.

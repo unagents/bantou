@@ -240,7 +240,7 @@ test("agents: reapOrphans はプロセス無しの running を failed にする"
         throw new Error("殺してはいけない");
       },
     });
-    assert.deepEqual(await m.reapOrphans(), { killed: 0, failed: 2, errored: 0 });
+    assert.deepEqual(await m.reapOrphans(), { killed: 0, failed: 2, errored: 0, reaped: [{ kind: "cap", id: "c1", error: "前回の実行が終了しないまま server が落ちた" }, { kind: "worker", id: "w1", error: "前回の実行が終了しないまま server が落ちた" }] });
     const st = await readState(dir);
     assert.equal(st.state, "failed");
     assert.equal(st.last_error, "前回の実行が終了しないまま server が落ちた");
@@ -251,7 +251,7 @@ test("agents: reapOrphans は ps 不可なら error にする", async () => {
   await withFixture(0, async (f) => {
     const dir = await seedRunning(f, "caps", "c1", "sid-a");
     const m = mgr(f, async () => ok("x"), { listProcesses: async () => null });
-    assert.deepEqual(await m.reapOrphans(), { killed: 0, failed: 0, errored: 1 });
+    assert.deepEqual(await m.reapOrphans(), { killed: 0, failed: 0, errored: 1, reaped: [] });
     assert.equal((await readState(dir)).state, "error");
   });
 });
@@ -270,7 +270,7 @@ test("agents: reapOrphans は一致したら terminate（注入）して failed"
         return true;
       },
     });
-    assert.deepEqual(await m.reapOrphans(), { killed: 1, failed: 0, errored: 0 });
+    assert.deepEqual(await m.reapOrphans(), { killed: 1, failed: 0, errored: 0, reaped: [{ kind: "cap", id: "c1", error: "起動時に孤児プロセスを回収" }] });
     assert.deepEqual(killed, [999991]);
     const st = await readState(dir);
     assert.equal(st.state, "failed");
@@ -453,5 +453,154 @@ test("agents: spawn 前（git 準備中など）の stop でも claude を起動
     const r3 = await m.invoke("cap", "c1", { prompt: "3" });
     assert.equal(r3.ok, true);
     assert.equal(n, 2);
+  });
+});
+
+type Obs = { ev: string[]; finished: Array<{ ok: boolean; lost: boolean; error?: string }>; started: Array<{ id: string; capId?: string; keepTask?: boolean }> };
+
+function observer(): { o: import("../../../../server/utils/bantou/agents").RunObserver; obs: Obs } {
+  const obs: Obs = { ev: [], finished: [], started: [] };
+  return {
+    obs,
+    o: {
+      started: (kind, id, input) => {
+        obs.ev.push(`started:${kind}:${id}`);
+        obs.started.push({ id, capId: input.capId, keepTask: input.keepTask });
+      },
+      line: (kind, id, line) => obs.ev.push(`line:${kind}:${id}:${line}`),
+      finished: (kind, id, out) => {
+        obs.ev.push(`finished:${kind}:${id}`);
+        obs.finished.push(out);
+      },
+    },
+  };
+}
+
+test("agents: observer は started → line → finished(ok) を受け、runner には onLine が渡る", async () => {
+  await withFixture(0, async (f) => {
+    const { o, obs } = observer();
+    const m = mgr(
+      f,
+      async (r) => {
+        r.onSpawn?.({ pid: undefined, once: () => {}, kill: () => true } as never);
+        r.onLine?.("a");
+        r.onLine?.("b");
+        return ok("x");
+      },
+      { observer: o },
+    );
+    await m.invoke("worker", "w1", { prompt: "p", capId: "c1", keepTask: true });
+    assert.deepEqual(obs.ev, ["started:worker:w1", "line:worker:w1:a", "line:worker:w1:b", "finished:worker:w1"]);
+    assert.deepEqual(obs.finished, [{ ok: true, lost: false }]);
+    assert.deepEqual(obs.started, [{ id: "w1", capId: "c1", keepTask: true }]);
+  });
+});
+
+test("agents: server 以外による signal 終了は lost。timeout・stop は lost にしない", async () => {
+  await withFixture(0, async (f) => {
+    const { o, obs } = observer();
+    const killedSigs: string[] = [];
+    const m = mgr(
+      f,
+      async (r) => {
+        r.onSpawn?.({ pid: undefined, once: () => {}, kill: (s: string) => killedSigs.push(s) } as never);
+        return { ...ng("signal SIGKILL で終了"), signal: "SIGKILL" } as ClaudeRunResult;
+      },
+      { observer: o },
+    );
+    const r = await m.invoke("worker", "w1", { prompt: "p", capId: "c1" });
+    assert.equal(r.ok, false);
+    assert.equal(obs.finished[0]!.lost, true);
+    assert.match(obs.finished[0]!.error!, /signal SIGKILL で終了（server からの停止ではない）/);
+    // 残った process group にも SIGKILL を送る
+    assert.deepEqual(killedSigs, ["SIGKILL"]);
+    assert.equal((await readState(join(f.ws, "workers", "w1"))).state, "failed");
+
+    const m2 = mgr(f, async () => ({ ...ng("タイムアウト (1ms)", { timedOut: true }), signal: "SIGKILL" }) as ClaudeRunResult, { observer: o });
+    await m2.invoke("cap", "c2", { prompt: "p" });
+    assert.deepEqual(obs.finished[1], { ok: false, lost: false, error: "タイムアウト (1ms)" });
+  });
+});
+
+test("agents: stop による signal 終了は lost にならず failed", async () => {
+  await withFixture(0, async (f) => {
+    const { o, obs } = observer();
+    const fc = fakeChild();
+    let release!: () => void;
+    const m = mgr(
+      f,
+      (r) => {
+        r.onSpawn?.(fc.child as never);
+        return new Promise<ClaudeRunResult>((res) => (release = () => res({ ...ng("x"), signal: "SIGTERM" } as ClaudeRunResult)));
+      },
+      { observer: o },
+    );
+    const p = m.invoke("worker", "w1", { prompt: "p", capId: "c1" });
+    await new Promise((r) => setTimeout(r, 30));
+    const s = m.stop("worker", "w1");
+    await new Promise((r) => setTimeout(r, 10));
+    release();
+    await s;
+    await p;
+    assert.deepEqual(obs.finished, [{ ok: false, lost: false, error: "stop_cap により停止" }]);
+  });
+});
+
+test("agents: prepareDir 失敗など投げる経路でも finished(ok:false) を呼ぶ", async () => {
+  await withFixture(0, async (f) => {
+    const { o, obs } = observer();
+    const m = mgr(f, async () => ok("x"), { observer: o });
+    await assert.rejects(m.invoke("worker", "w1", { prompt: "p", repo: "-bad" }), /repo \/ branch は - で始められない/);
+    assert.equal(obs.finished.length, 1);
+    assert.equal(obs.finished[0]!.ok, false);
+    assert.equal(obs.finished[0]!.lost, false);
+  });
+});
+
+test("agents: observer の例外は実行を壊さない", async () => {
+  await withFixture(0, async (f) => {
+    const m = mgr(f, async () => ok("x"), {
+      observer: {
+        started: () => {
+          throw new Error("obs ng");
+        },
+        line: () => {},
+        finished: () => {
+          throw new Error("obs ng");
+        },
+      },
+    });
+    assert.equal((await m.invoke("cap", "c1", { prompt: "p" })).ok, true);
+    assert.ok(f.logs.some((l) => l.includes("observer エラー")));
+  });
+});
+
+test("agents: runExtras の戻りが runner の引数に入り、実行ごとに呼ばれる", async () => {
+  await withFixture(0, async (f) => {
+    const seen: Array<[string, string, string | undefined]> = [];
+    const m = mgr(f, async () => ok("x"), {
+      runExtras: async (kind: string, id: string, input: { capId?: string }) => {
+        seen.push([kind, id, input.capId]);
+        return { mcpConfigFile: "/m.json", appendSystemPromptFile: "/s.md", extraAllowedTools: ["mcp__bantou__report"] };
+      },
+    });
+    await m.invoke("worker", "w1", { prompt: "p", capId: "c1" });
+    await m.invoke("worker", "w1", { prompt: "p2", capId: "c1" });
+    assert.deepEqual(seen, [["worker", "w1", "c1"], ["worker", "w1", "c1"]]);
+    assert.equal(f.calls[0]!.mcpConfigFile, "/m.json");
+    assert.equal(f.calls[0]!.appendSystemPromptFile, "/s.md");
+    assert.deepEqual(f.calls[0]!.extraAllowedTools, ["mcp__bantou__report"]);
+  });
+});
+
+test("agents: runExtras が投げたら指示は失敗し state は failed", async () => {
+  await withFixture(0, async (f) => {
+    const m = mgr(f, async () => ok("x"), {
+      runExtras: async () => {
+        throw new Error("mcp が未起動");
+      },
+    });
+    await assert.rejects(m.invoke("cap", "c1", { prompt: "p" }), /mcp が未起動/);
+    assert.equal((await readState(join(f.ws, "caps", "c1"))).state, "failed");
   });
 });

@@ -203,3 +203,70 @@ test("killGroup: pid 無しの子は child.kill に落ちる。実プロセス�
   await new Promise((r) => setTimeout(r, 100));
   assert.throws(() => process.kill(grand, 0), /ESRCH/);
 });
+
+test("claude: mcp-config / append-system-prompt-file / extraAllowedTools の並び", () => {
+  const args = buildClaudeArgs({
+    ...base,
+    allowedTools: ["Bash"],
+    extraAllowedTools: ["mcp__bantou__report"],
+    mcpConfigFile: "/w/logs/mcp.json",
+    appendSystemPromptFile: "/w/logs/system-prompt.md",
+    extraArgs: ["--model", "m"],
+  });
+  assert.deepEqual(args, [
+    "-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "auto",
+    "--allowedTools", "Bash", "mcp__bantou__report",
+    "--settings", "{\"sandbox\":{\"enabled\":false}}",
+    "--mcp-config", "/w/logs/mcp.json",
+    "--append-system-prompt-file", "/w/logs/system-prompt.md",
+    "--model", "m",
+    "--session-id", "sid-1", "--", "do it",
+  ]);
+  // 追加の許可だけでも --allowedTools が付く
+  assert.deepEqual(
+    buildClaudeArgs({ ...base, extraAllowedTools: ["a"] }).slice(6, 9),
+    ["--allowedTools", "a", "--settings"],
+  );
+  // 孤児回収の argv 照合に影響しない（本文を argv に載せない）
+  assert.equal(matchesSession(["claude", ...args].join(" "), "sid-1"), true);
+});
+
+test("runClaude: onLine は空でない行ごとに呼ばれ、例外は握る。ログ・結果は変わらない", async () => {
+  const script = `
+process.stdout.write(JSON.stringify({type:"system",subtype:"init"}) + "\\n\\n");
+process.stdout.write(JSON.stringify({type:"result",subtype:"success",is_error:false,session_id:"sid-1",result:"r"}));
+`;
+  await withFake(script, async (exe, dir) => {
+    const lines: string[] = [];
+    const r = await runClaude({
+      ...base,
+      claude: exe,
+      cwd: dir,
+      onLine: (l) => {
+        lines.push(l);
+        throw new Error("握られる");
+      },
+    });
+    assert.ok(r.ok);
+    assert.equal(lines.length, 2);
+    assert.equal(JSON.parse(lines[0]!).subtype, "init");
+    assert.equal(JSON.parse(lines[1]!).type, "result");
+  });
+});
+
+test("runClaude: signal で終了した子は signal を返す。タイムアウトは timedOut", async () => {
+  await withFake(`process.kill(process.pid, "SIGKILL");`, async (exe, dir) => {
+    const r = await runClaude({ ...base, claude: exe, cwd: dir });
+    assert.ok(!r.ok);
+    if (!r.ok) {
+      assert.equal(r.signal, "SIGKILL");
+      assert.equal(r.detail, "signal SIGKILL で終了");
+      assert.equal(r.timedOut, false);
+    }
+  });
+  await withFake(`console.error("boom"); process.exit(3);`, async (exe, dir) => {
+    const r = await runClaude({ ...base, claude: exe, cwd: dir });
+    assert.ok(!r.ok);
+    if (!r.ok) assert.equal(r.signal, undefined);
+  });
+});

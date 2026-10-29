@@ -70,6 +70,7 @@ second `bantou-core` on the shared broker.
 ### center 状態画面と接続先
 
 - ヘッダーのサーバーアイコンから開く。接続状態（接続先 URL と remote / sidecar の別、接続可否、直近エラー）、`rc_list`（project ごとの remote-control 状態）、`server_list`、各 server の `server_status`（cap / worker 一覧）を表示する。「更新」で再取得する。操作系（rc_start / cap_kick など）は無い。
+- 接続中は `rc_list` の下に「remotes」節を出す（`RemoteActivity.vue`）。`remote_list` を 3 秒ごとに取得し（前の取得が終わっていなければ飛ばす。画面を閉じると止まる）、remote ごとに cap と worker を 1 行ずつ、状態（動作中 / 停滞 / 待機 / 完了 / 失敗 / 消失）、作業内容（task）、直近の活動、最終出力からの経過時間で表示する。経過時間は `silent_ms` に取得からの経過を足した値で、ホスト間の時計ずれは使わない。center が `activity.stale` を立てた remote には「更新途絶」を付ける。`activity` が無い remote は「活動情報なし」と `state` だけを出す。e2e は `e2e/mock/bantou.ts` の `centerRemotes` に `remote_list` の JSON を入れる（`e2e/center.spec.ts`）。
 - 接続先は center が ON なら自分の sidecar（`http://127.0.0.1:<port>/mcp`。bind が loopback / wildcard 以外ならその bind）で、保存済み `remote` は使わない（値は消さない）。OFF なら保存済み `remote`。どちらにも Bearer token を付ける（sidecar は自分の token、remote は貼り付けた接続設定の token。token が無い remote は 401 になり「token が必要」と表示する）。どちらも無ければ「接続先が無い」を表示する。
 - desktop の Rust 側が center の MCP（Streamable HTTP）に接続する。webview は直接 fetch せず Tauri command `center_call`（tool 名と引数で呼ぶ。結果は MCP の tool result そのまま、`isError` は Err）と `center_connection`（接続先・接続可否・直近エラー）を使う。center の再起動などで session が切れても次の呼び出しで張り直す。
 - 注意: reqwest は TLS 無し（`https://` の remote は接続できない。center 側も TLS 無しで、token は平文で流れる）。center は bind が loopback 以外の時 Host 検査をせず Bearer だけで守るので、別ホストの desktop から使うには bind に LAN 等の IP（127.0.0.1 以外）を選ぶ。待ち受けるのは選んだ 1 つの IP だけで、`0.0.0.0` のような全 IP 待ち受けは選べなくなった。

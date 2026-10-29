@@ -10,7 +10,7 @@ import {
   type RunOutcome,
 } from "@agent-hand/bantou-protocol";
 import type { Config } from "./config";
-import { killGroup, type ClaudeRunResult, type RunMode } from "./claude";
+import { killGroup, type ClaudeRunOptions, type ClaudeRunResult, type RunMode } from "./claude";
 import { agentDir, runLogDir } from "./paths";
 import { listLiveProcesses, matchesSession, type LiveProcess } from "./processes";
 import type { AgentRunner } from "./runner";
@@ -23,13 +23,31 @@ export interface InvokeInput {
   branch?: string;
   prompt: string;
   reason?: string;
+  /** worker の持ち主 cap（mcp の header に入れる）。 */
+  capId?: string;
+  /** true なら activity の task を上書きしない（cap の report 起因の resume）。 */
+  keepTask?: boolean;
 }
 
 export interface ReapSummary {
   killed: number;
   failed: number;
   errored: number;
+  /** running から failed / error にした対象（activity の lost 登録用）。 */
+  reaped: Array<{ kind: AgentKind; id: string; error: string }>;
 }
+
+/** 実行の観測口（activity 用）。 */
+export interface RunObserver {
+  /** 子 spawn 時（retry ごと）。 */
+  started(kind: AgentKind, id: string, input: InvokeInput, pid: number | undefined): void;
+  /** stdout の空でない 1 行ごと。 */
+  line(kind: AgentKind, id: string, line: string): void;
+  /** 最終 state を書いた後。lost = server 以外による signal 終了。 */
+  finished(kind: AgentKind, id: string, outcome: { ok: boolean; lost: boolean; error?: string }): void;
+}
+
+export type RunExtras = Pick<ClaudeRunOptions, "mcpConfigFile" | "appendSystemPromptFile" | "extraAllowedTools">;
 
 export interface AgentManagerDeps {
   config: Config;
@@ -41,6 +59,9 @@ export interface AgentManagerDeps {
   terminate?: (pid: number) => Promise<boolean>;
   /** stop の SIGTERM から SIGKILL までの猶予（テストで短くする）。既定 3 秒。 */
   stopGraceMs?: number;
+  /** 実行ごとの追加引数（mcp 設定・system prompt のファイルを書いて返す）。 */
+  runExtras?: (kind: AgentKind, id: string, input: InvokeInput) => Promise<RunExtras>;
+  observer?: RunObserver;
 }
 
 export interface AgentManager {
@@ -114,6 +135,15 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
   const { config, runner, log } = deps;
   const listProcesses = deps.listProcesses ?? listLiveProcesses;
   const terminate = deps.terminate ?? killAndConfirm;
+  const observer = deps.observer;
+  const observe = (f: (o: RunObserver) => void): void => {
+    if (!observer) return;
+    try {
+      f(observer);
+    } catch (e) {
+      log(`observer エラー: ${errMsg(e)}`);
+    }
+  };
 
   const chains = new Map<string, Promise<unknown>>();
   const waiting = new Map<string, number>();
@@ -166,10 +196,21 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
   }
 
   async function execute(kind: AgentKind, id: string, input: InvokeInput): Promise<RunOutcome> {
+    try {
+      return await executeInner(kind, id, input);
+    } catch (e) {
+      // 投げた場合（prepareDir 失敗など）も activity を終端にする
+      observe((o) => o.finished(kind, id, { ok: false, lost: false, error: errMsg(e) }));
+      throw e;
+    }
+  }
+
+  async function executeInner(kind: AgentKind, id: string, input: InvokeInput): Promise<RunOutcome> {
     if (shuttingDown) throw new Error("server 終了中");
     const key = `${kind}:${id}`;
     const dir = agentDir(config.workspace, kind, id);
     if (stopRequests.has(key)) {
+      observe((o) => o.finished(kind, id, { ok: false, lost: false, error: STOP_MSG }));
       return { session_id: (await readState(dir).catch(() => null))?.session_id ?? "", ok: false, result_text: "", error: STOP_MSG };
     }
     try {
@@ -200,6 +241,7 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
 
       let retriesUsed = 0;
       let switched = false;
+      let lastChild: ChildProcess | undefined;
       let r: ClaudeRunResult;
       for (;;) {
         if (shuttingDown) throw new Error(SHUTDOWN_MSG);
@@ -207,7 +249,9 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
           r = { ok: false, sessionMissing: false, timedOut: false, detail: STOP_MSG, durationMs: 0 };
           break;
         }
+        const extras = deps.runExtras ? await deps.runExtras(kind, id, input) : {};
         r = await runner.run({
+          ...extras,
           claude: config.session.claude,
           sessionId,
           mode,
@@ -221,7 +265,10 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
           timeoutMs: config.session.timeoutMs,
           env: { ...process.env, ...config.session.env },
           logFile: join(runLogDir(dir), `${sessionId}.jsonl`),
+          onLine: (line) => observe((o) => o.line(kind, id, line)),
           onSpawn: (child) => {
+            lastChild = child;
+            observe((o) => o.started(kind, id, input, child.pid));
             const entry = { child, dir, key };
             live.add(entry);
             if (shuttingDown) killGroup(child, "SIGKILL");
@@ -264,6 +311,7 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
           retries: retriesUsed,
         });
         log(`claude 終了: kind=${kind} id=${id} session=${sessionId} ok=true ms=${r.durationMs} retries=${retriesUsed}`);
+        observe((o) => o.finished(kind, id, { ok: true, lost: false }));
         return { session_id: sessionId, ok: true, result_text: r.resultText };
       }
       const detail = shuttingDown ? SHUTDOWN_MSG : r.detail;
@@ -276,6 +324,19 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
         retries: retriesUsed,
       });
       log(`claude 終了: kind=${kind} id=${id} session=${sessionId} ok=false ms=${r.durationMs} retries=${retriesUsed} error=${detail}`);
+      // server 自身の kill（timeout・stop・shutdown）でない signal 終了は lost
+      const sig = r.ok ? null : (r.signal ?? null);
+      const lost = sig !== null && !r.timedOut && !shuttingDown && !stopRequests.has(key);
+      const lostError = `signal ${sig} で終了（server からの停止ではない）`;
+      if (lost && lastChild) {
+        // 外から claude 本体だけ kill されると、同じ group に子（Bash の実行物）が残る
+        try {
+          killGroup(lastChild, "SIGKILL");
+        } catch {
+          // 既に居ない
+        }
+      }
+      observe((o) => o.finished(kind, id, { ok: false, lost, error: lost ? lostError : detail }));
       return { session_id: sessionId, ok: false, result_text: "", error: detail };
     } catch (e) {
       await markFailed(dir, errMsg(e));
@@ -400,7 +461,7 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
   }
 
   async function reapOrphans(): Promise<ReapSummary> {
-    const sum: ReapSummary = { killed: 0, failed: 0, errored: 0 };
+    const sum: ReapSummary = { killed: 0, failed: 0, errored: 0, reaped: [] };
     let procs: LiveProcess[] | null | undefined;
     for (const kind of ["cap", "worker"] as const) {
       for (const id of await listIds(kind)) {
@@ -434,6 +495,7 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
             : [];
           if (hit.length === 0) {
             await writeState(dir, next("failed", "前回の実行が終了しないまま server が落ちた"));
+            sum.reaped.push({ kind, id, error: "前回の実行が終了しないまま server が落ちた" });
             log(`孤児回収: プロセス無し kind=${kind} id=${id} → failed`);
             sum.failed++;
             continue;
@@ -446,6 +508,7 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
           }
           if (allDead) {
             await writeState(dir, next("failed", "起動時に孤児プロセスを回収"));
+            sum.reaped.push({ kind, id, error: "起動時に孤児プロセスを回収" });
             sum.killed++;
           } else {
             await writeState(dir, next("error", "孤児プロセスを止められない"));

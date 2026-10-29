@@ -110,7 +110,7 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 | `session_list` | なし | `SessionInfo[]` |
 | `remote_create` | `prompt`, `server?`, `repo?`, `branch?`, `owner?` | `{ remote_id, server, serverName, state }`（返信を待たない） |
 | `remote_delete` | `remote_id`, `owner?`, `force?` | `{ remote_id, deleted, stopped, warning? }` |
-| `remote_list` | `owner?` | `RemoteRecord[]` |
+| `remote_list` | `owner?` | `RemoteView[]`（`RemoteRecord` + `activity?`、下記） |
 | `rc_list` | なし | `RcStatus[]` |
 | `rc_start` | `project` | `RcStatus`（起動済みなら現状を返す） |
 | `rc_stop` | `project` | `RcStatus` |
@@ -156,6 +156,12 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 - `remote_create`: center が `remote_id`（= server 上の cap_id、`r-<hex10>`）を採番し、発見した server に `kick_cap`（`reason: remote_create owner=<owner>`）を送る。**返信を待たず**`{ remote_id, server, serverName, state: "running" }` を返す。返信（`cap_result` / `error`）が来たら記録の `state` を `done` / `failed` にし、`result`（結果本文、8000 文字まで）と `error` を入れる。
 - `remote_delete`: server へ `stop_cap`（protocol `bantou` 1.1.0）を送って走行中の `claude -p` を止め、記録から外す。止められない（server が見つからない・error 返信）時、記録が `running` なら error（`force: true` なら記録だけ消し、`warning` に理由）。終わった記録は警告付きで消える。別の owner の remote は消せない。
 - `remote_list`: `owner` が分かればその owner の分だけ、分からなければ全件。`RemoteRecord` = `remote_id`, `owner`, `server`（作成時の peer id）, `serverName`, `state`, `createdAt`, `finishedAt?`, `result?`, `error?`。
+- `activity`（`remote_list` の各要素）: server が protocol `bantou`（1.2.0）の `activity` 通知で送ってくる remote-cap と worker の生存・進捗。通知がまだ無い remote には `activity` キーが無い。中身は `{ at, received_ms_ago, stale, agents }`。
+  - `agents`: `AgentActivity[]`（cap → worker）。`kind`, `id`, `cap_id`, `state`（`running` / `stalled` / `idle` / `done` / `failed` / `lost`）, `task`（prompt の冒頭）, `last_activity`, `last_output_at`, `silent_ms`, `started_at`, `finished_at`, `error?`。仕様は `docs/protocol.md` の「Activity notices」。
+  - `silent_ms`: 通知時の値に、center が受信してからの経過を足して返す。desktop はホスト間の時計ずれを避けるため、時刻の差でなくこの値で経過を出す。
+  - `received_ms_ago`: 最後の通知を受けてからの ms（center の時計）。`stale`: running / stalled の agent がいるのに 30 秒を超えて通知が来ていない（server・経路が落ちた疑い）。center は lost に書き換えず `stale` を立てるだけ（lost は server 側の事実）。
+  - 保持はメモリのみ（`remotes.json` には書かない）。center 再起動後は次の通知まで空。`remote_delete` で消える。`cap_kick` で起動した cap には記録が無いので `remote_list` に出ない。
+  - 通知が来るのは、その remote の `kick_cap` を送った center（peer id は再登録で変わるため、server が記録した旧 id 宛ては届かない）。ログ: 状態の組が変わった時だけ `activity 受信: cap_id=<id> <id>=<state> ...`。
 - 保存: メモリ + config と同じ dir の `remotes.json`。center 再起動で返信を受け取れなくなった `running` は復元時に `failed`（server 側は続行している可能性）にする。center 終了時に返信待ちだったものも `failed`（`center 終了`）。
 - **server 選択**（概念: server は master-cap から見えなくてよい。今は発見ベース）: `config.servers` に依存しない。messenger の `listPeers("all", {protocol: "bantou"})` で見つかった peer の先頭（既定）。`server` 引数は peer id、一致しなければ name。見つからなければ候補付きで error。既存の `cap_kick` などは `servers[]` のまま（挙動は変えない）。`servers[]` があれば先頭の messenger client を共有し、無ければ内部の client を 1 本使う。broker に古い peer が残っていると先頭がそれになり得る（実測: broker.json を引き継いだ再起動で古い peer が先頭に来て、指示が届かず待ち続けた）。
 - **owner**（呼んだ master-cap の識別）: http では header `X-Bantou-Session: <session 名>`（または URL query `?session=<名>`）があればそれ、無ければ tool 引数 `owner`。優先順は header > query > 引数。`remote_create` はどれも無ければ error。`remote_delete` は owner が分かる時だけ記録の owner と照合する。`remote_list` は分からなければ絞らない。stdio には header が無いので引数のみ。

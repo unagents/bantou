@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import { AGENT_ID_PATTERN } from "@agent-hand/bantou-protocol";
+import type { ActivityStore, RemoteActivity } from "./activity.js";
 import type { Logger } from "./log.js";
 import type { ServerLink, ServerPeer } from "./server-link.js";
 import type { JsonListStore } from "./store.js";
@@ -31,6 +32,9 @@ export interface RemoteRecord {
   error?: string;
 }
 
+/** remote_list が返す 1 件。通知がまだ無ければ activity は無い。 */
+export type RemoteView = RemoteRecord & { activity?: RemoteActivity };
+
 export const remoteCreateSchema = {
   prompt: z.string().min(1).refine((s) => !s.includes("\0"), { message: "NUL 文字を含められない" }).describe("remote-cap への最初の指示"),
   server: z.string().min(1).optional().describe("server の peer id（一致しなければ名前）。省略時は protocol bantou で発見した先頭"),
@@ -45,7 +49,7 @@ export interface RemoteManager {
   create(input: { owner: string; prompt: string; server?: string; repo?: string; branch?: string }): Promise<RemoteRecord>;
   /** stop_cap を送って記録を外す。owner が分かっていて記録の owner と違えば拒否。 */
   delete(input: { remote_id: string; owner?: string; force?: boolean }): Promise<{ remote_id: string; deleted: true; stopped: boolean; warning?: string }>;
-  list(filter?: { owner?: string }): RemoteRecord[];
+  list(filter?: { owner?: string }): RemoteView[];
 }
 
 const truncate = (s: string): string => (s.length > RESULT_MAX ? `${s.slice(0, RESULT_MAX)}…(省略)` : s);
@@ -54,6 +58,8 @@ export function createRemoteManager(opts: {
   link: ServerLink;
   store: JsonListStore<RemoteRecord>;
   log: Logger;
+  /** server からの activity 通知の保持。省けば list に activity は付かない。 */
+  activity?: ActivityStore;
   /** remote_id の採番（テスト用）。 */
   newId?: () => string;
 }): RemoteManager {
@@ -150,11 +156,18 @@ export function createRemoteManager(opts: {
         warning = `server へ stop_cap を送れなかった: ${msg}`;
       }
       records.delete(remote_id);
+      opts.activity?.forget(remote_id);
       await persist();
       log(`remote 削除: ${remote_id} stopped=${stopped}${warning ? ` warning=${warning}` : ""}`);
       return { remote_id, deleted: true, stopped, ...(warning ? { warning } : {}) };
     },
 
-    list: (filter) => [...records.values()].filter((r) => filter?.owner === undefined || r.owner === filter.owner).map((r) => ({ ...r })),
+    list: (filter) =>
+      [...records.values()]
+        .filter((r) => filter?.owner === undefined || r.owner === filter.owner)
+        .map((r) => {
+          const activity = opts.activity?.get(r.remote_id);
+          return { ...r, ...(activity ? { activity } : {}) };
+        }),
   };
 }

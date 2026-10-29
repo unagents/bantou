@@ -4,10 +4,12 @@ import {
   MESSENGER_PROTOCOL,
   PROTOCOL_VERSION,
   SERVER_NAME,
+  parseServerNotice,
   parseServerReply,
   type CapResultReply,
   type ErrorReply,
   type KickCapCommand,
+  type ServerNotice,
   type ResumeWorkerCommand,
   type ServerCommandType,
   type StatusReply,
@@ -182,6 +184,8 @@ export function createServerLink(opts: {
   healthCheck?: (server: ServerConfig) => Promise<boolean>;
   /** peer id の変化を見る間隔（既定 5 秒）。 */
   peerWatchMs?: number;
+  /** server からの通知（activity）。返信ではないので pending とは照合しない。 */
+  onNotice?: (n: ServerNotice) => void;
 }): ServerLink {
   const { config, log } = opts;
   const clientFactory = opts.clientFactory ?? ((s: ServerConfig): LinkClient => createClient(s, log));
@@ -228,7 +232,17 @@ export function createServerLink(opts: {
 
   const onInbound = (slot: Slot, m: LinkInbound): void => {
     if (m.mode === "ping") return;
-    const r = parseServerReply(stripWarning(m.text));
+    const body = stripWarning(m.text);
+    const notice = parseServerNotice(body);
+    if (notice && fromServer(slot, m)) {
+      try {
+        opts.onNotice?.(notice);
+      } catch (e) {
+        log(`通知の処理に失敗: server=${slot.cfg.name} type=${notice.type} ${e instanceof Error ? e.message : String(e)}`);
+      }
+      return;
+    }
+    const r = parseServerReply(body);
     if (!r || !fromServer(slot, m)) {
       log(`無視: server=${slot.cfg.name} from=${m.from_name} text=${m.text.replace(/\s+/g, " ").slice(0, 120)}`);
       return;

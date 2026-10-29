@@ -1,9 +1,9 @@
 /**
- * e2e: bantou-server を実起動し、messenger 経由で kick_cap / status / worker 報告（MCP）を検証する。
+ * e2e: bantou-server を実起動し、messenger 経由で kick_cap / status / worker 起動・報告（MCP の worker_start / report）を検証する。
  * claude を実際に複数回起動する（数分かかる）。claude のログインを使う。
  * `E2E_ROOT` で一時ディレクトリの親を変更できる。`E2E_CLAUDE_CONFIG_DIR` で CLAUDE_CONFIG_DIR を渡す。
  * 安全のため、server・cap・worker は本番 broker に繋がない（AGENT_MESSENGER_* / CLAUDE_CODE_MESSAGING_* を除去し、
- * cap と worker は --strict-mcp-config で他の MCP を載せない）。
+ * cap と worker は --strict-mcp-config で他の MCP を載せない。server が付ける bantou の MCP のみ）。
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -195,43 +195,29 @@ async function main(): Promise<void> {
       fail("server ログに該当 session の mode=resume が無い");
     }
 
-    // 3. worker 報告: cap が worker を claudep 方式で起動 → worker が MCP で report → cap が resume される
+    // 3. worker: cap が worker_start tool で worker を起動 → worker が MCP で report → cap が resume される
     const workerCap = `${capId}-w`;
     const workerId = "w1";
-    // cap の Bash は claude の sandbox 下で動き cwd 以外へ書けないため、log は cap の cwd に置く
-    const workerLog = join(ws, "caps", workerCap, "worker.log");
-    const mcpConfig = JSON.stringify({
-      mcpServers: {
-        bantou: {
-          type: "http",
-          url: mcpUrl,
-          headers: { "x-bantou-cap-id": workerCap, "x-bantou-worker-id": workerId },
-        },
-      },
-    });
-    const workerPrompt =
-      "Run the command echo hi with the Bash tool. Then call the mcp__bantou__report tool with kind=done and text='worker finished: hi'. " +
-      "After it returns accepted, end your turn.";
-    // --allowedTools / --mcp-config は可変長引数なので、prompt は先頭に置く（後ろに置くと飲み込まれる）
-    const launch =
-      `setsid claude -p ${JSON.stringify(workerPrompt)} --model ${process.env.E2E_MODEL ?? "sonnet"} ` +
-      `--output-format stream-json --verbose --strict-mcp-config --mcp-config '${mcpConfig}' ` +
-      "--allowedTools 'Bash,mcp__bantou__report' </dev/null >worker.log 2>&1 &";
     const clientSendAt = Date.now();
     await send({
       bantou: 1,
       type: "kick_cap",
       cap_id: workerCap,
       prompt:
-        "You are a cap. With the Bash tool, run exactly this one command (it starts a detached worker; do NOT use run_in_background, do NOT wait for the worker):\n\n" +
-        launch +
-        "\n\nThen reply with only the word LAUNCHED and end your turn immediately. " +
+        "You are a cap. Call the mcp__bantou__worker_start tool once with worker_id='w1' and prompt=" +
+        JSON.stringify(
+          "Run the command echo hi with the Bash tool. Then call the mcp__bantou__report tool with kind=done and text='worker finished: hi'. After it returns accepted, end your turn.",
+        ) +
+        ". Do not start claude with Bash. Then reply with only the word LAUNCHED and end your turn immediately. " +
         "Later you will be resumed with a message 'worker w1 から <kind>: <text>'. When that happens, reply with only: WORKER_REPORT <kind> <text>.",
       reason: "e2e worker",
     });
     const w1 = await nextReply("cap_result (worker 起動)", RUN_TIMEOUT + 30_000);
     if (w1.type !== "cap_result" || !w1.ok) fail(`worker 起動の cap_result が不正: ${JSON.stringify(w1)}`);
     if (!w1.result_text.includes("LAUNCHED")) fail(`result_text に LAUNCHED が無い: ${w1.result_text}`);
+    await waitFor("worker_start", 10_000, () =>
+      serverLog.find((l) => l.includes("worker_start:") && l.includes(`cap_id=${workerCap}`) && l.includes(`worker_id=${workerId}`)),
+    );
     await waitFor("report 受信", 180_000, () =>
       serverLog.find((l) => l.includes("report 受信:") && l.includes(`cap_id=${workerCap}`)),
     );
@@ -245,8 +231,13 @@ async function main(): Promise<void> {
       fail("report 起因の mode=resume が server ログに無い");
     }
     console.log(`[e2e] worker flow: ${Date.now() - clientSendAt}ms`);
+    const workerDir = join(ws, "workers", workerId);
+    const owner = JSON.parse(await readFile(join(workerDir, "logs", "owner.json"), "utf8")) as { cap_id?: string };
+    if (owner.cap_id !== workerCap) fail(`owner.json の持ち主が不正: ${JSON.stringify(owner)}`);
+    const workerState = await readStateFile(join(workerDir, "state.json"));
+    if (workerState.state !== "idle") fail(`worker の state が idle でない: ${workerState.state}`);
 
-    // 安全確認: worker と cap の system/init で mcp_servers が想定通り（本番 broker 系の MCP が載っていない）
+    // 安全確認: worker と cap の system/init で mcp_servers が bantou のみ（本番 broker 系の MCP が載っていない）
     const initOf = (lines: string[]): { mcp_servers?: Array<{ name: string; status: string }> } | undefined => {
       for (const l of lines) {
         try {
@@ -258,15 +249,18 @@ async function main(): Promise<void> {
       }
       return undefined;
     };
-    const workerInit = initOf((await readFile(workerLog, "utf8")).split("\n"));
-    const wNames = (workerInit?.mcp_servers ?? []).map((m) => `${m.name}:${m.status}`);
-    console.log(`[e2e] worker init mcp_servers=${JSON.stringify(workerInit?.mcp_servers)}`);
-    if (wNames.length !== 1 || wNames[0] !== "bantou:connected") fail(`worker の mcp_servers が bantou のみでない: ${wNames}`);
-    const logsDir = join(ws, "caps", workerCap, "logs");
-    for (const f of (await readdir(logsDir)).filter((n) => n.endsWith(".jsonl") && UUID.test(n.slice(0, -6)))) {
-      const capInit = initOf((await readFile(join(logsDir, f), "utf8")).split("\n"));
-      console.log(`[e2e] cap init (${f}) mcp_servers=${JSON.stringify(capInit?.mcp_servers)}`);
-      if ((capInit?.mcp_servers ?? []).length !== 0) fail(`cap の mcp_servers が空でない: ${JSON.stringify(capInit?.mcp_servers)}`);
+    for (const [label, logsDir] of [
+      ["worker", join(workerDir, "logs")],
+      ["cap", join(ws, "caps", workerCap, "logs")],
+    ] as const) {
+      const files = (await readdir(logsDir)).filter((n) => n.endsWith(".jsonl") && UUID.test(n.slice(0, -6)));
+      if (files.length === 0) fail(`${label} の実行ログが無い: ${logsDir}`);
+      for (const f of files) {
+        const init = initOf((await readFile(join(logsDir, f), "utf8")).split("\n"));
+        console.log(`[e2e] ${label} init (${f}) mcp_servers=${JSON.stringify(init?.mcp_servers)}`);
+        const names = (init?.mcp_servers ?? []).map((m) => `${m.name}:${m.status}`);
+        if (names.length !== 1 || names[0] !== "bantou:connected") fail(`${label} の mcp_servers が bantou のみでない: ${names}`);
+      }
     }
 
     // 4. status
@@ -340,7 +334,7 @@ async function main(): Promise<void> {
   }
 
   console.log("E2E OK");
-  const keys = ["bantou: 起動", "broker 起動", "mcp 起動", "report 受信", "mcp 停止", "peer 登録", "protocol 登録", "protocol 解除", "孤児回収", "指示受信", "claude 起動", "claude 終了", "返信", "SIGTERM", "broker 停止", "bantou: 終了"];
+  const keys = ["bantou: 起動", "broker 起動", "mcp 起動", "worker_start", "report 受信", "activity 通知", "mcp 停止", "peer 登録", "protocol 登録", "protocol 解除", "孤児回収", "指示受信", "claude 起動", "claude 終了", "返信", "SIGTERM", "broker 停止", "bantou: 終了"];
   console.log(serverLog.filter((l) => keys.some((k) => l.includes(k))).join("\n"));
   process.exit(0);
 }

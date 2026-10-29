@@ -50,6 +50,8 @@ export class MockBantou {
       workers: [{ kind: "worker", id: "w1", state: "running" }],
     },
   };
+  /** `remote_list` result (center `RemoteView[]`). */
+  centerRemotes: unknown[] = [];
   calls: InvokeRecord[] = [];
   sent: { to: string; text: string }[] = [];
   /** Ping timers: task id → expiry (ISO). */
@@ -252,6 +254,8 @@ export class MockBantou {
         switch (args.name) {
           case "rc_list":
             return text(this.centerRc);
+          case "remote_list":
+            return text(this.centerRemotes);
           case "server_list":
             return text(this.centerServers);
           case "server_status": {

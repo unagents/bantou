@@ -3,7 +3,9 @@ import { join } from "node:path";
 import {
   PROTOCOL_VERSION,
   isValidAgentId,
+  type ActivityNotice,
   type RunOutcome,
+  type ServerNotice,
   type ServerReply,
 } from "@agent-hand/bantou-protocol";
 import type { InvokeInput } from "./agents";
@@ -20,16 +22,14 @@ export const MAX_REPORT_TEXT = 20_000;
 
 /** worker から受けた report を cap の resume prompt にする。 */
 export function buildReportPrompt(
-  capId: string,
   workerId: string,
   kind: ReportKind,
   text: string,
-  mcpUrl: string,
 ): string {
   return [
     `worker ${workerId} から ${kind}: ${text}`,
     "",
-    `（worker へ返す時の MCP: url=${mcpUrl} header x-bantou-cap-id=${capId} x-bantou-worker-id=${workerId}。--mcp-config は resume のたびに渡す）`,
+    "（worker へ返す時は worker_start に同じ worker_id を渡す）",
   ].join("\n");
 }
 
@@ -37,10 +37,8 @@ export interface ReportHubDeps {
   workspace: string;
   /** cap を起動する。同一 cap の直列化は呼び出し先（manager）の queue が担う。 */
   invoke: (capId: string, input: InvokeInput) => Promise<RunOutcome>;
-  /** center（messenger の peer id）へ返信を送る。 */
-  send: (centerId: string, reply: ServerReply) => Promise<void>;
-  /** worker に伝える MCP の URL。 */
-  mcpUrl: string;
+  /** center（messenger の peer id）へ返信・通知を送る。 */
+  send: (centerId: string, reply: ServerReply | ServerNotice) => Promise<void>;
   log: (msg: string) => void;
 }
 
@@ -49,6 +47,8 @@ export interface ReportHub {
   rememberCenter(capId: string, centerId: string): Promise<void>;
   /** worker の report を記録し、cap の resume を queue に積む。積んだ時点で戻る。 */
   report(capId: string, workerId: string, kind: ReportKind, text: string): Promise<void>;
+  /** cap を依頼した center へ activity 通知を送る。center が不明なら何もしない。失敗は投げる。 */
+  notify(capId: string, notice: ActivityNotice): Promise<void>;
   /** report 起因の実行がすべて終わる（返信を出し切る）のを待つ。 */
   drain(): Promise<void>;
   /** 以降の report を拒否する。 */
@@ -109,6 +109,13 @@ export function createReportHub(deps: ReportHubDeps): ReportHub {
     }
   }
 
+  async function notify(capId: string, notice: ActivityNotice): Promise<void> {
+    const to = await centerOf(capId);
+    if (!to) return;
+    await deps.send(to, notice);
+    log(`activity 通知: to=${to} cap_id=${capId} ${notice.agents.map((a) => `${a.id}=${a.state}`).join(" ")}`);
+  }
+
   async function report(capId: string, workerId: string, kind: ReportKind, text: string): Promise<void> {
     if (closed) throw new Error("server 終了中");
     if (!isValidAgentId(capId)) throw new Error(`cap_id が不正: ${capId}`);
@@ -130,9 +137,9 @@ export function createReportHub(deps: ReportHubDeps): ReportHub {
     );
     log(`report 受信: cap_id=${capId} worker_id=${workerId} kind=${kind} text=${oneLine(text, 80)}`);
 
-    const prompt = buildReportPrompt(capId, workerId, kind, text, deps.mcpUrl);
+    const prompt = buildReportPrompt(workerId, kind, text);
     const p: Promise<void> = deps
-      .invoke(capId, { prompt, reason: `report from worker ${workerId}` })
+      .invoke(capId, { prompt, reason: `report from worker ${workerId}`, keepTask: true })
       .then(
         (r) => route(capId, { bantou: PROTOCOL_VERSION, type: "cap_result", cap_id: capId, ...r }),
         (e: unknown) => {
@@ -155,6 +162,7 @@ export function createReportHub(deps: ReportHubDeps): ReportHub {
   return {
     rememberCenter,
     report,
+    notify,
     drain: async () => {
       await Promise.allSettled([...pending]);
     },

@@ -115,6 +115,8 @@ const sourceLabel = { remote: "remote", sidecar: "sidecar" } as const;
             <p v-if="!rc.length" class="text-cork-muted text-xs">project 未登録</p>
           </div>
 
+          <RemoteActivity />
+
           <div class="flex flex-col gap-3">
             <span class="text-sm font-medium">servers</span>
             <div v-for="s in servers" :key="s.info.name" class="flex flex-col gap-1" data-testid="center-server-row">

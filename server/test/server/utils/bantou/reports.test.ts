@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ServerReply } from "@agent-hand/bantou-protocol";
+import type { ActivityNotice, ServerNotice, ServerReply } from "@agent-hand/bantou-protocol";
 import {
   buildReportPrompt,
   createReportHub,
@@ -14,13 +14,13 @@ import type { InvokeInput } from "../../../../server/utils/bantou/agents";
 
 async function withHub(
   invoke: (capId: string, input: InvokeInput) => Promise<{ session_id: string; ok: true; result_text: string }>,
-  fn: (h: { ws: string; hub: ReturnType<typeof createReportHub>; sent: Array<[string, ServerReply]>; logs: string[] }) => Promise<void>,
+  fn: (h: { ws: string; hub: ReturnType<typeof createReportHub>; sent: Array<[string, ServerReply | ServerNotice]>; logs: string[] }) => Promise<void>,
 ): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "bantou-reports-test-"));
   try {
     const ws = join(dir, "ws");
     await mkdir(join(ws, "caps", "c1"), { recursive: true });
-    const sent: Array<[string, ServerReply]> = [];
+    const sent: Array<[string, ServerReply | ServerNotice]> = [];
     const logs: string[] = [];
     const hub = createReportHub({
       workspace: ws,
@@ -28,7 +28,6 @@ async function withHub(
       send: async (to, r) => {
         sent.push([to, r]);
       },
-      mcpUrl: "http://127.0.0.1:1/mcp",
       log: (m) => logs.push(m),
     });
     await fn({ ws, hub, sent, logs });
@@ -37,11 +36,11 @@ async function withHub(
   }
 }
 
-test("report: prompt は「worker <id> から <kind>: <text>」で始まり、MCP 情報を添える", () => {
-  const p = buildReportPrompt("c1", "w1", "done", "ok", "http://h/mcp");
+test("report: prompt は「worker <id> から <kind>: <text>」で始まり、worker_start で返す案内を添える", () => {
+  const p = buildReportPrompt("w1", "done", "ok");
   assert.ok(p.startsWith("worker w1 から done: ok\n"));
-  assert.ok(p.includes("url=http://h/mcp"));
-  assert.ok(p.includes("x-bantou-cap-id=c1") && p.includes("x-bantou-worker-id=w1"));
+  assert.ok(p.includes("worker_start に同じ worker_id を渡す"));
+  assert.ok(!p.includes("--mcp-config") && !p.includes("x-bantou-cap-id"));
 });
 
 test("report: 記録して cap を resume し、結果を記録済み center へ返す", async () => {
@@ -58,6 +57,7 @@ test("report: 記録して cap を resume し、結果を記録済み center へ
       assert.equal(calls.length, 1);
       assert.equal(calls[0]![0], "c1");
       assert.ok(calls[0]![1].prompt.startsWith("worker w1 から done: finished"));
+      assert.equal(calls[0]![1].keepTask, true);
       assert.equal(sent.length, 1);
       assert.equal(sent[0]![0], "center-1");
       assert.deepEqual(sent[0]![1], {
@@ -142,7 +142,6 @@ test("report: center はファイルから復元できる（hub 作り直し後�
         send: async (to) => {
           sent.push(to);
         },
-        mcpUrl: "u",
         log: () => {},
       });
     await mk([]).rememberCenter("c1", "center-3");
@@ -178,4 +177,37 @@ test("report handler: set / get / 解除", () => {
   assert.equal(getReportHandler(), h);
   setReportHandler(undefined);
   assert.equal(getReportHandler(), undefined);
+});
+
+const notice: ActivityNotice = { bantou: 1, type: "activity", cap_id: "c1", at: "2026-10-29T00:00:00.000Z", agents: [] };
+
+test("notify: 記録済み center へ通知を送る。center 不明なら何もしない。送信失敗は投げる", async () => {
+  await withHub(
+    async () => ({ session_id: "s", ok: true, result_text: "" }),
+    async ({ hub, sent, logs }) => {
+      await hub.notify("c1", notice);
+      assert.equal(sent.length, 0);
+      await hub.rememberCenter("c1", "center-9");
+      await hub.notify("c1", notice);
+      assert.deepEqual(sent, [["center-9", notice]]);
+      assert.ok(logs.some((l) => l.includes("activity 通知: to=center-9 cap_id=c1")));
+    },
+  );
+  const dir = await mkdtemp(join(tmpdir(), "bantou-reports-test-"));
+  try {
+    const ws = join(dir, "ws");
+    await mkdir(join(ws, "caps", "c1"), { recursive: true });
+    const hub = createReportHub({
+      workspace: ws,
+      invoke: async () => ({ session_id: "s", ok: true, result_text: "" }),
+      send: async () => {
+        throw new Error("send ng");
+      },
+      log: () => {},
+    });
+    await hub.rememberCenter("c1", "center-9");
+    await assert.rejects(hub.notify("c1", notice), /send ng/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

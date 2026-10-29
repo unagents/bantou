@@ -26,11 +26,27 @@ export interface ClaudeRunOptions {
   env?: NodeJS.ProcessEnv;
   /** 子プロセス生成直後に呼ぶ。実行中の子の追跡用。 */
   onSpawn?: (child: ChildProcess) => void;
+  /** stdout の空でない 1 行ごとに呼ぶ（activity 用）。例外は握る。 */
+  onLine?: (line: string) => void;
+  /** `--mcp-config <file>`。 */
+  mcpConfigFile?: string;
+  /** `--append-system-prompt-file <file>`。 */
+  appendSystemPromptFile?: string;
+  /** allowedTools に足す。 */
+  extraAllowedTools?: string[];
 }
 
 export type ClaudeRunResult =
   | { ok: true; sessionId: string; resultText: string; durationMs: number }
-  | { ok: false; sessionMissing: boolean; timedOut: boolean; detail: string; durationMs: number };
+  | {
+      ok: false;
+      sessionMissing: boolean;
+      timedOut: boolean;
+      detail: string;
+      durationMs: number;
+      /** 子が signal で終わった時の signal。 */
+      signal?: NodeJS.Signals | null;
+    };
 
 /** claude が継続先 session を見つけられない時の文言（実測）。 */
 const SESSION_MISSING = "No conversation found with session ID";
@@ -40,6 +56,7 @@ export const BASH_SANDBOX_OFF_SETTINGS = JSON.stringify({ sandbox: { enabled: fa
 
 /** claude の引数を組み立てる。 */
 export function buildClaudeArgs(o: ClaudeRunOptions): string[] {
+  const allowed = [...o.allowedTools, ...(o.extraAllowedTools ?? [])];
   return [
     "-p",
     "--output-format",
@@ -47,10 +64,13 @@ export function buildClaudeArgs(o: ClaudeRunOptions): string[] {
     "--verbose",
     "--permission-mode",
     o.permissionMode,
-    ...(o.allowedTools.length > 0 ? ["--allowedTools", ...o.allowedTools] : []),
+    ...(allowed.length > 0 ? ["--allowedTools", ...allowed] : []),
     ...(o.disallowedTools.length > 0 ? ["--disallowedTools", ...o.disallowedTools] : []),
     // --settings は値 1 つ。可変長引数（--allowedTools 等）の後でも次のフラグで区切れる。extraArgs の前に置き、同じ指定が extraArgs にあればそちらを後勝ちにする
     ...(o.capBashSandbox === true ? [] : ["--settings", BASH_SANDBOX_OFF_SETTINGS]),
+    // 本文を argv に直書きすると " -- " を含む時に孤児回収（matchesSession）が照合できなくなるのでファイルで渡す
+    ...(o.mcpConfigFile ? ["--mcp-config", o.mcpConfigFile] : []),
+    ...(o.appendSystemPromptFile ? ["--append-system-prompt-file", o.appendSystemPromptFile] : []),
     ...o.extraArgs,
     o.mode === "new" ? "--session-id" : "--resume",
     o.sessionId,
@@ -107,13 +127,17 @@ export function runClaude(o: ClaudeRunOptions): Promise<ClaudeRunResult> {
       clearTimeout(timer);
       resolve(r);
     };
-    const fail = (detail: string, extra: { sessionMissing?: boolean; timedOut?: boolean } = {}): void =>
+    const fail = (
+      detail: string,
+      extra: { sessionMissing?: boolean; timedOut?: boolean; signal?: NodeJS.Signals | null } = {},
+    ): void =>
       finish({
         ok: false,
         sessionMissing: extra.sessionMissing ?? false,
         timedOut: extra.timedOut ?? false,
         detail,
         durationMs: Date.now() - started,
+        ...(extra.signal ? { signal: extra.signal } : {}),
       });
 
     let child: ChildProcess;
@@ -154,6 +178,11 @@ export function runClaude(o: ClaudeRunOptions): Promise<ClaudeRunResult> {
       if (line.trim() === "") return;
       last = line;
       void logStream.then((ws) => ws?.write(line + "\n"));
+      try {
+        o.onLine?.(line);
+      } catch {
+        // activity の失敗で実行を壊さない
+      }
     };
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
@@ -175,7 +204,7 @@ export function runClaude(o: ClaudeRunOptions): Promise<ClaudeRunResult> {
       fail(`claude を起動できない: ${e.message}`);
     });
 
-    child.on("close", (code: number | null) => {
+    child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
       void (async () => {
         const ws = await logStream;
         if (ws) {
@@ -191,7 +220,10 @@ export function runClaude(o: ClaudeRunOptions): Promise<ClaudeRunResult> {
         }
         const missing = `${stderr}${last}`.includes(SESSION_MISSING);
         if (code !== 0) {
-          fail(stderr.trim() || `終了コード ${code}`, { sessionMissing: missing });
+          fail(stderr.trim() || (signal ? `signal ${signal} で終了` : `終了コード ${code}`), {
+            sessionMissing: missing,
+            signal,
+          });
           return;
         }
         const env = readResultEnvelope(last);

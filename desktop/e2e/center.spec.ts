@@ -75,3 +75,110 @@ test("without a target the dialog says there is nothing to connect to", async ({
   await expect(page.getByTestId("center-conn-state")).toHaveText("disconnected");
   await expect(page.getByTestId("center-conn-error")).toContainText("接続先が無い");
 });
+
+const agent = (kind: "cap" | "worker", id: string, state: string, extra: Record<string, unknown> = {}) => ({
+  kind,
+  id,
+  cap_id: "r-0a1b2c3d4e",
+  state,
+  task: `task of ${id}`,
+  last_activity: null,
+  last_output_at: null,
+  silent_ms: 3200,
+  started_at: "2026-10-29T00:58:05.000Z",
+  finished_at: null,
+  ...extra,
+});
+
+/** `remote_list` shaped as docs of stream-liveness design chapter 4. */
+const remotes = (workerState: string) => [
+  {
+    remote_id: "r-0a1b2c3d4e",
+    owner: "bantou-pm",
+    server: "p-7c1d",
+    serverName: "bantou-server",
+    state: "done",
+    createdAt: "2026-10-29T00:57:00.000Z",
+    activity: {
+      at: "2026-10-29T01:00:05.000Z",
+      received_ms_ago: 1200,
+      stale: false,
+      agents: [
+        agent("cap", "r-0a1b2c3d4e", "idle", { silent_ms: 116200, last_activity: "text: worker を 3 本起動した" }),
+        agent("worker", "w-1f2e3d4c5b", workerState, { last_activity: "Bash 実行中 60s" }),
+        agent("worker", "w-2a3b4c5d6e", "stalled", { silent_ms: 366200 }),
+        agent("worker", "w-3c4d5e6f7a", "lost", { silent_ms: 36200, error: "signal SIGKILL で終了" }),
+      ],
+    },
+  },
+  {
+    remote_id: "r-9f8e7d6c5b",
+    owner: "bantou-pm",
+    server: "p-7c1d",
+    serverName: "bantou-server",
+    state: "running",
+    createdAt: "2026-10-29T00:59:50.000Z",
+    activity: {
+      at: "2026-10-29T00:59:55.000Z",
+      received_ms_ago: 45000,
+      stale: true,
+      agents: [agent("cap", "r-9f8e7d6c5b", "running", { silent_ms: 46000, last_activity: "thinking" })],
+    },
+  },
+  { remote_id: "r-5a5a5a5a5a", owner: "other-pm", server: "p-7c1d", serverName: "bantou-server", state: "failed", createdAt: "2026-10-28T22:00:00.000Z" },
+];
+
+const seedRemotes = (page: Page, list: unknown[]) =>
+  page.evaluate((l) => {
+    (window as unknown as { __BANTOU_MOCK__: { centerRemotes: unknown[] } }).__BANTOU_MOCK__.centerRemotes = l;
+  }, list);
+
+test("the remotes section shows each cap and worker with state, task and time since the last output", async ({ page }) => {
+  await page.goto("/");
+  await mock(page, { enabled: true });
+  await seedRemotes(page, remotes("running"));
+  await page.getByTestId("open-center").click();
+
+  await expect(page.getByTestId("center-remote")).toHaveCount(3);
+  const first = page.getByTestId("center-remote").nth(0);
+  const agents = first.getByTestId("center-remote-agent");
+  await expect(agents).toHaveCount(4);
+  await expect(agents.nth(0)).toHaveAttribute("data-kind", "cap");
+  await expect(agents.nth(0)).toHaveAttribute("data-state", "idle");
+  await expect(agents.nth(0).getByTestId("center-remote-agent-state")).toHaveText("待機");
+  await expect(agents.nth(0).getByTestId("center-remote-elapsed")).toContainText("最終出力 1分前");
+  await expect(agents.nth(1).getByTestId("center-remote-agent-state")).toHaveText("動作中");
+  await expect(agents.nth(1).getByTestId("center-remote-task")).toHaveText("task of w-1f2e3d4c5b");
+  await expect(agents.nth(1).getByTestId("center-remote-last")).toHaveText("Bash 実行中 60s");
+  await expect(agents.nth(1).getByTestId("center-remote-elapsed")).toContainText(/最終出力 \d+秒前/);
+  await expect(agents.nth(2).getByTestId("center-remote-agent-state")).toHaveText("停滞");
+  await expect(agents.nth(2).getByTestId("center-remote-elapsed")).toContainText("最終出力 6分前");
+  await expect(agents.nth(3).getByTestId("center-remote-agent-state")).toHaveText("消失");
+  await expect(agents.nth(3)).toContainText("signal SIGKILL で終了");
+
+  await expect(first.getByTestId("center-remote-stale")).toHaveCount(0);
+  await expect(page.getByTestId("center-remote").nth(1).getByTestId("center-remote-stale")).toHaveText("更新途絶");
+  const third = page.getByTestId("center-remote").nth(2);
+  await expect(third).toContainText("活動情報なし");
+  await expect(third).toContainText("failed");
+  await expect(third.getByTestId("center-remote-agent")).toHaveCount(0);
+});
+
+test("the remotes section refreshes by itself without pressing update", async ({ page }) => {
+  await page.goto("/");
+  await mock(page, { enabled: true });
+  await seedRemotes(page, remotes("running"));
+  await page.getByTestId("open-center").click();
+  const worker = page.getByTestId("center-remote").nth(0).getByTestId("center-remote-agent").nth(1);
+  await expect(worker).toHaveAttribute("data-state", "running");
+
+  await seedRemotes(page, remotes("lost"));
+  await expect(worker).toHaveAttribute("data-state", "lost", { timeout: 5_000 });
+});
+
+test("the remotes section says so when there is no remote", async ({ page }) => {
+  await page.goto("/");
+  await mock(page, { enabled: true });
+  await page.getByTestId("open-center").click();
+  await expect(page.getByTestId("center-remotes-none")).toHaveText("remote なし");
+});

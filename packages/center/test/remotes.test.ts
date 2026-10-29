@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
+import { createActivityStore, type ActivityStore } from "../src/activity.js";
 import { createRemoteManager, type RemoteRecord } from "../src/remotes.js";
 import type { ServerLink, ServerPeer } from "../src/server-link.js";
 import { createJsonListStore } from "../src/store.js";
@@ -18,7 +19,7 @@ afterEach(async () => {
 const peerA: ServerPeer = { id: "id-a", name: "bantou-server", version: "1.1.0" };
 const peerB: ServerPeer = { id: "id-b", name: "other" };
 
-function setup(over: Partial<ServerLink> = {}) {
+function setup(over: Partial<ServerLink> = {}, activity?: ActivityStore) {
   const kicks: { peer: ServerPeer; cmd: Record<string, unknown>; resolve: (r: unknown) => void }[] = [];
   const stops: { peer: ServerPeer; cmd: unknown }[] = [];
   let peers = [peerA, peerB];
@@ -40,7 +41,7 @@ function setup(over: Partial<ServerLink> = {}) {
   } as unknown as ServerLink;
   const store = createJsonListStore<RemoteRecord>(join(dir, "remotes.json"), () => {});
   let n = 0;
-  const mgr = createRemoteManager({ link, store, log: () => {}, newId: () => `r-${++n}` });
+  const mgr = createRemoteManager({ link, store, log: () => {}, newId: () => `r-${++n}`, ...(activity ? { activity } : {}) });
   return { mgr, kicks, stops, store, setPeers: (p: ServerPeer[]) => (peers = p) };
 }
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 10));
@@ -168,4 +169,31 @@ test("restore: 保存済みを読み、running は failed（返信を失った�
 test("owner 形式が不正なら create は拒否", async () => {
   const { mgr } = setup();
   await assert.rejects(mgr.create({ owner: "a b", prompt: "p" }), /owner/);
+});
+
+test("list: activity 通知のある remote には activity が付き、無い remote には付かない。delete で忘れる", async () => {
+  let now = 1_000_000;
+  const activity = createActivityStore({ now: () => now });
+  const { mgr } = setup({}, activity);
+  await mgr.create({ owner: "a", prompt: "p" });
+  await mgr.create({ owner: "a", prompt: "p" });
+  activity.apply({
+    bantou: 1, type: "activity", cap_id: "r-1", at: "2026-10-29T00:00:00.000Z",
+    agents: [{ kind: "cap", id: "r-1", cap_id: "r-1", state: "running", task: "t", last_activity: null, last_output_at: null, silent_ms: 1000, started_at: null, finished_at: null }],
+  });
+  now += 2000;
+  const [r1, r2] = mgr.list();
+  assert.equal(r1!.activity?.agents[0]!.silent_ms, 3000);
+  assert.equal(r1!.activity?.received_ms_ago, 2000);
+  assert.equal("activity" in r2!, false);
+  // 内部の記録には混ざらない（保存されない）
+  assert.equal("activity" in (await mgr.list({ owner: "a" }))[1]!, false);
+  await mgr.delete({ remote_id: "r-1", owner: "a" });
+  assert.equal(activity.get("r-1"), undefined);
+});
+
+test("list: activity の store が無ければ activity キーは付かない", async () => {
+  const { mgr } = setup();
+  await mgr.create({ owner: "a", prompt: "p" });
+  assert.equal("activity" in mgr.list()[0]!, false);
 });

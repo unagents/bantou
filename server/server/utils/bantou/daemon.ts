@@ -1,3 +1,4 @@
+import { mkdir, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { startBroker } from "@unagents/messenger-broker";
@@ -11,12 +12,16 @@ import {
   type ServerCommand,
   type ServerReply,
 } from "@agent-hand/bantou-protocol";
-import { createAgentManager, type AgentManager } from "./agents";
+import { createActivityTracker } from "./activity";
+import { createAgentManager, type AgentManager, type RunExtras } from "./agents";
 import { loadConfig } from "./config";
 import { log } from "./log";
-import type { McpListener } from "./mcp";
+import { CAP_ID_HEADER, WORKER_ID_HEADER, type McpListener } from "./mcp";
+import { agentDir, runLogDir } from "./paths";
+import { CAP_GUIDE, WORKER_GUIDE } from "./prompts";
 import { createReportHub, setReportHandler } from "./reports";
 import { cliRunner } from "./runner";
+import { createWorkerHub, readOwner, setWorkerHandler, writeOwner } from "./workers";
 import { prepareWorkspace } from "./workspace";
 
 /** 返信に付ける messenger の meta（bantou protocol の登録と同じ値）。 */
@@ -68,7 +73,7 @@ export async function execute(cmd: ServerCommand, manager: AgentManager): Promis
       return { bantou: PROTOCOL_VERSION, type: "stop_result", ok: true, cap_id: cmd.cap_id, stopped: r.stopped };
     }
     if (cmd.type === "resume_worker") {
-      // server は worker を起動しない（worker は cap の責務）。型は protocol に残るが処理しない
+      // worker は cap の依頼（/mcp の worker_start）で起動する。型は protocol に残るが center からの指示としては処理しない
       throw new Error("resume_worker は未対応");
     }
     const st = await manager.status();
@@ -100,7 +105,42 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
   log(`設定読込: ${configPath} (workspace=${config.workspace})`);
   const dirs = await prepareWorkspace(config.workspace);
   log(`workspace 準備完了: caps=${dirs.caps} workers=${dirs.workers}`);
-  const manager = createAgentManager({ config, runner: cliRunner, log });
+  // /mcp が立つ前は run が起きない（reapOrphans は run しない）。runExtras はその後の値を使う
+  let mcpUrl: string | undefined;
+  const tracker = createActivityTracker({
+    notify: (capId, notice) => hub.notify(capId, notice),
+    log,
+  });
+  const runExtras = async (kind: "cap" | "worker", id: string, input: { capId?: string }): Promise<RunExtras> => {
+    if (!mcpUrl) throw new Error("mcp が未起動");
+    const dir = agentDir(config.workspace, kind, id);
+    const headers: Record<string, string> = {};
+    if (kind === "cap") {
+      headers[CAP_ID_HEADER] = id;
+    } else {
+      const capId = input.capId ?? (await readOwner(config.workspace, id));
+      if (!capId) throw new Error(`worker の持ち主 cap が分からない: ${id}`);
+      await writeOwner(config.workspace, id, capId);
+      headers[CAP_ID_HEADER] = capId;
+      headers[WORKER_ID_HEADER] = id;
+    }
+    // 引数に本文を直書きすると " -- " を含む時に孤児回収が照合できなくなるのでファイルで渡す（claude.ts）
+    const logs = runLogDir(dir);
+    await mkdir(logs, { recursive: true });
+    const mcpConfigFile = join(logs, "mcp.json");
+    const appendSystemPromptFile = join(logs, "system-prompt.md");
+    await writeFile(mcpConfigFile, JSON.stringify({ mcpServers: { bantou: { type: "http", url: mcpUrl, headers } } }) + "\n");
+    await writeFile(appendSystemPromptFile, (kind === "cap" ? CAP_GUIDE : WORKER_GUIDE) + "\n");
+    return {
+      mcpConfigFile,
+      appendSystemPromptFile,
+      extraAllowedTools:
+        kind === "cap"
+          ? ["mcp__bantou__worker_start", "mcp__bantou__worker_status", "mcp__bantou__worker_stop"]
+          : ["mcp__bantou__report"],
+    };
+  };
+  const manager = createAgentManager({ config, runner: cliRunner, log, observer: tracker, runExtras });
   const reaped = await manager.reapOrphans();
   log(`孤児回収: killed=${reaped.killed} failed=${reaped.failed} error=${reaped.errored}`);
 
@@ -126,7 +166,7 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
     await broker.close().catch(() => {});
     throw e;
   }
-  const mcpUrl = `${brokerUrl(config.mcp.bind, mcp.port)}/mcp`;
+  mcpUrl = `${brokerUrl(config.mcp.bind, mcp.port)}/mcp`;
   log(`mcp 起動: url=${mcpUrl} bind=${config.mcp.bind}`);
 
   let closing = false;
@@ -138,7 +178,6 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
     send: async (to, reply) => {
       await client.send(to, JSON.stringify(reply), "pull", REPLY_META);
     },
-    mcpUrl,
     log,
   });
   // 実行中の指示。claude の実行は数分かかるので全体は直列にしない。
@@ -209,7 +248,16 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
     await broker.close().catch(() => {});
     throw e;
   }
-  setReportHandler((capId, workerId, kind, text) => hub.report(capId, workerId, kind, text));
+  setReportHandler((capId, workerId, kind, text) => {
+    tracker.reported(workerId, kind);
+    return hub.report(capId, workerId, kind, text);
+  });
+  setWorkerHandler(createWorkerHub({ workspace: config.workspace, manager, activity: tracker, log }));
+  // 起動時に回収した running は lost として center へ知らせる
+  for (const r of reaped.reaped) {
+    const capId = r.kind === "cap" ? r.id : await readOwner(config.workspace, r.id);
+    if (capId) tracker.seedLost(r.kind, r.id, capId, r.error);
+  }
 
   const stop = async (): Promise<void> => {
     if (closing) return;
@@ -217,12 +265,14 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
     try {
       // 実行中の claude を止め、中断の返信を出し切るのを少し待つ
       setReportHandler(undefined);
+      setWorkerHandler(undefined);
       hub.close();
       await manager.shutdown();
       await Promise.race([
         Promise.allSettled([...inflight, hub.drain()]),
         new Promise((r) => setTimeout(r, 2500)),
       ]);
+      tracker.close();
       if (protocolSet) {
         await client.unsetProtocol().then(
           () => log("protocol 解除"),

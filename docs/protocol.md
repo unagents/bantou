@@ -114,8 +114,8 @@ sender peer as one JSON object.
 ### Messenger protocol `bantou`
 
 The protocol definition is `packages/protocol/messenger/protocol.json` (JSON
-Schemas of `kick_cap`, `stop_cap`, `status`, `cap_result`, `stop_result`, `status_result`, `error`)
-and `PROTOCOL.md`. It is the agent-messenger protocol version (`1.1.0`,
+Schemas of `kick_cap`, `stop_cap`, `status`, `cap_result`, `stop_result`, `status_result`, `error`, `activity`)
+and `PROTOCOL.md`. It is the agent-messenger protocol version (`1.2.0`,
 `MESSENGER_PROTOCOL` in `server.ts`); the body field `bantou: 1` is a separate
 version of the JSON bodies below. Changing the definition needs a new protocol
 `version` (same name and version with other content is `PROTOCOL_CONFLICT`).
@@ -182,9 +182,9 @@ while agents are running.
 
 A worker session reports to `bantou-server` over MCP (Streamable HTTP, stateless,
 JSON responses) at `http://<mcp.bind>:<mcp.port>/mcp` (config `mcp`, default
-`127.0.0.1:7902`). The cap that starts the worker passes this in the worker's
-`--mcp-config` (needed on every resume), with `--strict-mcp-config` and
-`--allowedTools mcp__bantou__report`:
+`127.0.0.1:7902`). The server starts every worker (see "Starting workers") and
+writes this into `<worker path>/logs/mcp.json`, passed as `--mcp-config` on
+every run, with `--allowedTools mcp__bantou__report`:
 
 ```json
 {"mcpServers":{"bantou":{"type":"http","url":"http://127.0.0.1:7902/mcp","headers":{"x-bantou-cap-id":"cap-a","x-bantou-worker-id":"w1"}}}}
@@ -208,10 +208,80 @@ returns an MCP error result (`isError`). No token is used (authentication is
 deferred).
 
 The server then resumes the cap (`--resume`) with the prompt
-`worker <id> から <kind>: <text>` plus the MCP URL and header names. Runs are
+`worker <id> から <kind>: <text>` plus a line saying that a reply to the worker
+goes through `worker_start` with the same `worker_id`. Runs are
 serialized per cap. The result goes back as `cap_result` to the peer that sent
 the cap's `kick_cap`, same as for `kick_cap`. If the resume fails, an `error`
 reply (`command: "kick_cap"`, `cap_id`) is sent instead.
+
+### Starting workers (MCP `/mcp`)
+
+A cap (a connection with header `x-bantou-cap-id` and no `x-bantou-worker-id`)
+also gets three tools on the same `/mcp`; the server gives its `claude -p` the
+matching `--mcp-config` and `--allowedTools`. A worker connection has only `report`.
+Results are JSON text; a failure sets `isError` with `{"error":"..."}`.
+
+| tool | input | result |
+|---|---|---|
+| `worker_start` | `prompt`, `worker_id?` (`[A-Za-z0-9_-]+`), `repo?`, `branch?` | `{"worker_id":"w-1f2e3d4c5b","accepted":true}` |
+| `worker_status` | `worker_id?` | `{"workers":[AgentActivity,...]}` |
+| `worker_stop` | `worker_id` | `{"worker_id":"w-...","stopped":true}` |
+
+- `worker_start` returns without waiting for the work. Without `worker_id` the server
+  makes `w-<10 hex>` and starts a new session; with an existing id it resumes
+  that session (the next instruction). Output goes to the worker's
+  `logs/<session>.jsonl`.
+- A worker belongs to the cap that first started it (`logs/owner.json`). Another
+  cap gets `別の cap の worker: <id>` from all three tools.
+- `worker_status` returns `AgentActivity` (see "Activity notices") of that cap's workers.
+- `worker_stop` sends SIGTERM to the worker's process group, SIGKILL after 3 s.
+
+### Activity notices (server to center)
+
+`activity` is a notice, not a reply: it is never matched with a pending command.
+The server sends it to the peer that sent the cap's `kick_cap`, as a snapshot of
+the cap and all its workers. Messages carry the same `meta` as replies.
+
+```json
+{"bantou":1,"type":"activity","cap_id":"r-0a1b2c3d4e","at":"2026-10-29T01:00:05.000Z","agents":[{"kind":"worker","id":"w-1f2e3d4c5b","cap_id":"r-0a1b2c3d4e","state":"running","task":"server に worker tool を追加する","last_activity":"Bash 実行中 60s","last_output_at":"2026-10-29T01:00:03.000Z","silent_ms":2000,"started_at":"2026-10-29T00:58:05.000Z","finished_at":null}]}
+```
+
+| key | meaning |
+|---|---|
+| `cap_id` | the cap the snapshot is about |
+| `at` | send time, server clock (ISO 8601) |
+| `agents` | `AgentActivity[]`: the cap first, then its workers by id |
+
+`AgentActivity`:
+
+| key | meaning |
+|---|---|
+| `kind` / `id` | `cap` or `worker`, and its id |
+| `cap_id` | the cap itself, or the owning cap of a worker |
+| `state` | see below |
+| `task` | head of the last `kick_cap` / `worker_start` prompt (one line, at most 200 chars). A cap resumed by a worker report keeps its task |
+| `last_activity` | summary of the latest activity (at most 120 chars), or `null` |
+| `last_output_at` | when the last stdout line arrived (server clock), or `null` |
+| `silent_ms` | ms since the last output (or `started_at`) at send time. Use this for elapsed time, not clock differences between hosts |
+| `started_at` / `finished_at` | ISO 8601, or `null` |
+| `error` | why the agent is `failed` / `lost` (at most 200 chars) |
+
+`state` (separate from `AgentState` of `state.json`):
+
+| state | meaning |
+|---|---|
+| `running` | a run is in progress and output keeps coming |
+| `stalled` | running, but no output for 300 s. Display only; nothing is killed. New output returns it to `running` |
+| `idle` | the latest run ended normally (always so for a cap) |
+| `done` | a worker's run ended normally and it sent `report` with `kind: "done"` during that run |
+| `failed` | the run did not end normally (non-zero exit, unreadable result, timeout, stop, server shutdown, setup failure) |
+| `lost` | the process was ended by a signal the server did not send (killed from outside), or the server found it `running` at startup with no process |
+
+Cadence: every 5 s while any agent of the cap is `running` / `stalled`, plus
+immediately at each state change (start, stalled, finish, startup reaping). When
+all agents are in an end state, one last notice is sent and sending stops. A
+failed send is logged only. The state is kept in memory on both sides. A peer
+that does not know `activity` ignores it.
 
 ### Replies
 
@@ -303,6 +373,9 @@ Typical causes: git failure, agent state `running` / `error`, broken `state.json
 | `<workspace>/caps/<cap_id>/` | cap path = cwd of claude |
 | `<workspace>/workers/<worker_id>/` | worker path, same layout as a cap |
 | `<path>/state.json` | agent state (shape below) |
+| `<cap path>/logs/center.json` | center that sent the cap's `kick_cap` (`{"center_id":"..."}`) |
+| `<worker path>/logs/owner.json` | cap that owns the worker (`{"cap_id":"..."}`) |
+| `<path>/logs/mcp.json` / `logs/system-prompt.md` | `--mcp-config` / `--append-system-prompt-file` of the latest run, rewritten every run |
 | `<path>/logs/<session_id>.jsonl` | raw claude output (stream-json), appended per run with a `# <ISO> mode=<mode> session=<id>` header line |
 | `<workspace>/broker.json` | state file of the built-in broker |
 
@@ -361,8 +434,21 @@ Remote-control record:
 `server` is a server name from `center.json`. `cap_kick`, `worker_resume` and
 `server_status` fields match the `kick_cap` and `status` commands.
 `worker_resume` is kept for the protocol type only; the server does not handle
-`resume_worker` (workers are the cap's responsibility) and answers it with an
+`resume_worker` (a cap starts and continues workers with `worker_start`) and answers it with an
 `error` reply.
+
+`remote_list` returns `RemoteRecord[]` (`remote_id`, `owner`, `server`, `serverName`,
+`state`, `createdAt`, `finishedAt?`, `result?`, `error?`). A remote that has received
+`activity` notices also has `activity`:
+
+| key | meaning |
+|---|---|
+| `at` | `at` of the last notice (server clock) |
+| `received_ms_ago` | ms since the center received that notice (center clock) |
+| `stale` | an agent is `running` / `stalled` but no notice came for 30 s (the server or the path may be down). The center does not turn it into `lost` |
+| `agents` | `AgentActivity[]`; `silent_ms` is the notice's value plus the time since receipt |
+
+A remote without notices has no `activity` key. `cap_kick` caps have no record, so they do not appear.
 
 ### Reply correlation and timeout
 

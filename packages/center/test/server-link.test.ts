@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { MESSENGER_PROTOCOL } from "@agent-hand/bantou-protocol";
+import { MESSENGER_PROTOCOL, type ServerNotice } from "@agent-hand/bantou-protocol";
 import { parseConfig } from "../src/config.js";
 import {
   createClient,
@@ -60,7 +60,7 @@ class FakeClient implements LinkClient {
   }
 }
 
-function setup(timeoutMs = 2000, peerWatchMs?: number) {
+function setup(timeoutMs = 2000, peerWatchMs?: number, onNotice?: (n: ServerNotice) => void) {
   const cfg = parseConfig({ servers: [{ name: "s1", timeoutMs }] }, "/x/c.json");
   const clients: FakeClient[] = [];
   const logs: string[] = [];
@@ -74,6 +74,7 @@ function setup(timeoutMs = 2000, peerWatchMs?: number) {
     },
     healthCheck: async () => true,
     peerWatchMs,
+    onNotice,
   });
   return { link, clients, logs };
 }
@@ -624,4 +625,60 @@ test("config.servers があれば発見ベースは先頭 server の client を�
   assert.equal(clients.length, 1);
   assert.deepEqual((await link.list()).map((s) => s.name), ["s1"]);
   await link.close();
+});
+
+const notice = (capId: string): ServerNotice => ({
+  bantou: 1,
+  type: "activity",
+  cap_id: capId,
+  at: "2026-10-29T00:00:00.000Z",
+  agents: [
+    { kind: "cap", id: capId, cap_id: capId, state: "running", task: "t", last_activity: null, last_output_at: null, silent_ms: 0, started_at: null, finished_at: null },
+  ],
+});
+
+test("通知: activity は onNotice に渡り、pending（kick の待ち）を消さない", async () => {
+  const got: ServerNotice[] = [];
+  const { link, clients, logs } = setup(2000, undefined, (n) => got.push(n));
+  const p = link.kickCap("s1", { cap_id: "c1", prompt: "go" });
+  await sleep(20);
+  clients[0].reply(notice("c1"));
+  clients[0].reply(notice("c1"), "bantou-server", { meta: { protocol: "bantou", version: "1.2.0" } });
+  await sleep(20);
+  assert.equal(got.length, 2);
+  assert.equal(got[0]!.cap_id, "c1");
+  assert.ok(!logs.some((m) => m.startsWith("対応する待ちなし") || m.startsWith("無視:")));
+  // 待ちは生きていて、cap_result で解決する
+  clients[0].reply(capResult("c1", "done"));
+  assert.equal(((await p) as { result_text: string }).result_text, "done");
+  await link.close();
+});
+
+test("通知: server 以外からの activity・onNotice 無しは無視。警告行付きでも受ける。onNotice の例外は握る", async () => {
+  const got: ServerNotice[] = [];
+  const { link, clients, logs } = setup(2000, undefined, (n) => {
+    got.push(n);
+    if (got.length === 2) throw new Error("handler ng");
+  });
+  const p = link.status("s1");
+  await sleep(20);
+  clients[0].reply(notice("c1"), "stranger");
+  assert.equal(got.length, 0);
+  assert.ok(logs.some((m) => m.startsWith("無視:")));
+  clients[0].replyText(`[agent-messenger warning] protocol version mismatch: x\n${JSON.stringify(notice("c1"))}`);
+  clients[0].reply(notice("c2"));
+  await sleep(20);
+  assert.deepEqual(got.map((n) => n.cap_id), ["c1", "c2"]);
+  assert.ok(logs.some((m) => m.includes("通知の処理に失敗") && m.includes("handler ng")));
+  clients[0].reply(statusResult(1));
+  assert.equal((await p).type, "status_result");
+  await link.close();
+
+  const plain = setup();
+  const q = plain.link.status("s1");
+  await sleep(20);
+  plain.clients[0].reply(notice("c1"));
+  plain.clients[0].reply(statusResult(1));
+  assert.equal((await q).type, "status_result");
+  await plain.link.close();
 });

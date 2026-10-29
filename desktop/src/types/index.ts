@@ -186,6 +186,48 @@ export interface CenterServerStatus {
   workers: CenterAgentState[];
 }
 
+/** `activity.agents[].state` of `remote_list` (bantou-server `ActivityState`). */
+export type CenterActivityState = "running" | "stalled" | "idle" | "done" | "failed" | "lost";
+
+/** One cap / worker of `remote_list` `activity.agents` (bantou-server `AgentActivity`). */
+export interface CenterAgentActivity {
+  kind: "cap" | "worker";
+  id: string;
+  cap_id: string;
+  state: CenterActivityState;
+  task: string;
+  last_activity: string | null;
+  last_output_at: string | null;
+  /** ms since the last output as of the center's reply (shown with the time elapsed since the fetch). */
+  silent_ms: number;
+  started_at: string | null;
+  finished_at: string | null;
+  error?: string;
+}
+
+/** `remote_list[].activity` (center `RemoteActivity`). Omitted until the first notice arrives. */
+export interface CenterRemoteActivity {
+  at: string;
+  received_ms_ago: number;
+  /** running / stalled agents exist but notices stopped arriving (server or path may be down). */
+  stale: boolean;
+  agents: CenterAgentActivity[];
+}
+
+/** `remote_list` element (center `RemoteView`, the part shown). */
+export interface CenterRemoteRecord {
+  remote_id: string;
+  owner: string;
+  server: string;
+  serverName?: string;
+  state: "running" | "done" | "failed";
+  createdAt: string;
+  finishedAt?: string;
+  result?: string;
+  error?: string;
+  activity?: CenterRemoteActivity;
+}
+
 /** State machine of the in-app updater (`useUpdater`). Mirrors Cork's `UpdaterState`. */
 export type UpdaterState =
   | { kind: "idle" }

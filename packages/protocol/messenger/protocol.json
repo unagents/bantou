@@ -1,7 +1,7 @@
 {
   "name": "bantou",
-  "version": "1.1.0",
-  "description": "bantou-server commands (kick_cap, stop_cap, status) and replies (cap_result, stop_result, status_result, error). Message body is one JSON object in the text; `bantou: 1` is the body schema version.",
+  "version": "1.2.0",
+  "description": "bantou-server commands (kick_cap, stop_cap, status), replies (cap_result, stop_result, status_result, error) and a notice (activity). Message body is one JSON object in the text; `bantou: 1` is the body schema version.",
   "messages": {
     "kick_cap": {
       "type": "object",
@@ -91,6 +91,39 @@
             "last_error": { "type": "string" },
             "retries": { "type": "number" },
             "queued": { "type": "number", "description": "Commands waiting in this agent's queue (the running one excluded)." }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "activity": {
+      "type": "object",
+      "description": "Notice from server to center (not a reply). Liveness summary of a cap and its workers, derived from their stream-json output. Sent every 5s while any agent runs, and on each state change.",
+      "required": ["bantou", "type", "cap_id", "at", "agents"],
+      "properties": {
+        "bantou": { "const": 1 },
+        "type": { "const": "activity" },
+        "cap_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
+        "at": { "type": "string", "description": "Send time (server clock, ISO 8601)." },
+        "agents": { "type": "array", "description": "The cap first, then its workers by id.", "items": { "$ref": "#/$defs/agent_activity" } }
+      },
+      "$defs": {
+        "agent_activity": {
+          "type": "object",
+          "required": ["kind", "id", "cap_id", "state", "task", "last_activity", "last_output_at", "silent_ms", "started_at", "finished_at"],
+          "properties": {
+            "kind": { "enum": ["cap", "worker"] },
+            "id": { "type": "string" },
+            "cap_id": { "type": "string", "description": "The cap itself for a cap, the owning cap for a worker." },
+            "state": { "enum": ["running", "stalled", "idle", "done", "failed", "lost"] },
+            "task": { "type": "string", "description": "Head of the last kick_cap / worker_start prompt (one line, at most 200 chars)." },
+            "last_activity": { "type": ["string", "null"], "description": "Short summary of the latest activity (at most 120 chars)." },
+            "last_output_at": { "type": ["string", "null"], "description": "When the last stdout line arrived (server clock, ISO 8601)." },
+            "silent_ms": { "type": "number", "description": "Milliseconds since the last output (or started_at) at send time." },
+            "started_at": { "type": ["string", "null"] },
+            "finished_at": { "type": ["string", "null"] },
+            "error": { "type": "string", "description": "Why the agent is failed / lost (at most 200 chars)." }
           },
           "additionalProperties": true
         }

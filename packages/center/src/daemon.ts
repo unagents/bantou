@@ -1,6 +1,7 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { CliArgs } from "./args.js";
 import { resolveClaude } from "./claude-path.js";
+import { createActivityStore } from "./activity.js";
 import { loadConfig, MIN_TOKEN_LEN } from "./config.js";
 import { startHttpServer, type HttpHandle } from "./http.js";
 import { mkdir } from "node:fs/promises";
@@ -41,7 +42,21 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   }
   const claude = await resolveClaude(config.remoteControl.claude, log);
   const supervisor = createRemoteControlSupervisor({ config, log, claude });
-  const link = createServerLink({ config, log });
+  const activity = createActivityStore();
+  // 通知は 5 秒ごとに来るので、状態の組が変わった時だけログに出す
+  const lastStates = new Map<string, string>();
+  const link = createServerLink({
+    config,
+    log,
+    onNotice: (n) => {
+      activity.apply(n);
+      const states = n.agents.map((a) => `${a.id}=${a.state}`).join(" ");
+      if (lastStates.get(n.cap_id) !== states) {
+        lastStates.set(n.cap_id, states);
+        log(`activity 受信: cap_id=${n.cap_id} ${states}`);
+      }
+    },
+  });
   // session / remote の保存先は config と同じ dir（config の projects には書かない）
   const stateDir = dirname(resolve(configPath));
   const sessions = createSessionManager({
@@ -50,7 +65,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     store: createJsonListStore(join(stateDir, "sessions.json"), log),
     log,
   });
-  const remotes = createRemoteManager({ link, store: createJsonListStore(join(stateDir, "remotes.json"), log), log });
+  const remotes = createRemoteManager({ link, store: createJsonListStore(join(stateDir, "remotes.json"), log), log, activity });
 
   let closing = false;
   let http: HttpHandle | null = null;

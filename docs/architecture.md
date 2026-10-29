@@ -8,7 +8,7 @@
 |---|---|---|
 | desktop | `desktop/` | mac / windows のネイティブアプリ。薄いユーザー向け UI。各 master-cap からの承認依頼・対話を一括管理する。アプリ設定（Cork 式 on/off）で裏に center を起動し、接続先の center を設定できる |
 | center | `packages/center/`（TypeScript、MCP server） | 素のエージェントが MCP tool 経由で cap 運用できる tool 群。project ごとの `claude remote-control`（server mode、1 project 1 本）の起動・監視・切断復帰を担当する。mac200 では desktop を MCP on で常駐させる |
-| server | `server/`（npm package `bantou`、`npx bantou`） | リモートホストの headless 実行層。stroke 方式（`claude -p` を spawn、`--session-id` / `--resume`、path 分離、state 管理、孤児回収）を発展させる。kick を受けて remote cap を起動し、cap の返答で worker を resume で継続する。server mode には触らない |
+| server | `server/`（npm package `bantou`、`npx bantou`） | リモートホストの headless 実行層。stroke 方式（`claude -p` を spawn、`--session-id` / `--resume`、path 分離、state 管理、孤児回収）を発展させる。kick を受けて remote cap を起動し、cap の依頼（`/mcp` の `worker_*` tool）で worker を起動・継続する。cap と worker の stream-json 出力から生存と進捗を center へ通知する。server mode には触らない |
 | protocol | `packages/protocol/` | desktop・center・server・plugin 共通のメッセージ仕様と TS 型 |
 | plugin | `plugin/bantou/` | work session に配る Claude Code plugin（guardrail と bantou-protocol skill） |
 
@@ -21,15 +21,16 @@
 ## server の実行モデル（stroke 方式の発展）
 
 1. 人の操作は不要（tmux に attach する運用は想定しない）。全エージェントは headless（`claude -p`）
-2. server の責務は 3 つだけ: (1) center との窓口、(2) cap の起動と resume、(3) worker からの報告の受け口。server は worker を起動しない
+2. server の責務は 5 つ: (1) center との窓口、(2) cap の起動と resume、(3) cap の依頼による worker の起動・状態・停止、(4) worker からの報告の受け口、(5) cap と worker の出力から生存・進捗を center へ通知。worker を起動すると決めるのは cap、プロセスを起動するのは server（cap の依頼で起動する）
 3. center ↔ server は agent-messenger 0.10.0 の protocol 方式でつなぐ。server は起動時に `setProtocol` で bantou protocol（定義は `packages/protocol/messenger/protocol.json` と `PROTOCOL.md`、npm package に同梱）の待受として登録し、終了時に `unsetProtocol` する（peer は `bantou-server` 1 つ）。center は `listPeers("all", {protocol: "bantou"})` で server を発見し（center も server も普通の agent-messenger client として通常の解決 env → config → UDP 発見 → ローカル fallback で broker につなぐ。broker の URL は指名しない。config の `servers` は name のみ、peer 名は自動発見。`servers[].peer` で名前指定も可）、`meta: {protocol: "bantou", version}` 付きで送る。server の返信にも meta が付く。meta 無しの旧形式も当面受ける。登録に失敗しても名前待受で継続する。仕様の正本は `unagents/agent-messenger` の `docs/design/protocol.md`。center から「起動する cap の情報」を含む protocol メッセージが届く。server は「どの cap が、どの center（送信元 peer）の依頼で動いているか」を state で管理する
 4. cap の起動と resume は stroke 方式。cap 用の path（`<workspace>/caps/<cap-id>/`）を作り、そこで `claude -p --session-id|--resume <id> -- <prompt>` を実行し、stream-json の stdout で結果を受ける
-5. worker は cap の責務。cap は作業をせず、ユーザー指示を解釈して worker に作業させる。軽い作業は cap 内のサブエージェント（Agent tool）、worktree を切る作業は cap が claudep 方式で別 session を起動する。worker への返答も cap が claudep の resume で渡す
-6. worker → server: worker は server を MCP（HTTP）として持つ。cap が worker を起動する時の MCP 設定に、header（または環境変数）で `cap_id` と `worker_id` を入れる。token は使わない（認証は全体で後回し）。worker は MCP tool で進捗・質問・承認依頼・完了を送る。tool はすぐ「受け付けた」を返し、worker はそこでターンを終える。実装は Nitro の `/mcp`（Streamable HTTP、stateless）。listener は server が自前で立て（config `mcp.port` / `mcp.bind`、既定 `7902` / `127.0.0.1`）、tool は `report`（`kind`: progress / ask / approve / done、`text`）、header は `x-bantou-cap-id` / `x-bantou-worker-id`
+5. worker に作業させると決めるのは cap。cap は作業をせず、ユーザー指示を解釈して worker に作業させる。軽い作業は cap 内のサブエージェント（Agent tool）。worker は cap が server の `/mcp` の `worker_start` tool で起動する（実プロセスは server が `claude -p --output-format stream-json` で起動し、cap と同じ path 分離・state 管理・孤児回収・process group kill を使う）。worker への続きの指示は同じ `worker_id` で `worker_start` を呼ぶ（server が `--resume`）。状態は `worker_status`、停止は `worker_stop`。cap が自分で worker を報告させる方式は、エージェントがやらない場合があり成立しにくいため採らない
+6. worker → server: worker は server を MCP（HTTP）として持つ。server が worker を起動する時に MCP 設定（`logs/mcp.json`、`--mcp-config`）を付け、header で `cap_id` と `worker_id` を入れる。cap にも同じ listener の `worker_*` tool を持たせる（header `x-bantou-cap-id` のみの接続にだけ載る）。token は使わない（認証は全体で後回し）。worker は MCP tool で進捗・質問・承認依頼・完了を送る。tool はすぐ「受け付けた」を返し、worker はそこでターンを終える。実装は Nitro の `/mcp`（Streamable HTTP、stateless）。listener は server が自前で立て（config `mcp.port` / `mcp.bind`、既定 `7902` / `127.0.0.1`）、worker の tool は `report`（`kind`: progress / ask / approve / done、`text`）、cap の tool は `worker_start` / `worker_status` / `worker_stop`、header は `x-bantou-cap-id` / `x-bantou-worker-id`
 7. server → cap: 報告を受けたら、該当 cap を `--resume` で起動し、prompt に報告内容を渡す。cap ごとにキューを持ち、1 つずつ処理する（実行中の cap には、終わってから渡す）。prompt は `worker <id> から <kind>: <text>`。cap を依頼した center は cap ごとに記録し、report 起因の resume の結果も同じ center へ返す
 8. cap → center: cap の結果（stdout の result）を server が state を見て該当 center へ messenger で返す
-9. cap の `claude -p` は Bash の sandbox を既定で切って起動する（新規・resume とも `--settings {"sandbox":{"enabled":false}}`。config `session.capBashSandbox`、既定 false、true で従来どおり claude の設定のまま）。理由: 204 の既定は `sandbox.enabled: true` で、sandbox 下の cap の Bash が起動した worker は setsid しても cap の終了で消える。worker を cap の外で生かすために切る。server は worker を起動しないので、worker 側の生存は cap の起動方法に依存する
-10. 状態は path ごとの state.json に保存する。起動時に `ps` 照合で孤児プロセスを回収する
+9. cap の `claude -p` は Bash の sandbox を既定で切って起動する（新規・resume とも `--settings {"sandbox":{"enabled":false}}`。config `session.capBashSandbox`、既定 false、true で従来どおり claude の設定のまま）。理由: 204 の既定は `sandbox.enabled: true` で、sandbox 下の cap の Bash が起動した子は setsid しても cap の終了で消える。worker は server が起動するので、この影響は受けない。cap の Bash が起動する子の生存のために切る
+10. 状態は path ごとの state.json に保存する。起動時に `ps` 照合で孤児プロセスを回収する。cap と worker の持ち主（worker → cap）は `logs/owner.json`、cap を依頼した center は `logs/center.json`
+11. 生存の目安は stream-json の出力が続いているか。server は cap と worker の出力を 1 行ずつ読んで要約（状態 running / stalled / idle / done / failed / lost、最終出力時刻、直近の活動、作業内容 = prompt の冒頭）をメモリに保持し、cap を依頼した center へ protocol `bantou` の `activity` 通知（1.2.0）で送る（running がいる間は 5 秒ごと、状態遷移では即時）。プロセスが signal で落ちたら lost、出力が 300 秒無ければ stalled。center は remote ごとに保持して `remote_list` の `activity` に載せ、desktop が数秒ごとに取って表示する。通知が途絶えた時、center は lost にせず `stale` を立てる（server 側の事実でないため）
 
 ## 参考実装
 
