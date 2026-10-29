@@ -52,6 +52,12 @@ export class MockBantou {
   };
   /** `remote_list` result (center `RemoteView[]`). */
   centerRemotes: unknown[] = [];
+  /** `session_list` result (center `SessionInfo[]`); `session_create` appends to it. */
+  centerSessions: Record<string, unknown>[] = [{ name: "workspace", path: "/mock/.bantou", state: "connected", pid: 1, sessionUrl: null, startedAt: null, source: "config" }];
+  /** When set, `session_create` fails with this message (center error). */
+  centerSessionCreateError: string | null = null;
+  /** sessionUrl `session_create` returns (null: not connected yet). */
+  centerSessionUrl: string | null = "https://claude.ai/code/session_mock";
   calls: InvokeRecord[] = [];
   sent: { to: string; text: string }[] = [];
   /** Ping timers: task id → expiry (ISO). */
@@ -256,6 +262,25 @@ export class MockBantou {
             return text(this.centerRc);
           case "remote_list":
             return text(this.centerRemotes);
+          case "session_list":
+            return text(this.centerSessions);
+          case "session_create": {
+            const name = (args.arguments as { name: string }).name;
+            if (this.centerSessionCreateError) throw new Error(this.centerSessionCreateError);
+            if (!/^[A-Za-z0-9_-]+$/.test(name)) throw new Error("name は英数字と _ - のみ");
+            if (this.centerSessions.some((s) => s.name === name)) throw new Error(`name が既に使われている: ${name}`);
+            const s = {
+              name,
+              path: `/mock/.bantou/${name}`,
+              state: this.centerSessionUrl ? "connected" : "starting",
+              pid: 4300,
+              sessionUrl: this.centerSessionUrl,
+              startedAt: this.now(),
+              source: "session",
+            };
+            this.centerSessions.push(s);
+            return text(s);
+          }
           case "server_list":
             return text(this.centerServers);
           case "server_status": {

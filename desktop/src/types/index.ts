@@ -236,3 +236,12 @@ export type UpdaterState =
   | { kind: "downloading"; version: string; downloaded: number; contentLength: number | null }
   | { kind: "installing"; version: string }
   | { kind: "error"; message: string; version: string };
+
+/** `session_list` / `session_create` entry (`packages/center` `SessionInfo`, the part shown). */
+export interface CenterSession {
+  name: string;
+  state: "stopped" | "starting" | "connected" | "error";
+  sessionUrl: string | null;
+  source: "config" | "session";
+  lastError?: string;
+}

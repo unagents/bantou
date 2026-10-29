@@ -5,8 +5,10 @@ defineProps<{
   workspacePath: string | null;
   waitingCount: number;
   broker: BrokerStatus | null;
+  /** Why the PM button is off (no center to talk to). Unset: usable. */
+  pmDisabledReason?: string | null;
 }>();
-defineEmits<{ open: []; addSession: []; center: []; settings: [] }>();
+defineEmits<{ open: []; addSession: []; pm: []; center: []; settings: [] }>();
 </script>
 
 <template>
@@ -50,6 +52,21 @@ defineEmits<{ open: []; addSession: []; center: []; settings: [] }>();
         :disabled="!broker?.connected"
         @click="$emit('addSession')"
       />
+      <UTooltip :text="pmDisabledReason ?? 'PM を立てる'">
+        <span>
+          <UButton
+            size="sm"
+            variant="ghost"
+            color="neutral"
+            icon="i-lucide-crown"
+            label="PM を立てる"
+            :disabled="!!pmDisabledReason"
+            data-testid="open-pm"
+            @click="$emit('pm')"
+          />
+        </span>
+      </UTooltip>
+      <span v-if="pmDisabledReason" class="text-cork-muted max-w-48 truncate text-xs" data-testid="pm-disabled-reason">{{ pmDisabledReason }}</span>
       <UButton size="sm" variant="ghost" color="neutral" icon="i-lucide-folder-open" @click="$emit('open')" />
       <UButton
         size="sm"

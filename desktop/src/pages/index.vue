@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useIntervalFn } from "@vueuse/core";
-import { brokerConnect, brokerStatus, instructAddTask } from "~/api";
+import { brokerConnect, brokerStatus, centerGetSettings, instructAddTask } from "~/api";
 import type { BrokerStatus, RegisterResult, Task } from "~/types";
 
 const { dir, loaded, load, pickAndOpen } = useWorkspace();
@@ -58,6 +58,20 @@ watch(modalOpen, (v) => {
 const addSessionOpen = ref(false);
 const settingsOpen = ref(false);
 const centerOpen = ref(false);
+const pmOpen = ref(false);
+
+// The PM button needs a center to talk to: enabled, or a pasted remote (the same rule as the Rust side).
+const pmDisabledReason = ref<string | null>(null);
+async function refreshPmTarget() {
+  try {
+    const s = await centerGetSettings();
+    pmDisabledReason.value = s.enabled || s.remote ? null : "center が無効で接続先も無い（設定で center を有効にするか、別ホストの接続設定を貼る）";
+  } catch (e) {
+    pmDisabledReason.value = String(e);
+  }
+}
+onMounted(() => void refreshPmTarget());
+watch(settingsOpen, (v) => !v && void refreshPmTarget());
 async function onSessionsAdded(results: RegisterResult[]) {
   await refresh();
   for (const r of results) {
@@ -89,8 +103,10 @@ async function onInstruct(session: string, title: string, body: string) {
       :workspace-path="dir"
       :waiting-count="waitingCount"
       :broker="broker"
+      :pm-disabled-reason="pmDisabledReason"
       @open="pickAndOpen"
       @add-session="addSessionOpen = true"
+      @pm="pmOpen = true"
       @center="centerOpen = true"
       @settings="settingsOpen = true"
     />
@@ -148,6 +164,7 @@ async function onInstruct(session: string, title: string, body: string) {
       @done="onSessionsAdded"
     />
     <SettingsDialog v-if="settingsOpen" v-model:open="settingsOpen" />
+    <PmDialog v-if="pmOpen" v-model:open="pmOpen" />
     <CenterDialog v-if="centerOpen" v-model:open="centerOpen" />
     <InstructTaskDialog
       :open="instructTarget !== null"
