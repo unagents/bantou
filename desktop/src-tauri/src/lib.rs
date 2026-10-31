@@ -1,6 +1,7 @@
 mod agent;
 mod broker;
 mod center;
+mod center_events;
 mod center_mcp;
 mod center_snippet;
 mod error;
@@ -140,6 +141,8 @@ pub fn run() {
             center::autostart(app.handle());
 
             os_events::start(app.handle());
+
+            center_events::start(app.handle());
 
             Ok(())
         })

@@ -3,7 +3,7 @@ import type { SessionGroup } from "~/composables/useBoard";
 import type { Task, Thread } from "~/types";
 
 defineProps<{ group: SessionGroup; threads: Record<string, Thread>; running: Record<string, boolean> }>();
-defineEmits<{ openThread: [task: Task]; instruct: [session: string] }>();
+defineEmits<{ openThread: [task: Task] }>();
 const showDone = ref(false);
 </script>
 
@@ -18,16 +18,6 @@ const showDone = ref(false);
       <span class="text-cork-muted ml-auto text-xs font-normal">
         {{ group.working.length }} / {{ group.queued.length }}
       </span>
-      <UTooltip text="タスク追加を指示">
-        <UButton
-          size="xs"
-          variant="soft"
-          color="primary"
-          icon="i-lucide-circle-plus"
-          :aria-label="`${group.name} にタスク追加を指示`"
-          @click="$emit('instruct', group.name)"
-        />
-      </UTooltip>
     </h2>
     <ul class="divide-cork-border flex flex-col divide-y">
       <TaskRow

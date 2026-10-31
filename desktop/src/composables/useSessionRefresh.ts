@@ -1,6 +1,6 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useIntervalFn } from "@vueuse/core";
-import { OS_NETWORK_EVENT, OS_WAKE_EVENT, refreshSessions } from "~/api";
+import { CENTER_SESSIONS_CHANGED_EVENT, OS_NETWORK_EVENT, OS_WAKE_EVENT, refreshSessions } from "~/api";
 
 /** Insurance against missed notifications: long on purpose. */
 export const SAFETY_REFRESH_MS = 5 * 60_000;
@@ -14,6 +14,7 @@ export const WAKE_RETRY_MS = 5000;
  *
  * The list is read again (Rust keeps the last list; unreachable is reported with it):
  * - before the user does anything in the window (pointer or key, capture phase, every time),
+ * - when the center reports a session created / deleted / restored (`center-sessions-changed`),
  * - when the OS reports a wake from sleep (and once more shortly after) or a network change,
  * - when `refreshNow()` is called by the owner (target changed: settings, pasted connection),
  * - on a long timer.
@@ -55,6 +56,7 @@ export function useSessionRefresh() {
     document.addEventListener("pointerdown", onUserAction, true);
     document.addEventListener("keydown", onUserAction, true);
     unlisten.push(
+      await listen(CENTER_SESSIONS_CHANGED_EVENT, () => void refreshNow()),
       await listen(OS_WAKE_EVENT, () => {
         void refreshNow();
         clearTimeout(retry);

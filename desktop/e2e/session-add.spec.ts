@@ -13,6 +13,7 @@ type Mock = {
   centerSessionCreateError: string | null;
   calls: { cmd: string }[];
   centerDrop: (name: string) => void;
+  centerSessionsChanged: (reason?: string | null, name?: string | null) => void;
   osWake: () => void;
   osNetworkChanged: () => void;
 };
@@ -176,10 +177,20 @@ test.describe("center on", () => {
     await page.keyboard.press("Shift");
     await expect.poll(() => refreshCount(page)).toBeGreaterThan(mid);
     // a button press reads it too
-    await pickSession(page, "stroke-board");
     const last = await refreshCount(page);
-    await page.getByRole("button", { name: "stroke-board にタスク追加を指示" }).click();
+    await sideRow(page, "stroke-board").click();
     await expect.poll(() => refreshCount(page)).toBeGreaterThan(last);
+  });
+
+  test("a center-sessions-changed event (center GET /events) reads the list again at once", async ({ page }) => {
+    await page.goto("/");
+    await pickSession(page, "careery");
+    await centerHas(page, "made-elsewhere");
+    await page.waitForTimeout(500);
+    const before = await refreshCount(page);
+    await withMock(page, (m) => m.centerSessionsChanged("created", "made-elsewhere"));
+    // no user action: the event alone makes the list read again
+    await expect.poll(() => refreshCount(page)).toBeGreaterThan(before);
   });
 
   test("wake from sleep and a network change read the list again", async ({ page }) => {

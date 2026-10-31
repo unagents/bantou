@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useIntervalFn } from "@vueuse/core";
-import { brokerConnect, brokerStatus, centerGetSettings, instructAddTask } from "~/api";
+import { brokerConnect, brokerStatus, centerGetSettings } from "~/api";
 import type { BrokerStatus, Task } from "~/types";
 
 const { dir, loaded, load, pickAndOpen } = useWorkspace();
@@ -94,17 +94,6 @@ function onSessionCreated(name: string) {
   toast.add({ title: `${name} を作成`, color: "success" });
 }
 
-// --- instruct a session to add a task ------------------------------------------
-
-const instructTarget = ref<string | null>(null);
-async function onInstruct(session: string, title: string, body: string) {
-  try {
-    await instructAddTask(session, title, body);
-    toast.add({ title: `${session} にタスク追加を指示`, description: title, color: "success" });
-  } catch (e) {
-    toast.add({ title: "指示の送信に失敗", description: String(e), color: "error" });
-  }
-}
 </script>
 
 <template>
@@ -167,18 +156,29 @@ async function onInstruct(session: string, title: string, body: string) {
             </li>
           </ul>
         </nav>
-        <main class="min-w-0 flex-1 p-6">
-          <SessionColumn
-            v-if="selectedGroup"
-            :key="selectedGroup.name"
-            :group="selectedGroup"
-            :threads="threads"
-            :running="running"
-            @open-thread="openThread"
-            @instruct="instructTarget = $event"
-          />
+        <main
+          v-if="selectedGroup"
+          class="grid min-h-0 min-w-0 flex-1 grid-cols-[minmax(20rem,2fr)_minmax(0,3fr)]"
+          data-testid="session-main"
+        >
+          <!-- middle: remote instruction tasks of the session, the Cork task list below them -->
+          <div class="border-cork-border flex min-w-0 flex-col gap-4 overflow-y-auto border-r p-4" data-testid="middle-col">
+            <RemoteActivity :key="selectedGroup.name" :owner="selectedGroup.name" />
+            <SessionColumn
+              :key="selectedGroup.name"
+              :group="selectedGroup"
+              :threads="threads"
+              :running="running"
+              @open-thread="openThread"
+            />
+          </div>
+          <!-- right: conversation history (the session's terminal) -->
+          <div class="min-h-0 min-w-0" data-testid="right-col">
+            <TerminalView :session="selectedGroup.name" class="h-[calc(100vh-var(--cork-header-height))]" />
+          </div>
+        </main>
+        <main v-else class="min-w-0 flex-1 p-6">
           <div
-            v-else
             class="border-cork-border text-cork-muted flex flex-col items-center gap-3 border border-dashed py-10 text-sm"
           >
             <p>center にセッションが無い。名前を付けて作成する。</p>
@@ -209,11 +209,5 @@ async function onInstruct(session: string, title: string, body: string) {
     />
     <SettingsDialog v-if="settingsOpen" v-model:open="settingsOpen" />
     <CenterDialog v-if="centerOpen" v-model:open="centerOpen" />
-    <InstructTaskDialog
-      :open="instructTarget !== null"
-      :session="instructTarget ?? ''"
-      @update:open="(v) => !v && (instructTarget = null)"
-      @submit="onInstruct"
-    />
   </div>
 </template>

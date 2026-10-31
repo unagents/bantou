@@ -2,6 +2,11 @@
 import { centerTool } from "~/api";
 import type { CenterActivityState, CenterRemoteRecord } from "~/types";
 
+const props = defineProps<{ owner?: string }>();
+
+// test ids: the center dialog's list (all owners) and a session's list (one owner) can be on screen together.
+const tp = computed(() => (props.owner === undefined ? "center-" : "session-"));
+
 const POLL_MS = 3000;
 
 const remotes = ref<CenterRemoteRecord[] | null>(null);
@@ -14,7 +19,8 @@ async function poll() {
   if (polling) return;
   polling = true;
   try {
-    remotes.value = await centerTool<CenterRemoteRecord[]>("remote_list");
+    const all = await centerTool<CenterRemoteRecord[]>("remote_list");
+    remotes.value = props.owner === undefined ? all : all.filter((r) => r.owner === props.owner);
     fetchedAt.value = Date.now();
     error.value = null;
   } catch (e) {
@@ -23,6 +29,15 @@ async function poll() {
     polling = false;
   }
 }
+
+// A different owner: drop the previous owner's list and read again now.
+watch(
+  () => props.owner,
+  () => {
+    remotes.value = null;
+    void poll();
+  },
+);
 
 let pollTimer: ReturnType<typeof setInterval> | undefined;
 let tickTimer: ReturnType<typeof setInterval> | undefined;
@@ -64,16 +79,16 @@ function elapsed(silentMs: number): string {
 </script>
 
 <template>
-  <div class="flex flex-col gap-2" data-testid="center-remotes">
+  <div class="flex flex-col gap-2" :data-testid="`${tp}remotes`">
     <span class="text-sm font-medium">remotes</span>
-    <p v-if="error" class="text-cork-danger-text text-xs whitespace-pre-wrap" data-testid="center-remotes-error">
+    <p v-if="error" class="text-cork-danger-text text-xs whitespace-pre-wrap" :data-testid="`${tp}remotes-error`">
       {{ error }}
     </p>
     <div
       v-for="r in remotes ?? []"
       :key="r.remote_id"
       class="flex flex-col gap-1"
-      data-testid="center-remote"
+      :data-testid="`${tp}remote`"
       :data-remote-id="r.remote_id"
     >
       <div class="flex items-center gap-2 text-xs">
@@ -85,7 +100,7 @@ function elapsed(silentMs: number): string {
           color="warning"
           variant="subtle"
           label="更新途絶"
-          data-testid="center-remote-stale"
+          :data-testid="`${tp}remote-stale`"
         />
         <template v-if="!r.activity">
           <span class="text-cork-muted">活動情報なし</span>
@@ -97,7 +112,7 @@ function elapsed(silentMs: number): string {
           v-for="a in r.activity.agents"
           :key="`${a.kind}:${a.id}`"
           class="flex flex-col pl-2 text-xs"
-          data-testid="center-remote-agent"
+          :data-testid="`${tp}remote-agent`"
           :data-kind="a.kind"
           :data-state="a.state"
         >
@@ -108,19 +123,19 @@ function elapsed(silentMs: number): string {
               :color="stateColor[a.state]"
               variant="subtle"
               :label="stateLabel[a.state]"
-              data-testid="center-remote-agent-state"
+              :data-testid="`${tp}remote-agent-state`"
             />
-            <span class="min-w-0 flex-1 truncate" data-testid="center-remote-task">{{ a.task }}</span>
-            <span class="text-cork-muted shrink-0" data-testid="center-remote-elapsed">{{ elapsed(a.silent_ms) }}</span>
+            <span class="min-w-0 flex-1 truncate" :data-testid="`${tp}remote-task`">{{ a.task }}</span>
+            <span class="text-cork-muted shrink-0" :data-testid="`${tp}remote-elapsed`">{{ elapsed(a.silent_ms) }}</span>
           </div>
-          <span v-if="a.last_activity" class="text-cork-muted truncate pl-14" data-testid="center-remote-last">
+          <span v-if="a.last_activity" class="text-cork-muted truncate pl-14" :data-testid="`${tp}remote-last`">
             {{ a.last_activity }}
           </span>
           <span v-if="a.error" class="text-cork-danger-text truncate pl-14">{{ a.error }}</span>
         </div>
       </template>
     </div>
-    <p v-if="remotes && !remotes.length" class="text-cork-muted text-xs" data-testid="center-remotes-none">
+    <p v-if="remotes && !remotes.length" class="text-cork-muted text-xs" :data-testid="`${tp}remotes-none`">
       remote なし
     </p>
   </div>

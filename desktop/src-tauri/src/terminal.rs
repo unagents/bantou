@@ -143,13 +143,18 @@ pub fn to_payload(session: &str, ev: &SseEvent, last_id: &mut Option<u64>) -> Op
 
 /// `<origin of the MCP url>/sessions/<name>/<tail>`; the name is percent-encoded as a path segment.
 pub fn session_url(mcp_url: &str, session: &str, tail: &str) -> Result<reqwest::Url, String> {
+    center_url(mcp_url, &["sessions", session, tail])
+}
+
+/// `<origin of the MCP url>/<segments...>` (segments are percent-encoded as path segments).
+pub fn center_url(mcp_url: &str, segments: &[&str]) -> Result<reqwest::Url, String> {
     let mut url = reqwest::Url::parse(mcp_url).map_err(|e| format!("center の URL が不正: {e}"))?;
     url.set_query(None);
     url.set_fragment(None);
     url.path_segments_mut()
         .map_err(|_| "center の URL が不正".to_string())?
         .clear()
-        .extend(["sessions", session, tail]);
+        .extend(segments.iter().copied());
     Ok(url)
 }
 
@@ -166,7 +171,7 @@ pub fn reconnect_delay(n: u32) -> Duration {
     Duration::from_secs((1u64 << n.min(4)).min(15))
 }
 
-fn http() -> reqwest::Client {
+pub(crate) fn http() -> reqwest::Client {
     crate::ensure_crypto_provider();
     reqwest::Client::builder().connect_timeout(CONNECT_TIMEOUT).build().expect("reqwest client")
 }

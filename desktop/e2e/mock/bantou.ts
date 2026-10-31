@@ -76,6 +76,11 @@ export class MockBantou {
   centerSessionUrl: string | null = "https://claude.ai/code/session_mock";
   calls: InvokeRecord[] = [];
   sent: { to: string; text: string }[] = [];
+  /** Terminal: `session_output_start` / `session_output_stop` calls, keystrokes (base64) and size changes sent. */
+  outputStarts: { session: string; after: number | null }[] = [];
+  outputStops: string[] = [];
+  inputs: { session: string; data: string }[] = [];
+  resizes: { session: string; cols: number; rows: number }[] = [];
   /** Ping timers: task id → expiry (ISO). */
   pings = new Map<string, string>();
   private listeners = new Map<string, number[]>();
@@ -150,6 +155,29 @@ export class MockBantou {
   /** The center no longer lists session `name` (it was stopped / removed there). */
   centerDrop(name: string) {
     this.centerSessions = this.centerSessions.filter((s) => s.name !== name);
+  }
+
+  /** The Rust SSE client delivers output chunk `id` of `session` (`text` is encoded as UTF-8, then base64). */
+  sessionOutput(session: string, id: number, text: string) {
+    const bytes = new TextEncoder().encode(text);
+    let bin = "";
+    for (const b of bytes) bin += String.fromCharCode(b);
+    this.emitter("session-output", { session, id, data: btoa(bin), reset: false });
+  }
+
+  /** The center sent `reset` (the held position is too old): the view clears and repaints from what follows. */
+  sessionReset(session: string) {
+    this.emitter("session-output", { session, id: 0, data: "", reset: true });
+  }
+
+  /** Connection state of the output stream. */
+  sessionOutputStatus(session: string, state: "connected" | "retrying" | "rejected", message: string | null = null) {
+    this.emitter("session-output-status", { session, state, message });
+  }
+
+  /** The center's `GET /events` reported a session change (forwarded by the Rust side). */
+  centerSessionsChanged(reason: string | null = "created", name: string | null = null) {
+    this.emitter("center-sessions-changed", { reason, name });
   }
 
   /** The machine woke from sleep. */
@@ -245,11 +273,17 @@ export class MockBantou {
         this.readList();
         return structuredClone(s);
       }
-      case "instruct_add_task":
-        this.sent.push({
-          to: args.session as string,
-          text: `【bantou タスク追加指示】\nタスク名: ${args.title as string}\n作業内容:\n${args.body as string}`,
-        });
+      case "session_output_start":
+        this.outputStarts.push({ session: args.session as string, after: (args.after as number | null) ?? null });
+        return null;
+      case "session_output_stop":
+        this.outputStops.push(args.session as string);
+        return null;
+      case "session_input":
+        this.inputs.push({ session: args.session as string, data: args.dataB64 as string });
+        return null;
+      case "session_resize":
+        this.resizes.push({ session: args.session as string, cols: args.cols as number, rows: args.rows as number });
         return null;
       case "list_threads":
         return [...this.threads.values()].map((t) => structuredClone(t));

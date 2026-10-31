@@ -14,8 +14,8 @@ export {
   centerTool,
 } from "./center";
 export {
+  CENTER_SESSIONS_CHANGED_EVENT,
   createSession,
-  instructAddTask,
   listSessions,
   OS_NETWORK_EVENT,
   OS_WAKE_EVENT,
@@ -31,6 +31,16 @@ export {
   type Update,
 } from "./updater";
 export { getStatuses, listTasks } from "./tasks";
+export {
+  SESSION_OUTPUT_EVENT,
+  SESSION_OUTPUT_STATUS_EVENT,
+  sessionInput,
+  sessionOutputStart,
+  sessionOutputStop,
+  sessionResize,
+  type SessionOutput,
+  type SessionOutputStatus,
+} from "./terminal";
 export {
   AGENT_EVENT,
   agentAnswer,
