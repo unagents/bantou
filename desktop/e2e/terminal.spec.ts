@@ -25,15 +25,23 @@ const mock = <T>(page: Page, fn: (m: Mock) => T) =>
     fn.toString(),
   ) as Promise<T>;
 
-const send = (page: Page, session: string, id: number, text: string) =>
-  page.evaluate(
+/** The stream of `session` has been started (the view is attached and listening). */
+const streaming = (page: Page, session: string) =>
+  expect.poll(() => mock(page, (m) => m.outputStarts.at(-1)?.session)).toBe(session);
+
+const send = async (page: Page, session: string, id: number, text: string) => {
+  await streaming(page, session);
+  await page.evaluate(
     ([s, i, t]) =>
       (window as unknown as { __BANTOU_MOCK__: Mock }).__BANTOU_MOCK__.sessionOutput(s as string, i as number, t as string),
     [session, id, text],
   );
+};
 
-const reset = (page: Page, session: string) =>
-  page.evaluate((s) => (window as unknown as { __BANTOU_MOCK__: Mock }).__BANTOU_MOCK__.sessionReset(s), session);
+const reset = async (page: Page, session: string) => {
+  await streaming(page, session);
+  await page.evaluate((s) => (window as unknown as { __BANTOU_MOCK__: Mock }).__BANTOU_MOCK__.sessionReset(s), session);
+};
 
 const term = (page: Page) => page.getByTestId("terminal");
 const decodeInputs = (page: Page) =>
