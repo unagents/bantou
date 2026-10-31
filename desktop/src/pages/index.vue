@@ -6,6 +6,7 @@ import type { BrokerStatus, RegisterResult, Task } from "~/types";
 const { dir, loaded, load, pickAndOpen } = useWorkspace();
 const { threads, registered, sessions, waitingCount, running, refresh } = useBoard(dir);
 const toast = useToast();
+const { state: updaterState, checkManually, installAndRestart } = useUpdater();
 
 useWorkspaceWatcher(dir, () => void refresh());
 
@@ -104,11 +105,14 @@ async function onInstruct(session: string, title: string, body: string) {
       :waiting-count="waitingCount"
       :broker="broker"
       :pm-disabled-reason="pmDisabledReason"
+      :updater="updaterState"
       @open="pickAndOpen"
       @add-session="addSessionOpen = true"
       @pm="pmOpen = true"
       @center="centerOpen = true"
       @settings="settingsOpen = true"
+      @check-update="checkManually"
+      @install-update="installAndRestart"
     />
     <div
       v-if="loaded && !dir"

@@ -9,6 +9,8 @@ import {
 import type { UpdaterState } from "~/types";
 
 const MAIN_WINDOW_LABEL = "main";
+// How long "最新" stays in the header before it returns to the idle label.
+const LATEST_SHOWN_MS = 2000;
 
 // The auto-check fires once per process: only the `main` window runs it
 // (workspace-* windows skip it), and this flag keeps HMR / remounts from
@@ -16,15 +18,16 @@ const MAIN_WINDOW_LABEL = "main";
 const autoCheckFiredOnce = { current: false };
 
 export function useUpdater() {
-  const toast = useToast();
   const state = shallowRef<UpdaterState>({ kind: "idle" });
   // A stale resolve from an earlier check must not overwrite a fresher one.
   let requestId = 0;
+  let latestTimer: ReturnType<typeof setTimeout> | null = null;
 
   async function runCheck(mode: "auto" | "manual") {
     const k = state.value.kind;
     if (k === "checking" || k === "downloading" || k === "installing") return;
 
+    if (latestTimer) clearTimeout(latestTimer);
     const id = ++requestId;
     state.value = { kind: "checking" };
     try {
@@ -33,18 +36,24 @@ export function useUpdater() {
       if (update) {
         state.value = { kind: "available", update, version: update.version };
       } else {
-        // Manual checks need an explicit "no update" answer; auto stays silent.
-        if (mode === "manual") toast.add({ title: "bantou は最新です", color: "neutral" });
-        state.value = { kind: "idle" };
+        // Manual checks need an explicit "no update" answer (shown briefly); auto stays silent.
+        if (mode === "manual") {
+          state.value = { kind: "latest" };
+          latestTimer = setTimeout(() => {
+            if (state.value.kind === "latest") state.value = { kind: "idle" };
+          }, LATEST_SHOWN_MS);
+        } else {
+          state.value = { kind: "idle" };
+        }
       }
     } catch (e) {
       if (id !== requestId) return;
       if (mode === "manual") {
-        toast.add({ title: "アップデートの確認に失敗", description: String(e), color: "error" });
+        state.value = { kind: "error", message: String(e), version: null };
       } else {
         console.error("Auto update check failed:", e);
+        state.value = { kind: "idle" };
       }
-      state.value = { kind: "idle" };
     }
   }
 
@@ -94,7 +103,10 @@ export function useUpdater() {
     // Menu "アップデートを確認..." (emitted to the focused window only).
     unlisten = await win.listen(CHECK_FOR_UPDATES_EVENT, () => void runCheck("manual"));
   });
-  onBeforeUnmount(() => unlisten?.());
+  onBeforeUnmount(() => {
+    unlisten?.();
+    if (latestTimer) clearTimeout(latestTimer);
+  });
 
   return { state, checkManually: () => runCheck("manual"), installAndRestart, dismiss };
 }

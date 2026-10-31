@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { BrokerStatus } from "~/types";
+import type { BrokerStatus, UpdaterState } from "~/types";
 
 defineProps<{
   workspacePath: string | null;
@@ -7,8 +7,30 @@ defineProps<{
   broker: BrokerStatus | null;
   /** Why the PM button is off (no center to talk to). Unset: usable. */
   pmDisabledReason?: string | null;
+  /** State of the in-app updater; drives the single update control. */
+  updater: UpdaterState;
 }>();
-defineEmits<{ open: []; addSession: []; pm: []; center: []; settings: [] }>();
+defineEmits<{
+  open: [];
+  addSession: [];
+  pm: [];
+  center: [];
+  settings: [];
+  checkUpdate: [];
+  installUpdate: [];
+}>();
+
+function fmt(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function progressText(downloaded: number, total: number | null): string {
+  if (total === null || total <= 0) return fmt(downloaded);
+  const pct = Math.floor(Math.min(100, (downloaded / total) * 100));
+  return `${fmt(downloaded)} / ${fmt(total)} · ${pct}%`;
+}
 </script>
 
 <template>
@@ -67,6 +89,67 @@ defineEmits<{ open: []; addSession: []; pm: []; center: []; settings: [] }>();
         </span>
       </UTooltip>
       <span v-if="pmDisabledReason" class="text-cork-muted max-w-48 truncate text-xs" data-testid="pm-disabled-reason">{{ pmDisabledReason }}</span>
+      <UTooltip :text="updater.kind === 'error' ? updater.message : ''" :disabled="updater.kind !== 'error'">
+        <span>
+          <UButton
+            v-if="updater.kind === 'available'"
+            size="sm"
+            variant="soft"
+            color="primary"
+            icon="i-lucide-download"
+            :label="`アップデートして再起動（v${updater.version}）`"
+            data-testid="updater-control"
+            data-updater-state="available"
+            @click="$emit('installUpdate')"
+          />
+          <UButton
+            v-else-if="updater.kind === 'downloading'"
+            size="sm"
+            variant="soft"
+            color="primary"
+            icon="i-lucide-loader-circle"
+            :label="`ダウンロード中 ${progressText(updater.downloaded, updater.contentLength)}`"
+            disabled
+            data-testid="updater-control"
+            data-updater-state="downloading"
+          />
+          <UButton
+            v-else-if="updater.kind === 'installing'"
+            size="sm"
+            variant="soft"
+            color="primary"
+            icon="i-lucide-loader-circle"
+            label="再起動します…"
+            disabled
+            data-testid="updater-control"
+            data-updater-state="installing"
+          />
+          <UButton
+            v-else-if="updater.kind === 'error'"
+            size="sm"
+            variant="ghost"
+            color="error"
+            icon="i-lucide-circle-alert"
+            :label="`${updater.version ? 'アップデートに失敗' : '確認に失敗'}: ${updater.message}`"
+            class="max-w-72"
+            data-testid="updater-control"
+            data-updater-state="error"
+            @click="$emit('checkUpdate')"
+          />
+          <UButton
+            v-else
+            size="sm"
+            variant="ghost"
+            color="neutral"
+            :icon="updater.kind === 'checking' ? 'i-lucide-loader-circle' : 'i-lucide-refresh-cw'"
+            :label="updater.kind === 'checking' ? '確認中…' : updater.kind === 'latest' ? '最新' : 'アップデートを確認'"
+            :disabled="updater.kind !== 'idle'"
+            data-testid="updater-control"
+            :data-updater-state="updater.kind"
+            @click="$emit('checkUpdate')"
+          />
+        </span>
+      </UTooltip>
       <UButton size="sm" variant="ghost" color="neutral" icon="i-lucide-folder-open" @click="$emit('open')" />
       <UButton
         size="sm"
