@@ -1,317 +1,215 @@
-//! Registered work sessions.
+//! Work sessions added from the center.
 //!
-//! The user picks messenger peers from the broker's peer list; bantou keeps
-//! them as a per-workspace roster by name (peer ids change on every
-//! reconnect) in `bantou_dir(ws)/sessions.json`, and sends each one the
-//! bantou protocol over messenger. A session that stays away from the
-//! broker's peer list for `SESSION_ABSENT_TTL` is dropped from the roster.
+//! The user picks sessions from the target center's `session_list` (or names a new one, created
+//! with `session_create`). bantou keeps what was added in memory only (nothing is written to a
+//! file) and re-reads the center's list at several moments (the frontend decides when: before a
+//! user action, after wake / network change, on a settings change, on a long timer). Each re-read
+//! is reconciled against what was added (`reconcile`):
+//!
+//! - in the center's list: kept, state updated (`Link::Listed`);
+//! - not in the list: shown as lost (`Link::Lost`), kept so the user sees it went away;
+//! - the list could not be fetched: `Link::Unreachable`, told apart from lost. The previous state
+//!   is kept and the reason is carried.
+//!
+//! A lost session that is listed again is `Listed` again (the center took it back).
 
 use crate::broker::{self, Brokers};
+use crate::center_mcp;
 use crate::error::{CmdResult, CommandError};
 use crate::state::AppState;
-use crate::thread;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use serde_json::Value;
 use std::sync::Mutex;
-use std::time::Duration;
-use tauri::{Emitter, Manager};
-use time::OffsetDateTime;
+use tauri::Emitter;
 
 pub const SESSIONS_CHANGED_EVENT: &str = "bantou://sessions-changed";
 
-/// A roster session absent from the broker's peer list this long is removed.
-pub const SESSION_ABSENT_TTL: Duration = Duration::from_secs(10 * 60);
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Link {
+    /// In the center's list at the last read.
+    Listed,
+    /// The center answered and the session is not in its list.
+    Lost,
+    /// The center could not be asked.
+    Unreachable,
+}
 
-/// Observations further apart than this are not continuous (machine asleep,
-/// broker unreachable): absence is counted again from the later one.
-const OBSERVE_MAX_GAP: Duration = Duration::from_secs(90);
+/// A session as the center lists it (`session_list` / `session_create` result; fields bantou uses).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CenterEntry {
+    pub name: String,
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub session_url: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// A session the user added.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Session {
     pub name: String,
-    #[serde(default)]
-    pub hostname: String,
-    #[serde(default)]
-    pub cwd: String,
-    pub registered_at: String,
+    pub link: Link,
+    /// Center's state (`connected`, `starting`, ...) at the last successful read.
+    pub state: Option<String>,
+    pub session_url: Option<String>,
+    pub source: Option<String>,
+    /// Center's `lastError` of the session at the last successful read.
+    pub last_error: Option<String>,
+    /// Why the center could not be asked (only with `Link::Unreachable`).
+    pub reason: Option<String>,
+    pub added_at: String,
 }
 
-/// Mirror of the broker's `Peer` (fields bantou shows).
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Peer {
-    pub id: String,
-    #[serde(default)]
-    pub name: String,
-    #[serde(default)]
-    pub hostname: String,
-    #[serde(default)]
-    pub cwd: String,
-    #[serde(default)]
-    pub tty: Option<String>,
-    #[serde(default)]
-    pub summary: String,
-    #[serde(default)]
-    pub last_seen: String,
-    /// Name chosen in bantou for a peer that has none yet. The session is
-    /// told to `set_name` to it.
-    #[serde(default)]
-    pub assign_name: Option<String>,
+impl Session {
+    pub fn from_entry(e: &CenterEntry, added_at: String) -> Self {
+        Self {
+            name: e.name.clone(),
+            link: Link::Listed,
+            state: e.state.clone(),
+            session_url: e.session_url.clone(),
+            source: e.source.clone(),
+            last_error: e.last_error.clone(),
+            reason: None,
+            added_at,
+        }
+    }
 }
 
-/// Roster, one list per workspace, persisted under `bantou_dir(ws)`.
+/// Compare what was added with a fresh read of the center's list. `listing` is the list, or the
+/// reason it could not be fetched. Pure.
+pub fn reconcile(added: &[Session], listing: Result<&[CenterEntry], &str>) -> Vec<Session> {
+    added
+        .iter()
+        .map(|s| match listing {
+            Err(why) => Session { link: Link::Unreachable, reason: Some(why.to_string()), ..s.clone() },
+            Ok(list) => match list.iter().find(|e| e.name == s.name) {
+                Some(e) => Session { link: Link::Listed, reason: None, ..Session::from_entry(e, s.added_at.clone()) },
+                None => Session { link: Link::Lost, reason: None, ..s.clone() },
+            },
+        })
+        .collect()
+}
+
+/// Added sessions, in memory, for the whole app (the center is not tied to a window).
 #[derive(Default)]
 pub struct Sessions {
-    lock: Mutex<()>,
-}
-
-fn roster_path(ws: &Path) -> PathBuf {
-    thread::bantou_dir(ws).join("sessions.json")
-}
-
-fn read_roster(ws: &Path) -> Vec<Session> {
-    std::fs::read_to_string(roster_path(ws))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
-}
-
-fn write_roster(ws: &Path, list: &[Session]) -> CmdResult<()> {
-    std::fs::create_dir_all(thread::bantou_dir(ws))?;
-    std::fs::write(roster_path(ws), serde_json::to_vec_pretty(list).map_err(CommandError::other)?)?;
-    Ok(())
+    list: Mutex<Vec<Session>>,
 }
 
 impl Sessions {
-    pub fn list(&self, ws: &Path) -> Vec<Session> {
-        let _g = self.lock.lock().unwrap();
-        read_roster(ws)
+    pub fn list(&self) -> Vec<Session> {
+        self.list.lock().unwrap().clone()
     }
-    fn add(&self, ws: &Path, s: Session) -> CmdResult<()> {
-        let _g = self.lock.lock().unwrap();
-        let mut list = read_roster(ws);
-        if !list.iter().any(|x| x.name == s.name) {
-            list.push(s);
-            write_roster(ws, &list)?;
-        }
-        Ok(())
-    }
-    fn remove(&self, ws: &Path, name: &str) -> CmdResult<()> {
-        let _g = self.lock.lock().unwrap();
-        let mut list = read_roster(ws);
-        list.retain(|s| s.name != name);
-        write_roster(ws, &list)
-    }
-}
-
-/// Absence of the roster sessions of one workspace, in memory only.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Absence {
-    /// Time of the previous successful observation.
-    observed_at: Option<OffsetDateTime>,
-    /// Session name → since when it has been continuously absent.
-    since: HashMap<String, OffsetDateTime>,
-}
-
-/// A session is present when a live peer has its name, or its hostname and
-/// cwd (the peer name is lost on reconnect).
-fn present(s: &Session, live: &[Peer]) -> bool {
-    live.iter().any(|p| p.name == s.name || (p.hostname == s.hostname && p.cwd == s.cwd))
-}
-
-/// One observation of the peer list at `now`; `live` is `None` when it could
-/// not be fetched. Returns the names of the sessions to remove and the next
-/// state. Absence is counted between continuous observations only.
-pub fn observe(
-    roster: &[Session],
-    live: Option<&[Peer]>,
-    prev: &Absence,
-    now: OffsetDateTime,
-) -> (Vec<String>, Absence) {
-    let Some(live) = live else {
-        return (Vec::new(), Absence::default());
-    };
-    let continuous = prev.observed_at.is_some_and(|at| now - at <= OBSERVE_MAX_GAP);
-    let mut next = Absence { observed_at: Some(now), since: HashMap::new() };
-    let mut gone = Vec::new();
-    for s in roster.iter().filter(|s| !present(s, live)) {
-        let since = match prev.since.get(&s.name) {
-            Some(at) if continuous => *at,
-            _ => now,
-        };
-        if now - since >= SESSION_ABSENT_TTL {
-            gone.push(s.name.clone());
-        } else {
-            next.since.insert(s.name.clone(), since);
+    /// Add (or replace by name).
+    fn add(&self, s: Session) {
+        let mut l = self.list.lock().unwrap();
+        match l.iter_mut().find(|x| x.name == s.name) {
+            Some(x) => *x = s,
+            None => l.push(s),
         }
     }
-    (gone, next)
-}
-
-/// Observe the peer list of the broker at `url` once and drop the sessions of
-/// `ws` that have been gone for `SESSION_ABSENT_TTL`. Roster only: task md
-/// files stay and nothing is sent to the session. `me` is bantou's own peer id.
-pub(crate) async fn drop_absent<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
-    ws: &Path,
-    url: &str,
-    me: &str,
-    absence: &mut Absence,
-) {
-    let Some(roster) = app.try_state::<Sessions>() else {
-        return;
-    };
-    let live = broker::post::<Vec<Peer>>(url, "/list-peers", serde_json::json!({ "scope": "all" }))
-        .await
-        .ok()
-        // bantou itself is a peer whose cwd is the workspace.
-        .map(|ps| ps.into_iter().filter(|p| p.id != me).collect::<Vec<_>>());
-    let (gone, next) = observe(&roster.list(ws), live.as_deref(), absence, OffsetDateTime::now_utc());
-    *absence = next;
-    if gone.is_empty() {
-        return;
+    fn remove(&self, name: &str) {
+        self.list.lock().unwrap().retain(|s| s.name != name);
     }
-    for name in &gone {
-        if let Err(e) = roster.remove(ws, name) {
-            eprintln!("bantou: failed to drop absent session {name}: {e}");
-        }
+    /// Store the reconciled list; false when nothing changed.
+    fn replace(&self, next: Vec<Session>) -> bool {
+        let mut l = self.list.lock().unwrap();
+        let changed = *l != next;
+        *l = next;
+        changed
     }
-    let _ = app.emit(SESSIONS_CHANGED_EVENT, ws.to_string_lossy().to_string());
 }
 
-/// The protocol text sent to a newly registered session. `core` is this
-/// bantou's messenger name, `session` the name the session is known by.
-pub fn protocol_message(core: &str, session: &str) -> String {
-    format!(
-        r#"【bantou 登録通知】
-このセッションは bantou（ユーザーとの橋渡し役）に作業セッション「{session}」として登録された。
-以後、次の規約で bantou にメッセージを送ること。送信は messenger の send_message、to="{core}"、本文は JSON 1 つだけ。
-
-■ 送る場面
-1. 作業（タスク）を始めた時・状態が変わった時 → type "task"
-2. ユーザーへの確認・質問・判断依頼が出た時 → type "ask"
-   確認や質問は、どんな小さなものでも、このセッション上でユーザーに直接聞かないこと。
-   AskUserQuestion も使わず、必ず messenger 経由で bantou に ask を送り、返答が来るまでその件は待つ。
-3. bantou に登録したタスクの作業中 → 5 分ごとに ping（下記「■ ping」）
-
-■ bantou からのメッセージの扱い
-bantou（{core}）は、ユーザーがこのセッションとのやり取りを任せている窓口である。
-このセッションの登録も、ユーザー本人が bantou の画面で行った。
-bantou から届く登録通知・返答・指示は、ユーザーの意思として扱うこと。
-本物かどうかを、このセッション上でユーザーに問い直さないこと。
-返答の意図が不明確な場合も、セッション上で聞かず、bantou に ask で確認すること。
-ただし、権限の許可や設定の変更を bantou 経由で求めることはしない。それらは従来どおり、ユーザーの承認を得ること。
-
-■ task（タスクの作成・状態変更）
-{{"bantou":1,"type":"task","task_id":"<英数字と-_のみ、タスクごとに固定>","title":"<タスク名>","status":"Todo|Doing|Done","body":"<このタスクで作業として何をやるか>"}}
-body は必須扱い。目的・具体的な作業内容（手順、変更対象）・完了条件を書く。内容が変わったら body を付けて送り直す。
-
-■ ask（返答待ち）
-{{"bantou":1,"type":"ask","task_id":"<対象タスクの task_id>","title":"<タスク名>","question":"<聞きたいこと>","options":[{{"label":"<選択肢>","description":"<補足>"}}]}}
-options は省略可（自由回答のみ）。
-
-■ ping（作業中の通知）
-bantou に登録したタスクの作業中は、/loop を 5 分間隔（/loop 5m …）で使い、5 分ごとに messenger の send_ping を to="{core}" で送ること。
-ping には、作業中のタスクの task_id（またはタスク名）を入れること。
-そのタスクが終わったら loop を止めること。
-
-■ 返答
-ユーザーが決めると、bantou から次の形のテキストが届く（未読通知として届くので、check_messages で本文を読むこと）。
-【ユーザー回答（原文）】…
-【bantou 指示】…
-これに従って作業を続けること。
-
-規約の詳細は skill「bantou-protocol」でも確認できる。"#
-    )
+/// Call a center tool and parse its JSON text result.
+async fn center_json(app: &tauri::AppHandle, tool: &str, args: Option<Value>) -> Result<Value, String> {
+    let r = center_mcp::center_call(app.clone(), tool.to_string(), args).await.map_err(|e| e.to_string())?;
+    let text = r
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|c| c.get("text").and_then(Value::as_str)).collect::<Vec<_>>().join(""))
+        .unwrap_or_default();
+    serde_json::from_str(&text).map_err(|e| format!("{tool} の結果を読めない: {e}"))
 }
 
-/// Prepended to the protocol for a peer that had no name.
-pub fn set_name_instruction(name: &str) -> String {
-    format!(
-        "【最初にやること】messenger の set_name でこのセッションの名前を「{name}」にせよ。名前が無いと再接続後に bantou から届かなくなる。\n\n"
-    )
+async fn fetch_list(app: &tauri::AppHandle) -> Result<Vec<CenterEntry>, String> {
+    let v = center_json(app, "session_list", None).await?;
+    serde_json::from_value(v).map_err(|e| format!("session_list の結果を読めない: {e}"))
+}
+
+fn notify(app: &tauri::AppHandle) {
+    let _ = app.emit(SESSIONS_CHANGED_EVENT, ());
 }
 
 #[tauri::command]
-pub fn list_sessions(
-    window: tauri::WebviewWindow,
-    state: tauri::State<'_, AppState>,
+pub fn list_sessions(roster: tauri::State<'_, Sessions>) -> Vec<Session> {
+    roster.list()
+}
+
+/// Re-read the center's `session_list` and reconcile. With nothing added it asks nobody.
+#[tauri::command]
+pub async fn refresh_sessions(app: tauri::AppHandle, roster: tauri::State<'_, Sessions>) -> CmdResult<Vec<Session>> {
+    let added = roster.list();
+    if added.is_empty() {
+        return Ok(added);
+    }
+    let listing = fetch_list(&app).await;
+    // Snapshot again: sessions may have been added while the center was being asked.
+    let added = roster.list();
+    let next = reconcile(&added, listing.as_ref().map(|l| l.as_slice()).map_err(|e| e.as_str()));
+    if roster.replace(next.clone()) {
+        notify(&app);
+    }
+    Ok(next)
+}
+
+/// Add sessions of the center's list by name.
+#[tauri::command]
+pub async fn add_sessions(
+    app: tauri::AppHandle,
     roster: tauri::State<'_, Sessions>,
+    names: Vec<String>,
 ) -> CmdResult<Vec<Session>> {
-    let ws = state.require_workspace(window.label())?;
-    Ok(roster.list(&ws))
-}
-
-/// Connected peers on the broker, as-is.
-#[tauri::command]
-pub async fn list_peers(
-    window: tauri::WebviewWindow,
-    state: tauri::State<'_, AppState>,
-    brokers: tauri::State<'_, Brokers>,
-) -> CmdResult<Vec<Peer>> {
-    let ws = state.require_workspace(window.label())?;
-    let url = brokers.url(&ws).ok_or_else(|| CommandError::other("broker 未接続"))?;
-    broker::post::<Vec<Peer>>(&url, "/list-peers", serde_json::json!({ "scope": "all" }))
-        .await
-        .map_err(CommandError::other)
-}
-
-#[derive(Serialize)]
-pub struct RegisterResult {
-    pub name: String,
-    pub delivered: bool,
-    pub error: Option<String>,
-}
-
-/// Register peers by name and send each the protocol.
-#[tauri::command]
-pub async fn register_sessions(
-    window: tauri::WebviewWindow,
-    state: tauri::State<'_, AppState>,
-    brokers: tauri::State<'_, Brokers>,
-    roster: tauri::State<'_, Sessions>,
-    peers: Vec<Peer>,
-) -> CmdResult<Vec<RegisterResult>> {
-    let ws = state.require_workspace(window.label())?;
-    let url = brokers.url(&ws).ok_or_else(|| CommandError::other("broker 未接続"))?;
-    let me = brokers
-        .peer_id(&ws)
-        .ok_or_else(|| CommandError::other("broker 未接続"))?;
-    let mut results = Vec::new();
-    for p in peers {
-        let assigned = p.name.is_empty();
-        let name = if assigned {
-            match p.assign_name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
-                Some(n) => n.to_string(),
-                None => {
-                    results.push(RegisterResult {
-                        name: p.id,
-                        delivered: false,
-                        error: Some("名前の無い peer にはセッション名の入力が必要".into()),
-                    });
-                    continue;
-                }
-            }
-        } else {
-            p.name.clone()
-        };
-        roster.add(
-            &ws,
-            Session { name: name.clone(), hostname: p.hostname.clone(), cwd: p.cwd.clone(), registered_at: thread::now() },
-        )?;
-        // Send to the id picked in the list: names can be duplicated.
-        let mut text = protocol_message(broker::CORE_NAME, &name);
-        if assigned {
-            text = format!("{}{text}", set_name_instruction(&name));
-        }
-        let r = broker::send(&url, &me, &p.id, &text).await;
-        results.push(RegisterResult {
-            name,
-            delivered: r.is_ok(),
-            error: r.err(),
-        });
+    let list = fetch_list(&app).await.map_err(CommandError::Other)?;
+    for n in &names {
+        let e = list
+            .iter()
+            .find(|e| &e.name == n)
+            .ok_or_else(|| CommandError::other(format!("center の一覧に無い: {n}")))?;
+        roster.add(Session::from_entry(e, crate::thread::now()));
     }
-    Ok(results)
+    notify(&app);
+    Ok(roster.list())
+}
+
+/// Create a new session on the center (`session_create`) and add it.
+#[tauri::command]
+pub async fn create_session(
+    app: tauri::AppHandle,
+    roster: tauri::State<'_, Sessions>,
+    name: String,
+) -> CmdResult<Session> {
+    let v = center_json(&app, "session_create", Some(serde_json::json!({ "name": name.trim() })))
+        .await
+        .map_err(CommandError::Other)?;
+    let e: CenterEntry =
+        serde_json::from_value(v).map_err(|e| CommandError::other(format!("session_create の結果を読めない: {e}")))?;
+    let s = Session::from_entry(&e, crate::thread::now());
+    roster.add(s.clone());
+    notify(&app);
+    Ok(s)
+}
+
+#[tauri::command]
+pub fn unregister_session(app: tauri::AppHandle, roster: tauri::State<'_, Sessions>, name: String) {
+    roster.remove(&name);
+    notify(&app);
 }
 
 /// Instruction asking a session to add (and start) a task the user typed in bantou.
@@ -345,29 +243,9 @@ pub async fn instruct_add_task(
         .map_err(CommandError::other)
 }
 
-#[tauri::command]
-pub fn unregister_session(
-    window: tauri::WebviewWindow,
-    state: tauri::State<'_, AppState>,
-    roster: tauri::State<'_, Sessions>,
-    name: String,
-) -> CmdResult<()> {
-    let ws = state.require_workspace(window.label())?;
-    roster.remove(&ws, &name)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn protocol_message_names_core_and_session() {
-        let m = protocol_message("bantou-core", "careery");
-        assert!(m.contains(r#"to="bantou-core""#));
-        assert!(m.contains("「careery」"));
-        assert!(m.contains(r#"{"bantou":1,"type":"ask""#));
-        assert!(m.contains(r#"/loop 5m …）で使い、5 分ごとに messenger の send_ping を to="bantou-core" で送ること"#));
-    }
 
     #[test]
     fn add_task_instruction_carries_title_and_body() {
@@ -377,131 +255,112 @@ mod tests {
         assert!(m.ends_with("\n\nタスク名: 列マッピング\n作業内容:\n手順1\n手順2"));
     }
 
-    #[test]
-    fn set_name_instruction_names_target() {
-        assert!(set_name_instruction("inet250").contains("「inet250」"));
-    }
-
-    #[test]
-    fn roster_is_per_workspace_and_deduplicated() {
-        let r = Sessions::default();
-        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-        let s = |n: &str| Session { name: n.into(), hostname: String::new(), cwd: String::new(), registered_at: String::new() };
-        r.add(a.path(), s("x")).unwrap();
-        r.add(a.path(), s("x")).unwrap();
-        r.add(b.path(), s("y")).unwrap();
-        assert_eq!(r.list(a.path()).len(), 1);
-        assert_eq!(r.list(b.path())[0].name, "y");
-        // nothing inside the workspace itself
-        assert_eq!(std::fs::read_dir(a.path()).unwrap().count(), 0);
-        r.remove(a.path(), "x").unwrap();
-        assert!(r.list(a.path()).is_empty());
-    }
-
-    fn sess(name: &str) -> Session {
-        Session { name: name.into(), hostname: "mac".into(), cwd: format!("/w/{name}"), registered_at: String::new() }
-    }
-
-    fn peer(name: &str, hostname: &str, cwd: &str) -> Peer {
-        Peer {
-            id: format!("id-{name}-{cwd}"),
+    fn entry(name: &str, state: &str) -> CenterEntry {
+        CenterEntry {
             name: name.into(),
-            hostname: hostname.into(),
-            cwd: cwd.into(),
-            tty: None,
-            summary: String::new(),
-            last_seen: String::new(),
-            assign_name: None,
+            state: Some(state.into()),
+            session_url: Some(format!("https://claude.ai/code/{name}")),
+            source: Some("session".into()),
+            last_error: None,
         }
     }
 
-    fn at(secs: i64) -> OffsetDateTime {
-        OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(secs)
-    }
-
-    /// Observe every 30 s from `from` to `to` (seconds); returns every name removed on the way.
-    fn watch(roster: &[Session], live: &[Peer], state: &mut Absence, from: i64, to: i64) -> Vec<String> {
-        let mut gone = Vec::new();
-        for t in (from..=to).step_by(30) {
-            let (g, next) = observe(roster, Some(live), state, at(t));
-            *state = next;
-            gone.extend(g);
-        }
-        gone
+    fn added(name: &str) -> Session {
+        Session::from_entry(&entry(name, "starting"), "t0".into())
     }
 
     #[test]
-    fn present_by_host_and_cwd_without_name() {
-        let mut st = Absence::default();
-        let live = [peer("", "mac", "/w/careery")];
-        assert!(watch(&[sess("careery")], &live, &mut st, 0, 900).is_empty());
-        assert!(st.since.is_empty());
-        // same cwd on another host is someone else
-        let other = [peer("", "mac200", "/w/careery")];
-        watch(&[sess("careery")], &other, &mut st, 930, 930);
-        assert_eq!(st.since.get("careery"), Some(&at(930)));
+    fn listed_session_is_kept_and_its_state_updated() {
+        let next = reconcile(&[added("a")], Ok(&[entry("a", "connected")]));
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].link, Link::Listed);
+        assert_eq!(next[0].state.as_deref(), Some("connected"));
+        assert_eq!(next[0].added_at, "t0");
     }
 
     #[test]
-    fn present_by_name() {
-        let mut st = Absence::default();
-        let live = [peer("careery", "mac200", "/elsewhere")];
-        assert!(watch(&[sess("careery")], &live, &mut st, 0, 900).is_empty());
-        assert!(st.since.is_empty());
+    fn session_missing_from_the_list_is_lost_and_kept() {
+        let next = reconcile(&[added("a"), added("b")], Ok(&[entry("b", "connected")]));
+        assert_eq!(next[0].name, "a");
+        assert_eq!(next[0].link, Link::Lost);
+        assert_eq!(next[0].reason, None);
+        // the last known state stays visible
+        assert_eq!(next[0].state.as_deref(), Some("starting"));
+        assert_eq!(next[1].link, Link::Listed);
     }
 
     #[test]
-    fn absent_below_ttl_is_kept() {
-        let mut st = Absence::default();
-        assert!(watch(&[sess("careery")], &[], &mut st, 0, 570).is_empty());
-        assert_eq!(st.since.get("careery"), Some(&at(0)));
+    fn empty_list_loses_everything_but_unreachable_does_not() {
+        let roster = [added("a")];
+        assert_eq!(reconcile(&roster, Ok(&[]))[0].link, Link::Lost);
+        let next = reconcile(&roster, Err("接続できない"));
+        assert_eq!(next[0].link, Link::Unreachable);
+        assert_eq!(next[0].reason.as_deref(), Some("接続できない"));
+        assert_eq!(next[0].state.as_deref(), Some("starting"));
     }
 
     #[test]
-    fn absent_for_ttl_is_removed() {
-        let mut st = Absence::default();
-        let roster = [sess("careery"), sess("stroke-board")];
-        let live = [peer("stroke-board", "mac", "/w/stroke-board")];
-        assert!(watch(&roster, &live, &mut st, 0, 570).is_empty());
-        let (gone, next) = observe(&roster, Some(&live), &st, at(600));
-        assert_eq!(gone, vec!["careery".to_string()]);
-        assert!(next.since.is_empty());
+    fn unreachable_then_answered_decides_between_listed_and_lost() {
+        let unreachable = reconcile(&[added("a"), added("b")], Err("x"));
+        let next = reconcile(&unreachable, Ok(&[entry("a", "connected")]));
+        assert_eq!(next[0].link, Link::Listed);
+        assert_eq!(next[0].reason, None);
+        assert_eq!(next[1].link, Link::Lost);
     }
 
     #[test]
-    fn seen_again_resets() {
-        let mut st = Absence::default();
-        let roster = [sess("careery")];
-        assert!(watch(&roster, &[], &mut st, 0, 300).is_empty());
-        assert!(watch(&roster, &[peer("careery", "mac", "/w/careery")], &mut st, 330, 330).is_empty());
-        assert!(st.since.is_empty());
-        assert!(watch(&roster, &[], &mut st, 360, 930).is_empty());
-        assert_eq!(watch(&roster, &[], &mut st, 960, 960), vec!["careery".to_string()]);
+    fn lost_then_listed_again_is_listed() {
+        let lost = reconcile(&[added("a")], Ok(&[]));
+        let next = reconcile(&lost, Ok(&[entry("a", "connected")]));
+        assert_eq!(next[0].link, Link::Listed);
     }
 
     #[test]
-    fn observation_gap_resets() {
-        let mut st = Absence::default();
-        let roster = [sess("careery")];
-        assert!(watch(&roster, &[], &mut st, 0, 570).is_empty());
-        // machine asleep for an hour: the time in between was not observed
-        assert!(watch(&roster, &[], &mut st, 4170, 4170).is_empty());
-        assert_eq!(st.since.get("careery"), Some(&at(4170)));
-        assert!(watch(&roster, &[], &mut st, 4200, 4740).is_empty());
-        assert_eq!(watch(&roster, &[], &mut st, 4770, 4770), vec!["careery".to_string()]);
+    fn lost_stays_lost_while_unreachable_overrides_it_until_answered() {
+        let lost = reconcile(&[added("a")], Ok(&[]));
+        let unreachable = reconcile(&lost, Err("x"));
+        assert_eq!(unreachable[0].link, Link::Unreachable);
+        // the answer after that says it is still not there
+        assert_eq!(reconcile(&unreachable, Ok(&[]))[0].link, Link::Lost);
     }
 
     #[test]
-    fn failed_observation_resets() {
-        let mut st = Absence::default();
-        let roster = [sess("careery")];
-        assert!(watch(&roster, &[], &mut st, 0, 570).is_empty());
-        let (gone, next) = observe(&roster, None, &st, at(600));
-        assert!(gone.is_empty());
-        assert_eq!(next, Absence::default());
-        st = next;
-        assert!(watch(&roster, &[], &mut st, 630, 1200).is_empty());
-        assert_eq!(st.since.get("careery"), Some(&at(630)));
-        assert_eq!(watch(&roster, &[], &mut st, 1230, 1230), vec!["careery".to_string()]);
+    fn reconcile_without_roster_is_empty() {
+        assert!(reconcile(&[], Ok(&[entry("a", "connected")])).is_empty());
+        assert!(reconcile(&[], Err("x")).is_empty());
+    }
+
+    #[test]
+    fn center_entry_reads_the_center_json() {
+        let e: CenterEntry = serde_json::from_str(
+            r#"{"name":"pm-a","path":"/p","state":"connected","pid":1,"sessionUrl":"https://u","startedAt":null,"source":"session","lastError":"x"}"#,
+        )
+        .unwrap();
+        assert_eq!(e.session_url.as_deref(), Some("https://u"));
+        assert_eq!(e.last_error.as_deref(), Some("x"));
+        let bare: CenterEntry = serde_json::from_str(r#"{"name":"a"}"#).unwrap();
+        assert_eq!(bare.state, None);
+    }
+
+    #[test]
+    fn session_serializes_for_the_frontend() {
+        let v = serde_json::to_value(reconcile(&[added("a")], Ok(&[]))).unwrap();
+        assert_eq!(v[0]["link"], "lost");
+        assert_eq!(v[0]["sessionUrl"], "https://claude.ai/code/a");
+        assert_eq!(v[0]["addedAt"], "t0");
+    }
+
+    #[test]
+    fn roster_adds_replaces_removes_and_reports_changes() {
+        let r = Sessions::default();
+        r.add(added("a"));
+        r.add(Session::from_entry(&entry("a", "connected"), "t1".into()));
+        assert_eq!(r.list().len(), 1);
+        assert_eq!(r.list()[0].state.as_deref(), Some("connected"));
+        let same = r.list();
+        assert!(!r.replace(same));
+        assert!(r.replace(reconcile(&r.list(), Ok(&[]))));
+        r.remove("a");
+        assert!(r.list().is_empty());
     }
 }

@@ -37,6 +37,8 @@ tokio = { version = "=1.52.3", features = ["sync", "time", "rt", "fs", "io-util"
 time = { version = "=0.3.47", features = ["formatting"] }
 # The broker (agent-messenger) is reached over plain HTTP on the LAN.
 reqwest = { version = "=0.13.4", default-features = false, features = ["json"] }
+# Interface-change watcher (netlink / route socket / NotifyIpInterfaceChange) for the session refresh.
+netwatcher = "=0.8.0"
 # Directed broadcast addresses for the messenger UDP discovery probe.
 if-addrs = "=0.15.0"
 
@@ -53,6 +55,7 @@ tauri = { version = "=2.11.2", features = ["test"] }
 objc2-app-kit = { version = "=0.3.2", features = [
   "NSColor",
   "NSWindow",
+  "NSWorkspace",
   "NSView",
   "NSButton",
   "NSControl",
@@ -67,3 +70,7 @@ objc2-foundation = { version = "=0.3.2", features = [
 ] }
 objc2 = "=0.6.4"
 block2 = "=0.6.2"
+
+# Resume-from-sleep notification (`os_events.rs`). Same version as already locked via tauri.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_System_Power", "Win32_UI_WindowsAndMessaging"] }
