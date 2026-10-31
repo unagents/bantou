@@ -52,8 +52,6 @@ const ERROR_TAIL_LINES: usize = 5;
 
 /// Default workspace (`~` is the home directory, resolved when the config is written).
 const DEFAULT_WORKSPACE: &str = "~/.bantou";
-/// Name of the single project handed to the center for the workspace.
-const WORKSPACE_PROJECT: &str = "workspace";
 
 /// A center on another host, taken from a pasted connection snippet.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -73,7 +71,7 @@ pub struct CenterSettings {
     /// The IP the connection settings (mcp.json / claude mcp add) name as the URL host. Not what the
     /// center listens on (always `LISTEN_BIND`). Empty: nothing saved, the default IP applies.
     pub bind: String,
-    /// The one workspace directory handed to the center as its single project. `~` / `~/x` or absolute.
+    /// The one workspace directory handed to the center as its `workspace` (the parent of `<workspace>/<name>` for `session_create` without a path). `~` / `~/x` or absolute.
     pub workspace: String,
     /// Absolute path of the claude executable. Unset: the center resolves it via a login shell.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -166,19 +164,17 @@ pub fn resolve_workspace(workspace: &str, home: &Path) -> PathBuf {
     }
 }
 
-/// Config file for the center: the workspace as its single project. It autostarts: remote-control is
-/// started by the center when the desktop starts it. spawn / permissionMode are left to the center's defaults.
+/// Config file for the center: no projects (no session is started at launch). The workspace is passed
+/// as `workspace`, which the center uses only as the default place for `session_create` without a path.
 pub fn build_config(s: &CenterSettings, home: &Path) -> serde_json::Value {
-    let projects = vec![serde_json::json!({
-        "name": WORKSPACE_PROJECT,
-        "path": resolve_workspace(&s.workspace, home).to_string_lossy(),
-        "autostart": true,
-    })];
     let mut remote_control = serde_json::json!({});
     if let Some(v) = &s.claude_path {
         remote_control["claude"] = v.clone().into();
     }
-    let mut cfg = serde_json::json!({ "projects": projects, "remoteControl": remote_control });
+    let mut cfg = serde_json::json!({
+        "workspace": resolve_workspace(&s.workspace, home).to_string_lossy(),
+        "remoteControl": remote_control,
+    });
     if !s.token.is_empty() {
         cfg["token"] = s.token.clone().into();
     }
@@ -887,19 +883,19 @@ mod tests {
     }
 
     #[test]
-    fn config_json_has_the_workspace_as_single_project() {
+    fn config_json_has_the_workspace_and_no_projects() {
         let s = CenterSettings { workspace: "~/.bantou".into(), ..Default::default() };
         assert_eq!(
             build_config(&s, Path::new("/home/u")),
             serde_json::json!({
-                "projects": [
-                    { "name": "workspace", "path": "/home/u/.bantou", "autostart": true },
-                ],
+                "workspace": "/home/u/.bantou",
                 "remoteControl": {},
             })
         );
         let s = CenterSettings { workspace: "/w/x".into(), ..Default::default() };
-        assert_eq!(build_config(&s, Path::new("/home/u"))["projects"].as_array().unwrap().len(), 1);
+        let v = build_config(&s, Path::new("/home/u"));
+        assert!(v.get("projects").is_none());
+        assert_eq!(v["workspace"], "/w/x");
     }
 
     fn tmp_dir(tag: &str) -> PathBuf {
@@ -916,8 +912,8 @@ mod tests {
         write_config(&s, &cfg, &home).unwrap();
         assert!(home.join(".bantou").is_dir());
         let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
-        assert_eq!(v["projects"].as_array().unwrap().len(), 1);
-        assert_eq!(v["projects"][0]["path"], home.join(".bantou").to_string_lossy().as_ref());
+        assert!(v.get("projects").is_none());
+        assert_eq!(v["workspace"], home.join(".bantou").to_string_lossy().as_ref());
         // existing directory (with content) is left alone, rewrite is the same
         std::fs::write(home.join(".bantou/keep"), "x").unwrap();
         write_config(&s, &cfg, &home).unwrap();

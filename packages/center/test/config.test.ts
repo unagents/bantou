@@ -24,6 +24,12 @@ test("最小 config に既定値が入る", () => {
 test("空オブジェクトでも通る", () => {
   const c = parseConfig({}, "/x/c.json");
   assert.deepEqual(c.projects, []);
+  assert.equal(c.workspace, undefined);
+});
+
+test("workspace は絶対パスの任意項目。相対パスは拒否", () => {
+  assert.equal(parseConfig({ workspace: "/w/x" }, "/x/c.json").workspace, "/w/x");
+  assert.throws(() => parseConfig({ workspace: "rel/x" }, "/x/c.json"), /workspace/);
 });
 
 test("全項目指定", () => {

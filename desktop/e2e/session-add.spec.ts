@@ -62,8 +62,7 @@ test.describe("center on", () => {
     await page.getByTestId("open-add-session").click();
     const dlg = page.getByTestId("add-dialog");
     await expect(dlg.locator("[data-testid=add-row][data-name=webtool]")).toBeVisible();
-    // the center's own config session is listed too; the ones already added are not
-    await expect(dlg.locator("[data-testid=add-row][data-name=workspace]")).toBeVisible();
+    // the ones already added are not listed
     await expect(dlg.locator("[data-testid=add-row][data-name=careery]")).toHaveCount(0);
     await expect(dlg.getByTestId("add-submit")).toBeDisabled();
     await dlg.locator("[data-testid=add-row][data-name=webtool]").click();
@@ -86,10 +85,11 @@ test.describe("center on", () => {
 
   test("a name already used or invalid cannot be created", async ({ page }) => {
     await page.goto("/");
+    await centerHas(page, "center-only");
     await page.getByTestId("open-add-session").click();
     const dlg = page.getByTestId("add-dialog");
     // added already / only on the center
-    for (const taken of ["careery", "workspace"]) {
+    for (const taken of ["careery", "center-only"]) {
       await dlg.getByTestId("add-name").fill(taken);
       await expect(dlg).toContainText("既に使われている名前");
       await expect(dlg.getByTestId("add-create")).toBeDisabled();

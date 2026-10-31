@@ -45,7 +45,7 @@ let config: Config;
 const project = (name: string, path: string): ProjectConfig => ({ name, path, spawn: "same-dir", permissionMode: "auto", autostart: true });
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "center-sess-"));
-  config = parseConfig({ projects: [{ name: "workspace", path: join(dir, "ws") }] }, join(dir, "c.json"));
+  config = parseConfig({ workspace: join(dir, "ws"), projects: [{ name: "cfg", path: join(dir, "cfgproj") }] }, join(dir, "c.json"));
 });
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
@@ -70,6 +70,7 @@ test("create: path 省略は <workspace>/<name> を作り、起動して保存�
   assert.equal(saved.length, 1);
   assert.deepEqual({ name: saved[0].name, path: saved[0].path, permissionMode: saved[0].permissionMode }, { name: "pm1", path: r.path, permissionMode: "auto" });
   assert.equal(config.projects.length, 1);
+  assert.deepEqual(config.projects.map((p) => p.name), ["cfg"]);
 });
 
 test("create: path と permissionMode を指定できる。相対 path は拒否", async () => {
@@ -80,17 +81,17 @@ test("create: path と permissionMode を指定できる。相対 path は拒否
   await assert.rejects(mgr.create({ name: "b", path: "rel/x" }), /絶対パス/);
 });
 
-test("create: name の重複・既存 project 名（workspace）との衝突・path の重複・不正 name を拒否", async () => {
+test("create: name の重複・既存 project 名（cfg）との衝突・path の重複・不正 name を拒否", async () => {
   const { mgr } = setup();
   await mgr.create({ name: "pm1" });
   await assert.rejects(mgr.create({ name: "pm1", path: join(dir, "o") }), /name が既に使われている/);
-  await assert.rejects(mgr.create({ name: "workspace", path: join(dir, "o2") }), /name が既に使われている/);
+  await assert.rejects(mgr.create({ name: "cfg", path: join(dir, "o2") }), /name が既に使われている/);
   await assert.rejects(mgr.create({ name: "pm2", path: join(dir, "ws", "pm1") }), /path が既に使われている/);
-  await assert.rejects(mgr.create({ name: "pm3", path: join(dir, "ws") }), /path が既に使われている.*workspace/);
+  await assert.rejects(mgr.create({ name: "pm3", path: join(dir, "cfgproj") }), /path が既に使われている.*cfg/);
   await assert.rejects(mgr.create({ name: "a b" }), /英数字/);
 });
 
-test("create: workspace project が無く path も無ければ拒否", async () => {
+test("create: config に workspace が無く path も無ければ拒否", async () => {
   config = parseConfig({}, join(dir, "c.json"));
   const { mgr } = setup();
   await assert.rejects(mgr.create({ name: "x" }), /workspace/);
@@ -105,19 +106,19 @@ test("create: 同時の同名 create は片方だけ成功する", async () => {
 test("delete: session だけ消せる。config 由来・未定義は拒否。保存からも外れ path は残る", async () => {
   const { mgr, calls } = setup();
   const r = await mgr.create({ name: "pm1" });
-  await assert.rejects(mgr.delete("workspace"), /config 由来/);
+  await assert.rejects(mgr.delete("cfg"), /config 由来/);
   await assert.rejects(mgr.delete("nope"), /未定義/);
   assert.deepEqual(await mgr.delete("pm1"), { name: "pm1", deleted: true });
   assert.ok(calls.includes("remove:pm1"));
   assert.deepEqual(JSON.parse(await readFile(join(dir, "sessions.json"), "utf8")), []);
   assert.ok((await stat(r.path)).isDirectory());
-  assert.deepEqual(mgr.list().map((s) => s.name), ["workspace"]);
+  assert.deepEqual(mgr.list().map((s) => s.name), ["cfg"]);
 });
 
 test("list: config と session を source で区別して返す", async () => {
   const { mgr } = setup();
   await mgr.create({ name: "pm1" });
-  assert.deepEqual(mgr.list().map((s) => [s.name, s.source]), [["workspace", "config"], ["pm1", "session"]]);
+  assert.deepEqual(mgr.list().map((s) => [s.name, s.source]), [["cfg", "config"], ["pm1", "session"]]);
 });
 
 test("restore: 保存済みを add して resume 付きで start。壊れた項目は飛ばす", async () => {
@@ -130,7 +131,7 @@ test("restore: 保存済みを add して resume 付きで start。壊れた項�
   ]);
   await mgr.restore();
   assert.deepEqual(calls, ["add:pm1:auto", "start:pm1:resume", "add:pm3:plan", "start:pm3:resume"]);
-  assert.deepEqual(mgr.list().map((s) => s.name), ["workspace", "pm1", "pm3"]);
+  assert.deepEqual(mgr.list().map((s) => s.name), ["cfg", "pm1", "pm3"]);
   // 復帰した session は delete できる
   await mgr.delete("pm1");
 });

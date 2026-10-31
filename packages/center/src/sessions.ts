@@ -6,9 +6,6 @@ import type { Logger } from "./log.js";
 import type { RcStatus, RemoteControlSupervisor } from "./remote-control.js";
 import type { JsonListStore } from "./store.js";
 
-/** config の project 名のうち、desktop が渡す workspace 1 件の名前。session の既定 path の親。 */
-export const WORKSPACE_PROJECT = "workspace";
-
 export const SESSION_NAME = /^[A-Za-z0-9_-]+$/;
 
 /** center が自前で保存する session（config の projects には書かない）。 */
@@ -26,7 +23,7 @@ export interface SessionInfo {
   pid: number | null;
   sessionUrl: string | null;
   startedAt: string | null;
-  /** config = config の projects（desktop の workspace など）、session = session_create で作ったもの。 */
+  /** config = config の projects、session = session_create で作ったもの。 */
   source: "config" | "session";
   lastError?: string;
 }
@@ -110,9 +107,8 @@ export function createSessionManager(opts: {
         if (existing.some((s) => s.project === name)) throw new Error(`name が既に使われている: ${name}`);
         let path = input.path;
         if (path === undefined) {
-          const ws = config.projects.find((p) => p.name === WORKSPACE_PROJECT);
-          if (!ws) throw new Error(`path を省略できない: config に ${WORKSPACE_PROJECT} project が無い（path を指定する）`);
-          path = join(ws.path, name);
+          if (!config.workspace) throw new Error("path を省略できない: config に workspace が無い（path を指定する）");
+          path = join(config.workspace, name);
         }
         if (!isAbsolute(path)) throw new Error("path は絶対パスで指定する");
         path = resolve(path);

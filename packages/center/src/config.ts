@@ -72,6 +72,8 @@ export const configSchema = z
     remoteControl: remoteControlSchema.default(() => remoteControlSchema.parse({})),
     servers: z.array(serverSchema).default([]),
     logDir: absPath.optional(),
+    /** session_create で path を省いた時の置き場所の親（<workspace>/<name>）。起動時の session は立てない。 */
+    workspace: absPath.optional(),
     /** http transport の `/mcp` が要求する Bearer token。stdio では使わない。無い・短い時は http が起動しない。 */
     token: z.string().optional(),
   })
@@ -97,6 +99,8 @@ export interface Config {
   servers: ServerConfig[];
   /** remote-control の出力ログ置き場（絶対パス）。 */
   logDir: string;
+  /** session_create で path 省略時の親 dir（未設定なら undefined。その時 path は必須）。 */
+  workspace?: string;
   /** http transport の Bearer token（未設定なら undefined）。 */
   token?: string;
 }
@@ -110,10 +114,11 @@ export function parseConfig(data: unknown, configPath: string): Config {
       .join("; ");
     throw new Error(`config が不正: ${issues}`);
   }
-  const { logDir, token, ...rest } = r.data;
+  const { logDir, token, workspace, ...rest } = r.data;
   return {
     ...rest,
     logDir: logDir ?? join(dirname(resolve(configPath)), "center-logs"),
+    ...(workspace ? { workspace } : {}),
     ...(token ? { token } : {}),
   };
 }

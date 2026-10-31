@@ -64,6 +64,7 @@ stdout は MCP の通信路。ログは全て stderr に出る。
     { "name": "named", "peer": "my-bantou-server" }
   ],
   "logDir": "/home/me/.config/bantou/center-logs",
+  "workspace": "/home/me/.bantou",
   "token": "（http transport で必須。12 文字以上のランダム文字列）"
 }
 ```
@@ -88,6 +89,7 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 | `servers[].peer` | string | なし | server の peer 名または id。指定すると発見せずその名前へ送る（従来の名前指定）。省略すると `list_peers`（`protocol: "bantou"`）で自動発見する |
 | `servers[].timeoutMs` | 正の整数 | `2100000`（35 分） | 返信待ちの打ち切り |
 | `logDir` | 絶対パス | config と同じ場所の `center-logs/` | remote-control の出力ログ置き場 |
+| `workspace` | 絶対パス | なし | `session_create` で `path` 省略時の置き場所 `<workspace>/<name>` の親。session は起動時に立てない |
 | `token` | 12 文字以上の文字列 | なし | http transport の `/mcp` が要求する Bearer token。http では必須（無い・12 文字未満だと起動せずエラー終了。Cork の MCP Server が 12 文字未満の token を拒否し、保存値が不正なら作り直すのに合わせた）。stdio では使わない。desktop は sidecar 起動時に `center.json` へ書く |
 
 ### server の発見（protocol 方式）
@@ -143,7 +145,7 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 
 ### session（A）
 
-- `session_create`: `claude remote-control --name <name> --permission-mode <permissionMode>` を `path` で起動し、supervisor に動的に足す。`path` 省略時は config の project `workspace`（desktop が渡す 1 件）の path の下の `<name>`（無ければ作る）。`workspace` が無ければ `path` が必須。`permissionMode` の既定は `auto`。`name` の重複、既存 project 名（`workspace` を含む）との衝突、他の project / session と同じ path は拒否。接続（URL 取得）か早期終了まで最大 15 秒待って状態を返す（待ちきれなければ `starting`）。
+- `session_create`: `claude remote-control --name <name> --permission-mode <permissionMode>` を `path` で起動し、supervisor に動的に足す。`path` 省略時は config の `workspace` の下の `<name>`（無ければ作る）。`workspace` が無ければ `path` が必須。`permissionMode` の既定は `auto`。`name` の重複、既存 project 名との衝突、他の project / session と同じ path は拒否。接続（URL 取得）か早期終了まで最大 15 秒待って状態を返す（待ちきれなければ `starting`）。
 - `session_delete`: `session_create` で作ったものだけ。remote-control を停止（SIGTERM → `stopGraceMs` 後 SIGKILL）して監視と保存から外す。path は消さない。config 由来の project は拒否。
 - `session_list`: config の project と session の全部。`source` が `config` / `session`。
 - 保存: config と同じ dir の `sessions.json`（`name`, `path`, `permissionMode`, `createdAt`）。config の projects には書かない。center 起動時に復元して `--continue` で起動する。`--continue` で接続前に 30 秒以内に終了した場合（約 4 時間以内の記録が無い、など）は、素の起動へ fallback する（再起動回数は増やさない）。

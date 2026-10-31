@@ -65,7 +65,7 @@ export class MockBantou {
   /** `remote_list` result (center `RemoteView[]`). */
   centerRemotes: unknown[] = [];
   /** `session_list` result (center `SessionInfo[]`); `session_create` appends to it. */
-  centerSessions: Record<string, unknown>[] = [{ name: "workspace", path: "/mock/.bantou", state: "connected", pid: 1, sessionUrl: null, startedAt: null, source: "config" }];
+  centerSessions: Record<string, unknown>[] = [];
   /** Sessions added in bantou (memory on the Rust side). */
   added: Session[] = [];
   /** When set, `session_create` fails with this message (center error). */
