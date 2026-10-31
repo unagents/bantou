@@ -18,7 +18,6 @@ tauri-build = { version = "=2.6.2", features = [] }
 gray_matter = "=0.3.2"
 yaml-rust2 = "=0.10.4"
 tauri = { version = "=2.11.2", features = [] }
-tauri-plugin-opener = "=2.5.4"
 tauri-plugin-fs = { version = "=2.5.1", features = ["watch"] }
 tauri-plugin-store = "=2.4.3"
 # 2.3.6 is the newest release that accepts tauri 2.11 (2.4+ needs tauri ^2.12).

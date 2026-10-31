@@ -1,4 +1,3 @@
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 
@@ -25,9 +24,5 @@ export const downloadAndInstall = (
 ): Promise<void> => update.downloadAndInstall(onProgress);
 
 export const relaunchApp = (): Promise<void> => relaunch();
-
-/** Opens the GitHub release page of `version` in the default browser. */
-export const openReleaseNotes = (version: string): Promise<void> =>
-  openUrl(`https://github.com/unagents/bantou/releases/tag/v${version}`);
 
 export type { Update };

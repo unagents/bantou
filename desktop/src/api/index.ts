@@ -24,7 +24,6 @@ export {
   CHECK_FOR_UPDATES_EVENT,
   checkForUpdate,
   downloadAndInstall,
-  openReleaseNotes,
   relaunchApp,
   type DownloadProgress,
   type Update,

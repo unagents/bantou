@@ -33,7 +33,7 @@ brew install --cask bantou
 アプリ自身が更新する（`tauri-plugin-updater`、Cork と同じ仕組み）。cask には `auto_updates true` を付けてあるので、brew からの upgrade は不要。
 
 - 起動時に `main` ウィンドウだけが自動チェックする（更新が無い・失敗した時は何も出さない）。アプリメニューの「アップデートを確認...」は手動チェックで、最新なら「bantou は最新です」と出す。
-- 更新があると通知（トースト）に「再起動して更新」が出る。押すとダウンロード（進捗表示）、インストール、再起動まで進む。「リリースノート」は GitHub の release ページを開く。
+- 更新の操作はヘッダーの更新ボタン（cmux 方式）。通常は「アップデートを確認」で、押すと手動チェックする（最新なら「最新」が約2秒出て戻る）。更新があると「アップデートして再起動（v<ver>）」に変わり、押すとダウンロード（進捗表示）、インストール、再起動まで進む。失敗時は理由が出て、押すと再チェックする。
 - 確認先は `https://github.com/unagents/bantou/releases/latest/download/latest.json`。`src-tauri/tauri.conf.json` の `plugins.updater`（endpoints / pubkey）と `bundle.createUpdaterArtifacts: true` で設定。権限は `capabilities/default.json` の `updater:default` / `process:default`。
 - 更新物は署名必須。ビルド時に Mac の `~/.tauri/bantou-updater.key`（パスワード無し）を `TAURI_SIGNING_PRIVATE_KEY` で渡し、`bantou.app.tar.gz` と `.sig` を作る。`scripts/make-latest-json.sh <version> <sig-file>` で `latest.json`（`darwin-aarch64`）を作り、release に `.app.tar.gz` / `.sig` / `latest.json` を添付する。手順は `CLAUDE.md` の Release。
 - e2e は updater の command をモックしている（seed の `update` に version を入れると「更新あり」になる。`e2e/updater.spec.ts`）。

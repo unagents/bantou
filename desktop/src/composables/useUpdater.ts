@@ -86,13 +86,6 @@ export function useUpdater() {
     }
   }
 
-  function dismiss() {
-    // Ignore a stale close of an earlier toast (e.g. the one whose action started the install).
-    const k = state.value.kind;
-    if (k !== "available" && k !== "error") return;
-    state.value = { kind: "idle" };
-  }
-
   let unlisten: (() => void) | null = null;
   onMounted(async () => {
     const win = getCurrentWebviewWindow();
@@ -108,5 +101,5 @@ export function useUpdater() {
     if (latestTimer) clearTimeout(latestTimer);
   });
 
-  return { state, checkManually: () => runCheck("manual"), installAndRestart, dismiss };
+  return { state, checkManually: () => runCheck("manual"), installAndRestart };
 }
