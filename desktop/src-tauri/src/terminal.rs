@@ -27,6 +27,15 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// The center sends a keep-alive every 15 s; three missed ones mean the connection is dead.
 const READ_TIMEOUT: Duration = Duration::from_secs(45);
 const POST_TIMEOUT: Duration = Duration::from_secs(10);
+/// Longest response body written to the log.
+const LOG_BODY_CHARS: usize = 2000;
+
+/// A response body for the log: cut at `LOG_BODY_CHARS`, newlines folded so it stays one line.
+pub(crate) fn clip_body(body: &str) -> String {
+    let t: String = body.chars().take(LOG_BODY_CHARS).collect();
+    let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+    if t.is_empty() { "(empty body)".to_string() } else { t }
+}
 
 // -- SSE parsing -------------------------------------------------------------------------
 
@@ -183,8 +192,8 @@ pub enum StreamEnd {
     Closed,
     /// The caller's sink asked to stop.
     Stopped,
-    /// The center answered with this status (404: unknown session, 401: bad token): do not retry blindly.
-    Rejected(u16),
+    /// The center answered with this status and body (404: unknown session, 401: bad token): do not retry blindly.
+    Rejected(u16, String),
 }
 
 /// Open the output stream once and feed events to `on_event` until it ends. `on_event` returns
@@ -207,7 +216,8 @@ pub async fn stream_once<F: FnMut(SseEvent) -> bool>(
     let mut resp = req.send().await.map_err(|e| format!("{url} に接続できない: {e}"))?;
     let status = resp.status();
     if !status.is_success() {
-        return Ok(StreamEnd::Rejected(status.as_u16()));
+        let body = resp.text().await.unwrap_or_default();
+        return Ok(StreamEnd::Rejected(status.as_u16(), body));
     }
     let mut parser = SseParser::default();
     loop {
@@ -260,6 +270,11 @@ impl Terminals {
 }
 
 fn status(app: &tauri::AppHandle, session: &str, state: &'static str, message: Option<String>) {
+    match (state, &message) {
+        ("connected", _) => log::info!("terminal output [{session}]: connected"),
+        (_, Some(m)) => log::warn!("terminal output [{session}]: {state}: {m}"),
+        (_, None) => log::info!("terminal output [{session}]: {state}"),
+    }
     let _ = app.emit(STATUS_EVENT, StatusPayload { session: session.to_string(), state, message });
 }
 
@@ -287,7 +302,8 @@ async fn run_stream(app: tauri::AppHandle, client: reqwest::Client, session: Str
         }
         .await;
         match result {
-            Ok((StreamEnd::Rejected(code), _)) => {
+            Ok((StreamEnd::Rejected(code, body), _)) => {
+                log::warn!("terminal output [{session}]: center rejected the stream: HTTP {code}: {}", clip_body(&body));
                 status(&app, &session, "rejected", Some(format!("center が {code} を返した")));
                 return;
             }
@@ -329,12 +345,24 @@ async fn post(app: &tauri::AppHandle, session: &str, tail: &str, body: Value) ->
     if let Some(tok) = &t.token {
         req = req.header("authorization", format!("Bearer {tok}"));
     }
-    let resp = req.send().await.map_err(|e| CommandError::other(format!("{url} に接続できない: {e}")))?;
+    // What was sent, for the log: the size for `resize`; for `input` only the length (keystrokes stay out).
+    let sent = match tail {
+        "resize" => body.to_string(),
+        _ => format!("{} bytes (base64)", body["data"].as_str().map_or(0, str::len)),
+    };
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!("terminal {tail} [{session}]: cannot reach {url}: {e} (sent {sent})");
+            return Err(CommandError::other(format!("{url} に接続できない: {e}")));
+        }
+    };
     if resp.status().as_u16() == 204 || resp.status().is_success() {
         return Ok(());
     }
     let code = resp.status().as_u16();
     let text = resp.text().await.unwrap_or_default();
+    log::warn!("terminal {tail} [{session}]: HTTP {code}: {} (sent {sent})", clip_body(&text));
     let reason = if code == 409 { "セッションは動いていない".to_string() } else { text.chars().take(200).collect() };
     Err(CommandError::other(format!("center が {code} を返した: {reason}")))
 }
@@ -448,6 +476,13 @@ mod tests {
     }
 
     #[test]
+    fn clip_body_is_one_line_and_bounded() {
+        assert_eq!(clip_body(""), "(empty body)");
+        assert_eq!(clip_body("a\n  b\r\nc"), "a b c");
+        assert_eq!(clip_body(&"x".repeat(LOG_BODY_CHARS + 50)).chars().count(), LOG_BODY_CHARS);
+    }
+
+    #[test]
     fn reconnect_delay_backs_off_and_caps() {
         let secs: Vec<u64> = (0..7).map(|n| reconnect_delay(n).as_secs()).collect();
         assert_eq!(secs, [1, 2, 4, 8, 15, 15, 15]);
@@ -495,10 +530,10 @@ mod tests {
 
     #[tokio::test]
     async fn stream_once_omits_last_event_id_when_none_and_reports_rejection() {
-        let (base, heads) = serve(vec![("404 Not Found", String::new())]);
+        let (base, heads) = serve(vec![("404 Not Found", "no such session".to_string())]);
         let url = session_url(&format!("{base}/mcp"), "gone", "output").unwrap();
         let end = stream_once(&http(), url, None, None, Duration::from_secs(5), |_| true).await.unwrap();
-        assert_eq!(end, StreamEnd::Rejected(404));
+        assert_eq!(end, StreamEnd::Rejected(404, "no such session".to_string()));
         let head = heads.lock().unwrap()[0].to_lowercase();
         assert!(!head.contains("last-event-id"));
         assert!(!head.contains("authorization"));

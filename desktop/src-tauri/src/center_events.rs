@@ -48,7 +48,7 @@ pub fn to_changed(ev: &SseEvent) -> Option<Changed> {
 /// Wait before the next attempt, given how the last one ended.
 pub fn retry_delay(last: &Result<StreamEnd, String>, failures: u32) -> Duration {
     match last {
-        Ok(StreamEnd::Rejected(_)) => REJECTED_DELAY,
+        Ok(StreamEnd::Rejected(..)) => REJECTED_DELAY,
         _ => reconnect_delay(failures),
     }
 }
@@ -157,7 +157,7 @@ mod tests {
     fn retry_delay_backs_off_and_waits_long_after_a_rejection() {
         assert_eq!(retry_delay(&Ok(StreamEnd::Closed), 0), Duration::from_secs(1));
         assert_eq!(retry_delay(&Err("x".into()), 2), Duration::from_secs(4));
-        assert_eq!(retry_delay(&Ok(StreamEnd::Rejected(404)), 0), REJECTED_DELAY);
+        assert_eq!(retry_delay(&Ok(StreamEnd::Rejected(404, String::new())), 0), REJECTED_DELAY);
     }
 
     #[tokio::test]

@@ -55,6 +55,15 @@ The broker is found with agent-messenger's discovery order (env
 `AGENT_MESSENGER_HOST` at a test broker so the dev build does not register a
 second `bantou-core` on the shared broker.
 
+## ログ
+
+調査用のログを `tauri-plugin-log` でファイルに書く（Rust 側と webview 側は同じファイル）。
+
+- 置き場所: OS のログ置き場の `bantou.log`。macOS は `~/Library/Logs/jp.grrow.bantou/bantou.log`。
+- ローテーション: 5 MiB で切り替え、古い 5 世代を残す（`lib.rs` の `LOG_MAX_FILE_BYTES` / `LOG_KEEP_FILES`）。
+- 記録するもの: center の MCP 呼び出し（tool 名・HTTP status、失敗時は応答本文）、ターミナル出力 stream の状態変化と拒否（status・応答本文）、入力とサイズ変更の失敗（status・応答本文・送った cols/rows。入力の中身は書かず長さだけ）、セッション一覧の取り直しの結果、アップデータの失敗、broker 接続、webview の失敗（`[webview]` 付き）。
+- 自分の sidecar center のログは別: `~/.local/share/bantou/center-logs/center.log`（`packages/center/README.md` の「ログ」）。
+
 ## center（sidecar）
 
 `packages/center` を `bun build --compile` した単体バイナリを sidecar（`bundle.externalBin`）として同梱し、アプリが起動・停止する。

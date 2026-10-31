@@ -12,6 +12,7 @@
     "fs:default",
     "fs:allow-watch",
     "store:default",
+    "log:default",
     "updater:default",
     "process:default"
   ]

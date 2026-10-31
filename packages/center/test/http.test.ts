@@ -25,7 +25,7 @@ const TOOLS = [
 ];
 
 async function boot(
-  extra: { sessionIdleTtlMs?: number; sweepIntervalMs?: number; maxSessions?: number; bind?: string; token?: string; keepAliveMs?: number } = {},
+  extra: { sessionIdleTtlMs?: number; sweepIntervalMs?: number; maxSessions?: number; bind?: string; token?: string; keepAliveMs?: number; log?: (msg: string) => void } = {},
 ) {
   const config = parseConfig({}, "/tmp/c.json");
   const supervisor = {
@@ -93,6 +93,26 @@ test("http: /mcp 以外は 404、session 無しの非 initialize は 400、未�
     assert.equal((await post({})).status, 400);
     assert.equal((await post({ "mcp-session-id": "nope" })).status, 404);
     assert.equal((await fetch(`${base}/mcp`, { headers: AUTH })).status, 400);
+  } finally {
+    await h.close();
+  }
+});
+
+test("http: 2xx 以外の応答は method・path・status・理由で log に残り、2xx は残らない", async () => {
+  const lines: string[] = [];
+  const { h } = await boot({ log: (m) => lines.push(m) });
+  const base = `http://127.0.0.1:${h.port}`;
+  try {
+    assert.equal((await fetch(`${base}/other?x=1`)).status, 404);
+    assert.equal((await fetch(`${base}/mcp`)).status, 401);
+    assert.equal((await fetch(`${base}/mcp`, { headers: { ...AUTH, "mcp-session-id": "nope" } })).status, 404);
+    assert.equal((await fetch(`${base}/mcp`, { method: "POST", headers: MCP_HEADERS, body: JSON.stringify(INIT) })).status, 200);
+    const http = lines.filter((l) => l.startsWith("HTTP "));
+    assert.deepEqual(http, [
+      "HTTP GET /other -> 404: not found",
+      "HTTP GET /mcp -> 401: unauthorized",
+      "HTTP GET /mcp -> 404: session が存在しない",
+    ]);
   } finally {
     await h.close();
   }
