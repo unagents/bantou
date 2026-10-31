@@ -4,6 +4,8 @@ import type { Session, SessionList } from "~/types";
 export const SESSIONS_CHANGED_EVENT = "bantou://sessions-changed";
 /** The machine woke from sleep (emitted by the Rust side). */
 export const OS_WAKE_EVENT = "bantou://os-wake";
+/** The own sidecar center was started (it may not be listening yet; emitted by the Rust side). */
+export const CENTER_RUNNING_EVENT = "bantou://center-running";
 /** A network interface or address changed (emitted by the Rust side). */
 export const OS_NETWORK_EVENT = "bantou://os-network-changed";
 

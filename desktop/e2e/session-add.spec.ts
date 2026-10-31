@@ -14,6 +14,7 @@ type Mock = {
   calls: { cmd: string }[];
   centerDrop: (name: string) => void;
   centerSessionsChanged: (reason?: string | null, name?: string | null) => void;
+  centerRunning: () => void;
   osWake: () => void;
   osNetworkChanged: () => void;
 };
@@ -146,6 +147,37 @@ test.describe("center on", () => {
     await act(page);
     await expect(page.getByTestId("side-unreachable")).toHaveCount(0);
     await expect(page.getByTestId("session-unreachable")).toHaveCount(0);
+  });
+
+  test("the center does not answer at start and answers a bit later: the list appears without any action", async ({ page }) => {
+    // before the app starts reading (init scripts run after the mock is installed)
+    await page.addInitScript(() => {
+      const m = (window as unknown as { __BANTOU_MOCK__: Mock & { sessionCache: unknown } }).__BANTOU_MOCK__;
+      m.centerReachable = false;
+      // the Rust cache is empty at start
+      m.sessionCache = { sessions: [], reachable: true, reason: null, rev: 0 };
+    });
+    await page.goto("/");
+    await expect(page.getByTestId("side-unreachable")).toHaveText("つながらない");
+    await expect(sideRow(page, "careery")).toHaveCount(0);
+    await withMock(page, (m) => {
+      m.centerReachable = true;
+    });
+    // no click, no key: the start-up retry (every 2 s) picks it up
+    await expect(sideRow(page, "careery")).toBeVisible({ timeout: 8000 });
+    await expect(page.getByTestId("side-unreachable")).toHaveCount(0);
+    // answered: the retry stops (no more reads without a trigger)
+    const n = await refreshCount(page);
+    await page.waitForTimeout(2600);
+    expect(await refreshCount(page)).toBe(n);
+  });
+
+  test("the sidecar center started: the list is read at once", async ({ page }) => {
+    await page.goto("/");
+    await pickSession(page, "careery");
+    const before = await refreshCount(page);
+    await withMock(page, (m) => m.centerRunning());
+    await expect.poll(() => refreshCount(page)).toBeGreaterThan(before);
   });
 
   test("unreachable, then answered without a session: it is gone (not 'ロスト')", async ({ page }) => {

@@ -180,6 +180,11 @@ export class MockBantou {
     this.emitter("center-sessions-changed", { reason, name });
   }
 
+  /** The own sidecar center was started (Rust `center::CENTER_RUNNING_EVENT`). */
+  centerRunning() {
+    this.emitter("bantou://center-running", "running");
+  }
+
   /** The machine woke from sleep. */
   osWake() {
     this.emitter("bantou://os-wake", null);

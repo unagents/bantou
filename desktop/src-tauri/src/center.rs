@@ -14,12 +14,16 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 use tauri_plugin_store::StoreExt;
 
 const CENTER_KEY: &str = "center";
+/// Emitted (payload: `"running"`) each time the sidecar is spawned. The center may not be
+/// listening yet at that moment; the frontend reads the session list again and keeps retrying
+/// until it answers.
+pub const CENTER_RUNNING_EVENT: &str = "bantou://center-running";
 const SIDECAR_NAME: &str = "bantou-center";
 const DEFAULT_PORT: u32 = 7910;
 /// What the center listens on: always every address (LAN, Tailscale ...); the token guards it.
@@ -544,6 +548,7 @@ impl Center {
             g.logs.clear();
             g.generation
         };
+        let _ = app.emit(CENTER_RUNNING_EVENT, "running");
         let handle = app.clone();
         tauri::async_runtime::spawn(async move {
             while let Some(ev) = rx.recv().await {
@@ -1035,6 +1040,12 @@ mod tests {
         // just under 5 minutes does not reset
         sup.on_started(t0 + secs(320));
         assert_eq!(sup.on_abnormal_exit(t0 + secs(320) + HEALTHY_AFTER - secs(1)), ExitDecision::Retry(secs(4)));
+    }
+
+    #[test]
+    fn running_event_name_matches_the_frontend() {
+        // src/api/sessions.ts CENTER_RUNNING_EVENT
+        assert_eq!(CENTER_RUNNING_EVENT, "bantou://center-running");
     }
 
     #[test]
