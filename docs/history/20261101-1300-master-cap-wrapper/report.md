@@ -12,8 +12,9 @@
 | center（窓口分離、使い捨て token、core、wrapper 経由の起動） | develop に commit 済み（1f8d25e） |
 | center `GET /events`（追加指示 1） | develop に commit 済み（43eedd0） |
 | 設計書の 7（追加指示 1）、指示書、interfaces、本報告 | 本報告の commit |
-| desktop（3 列、xterm、Rust の SSE、指示ボタン廃止、`center-sessions-changed`） | **未統合**。local branch `worktree-agent-a9734fb447a1dbf69`（31994e9・f2f3e04、43eedd0 の上）。追加指示 2 に従い、`fix/session-list-from-center` が develop に入った後にその上へ合わせる |
-| desktop のセッション一覧（追加指示 2） | branch `fix/session-list-from-center` を push 済み（7874b50・3051bb2） |
+| desktop（3 列、xterm、Rust の SSE、指示ボタン廃止、`center-sessions-changed`） | develop に統合済み（ef50ba0・9dddf6e・2f54df6、0af4dd8 の上に rebase して fast-forward）。セッション一覧は fix の rev 方式を土台にし、`center-sessions-changed` は既存の `refreshNow()` → `refresh_sessions` → SessionCache の rev → `setCenterList` の経路を通る（rev を通らない別経路は無い） |
+| desktop のセッション一覧（追加指示 2・3） | Mac main cap が 0.1.24 として release し、develop に統合済み（fff7468、0af4dd8） |
+| 起動直後の一覧の取り直し（追加指示 4） | branch `hotfix/startup-session-refresh`（main b5783eb から）で作業中。develop への merge は Mac main cap が行う。その時に 3 列画面側の `useSessionRefresh.ts`（`center-sessions-changed` の listener を足した）との整合を確かめる必要がある |
 
 ## 変更ファイル
 
@@ -33,7 +34,7 @@
   - `/mcp`（外向け）は 12 tool。`remote_create`・`remote_delete`・`cap_kick` を外し、`remote_list` は読み取り専用で残した。
   - `/mcp/session` は `remote_create`・`remote_delete`・`remote_list`。認証は、セッションに紐づく使い捨て token と `X-Bantou-Session` の組。
 
-### desktop（未統合の branch の内容）
+### desktop
 
 - Rust: 新規 `src-tauri/src/terminal.rs`、`src-tauri/src/center_events.rs`。変更 `lib.rs`、`session.rs`（`instruct_add_task` を削除）。
 - front:
@@ -51,8 +52,8 @@
 | center `npm test` | 196 passed | 230 passed / 0 failed（develop 43eedd0） | cap が再実行 |
 | center `npm run typecheck` | - | エラー無し | cap が再実行 |
 | desktop `cargo test`（develop） | 214 passed / 5 ignored | 214 passed / 5 ignored（externalBin 追加後） | worker |
-| desktop `cargo test`（desktop branch） | 214 passed / 5 ignored | 238 passed / 5 ignored | worker |
-| desktop e2e（desktop branch） | 57 passed | 68 passed / 0 failed | worker |
+| desktop `cargo test`（統合後の develop 2f54df6） | 212 passed / 5 ignored（0af4dd8） | 236 passed / 5 ignored | cap が再実行 |
+| desktop e2e（統合後の develop、静的ビルド） | 56 passed（0af4dd8） | 67 passed / 0 failed。mock の invoke に 12ms の遅延を入れても 67 passed | worker |
 
 - e2e は、204 の sandbox では通常の手順で回せなかった。
   - sandbox が unix socket の listen と Chrome の socket を EPERM で拒否するため、`nuxt dev` が起動しない。
@@ -111,6 +112,6 @@
   - `/tmp/claude-1002/` の下: `tmp.wZGyymHC5L/`、`mcw/`（実測の config・script・log）、`cargo-home/`（約 170MB）、`npmcache/`、`bunc/`、`w-sl/`、`desktop-test.log`、`static.mjs`、`base.log`、`after.log`、`gen.log`、`nuxt.log`、`cargo.log`、`e.mjs`、`e2.mjs`、`edit-*.mjs`、`three-columns.png`。
   - `develop/.claude/worktrees/` の下の worktree 3 つ。
     - center 用 `agent-a3329c6e724849a4a`: 統合済み。
-    - desktop 用 `agent-a9734fb447a1dbf69`: 未統合の commit を持つので残す。
+    - desktop 用 `agent-a9734fb447a1dbf69`: 統合済み。
     - w-list 用 `agent-aafdaaa90addceff2`: push 済み。
   - 各 worktree の中の未追跡物: `package-lock.json`、`desktop/playwright.local.config.ts`、`desktop/pw.local.config.ts`、`desktop/.output/`。
