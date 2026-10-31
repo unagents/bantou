@@ -55,30 +55,38 @@ const centerHas = (page: Page, name: string) =>
 test.describe("center on", () => {
   test.use({ seed: boardSeed });
 
-  test("pick a session from the center's list and add it", async ({ page }) => {
+  test("the side menu is the center's list: a session made elsewhere shows up, one that left disappears", async ({ page }) => {
     await page.goto("/");
     await pickSession(page, "careery");
+    await expect(sideRow(page, "webtool")).toHaveCount(0);
+    // made on the center by someone else (another desktop, MCP)
     await centerHas(page, "webtool");
-    await page.getByTestId("open-add-session").click();
-    const dlg = page.getByTestId("add-dialog");
-    await expect(dlg.locator("[data-testid=add-row][data-name=webtool]")).toBeVisible();
-    // the ones already added are not listed
-    await expect(dlg.locator("[data-testid=add-row][data-name=careery]")).toHaveCount(0);
-    await expect(dlg.getByTestId("add-submit")).toBeDisabled();
-    await dlg.locator("[data-testid=add-row][data-name=webtool]").click();
-    await dlg.getByTestId("add-submit").click();
-    await expect(dlg).toBeHidden();
+    await act(page);
+    await expect(sideRow(page, "webtool")).toBeVisible();
     await pickSession(page, "webtool");
-    await expect(sideRow(page, "webtool").getByTestId("side-lost")).toHaveCount(0);
     await page.screenshot({ path: resolve(SHOT_DIR, "session-added.png"), fullPage: true });
+    // gone from the center: gone from the menu (no "lost" row), the others stay
+    await withMock(page, (m) => m.centerDrop("careery"));
+    await act(page);
+    await expect(sideRow(page, "careery")).toHaveCount(0);
+    await expect(sideRow(page, "stroke-board")).toBeVisible();
+    await expect(page.getByTestId("side-unreachable")).toHaveCount(0);
+    // the center takes it back
+    await centerHas(page, "careery");
+    await act(page);
+    await expect(sideRow(page, "careery")).toBeVisible();
   });
 
-  test("a name that is not on the center's list is created and added", async ({ page }) => {
+  test("a name is created on the center and listed", async ({ page }) => {
     await page.goto("/");
     await page.getByTestId("open-add-session").click();
-    await page.getByTestId("add-name").fill("pm-main_1");
-    await page.getByTestId("add-create").click();
-    await expect(page.getByTestId("add-dialog")).toBeHidden();
+    const dlg = page.getByTestId("add-dialog");
+    // create only: the center's list is not offered for picking
+    await expect(dlg.getByTestId("add-row")).toHaveCount(0);
+    await expect(dlg.getByTestId("add-submit")).toHaveCount(0);
+    await dlg.getByTestId("add-name").fill("pm-main_1");
+    await dlg.getByTestId("add-create").click();
+    await expect(dlg).toBeHidden();
     await pickSession(page, "pm-main_1");
     expect(await withMock(page, (m) => m.centerSessions.some((s) => s.name === "pm-main_1"))).toBe(true);
   });
@@ -88,7 +96,7 @@ test.describe("center on", () => {
     await centerHas(page, "center-only");
     await page.getByTestId("open-add-session").click();
     const dlg = page.getByTestId("add-dialog");
-    // added already / only on the center
+    // listed by the center (made here or elsewhere)
     for (const taken of ["careery", "center-only"]) {
       await dlg.getByTestId("add-name").fill(taken);
       await expect(dlg).toContainText("既に使われている名前");
@@ -103,7 +111,7 @@ test.describe("center on", () => {
     await expect(dlg.getByTestId("add-create")).toBeDisabled();
   });
 
-  test("a failure of the center on create is shown and nothing is added", async ({ page }) => {
+  test("a failure of the center on create is shown and nothing is listed", async ({ page }) => {
     await page.goto("/");
     await withMock(page, (m) => {
       m.centerSessionCreateError = "claude が見つからない";
@@ -116,45 +124,30 @@ test.describe("center on", () => {
     await expect(sideRow(page, "pm-x")).toHaveCount(0);
   });
 
-  test("a session that left the center's list is shown as lost, the others stay", async ({ page }) => {
+  test("when the center cannot be asked, the last list stays with 'つながらない' (no 'ロスト')", async ({ page }) => {
     await page.goto("/");
     await pickSession(page, "careery");
-    await expect(page.getByTestId("side-lost")).toHaveCount(0);
-    await withMock(page, (m) => m.centerDrop("careery"));
-    await act(page);
-    await expect(sideRow(page, "careery").getByTestId("side-lost")).toHaveText("ロスト");
-    await expect(sideRow(page, "careery").getByTestId("side-unreachable")).toHaveCount(0);
-    await expect(sideRow(page, "stroke-board").getByTestId("side-lost")).toHaveCount(0);
-    // its tasks are still there
-    await expect(session(page, "careery")).toContainText("スキルシート xlsx 取込の列マッピング");
-    // the center takes it back
-    await centerHas(page, "careery");
-    await act(page);
-    await expect(sideRow(page, "careery").getByTestId("side-lost")).toHaveCount(0);
-  });
-
-  test("when the center cannot be asked, rows say 'つながらない' and not 'ロスト'", async ({ page }) => {
-    await page.goto("/");
-    await pickSession(page, "careery");
+    await expect(page.getByTestId("side-unreachable")).toHaveCount(0);
     await withMock(page, (m) => {
       m.centerReachable = false;
     });
     await act(page);
-    await expect(page.getByTestId("side-unreachable")).toHaveCount(3);
-    await expect(page.getByTestId("side-unreachable").first()).toHaveText("つながらない");
+    await expect(page.getByTestId("side-unreachable")).toHaveText("つながらない");
+    await expect(page.getByTestId("session-unreachable")).toHaveCount(1);
     await expect(page.getByTestId("side-lost")).toHaveCount(0);
-    // rows and tasks stay
+    // the rows (last list) and tasks stay
+    for (const n of ["agent-messenger", "careery", "stroke-board"]) await expect(sideRow(page, n)).toBeVisible();
     await expect(session(page, "careery")).toContainText("スキルシート xlsx 取込の列マッピング");
-    // answered again: back to listed
+    // answered again: back to normal
     await withMock(page, (m) => {
       m.centerReachable = true;
     });
     await act(page);
     await expect(page.getByTestId("side-unreachable")).toHaveCount(0);
-    await expect(page.getByTestId("side-lost")).toHaveCount(0);
+    await expect(page.getByTestId("session-unreachable")).toHaveCount(0);
   });
 
-  test("unreachable, then answered without the session: lost", async ({ page }) => {
+  test("unreachable, then answered without a session: it is gone (not 'ロスト')", async ({ page }) => {
     await page.goto("/");
     await pickSession(page, "careery");
     await withMock(page, (m) => {
@@ -162,13 +155,15 @@ test.describe("center on", () => {
       m.centerDrop("careery");
     });
     await act(page);
-    await expect(sideRow(page, "careery").getByTestId("side-unreachable")).toBeVisible();
+    await expect(page.getByTestId("side-unreachable")).toBeVisible();
+    await expect(sideRow(page, "careery")).toBeVisible();
     await withMock(page, (m) => {
       m.centerReachable = true;
     });
     await act(page);
-    await expect(sideRow(page, "careery").getByTestId("side-lost")).toBeVisible();
-    await expect(sideRow(page, "stroke-board").getByTestId("side-lost")).toHaveCount(0);
+    await expect(sideRow(page, "careery")).toHaveCount(0);
+    await expect(page.getByTestId("side-unreachable")).toHaveCount(0);
+    await expect(sideRow(page, "stroke-board")).toBeVisible();
   });
 
   test("the list is read again before every action in the window", async ({ page }) => {
@@ -193,7 +188,7 @@ test.describe("center on", () => {
     await withMock(page, (m) => m.centerDrop("careery"));
     const before = await refreshCount(page);
     await withMock(page, (m) => m.osWake());
-    await expect(sideRow(page, "careery").getByTestId("side-lost")).toBeVisible();
+    await expect(sideRow(page, "careery")).toHaveCount(0);
     expect(await refreshCount(page)).toBeGreaterThan(before);
 
     // a burst of network events is read once, after it settles
@@ -204,7 +199,7 @@ test.describe("center on", () => {
       m.osNetworkChanged();
       m.osNetworkChanged();
     });
-    await expect(sideRow(page, "careery").getByTestId("side-lost")).toHaveCount(0);
+    await expect(sideRow(page, "careery")).toBeVisible();
     expect((await refreshCount(page)) - mid).toBe(1);
   });
 
@@ -218,7 +213,7 @@ test.describe("center on", () => {
     const before = await refreshCount(page);
     await page.keyboard.press("Escape");
     await expect(page.getByTestId("settings-dialog")).toBeHidden();
-    await expect(sideRow(page, "careery").getByTestId("side-lost")).toBeVisible();
+    await expect(sideRow(page, "careery")).toHaveCount(0);
     expect(await refreshCount(page)).toBeGreaterThan(before);
   });
 });
@@ -250,7 +245,7 @@ test.describe("no center of our own", () => {
     await page.keyboard.press("Escape");
     await expect(page.getByTestId("open-add-session")).toBeEnabled();
     await page.getByTestId("open-add-session").click();
-    await expect(page.getByTestId("add-list-error")).toContainText("接続できない");
+    await expect(page.getByTestId("side-unreachable")).toBeVisible();
     await page.getByTestId("add-name").fill("pm-y");
     await page.getByTestId("add-create").click();
     await expect(page.getByTestId("add-action-error")).toContainText("接続できない");

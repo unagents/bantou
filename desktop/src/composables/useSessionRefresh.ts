@@ -10,9 +10,9 @@ export const NETWORK_SETTLE_MS = 2000;
 export const WAKE_RETRY_MS = 5000;
 
 /**
- * Keeps the added sessions in step with the center's `session_list`.
+ * Keeps the side menu in step with the center's `session_list`.
  *
- * The list is read again (Rust reconciles: listed / lost / unreachable):
+ * The list is read again (Rust keeps the last list; unreachable is reported with it):
  * - before the user does anything in the window (pointer or key, capture phase, every time),
  * - when the OS reports a wake from sleep (and once more shortly after) or a network change,
  * - when `refreshNow()` is called by the owner (target changed: settings, pasted connection),
@@ -34,7 +34,7 @@ export function useSessionRefresh() {
         try {
           await refreshSessions();
         } catch {
-          // The result is carried by the sessions themselves (unreachable); nothing to show here.
+          // The result is carried by the list itself (reachable: false); nothing to show here.
         }
       } while (queued);
     })().finally(() => {

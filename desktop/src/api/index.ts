@@ -14,7 +14,6 @@ export {
   centerTool,
 } from "./center";
 export {
-  addSessions,
   createSession,
   instructAddTask,
   listSessions,
@@ -22,7 +21,6 @@ export {
   OS_WAKE_EVENT,
   refreshSessions,
   SESSIONS_CHANGED_EVENT,
-  unregisterSession,
 } from "./sessions";
 export {
   CHECK_FOR_UPDATES_EVENT,

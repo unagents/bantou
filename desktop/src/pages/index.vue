@@ -5,7 +5,7 @@ import type { BrokerStatus, Task } from "~/types";
 
 const { dir, loaded, load, pickAndOpen } = useWorkspace();
 const { refreshNow: refreshSessions } = useSessionRefresh();
-const { threads, registered, sessions, waitingCount, running, refresh } = useBoard(dir);
+const { threads, centerList, sessions, waitingCount, running, refresh } = useBoard(dir);
 const toast = useToast();
 const { state: updaterState, checkManually, installAndRestart } = useUpdater();
 
@@ -55,7 +55,7 @@ watch(modalOpen, (v) => {
   if (!v) activeTask.value = null;
 });
 
-// --- session side menu (selection lives in memory only) ----------------------
+// --- session side menu (the connected center's session_list; selection lives in memory only) ----
 
 const selectedName = ref<string | null>(null);
 watch(
@@ -90,8 +90,8 @@ watch(settingsOpen, (v) => {
   void refreshAddTarget();
   void refreshSessions();
 });
-function onSessionsAdded(names: string[]) {
-  toast.add({ title: `${names.join(", ")} を追加`, color: "success" });
+function onSessionCreated(name: string) {
+  toast.add({ title: `${name} を作成`, color: "success" });
 }
 
 // --- instruct a session to add a task ------------------------------------------
@@ -138,6 +138,15 @@ async function onInstruct(session: string, title: string, body: string) {
     <template v-else-if="dir">
       <div class="flex min-h-[calc(100vh-var(--cork-header-height))]">
         <nav aria-label="セッション一覧" class="border-cork-border w-60 shrink-0 border-r">
+          <UTooltip v-if="!centerList.reachable" :text="centerList.reason ?? 'center に問い合わせられなかった'">
+            <UBadge
+              class="m-2"
+              color="warning"
+              variant="subtle"
+              label="つながらない"
+              data-testid="side-unreachable"
+            />
+          </UTooltip>
           <ul class="flex flex-col">
             <li v-for="g in sessions" :key="g.name">
               <button
@@ -151,14 +160,6 @@ async function onInstruct(session: string, title: string, body: string) {
               >
                 <UIcon name="i-lucide-terminal-square" class="text-cork-accent size-4 shrink-0" />
                 <span class="truncate">{{ g.name }}</span>
-                <UBadge v-if="g.link === 'lost'" color="error" variant="subtle" label="ロスト" data-testid="side-lost" />
-                <UBadge
-                  v-else-if="g.link === 'unreachable'"
-                  color="warning"
-                  variant="subtle"
-                  label="つながらない"
-                  data-testid="side-unreachable"
-                />
                 <span class="text-cork-muted ml-auto shrink-0 text-xs font-normal" data-testid="side-count">
                   {{ g.working.length }} / {{ g.queued.length }}
                 </span>
@@ -180,7 +181,7 @@ async function onInstruct(session: string, title: string, body: string) {
             v-else
             class="border-cork-border text-cork-muted flex flex-col items-center gap-3 border border-dashed py-10 text-sm"
           >
-            <p>作業セッションが未追加。center のセッション一覧から追加する。</p>
+            <p>center にセッションが無い。名前を付けて作成する。</p>
             <UButton
               icon="i-lucide-user-plus"
               label="セッション追加"
@@ -203,8 +204,8 @@ async function onInstruct(session: string, title: string, body: string) {
     <AddSessionDialog
       v-if="addSessionOpen"
       v-model:open="addSessionOpen"
-      :added="registered"
-      @done="onSessionsAdded"
+      :existing="centerList.sessions.map((s) => s.name)"
+      @done="onSessionCreated"
     />
     <SettingsDialog v-if="settingsOpen" v-model:open="settingsOpen" />
     <CenterDialog v-if="centerOpen" v-model:open="centerOpen" />

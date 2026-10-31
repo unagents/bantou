@@ -1,17 +1,16 @@
-//! Work sessions added from the center.
+//! Work sessions: the connected center's `session_list`.
 //!
-//! The user picks sessions from the target center's `session_list` (or names a new one, created
-//! with `session_create`). bantou keeps what was added in memory only (nothing is written to a
-//! file) and re-reads the center's list at several moments (the frontend decides when: before a
-//! user action, after wake / network change, on a settings change, on a long timer). Each re-read
-//! is reconciled against what was added (`reconcile`):
+//! The side menu shows what the center (own sidecar, or a pasted remote center) lists, nothing
+//! more. bantou keeps no list of its own: only the last list that could be fetched is cached in
+//! memory (`SessionCache`), so it can still be shown, flagged as unreachable, when the center
+//! cannot be asked. The frontend decides when to re-read (before a user action, after wake /
+//! network change, on a settings change, on a long timer).
 //!
-//! - in the center's list: kept, state updated (`Link::Listed`);
-//! - not in the list: shown as lost (`Link::Lost`), kept so the user sees it went away;
-//! - the list could not be fetched: `Link::Unreachable`, told apart from lost. The previous state
-//!   is kept and the reason is carried.
+//! - the center answered: its list replaces the cache (`reachable: true`);
+//! - the center could not be asked: the cached list is kept, `reachable: false`, the reason is
+//!   carried.
 //!
-//! A lost session that is listed again is `Listed` again (the center took it back).
+//! A new session is made with `session_create`; it shows up through the next read of the list.
 
 use crate::broker::{self, Brokers};
 use crate::center_mcp;
@@ -24,106 +23,66 @@ use tauri::Emitter;
 
 pub const SESSIONS_CHANGED_EVENT: &str = "bantou://sessions-changed";
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Link {
-    /// In the center's list at the last read.
-    Listed,
-    /// The center answered and the session is not in its list.
-    Lost,
-    /// The center could not be asked.
-    Unreachable,
-}
-
 /// A session as the center lists it (`session_list` / `session_create` result; fields bantou uses).
-#[derive(Clone, Debug, PartialEq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CenterEntry {
-    pub name: String,
-    #[serde(default)]
-    pub state: Option<String>,
-    #[serde(default)]
-    pub session_url: Option<String>,
-    #[serde(default)]
-    pub source: Option<String>,
-    #[serde(default)]
-    pub last_error: Option<String>,
-}
-
-/// A session the user added.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
     pub name: String,
-    pub link: Link,
-    /// Center's state (`connected`, `starting`, ...) at the last successful read.
+    /// Center's state (`connected`, `starting`, ...).
+    #[serde(default)]
     pub state: Option<String>,
+    #[serde(default)]
     pub session_url: Option<String>,
+    #[serde(default)]
     pub source: Option<String>,
-    /// Center's `lastError` of the session at the last successful read.
+    /// Center's `lastError` of the session.
+    #[serde(default)]
     pub last_error: Option<String>,
-    /// Why the center could not be asked (only with `Link::Unreachable`).
-    pub reason: Option<String>,
-    pub added_at: String,
 }
 
-impl Session {
-    pub fn from_entry(e: &CenterEntry, added_at: String) -> Self {
-        Self {
-            name: e.name.clone(),
-            link: Link::Listed,
-            state: e.state.clone(),
-            session_url: e.session_url.clone(),
-            source: e.source.clone(),
-            last_error: e.last_error.clone(),
-            reason: None,
-            added_at,
-        }
+/// What the side menu shows: the center's list as last fetched, and whether the latest read worked.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionList {
+    pub sessions: Vec<Session>,
+    /// false: the center could not be asked at the latest read (`sessions` is the older list).
+    pub reachable: bool,
+    /// Why the center could not be asked (only with `reachable: false`).
+    pub reason: Option<String>,
+}
+
+impl Default for SessionList {
+    fn default() -> Self {
+        Self { sessions: Vec::new(), reachable: true, reason: None }
     }
 }
 
-/// Compare what was added with a fresh read of the center's list. `listing` is the list, or the
-/// reason it could not be fetched. Pure.
-pub fn reconcile(added: &[Session], listing: Result<&[CenterEntry], &str>) -> Vec<Session> {
-    added
-        .iter()
-        .map(|s| match listing {
-            Err(why) => Session { link: Link::Unreachable, reason: Some(why.to_string()), ..s.clone() },
-            Ok(list) => match list.iter().find(|e| e.name == s.name) {
-                Some(e) => Session { link: Link::Listed, reason: None, ..Session::from_entry(e, s.added_at.clone()) },
-                None => Session { link: Link::Lost, reason: None, ..s.clone() },
-            },
-        })
-        .collect()
+/// Next list after a read. `listing` is the center's list, or the reason it could not be fetched.
+/// Pure.
+pub fn apply_listing(prev: &SessionList, listing: Result<&[Session], &str>) -> SessionList {
+    match listing {
+        Ok(list) => SessionList { sessions: list.to_vec(), reachable: true, reason: None },
+        Err(why) => SessionList { sessions: prev.sessions.clone(), reachable: false, reason: Some(why.to_string()) },
+    }
 }
 
-/// Added sessions, in memory, for the whole app (the center is not tied to a window).
+/// The last list fetched, in memory, for the whole app (the center is not tied to a window).
 #[derive(Default)]
-pub struct Sessions {
-    list: Mutex<Vec<Session>>,
+pub struct SessionCache {
+    list: Mutex<SessionList>,
 }
 
-impl Sessions {
-    pub fn list(&self) -> Vec<Session> {
+impl SessionCache {
+    pub fn get(&self) -> SessionList {
         self.list.lock().unwrap().clone()
     }
-    /// Add (or replace by name).
-    fn add(&self, s: Session) {
+    /// Store the result of a read; the new list and whether it differs from the old one.
+    fn apply(&self, listing: Result<&[Session], &str>) -> (SessionList, bool) {
         let mut l = self.list.lock().unwrap();
-        match l.iter_mut().find(|x| x.name == s.name) {
-            Some(x) => *x = s,
-            None => l.push(s),
-        }
-    }
-    fn remove(&self, name: &str) {
-        self.list.lock().unwrap().retain(|s| s.name != name);
-    }
-    /// Store the reconciled list; false when nothing changed.
-    fn replace(&self, next: Vec<Session>) -> bool {
-        let mut l = self.list.lock().unwrap();
+        let next = apply_listing(&l, listing);
         let changed = *l != next;
-        *l = next;
-        changed
+        *l = next.clone();
+        (next, changed)
     }
 }
 
@@ -138,7 +97,7 @@ async fn center_json(app: &tauri::AppHandle, tool: &str, args: Option<Value>) ->
     serde_json::from_str(&text).map_err(|e| format!("{tool} の結果を読めない: {e}"))
 }
 
-async fn fetch_list(app: &tauri::AppHandle) -> Result<Vec<CenterEntry>, String> {
+async fn fetch_list(app: &tauri::AppHandle) -> Result<Vec<Session>, String> {
     let v = center_json(app, "session_list", None).await?;
     serde_json::from_value(v).map_err(|e| format!("session_list の結果を読めない: {e}"))
 }
@@ -147,69 +106,43 @@ fn notify(app: &tauri::AppHandle) {
     let _ = app.emit(SESSIONS_CHANGED_EVENT, ());
 }
 
-#[tauri::command]
-pub fn list_sessions(roster: tauri::State<'_, Sessions>) -> Vec<Session> {
-    roster.list()
+/// Read the center's `session_list` into the cache; tell the frontend when it changed.
+async fn read_list(app: &tauri::AppHandle, cache: &SessionCache) -> SessionList {
+    let listing = fetch_list(app).await;
+    let (next, changed) = cache.apply(listing.as_ref().map(|l| l.as_slice()).map_err(|e| e.as_str()));
+    if changed {
+        notify(app);
+    }
+    next
 }
 
-/// Re-read the center's `session_list` and reconcile. With nothing added it asks nobody.
+/// The cached list, without asking the center.
 #[tauri::command]
-pub async fn refresh_sessions(app: tauri::AppHandle, roster: tauri::State<'_, Sessions>) -> CmdResult<Vec<Session>> {
-    let added = roster.list();
-    if added.is_empty() {
-        return Ok(added);
-    }
-    let listing = fetch_list(&app).await;
-    // Snapshot again: sessions may have been added while the center was being asked.
-    let added = roster.list();
-    let next = reconcile(&added, listing.as_ref().map(|l| l.as_slice()).map_err(|e| e.as_str()));
-    if roster.replace(next.clone()) {
-        notify(&app);
-    }
-    Ok(next)
+pub fn list_sessions(cache: tauri::State<'_, SessionCache>) -> SessionList {
+    cache.get()
 }
 
-/// Add sessions of the center's list by name.
+/// Re-read the center's `session_list`.
 #[tauri::command]
-pub async fn add_sessions(
-    app: tauri::AppHandle,
-    roster: tauri::State<'_, Sessions>,
-    names: Vec<String>,
-) -> CmdResult<Vec<Session>> {
-    let list = fetch_list(&app).await.map_err(CommandError::Other)?;
-    for n in &names {
-        let e = list
-            .iter()
-            .find(|e| &e.name == n)
-            .ok_or_else(|| CommandError::other(format!("center の一覧に無い: {n}")))?;
-        roster.add(Session::from_entry(e, crate::thread::now()));
-    }
-    notify(&app);
-    Ok(roster.list())
+pub async fn refresh_sessions(app: tauri::AppHandle, cache: tauri::State<'_, SessionCache>) -> CmdResult<SessionList> {
+    Ok(read_list(&app, &cache).await)
 }
 
-/// Create a new session on the center (`session_create`) and add it.
+/// Create a new session on the center (`session_create`). The center lists it, so the list is
+/// read again.
 #[tauri::command]
 pub async fn create_session(
     app: tauri::AppHandle,
-    roster: tauri::State<'_, Sessions>,
+    cache: tauri::State<'_, SessionCache>,
     name: String,
 ) -> CmdResult<Session> {
     let v = center_json(&app, "session_create", Some(serde_json::json!({ "name": name.trim() })))
         .await
         .map_err(CommandError::Other)?;
-    let e: CenterEntry =
+    let s: Session =
         serde_json::from_value(v).map_err(|e| CommandError::other(format!("session_create の結果を読めない: {e}")))?;
-    let s = Session::from_entry(&e, crate::thread::now());
-    roster.add(s.clone());
-    notify(&app);
+    read_list(&app, &cache).await;
     Ok(s)
-}
-
-#[tauri::command]
-pub fn unregister_session(app: tauri::AppHandle, roster: tauri::State<'_, Sessions>, name: String) {
-    roster.remove(&name);
-    notify(&app);
 }
 
 /// Instruction asking a session to add (and start) a task the user typed in bantou.
@@ -255,8 +188,8 @@ mod tests {
         assert!(m.ends_with("\n\nタスク名: 列マッピング\n作業内容:\n手順1\n手順2"));
     }
 
-    fn entry(name: &str, state: &str) -> CenterEntry {
-        CenterEntry {
+    fn entry(name: &str, state: &str) -> Session {
+        Session {
             name: name.into(),
             state: Some(state.into()),
             session_url: Some(format!("https://claude.ai/code/{name}")),
@@ -265,102 +198,84 @@ mod tests {
         }
     }
 
-    fn added(name: &str) -> Session {
-        Session::from_entry(&entry(name, "starting"), "t0".into())
+    #[test]
+    fn answered_list_is_shown_as_is() {
+        let prev = SessionList { sessions: vec![entry("old", "connected")], reachable: true, reason: None };
+        let next = apply_listing(&prev, Ok(&[entry("a", "connected"), entry("b", "starting")]));
+        assert_eq!(next.sessions.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+        assert!(next.reachable);
+        assert_eq!(next.reason, None);
     }
 
     #[test]
-    fn listed_session_is_kept_and_its_state_updated() {
-        let next = reconcile(&[added("a")], Ok(&[entry("a", "connected")]));
-        assert_eq!(next.len(), 1);
-        assert_eq!(next[0].link, Link::Listed);
-        assert_eq!(next[0].state.as_deref(), Some("connected"));
-        assert_eq!(next[0].added_at, "t0");
+    fn center_side_sessions_appear_and_disappear_with_the_list() {
+        let first = apply_listing(&SessionList::default(), Ok(&[entry("a", "connected")]));
+        let second = apply_listing(&first, Ok(&[entry("a", "connected"), entry("made-elsewhere", "connected")]));
+        assert_eq!(second.sessions.len(), 2);
+        let third = apply_listing(&second, Ok(&[entry("made-elsewhere", "connected")]));
+        assert_eq!(third.sessions.len(), 1);
+        assert_eq!(third.sessions[0].name, "made-elsewhere");
+        // an empty answer is an empty list (nothing is kept as lost)
+        assert!(apply_listing(&third, Ok(&[])).sessions.is_empty());
     }
 
     #[test]
-    fn session_missing_from_the_list_is_lost_and_kept() {
-        let next = reconcile(&[added("a"), added("b")], Ok(&[entry("b", "connected")]));
-        assert_eq!(next[0].name, "a");
-        assert_eq!(next[0].link, Link::Lost);
-        assert_eq!(next[0].reason, None);
-        // the last known state stays visible
-        assert_eq!(next[0].state.as_deref(), Some("starting"));
-        assert_eq!(next[1].link, Link::Listed);
+    fn unreachable_keeps_the_last_list_and_says_why() {
+        let ok = apply_listing(&SessionList::default(), Ok(&[entry("a", "connected")]));
+        let next = apply_listing(&ok, Err("接続できない"));
+        assert_eq!(next.sessions, ok.sessions);
+        assert!(!next.reachable);
+        assert_eq!(next.reason.as_deref(), Some("接続できない"));
+        // answered again: back to reachable, the list is the center's
+        let back = apply_listing(&next, Ok(&[]));
+        assert!(back.reachable);
+        assert_eq!(back.reason, None);
+        assert!(back.sessions.is_empty());
     }
 
     #[test]
-    fn empty_list_loses_everything_but_unreachable_does_not() {
-        let roster = [added("a")];
-        assert_eq!(reconcile(&roster, Ok(&[]))[0].link, Link::Lost);
-        let next = reconcile(&roster, Err("接続できない"));
-        assert_eq!(next[0].link, Link::Unreachable);
-        assert_eq!(next[0].reason.as_deref(), Some("接続できない"));
-        assert_eq!(next[0].state.as_deref(), Some("starting"));
+    fn unreachable_before_any_list_is_empty() {
+        let next = apply_listing(&SessionList::default(), Err("x"));
+        assert!(next.sessions.is_empty());
+        assert!(!next.reachable);
     }
 
     #[test]
-    fn unreachable_then_answered_decides_between_listed_and_lost() {
-        let unreachable = reconcile(&[added("a"), added("b")], Err("x"));
-        let next = reconcile(&unreachable, Ok(&[entry("a", "connected")]));
-        assert_eq!(next[0].link, Link::Listed);
-        assert_eq!(next[0].reason, None);
-        assert_eq!(next[1].link, Link::Lost);
+    fn cache_reports_whether_a_read_changed_anything() {
+        let c = SessionCache::default();
+        assert_eq!(c.get(), SessionList::default());
+        let (_, changed) = c.apply(Ok(&[entry("a", "connected")]));
+        assert!(changed);
+        let (_, changed) = c.apply(Ok(&[entry("a", "connected")]));
+        assert!(!changed);
+        let (next, changed) = c.apply(Err("x"));
+        assert!(changed);
+        assert_eq!(next.sessions.len(), 1);
+        assert_eq!(c.get(), next);
+        // the same failure again is no change
+        assert!(!c.apply(Err("x")).1);
     }
 
     #[test]
-    fn lost_then_listed_again_is_listed() {
-        let lost = reconcile(&[added("a")], Ok(&[]));
-        let next = reconcile(&lost, Ok(&[entry("a", "connected")]));
-        assert_eq!(next[0].link, Link::Listed);
-    }
-
-    #[test]
-    fn lost_stays_lost_while_unreachable_overrides_it_until_answered() {
-        let lost = reconcile(&[added("a")], Ok(&[]));
-        let unreachable = reconcile(&lost, Err("x"));
-        assert_eq!(unreachable[0].link, Link::Unreachable);
-        // the answer after that says it is still not there
-        assert_eq!(reconcile(&unreachable, Ok(&[]))[0].link, Link::Lost);
-    }
-
-    #[test]
-    fn reconcile_without_roster_is_empty() {
-        assert!(reconcile(&[], Ok(&[entry("a", "connected")])).is_empty());
-        assert!(reconcile(&[], Err("x")).is_empty());
-    }
-
-    #[test]
-    fn center_entry_reads_the_center_json() {
-        let e: CenterEntry = serde_json::from_str(
+    fn session_reads_the_center_json() {
+        let e: Session = serde_json::from_str(
             r#"{"name":"pm-a","path":"/p","state":"connected","pid":1,"sessionUrl":"https://u","startedAt":null,"source":"session","lastError":"x"}"#,
         )
         .unwrap();
         assert_eq!(e.session_url.as_deref(), Some("https://u"));
         assert_eq!(e.last_error.as_deref(), Some("x"));
-        let bare: CenterEntry = serde_json::from_str(r#"{"name":"a"}"#).unwrap();
+        let bare: Session = serde_json::from_str(r#"{"name":"a"}"#).unwrap();
         assert_eq!(bare.state, None);
     }
 
     #[test]
-    fn session_serializes_for_the_frontend() {
-        let v = serde_json::to_value(reconcile(&[added("a")], Ok(&[]))).unwrap();
-        assert_eq!(v[0]["link"], "lost");
-        assert_eq!(v[0]["sessionUrl"], "https://claude.ai/code/a");
-        assert_eq!(v[0]["addedAt"], "t0");
-    }
-
-    #[test]
-    fn roster_adds_replaces_removes_and_reports_changes() {
-        let r = Sessions::default();
-        r.add(added("a"));
-        r.add(Session::from_entry(&entry("a", "connected"), "t1".into()));
-        assert_eq!(r.list().len(), 1);
-        assert_eq!(r.list()[0].state.as_deref(), Some("connected"));
-        let same = r.list();
-        assert!(!r.replace(same));
-        assert!(r.replace(reconcile(&r.list(), Ok(&[]))));
-        r.remove("a");
-        assert!(r.list().is_empty());
+    fn session_list_serializes_for_the_frontend() {
+        let v = serde_json::to_value(apply_listing(&SessionList::default(), Ok(&[entry("a", "connected")]))).unwrap();
+        assert_eq!(v["reachable"], true);
+        assert_eq!(v["sessions"][0]["sessionUrl"], "https://claude.ai/code/a");
+        assert_eq!(v["sessions"][0]["state"], "connected");
+        let v = serde_json::to_value(apply_listing(&SessionList::default(), Err("x"))).unwrap();
+        assert_eq!(v["reachable"], false);
+        assert_eq!(v["reason"], "x");
     }
 }
