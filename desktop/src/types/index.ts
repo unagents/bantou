@@ -64,21 +64,24 @@ export interface AgentEvent {
   message: string | null;
 }
 
-/** How an added session stands against the center's `session_list` (mirror of `session.rs::Link`). */
-export type SessionLink = "listed" | "lost" | "unreachable";
-
-/** A session added from the center (mirror of `src-tauri/src/session.rs::Session`). Held in memory only. */
+/** A session of the center's `session_list` (mirror of `src-tauri/src/session.rs::Session`). */
 export interface Session {
   name: string;
-  link: SessionLink;
-  /** Center's state at the last successful read. */
   state: CenterSession["state"] | null;
   sessionUrl: string | null;
   source: CenterSession["source"] | null;
   lastError: string | null;
-  /** Why the center could not be asked (link `unreachable`). */
+}
+
+/** The center's list as last fetched (mirror of `src-tauri/src/session.rs::SessionList`). Memory only. */
+export interface SessionList {
+  sessions: Session[];
+  /** false: the center could not be asked at the latest read; `sessions` is the older list. */
+  reachable: boolean;
+  /** Why the center could not be asked (`reachable` false). */
   reason: string | null;
-  addedAt: string;
+  /** Counts the changes of the Rust-side cache; the highest one wins (see `useBoard`). */
+  rev: number;
 }
 
 /** Mirror of `src-tauri/src/center.rs::CenterSettings`. */

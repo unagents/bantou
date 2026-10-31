@@ -25,7 +25,7 @@ export const defaultSeed: Seed = {
     task("t-am001", "broker 冗長化（202 + Mac）", "Doing", 0, "agent-messenger"),
     task("t-rs001", "USB3 省電力の無効化", "Done", 0, "researcher"),
   ],
-  // researcher is a tag only (not added) → never a row.
+  // researcher is a tag only (the center does not list it) → never a row.
   sessions: ["agent-messenger", "careery", "stroke-board"],
   threads: [
     {
@@ -55,5 +55,5 @@ export const defaultSeed: Seed = {
   ],
 };
 
-/** The default board with the center on, so the added sessions are listed by it (rows stay `listed`). */
+/** The default board with the center on, so the sessions are listed by it (reachable). */
 export const boardSeed: Seed = { ...defaultSeed, center: { enabled: true } };

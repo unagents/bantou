@@ -10,16 +10,16 @@ import {
   SESSIONS_CHANGED_EVENT,
   THREADS_CHANGED_EVENT,
 } from "~/api";
-import type { Ping, Session, Task, Thread } from "~/types";
+import type { Ping, SessionList, Task, Thread } from "~/types";
 
 /** How often the remaining time of the ping timers is re-evaluated. */
 const PING_TICK_MS = 5000;
 
 export interface SessionGroup {
   name: string;
-  /** Standing against the center's list: listed, lost (gone from it) or unreachable (could not ask). */
-  link: Session["link"];
-  /** Why the center could not be asked (link `unreachable`). */
+  /** The center could not be asked at the latest read (this row is from the last list that could be fetched). */
+  unreachable: boolean;
+  /** Why the center could not be asked. */
   reason: string | null;
   /** In-progress tasks (statuses between the first and the last). */
   working: Task[];
@@ -37,8 +37,17 @@ export function useBoard(dir: Ref<string | null>) {
   const tasks = ref<Task[]>([]);
   const statuses = ref<string[]>(["Todo", "Doing", "Done"]);
   const threads = ref<Record<string, Thread>>({});
-  /** Sessions added from the center (in-memory on the Rust side). */
-  const registered = ref<Session[]>([]);
+  /** The connected center's `session_list` as last fetched (cached on the Rust side). */
+  const centerList = ref<SessionList>({ sessions: [], reachable: true, reason: null, rev: -1 });
+  /**
+   * The list arrives from several places in no fixed order (start-up read, the change event,
+   * the workspace refresh). Keep the highest `rev`: a late older read must not bring back a list
+   * that was already replaced (the Rust side only emits the event when the content changes, so
+   * a stale list would stay).
+   */
+  function setCenterList(next: SessionList) {
+    if (next.rev >= centerList.value.rev) centerList.value = next;
+  }
   /** Ping timers: task id → expiry (epoch ms). */
   const pings = ref<Record<string, number>>({});
   const now = ref(Date.now());
@@ -56,17 +65,17 @@ export function useBoard(dir: Ref<string | null>) {
       tasks.value = [];
       threads.value = {};
       pings.value = {};
-      registered.value = await listSessions();
+      setCenterList(await listSessions());
       return;
     }
-    const [t, s, th, rs, ps] = await Promise.all([
+    const [t, s, th, cl, ps] = await Promise.all([
       listTasks(),
       getStatuses(),
       listThreads(),
       listSessions(),
       listPings(),
     ]);
-    registered.value = rs;
+    setCenterList(cl);
     tasks.value = t;
     statuses.value = s;
     threads.value = Object.fromEntries(th.map((x) => [x.task_id, x]));
@@ -85,16 +94,22 @@ export function useBoard(dir: Ref<string | null>) {
     const group = (name: string) => {
       let g = map.get(name);
       if (!g) {
-        const r = registered.value.find((x) => x.name === name);
-        g = { name, link: r?.link ?? "listed", reason: r?.reason ?? null, working: [], queued: [], done: [] };
+        g = {
+          name,
+          unreachable: !centerList.value.reachable,
+          reason: centerList.value.reason,
+          working: [],
+          queued: [],
+          done: [],
+        };
         map.set(name, g);
       }
       return g;
     };
-    // Added sessions are listed even without tasks.
-    for (const r of registered.value) group(r.name);
-    const reg = new Set(registered.value.map((r) => r.name));
-    // Only added sessions are rows; tags of other tasks are not sessions.
+    // The center's sessions are listed even without tasks.
+    for (const r of centerList.value.sessions) group(r.name);
+    const reg = new Set(centerList.value.sessions.map((r) => r.name));
+    // Only the center's sessions are rows; tags of other tasks are not sessions.
     for (const t of tasks.value) {
       for (const n of t.tags) {
         if (!reg.has(n)) continue;
@@ -122,8 +137,10 @@ export function useBoard(dir: Ref<string | null>) {
       if (e.payload === dir.value) setPings(await listPings());
     });
     unlistenSessions = await listen(SESSIONS_CHANGED_EVENT, async () => {
-      registered.value = await listSessions();
+      setCenterList(await listSessions());
     });
+    // A change before the listener was registered has no event: read once more now.
+    setCenterList(await listSessions());
   });
   onBeforeUnmount(() => {
     unlisten?.();
@@ -131,5 +148,5 @@ export function useBoard(dir: Ref<string | null>) {
     unlistenSessions?.();
   });
 
-  return { tasks, statuses, threads, registered, sessions, waitingCount, running, refresh };
+  return { tasks, statuses, threads, centerList, sessions, waitingCount, running, refresh };
 }

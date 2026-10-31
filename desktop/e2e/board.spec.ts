@@ -94,7 +94,7 @@ test("status is read-only text (no status combobox)", async ({ page }) => {
   await expect(page.getByRole("combobox")).toHaveCount(0);
 });
 
-test("a tag that is not an added session is not listed", async ({ page }) => {
+test("a tag that is not a session of the center is not listed", async ({ page }) => {
   await page.goto("/");
   await pickSession(page, "careery");
   await expect(session(page, "researcher")).toHaveCount(0);

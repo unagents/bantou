@@ -1,4 +1,4 @@
-import type { BrokerStatus, CenterSettings, Session, Task, Thread } from "../../src/types";
+import type { BrokerStatus, CenterSettings, Session, SessionList, Task, Thread } from "../../src/types";
 
 export interface Seed {
   dir: string | null;
@@ -7,7 +7,7 @@ export interface Seed {
   statuses?: string[];
   /** Text the mocked bantou responder answers with on open. */
   supplement?: string;
-  /** Names of the sessions already added (the center lists them too, connected). */
+  /** Names of the sessions the center lists (connected). */
   sessions?: string[];
   /** Merged into the mocked center settings. */
   center?: Partial<CenterSettings>;
@@ -66,8 +66,8 @@ export class MockBantou {
   centerRemotes: unknown[] = [];
   /** `session_list` result (center `SessionInfo[]`); `session_create` appends to it. */
   centerSessions: Record<string, unknown>[] = [];
-  /** Sessions added in bantou (memory on the Rust side). */
-  added: Session[] = [];
+  /** The list as last fetched (memory on the Rust side, `SessionCache`). */
+  sessionCache: SessionList = { sessions: [], reachable: true, reason: null, rev: 0 };
   /** When set, `session_create` fails with this message (center error). */
   centerSessionCreateError: string | null = null;
   /** When set, center_set_settings fails with this message (a failed save). */
@@ -92,8 +92,8 @@ export class MockBantou {
     for (const name of seed.sessions ?? []) {
       const e = this.centerEntry(name, "connected", "https://claude.ai/code/session_" + name);
       this.centerSessions.push(e);
-      this.added.push(this.toSession(e));
     }
+    this.sessionCache = { sessions: this.centerSessions.map((e) => this.toSession(e)), reachable: true, reason: null, rev: 0 };
     this.update = seed.update;
   }
 
@@ -140,13 +140,10 @@ export class MockBantou {
   private toSession(e: Record<string, unknown>): Session {
     return {
       name: e.name as string,
-      link: "listed",
       state: e.state as Session["state"],
       sessionUrl: (e.sessionUrl as string | null) ?? null,
       source: e.source as Session["source"],
       lastError: (e.lastError as string | undefined) ?? null,
-      reason: null,
-      addedAt: this.now(),
     };
   }
 
@@ -177,19 +174,20 @@ export class MockBantou {
     return this.centerSessions;
   }
 
-  /** Mirror of `session.rs::reconcile`. */
-  private reconcile(): Session[] {
-    let list: Record<string, unknown>[] | string;
+  /** Mirror of `session.rs::read_list`: the center's list replaces the cache; when it cannot be asked the old list stays. */
+  private readList(): SessionList {
+    let next: SessionList;
     try {
-      list = this.fetchCenterList();
+      next = { sessions: this.fetchCenterList().map((e) => this.toSession(e)), reachable: true, reason: null, rev: this.sessionCache.rev };
     } catch (e) {
-      list = e instanceof Error ? e.message : String(e);
+      next = { sessions: this.sessionCache.sessions, reachable: false, reason: e instanceof Error ? e.message : String(e), rev: this.sessionCache.rev };
     }
-    return this.added.map((s) => {
-      if (typeof list === "string") return { ...s, link: "unreachable", reason: list } as Session;
-      const e = list.find((x) => x.name === s.name);
-      return e ? { ...this.toSession(e), addedAt: s.addedAt } : ({ ...s, link: "lost", reason: null } as Session);
-    });
+    if (JSON.stringify(next) !== JSON.stringify(this.sessionCache)) {
+      next.rev += 1;
+      this.sessionCache = next;
+      this.emitter("bantou://sessions-changed", null);
+    }
+    return next;
   }
 
   /** `session_create` on the center: validates, appends to its list and returns the new entry. */
@@ -239,36 +237,14 @@ export class MockBantou {
         return t;
       }
       case "list_sessions":
-        return structuredClone(this.added);
-      case "refresh_sessions": {
-        if (!this.added.length) return [];
-        const next = this.reconcile();
-        const changed = JSON.stringify(next) !== JSON.stringify(this.added);
-        this.added = next;
-        if (changed) this.emitter("bantou://sessions-changed", null);
-        return structuredClone(next);
-      }
-      case "add_sessions": {
-        const list = this.fetchCenterList();
-        for (const n of args.names as string[]) {
-          const e = list.find((x) => x.name === n);
-          if (!e) throw new Error(`center の一覧に無い: ${n}`);
-          this.added = [...this.added.filter((s) => s.name !== n), this.toSession(e)];
-        }
-        this.emitter("bantou://sessions-changed", null);
-        return structuredClone(this.added);
-      }
+        return structuredClone(this.sessionCache);
+      case "refresh_sessions":
+        return structuredClone(this.readList());
       case "create_session": {
-        const e = this.createCenterSession((args.name as string).trim());
-        const s = this.toSession(e);
-        this.added = [...this.added.filter((x) => x.name !== s.name), s];
-        this.emitter("bantou://sessions-changed", null);
+        const s = this.toSession(this.createCenterSession((args.name as string).trim()));
+        this.readList();
         return structuredClone(s);
       }
-      case "unregister_session":
-        this.added = this.added.filter((s) => s.name !== args.name);
-        this.emitter("bantou://sessions-changed", null);
-        return null;
       case "instruct_add_task":
         this.sent.push({
           to: args.session as string,
