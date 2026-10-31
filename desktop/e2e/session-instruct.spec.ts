@@ -1,4 +1,4 @@
-import { expect, sentMessages, test } from "./fixtures";
+import { expect, pickSession, sentMessages, test } from "./fixtures";
 import { boardSeed } from "./seed";
 
 test.use({ seed: boardSeed });
@@ -10,6 +10,7 @@ test("header has no standalone task button", async ({ page }) => {
 
 test("session header button sends an add-task instruction to that session", async ({ page }) => {
   await page.goto("/");
+  await pickSession(page, "stroke-board");
   const btn = page.getByRole("button", { name: "stroke-board にタスク追加を指示" });
   await btn.click();
   const dlg = page.locator('[role="dialog"]');

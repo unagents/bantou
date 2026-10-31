@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 
 import type { Page } from "@playwright/test";
 
-import { expect, test } from "./fixtures";
+import { expect, pickSession, test } from "./fixtures";
 import { boardSeed } from "./seed";
 import { SHOT_DIR } from "./paths";
 
@@ -23,6 +23,7 @@ const ping = (page: Page, taskId: string, ttlMs?: number) =>
 
 test("only a working task with a live ping timer has the spinning icon", async ({ page }) => {
   await page.goto("/");
+  await pickSession(page, "careery");
   await expect(row(page, "t-cr001")).toBeVisible();
   // No ping yet: nothing spins.
   await expect(page.locator(".animate-spin")).toHaveCount(0);
@@ -31,18 +32,20 @@ test("only a working task with a live ping timer has the spinning icon", async (
   // working + live timer
   await expect(row(page, "t-cr001")).toHaveAttribute("data-running", "true");
   await expect(icon(page, "t-cr001")).toHaveClass(/animate-spin/);
-  // working, no timer
-  await expect(row(page, "t-sb001")).toHaveAttribute("data-running", "false");
-  await expect(icon(page, "t-sb001")).not.toHaveClass(/animate-spin/);
   // queued + live timer
   await expect(row(page, "t-cr002")).toHaveAttribute("data-running", "false");
   await expect(icon(page, "t-cr002")).not.toHaveClass(/animate-spin/);
   await expect(page.locator(".animate-spin")).toHaveCount(1);
   await page.screenshot({ path: resolve(SHOT_DIR, "ping.png"), fullPage: true });
+  // working, no timer (another session, shown after selecting it)
+  await pickSession(page, "stroke-board");
+  await expect(row(page, "t-sb001")).toHaveAttribute("data-running", "false");
+  await expect(icon(page, "t-sb001")).not.toHaveClass(/animate-spin/);
 });
 
 test("the icon stops without a reload when the timer runs out", async ({ page }) => {
   await page.goto("/");
+  await pickSession(page, "agent-messenger");
   await expect(row(page, "t-am001")).toBeVisible();
   await ping(page, "t-am001", 3000);
   await expect(icon(page, "t-am001")).toHaveClass(/animate-spin/);

@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 
 import type { Page } from "@playwright/test";
 
-import { expect, test } from "./fixtures";
+import { expect, pickSession, sideRow, test } from "./fixtures";
 import { SHOT_DIR } from "./paths";
 import { boardSeed } from "./seed";
 
@@ -57,7 +57,7 @@ test.describe("center on", () => {
 
   test("pick a session from the center's list and add it", async ({ page }) => {
     await page.goto("/");
-    await expect(session(page, "careery")).toBeVisible();
+    await pickSession(page, "careery");
     await centerHas(page, "webtool");
     await page.getByTestId("open-add-session").click();
     const dlg = page.getByTestId("add-dialog");
@@ -68,8 +68,8 @@ test.describe("center on", () => {
     await dlg.locator("[data-testid=add-row][data-name=webtool]").click();
     await dlg.getByTestId("add-submit").click();
     await expect(dlg).toBeHidden();
-    await expect(session(page, "webtool")).toBeVisible();
-    await expect(session(page, "webtool").getByTestId("session-lost")).toHaveCount(0);
+    await pickSession(page, "webtool");
+    await expect(sideRow(page, "webtool").getByTestId("side-lost")).toHaveCount(0);
     await page.screenshot({ path: resolve(SHOT_DIR, "session-added.png"), fullPage: true });
   });
 
@@ -79,7 +79,7 @@ test.describe("center on", () => {
     await page.getByTestId("add-name").fill("pm-main_1");
     await page.getByTestId("add-create").click();
     await expect(page.getByTestId("add-dialog")).toBeHidden();
-    await expect(session(page, "pm-main_1")).toBeVisible();
+    await pickSession(page, "pm-main_1");
     expect(await withMock(page, (m) => m.centerSessions.some((s) => s.name === "pm-main_1"))).toBe(true);
   });
 
@@ -113,36 +113,36 @@ test.describe("center on", () => {
     await page.getByTestId("add-create").click();
     await expect(page.getByTestId("add-action-error")).toContainText("claude が見つからない");
     await expect(page.getByTestId("add-dialog")).toBeVisible();
-    await expect(session(page, "pm-x")).toHaveCount(0);
+    await expect(sideRow(page, "pm-x")).toHaveCount(0);
   });
 
   test("a session that left the center's list is shown as lost, the others stay", async ({ page }) => {
     await page.goto("/");
-    await expect(session(page, "careery")).toBeVisible();
-    await expect(page.getByTestId("session-lost")).toHaveCount(0);
+    await pickSession(page, "careery");
+    await expect(page.getByTestId("side-lost")).toHaveCount(0);
     await withMock(page, (m) => m.centerDrop("careery"));
     await act(page);
-    await expect(session(page, "careery").getByTestId("session-lost")).toHaveText("ロスト");
-    await expect(session(page, "careery").getByTestId("session-unreachable")).toHaveCount(0);
-    await expect(session(page, "stroke-board").getByTestId("session-lost")).toHaveCount(0);
+    await expect(sideRow(page, "careery").getByTestId("side-lost")).toHaveText("ロスト");
+    await expect(sideRow(page, "careery").getByTestId("side-unreachable")).toHaveCount(0);
+    await expect(sideRow(page, "stroke-board").getByTestId("side-lost")).toHaveCount(0);
     // its tasks are still there
     await expect(session(page, "careery")).toContainText("スキルシート xlsx 取込の列マッピング");
     // the center takes it back
     await centerHas(page, "careery");
     await act(page);
-    await expect(session(page, "careery").getByTestId("session-lost")).toHaveCount(0);
+    await expect(sideRow(page, "careery").getByTestId("side-lost")).toHaveCount(0);
   });
 
   test("when the center cannot be asked, rows say 'つながらない' and not 'ロスト'", async ({ page }) => {
     await page.goto("/");
-    await expect(session(page, "careery")).toBeVisible();
+    await pickSession(page, "careery");
     await withMock(page, (m) => {
       m.centerReachable = false;
     });
     await act(page);
-    await expect(page.getByTestId("session-unreachable")).toHaveCount(3);
-    await expect(page.getByTestId("session-unreachable").first()).toHaveText("つながらない");
-    await expect(page.getByTestId("session-lost")).toHaveCount(0);
+    await expect(page.getByTestId("side-unreachable")).toHaveCount(3);
+    await expect(page.getByTestId("side-unreachable").first()).toHaveText("つながらない");
+    await expect(page.getByTestId("side-lost")).toHaveCount(0);
     // rows and tasks stay
     await expect(session(page, "careery")).toContainText("スキルシート xlsx 取込の列マッピング");
     // answered again: back to listed
@@ -150,30 +150,30 @@ test.describe("center on", () => {
       m.centerReachable = true;
     });
     await act(page);
-    await expect(page.getByTestId("session-unreachable")).toHaveCount(0);
-    await expect(page.getByTestId("session-lost")).toHaveCount(0);
+    await expect(page.getByTestId("side-unreachable")).toHaveCount(0);
+    await expect(page.getByTestId("side-lost")).toHaveCount(0);
   });
 
   test("unreachable, then answered without the session: lost", async ({ page }) => {
     await page.goto("/");
-    await expect(session(page, "careery")).toBeVisible();
+    await pickSession(page, "careery");
     await withMock(page, (m) => {
       m.centerReachable = false;
       m.centerDrop("careery");
     });
     await act(page);
-    await expect(session(page, "careery").getByTestId("session-unreachable")).toBeVisible();
+    await expect(sideRow(page, "careery").getByTestId("side-unreachable")).toBeVisible();
     await withMock(page, (m) => {
       m.centerReachable = true;
     });
     await act(page);
-    await expect(session(page, "careery").getByTestId("session-lost")).toBeVisible();
-    await expect(session(page, "stroke-board").getByTestId("session-lost")).toHaveCount(0);
+    await expect(sideRow(page, "careery").getByTestId("side-lost")).toBeVisible();
+    await expect(sideRow(page, "stroke-board").getByTestId("side-lost")).toHaveCount(0);
   });
 
   test("the list is read again before every action in the window", async ({ page }) => {
     await page.goto("/");
-    await expect(session(page, "careery")).toBeVisible();
+    await pickSession(page, "careery");
     const before = await refreshCount(page);
     await act(page);
     await expect.poll(() => refreshCount(page)).toBeGreaterThan(before);
@@ -181,6 +181,7 @@ test.describe("center on", () => {
     await page.keyboard.press("Shift");
     await expect.poll(() => refreshCount(page)).toBeGreaterThan(mid);
     // a button press reads it too
+    await pickSession(page, "stroke-board");
     const last = await refreshCount(page);
     await page.getByRole("button", { name: "stroke-board にタスク追加を指示" }).click();
     await expect.poll(() => refreshCount(page)).toBeGreaterThan(last);
@@ -188,11 +189,11 @@ test.describe("center on", () => {
 
   test("wake from sleep and a network change read the list again", async ({ page }) => {
     await page.goto("/");
-    await expect(session(page, "careery")).toBeVisible();
+    await pickSession(page, "careery");
     await withMock(page, (m) => m.centerDrop("careery"));
     const before = await refreshCount(page);
     await withMock(page, (m) => m.osWake());
-    await expect(session(page, "careery").getByTestId("session-lost")).toBeVisible();
+    await expect(sideRow(page, "careery").getByTestId("side-lost")).toBeVisible();
     expect(await refreshCount(page)).toBeGreaterThan(before);
 
     // a burst of network events is read once, after it settles
@@ -203,13 +204,13 @@ test.describe("center on", () => {
       m.osNetworkChanged();
       m.osNetworkChanged();
     });
-    await expect(session(page, "careery").getByTestId("session-lost")).toHaveCount(0);
+    await expect(sideRow(page, "careery").getByTestId("side-lost")).toHaveCount(0);
     expect((await refreshCount(page)) - mid).toBe(1);
   });
 
   test("closing the settings dialog reads the list again (the target may have changed)", async ({ page }) => {
     await page.goto("/");
-    await expect(session(page, "careery")).toBeVisible();
+    await pickSession(page, "careery");
     await page.getByTestId("open-settings").click();
     await expect(page.getByTestId("settings-dialog")).toBeVisible();
     // the new target answers without careery
@@ -217,7 +218,7 @@ test.describe("center on", () => {
     const before = await refreshCount(page);
     await page.keyboard.press("Escape");
     await expect(page.getByTestId("settings-dialog")).toBeHidden();
-    await expect(session(page, "careery").getByTestId("session-lost")).toBeVisible();
+    await expect(sideRow(page, "careery").getByTestId("side-lost")).toBeVisible();
     expect(await refreshCount(page)).toBeGreaterThan(before);
   });
 });
