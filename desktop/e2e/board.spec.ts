@@ -2,6 +2,9 @@ import { resolve } from "node:path";
 
 import { expect, sentMessages, test } from "./fixtures";
 import { SHOT_DIR } from "./paths";
+import { boardSeed } from "./seed";
+
+test.use({ seed: boardSeed });
 
 const session = (page: import("@playwright/test").Page, name: string) =>
   page.locator(`section[aria-label="${name}"]`);
@@ -71,55 +74,10 @@ test("status is read-only text (no status combobox)", async ({ page }) => {
   await expect(page.getByRole("combobox")).toHaveCount(0);
 });
 
-test("a tag that is not a registered session is not listed", async ({ page }) => {
+test("a tag that is not an added session is not listed", async ({ page }) => {
   await page.goto("/");
   await expect(session(page, "careery")).toBeVisible();
   await expect(session(page, "researcher")).toHaveCount(0);
-});
-
-test("add session: pick from peer list, register, protocol sent, row appears", async ({ page }) => {
-  await page.goto("/");
-  await page.getByRole("button", { name: "セッション追加" }).click();
-  const dlg = page.locator('[role="dialog"]');
-  await expect(dlg.locator("tr[data-peer='webtool']")).toBeVisible();
-  // self is hidden, unnamed peer is shown but not selectable
-  await expect(dlg.locator("tr[data-peer='bantou-core']")).toHaveCount(0);
-  await dlg.locator("tr[data-peer='webtool']").click();
-  await dlg.getByRole("button", { name: /登録して規約を送る（1）/ }).click();
-  await expect(session(page, "webtool")).toBeVisible();
-  const sent = await sentMessages(page);
-  expect(sent.map((m) => m.to)).toEqual(["p3"]);
-  await page.screenshot({ path: resolve(SHOT_DIR, "session-added.png"), fullPage: true });
-});
-
-test("unnamed peer: pick, name it (defaults to cwd basename), set_name instruction sent", async ({ page }) => {
-  await page.goto("/");
-  await page.getByRole("button", { name: "セッション追加" }).first().click();
-  const dlg = page.locator('[role="dialog"]');
-  await dlg.locator("tr[data-peer='p2']").click();
-  const input = dlg.getByLabel("p2 のセッション名");
-  await expect(input).toHaveValue("inet250");
-  await input.fill("careery");
-  await expect(dlg.getByRole("button", { name: /登録して規約を送る/ })).toBeDisabled();
-  await input.fill("inet250");
-  await dlg.getByRole("button", { name: /登録して規約を送る（1）/ }).click();
-  await expect(session(page, "inet250")).toBeVisible();
-  const sent = await sentMessages(page);
-  expect(sent[0]!.to).toBe("p2");
-  expect(sent[0]!.text).toContain("set_name「inet250」");
-});
-
-test("a session dropped from the roster disappears without a reload, other rows stay", async ({ page }) => {
-  await page.goto("/");
-  await expect(session(page, "careery")).toBeVisible();
-  await page.evaluate(() =>
-    (
-      window as unknown as { __BANTOU_MOCK__: { dropAbsent: (name: string) => void } }
-    ).__BANTOU_MOCK__.dropAbsent("careery"),
-  );
-  await expect(session(page, "careery")).toHaveCount(0);
-  await expect(session(page, "agent-messenger")).toBeVisible();
-  await expect(session(page, "stroke-board")).toBeVisible();
 });
 
 test("IME conversion Enter does not send; plain Enter does", async ({ page }) => {

@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { useIntervalFn } from "@vueuse/core";
 import { brokerConnect, brokerStatus, centerGetSettings, instructAddTask } from "~/api";
-import type { BrokerStatus, RegisterResult, Task } from "~/types";
+import type { BrokerStatus, Task } from "~/types";
 
 const { dir, loaded, load, pickAndOpen } = useWorkspace();
+const { refreshNow: refreshSessions } = useSessionRefresh();
 const { threads, registered, sessions, waitingCount, running, refresh } = useBoard(dir);
 const toast = useToast();
 const { state: updaterState, checkManually, installAndRestart } = useUpdater();
@@ -59,29 +60,26 @@ watch(modalOpen, (v) => {
 const addSessionOpen = ref(false);
 const settingsOpen = ref(false);
 const centerOpen = ref(false);
-const pmOpen = ref(false);
 
-// The PM button needs a center to talk to: enabled, or a pasted remote (the same rule as the Rust side).
-const pmDisabledReason = ref<string | null>(null);
-async function refreshPmTarget() {
+// "セッション追加" needs a center to talk to: enabled, or a pasted remote (the same rule as the Rust side).
+const addSessionDisabledReason = ref<string | null>(null);
+async function refreshAddTarget() {
   try {
     const s = await centerGetSettings();
-    pmDisabledReason.value = s.enabled || s.remote ? null : "center が無効で接続先も無い（設定で center を有効にするか、別ホストの接続設定を貼る）";
+    addSessionDisabledReason.value = s.enabled || s.remote ? null : "center が無効で接続先も無い（設定で center を有効にするか、別ホストの接続設定を貼る）";
   } catch (e) {
-    pmDisabledReason.value = String(e);
+    addSessionDisabledReason.value = String(e);
   }
 }
-onMounted(() => void refreshPmTarget());
-watch(settingsOpen, (v) => !v && void refreshPmTarget());
-async function onSessionsAdded(results: RegisterResult[]) {
-  await refresh();
-  for (const r of results) {
-    toast.add(
-      r.delivered
-        ? { title: `${r.name} を登録`, description: "規約を送信した", color: "success" }
-        : { title: `${r.name} の登録に失敗`, description: r.error ?? "", color: "error" },
-    );
-  }
+onMounted(() => void refreshAddTarget());
+// The target may have changed (settings, pasted connection): re-read the center.
+watch(settingsOpen, (v) => {
+  if (v) return;
+  void refreshAddTarget();
+  void refreshSessions();
+});
+function onSessionsAdded(names: string[]) {
+  toast.add({ title: `${names.join(", ")} を追加`, color: "success" });
 }
 
 // --- instruct a session to add a task ------------------------------------------
@@ -104,11 +102,10 @@ async function onInstruct(session: string, title: string, body: string) {
       :workspace-path="dir"
       :waiting-count="waitingCount"
       :broker="broker"
-      :pm-disabled-reason="pmDisabledReason"
+      :add-session-disabled-reason="addSessionDisabledReason"
       :updater="updaterState"
       @open="pickAndOpen"
       @add-session="addSessionOpen = true"
-      @pm="pmOpen = true"
       @center="centerOpen = true"
       @settings="settingsOpen = true"
       @check-update="checkManually"
@@ -141,11 +138,11 @@ async function onInstruct(session: string, title: string, body: string) {
           v-if="!sessions.length"
           class="border-cork-border text-cork-muted flex flex-col items-center gap-3 border border-dashed py-10 text-sm"
         >
-          <p>作業セッションが未登録。messenger に接続中のセッションから登録する。</p>
+          <p>作業セッションが未追加。center のセッション一覧から追加する。</p>
           <UButton
             icon="i-lucide-user-plus"
             label="セッション追加"
-            :disabled="!broker?.connected"
+            :disabled="!!addSessionDisabledReason"
             @click="addSessionOpen = true"
           />
         </div>
@@ -163,12 +160,10 @@ async function onInstruct(session: string, title: string, body: string) {
     <AddSessionDialog
       v-if="addSessionOpen"
       v-model:open="addSessionOpen"
-      :registered="registered"
-      :self-name="broker?.name ?? 'bantou-core'"
+      :added="registered"
       @done="onSessionsAdded"
     />
     <SettingsDialog v-if="settingsOpen" v-model:open="settingsOpen" />
-    <PmDialog v-if="pmOpen" v-model:open="pmOpen" />
     <CenterDialog v-if="centerOpen" v-model:open="centerOpen" />
     <InstructTaskDialog
       :open="instructTarget !== null"

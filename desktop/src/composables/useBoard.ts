@@ -17,6 +17,10 @@ const PING_TICK_MS = 5000;
 
 export interface SessionGroup {
   name: string;
+  /** Standing against the center's list: listed, lost (gone from it) or unreachable (could not ask). */
+  link: Session["link"];
+  /** Why the center could not be asked (link `unreachable`). */
+  reason: string | null;
   /** In-progress tasks (statuses between the first and the last). */
   working: Task[];
   /** Queued tasks (the first status, Cork's "Todo"). */
@@ -33,7 +37,7 @@ export function useBoard(dir: Ref<string | null>) {
   const tasks = ref<Task[]>([]);
   const statuses = ref<string[]>(["Todo", "Doing", "Done"]);
   const threads = ref<Record<string, Thread>>({});
-  /** Sessions registered from the peer list (in-memory roster on the Rust side). */
+  /** Sessions added from the center (in-memory on the Rust side). */
   const registered = ref<Session[]>([]);
   /** Ping timers: task id → expiry (epoch ms). */
   const pings = ref<Record<string, number>>({});
@@ -52,6 +56,7 @@ export function useBoard(dir: Ref<string | null>) {
       tasks.value = [];
       threads.value = {};
       pings.value = {};
+      registered.value = await listSessions();
       return;
     }
     const [t, s, th, rs, ps] = await Promise.all([
@@ -80,15 +85,16 @@ export function useBoard(dir: Ref<string | null>) {
     const group = (name: string) => {
       let g = map.get(name);
       if (!g) {
-        g = { name, working: [], queued: [], done: [] };
+        const r = registered.value.find((x) => x.name === name);
+        g = { name, link: r?.link ?? "listed", reason: r?.reason ?? null, working: [], queued: [], done: [] };
         map.set(name, g);
       }
       return g;
     };
-    // Registered sessions are listed even without tasks.
+    // Added sessions are listed even without tasks.
     for (const r of registered.value) group(r.name);
     const reg = new Set(registered.value.map((r) => r.name));
-    // Only registered sessions are rows; tags of other tasks are not sessions.
+    // Only added sessions are rows; tags of other tasks are not sessions.
     for (const t of tasks.value) {
       for (const n of t.tags) {
         if (!reg.has(n)) continue;
@@ -115,8 +121,8 @@ export function useBoard(dir: Ref<string | null>) {
     unlistenPings = await listen<string>(PINGS_CHANGED_EVENT, async (e) => {
       if (e.payload === dir.value) setPings(await listPings());
     });
-    unlistenSessions = await listen<string>(SESSIONS_CHANGED_EVENT, async (e) => {
-      if (e.payload === dir.value) registered.value = await listSessions();
+    unlistenSessions = await listen(SESSIONS_CHANGED_EVENT, async () => {
+      registered.value = await listSessions();
     });
   });
   onBeforeUnmount(() => {

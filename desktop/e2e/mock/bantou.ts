@@ -1,4 +1,4 @@
-import type { BrokerStatus, CenterSettings, Peer, Session, Task, Thread } from "../../src/types";
+import type { BrokerStatus, CenterSettings, Session, Task, Thread } from "../../src/types";
 
 export interface Seed {
   dir: string | null;
@@ -7,8 +7,10 @@ export interface Seed {
   statuses?: string[];
   /** Text the mocked bantou responder answers with on open. */
   supplement?: string;
-  peers?: Peer[];
-  sessions?: Session[];
+  /** Names of the sessions already added (the center lists them too, connected). */
+  sessions?: string[];
+  /** Merged into the mocked center settings. */
+  center?: Partial<CenterSettings>;
   /** When set, `plugin:updater|check` reports this release as available. */
   update?: { version: string; currentVersion?: string; body?: string };
 }
@@ -30,8 +32,6 @@ export class MockBantou {
   threads: Map<string, Thread>;
   statuses: string[];
   supplement: string;
-  peers: Peer[];
-  sessionsList: Session[];
   update: Seed["update"];
   center: CenterSettings = { enabled: false, port: 7910, bind: "127.0.0.1", workspace: "~/.bantou", token: "mock-token-000000000000000000000001" };
   /** Number of tokens minted by center_regenerate_token (the next one is mock-token-<n>). */
@@ -61,6 +61,8 @@ export class MockBantou {
   centerRemotes: unknown[] = [];
   /** `session_list` result (center `SessionInfo[]`); `session_create` appends to it. */
   centerSessions: Record<string, unknown>[] = [{ name: "workspace", path: "/mock/.bantou", state: "connected", pid: 1, sessionUrl: null, startedAt: null, source: "config" }];
+  /** Sessions added in bantou (memory on the Rust side). */
+  added: Session[] = [];
   /** When set, `session_create` fails with this message (center error). */
   centerSessionCreateError: string | null = null;
   /** sessionUrl `session_create` returns (null: not connected yet). */
@@ -79,8 +81,12 @@ export class MockBantou {
     this.threads = new Map(seed.threads.map((t) => [t.task_id, structuredClone(t)]));
     this.statuses = seed.statuses ?? ["Todo", "Doing", "Done"];
     this.supplement = seed.supplement ?? "補足: 判断材料のモック。";
-    this.peers = seed.peers ?? [];
-    this.sessionsList = seed.sessions ?? [];
+    if (seed.center) Object.assign(this.center, seed.center);
+    for (const name of seed.sessions ?? []) {
+      const e = this.centerEntry(name, "connected", "https://claude.ai/code/session_" + name);
+      this.centerSessions.push(e);
+      this.added.push(this.toSession(e));
+    }
     this.update = seed.update;
   }
 
@@ -120,10 +126,74 @@ export class MockBantou {
     this.emitter("bantou://pings-changed", this.dir);
   }
 
-  /** Session `name` has been gone for the absence TTL: bantou drops it from the roster. */
-  dropAbsent(name: string) {
-    this.sessionsList = this.sessionsList.filter((s) => s.name !== name);
-    this.emitter("bantou://sessions-changed", this.dir);
+  private centerEntry(name: string, state: string, sessionUrl: string | null): Record<string, unknown> {
+    return { name, path: `/mock/.bantou/${name}`, state, pid: 4300, sessionUrl, startedAt: this.now(), source: "session" };
+  }
+
+  private toSession(e: Record<string, unknown>): Session {
+    return {
+      name: e.name as string,
+      link: "listed",
+      state: e.state as Session["state"],
+      sessionUrl: (e.sessionUrl as string | null) ?? null,
+      source: e.source as Session["source"],
+      lastError: (e.lastError as string | undefined) ?? null,
+      reason: null,
+      addedAt: this.now(),
+    };
+  }
+
+  /** The center no longer lists session `name` (it was stopped / removed there). */
+  centerDrop(name: string) {
+    this.centerSessions = this.centerSessions.filter((s) => s.name !== name);
+  }
+
+  /** The machine woke from sleep. */
+  osWake() {
+    this.emitter("bantou://os-wake", null);
+  }
+
+  /** A network interface / address changed. */
+  osNetworkChanged() {
+    this.emitter("bantou://os-network-changed", null);
+  }
+
+  /** Where the mocked desktop would connect: the same rule as `select_target`. */
+  private hasCenterTarget() {
+    return this.center.enabled || !!this.center.remote;
+  }
+
+  /** `session_list` as the Rust side sees it: fails when there is no target or the center does not answer. */
+  private fetchCenterList(): Record<string, unknown>[] {
+    if (!this.hasCenterTarget()) throw new Error("接続先が無い（center を有効にするか、別ホストの接続設定を貼る）");
+    if (!this.centerReachable) throw new Error("center に接続できない: mock");
+    return this.centerSessions;
+  }
+
+  /** Mirror of `session.rs::reconcile`. */
+  private reconcile(): Session[] {
+    let list: Record<string, unknown>[] | string;
+    try {
+      list = this.fetchCenterList();
+    } catch (e) {
+      list = e instanceof Error ? e.message : String(e);
+    }
+    return this.added.map((s) => {
+      if (typeof list === "string") return { ...s, link: "unreachable", reason: list } as Session;
+      const e = list.find((x) => x.name === s.name);
+      return e ? { ...this.toSession(e), addedAt: s.addedAt } : ({ ...s, link: "lost", reason: null } as Session);
+    });
+  }
+
+  /** `session_create` on the center: validates, appends to its list and returns the new entry. */
+  private createCenterSession(name: string): Record<string, unknown> {
+    this.fetchCenterList();
+    if (this.centerSessionCreateError) throw new Error(this.centerSessionCreateError);
+    if (!/^[A-Za-z0-9_-]+$/.test(name)) throw new Error("name は英数字と _ - のみ");
+    if (this.centerSessions.some((s) => s.name === name)) throw new Error(`name が既に使われている: ${name}`);
+    const e = this.centerEntry(name, this.centerSessionUrl ? "connected" : "starting", this.centerSessionUrl);
+    this.centerSessions.push(e);
+    return e;
   }
 
   listenerIds(event: string) {
@@ -162,19 +232,36 @@ export class MockBantou {
         return t;
       }
       case "list_sessions":
-        return structuredClone(this.sessionsList);
-      case "list_peers":
-        return structuredClone(this.peers);
-      case "register_sessions": {
-        const ps = args.peers as Peer[];
-        return ps.map((p) => {
-          const name = p.name || p.assign_name || "";
-          this.sessionsList.push({ name, hostname: p.hostname, cwd: p.cwd, registered_at: this.now() });
-          const prefix = p.name ? "" : `【最初にやること】set_name「${name}」\n`;
-          this.sent.push({ to: p.id, text: `${prefix}【bantou 登録通知】${name}` });
-          return { name, delivered: true, error: null };
-        });
+        return structuredClone(this.added);
+      case "refresh_sessions": {
+        if (!this.added.length) return [];
+        const next = this.reconcile();
+        const changed = JSON.stringify(next) !== JSON.stringify(this.added);
+        this.added = next;
+        if (changed) this.emitter("bantou://sessions-changed", null);
+        return structuredClone(next);
       }
+      case "add_sessions": {
+        const list = this.fetchCenterList();
+        for (const n of args.names as string[]) {
+          const e = list.find((x) => x.name === n);
+          if (!e) throw new Error(`center の一覧に無い: ${n}`);
+          this.added = [...this.added.filter((s) => s.name !== n), this.toSession(e)];
+        }
+        this.emitter("bantou://sessions-changed", null);
+        return structuredClone(this.added);
+      }
+      case "create_session": {
+        const e = this.createCenterSession((args.name as string).trim());
+        const s = this.toSession(e);
+        this.added = [...this.added.filter((x) => x.name !== s.name), s];
+        this.emitter("bantou://sessions-changed", null);
+        return structuredClone(s);
+      }
+      case "unregister_session":
+        this.added = this.added.filter((s) => s.name !== args.name);
+        this.emitter("bantou://sessions-changed", null);
+        return null;
       case "instruct_add_task":
         this.sent.push({
           to: args.session as string,
@@ -270,24 +357,9 @@ export class MockBantou {
           case "remote_list":
             return text(this.centerRemotes);
           case "session_list":
-            return text(this.centerSessions);
-          case "session_create": {
-            const name = (args.arguments as { name: string }).name;
-            if (this.centerSessionCreateError) throw new Error(this.centerSessionCreateError);
-            if (!/^[A-Za-z0-9_-]+$/.test(name)) throw new Error("name は英数字と _ - のみ");
-            if (this.centerSessions.some((s) => s.name === name)) throw new Error(`name が既に使われている: ${name}`);
-            const s = {
-              name,
-              path: `/mock/.bantou/${name}`,
-              state: this.centerSessionUrl ? "connected" : "starting",
-              pid: 4300,
-              sessionUrl: this.centerSessionUrl,
-              startedAt: this.now(),
-              source: "session",
-            };
-            this.centerSessions.push(s);
-            return text(s);
-          }
+            return text(this.fetchCenterList());
+          case "session_create":
+            return text(this.createCenterSession((args.arguments as { name: string }).name));
           case "server_list":
             return text(this.centerServers);
           case "server_peers":

@@ -13,10 +13,13 @@ export {
   centerTool,
 } from "./center";
 export {
+  addSessions,
+  createSession,
   instructAddTask,
-  listPeers,
   listSessions,
-  registerSessions,
+  OS_NETWORK_EVENT,
+  OS_WAKE_EVENT,
+  refreshSessions,
   SESSIONS_CHANGED_EVENT,
   unregisterSession,
 } from "./sessions";
