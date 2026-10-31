@@ -134,6 +134,28 @@ test("pasting a connection snippet shows the parsed URL and token, or a readable
   await expect(page.getByTestId("settings-save")).toBeEnabled();
 });
 
+test("a saved remote target fills the paste field and the parsed result when the dialog opens", async ({ page }) => {
+  await page.goto("/");
+  await page.evaluate(() => {
+    const m = (window as unknown as { __BANTOU_MOCK__: { center: Record<string, unknown> } }).__BANTOU_MOCK__;
+    m.center.remote = { url: "http://mac200:7910/mcp", token: "tok-saved-remote-0123" };
+  });
+  await page.getByTestId("open-settings").click();
+  const paste = page.getByTestId("center-remote-paste");
+  await expect(paste).toHaveValue(/"url": "http:\/\/mac200:7910\/mcp"/);
+  await expect(paste).toHaveValue(/"Authorization": "Bearer tok-saved-remote-0123"/);
+  await expect(page.getByTestId("center-remote-parsed-url")).toHaveText("http://mac200:7910/mcp");
+  await expect(page.getByTestId("center-remote-parsed-token")).toContainText("あり");
+  // the same as the saved value: nothing to save
+  await expect(page.getByTestId("settings-save")).toBeDisabled();
+
+  // editing the field parses again as before
+  await paste.fill("claude mcp add --transport http bantou-center http://mac204:7910/mcp");
+  await expect(page.getByTestId("center-remote-parsed-url")).toHaveText("http://mac204:7910/mcp");
+  await expect(page.getByTestId("center-remote-parsed-token")).toContainText("なし");
+  await expect(page.getByTestId("settings-save")).toBeEnabled();
+});
+
 test("one IP choice is the host of the connection snippets (the center listens on all addresses)", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("open-settings").click();

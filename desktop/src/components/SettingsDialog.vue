@@ -41,6 +41,7 @@ async function load() {
   try {
     settings.value = await centerGetSettings();
     baseline.value = snapshot(settings.value);
+    await showSavedRemote(settings.value);
   } catch (e) {
     error.value = String(e);
   }
@@ -208,6 +209,29 @@ async function onPaste(text: string) {
     if (seq !== parseSeq) return;
     parsed.value = null;
     parseError.value = String(e);
+  }
+}
+
+// With the center off and a saved remote, open with the paste field filled by it (mcp.json form) and parsed.
+// The saved remote stays as it is, so the draft equals the baseline and save stays disabled.
+async function showSavedRemote(s: CenterSettings) {
+  const seq = ++parseSeq;
+  parsed.value = null;
+  parseError.value = null;
+  pasteText.value = "";
+  if (s.enabled || !s.remote) return;
+  const entry = {
+    type: "http",
+    url: s.remote.url,
+    ...(s.remote.token ? { headers: { Authorization: `Bearer ${s.remote.token}` } } : {}),
+  };
+  const text = JSON.stringify({ mcpServers: { "bantou-center": entry } }, null, 2);
+  pasteText.value = text;
+  try {
+    const r = await centerParseConnect(text);
+    if (seq === parseSeq) parsed.value = r;
+  } catch (e) {
+    if (seq === parseSeq) parseError.value = String(e);
   }
 }
 
