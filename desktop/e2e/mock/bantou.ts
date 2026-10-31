@@ -70,6 +70,8 @@ export class MockBantou {
   added: Session[] = [];
   /** When set, `session_create` fails with this message (center error). */
   centerSessionCreateError: string | null = null;
+  /** When set, center_set_settings fails with this message (a failed save). */
+  centerSetSettingsError: string | null = null;
   /** sessionUrl `session_create` returns (null: not connected yet). */
   centerSessionUrl: string | null = "https://claude.ai/code/session_mock";
   calls: InvokeRecord[] = [];
@@ -317,6 +319,7 @@ export class MockBantou {
       case "center_get_settings":
         return { ...structuredClone(this.center), bind: this.center.bind || defaultIp(this.localIps) };
       case "center_set_settings":
+        if (this.centerSetSettingsError) throw this.centerSetSettingsError;
         this.center = JSON.parse(JSON.stringify(args.settings)) as CenterSettings;
         return structuredClone(this.center);
       case "center_status":

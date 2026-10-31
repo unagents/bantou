@@ -15,6 +15,11 @@ const open = defineModel<boolean>("open", { required: true });
 const toast = useToast();
 
 const settings = ref<CenterSettings | null>(null);
+// The settings as loaded (token follows a regenerate, which is stored at once): save is enabled only when the draft differs.
+const baseline = ref<string | null>(null);
+function snapshot(s: CenterSettings): string {
+  return JSON.stringify({ ...s, port: Number(s.port) });
+}
 const status = ref<CenterStatus | null>(null);
 const error = ref<string | null>(null);
 const saving = ref(false);
@@ -35,6 +40,7 @@ async function load() {
   error.value = null;
   try {
     settings.value = await centerGetSettings();
+    baseline.value = snapshot(settings.value);
   } catch (e) {
     error.value = String(e);
   }
@@ -68,6 +74,11 @@ const portError = computed(() => {
   const p = Number(settings.value?.port);
   return Number.isInteger(p) && p >= 1 && p <= 65535 ? null : "port は 1〜65535 の整数";
 });
+
+// ipChoice "new" counts too: the picked IP is saved even when it equals the current bind.
+const dirty = computed(
+  () => !!settings.value && (snapshot(settings.value) !== baseline.value || ipChoice.value === "new"),
+);
 
 const MIN_TOKEN_LEN = 12;
 const tokenError = computed(() =>
@@ -162,7 +173,9 @@ async function regenerateToken() {
   error.value = null;
   try {
     // Stored and applied (a running center restarts with it) right away; other draft fields stay unsaved.
-    settings.value.token = await centerRegenerateToken();
+    const token = await centerRegenerateToken();
+    if (baseline.value !== null) baseline.value = JSON.stringify({ ...JSON.parse(baseline.value), token });
+    settings.value.token = token;
     await refreshStatus();
     pollStatus();
   } catch (e) {
@@ -213,9 +226,7 @@ async function save() {
   try {
     settings.value = await centerSetSettings({ ...settings.value, port: Number(settings.value.port) });
     toast.add({ title: "設定を保存した", color: "success" });
-    if (ipChoice.value === "new") ipChoice.value = "done";
-    await Promise.all([refreshStatus(), loadIpStatus()]);
-    pollStatus();
+    open.value = false;
   } catch (e) {
     error.value = String(e);
   } finally {
@@ -433,7 +444,7 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
           icon="i-lucide-save"
           label="保存"
           :loading="saving"
-          :disabled="!!portError || !!tokenError"
+          :disabled="!!portError || !!tokenError || !dirty"
           data-testid="settings-save"
           @click="save"
         />

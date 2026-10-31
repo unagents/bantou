@@ -12,13 +12,59 @@ test("the settings dialog saves the center port and shows it again", async ({ pa
 
   await page.getByTestId("center-port").fill("7920");
   await page.getByTestId("settings-save").click();
-  await expect(page.getByText("設定を保存した")).toBeVisible();
-
-  await page.keyboard.press("Escape");
+  await expect(page.getByText("設定を保存した", { exact: true })).toBeVisible();
+  // saving closes the dialog
   await expect(dialog).toBeHidden();
 
   await page.getByTestId("open-settings").click();
   await expect(page.getByTestId("center-port")).toHaveValue("7920");
+});
+
+test("save is disabled until something changes, and a change back to the loaded value disables it again", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTestId("open-settings").click();
+  const save = page.getByTestId("settings-save");
+  await expect(page.getByTestId("center-state")).toHaveText("stopped");
+  await expect(save).toBeDisabled();
+
+  await page.getByTestId("center-enabled").click();
+  await expect(save).toBeEnabled();
+  await page.getByTestId("center-port").fill("7920");
+  await expect(save).toBeEnabled();
+  await page.getByTestId("center-port").fill("7910");
+  await page.getByTestId("center-enabled").click();
+  await expect(save).toBeDisabled();
+});
+
+test("regenerating the token is not a change; a new IP from the banner is", async ({ page }) => {
+  await page.goto("/");
+  await page.evaluate(() => {
+    const m = (window as unknown as { __BANTOU_MOCK__: { center: { enabled: boolean; bind: string } } }).__BANTOU_MOCK__;
+    m.center.enabled = true;
+    m.center.bind = "192.168.1.50";
+  });
+  await page.getByTestId("open-settings").click();
+  const save = page.getByTestId("settings-save");
+  await expect(save).toBeDisabled();
+
+  await page.getByTestId("center-token-regenerate").click();
+  await expect(page.getByTestId("center-token")).toHaveValue("mock-token-00000000000000000000000000000002");
+  await expect(save).toBeDisabled();
+
+  await page.getByTestId("center-ip-new").click();
+  await expect(save).toBeEnabled();
+});
+
+test("a failed save keeps the dialog open and shows the error", async ({ page }) => {
+  await page.goto("/");
+  await page.evaluate(() => {
+    (window as unknown as { __BANTOU_MOCK__: { centerSetSettingsError: string } }).__BANTOU_MOCK__.centerSetSettingsError = "保存できない: mock";
+  });
+  await page.getByTestId("open-settings").click();
+  await page.getByTestId("center-enabled").click();
+  await page.getByTestId("settings-save").click();
+  await expect(page.getByTestId("settings-error")).toContainText("保存できない: mock");
+  await expect(page.getByTestId("settings-dialog")).toBeVisible();
 });
 
 test("regenerating the token changes the token field and the connection snippets", async ({ page }) => {
@@ -77,9 +123,15 @@ test("pasting a connection snippet shows the parsed URL and token, or a readable
   await paste.fill('{"url":"http://mac200:7910/mcp","headers":{"Authorization":"Bearer tok-from-json-0123"}}');
   await expect(page.getByTestId("center-remote-current")).toContainText("http://mac200:7910/mcp");
   await page.getByTestId("settings-save").click();
-  await expect(page.getByText("設定を保存した")).toBeVisible();
+  await expect(page.getByText("設定を保存した", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("settings-dialog")).toBeHidden();
+  await page.getByTestId("open-settings").click();
+  await expect(page.getByTestId("center-remote-current")).toContainText("http://mac200:7910/mcp");
+  // clearing is a change, so save becomes enabled
+  await expect(page.getByTestId("settings-save")).toBeDisabled();
   await page.getByTestId("center-remote-clear").click();
   await expect(page.getByTestId("center-remote-current")).toBeHidden();
+  await expect(page.getByTestId("settings-save")).toBeEnabled();
 });
 
 test("one IP choice is the host of the connection snippets (the center listens on all addresses)", async ({ page }) => {
@@ -125,10 +177,10 @@ test("one IP choice is the host of the connection snippets (the center listens o
   await bind.click();
   await page.getByRole("option", { name: "100.64.0.9" }).click();
   await page.getByTestId("settings-save").click();
-  await expect(page.getByText("設定を保存した")).toBeVisible();
+  await expect(page.getByText("設定を保存した", { exact: true })).toBeVisible();
   const saved = await page.evaluate(() => (window as unknown as { __BANTOU_MOCK__: { center: { bind: string } } }).__BANTOU_MOCK__.center.bind);
   expect(saved).toBe("100.64.0.9");
-  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("settings-dialog")).toBeHidden();
   await page.getByTestId("open-settings").click();
   await expect(page.getByTestId("center-bind")).toContainText("100.64.0.9");
   await expect(snippet).toContainText("http://100.64.0.9:7910/mcp");
@@ -251,14 +303,22 @@ test("a vanished saved IP is reported with the current candidates, and nothing c
   await expect(page.getByTestId("center-ip-new-select")).toContainText("192.168.1.204");
 });
 
-test("choosing 'keep the same IP' keeps the saved IP", async ({ page }) => {
-  await openWithVanishedIp(page);
+test("choosing 'keep the same IP' keeps the saved IP and is not a change", async ({ page }) => {
+  await page.goto("/");
+  // center already on and its saved IP vanished: nothing is edited, so only the IP choice is in play
+  await page.evaluate(() => {
+    const m = (window as unknown as MockHandle).__BANTOU_MOCK__;
+    m.center.bind = "192.168.1.50";
+    (m.center as unknown as { enabled: boolean }).enabled = true;
+  });
+  await page.getByTestId("open-settings").click();
+  await expect(page.getByTestId("center-ip-banner")).toBeVisible();
+  await expect(page.getByTestId("settings-save")).toBeDisabled();
   await page.getByTestId("center-ip-keep").click();
+  await expect(page.getByTestId("settings-save")).toBeDisabled();
   await expect(page.getByTestId("center-ip-banner")).toHaveCount(0);
   await expect(page.getByTestId("center-bind")).toContainText("192.168.1.50");
   await expect(page.getByTestId("center-snippet")).toContainText("http://192.168.1.50:7910/mcp");
-  await page.getByTestId("settings-save").click();
-  await expect(page.getByText("設定を保存した")).toBeVisible();
   const saved = await page.evaluate(() => (window as unknown as MockHandle).__BANTOU_MOCK__.center.bind);
   expect(saved).toBe("192.168.1.50");
 });
@@ -272,12 +332,11 @@ test("choosing 'a new IP' switches to the first external IP, saves it and update
   // nothing is stored before save
   expect(await page.evaluate(() => (window as unknown as MockHandle).__BANTOU_MOCK__.center.bind)).toBe("192.168.1.50");
   await page.getByTestId("settings-save").click();
-  await expect(page.getByText("設定を保存した")).toBeVisible();
+  await expect(page.getByText("設定を保存した", { exact: true })).toBeVisible();
   expect(await page.evaluate(() => (window as unknown as MockHandle).__BANTOU_MOCK__.center.bind)).toBe("192.168.1.204");
-  await expect(page.getByTestId("center-ip-banner")).toHaveCount(0);
+  await expect(page.getByTestId("settings-dialog")).toBeHidden();
 
   // another candidate can be picked instead of the default
-  await page.keyboard.press("Escape");
   await page.evaluate(() => {
     (window as unknown as MockHandle).__BANTOU_MOCK__.center.bind = "192.168.1.50";
   });
