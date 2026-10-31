@@ -1,9 +1,9 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, readFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// Compiles `packages/center` into a single binary and stages it as a Tauri sidecar.
+// Compiles `packages/center` into a single binary and builds `packages/pty-wrapper` (Rust), staging both as Tauri sidecars.
 // Tauri requires the `-<target-triple>` suffix (see tauri.conf.json `bundle.externalBin`),
 // which it strips when bundling. Usage: bun scripts/build-sidecar.ts [--target <rust-triple>]
 // Triple precedence: --target, else env TAURI_ENV_TARGET_TRIPLE (set by the tauri CLI), else `rustc -vV` host.
@@ -48,6 +48,19 @@ function targetFromArgs(argv: string[]): string | undefined {
   return undefined;
 }
 
+// `cargo build --release` for the wrapper crate (`--target <triple>` only when cross-building) and stage it.
+function buildPtyWrapper(triple: string, binariesDir: string) {
+  const crateDir = join(packagesDir, "pty-wrapper");
+  const cross = triple !== hostTargetTriple();
+  console.log(`Building bantou-pty-wrapper (${triple})...`);
+  execFileSync("cargo", ["build", "--release", ...(cross ? ["--target", triple] : [])], { cwd: crateDir, stdio: "inherit" });
+  const built = join(crateDir, "target", ...(cross ? [triple] : []), "release", "bantou-pty-wrapper");
+  const dest = join(binariesDir, `bantou-pty-wrapper-${triple}`);
+  copyFileSync(built, dest);
+  chmodSync(dest, 0o755);
+  console.log(`Sidecar staged: ${dest}`);
+}
+
 function main() {
   const triple = targetFromArgs(process.argv.slice(2)) || process.env.TAURI_ENV_TARGET_TRIPLE || hostTargetTriple();
   const bunTarget = BUN_TARGETS[triple];
@@ -82,6 +95,8 @@ function main() {
   chmodSync(dest, 0o755);
 
   console.log(`Sidecar staged: ${dest}`);
+
+  buildPtyWrapper(triple, binariesDir);
 }
 
 main();
