@@ -272,3 +272,5 @@ center プロセス内のモジュール（`src/core.ts`）。session ごとの�
 - `GET /sessions/<name>/output`: SSE。続きは `Last-Event-ID` か `?after=<id>`。続きが残っていない / 指定なしは `event: reset` の後に積んである全部。各チャンクは `id: <id>` `event: output` `data: <base64>`。15 秒ごとに `: ka`。未知の session は 404。
 - `POST /sessions/<name>/input` `{"data":"<base64>"}` → 204（実行中でなければ 409）。
 - `POST /sessions/<name>/resize` `{"cols":N,"rows":N}` → 204。最後に送った側のサイズを覚え、次の wrapper 起動の初期値にする。
+
+- `GET /events`: SSE（外向け token、イベント ID・再送なし）。接続時に `event: sessions` `data: {}`、session の追加・削除・起動時復帰ごとに `event: sessions` `data: {"reason":"created"|"deleted"|"restored","name":"<name>"}`。15 秒ごとに `: ka`。受け取った側は `session_list` を取り直す。

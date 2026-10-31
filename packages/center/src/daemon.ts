@@ -16,6 +16,7 @@ import { createSessionManager } from "./sessions.js";
 import { createJsonListStore } from "./store.js";
 import { createCenterServer, createSessionMcpServer } from "./server.js";
 import { createCore } from "./core.js";
+import { createEventHub } from "./events.js";
 import { createSessionTokens } from "./session-auth.js";
 import { createServerLink } from "./server-link.js";
 
@@ -83,8 +84,10 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   link.setGate((peer, command) => follow.gate(peer, command));
   // session / remote の保存先は config と同じ dir（config の projects には書かない）
   const stateDir = dirname(resolve(configPath));
+  const events = createEventHub();
   const sessions = createSessionManager({
     config,
+    events,
     supervisor,
     store: createJsonListStore(join(stateDir, "sessions.json"), log),
     log,
@@ -144,6 +147,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
       createSessionServer: (owner) => createSessionMcpServer({ remotes, owner }),
       sessionAuth: sessionTokens,
       core,
+      events,
       port: args.port,
       bind: args.bind,
       token: config.token,

@@ -7,6 +7,7 @@ import { parseConfig, type Config, type ProjectConfig } from "../src/config.js";
 import type { RcStatus, RemoteControlSupervisor } from "../src/remote-control.js";
 import { createSessionManager, type SavedSession } from "../src/sessions.js";
 import { createJsonListStore } from "../src/store.js";
+import { createEventHub, type SessionsEvent } from "../src/events.js";
 
 /** supervisor の偽物。add / remove / start / list / status だけ持つ。 */
 function fakeSupervisor(initial: ProjectConfig[]) {
@@ -54,8 +55,11 @@ afterEach(async () => {
 const setup = () => {
   const fs = fakeSupervisor(config.projects);
   const store = createJsonListStore<SavedSession>(join(dir, "sessions.json"), () => {});
-  const mgr = createSessionManager({ config, supervisor: fs.sup, store, log: () => {}, waitMs: 0 });
-  return { ...fs, store, mgr };
+  const events = createEventHub();
+  const seen: SessionsEvent[] = [];
+  events.subscribe((e) => seen.push(e));
+  const mgr = createSessionManager({ config, supervisor: fs.sup, store, log: () => {}, waitMs: 0, events });
+  return { ...fs, store, mgr, seen };
 };
 
 test("create: path 省略は <workspace>/<name> を作り、起動して保存する。config の projects には書かない", async () => {
@@ -163,4 +167,19 @@ test("create: 起動直後に一度終了した（trust 未承認など）なら
   const r = await mgr.create({ name: "pm1" });
   assert.ok(Date.now() - t0 < 2000);
   assert.match(r.lastError ?? "", /Workspace not trusted/);
+});
+
+test("events: create / delete / restore で通知する。失敗した create や拒否された delete は通知しない", async () => {
+  const { mgr, store, seen } = setup();
+  await mgr.create({ name: "pm1" });
+  await assert.rejects(mgr.create({ name: "pm1", path: join(dir, "o") }));
+  await assert.rejects(mgr.delete("cfg"));
+  await mgr.delete("pm1");
+  assert.deepEqual(seen, [{ reason: "created", name: "pm1" }, { reason: "deleted", name: "pm1" }]);
+  await store.save([
+    { name: "pm4", path: join(dir, "ws", "pm4"), permissionMode: "auto", createdAt: "t" },
+    { name: "bad name", path: join(dir, "x"), permissionMode: "auto", createdAt: "t" },
+  ]);
+  await mgr.restore();
+  assert.deepEqual(seen.slice(2), [{ reason: "restored", name: "pm4" }]);
 });

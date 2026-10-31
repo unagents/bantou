@@ -4,6 +4,7 @@ import { z } from "zod";
 import { projectSchema, PERMISSION_MODES, type Config, type ProjectConfig } from "./config.js";
 import type { Logger } from "./log.js";
 import type { RcStatus, RemoteControlSupervisor } from "./remote-control.js";
+import type { EventHub } from "./events.js";
 import type { JsonListStore } from "./store.js";
 
 export const SESSION_NAME = /^[A-Za-z0-9_-]+$/;
@@ -53,6 +54,8 @@ export function createSessionManager(opts: {
   log: Logger;
   /** create 後、接続（URL 取得）か失敗を待つ上限。0 で待たない。既定 15 秒。 */
   waitMs?: number;
+  /** session の増減を通知する先（GET /events）。省略時は通知しない。 */
+  events?: EventHub;
 }): SessionManager {
   const { config, supervisor, store, log } = opts;
   const waitMs = opts.waitMs ?? 15_000;
@@ -90,6 +93,7 @@ export function createSessionManager(opts: {
           if (!SESSION_NAME.test(s.name) || !isAbsolute(s.path)) throw new Error("保存内容が不正");
           supervisor.add(toProject(s), { wrapper: true });
           saved.set(s.name, s);
+          opts.events?.publish({ reason: "restored", name: s.name });
           await mkdir(s.path, { recursive: true });
           await supervisor.start(s.name, { resume: true });
           log(`session 復帰: ${s.name} (${s.path})`);
@@ -130,6 +134,7 @@ export function createSessionManager(opts: {
           await supervisor.remove(name);
           throw new Error(`状態ファイルに保存できない: ${(e as Error).message}`);
         }
+        opts.events?.publish({ reason: "created", name });
         let st = await supervisor.start(name);
         log(`session 作成: ${name} (${path})`);
         // 接続（URL 取得）か失敗までを少し待つ。待ちきれなければ starting のまま返す
@@ -151,6 +156,7 @@ export function createSessionManager(opts: {
         await supervisor.remove(name);
         saved.delete(name);
         await persist();
+        opts.events?.publish({ reason: "deleted", name });
         log(`session 削除: ${name}`);
         return { name, deleted: true as const };
       }),

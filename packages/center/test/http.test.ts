@@ -7,6 +7,7 @@ import { allowedHostsFor, startHttpServer } from "../src/http.js";
 import type { RemoteManager } from "../src/remotes.js";
 import { createCenterServer, createSessionMcpServer } from "../src/server.js";
 import { createCore, type Core } from "../src/core.js";
+import { createEventHub } from "../src/events.js";
 import { createSessionTokens, type SessionTokens } from "../src/session-auth.js";
 import type { SessionManager } from "../src/sessions.js";
 import { parseConfig } from "../src/config.js";
@@ -39,6 +40,7 @@ async function boot(
   } as unknown as RemoteManager;
   const tokens = createSessionTokens();
   const core = createCore();
+  const events = createEventHub();
   const created: unknown[] = [];
   const remotes2 = {
     ...remotes,
@@ -49,13 +51,14 @@ async function boot(
     createSessionServer: (owner) => createSessionMcpServer({ remotes: remotes2, owner }),
     sessionAuth: tokens,
     core,
+    events,
     port: 0,
     log: () => {},
     ...extra,
     bind: extra.bind ?? "127.0.0.1",
     token: extra.token ?? TOKEN,
   });
-  return { h, url: new URL(`http://127.0.0.1:${h.port}/mcp`), tokens, core, created, base: `http://127.0.0.1:${h.port}` };
+  return { h, url: new URL(`http://127.0.0.1:${h.port}/mcp`), tokens, core, events, created, base: `http://127.0.0.1:${h.port}` };
 }
 
 test("http: 2 クライアントが並行に接続して tools/list と tool 呼び出しができる", async () => {
@@ -510,5 +513,54 @@ test("core POST: input は 204 / 実行中でなければ 409 / 未知 session 4
     assert.equal((await fetch(`${base}/sessions/s1/output`, { method: "POST", headers: AUTH })).status, 405);
   } finally {
     await h.close();
+  }
+});
+
+// -- GET /events --
+
+test("GET /events: token 必須。接続時に空の sessions イベント、増減で理由と名前付きのイベント、keep-alive", async () => {
+  const { h, events, base } = await boot({ keepAliveMs: 40 });
+  try {
+    assert.equal((await fetch(`${base}/events`)).status, 401);
+    assert.equal((await fetch(`${base}/events`, { headers: { authorization: "Bearer nope" } })).status, 401);
+    assert.equal((await fetch(`${base}/events`, { method: "POST", headers: AUTH })).status, 405);
+    const res = await fetch(`${base}/events`, { headers: AUTH });
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /text\/event-stream/);
+    setTimeout(() => {
+      events.publish({ reason: "created", name: "a" });
+      events.publish({ reason: "deleted", name: "a" });
+      events.publish({ reason: "restored", name: "b" });
+    }, 20);
+    const evs = await readSse(res, (e) => e.filter((x) => x.event === "sessions").length >= 4 && e.some((x) => x.event === "comment:ka"));
+    const sess = evs.filter((e) => e.event === "sessions");
+    assert.deepEqual(sess.map((e) => e.data), [
+      "{}",
+      '{"reason":"created","name":"a"}',
+      '{"reason":"deleted","name":"a"}',
+      '{"reason":"restored","name":"b"}',
+    ]);
+    assert.ok(sess.every((e) => e.id === undefined)); // event ID は付けない
+    assert.ok(evs.some((e) => e.event === "comment:ka"));
+  } finally {
+    await h.close();
+  }
+});
+
+test("GET /events: 切断後は購読が外れ、events を渡さなければ 404", async () => {
+  const { h, events, base } = await boot();
+  try {
+    const res = await fetch(`${base}/events`, { headers: AUTH });
+    await readSse(res, (e) => e.length >= 1);
+    await new Promise((r) => setTimeout(r, 50));
+    events.publish({ reason: "created", name: "x" }); // 購読者が居なくても投げない
+  } finally {
+    await h.close();
+  }
+  const bare = await startHttpServer({ createServer: () => { throw new Error("unused"); }, port: 0, bind: "127.0.0.1", token: TOKEN, log: () => {} });
+  try {
+    assert.equal((await fetch(`http://127.0.0.1:${bare.port}/events`, { headers: AUTH })).status, 404);
+  } finally {
+    await bare.close();
   }
 });

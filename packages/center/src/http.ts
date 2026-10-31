@@ -6,11 +6,13 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { MIN_TOKEN_LEN } from "./config.js";
 import type { Core } from "./core.js";
+import type { EventHub } from "./events.js";
 import type { SessionTokens } from "./session-auth.js";
 import type { Logger } from "./log.js";
 
 export const MCP_PATH = "/mcp";
 /** session（master-cap）向けの MCP 窓口。認証は session ごとの使い捨て token + header X-Bantou-Session。 */
+export const EVENTS_PATH = "/events";
 export const SESSION_MCP_PATH = "/mcp/session";
 const OWNER_HEADER = "x-bantou-session";
 const SESSION_NAME = /^[A-Za-z0-9_-]+$/;
@@ -133,6 +135,8 @@ export async function startHttpServer(opts: {
   sessionAuth?: SessionTokens;
   /** pty 出力の core。渡すと /sessions/<name>/{output,input,resize} を外向け token で提供する。 */
   core?: Core;
+  /** セッション増減の通知。渡すと GET /events（外向け token）を提供する。 */
+  events?: EventHub;
   /** SSE の keep-alive 間隔（テスト用）。 */
   keepAliveMs?: number;
   port: number;
@@ -284,6 +288,34 @@ export async function startHttpServer(opts: {
         return;
       }
       owner = name;
+    } else if (path === EVENTS_PATH && opts.events) {
+      if (!bearerMatches(req.headers.authorization, token)) {
+        sendJson(res, 401, { error: "unauthorized" }, { "www-authenticate": "Bearer" });
+        return;
+      }
+      if (allowed && !allowed.hosts.includes(req.headers.host ?? "")) {
+        sendJson(res, 403, { error: "forbidden host" });
+        return;
+      }
+      if (req.method !== "GET") {
+        sendJson(res, 405, { error: "method not allowed" }, { allow: "GET" });
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+      res.flushHeaders();
+      res.write("event: sessions\ndata: {}\n\n");
+      const unsub = opts.events.subscribe((ev) => {
+        if (!res.writableEnded) res.write(`event: sessions\ndata: ${JSON.stringify(ev)}\n\n`);
+      });
+      const ka = setInterval(() => {
+        if (!res.writableEnded) res.write(": ka\n\n");
+      }, opts.keepAliveMs ?? SSE_KEEPALIVE_MS);
+      ka.unref();
+      res.once("close", () => {
+        unsub();
+        clearInterval(ka);
+      });
+      return;
     } else if (coreMatch) {
       if (!bearerMatches(req.headers.authorization, token)) {
         sendJson(res, 401, { error: "unauthorized" }, { "www-authenticate": "Bearer" });
