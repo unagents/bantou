@@ -49,20 +49,29 @@ pub struct SessionList {
     pub reachable: bool,
     /// Why the center could not be asked (only with `reachable: false`).
     pub reason: Option<String>,
+    /// Counts the changes of the cache. The frontend reads the list from several places (start-up,
+    /// the change event, the result of a re-read) in no fixed order; it keeps the highest `rev`,
+    /// so an older read that arrives late never replaces a newer list.
+    pub rev: u64,
 }
 
 impl Default for SessionList {
     fn default() -> Self {
-        Self { sessions: Vec::new(), reachable: true, reason: None }
+        Self { sessions: Vec::new(), reachable: true, reason: None, rev: 0 }
     }
 }
 
-/// Next list after a read. `listing` is the center's list, or the reason it could not be fetched.
-/// Pure.
+/// Next list after a read (`rev` is carried over; the cache bumps it when the content changed).
+/// `listing` is the center's list, or the reason it could not be fetched. Pure.
 pub fn apply_listing(prev: &SessionList, listing: Result<&[Session], &str>) -> SessionList {
     match listing {
-        Ok(list) => SessionList { sessions: list.to_vec(), reachable: true, reason: None },
-        Err(why) => SessionList { sessions: prev.sessions.clone(), reachable: false, reason: Some(why.to_string()) },
+        Ok(list) => SessionList { sessions: list.to_vec(), reachable: true, reason: None, rev: prev.rev },
+        Err(why) => SessionList {
+            sessions: prev.sessions.clone(),
+            reachable: false,
+            reason: Some(why.to_string()),
+            rev: prev.rev,
+        },
     }
 }
 
@@ -79,8 +88,11 @@ impl SessionCache {
     /// Store the result of a read; the new list and whether it differs from the old one.
     fn apply(&self, listing: Result<&[Session], &str>) -> (SessionList, bool) {
         let mut l = self.list.lock().unwrap();
-        let next = apply_listing(&l, listing);
+        let mut next = apply_listing(&l, listing);
         let changed = *l != next;
+        if changed {
+            next.rev += 1;
+        }
         *l = next.clone();
         (next, changed)
     }
@@ -200,7 +212,7 @@ mod tests {
 
     #[test]
     fn answered_list_is_shown_as_is() {
-        let prev = SessionList { sessions: vec![entry("old", "connected")], reachable: true, reason: None };
+        let prev = SessionList { sessions: vec![entry("old", "connected")], reachable: true, reason: None, rev: 0 };
         let next = apply_listing(&prev, Ok(&[entry("a", "connected"), entry("b", "starting")]));
         assert_eq!(next.sessions.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["a", "b"]);
         assert!(next.reachable);
@@ -231,6 +243,20 @@ mod tests {
         assert!(back.reachable);
         assert_eq!(back.reason, None);
         assert!(back.sessions.is_empty());
+    }
+
+    #[test]
+    fn rev_counts_changes_only() {
+        let c = SessionCache::default();
+        assert_eq!(c.get().rev, 0);
+        assert_eq!(c.apply(Ok(&[entry("a", "connected")])).0.rev, 1);
+        // same answer: no change, same rev
+        assert_eq!(c.apply(Ok(&[entry("a", "connected")])).0.rev, 1);
+        assert_eq!(c.apply(Err("x")).0.rev, 2);
+        assert_eq!(c.apply(Err("x")).0.rev, 2);
+        assert_eq!(c.apply(Err("y")).0.rev, 3);
+        assert_eq!(c.apply(Ok(&[entry("a", "connected")])).0.rev, 4);
+        assert_eq!(c.get().rev, 4);
     }
 
     #[test]

@@ -67,7 +67,7 @@ export class MockBantou {
   /** `session_list` result (center `SessionInfo[]`); `session_create` appends to it. */
   centerSessions: Record<string, unknown>[] = [];
   /** The list as last fetched (memory on the Rust side, `SessionCache`). */
-  sessionCache: SessionList = { sessions: [], reachable: true, reason: null };
+  sessionCache: SessionList = { sessions: [], reachable: true, reason: null, rev: 0 };
   /** When set, `session_create` fails with this message (center error). */
   centerSessionCreateError: string | null = null;
   /** When set, center_set_settings fails with this message (a failed save). */
@@ -93,7 +93,7 @@ export class MockBantou {
       const e = this.centerEntry(name, "connected", "https://claude.ai/code/session_" + name);
       this.centerSessions.push(e);
     }
-    this.sessionCache = { sessions: this.centerSessions.map((e) => this.toSession(e)), reachable: true, reason: null };
+    this.sessionCache = { sessions: this.centerSessions.map((e) => this.toSession(e)), reachable: true, reason: null, rev: 0 };
     this.update = seed.update;
   }
 
@@ -178,11 +178,12 @@ export class MockBantou {
   private readList(): SessionList {
     let next: SessionList;
     try {
-      next = { sessions: this.fetchCenterList().map((e) => this.toSession(e)), reachable: true, reason: null };
+      next = { sessions: this.fetchCenterList().map((e) => this.toSession(e)), reachable: true, reason: null, rev: this.sessionCache.rev };
     } catch (e) {
-      next = { sessions: this.sessionCache.sessions, reachable: false, reason: e instanceof Error ? e.message : String(e) };
+      next = { sessions: this.sessionCache.sessions, reachable: false, reason: e instanceof Error ? e.message : String(e), rev: this.sessionCache.rev };
     }
     if (JSON.stringify(next) !== JSON.stringify(this.sessionCache)) {
+      next.rev += 1;
       this.sessionCache = next;
       this.emitter("bantou://sessions-changed", null);
     }

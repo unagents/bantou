@@ -38,7 +38,16 @@ export function useBoard(dir: Ref<string | null>) {
   const statuses = ref<string[]>(["Todo", "Doing", "Done"]);
   const threads = ref<Record<string, Thread>>({});
   /** The connected center's `session_list` as last fetched (cached on the Rust side). */
-  const centerList = ref<SessionList>({ sessions: [], reachable: true, reason: null });
+  const centerList = ref<SessionList>({ sessions: [], reachable: true, reason: null, rev: -1 });
+  /**
+   * The list arrives from several places in no fixed order (start-up read, the change event,
+   * the workspace refresh). Keep the highest `rev`: a late older read must not bring back a list
+   * that was already replaced (the Rust side only emits the event when the content changes, so
+   * a stale list would stay).
+   */
+  function setCenterList(next: SessionList) {
+    if (next.rev >= centerList.value.rev) centerList.value = next;
+  }
   /** Ping timers: task id → expiry (epoch ms). */
   const pings = ref<Record<string, number>>({});
   const now = ref(Date.now());
@@ -56,7 +65,7 @@ export function useBoard(dir: Ref<string | null>) {
       tasks.value = [];
       threads.value = {};
       pings.value = {};
-      centerList.value = await listSessions();
+      setCenterList(await listSessions());
       return;
     }
     const [t, s, th, cl, ps] = await Promise.all([
@@ -66,7 +75,7 @@ export function useBoard(dir: Ref<string | null>) {
       listSessions(),
       listPings(),
     ]);
-    centerList.value = cl;
+    setCenterList(cl);
     tasks.value = t;
     statuses.value = s;
     threads.value = Object.fromEntries(th.map((x) => [x.task_id, x]));
@@ -128,8 +137,10 @@ export function useBoard(dir: Ref<string | null>) {
       if (e.payload === dir.value) setPings(await listPings());
     });
     unlistenSessions = await listen(SESSIONS_CHANGED_EVENT, async () => {
-      centerList.value = await listSessions();
+      setCenterList(await listSessions());
     });
+    // A change before the listener was registered has no event: read once more now.
+    setCenterList(await listSessions());
   });
   onBeforeUnmount(() => {
     unlisten?.();

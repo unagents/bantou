@@ -80,6 +80,8 @@ export interface SessionList {
   reachable: boolean;
   /** Why the center could not be asked (`reachable` false). */
   reason: string | null;
+  /** Counts the changes of the Rust-side cache; the highest one wins (see `useBoard`). */
+  rev: number;
 }
 
 /** Mirror of `src-tauri/src/center.rs::CenterSettings`. */
