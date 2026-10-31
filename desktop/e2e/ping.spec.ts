@@ -3,7 +3,10 @@ import { resolve } from "node:path";
 import type { Page } from "@playwright/test";
 
 import { expect, test } from "./fixtures";
+import { boardSeed } from "./seed";
 import { SHOT_DIR } from "./paths";
+
+test.use({ seed: boardSeed });
 
 const row = (page: Page, taskId: string) => page.locator(`li[data-task-id="${taskId}"]`);
 const icon = (page: Page, taskId: string) => row(page, taskId).getByTestId("task-icon");

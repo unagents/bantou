@@ -12,6 +12,12 @@ const showDone = ref(false);
     <h2 class="font-display bg-cork-elevated border-cork-border flex items-center gap-2 border-b px-3 py-2 font-semibold">
       <UIcon name="i-lucide-terminal-square" class="text-cork-accent size-4" />
       <span class="truncate">{{ group.name }}</span>
+      <UTooltip v-if="group.link === 'lost'" text="center の一覧から消えた">
+        <UBadge color="error" variant="subtle" label="ロスト" data-testid="session-lost" />
+      </UTooltip>
+      <UTooltip v-else-if="group.link === 'unreachable'" :text="group.reason ?? 'center に問い合わせられなかった'">
+        <UBadge color="warning" variant="subtle" label="つながらない" data-testid="session-unreachable" />
+      </UTooltip>
       <span class="text-cork-muted ml-auto text-xs font-normal">
         {{ group.working.length }} / {{ group.queued.length }}
       </span>

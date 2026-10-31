@@ -64,31 +64,21 @@ export interface AgentEvent {
   message: string | null;
 }
 
-/** Mirror of `src-tauri/src/session.rs::Session`. */
+/** How an added session stands against the center's `session_list` (mirror of `session.rs::Link`). */
+export type SessionLink = "listed" | "lost" | "unreachable";
+
+/** A session added from the center (mirror of `src-tauri/src/session.rs::Session`). Held in memory only. */
 export interface Session {
   name: string;
-  hostname: string;
-  cwd: string;
-  registered_at: string;
-}
-
-/** Mirror of `src-tauri/src/session.rs::Peer`. */
-export interface Peer {
-  id: string;
-  name: string;
-  hostname: string;
-  cwd: string;
-  tty: string | null;
-  summary: string;
-  last_seen: string;
-  /** Name chosen in bantou for an unnamed peer. */
-  assign_name?: string | null;
-}
-
-export interface RegisterResult {
-  name: string;
-  delivered: boolean;
-  error: string | null;
+  link: SessionLink;
+  /** Center's state at the last successful read. */
+  state: CenterSession["state"] | null;
+  sessionUrl: string | null;
+  source: CenterSession["source"] | null;
+  lastError: string | null;
+  /** Why the center could not be asked (link `unreachable`). */
+  reason: string | null;
+  addedAt: string;
 }
 
 /** Mirror of `src-tauri/src/center.rs::CenterSettings`. */

@@ -1,30 +1,32 @@
 <script setup lang="ts">
-import { listPeers, registerSessions } from "~/api";
-import type { Peer, RegisterResult, Session } from "~/types";
+import { addSessions, centerTool, createSession } from "~/api";
+import type { CenterSession, Session } from "~/types";
 
 const open = defineModel<boolean>("open", { required: true });
-const props = defineProps<{ registered: Session[]; selfName: string }>();
-const emit = defineEmits<{ done: [results: RegisterResult[]] }>();
+const props = defineProps<{ added: Session[] }>();
+const emit = defineEmits<{ done: [names: string[]] }>();
 
-const peers = ref<Peer[]>([]);
+const NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+const listed = ref<CenterSession[]>([]);
 const loading = ref(false);
-const error = ref<string | null>(null);
-const query = ref("");
+const listError = ref<string | null>(null);
 const picked = ref<Set<string>>(new Set());
-/** Session names typed for unnamed peers, keyed by peer id. */
-const assigned = ref<Record<string, string>>({});
+const name = ref("");
+const busy = ref(false);
+const actionError = ref<string | null>(null);
 
-const baseName = (cwd: string) => cwd.split("/").filter(Boolean).pop() ?? "";
+const stateColor = { stopped: "neutral", starting: "warning", connected: "success", error: "error" } as const;
 
 async function load() {
   loading.value = true;
-  error.value = null;
+  listError.value = null;
   picked.value = new Set();
-  assigned.value = {};
   try {
-    peers.value = await listPeers();
+    listed.value = await centerTool<CenterSession[]>("session_list");
   } catch (e) {
-    error.value = String(e);
+    listed.value = [];
+    listError.value = String(e);
   } finally {
     loading.value = false;
   }
@@ -32,112 +34,120 @@ async function load() {
 
 watch(open, (v) => v && void load(), { immediate: true });
 
+/** Sessions of the center's list that are not added yet. */
 const rows = computed(() => {
-  const reg = new Set(props.registered.map((s) => s.name));
-  const q = query.value.trim().toLowerCase();
-  return peers.value
-    .filter((p) => p.name !== props.selfName && !reg.has(p.name))
-    .filter((p) => !q || `${p.name} ${p.hostname} ${p.cwd} ${p.summary}`.toLowerCase().includes(q))
-    .sort((a, b) => Number(!a.name) - Number(!b.name) || a.name.localeCompare(b.name));
+  const have = new Set(props.added.map((s) => s.name));
+  return listed.value.filter((s) => !have.has(s.name));
 });
 
-function toggle(p: Peer) {
+function toggle(n: string) {
   const s = new Set(picked.value);
-  if (s.has(p.id)) s.delete(p.id);
-  else {
-    s.add(p.id);
-    if (!p.name && !assigned.value[p.id]) assigned.value[p.id] = baseName(p.cwd);
-  }
+  if (!s.delete(n)) s.add(n);
   picked.value = s;
 }
 
-/** Every picked unnamed peer needs a non-empty name that is not taken. */
-const invalid = computed(() => {
-  const taken = new Set([...props.registered.map((s) => s.name), ...peers.value.map((p) => p.name).filter(Boolean)]);
-  const seen = new Set<string>();
-  for (const p of peers.value) {
-    if (!picked.value.has(p.id) || p.name) continue;
-    const n = (assigned.value[p.id] ?? "").trim();
-    if (!n || taken.has(n) || seen.has(n)) return true;
-    seen.add(n);
+const trimmed = computed(() => name.value.trim());
+const nameError = computed(() => {
+  if (!trimmed.value) return null;
+  if (!NAME_PATTERN.test(trimmed.value)) return "英数字と _ - のみ";
+  if (listed.value.some((s) => s.name === trimmed.value) || props.added.some((s) => s.name === trimmed.value)) {
+    return "既に使われている名前";
   }
-  return false;
+  return null;
 });
 
-async function submit() {
-  const chosen = peers.value
-    .filter((p) => picked.value.has(p.id))
-    .map((p) => (p.name ? p : { ...p, assign_name: (assigned.value[p.id] ?? "").trim() }));
-  if (!chosen.length || invalid.value) return;
+async function run(names: string[], action: () => Promise<unknown>) {
+  busy.value = true;
+  actionError.value = null;
   try {
-    emit("done", await registerSessions(chosen));
+    await action();
+    emit("done", names);
     open.value = false;
   } catch (e) {
-    error.value = String(e);
+    actionError.value = String(e);
+    await load();
+  } finally {
+    busy.value = false;
   }
 }
+
+const addPicked = () => {
+  const names = [...picked.value];
+  if (names.length) void run(names, () => addSessions(names));
+};
+
+const create = () => {
+  if (!trimmed.value || nameError.value) return;
+  void run([trimmed.value], () => createSession(trimmed.value));
+};
 </script>
 
 <template>
-  <UModal v-model:open="open" title="セッション追加" description="messenger に接続中のセッションから選ぶ" :ui="{ content: 'max-w-4xl' }">
+  <UModal v-model:open="open" title="セッション追加" description="center のセッション一覧から選ぶか、名前を付けて新しく作る" :ui="{ content: 'max-w-2xl' }">
     <template #body>
-      <div class="flex flex-col gap-3">
-        <div class="flex gap-2">
-          <UInput v-model="query" icon="i-lucide-search" placeholder="名前・ホスト・cwd で絞り込み" class="flex-1" />
-          <UButton icon="i-lucide-refresh-cw" color="neutral" variant="ghost" :loading="loading" aria-label="再読込" @click="load" />
+      <div class="flex flex-col gap-4" data-testid="add-dialog">
+        <div class="flex flex-col gap-2">
+          <div class="flex items-center">
+            <span class="text-sm font-medium">center のセッション</span>
+            <UButton
+              class="ml-auto"
+              size="xs"
+              variant="ghost"
+              color="neutral"
+              icon="i-lucide-refresh-cw"
+              label="更新"
+              :loading="loading"
+              data-testid="add-refresh"
+              @click="load"
+            />
+          </div>
+          <p v-if="listError" class="text-cork-danger-text text-xs whitespace-pre-wrap" data-testid="add-list-error">
+            {{ listError }}
+          </p>
+          <div
+            v-for="s in rows"
+            :key="s.name"
+            class="hover:bg-cork-elevated/50 flex cursor-pointer items-center gap-2 text-xs"
+            data-testid="add-row"
+            :data-name="s.name"
+            @click="toggle(s.name)"
+          >
+            <UCheckbox :model-value="picked.has(s.name)" :aria-label="s.name" />
+            <span class="w-40 truncate font-medium">{{ s.name }}</span>
+            <UBadge :color="stateColor[s.state]" variant="subtle" :label="s.state" />
+            <span v-if="s.lastError" class="text-cork-danger-text truncate">{{ s.lastError }}</span>
+            <span v-if="s.sessionUrl" class="text-cork-muted ml-auto truncate">{{ s.sessionUrl }}</span>
+          </div>
+          <p v-if="!rows.length && !loading && !listError" class="text-cork-muted text-xs" data-testid="add-none">
+            追加できるセッションがない
+          </p>
+          <UButton
+            class="self-end"
+            icon="i-lucide-user-plus"
+            :label="`追加（${picked.size}）`"
+            :loading="busy"
+            :disabled="!picked.size"
+            data-testid="add-submit"
+            @click="addPicked"
+          />
         </div>
-        <p v-if="error" class="text-cork-danger-text text-xs">{{ error }}</p>
-        <table class="w-full text-sm">
-          <thead class="text-cork-muted text-left text-xs">
-            <tr class="border-cork-border border-b">
-              <th class="w-8 py-1.5" />
-              <th class="py-1.5">名前</th>
-              <th class="py-1.5">ホスト</th>
-              <th class="py-1.5">cwd</th>
-              <th class="py-1.5">summary</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="p in rows"
-              :key="p.id"
-              class="border-cork-border hover:bg-cork-elevated/50 cursor-pointer border-b"
-              :data-peer="p.name || p.id"
-              @click="toggle(p)"
-            >
-              <td class="py-1.5">
-                <UCheckbox :model-value="picked.has(p.id)" :aria-label="p.name || p.id" />
-              </td>
-              <td class="py-1.5">
-                <template v-if="p.name">{{ p.name }}</template>
-                <UInput
-                  v-else-if="picked.has(p.id)"
-                  v-model="assigned[p.id]"
-                  size="xs"
-                  placeholder="セッション名"
-                  :aria-label="`${p.id} のセッション名`"
-                  @click.stop
-                />
-                <span v-else class="text-cork-muted">（名前なし: {{ p.id }}）</span>
-              </td>
-              <td class="text-cork-muted py-1.5 text-xs">{{ p.hostname }}</td>
-              <td class="text-cork-muted max-w-56 truncate py-1.5 text-xs" :title="p.cwd">{{ p.cwd }}</td>
-              <td class="text-cork-muted max-w-56 truncate py-1.5 text-xs" :title="p.summary">
-                {{ p.name ? p.summary : "登録時に名前を付ける" }}
-              </td>
-            </tr>
-            <tr v-if="!rows.length && !loading">
-              <td colspan="5" class="text-cork-muted py-4 text-center text-xs">追加できるセッションがない</td>
-            </tr>
-          </tbody>
-        </table>
-        <UButton
-          class="self-end"
-          icon="i-lucide-user-plus"
-          :label="`登録して規約を送る（${picked.size}）`"
-          :disabled="!picked.size || invalid"
-          @click="submit"
-        />
+
+        <div class="border-cork-border flex flex-col gap-2 border-t pt-3">
+          <UFormField label="新しく作る" :error="nameError ?? undefined" help="名前を付けて作る。英数字と _ - のみ。既存名とは重複できない">
+            <UInput v-model="name" class="w-full" placeholder="セッション名" data-testid="add-name" @keydown.enter="create" />
+          </UFormField>
+          <UButton
+            class="self-end"
+            label="作成して追加"
+            :loading="busy"
+            :disabled="!trimmed || !!nameError"
+            data-testid="add-create"
+            @click="create"
+          />
+        </div>
+        <p v-if="actionError" class="text-cork-danger-text text-xs whitespace-pre-wrap" data-testid="add-action-error">
+          {{ actionError }}
+        </p>
       </div>
     </template>
   </UModal>

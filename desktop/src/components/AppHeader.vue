@@ -5,15 +5,14 @@ defineProps<{
   workspacePath: string | null;
   waitingCount: number;
   broker: BrokerStatus | null;
-  /** Why the PM button is off (no center to talk to). Unset: usable. */
-  pmDisabledReason?: string | null;
+  /** Why "セッション追加" is off (no center to talk to). Unset: usable. */
+  addSessionDisabledReason?: string | null;
   /** State of the in-app updater; drives the single update control. */
   updater: UpdaterState;
 }>();
 defineEmits<{
   open: [];
   addSession: [];
-  pm: [];
   center: [];
   settings: [];
   checkUpdate: [];
@@ -64,31 +63,21 @@ function progressText(downloaded: number, total: number | null): string {
           <span class="text-cork-muted">messenger</span>
         </span>
       </UTooltip>
-      <UButton
-        v-if="workspacePath"
-        size="sm"
-        variant="ghost"
-        color="neutral"
-        icon="i-lucide-user-plus"
-        label="セッション追加"
-        :disabled="!broker?.connected"
-        @click="$emit('addSession')"
-      />
-      <UTooltip :text="pmDisabledReason ?? 'PM を立てる'">
+      <UTooltip :text="addSessionDisabledReason ?? 'center のセッションを追加'">
         <span>
           <UButton
             size="sm"
             variant="ghost"
             color="neutral"
-            icon="i-lucide-crown"
-            label="PM を立てる"
-            :disabled="!!pmDisabledReason"
-            data-testid="open-pm"
-            @click="$emit('pm')"
+            icon="i-lucide-user-plus"
+            label="セッション追加"
+            :disabled="!!addSessionDisabledReason"
+            data-testid="open-add-session"
+            @click="$emit('addSession')"
           />
         </span>
       </UTooltip>
-      <span v-if="pmDisabledReason" class="text-cork-muted max-w-48 truncate text-xs" data-testid="pm-disabled-reason">{{ pmDisabledReason }}</span>
+      <span v-if="addSessionDisabledReason" class="text-cork-muted max-w-48 truncate text-xs" data-testid="add-disabled-reason">{{ addSessionDisabledReason }}</span>
       <UTooltip :text="updater.kind === 'error' ? updater.message : ''" :disabled="updater.kind !== 'error'">
         <span>
           <UButton

@@ -6,6 +6,7 @@ mod center_snippet;
 mod error;
 mod frontmatter;
 mod menu;
+mod os_events;
 mod security;
 mod session;
 mod state;
@@ -66,6 +67,7 @@ pub fn run() {
         .manage(broker::Pings::default())
         .manage(agent::Agents::default())
         .manage(session::Sessions::default())
+        .manage(os_events::OsEvents::default())
         .manage(center::Center::default())
         .manage(center_mcp::CenterClient::default())
         .invoke_handler(tauri::generate_handler![
@@ -87,8 +89,9 @@ pub fn run() {
             agent::agent_say,
             agent::agent_answer,
             session::list_sessions,
-            session::list_peers,
-            session::register_sessions,
+            session::refresh_sessions,
+            session::add_sessions,
+            session::create_session,
             session::unregister_session,
             session::instruct_add_task,
             center::center_get_settings,
@@ -132,6 +135,8 @@ pub fn run() {
             menu::setup(app)?;
 
             center::autostart(app.handle());
+
+            os_events::start(app.handle());
 
             Ok(())
         })

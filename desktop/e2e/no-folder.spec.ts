@@ -9,7 +9,6 @@ test.describe("no folder selected", () => {
     await expect(page.getByRole("button", { name: "フォルダを開く" })).toBeVisible();
     await expect(page.getByTestId("open-settings")).toBeVisible();
     await expect(page.getByTestId("open-center")).toBeVisible();
-    await expect(page.getByRole("button", { name: "セッション追加" })).toHaveCount(0);
     await expect(page.getByText("返答待ち")).toHaveCount(0);
     await expect(page.getByText("messenger", { exact: true })).toHaveCount(0);
   });

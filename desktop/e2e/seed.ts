@@ -12,7 +12,7 @@ const task = (id: string, title: string, status: string, order: number, tag: str
   body,
 });
 
-/** Mirrors `fixtures/demo-ws`. */
+/** Mirrors `fixtures/demo-ws`. The center is off here (the settings specs start from that). */
 export const defaultSeed: Seed = {
   dir: DIR,
   tasks: [
@@ -25,19 +25,8 @@ export const defaultSeed: Seed = {
     task("t-am001", "broker 冗長化（202 + Mac）", "Doing", 0, "agent-messenger"),
     task("t-rs001", "USB3 省電力の無効化", "Done", 0, "researcher"),
   ],
-  peers: [
-    { id: "p1", name: "careery", hostname: "mac", cwd: "/w/careery", tty: null, summary: "careery 実装", last_seen: "" },
-    { id: "p2", name: "", hostname: "mac", cwd: "/w/inet250", tty: null, summary: "", last_seen: "" },
-    { id: "p3", name: "webtool", hostname: "mini10", cwd: "/w/webtool", tty: null, summary: "webtool worker", last_seen: "" },
-    { id: "p4", name: "bantou-core", hostname: "mac", cwd: "/w/bantou", tty: null, summary: "", last_seen: "" },
-  ],
-  // researcher is a tag only (not registered) → never a row.
-  sessions: ["agent-messenger", "careery", "stroke-board"].map((name) => ({
-    name,
-    hostname: "mac",
-    cwd: `/w/${name}`,
-    registered_at: "",
-  })),
+  // researcher is a tag only (not added) → never a row.
+  sessions: ["agent-messenger", "careery", "stroke-board"],
   threads: [
     {
       task_id: "t-cr001",
@@ -65,3 +54,6 @@ export const defaultSeed: Seed = {
     },
   ],
 };
+
+/** The default board with the center on, so the added sessions are listed by it (rows stay `listed`). */
+export const boardSeed: Seed = { ...defaultSeed, center: { enabled: true } };

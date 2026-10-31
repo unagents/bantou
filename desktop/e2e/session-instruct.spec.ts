@@ -1,4 +1,7 @@
 import { expect, sentMessages, test } from "./fixtures";
+import { boardSeed } from "./seed";
+
+test.use({ seed: boardSeed });
 
 test("header has no standalone task button", async ({ page }) => {
   await page.goto("/");
