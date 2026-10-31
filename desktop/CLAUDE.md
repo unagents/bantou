@@ -28,6 +28,7 @@ Run E2E on mac200, never on this Mac.
 Do it without asking once the review check passes.
 
 1. Bump the version in `package.json`, `src-tauri/Cargo.toml` and `Cargo.lock`. Commit on develop. Do not edit `Casks/bantou.rb` by hand; step 5 rewrites it.
+   The desktop embeds `server/package.json`'s version as its paired server version (`build-sidecar.ts`). When `server/` changed, bump `server/package.json` in the same commit and `npm publish` the server **before** building the desktop; otherwise centers ask servers for an unpublished version and show `failed`.
 2. Push to GitHub (`origin`; Gitea `gitea` is a read-only pull mirror, never push there): `git push origin develop`, fast-forward main (`git merge --ff-only develop`), `git push origin main`, back to develop.
 3. Build (in `desktop/`). The updater artifacts are signed at build time with the key on this Mac (`~/.tauri/bantou-updater.key`, no password; never copy it elsewhere):
    `TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/bantou-updater.key)" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" CI=true bun run tauri build`
