@@ -12,10 +12,8 @@
 //!
 //! A new session is made with `session_create`; it shows up through the next read of the list.
 
-use crate::broker::{self, Brokers};
 use crate::center_mcp;
 use crate::error::{CmdResult, CommandError};
-use crate::state::AppState;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Mutex;
@@ -157,48 +155,9 @@ pub async fn create_session(
     Ok(s)
 }
 
-/// Instruction asking a session to add (and start) a task the user typed in bantou.
-pub fn add_task_instruction(title: &str, body: &str) -> String {
-    format!(
-        "【bantou タスク追加指示】（ユーザーが bantou の画面から送信）\n次のタスクを追加して着手すること。追加したら規約どおり type \"task\"（body 付き）を bantou-core に送ること。確認や質問はこのセッション上で聞かず bantou-core に ask で送ること。\n\nタスク名: {title}\n作業内容:\n{body}"
-    )
-}
-
-/// Send a registered session an instruction to add a task.
-#[tauri::command]
-pub async fn instruct_add_task(
-    window: tauri::WebviewWindow,
-    state: tauri::State<'_, AppState>,
-    brokers: tauri::State<'_, Brokers>,
-    session: String,
-    title: String,
-    body: String,
-) -> CmdResult<()> {
-    let ws = state.require_workspace(window.label())?;
-    let title = title.trim();
-    if title.is_empty() {
-        return Err(CommandError::other("タスク名が空"));
-    }
-    let url = brokers.url(&ws).ok_or_else(|| CommandError::other("broker 未接続"))?;
-    let me = brokers
-        .peer_id(&ws)
-        .ok_or_else(|| CommandError::other("broker 未接続"))?;
-    broker::send(&url, &me, &session, &add_task_instruction(title, body.trim()))
-        .await
-        .map_err(CommandError::other)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn add_task_instruction_carries_title_and_body() {
-        let m = add_task_instruction("列マッピング", "手順1\n手順2");
-        assert!(m.starts_with("【bantou タスク追加指示】（ユーザーが bantou の画面から送信）\n"));
-        assert!(m.contains(r#"type "task"（body 付き）を bantou-core に送ること"#));
-        assert!(m.ends_with("\n\nタスク名: 列マッピング\n作業内容:\n手順1\n手順2"));
-    }
 
     fn entry(name: &str, state: &str) -> Session {
         Session {

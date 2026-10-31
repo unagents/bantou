@@ -11,6 +11,7 @@ mod security;
 mod session;
 mod state;
 mod task;
+mod terminal;
 mod thread;
 mod workspace;
 #[cfg(test)]
@@ -70,6 +71,7 @@ pub fn run() {
         .manage(os_events::OsEvents::default())
         .manage(center::Center::default())
         .manage(center_mcp::CenterClient::default())
+        .manage(terminal::Terminals::default())
         .invoke_handler(tauri::generate_handler![
             workspace::pick_directory,
             workspace::set_workspace_directory,
@@ -91,7 +93,6 @@ pub fn run() {
             session::list_sessions,
             session::refresh_sessions,
             session::create_session,
-            session::instruct_add_task,
             center::center_get_settings,
             center::center_set_settings,
             center::center_status,
@@ -102,6 +103,10 @@ pub fn run() {
             center_snippet::center_parse_connect,
             center_mcp::center_call,
             center_mcp::center_connection,
+            terminal::session_output_start,
+            terminal::session_output_stop,
+            terminal::session_input,
+            terminal::session_resize,
         ])
         .on_window_event(|window, event| {
             // `Destroyed` (not `CloseRequested`) is the right hook:
