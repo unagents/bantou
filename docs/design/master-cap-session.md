@@ -67,6 +67,13 @@ desktop ──(1 か所)── center ホスト
 
 - 「タスク追加を指示」ボタンはやめる。ユーザーは右の欄（対話の履歴）で master-cap に直接話す。対話セッションと同じ仕様にする。
 
+### 7. desktop のセッション一覧は center の `session_list` そのもの（ユーザー決定、追加指示 1）
+
+- サイドメニューのセッション一覧は、つないでいる center（自分の sidecar、または貼った別ホストの center）の `session_list` をそのまま出す。desktop のメモリの「追加済み」一覧（`session.rs` の `Sessions`、`add_sessions`、`reconcile` の lost 判定）はやめる。center 側で作られたセッション（他の desktop や MCP から）も出るようにするため。
+- 取り直しの時機は、操作前・スリープ復帰・ネットワーク変化・設定を閉じた時・5 分ごとに加え、center のセッションが増減した時。center は SSE（`GET /events`、外向け token）でセッション一覧の変化を知らせ、desktop はそれを受けて `session_list` を取り直す。
+- center に問い合わせられない時は、最後に取れた一覧を「つながらない」表示付きで出す。
+- 「セッション追加」は新規作成（`session_create`）だけにする。一覧から選んで追加する画面は無くす。
+
 ## 実測（2026-11-01、mac200、claude 2.1.312）
 
 | 試したこと | 結果 |
