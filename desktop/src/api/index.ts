@@ -31,6 +31,7 @@ export {
   type DownloadProgress,
   type Update,
 } from "./updater";
+export { errorText, logWebview } from "./log";
 export { getStatuses, listTasks } from "./tasks";
 export {
   SESSION_OUTPUT_EVENT,

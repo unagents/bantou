@@ -1,6 +1,6 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useIntervalFn } from "@vueuse/core";
-import { CENTER_RUNNING_EVENT, CENTER_SESSIONS_CHANGED_EVENT, OS_NETWORK_EVENT, OS_WAKE_EVENT, refreshSessions } from "~/api";
+import { CENTER_RUNNING_EVENT, CENTER_SESSIONS_CHANGED_EVENT, errorText, logWebview, OS_NETWORK_EVENT, OS_WAKE_EVENT, refreshSessions } from "~/api";
 
 /** Insurance against missed notifications: long on purpose. */
 export const SAFETY_REFRESH_MS = 5 * 60_000;
@@ -43,7 +43,8 @@ export function useSessionRefresh() {
         queued = false;
         try {
           lastReachable = (await refreshSessions()).reachable;
-        } catch {
+        } catch (e) {
+          logWebview("warn", `session list refresh call failed: ${errorText(e)}`);
           lastReachable = false;
           // The result is carried by the list itself (reachable: false); nothing to show here.
         }

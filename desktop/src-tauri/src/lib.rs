@@ -29,6 +29,11 @@ use tauri::Manager;
 /// `"workspace-*"` glob to cover this naming convention.
 const MAIN_WINDOW_LABEL: &str = "main";
 
+/// Size at which `bantou.log` is rotated.
+const LOG_MAX_FILE_BYTES: u128 = 5 * 1024 * 1024;
+/// Rotated files kept next to `bantou.log`.
+const LOG_KEEP_FILES: usize = 5;
+
 /// Install the rustls crypto provider once. reqwest (feature `rustls-no-provider`, enabled by
 /// `tauri-plugin-updater`) panics on `Client::build` while none is installed; the updater only
 /// installs one lazily on its first check. Call before building any `reqwest::Client`.
@@ -59,6 +64,19 @@ pub fn run() {
                 eprintln!("failed to dispatch CLI invocation to the main thread: {e}");
             }
         }))
+        // Investigation log: <OS log dir>/bantou.log (macOS: ~/Library/Logs/jp.grrow.bantou/),
+        // rotated by size. The webview writes to the same file through the plugin's JS API.
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .clear_targets()
+                .target(tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                    file_name: Some("bantou".into()),
+                }))
+                .level(log::LevelFilter::Info)
+                .max_file_size(LOG_MAX_FILE_BYTES)
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(LOG_KEEP_FILES))
+                .build(),
+        )
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_shell::init())
@@ -119,6 +137,7 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            log::info!("bantou {} started", env!("CARGO_PKG_VERSION"));
             // Seed the `main` window's workspace into AppState *before* the
             // window is built, so the frontend's first `get_workspace_directory`
             // call already sees it.

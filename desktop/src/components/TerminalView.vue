@@ -2,7 +2,7 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { sessionInput, sessionResize } from "~/api";
+import { logWebview, sessionInput, sessionResize } from "~/api";
 import { encodeBase64 } from "~/composables/terminalBuffer";
 
 const props = defineProps<{ session: string }>();
@@ -22,12 +22,22 @@ function report(e: unknown) {
 }
 
 function sendInput(session: string, b64: string) {
-  sessionInput(session, b64).then(() => (error.value = null), report);
+  sessionInput(session, b64).then(
+    () => (error.value = null),
+    (e) => {
+      logWebview("warn", `terminal input failed [${session}]: ${String(e)}`);
+      report(e);
+    },
+  );
 }
 
 function sendSize(session: string) {
   if (!term) return;
-  sessionResize(session, term.cols, term.rows).catch(report);
+  const { cols, rows } = term;
+  sessionResize(session, cols, rows).catch((e) => {
+    logWebview("warn", `terminal resize failed [${session}] (${cols}x${rows}): ${String(e)}`);
+    report(e);
+  });
 }
 
 async function open(session: string) {

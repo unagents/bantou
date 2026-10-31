@@ -13,6 +13,7 @@
 
 use crate::center::{load_settings, CenterSettings};
 use crate::error::{CmdResult, CommandError};
+use crate::terminal::clip_body;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -86,6 +87,14 @@ enum McpError {
 impl McpError {
     fn failed(msg: impl Into<String>) -> Self {
         Self::Failed(msg.into())
+    }
+
+    /// The message, for the log.
+    fn describe(&self) -> &str {
+        match self {
+            Self::SessionGone => "MCP session が切れた",
+            Self::Failed(m) => m,
+        }
     }
 
     fn message(self) -> String {
@@ -238,7 +247,12 @@ impl CenterClient {
                 "clientInfo": { "name": "bantou-desktop", "version": env!("CARGO_PKG_VERSION") },
             },
         });
-        let r = self.post(url, token, None, &req, SHORT_TIMEOUT).await?;
+        let r = self.post(url, token, None, &req, SHORT_TIMEOUT).await.inspect_err(|e| {
+            log::warn!("center MCP initialize: {}", e.describe());
+        })?;
+        if !(200..300).contains(&r.status) {
+            log::warn!("center MCP initialize: HTTP {}: {}", r.status, clip_body(&r.body));
+        }
         if r.status == 401 {
             return Err(McpError::failed(unauthorized(url, token)));
         }
@@ -257,8 +271,11 @@ impl CenterClient {
                 .to_string(),
         };
         let note = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
-        let n = self.post(url, token, Some(&session), &note, SHORT_TIMEOUT).await?;
+        let n = self.post(url, token, Some(&session), &note, SHORT_TIMEOUT).await.inspect_err(|e| {
+            log::warn!("center MCP notifications/initialized: {}", e.describe());
+        })?;
         if !(200..300).contains(&n.status) {
+            log::warn!("center MCP notifications/initialized: HTTP {}: {}", n.status, clip_body(&n.body));
             return Err(McpError::failed(format!("initialized 通知が HTTP {} で失敗: {}", n.status, snippet(&n.body))));
         }
         Ok(session)
@@ -298,7 +315,25 @@ impl CenterClient {
         let session = self.ensure(url, token).await?;
         let id = self.id();
         let req = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
-        let r = self.post(url, token, Some(&session), &req, timeout).await?;
+        let what = match params.get("name").and_then(Value::as_str) {
+            Some(tool) => format!("{method} {tool}"),
+            None => method.to_string(),
+        };
+        let r = match self.post(url, token, Some(&session), &req, timeout).await {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!("center MCP {what}: {}", e.describe());
+                return Err(e);
+            }
+        };
+        if (200..300).contains(&r.status) {
+            // `ping` runs on every connection probe: only `tools/call` is logged when it works.
+            if method == "tools/call" {
+                log::info!("center MCP {what}: HTTP {}", r.status);
+            }
+        } else {
+            log::warn!("center MCP {what}: HTTP {}: {}", r.status, clip_body(&r.body));
+        }
         if r.status == 401 {
             return Err(McpError::failed(unauthorized(url, token)));
         }
@@ -357,6 +392,7 @@ impl CenterClient {
         if result.get("isError").and_then(Value::as_bool) == Some(true) {
             let text = tool_text(&result);
             let msg = format!("{name} が失敗: {}", if text.is_empty() { "(no message)" } else { &text });
+            log::warn!("center MCP tools/call {name}: tool error: {}", clip_body(&text));
             *self.last_error.lock().unwrap() = Some(msg.clone());
             return Err(msg);
         }

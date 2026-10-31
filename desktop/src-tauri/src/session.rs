@@ -119,6 +119,10 @@ fn notify(app: &tauri::AppHandle) {
 /// Read the center's `session_list` into the cache; tell the frontend when it changed.
 async fn read_list(app: &tauri::AppHandle, cache: &SessionCache) -> SessionList {
     let listing = fetch_list(app).await;
+    match &listing {
+        Ok(l) => log::info!("session list refresh: {} sessions", l.len()),
+        Err(e) => log::warn!("session list refresh failed (cached list kept): {e}"),
+    }
     let (next, changed) = cache.apply(listing.as_ref().map(|l| l.as_slice()).map_err(|e| e.as_str()));
     if changed {
         notify(app);

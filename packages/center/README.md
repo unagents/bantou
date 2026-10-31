@@ -190,7 +190,8 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 
 ## ログ
 
-- center 自身: stderr に `<ISO> bantou-center: <msg>`。
+- center 自身: stderr に `<ISO> bantou-center: <msg>`。daemon 起動時は同じ行を `logDir/center.log` にも追記する。
+- 2xx 以外を返した HTTP 応答: `HTTP <method> <path> -> <status>: <理由>` を center.log に残す（query は除く。理由は応答本文の `error`、無ければ本文の先頭、それも無ければ status message）。
 - remote-control の出力: `logDir/<project>.log` に stdout / stderr をそのまま追記する。
 
 ## remote-control の再起動

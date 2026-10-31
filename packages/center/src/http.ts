@@ -83,6 +83,20 @@ export function bearerMatches(header: string | undefined, token: string): boolea
   return timingSafeEqual(digest(header.slice("Bearer ".length)), digest(token));
 }
 
+/** 応答本文から理由を取り出す（JSON は error / error.message、他は先頭 200 文字、本文が無ければ statusMessage）。 */
+const httpReason = (body: string, statusMessage: string): string => {
+  let text = body;
+  try {
+    const j = JSON.parse(body) as { error?: unknown };
+    if (typeof j.error === "string") text = j.error;
+    else if (j.error && typeof (j.error as { message?: unknown }).message === "string") text = (j.error as { message: string }).message;
+  } catch {
+    // JSON でなければ本文そのまま
+  }
+  text = text.replace(/\s+/g, " ").trim().slice(0, 200);
+  return text || statusMessage || "(no reason)";
+};
+
 const sendJson = (res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void => {
   if (res.headersSent) return;
   res.writeHead(status, { "content-type": "application/json", ...headers });
@@ -401,7 +415,26 @@ export async function startHttpServer(opts: {
     }
   };
 
+  /** 2xx 以外を返した応答を method・path・status・理由で log に残す（SSE などの 2xx は残さない）。 */
+  const logNon2xx = (req: IncomingMessage, res: ServerResponse): void => {
+    const origEnd = res.end.bind(res) as (...args: unknown[]) => ServerResponse;
+    let reason = "";
+    // 本文の先頭（JSON なら error の文言）を理由として拾う。応答自体は変えない
+    (res as { end: unknown }).end = (...args: unknown[]): ServerResponse => {
+      const chunk = args[0];
+      if ((res.statusCode < 200 || res.statusCode >= 300) && (typeof chunk === "string" || Buffer.isBuffer(chunk))) {
+        reason = chunk.toString("utf8");
+      }
+      return origEnd(...args);
+    };
+    res.once("finish", () => {
+      if (res.statusCode >= 200 && res.statusCode < 300) return;
+      log(`HTTP ${req.method ?? "?"} ${(req.url ?? "").split("?", 1)[0]} -> ${res.statusCode}: ${httpReason(reason, res.statusMessage)}`);
+    });
+  };
+
   const http: Server = createServer((req, res) => {
+    logNon2xx(req, res);
     handle(req, res).catch((e: unknown) => {
       log(`HTTP 処理エラー: ${e instanceof Error ? e.message : String(e)}`);
       rpcError(res, 500, "internal error");

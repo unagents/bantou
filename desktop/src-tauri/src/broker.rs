@@ -606,6 +606,22 @@ async fn acknowledge(url: &str, id: &str, ids: &[u64]) -> Result<(), String> {
 
 // -- poller ---------------------------------------------------------------------
 
+/// Log a broker failure once per distinct message (the poller retries every few seconds), and the
+/// recovery when the next call works. `last` holds the failure being reported.
+fn note_broker(last: &mut Option<String>, ws: &Path, what: &str, result: Result<(), &str>) {
+    match result {
+        Err(e) if last.as_deref() != Some(e) => {
+            log::warn!("broker [{}]: {what} failed: {e}", ws.display());
+            *last = Some(e.to_string());
+        }
+        Ok(()) if last.is_some() => {
+            log::info!("broker [{}]: {what} ok again", ws.display());
+            *last = None;
+        }
+        _ => {}
+    }
+}
+
 /// Start the poller for `ws`. `fixed_url` pins the broker (tests); `None`
 /// resolves it with the messenger discovery order, again after each failure.
 pub(crate) fn start_poller<R: tauri::Runtime>(app: tauri::AppHandle<R>, ws: PathBuf, fixed_url: Option<String>) {
@@ -615,6 +631,7 @@ pub(crate) fn start_poller<R: tauri::Runtime>(app: tauri::AppHandle<R>, ws: Path
         let mut url = String::new();
         let pid = peer_pid();
         let mut tick: u32 = 0;
+        let mut last_error: Option<String> = None;
         loop {
             let brokers = app.state::<Brokers>();
             if peer.is_none() {
@@ -629,11 +646,14 @@ pub(crate) fn start_poller<R: tauri::Runtime>(app: tauri::AppHandle<R>, ws: Path
                 Some(id) => id.clone(),
                 None => match register(&cfg, &ws, pid).await {
                     Ok(id) => {
+                        log::info!("broker [{}]: registered as {id} at {url}", ws.display());
+                        last_error = None;
                         brokers.set(&ws, BrokerStatus { connected: true, peer_id: Some(id.clone()), ..base.clone() });
                         peer = Some(id.clone());
                         id
                     }
                     Err(e) => {
+                        note_broker(&mut last_error, &ws, &format!("register at {url}"), Err(&e));
                         brokers.set(&ws, BrokerStatus { error: Some(e), ..base.clone() });
                         tokio::time::sleep(Duration::from_secs(10)).await;
                         continue;
@@ -644,11 +664,13 @@ pub(crate) fn start_poller<R: tauri::Runtime>(app: tauri::AppHandle<R>, ws: Path
             if tick % HEARTBEAT_EVERY == 0 {
                 match post::<OkResult>(&url, "/heartbeat", serde_json::json!({ "id": id })).await {
                     Ok(r) if !r.ok => {
+                        log::warn!("broker [{}]: heartbeat refused, registering again", ws.display());
                         peer = None;
                         continue;
                     }
                     Err(e) => {
                         // Broker gone: resolve again on the next round.
+                        note_broker(&mut last_error, &ws, "heartbeat", Err(&e));
                         brokers.set(&ws, BrokerStatus { error: Some(e), ..base.clone() });
                         peer = None;
                         tokio::time::sleep(Duration::from_secs(10)).await;
@@ -659,13 +681,17 @@ pub(crate) fn start_poller<R: tauri::Runtime>(app: tauri::AppHandle<R>, ws: Path
             }
             match post::<PollResponse>(&url, "/poll-messages", serde_json::json!({ "id": id })).await {
                 Ok(r) => {
+                    note_broker(&mut last_error, &ws, "poll", Ok(()));
                     let mut changed = false;
                     let mut pinged = false;
                     for m in &r.messages {
                         if is_ping(m) {
                             match handle_ping(&ws, m, &app.state::<Pings>()) {
                                 Ok(p) => pinged |= p,
-                                Err(e) => eprintln!("bantou: failed to apply ping: {e}"),
+                                Err(e) => {
+                                    eprintln!("bantou: failed to apply ping: {e}");
+                                    log::warn!("broker [{}]: failed to apply ping: {e}", ws.display());
+                                }
                             }
                             continue;
                         }
@@ -674,6 +700,7 @@ pub(crate) fn start_poller<R: tauri::Runtime>(app: tauri::AppHandle<R>, ws: Path
                             Err(e) => {
                                 // Already marked read on the broker: never drop it.
                                 eprintln!("bantou: failed to apply message, kept in inbox: {e}");
+                                log::warn!("broker [{}]: failed to apply message, kept in inbox: {e}", ws.display());
                                 let _ = append_inbox(&ws, m);
                             }
                         }
@@ -682,6 +709,7 @@ pub(crate) fn start_poller<R: tauri::Runtime>(app: tauri::AppHandle<R>, ws: Path
                     if !ids.is_empty() {
                         if let Err(e) = acknowledge(&url, &id, &ids).await {
                             eprintln!("bantou: failed to acknowledge messages: {e}");
+                            log::warn!("broker [{}]: failed to acknowledge messages: {e}", ws.display());
                         }
                     }
                     if changed {
@@ -693,6 +721,7 @@ pub(crate) fn start_poller<R: tauri::Runtime>(app: tauri::AppHandle<R>, ws: Path
                     brokers.set(&ws, BrokerStatus { connected: true, peer_id: Some(id.clone()), ..base.clone() });
                 }
                 Err(e) => {
+                    note_broker(&mut last_error, &ws, "poll", Err(&e));
                     brokers.set(&ws, BrokerStatus { peer_id: Some(id.clone()), error: Some(e), ..base.clone() });
                 }
             }

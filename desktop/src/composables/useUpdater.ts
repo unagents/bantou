@@ -3,6 +3,8 @@ import {
   CHECK_FOR_UPDATES_EVENT,
   checkForUpdate,
   downloadAndInstall,
+  errorText,
+  logWebview,
   relaunchApp,
   type DownloadProgress,
 } from "~/api";
@@ -32,6 +34,7 @@ export function useUpdater() {
     state.value = { kind: "checking" };
     try {
       const update = await checkForUpdate();
+      logWebview("info", `update check (${mode}): ${update ? `v${update.version} available` : "up to date"}`);
       if (id !== requestId) return;
       if (update) {
         state.value = { kind: "available", update, version: update.version };
@@ -47,6 +50,7 @@ export function useUpdater() {
         }
       }
     } catch (e) {
+      logWebview("error", `update check failed (${mode}): ${errorText(e)}`);
       if (id !== requestId) return;
       if (mode === "manual") {
         state.value = { kind: "error", message: String(e), version: null };
@@ -82,6 +86,7 @@ export function useUpdater() {
       });
       await relaunchApp();
     } catch (e) {
+      logWebview("error", `update install failed (v${version}): ${errorText(e)}`);
       state.value = { kind: "error", message: String(e), version };
     }
   }
