@@ -10,7 +10,7 @@
 | center | `packages/center/`（TypeScript、MCP server） | 素のエージェントが MCP tool 経由で cap 運用できる tool 群。project ごとの `claude remote-control`（server mode、1 project 1 本）の起動・監視・切断復帰を担当する。mac200 では desktop を MCP on で常駐させる |
 | server | `server/`（npm package `bantou`、`npx bantou`） | リモートホストの headless 実行層。stroke 方式（`claude -p` を spawn、`--session-id` / `--resume`、path 分離、state 管理、孤児回収）を発展させる。kick を受けて remote cap を起動し、cap の依頼（`/mcp` の `worker_*` tool）で worker を起動・継続する。cap と worker の stream-json 出力から生存と進捗を center へ通知する。server mode には触らない |
 | protocol | `packages/protocol/` | desktop・center・server・plugin 共通のメッセージ仕様と TS 型 |
-| plugin | `plugin/bantou/` | work session に配る Claude Code plugin（guardrail と bantou-protocol skill） |
+| plugin | `plugin/bantou/` | work session に配る Claude Code plugin（bantou-protocol skill） |
 
 ## 人（モバイル）からの経路
 

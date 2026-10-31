@@ -322,5 +322,4 @@ npm run e2e
 
 - [`../docs/architecture.md`](../docs/architecture.md)
 - [`../docs/protocol.md`](../docs/protocol.md)
-- [`../docs/guardrail.md`](../docs/guardrail.md)
 - [`../desktop/README.md`](../desktop/README.md)

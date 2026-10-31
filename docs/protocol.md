@@ -93,7 +93,6 @@ Pings (`mode: "ping"`) are never stored there.
 |---|---|
 | `<workspace>/*.md` | Cork-format tasks (+ frontmatter `id`) |
 | `<workspace>/.cork.json` | Cork status list (read only) |
-| `~/.local/share/bantou/<workspace-key>/sessions.json` | registered sessions (roster) |
 | `~/.local/share/bantou/<workspace-key>/threads/<task_id>.json` | waiting thread + timeline + responder session id |
 | `~/.local/share/bantou/<workspace-key>/inbox.jsonl` | non-envelope messages |
 

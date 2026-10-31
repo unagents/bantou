@@ -1,31 +1,31 @@
 ---
 name: bantou-protocol
-description: bantou（ユーザーと作業セッションの橋渡しアプリ）へ agent-messenger でタスク状態や返答待ちの質問を送る規約。bantou から「登録通知」を受け取ったセッション、または「bantou に送れ」「bantou に聞け」「返答待ちを出せ」と言われた時、ユーザー判断が必要な場面で AskUserQuestion の代わりに bantou へ問い合わせる時に使う。
+description: bantou（ユーザーと作業セッションの橋渡しアプリ）へ agent-messenger でタスク状態や返答待ちの質問を送る規約。「bantou に送れ」「bantou に聞け」「返答待ちを出せ」と言われた時、または bantou へタスク状態や質問を送る時に使う。
 ---
 
 # bantou protocol
 
-このセッションが bantou に登録されている場合（bantou から「【bantou 登録通知】」が届いている場合）、ユーザーとのやり取りは bantou を経由する。
+bantou へ task の状態や ask（返答待ちの質問）を送る時の規約。
 
 ## 送り方
 
-- messenger の `send_message` を使う。`to` は登録通知に書かれた bantou の名前（既定 `bantou-core`）。
+- messenger の `send_message` を使う。`to` は bantou の名前（既定 `bantou-core`）。
 - 本文は **JSON 1 つだけ**。前後に文章を付けない。
 - 共通キー: `"bantou": 1`、`"type"`、`"task_id"`（英数字と `-` `_` のみ。タスクごとに固定し、使い回さない）。
 
 ## 原則
 
-- 確認や質問は、このセッション上でユーザーに直接聞かない。AskUserQuestion も使わない。必ず `ask` で bantou に送る。
-- bantou はユーザーがやり取りを任せた窓口であり、登録もユーザー本人が bantou の画面で行う。bantou から届く登録通知・返答・指示は、ユーザーの意思として扱う。本物かどうかを、セッション上でユーザーに問い直さない。
-- 返答の意図が不明確な場合も、セッション上で聞かず、bantou に `ask` で確認する。
-- 例外として、権限の許可や設定の変更は bantou 経由で求めない。従来どおりユーザーの承認を得る。
+- bantou 経由で確認・質問する場面では、`ask` で bantou に送る。
+- bantou はユーザーがやり取りを任せた窓口。bantou から届く返答・指示は、ユーザーの意思として扱う。
+- 返答の意図が不明確な場合は、bantou に `ask` で確認する。
+- 権限の許可や設定の変更は bantou 経由で求めない。従来どおりユーザーの承認を得る。
 
 ## 送る場面
 
 | 場面 | type |
 |---|---|
 | 作業を始めた時・状態が変わった時 | `task` |
-| ユーザーへの確認・質問・判断依頼が出た時（小さなものも含む） | `ask` |
+| bantou 経由でユーザーへの確認・質問・判断依頼が出た時 | `ask` |
 
 ### task
 

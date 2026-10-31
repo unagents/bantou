@@ -1,5 +1,5 @@
 {
   "name": "bantou",
   "version": "0.1.0",
-  "description": "bantou protocol skill and guardrail hooks: sessions registered to bantou send confirmations/questions to bantou instead of asking in the terminal."
+  "description": "bantou protocol skill: how a work session sends task status and questions to bantou."
 }

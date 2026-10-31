@@ -5,7 +5,7 @@
 - `desktop/`: Tauri 2 + Nuxt 4。`src/`（Nuxt、Cork の `src/` 相当）と `src-tauri/`（Rust）。
 - `server/`: TypeScript。npm package として npx で起動。desktop からの remote session 起動と remote cap の起動を担う。雛形のみ。
 - `packages/protocol/`: desktop・server・plugin 共通のメッセージ仕様と TS 型。雛形のみ。
-- `docs/`: 共通資料。`concept.md`（概念、設計判断の前提） / `protocol.md` / `guardrail.md` / `handoff.md`。
+- `docs/`: 共通資料。`concept.md`（概念、設計判断の前提） / `protocol.md` / `handoff.md`。
 - `plugin/`: work session に配る Claude Code plugin `bantou`。
 - center は desktop に sidecar 同梱（packages/center を bun build --compile、desktop/scripts/build-sidecar.ts）。
 
@@ -25,7 +25,6 @@
 - `desktop/README.md`: bantou-desktop の概要・インストール・Dev。
 - `desktop/CLAUDE.md`: E2E on mac200・Release 手順。
 - `docs/protocol.md`: work session と bantou のメッセージ仕様。
-- `docs/guardrail.md`: Claude Code plugin による guardrail。
 - `docs/handoff.md`: 開発引き継ぎメモ（Lessons 節を含む）。
 - `server/README.md`: bantou-server の概要。
 
