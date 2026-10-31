@@ -97,7 +97,7 @@ function onSessionCreated(name: string) {
 </script>
 
 <template>
-  <div class="min-h-screen bg-default text-default">
+  <div class="flex h-screen flex-col overflow-hidden bg-default text-default">
     <AppHeader
       v-if="loaded"
       :workspace-path="dir"
@@ -125,8 +125,8 @@ function onSessionCreated(name: string) {
     </div>
 
     <template v-else-if="dir">
-      <div class="flex min-h-[calc(100vh-var(--cork-header-height))]">
-        <nav aria-label="セッション一覧" class="border-cork-border w-60 shrink-0 border-r">
+      <div class="flex min-h-0 flex-1">
+        <nav aria-label="セッション一覧" class="border-cork-border w-60 shrink-0 overflow-y-auto border-r">
           <UTooltip v-if="!centerList.reachable" :text="centerList.reason ?? 'center に問い合わせられなかった'">
             <UBadge
               class="m-2"
@@ -158,7 +158,7 @@ function onSessionCreated(name: string) {
         </nav>
         <main
           v-if="selectedGroup"
-          class="grid min-h-0 min-w-0 flex-1 grid-cols-[minmax(20rem,2fr)_minmax(0,3fr)]"
+          class="grid min-h-0 min-w-0 flex-1 grid-cols-[minmax(20rem,2fr)_minmax(0,3fr)] grid-rows-[minmax(0,1fr)]"
           data-testid="session-main"
         >
           <!-- middle: remote instruction tasks of the session, the Cork task list below them -->
@@ -174,13 +174,13 @@ function onSessionCreated(name: string) {
           </div>
           <!-- right: conversation history (the session's terminal) -->
           <div
-            class="h-[calc(100vh-var(--cork-header-height))] max-h-[calc(100vh-var(--cork-header-height))] min-h-0 min-w-0 overflow-hidden"
+            class="min-h-0 min-w-0 overflow-hidden"
             data-testid="right-col"
           >
             <TerminalView :session="selectedGroup.name" />
           </div>
         </main>
-        <main v-else class="min-w-0 flex-1 p-6">
+        <main v-else class="min-h-0 min-w-0 flex-1 overflow-y-auto p-6">
           <div
             class="border-cork-border text-cork-muted flex flex-col items-center gap-3 border border-dashed py-10 text-sm"
           >
