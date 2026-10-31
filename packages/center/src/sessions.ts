@@ -43,7 +43,7 @@ export interface SessionManager {
 }
 
 /**
- * session（center 上の master-cap）の起動・削除・一覧。実体は `claude remote-control --name <name>` を path で動かす supervisor の entry。
+ * session（center 上の master-cap）の起動・削除・一覧。実体は pty wrapper 経由の対話型 `claude --remote-control <name>` を path で動かす supervisor の entry。
  * 保存先は center 自前の状態ファイル（config とは別）。
  */
 export function createSessionManager(opts: {
@@ -88,7 +88,7 @@ export function createSessionManager(opts: {
       for (const s of await store.load()) {
         try {
           if (!SESSION_NAME.test(s.name) || !isAbsolute(s.path)) throw new Error("保存内容が不正");
-          supervisor.add(toProject(s));
+          supervisor.add(toProject(s), { wrapper: true });
           saved.set(s.name, s);
           await mkdir(s.path, { recursive: true });
           await supervisor.start(s.name, { resume: true });
@@ -121,7 +121,7 @@ export function createSessionManager(opts: {
           permissionMode: input.permissionMode ?? "auto",
           createdAt: new Date().toISOString(),
         };
-        supervisor.add(toProject(rec));
+        supervisor.add(toProject(rec), { wrapper: true });
         saved.set(name, rec);
         try {
           await persist();

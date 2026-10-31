@@ -3,7 +3,7 @@ import type { CliArgs } from "./args.js";
 import { resolveClaude } from "./claude-path.js";
 import { createActivityStore } from "./activity.js";
 import { loadConfig, MIN_TOKEN_LEN } from "./config.js";
-import { startHttpServer, type HttpHandle } from "./http.js";
+import { SESSION_MCP_PATH, startHttpServer, type HttpHandle } from "./http.js";
 import { mkdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { log, setLogFile } from "./log.js";
@@ -14,7 +14,9 @@ import { createRemoteManager } from "./remotes.js";
 import { createRemoteControlSupervisor } from "./remote-control.js";
 import { createSessionManager } from "./sessions.js";
 import { createJsonListStore } from "./store.js";
-import { createCenterServer } from "./server.js";
+import { createCenterServer, createSessionMcpServer } from "./server.js";
+import { createCore } from "./core.js";
+import { createSessionTokens } from "./session-auth.js";
 import { createServerLink } from "./server-link.js";
 
 /** 強制終了の猶予に足す余裕（stop は SIGTERM 待ち stopGraceMs の後、SIGKILL 待ちで最大 5 秒）。 */
@@ -43,7 +45,22 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     log(`center.log を開けない（stderr のみ）: ${e instanceof Error ? e.message : String(e)}`);
   }
   const claude = await resolveClaude(config.remoteControl.claude, log);
-  const supervisor = createRemoteControlSupervisor({ config, log, claude });
+  const core = createCore();
+  const sessionTokens = createSessionTokens();
+  let httpPort: number | null = null;
+  // session（master-cap）から center の MCP へ戻る URL。http で待ち受けていなければ null（--mcp-config を付けない）
+  const sessionMcpUrl = (): string | null => {
+    if (httpPort === null) return null;
+    const b = args.bind;
+    const host = b === "" || b === "0.0.0.0" || b === "::" || b === "localhost" ? "127.0.0.1" : b.includes(":") && !b.startsWith("[") ? `[${b}]` : b;
+    return `http://${host}:${httpPort}${SESSION_MCP_PATH}`;
+  };
+  const supervisor = createRemoteControlSupervisor({
+    config,
+    log,
+    claude,
+    wrapper: { core, tokens: sessionTokens, mcpUrl: sessionMcpUrl },
+  });
   const activity = createActivityStore();
   // 通知は 5 秒ごとに来るので、状態の組が変わった時だけログに出す
   const lastStates = new Map<string, string>();
@@ -122,7 +139,17 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     if (!config.token || config.token.length < MIN_TOKEN_LEN) {
       throw new Error(`http transport には config の token（${MIN_TOKEN_LEN} 文字以上）が必要: ${configPath}`);
     }
-    http = await startHttpServer({ createServer: makeServer, port: args.port, bind: args.bind, token: config.token, log });
+    http = await startHttpServer({
+      createServer: makeServer,
+      createSessionServer: (owner) => createSessionMcpServer({ remotes, owner }),
+      sessionAuth: sessionTokens,
+      core,
+      port: args.port,
+      bind: args.bind,
+      token: config.token,
+      log,
+    });
+    httpPort = http.port;
     watchParent({ onOrphan: (reason) => void shutdown(reason) });
   } else {
     const server = makeServer();

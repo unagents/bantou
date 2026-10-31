@@ -69,7 +69,7 @@ export function registerTools(
     {
       title: "session 作成",
       description:
-        "center 上に master-cap の session を作る。path（省略時は <workspace>/<name>、無ければ作る）で `claude remote-control --name <name>` を起動して監視対象に加える。center 再起動後も復帰する（--continue）",
+        "center 上に master-cap の session を作る。path（省略時は <workspace>/<name>、無ければ作る）で pty wrapper 経由の対話型 `claude --remote-control <name>` を起動して監視対象に加える。center 再起動後も復帰する（--continue）",
       inputSchema: sessionCreateSchema,
     },
     (args) => guard(async () => json(await sessions.create(args))),
@@ -92,37 +92,7 @@ export function registerTools(
     () => guard(() => json(sessions.list())),
   );
 
-  // -- B. remote session（center が master-cap に持たせる道具） --
-  server.registerTool(
-    "remote_create",
-    {
-      title: "remote 作成",
-      description:
-        "server に remote-cap を作らせ、prompt を最初の指示として起動する。完了を待たず {remote_id, state:\"running\"} を返す。完了は remote_list で確認する（state が done / failed になる）。server は protocol bantou で発見した先頭、server 引数で peer id か名前を指定できる",
-      inputSchema: { ...remoteCreateSchema, owner: ownerArg },
-    },
-    ({ owner, ...args }, extra) =>
-      guard(async () => {
-        const who = resolveOwner(extra as OwnerRequestInfo, owner);
-        if (!who) throw new Error("owner が分からない: http の header X-Bantou-Session か引数 owner が必要");
-        const r = await remotes.create({ owner: who, ...args });
-        return json({ remote_id: r.remote_id, server: r.server, serverName: r.serverName, state: r.state });
-      }),
-  );
-  server.registerTool(
-    "remote_delete",
-    {
-      title: "remote 削除",
-      description:
-        "remote-cap の実行を止め（server へ stop_cap）、center の記録から外す。止められない時は error（force: true で記録だけ消す）。別の owner の remote は消せない",
-      inputSchema: { remote_id: agentId, owner: ownerArg, force: z.boolean().optional() },
-    },
-    ({ remote_id, owner, force }, extra) =>
-      guard(async () => {
-        const who = resolveOwner(extra as OwnerRequestInfo, owner);
-        return json(await remotes.delete({ remote_id, ...(who ? { owner: who } : {}), ...(force !== undefined ? { force } : {}) }));
-      }),
-  );
+  // -- B. remote の読み取り（外向けは一覧だけ。作成・削除は session 向けの窓口 /mcp/session） --
   server.registerTool(
     "remote_list",
     {
@@ -197,27 +167,6 @@ export function registerTools(
       }),
   );
   server.registerTool(
-    "cap_kick",
-    {
-      title: "cap を kick",
-      description:
-        "bantou-server の remote cap を headless で起動（または resume）して prompt を実行させ、結果が返るまで待つ。返り値は bantou-server の cap_result / error 返信そのまま",
-      inputSchema: {
-        server: serverName,
-        cap_id: agentId,
-        prompt,
-        repo: gitArg.optional().describe("初回に clone する Git URL"),
-        branch: gitArg.optional(),
-        reason: z.string().refine(noNul, noNulMsg).optional().describe("ログ用の自由記述"),
-      },
-    },
-    ({ server: name, ...cmd }) =>
-      guard(async () => {
-        const r = await link.kickCap(name, cmd);
-        return json(r, isFailure(r));
-      }),
-  );
-  server.registerTool(
     "worker_resume",
     {
       title: "worker を resume",
@@ -249,5 +198,47 @@ export function registerTools(
         const r = await link.status(name);
         return json(r, isFailure(r));
       }),
+  );
+}
+
+/**
+ * session 向けの窓口（/mcp/session）の tool。owner は呼び出し元 session（認証済みの header X-Bantou-Session）で、
+ * 引数では受けない（自己申告させない）。
+ */
+export function registerSessionTools(server: McpServer, deps: { remotes: RemoteManager; owner: string }): void {
+  const { remotes, owner } = deps;
+
+  server.registerTool(
+    "remote_create",
+    {
+      title: "remote 作成",
+      description:
+        "server に remote-cap を作らせ、prompt を最初の指示として起動する。完了を待たず {remote_id, state:\"running\"} を返す。完了は remote_list で確認する（state が done / failed になる）。server は protocol bantou で発見した先頭、server 引数で peer id か名前を指定できる",
+      inputSchema: remoteCreateSchema,
+    },
+    (args) =>
+      guard(async () => {
+        const r = await remotes.create({ owner, ...args });
+        return json({ remote_id: r.remote_id, server: r.server, serverName: r.serverName, state: r.state });
+      }),
+  );
+  server.registerTool(
+    "remote_delete",
+    {
+      title: "remote 削除",
+      description:
+        "remote-cap の実行を止め（server へ stop_cap）、center の記録から外す。止められない時は error（force: true で記録だけ消す）。自分（この session）の remote だけ消せる",
+      inputSchema: { remote_id: agentId, force: z.boolean().optional() },
+    },
+    ({ remote_id, force }) =>
+      guard(async () => json(await remotes.delete({ remote_id, owner, ...(force !== undefined ? { force } : {}) }))),
+  );
+  server.registerTool(
+    "remote_list",
+    {
+      title: "remote 一覧",
+      description: "この session が作った remote（remote_id, server, state, 時刻, 結果、通知を受けたものは activity 付き）の一覧",
+    },
+    () => guard(() => json(remotes.list({ owner }))),
   );
 }

@@ -5,7 +5,9 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { allowedHostsFor, startHttpServer } from "../src/http.js";
 import type { RemoteManager } from "../src/remotes.js";
-import { createCenterServer } from "../src/server.js";
+import { createCenterServer, createSessionMcpServer } from "../src/server.js";
+import { createCore, type Core } from "../src/core.js";
+import { createSessionTokens, type SessionTokens } from "../src/session-auth.js";
 import type { SessionManager } from "../src/sessions.js";
 import { parseConfig } from "../src/config.js";
 import type { RemoteControlSupervisor } from "../src/remote-control.js";
@@ -14,13 +16,15 @@ import type { ServerLink } from "../src/server-link.js";
 const TOKEN = "test-token-0123456789";
 const AUTH = { authorization: `Bearer ${TOKEN}` };
 
+const AUTH_WITH = (name: string): Record<string, string> => ({ ...AUTH, "x-bantou-session": name });
+
 const TOOLS = [
-  "cap_kick", "rc_list", "rc_start", "rc_status", "rc_stop", "remote_create", "remote_delete", "remote_list",
+  "rc_list", "rc_start", "rc_status", "rc_stop", "remote_list",
   "server_list", "server_peers", "server_status", "session_create", "session_delete", "session_list", "worker_resume",
 ];
 
 async function boot(
-  extra: { sessionIdleTtlMs?: number; sweepIntervalMs?: number; maxSessions?: number; bind?: string; token?: string } = {},
+  extra: { sessionIdleTtlMs?: number; sweepIntervalMs?: number; maxSessions?: number; bind?: string; token?: string; keepAliveMs?: number } = {},
 ) {
   const config = parseConfig({}, "/tmp/c.json");
   const supervisor = {
@@ -33,15 +37,25 @@ async function boot(
     list: (f?: { owner?: string }) => [{ remote_id: "r-1", owner: f?.owner ?? "(all)" }],
     create: async (i: { owner: string }) => ({ remote_id: "r-9", server: "s", serverName: "n", state: "running", owner: i.owner }),
   } as unknown as RemoteManager;
+  const tokens = createSessionTokens();
+  const core = createCore();
+  const created: unknown[] = [];
+  const remotes2 = {
+    ...remotes,
+    create: async (i: { owner: string }) => (created.push(i), { remote_id: "r-9", server: "s", serverName: "n", state: "running", owner: i.owner }),
+  } as unknown as RemoteManager;
   const h = await startHttpServer({
     createServer: () => createCenterServer({ config, supervisor, link, sessions, remotes }),
+    createSessionServer: (owner) => createSessionMcpServer({ remotes: remotes2, owner }),
+    sessionAuth: tokens,
+    core,
     port: 0,
     log: () => {},
     ...extra,
     bind: extra.bind ?? "127.0.0.1",
     token: extra.token ?? TOKEN,
   });
-  return { h, url: new URL(`http://127.0.0.1:${h.port}/mcp`) };
+  return { h, url: new URL(`http://127.0.0.1:${h.port}/mcp`), tokens, core, created, base: `http://127.0.0.1:${h.port}` };
 }
 
 test("http: 2 クライアントが並行に接続して tools/list と tool 呼び出しができる", async () => {
@@ -280,13 +294,221 @@ test("http: owner は header X-Bantou-Session > URL query session > 引数 owner
     assert.equal(await owner(both), "pm-h"); // header が query より優先
     assert.equal(await owner(none, { owner: "arg" }), "arg");
     assert.equal(await owner(none), "(all)"); // 分からなければ全件
-    // create は owner 必須（header / query / 引数のどれか）
-    const noOwner = await none.callTool({ name: "remote_create", arguments: { prompt: "p" } });
-    assert.equal(noOwner.isError, true);
-    const viaHdr = await hdr.callTool({ name: "remote_create", arguments: { prompt: "p" } });
-    assert.equal((JSON.parse((viaHdr.content as { text: string }[])[0].text) as { state: string }).state, "running");
+    // 作成は外向けから消えた（session 向けの窓口だけ）
+    await assert.rejects(async () => {
+      const r = await hdr.callTool({ name: "remote_create", arguments: { prompt: "p" } });
+      if (r.isError) throw new Error("tool error");
+    });
   } finally {
     await Promise.all(clients.map((c) => c.close().catch(() => {})));
+    await h.close();
+  }
+});
+
+// -- 窓口の分離と認証 --
+
+const postInit = (url: string, headers: Record<string, string>) =>
+  fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...headers },
+    body: JSON.stringify({
+      jsonrpc: "2.0", id: 1, method: "initialize",
+      params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "0" } },
+    }),
+  });
+
+const sessionClient = async (base: string, token: string, name: string) => {
+  const c = new Client({ name: "s", version: "0" });
+  await c.connect(
+    new StreamableHTTPClientTransport(new URL(`${base}/mcp/session`), {
+      requestInit: { headers: { authorization: `Bearer ${token}`, "X-Bantou-Session": name } },
+    }),
+  );
+  return c;
+};
+
+test("/mcp/session: 窓口は remote_create / remote_delete / remote_list だけ。owner は header の session 名", async () => {
+  const { h, tokens, created, base } = await boot();
+  const t = tokens.issue("pm1");
+  const c = await sessionClient(base, t, "pm1");
+  try {
+    assert.deepEqual((await c.listTools()).tools.map((x) => x.name).sort(), ["remote_create", "remote_delete", "remote_list"]);
+    await c.callTool({ name: "remote_create", arguments: { prompt: "p", owner: "evil" } });
+    assert.deepEqual(created, [{ owner: "pm1", prompt: "p" }]);
+    const l = await c.callTool({ name: "remote_list", arguments: {} });
+    assert.equal((JSON.parse((l.content as { text: string }[])[0].text) as { owner: string }[])[0].owner, "pm1");
+  } finally {
+    await c.close().catch(() => {});
+    await h.close();
+  }
+});
+
+test("/mcp/session: session A の token に header B は 401、外向け token・token 無し・header 無し・不正 token も 401", async () => {
+  const { h, tokens, base } = await boot();
+  const ta = tokens.issue("a");
+  tokens.issue("b");
+  const url = `${base}/mcp/session`;
+  try {
+    assert.equal((await postInit(url, { authorization: `Bearer ${ta}`, "x-bantou-session": "b" })).status, 401);
+    assert.equal((await postInit(url, AUTH_WITH("a"))).status, 401); // 外向け token
+    assert.equal((await postInit(url, { "x-bantou-session": "a" })).status, 401);
+    assert.equal((await postInit(url, { authorization: `Bearer ${ta}` })).status, 401);
+    assert.equal((await postInit(url, { authorization: "Bearer wrong", "x-bantou-session": "a" })).status, 401);
+    assert.equal((await postInit(url, { authorization: `Bearer ${ta}`, "x-bantou-session": "a b" })).status, 401);
+    assert.equal((await postInit(url, { authorization: `Bearer ${ta}`, "x-bantou-session": "a" })).status, 200);
+    // 発行し直すと古い token は使えない / revoke 後も 401
+    const ta2 = tokens.issue("a");
+    assert.equal((await postInit(url, { authorization: `Bearer ${ta}`, "x-bantou-session": "a" })).status, 401);
+    tokens.revoke("a");
+    assert.equal((await postInit(url, { authorization: `Bearer ${ta2}`, "x-bantou-session": "a" })).status, 401);
+  } finally {
+    await h.close();
+  }
+});
+
+
+test("session token は外向け /mcp では通らない。MCP session id は窓口をまたいで使えない", async () => {
+  const { h, tokens, base } = await boot();
+  const ta = tokens.issue("a");
+  try {
+    assert.equal((await postInit(`${base}/mcp`, { authorization: `Bearer ${ta}`, "x-bantou-session": "a" })).status, 401);
+    // 外向けで作った MCP session id を /mcp/session に持ち込む
+    const ext = await postInit(`${base}/mcp`, AUTH);
+    const sid = ext.headers.get("mcp-session-id");
+    assert.ok(sid);
+    const r = await fetch(`${base}/mcp/session`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${ta}`, "x-bantou-session": "a", "mcp-session-id": sid },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }),
+    });
+    assert.equal(r.status, 404);
+    // session A の MCP session id を、別 session B の認証で使えない
+    const tb = tokens.issue("b");
+    const a = await postInit(`${base}/mcp/session`, { authorization: `Bearer ${ta}`, "x-bantou-session": "a" });
+    const asid = a.headers.get("mcp-session-id")!;
+    const r2 = await fetch(`${base}/mcp/session`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${tb}`, "x-bantou-session": "b", "mcp-session-id": asid },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }),
+    });
+    assert.equal(r2.status, 404);
+  } finally {
+    await h.close();
+  }
+});
+
+// -- core の HTTP（SSE / input / resize） --
+
+/** SSE を読み、イベントを集める。条件を満たすまで待つ。 */
+async function readSse(res: Response, until: (evs: { id?: string; event?: string; data: string }[]) => boolean, ms = 3000) {
+  const evs: { id?: string; event?: string; data: string }[] = [];
+  const reader = res.body!.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  const end = Date.now() + ms;
+  while (!until(evs) && Date.now() < end) {
+    const r = await Promise.race([reader.read(), new Promise<null>((r2) => setTimeout(() => r2(null), 100))]);
+    if (r === null) continue;
+    if (r.done) break;
+    buf += dec.decode(r.value, { stream: true });
+    const parts = buf.split("\n\n");
+    buf = parts.pop() ?? "";
+    for (const p of parts) {
+      const ev: { id?: string; event?: string; data: string } = { data: "" };
+      for (const line of p.split("\n")) {
+        if (line.startsWith("id: ")) ev.id = line.slice(4);
+        else if (line.startsWith("event: ")) ev.event = line.slice(7);
+        else if (line.startsWith("data: ")) ev.data = line.slice(6);
+        else if (line.startsWith(": ")) ev.event = "comment:" + line.slice(2);
+      }
+      evs.push(ev);
+    }
+  }
+  await reader.cancel().catch(() => {});
+  return evs;
+}
+const b64 = (s: string): string => Buffer.from(s).toString("base64");
+
+test("core SSE: 外向け token 必須。未知 session は 404。after 無しは reset の後に全部、live も流れる", async () => {
+  const { h, core, base } = await boot();
+  core.register("s1");
+  core.push("s1", Buffer.from("one"));
+  core.push("s1", Buffer.from("two"));
+  try {
+    assert.equal((await fetch(`${base}/sessions/s1/output`)).status, 401);
+    assert.equal((await fetch(`${base}/sessions/s1/output`, { headers: { authorization: "Bearer nope" } })).status, 401);
+    assert.equal((await fetch(`${base}/sessions/nope/output`, { headers: AUTH })).status, 404);
+    const res = await fetch(`${base}/sessions/s1/output`, { headers: AUTH });
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /text\/event-stream/);
+    setTimeout(() => core.push("s1", Buffer.from("live")), 50);
+    const evs = await readSse(res, (e) => e.length >= 4);
+    assert.deepEqual(evs.map((e) => e.event), ["reset", "output", "output", "output"]);
+    assert.deepEqual(evs.slice(1).map((e) => [e.id, e.data]), [["1", b64("one")], ["2", b64("two")], ["3", b64("live")]]);
+  } finally {
+    await h.close();
+  }
+});
+
+test("core SSE: Last-Event-ID / ?after で続きから。残っていなければ reset。header が query より優先", async () => {
+  const { h, core, base } = await boot();
+  core.register("s1");
+  for (const w of ["a", "b", "c"]) core.push("s1", Buffer.from(w));
+  try {
+    const get = (path: string, headers: Record<string, string> = {}) => fetch(`${base}${path}`, { headers: { ...AUTH, ...headers } });
+    let evs = await readSse(await get("/sessions/s1/output", { "last-event-id": "1" }), (e) => e.length >= 2);
+    assert.deepEqual(evs.map((e) => [e.event, e.id]), [["output", "2"], ["output", "3"]]);
+    evs = await readSse(await get("/sessions/s1/output?after=2"), (e) => e.length >= 1);
+    assert.deepEqual(evs.map((e) => [e.event, e.id]), [["output", "3"]]);
+    evs = await readSse(await get("/sessions/s1/output?after=1", { "last-event-id": "3" }), () => false, 300);
+    assert.deepEqual(evs, []); // 3 まで受け取り済み
+    evs = await readSse(await get("/sessions/s1/output?after=junk"), (e) => e.length >= 4);
+    assert.equal(evs[0].event, "reset");
+  } finally {
+    await h.close();
+  }
+});
+
+test("core SSE: 古すぎる after（キューから落ちた分）は reset + 残っている分。keep-alive コメントが流れる", async () => {
+  const { h, core, base } = await boot({ keepAliveMs: 40 });
+  // 上限 8 MiB の core とは別に、小さい上限の core を差し替える代わりに、実際に溢れさせる
+  core.register("s1");
+  const big = Buffer.alloc(3 * 1024 * 1024, 1);
+  for (let i = 0; i < 4; i++) core.push("s1", big); // 12 MiB 分 → id 1,2 は落ちる
+  try {
+    const evs = await readSse(await fetch(`${base}/sessions/s1/output?after=1`, { headers: AUTH }), (e) => e.some((x) => x.event === "comment:ka"));
+    assert.equal(evs[0].event, "reset");
+    assert.deepEqual(evs.filter((e) => e.event === "output").map((e) => e.id), ["3", "4"]);
+    assert.ok(evs.some((e) => e.event === "comment:ka"));
+  } finally {
+    await h.close();
+  }
+});
+
+test("core POST: input は 204 / 実行中でなければ 409 / 未知 session 404 / 不正は 400。resize も同様", async () => {
+  const { h, core, base } = await boot();
+  core.register("s1");
+  const got: string[] = [];
+  const post = (path: string, body: unknown, headers: Record<string, string> = AUTH) =>
+    fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+  try {
+    assert.equal((await post("/sessions/s1/input", { data: b64("x") })).status, 409);
+    assert.equal((await post("/sessions/s1/resize", { cols: 80, rows: 24 })).status, 409);
+    core.attach("s1", { input: (d) => got.push(`in:${d.toString()}`), resize: (c, r) => got.push(`rs:${c}x${r}`) });
+    assert.equal((await post("/sessions/s1/input", { data: b64("hi\r") })).status, 204);
+    assert.equal((await post("/sessions/s1/resize", { cols: 100, rows: 30 })).status, 204);
+    assert.equal((await post("/sessions/s1/resize", { cols: 90, rows: 20 })).status, 204);
+    assert.deepEqual(got, ["in:hi\r", "rs:100x30", "rs:90x20"]);
+    assert.deepEqual(core.size("s1"), { cols: 90, rows: 20 }); // 最後に送った側が勝つ
+    assert.equal((await post("/sessions/nope/input", { data: "" })).status, 404);
+    assert.equal((await post("/sessions/s1/input", { data: 5 })).status, 400);
+    assert.equal((await post("/sessions/s1/input", { data: "***" })).status, 400);
+    assert.equal((await post("/sessions/s1/resize", { cols: 0, rows: 5 })).status, 400);
+    assert.equal((await post("/sessions/s1/resize", { cols: "a", rows: 5 })).status, 400);
+    assert.equal((await post("/sessions/s1/input", { data: b64("x") }, {})).status, 401);
+    assert.equal((await fetch(`${base}/sessions/s1/input`, { headers: AUTH })).status, 405);
+    assert.equal((await fetch(`${base}/sessions/s1/output`, { method: "POST", headers: AUTH })).status, 405);
+  } finally {
     await h.close();
   }
 });

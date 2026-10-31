@@ -7,6 +7,20 @@ import type { ResolvedClaude } from "./claude-path.js";
 import type { Config, ProjectConfig } from "./config.js";
 import type { Logger } from "./log.js";
 import { reapOrphans } from "./reap.js";
+import type { Core } from "./core.js";
+import type { SessionTokens } from "./session-auth.js";
+import {
+  buildWrapperArgs,
+  encodeInput,
+  encodeResize,
+  encodeStop,
+  findSessionUrl,
+  mcpConfigJson,
+  parseWrapperLine,
+  resolveWrapperPath,
+  TEXT_WINDOW,
+  windowConnected,
+} from "./wrapper.js";
 
 export type RcState = "stopped" | "starting" | "connected" | "error";
 
@@ -71,8 +85,11 @@ export interface RemoteControlSupervisor {
    * （claude は約 4 時間以内の記録が無いと --continue で error exit する）。
    */
   start(project: string, opts?: { resume?: boolean }): Promise<RcStatus>;
-  /** 実行中に project を足す（起動はしない）。同名は拒否。remove で外せるのはこの add で足したものだけ。 */
-  add(project: ProjectConfig): void;
+  /**
+   * 実行中に project を足す（起動はしない）。同名は拒否。remove で外せるのはこの add で足したものだけ。
+   * wrapper: true なら pty wrapper 経由の対話型（`claude --remote-control`）で起動する。省略は従来の `claude remote-control`。
+   */
+  add(project: ProjectConfig, opts?: { wrapper?: boolean }): void;
   /** add で足した project を停止して外す。config 由来の project は外せない。 */
   remove(name: string): Promise<void>;
   stop(project: string): Promise<RcStatus>;
@@ -155,6 +172,18 @@ interface Entry {
   /** 現在の child が終了済みか。 */
   exited: Promise<void> | null;
   logStream: WriteStream | null;
+  /** pty wrapper 経由で起動する entry か。 */
+  wrapper: boolean;
+}
+
+/** wrapper 経由の起動に必要なもの。 */
+export interface WrapperDeps {
+  core: Core;
+  tokens: SessionTokens;
+  /** wrapper の実行ファイル。省略時は resolveWrapperPath()。 */
+  path?: string;
+  /** session 向け MCP 窓口の URL。http で待ち受けていない（stdio）時は null で、その時は --mcp-config を付けない。 */
+  mcpUrl: () => string | null;
 }
 
 /**
@@ -184,6 +213,8 @@ export function createRemoteControlSupervisor(opts: {
   reap?: (project: string) => Promise<unknown>;
   /** 解決済みの claude。省略時は config 指定、なければ PATH 任せの `claude`。 */
   claude?: ResolvedClaude;
+  /** wrapper 経由で起動する entry（add の wrapper: true）に必要なもの。 */
+  wrapper?: WrapperDeps;
 }): RemoteControlSupervisor {
   const { config, log } = opts;
   const spawnImpl: SpawnImpl = opts.spawnImpl ?? ((c, a, o) => nodeSpawn(c, a, o) as unknown as ChildLike);
@@ -196,7 +227,7 @@ export function createRemoteControlSupervisor(opts: {
   const entries = new Map<string, Entry>();
   /** add() で足した project の名前（remove できるのはこれだけ）。 */
   const dynamic = new Set<string>();
-  const newEntry = (p: ProjectConfig): Entry => ({
+  const newEntry = (p: ProjectConfig, wrapper = false): Entry => ({
       project: p,
       status: {
         project: p.name,
@@ -218,6 +249,7 @@ export function createRemoteControlSupervisor(opts: {
       gen: 0,
       exited: null,
       logStream: null,
+      wrapper,
   });
   for (const p of config.projects) entries.set(p.name, newEntry(p));
 
@@ -233,7 +265,32 @@ export function createRemoteControlSupervisor(opts: {
   /** 子プロセスを 1 本起動して監視を付ける。 */
   const launch = (e: Entry, useContinue: boolean, fallback = false): void => {
     const name = e.project.name;
-    const args = buildRcArgs(e.project, rc, { continue: useContinue });
+    const wd = e.wrapper ? opts.wrapper : undefined;
+    let command = claude.path;
+    let args: string[];
+    let env = childEnv(e.project);
+    if (e.wrapper) {
+      if (!wd) {
+        e.status.state = "error";
+        e.status.lastError = "起動失敗: wrapper の設定が無い";
+        return;
+      }
+      wd.core.register(name);
+      const mcpUrl = wd.mcpUrl();
+      if (!mcpUrl) log(`session 向け MCP 窓口が無いので --mcp-config を付けない: project=${name}`);
+      args = buildWrapperArgs({
+        claudePath: claude.path,
+        name,
+        permissionMode: e.project.permissionMode,
+        mcpConfig: mcpUrl ? mcpConfigJson(mcpUrl, name) : null,
+        resume: useContinue,
+        ...(wd.core.size(name) ?? {}),
+      });
+      command = wd.path ?? resolveWrapperPath();
+      env = { ...env, BANTOU_SESSION_TOKEN: wd.tokens.issue(name) };
+    } else {
+      args = buildRcArgs(e.project, rc, { continue: useContinue });
+    }
     e.stopRequested = false;
     const gen = ++e.gen;
     e.status = {
@@ -253,8 +310,9 @@ export function createRemoteControlSupervisor(opts: {
 
     let child: ChildLike;
     try {
-      child = spawnImpl(claude.path, args, { cwd: e.project.path, env: childEnv(e.project), stdio: ["pipe", "pipe", "pipe"], detached: true });
+      child = spawnImpl(command, args, { cwd: e.project.path, env, stdio: ["pipe", "pipe", "pipe"], detached: true });
     } catch (err) {
+      wd?.tokens.revoke(name);
       e.status.state = "error";
       e.status.lastError = `起動失敗: ${(err as Error).message}`;
       logStream.end();
@@ -317,8 +375,65 @@ export function createRemoteControlSupervisor(opts: {
         buf = "";
       });
     };
-    attach(child.stdout, true);
-    attach(child.stderr, false);
+    /** wrapper の stdout（1 行 1 JSON）。output は core へ、text は窓に溜めて照合する。 */
+    let wrapperExit: { code: number | null; signal: string | null } | null = null;
+    const attachWrapperOut = (s: Readable | null): void => {
+      if (!s || !wd) return;
+      let buf = "";
+      let win = "";
+      let wconsent = false;
+      const onText = (text: string): void => {
+        if (!logStream.writableEnded) logStream.write(text);
+        const tail = text.split("\n").map((l) => l.trim()).filter(Boolean).pop();
+        if (tail) lastLine = tail.slice(0, 300);
+        win = (win + text).slice(-TEXT_WINDOW);
+        if (rc.autoConsent && !wconsent && win.includes(CONSENT_PROMPT)) {
+          wconsent = true;
+          log(`remote-control の有効化確認に y を送信: project=${name}`);
+          child.stdin?.write(encodeInput(Buffer.from("y\r")), () => {});
+        }
+        const url = findSessionUrl(win);
+        if (url) e.status.sessionUrl = url;
+        if (e.status.state === "starting" && windowConnected(win)) {
+          e.status.state = "connected";
+          connectedSeen = true;
+          log(`remote-control 接続: project=${name}`);
+        }
+      };
+      const onMsg = (line: string): void => {
+        const m = parseWrapperLine(line);
+        if (!m) {
+          if (line.trim()) log(`wrapper の不明な行を無視: project=${name} ${line.slice(0, 100)}`);
+          return;
+        }
+        if (m.t === "output") wd.core.push(name, m.data);
+        else if (m.t === "text") onText(m.data);
+        else if (m.t === "exit") wrapperExit = { code: m.code, signal: m.signal };
+      };
+      s.setEncoding("utf8");
+      s.on("data", (chunk: string) => {
+        buf += chunk;
+        const lines = buf.split("\n");
+        buf = lines.pop() ?? "";
+        for (const l of lines) onMsg(l);
+      });
+      s.on("end", () => {
+        if (buf) onMsg(buf);
+        buf = "";
+      });
+    };
+    if (wd) {
+      child.stdin?.on("error", () => {});
+      attachWrapperOut(child.stdout);
+      attach(child.stderr, false);
+      wd.core.attach(name, {
+        input: (data) => void child.stdin?.write(encodeInput(data), () => {}),
+        resize: (cols, rows) => void child.stdin?.write(encodeResize(cols, rows), () => {}),
+      });
+    } else {
+      attach(child.stdout, true);
+      attach(child.stderr, false);
+    }
 
     // 状態の確定（exit / spawn 失敗）。古い世代は自分の後始末だけで、現在の entry は触らない
     let done = false;
@@ -328,6 +443,10 @@ export function createRemoteControlSupervisor(opts: {
       if (e.gen === gen) {
         e.child = null;
         e.status.pid = null;
+        if (wd) {
+          wd.core.detach(name);
+          wd.tokens.revoke(name);
+        }
       }
       resolveExited();
       return true;
@@ -357,10 +476,10 @@ export function createRemoteControlSupervisor(opts: {
       log(`remote-control エラー: project=${name} ${err.message}`);
     });
 
-    child.on("exit", (code, signal) => {
-      if (!finish()) return;
-      closeTimer = setTimeout(closeLog, CLOSE_WAIT_MS);
-      closeTimer.unref();
+    const handleExit = (rawCode: number | null, rawSignal: NodeJS.Signals | null): void => {
+      // wrapper は子（claude）の終了コードを exit メッセージで伝える。あればそちらが実際の終了
+      const code = wrapperExit ? wrapperExit.code : rawCode;
+      const signal = wrapperExit ? (wrapperExit.signal as NodeJS.Signals | null) : rawSignal;
       if (e.gen !== gen) {
         log(`古い remote-control の終了を無視: project=${name} code=${code ?? "null"} signal=${signal ?? "null"}`);
         return;
@@ -390,9 +509,33 @@ export function createRemoteControlSupervisor(opts: {
         e.status.lastError = e.status.lastError ? `再起動回数の上限（${e.status.lastError}）` : "再起動回数の上限";
         log(`remote-control 再起動上限: project=${name}`);
       }
+    };
+
+    let exitHandled = false;
+    let pendingExit: [number | null, NodeJS.Signals | null] | null = null;
+    const runExit = (): void => {
+      if (exitHandled || !pendingExit) return;
+      exitHandled = true;
+      handleExit(...pendingExit);
+    };
+    child.on("exit", (code, signal) => {
+      if (!finish()) return;
+      closeTimer = setTimeout(closeLog, CLOSE_WAIT_MS);
+      closeTimer.unref();
+      pendingExit = [code, signal];
+      if (!wd) {
+        runExit();
+        return;
+      }
+      // wrapper は exit 直前の出力（接続判定・exit メッセージ）が stdout に残っているので、閉じるまで待ってから判定する
+      const t = setTimeout(runExit, CLOSE_WAIT_MS);
+      t.unref();
     });
 
-    child.on("close", closeLog);
+    child.on("close", () => {
+      closeLog();
+      if (wd) runExit();
+    });
   };
 
   const isActive = (e: Entry): boolean => e.status.state === "starting" || e.status.state === "connected";
@@ -438,8 +581,14 @@ export function createRemoteControlSupervisor(opts: {
     const child = e.child;
     if (child && e.exited) {
       const exited = e.exited;
-      log(`remote-control 停止要求: project=${name} SIGTERM`);
-      killImpl(child, "SIGTERM");
+      if (e.wrapper) {
+        // wrapper には stop メッセージで子（claude）を止めさせる（wrapper が SIGTERM → SIGKILL を扱う）
+        log(`remote-control 停止要求: project=${name} stop メッセージ`);
+        child.stdin?.write(encodeStop(), () => {});
+      } else {
+        log(`remote-control 停止要求: project=${name} SIGTERM`);
+        killImpl(child, "SIGTERM");
+      }
       const graceful = await Promise.race([exited.then(() => true), sleep(rc.stopGraceMs).then(() => false)]);
       if (!graceful) {
         log(`remote-control SIGKILL: project=${name} (${rc.stopGraceMs}ms 以内に終了せず)`);
@@ -452,9 +601,11 @@ export function createRemoteControlSupervisor(opts: {
     return snapshot(e);
   };
 
-  const add = (project: ProjectConfig): void => {
+  const add = (project: ProjectConfig, addOpts: { wrapper?: boolean } = {}): void => {
     if (entries.has(project.name)) throw new Error(`project が既に存在: ${project.name}`);
-    entries.set(project.name, newEntry(project));
+    if (addOpts.wrapper && !opts.wrapper) throw new Error("wrapper の設定が無いので wrapper 起動の project は足せない");
+    entries.set(project.name, newEntry(project, addOpts.wrapper === true));
+    if (addOpts.wrapper) opts.wrapper?.core.register(project.name);
     dynamic.add(project.name);
   };
 
@@ -462,6 +613,10 @@ export function createRemoteControlSupervisor(opts: {
     get(name);
     if (!dynamic.has(name)) throw new Error(`config 由来の project は外せない: ${name}`);
     await stop(name);
+    if (opts.wrapper && entries.get(name)?.wrapper) {
+      opts.wrapper.core.remove(name);
+      opts.wrapper.tokens.revoke(name);
+    }
     entries.delete(name);
     dynamic.delete(name);
   };
@@ -481,6 +636,8 @@ export function createRemoteControlSupervisor(opts: {
       for (const e of entries.values()) {
         if (!e.child) continue;
         try {
+          // wrapper 経由の子（claude）は wrapper に止めさせる。signal だけでは pty 側が残り得る
+          if (e.wrapper) e.child.stdin?.write(encodeStop());
           killImpl(e.child, signal);
         } catch {
           // 既に終了している等。最後の砦なので握りつぶす

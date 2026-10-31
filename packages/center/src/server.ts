@@ -6,7 +6,7 @@ import type { RemoteManager } from "./remotes.js";
 import type { RemoteControlSupervisor } from "./remote-control.js";
 import type { SessionManager } from "./sessions.js";
 import type { ServerLink } from "./server-link.js";
-import { registerTools } from "./tools.js";
+import { registerSessionTools, registerTools } from "./tools.js";
 
 /** package.json の version（src/ と dist/ のどちらからでも ../package.json）。 */
 function packageVersion(): string {
@@ -29,5 +29,12 @@ export function createCenterServer(deps: {
 }): McpServer {
   const server = new McpServer({ name: "bantou-center", version: packageVersion() });
   registerTools(server, { supervisor: deps.supervisor, link: deps.link, sessions: deps.sessions, remotes: deps.remotes, follow: deps.follow });
+  return server;
+}
+
+/** session 向け窓口（/mcp/session）の MCP server。owner = 認証済みの呼び出し元 session 名。 */
+export function createSessionMcpServer(deps: { remotes: RemoteManager; owner: string }): McpServer {
+  const server = new McpServer({ name: "bantou-center-session", version: packageVersion() });
+  registerSessionTools(server, deps);
   return server;
 }

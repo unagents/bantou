@@ -33,8 +33,8 @@ bantou-center [--config <path>] [--transport stdio|http] [--port <n>] [--bind <a
 
 ### http transport
 
-- エンドポイントは `http://<bind>:<port>/mcp`（MCP Streamable HTTP。POST / GET / DELETE）。`/mcp` 以外は 404。
-- **認証は Bearer token**。`/mcp` へのリクエスト（POST / GET / DELETE すべて）は `Authorization: Bearer <config の token>` が必要で、欠落・形式違い・不一致は 401（`WWW-Authenticate: Bearer`）。比較は定時間。token が無い・12 文字未満だと http は起動しない。既定は loopback にだけ bind する。`--bind 0.0.0.0` 等で外に出しても、token を知らない相手は rc_start / cap_kick を呼べない（ただし TLS は無いので平文。信頼できる LAN だけで使う）。
+- エンドポイントは `http://<bind>:<port>/mcp`（外向け。MCP Streamable HTTP。POST / GET / DELETE）と `/mcp/session`（master-cap 向け。下記「窓口の分離」）。pty 出力の配信は `/sessions/<name>/{output,input,resize}`（下記「core」）。それ以外は 404。
+- **認証は Bearer token**。`/mcp` へのリクエスト（POST / GET / DELETE すべて）は `Authorization: Bearer <config の token>` が必要で、欠落・形式違い・不一致は 401（`WWW-Authenticate: Bearer`）。比較は定時間。token が無い・12 文字未満だと http は起動しない。既定は loopback にだけ bind する。`--bind 0.0.0.0` 等で外に出しても、token を知らない相手は rc_start などを呼べない（ただし TLS は無いので平文。信頼できる LAN だけで使う）。
 - MCP session ごとに McpServer を作る。supervisor と server 接続は全 session で共有。
 - SIGTERM / SIGINT で http server・全 session・全 project を停止して exit 0。http では stdin を見ない（親が `/dev/null` を渡しても落ちない。親は SIGTERM で止める）。
 - 親プロセスが死んだら同じ手順で停止して exit 0。2 秒ごとに `ppid` を見て、起動時の値から変わったら（orphan で 1 / launchd に付け替わったら）終了する。
@@ -101,7 +101,7 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 
 ## tools
 
-概念は `docs/concept.md`、設計の経緯は `docs/design/center-tools.md`。`session_*` が A（番頭が使う、center 上の master-cap）、`remote_*` が B（center が master-cap に持たせる、server への指示の道具）。`rc_*` `server_*` `cap_kick` `worker_resume` は従来の tool で、そのまま残している（A・B との重複は設計資料の表）。
+概念は `docs/concept.md`、設計の経緯は `docs/design/center-tools.md`。`session_*` が A（番頭が使う、center 上の master-cap）、`remote_*` が B（center が master-cap に持たせる、server への指示の道具）。`rc_*` `server_*` `worker_resume` は従来の tool で、そのまま残している。窓口は 2 つに分かれる（「窓口の分離」）。外向け `/mcp` の tool は下の表のうち `remote_create` / `remote_delete`（session 向け `/mcp/session` だけ）を除いたもの。`cap_kick` は外向けからも外した。
 
 出力は全て JSON 文字列を 1 つの text content に入れて返す。例外・失敗は `isError: true`（例外は `{ "error": "..." }`）。
 
@@ -110,22 +110,21 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 | `session_create` | `name`, `path?`, `permissionMode?` | `SessionInfo`（下記） |
 | `session_delete` | `name` | `{ name, deleted }` |
 | `session_list` | なし | `SessionInfo[]` |
-| `remote_create` | `prompt`, `server?`, `repo?`, `branch?`, `owner?` | `{ remote_id, server, serverName, state }`（返信を待たない） |
-| `remote_delete` | `remote_id`, `owner?`, `force?` | `{ remote_id, deleted, stopped, warning? }` |
-| `remote_list` | `owner?` | `RemoteView[]`（`RemoteRecord` + `activity?`、下記） |
+| `remote_create`（session 向けのみ） | `prompt`, `server?`, `repo?`, `branch?` | `{ remote_id, server, serverName, state }`（返信を待たない）。owner は header の session 名 |
+| `remote_delete`（session 向けのみ） | `remote_id`, `force?` | `{ remote_id, deleted, stopped, warning? }`。自分の remote だけ |
+| `remote_list` | `owner?`（外向け）。session 向けは引数なしで自分の分 | `RemoteView[]`（`RemoteRecord` + `activity?`、下記） |
 | `rc_list` | なし | `RcStatus[]` |
 | `rc_start` | `project` | `RcStatus`（起動済みなら現状を返す） |
 | `rc_stop` | `project` | `RcStatus` |
 | `rc_status` | `project` | `RcStatus` |
 | `server_peers` | `refresh?` | `{ pair: { server, protocol }, peers: FollowEntry[] }`。下記「server の版合わせ」 |
 | `server_list` | なし | `{ name, connected, reachable, peerId, serverPeer }[]`（`reachable` は broker への接続を確保できたか、`peerId` は center 自身の peer id、`serverPeer` は直近に解決した server の送信先（peer id か名前、未解決は null）） |
-| `cap_kick` | `server`, `cap_id`, `prompt`, `repo?`, `branch?`, `reason?` | bantou-server の `cap_result` / `error` 返信そのまま |
 | `worker_resume` | `server`, `worker_id`, `prompt`, `repo?`, `branch?` | `worker_result` / `error` 返信そのまま |
 | `server_status` | `server` | `status_result` / `error` 返信そのまま |
 
-- `cap_id` / `worker_id` は `[A-Za-z0-9_-]+`、`prompt` は 1 文字以上、`repo` / `branch` は `-` で始められない。
-- `cap_kick` / `worker_resume` / `server_status` は、返信が `error` か `ok: false` の時に `isError: true` になる。本文は返信そのまま。
-- `cap_kick` / `worker_resume` は返信が来るまで待つ（claude の実行が終わるまで数分）。`timeoutMs` で打ち切り、`タイムアウト` の `error` 返信になる。
+- `worker_id` は `[A-Za-z0-9_-]+`、`prompt` は 1 文字以上、`repo` / `branch` は `-` で始められない。
+- `worker_resume` / `server_status` は、返信が `error` か `ok: false` の時に `isError: true` になる。本文は返信そのまま。
+- `worker_resume` は返信が来るまで待つ（claude の実行が終わるまで数分）。`timeoutMs` で打ち切り、`タイムアウト` の `error` 返信になる。
 - 同じ `cap_id`（`worker_id`）への指示は center 側でも直列にする。`error` 返信は `cap_id` / `worker_id` があればその ID で照合し、無ければ同じ `command` の最古の待ちに割り当てる。
 - 返信の形は `packages/protocol` の `server.ts` と `server/README.md` を参照。
 
@@ -145,7 +144,7 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 
 ### session（A）
 
-- `session_create`: `claude remote-control --name <name> --permission-mode <permissionMode>` を `path` で起動し、supervisor に動的に足す。`path` 省略時は config の `workspace` の下の `<name>`（無ければ作る）。`workspace` が無ければ `path` が必須。`permissionMode` の既定は `auto`。`name` の重複、既存 project 名との衝突、他の project / session と同じ path は拒否。接続（URL 取得）か早期終了まで最大 15 秒待って状態を返す（待ちきれなければ `starting`）。
+- `session_create`: pty wrapper 経由の対話型 `claude --remote-control <name> --permission-mode <permissionMode> --mcp-config '<JSON>'`（再起動時は `--continue` 付き）を `path` で起動し、supervisor に動的に足す（起動の詳細は「master-cap の起動（wrapper）」）。`path` 省略時は config の `workspace` の下の `<name>`（無ければ作る）。`workspace` が無ければ `path` が必須。`permissionMode` の既定は `auto`。`name` の重複、既存 project 名との衝突、他の project / session と同じ path は拒否。接続（URL 取得）か早期終了まで最大 15 秒待って状態を返す（待ちきれなければ `starting`）。
 - `session_delete`: `session_create` で作ったものだけ。remote-control を停止（SIGTERM → `stopGraceMs` 後 SIGKILL）して監視と保存から外す。path は消さない。config 由来の project は拒否。
 - `session_list`: config の project と session の全部。`source` が `config` / `session`。
 - 保存: config と同じ dir の `sessions.json`（`name`, `path`, `permissionMode`, `createdAt`）。config の projects には書かない。center 起動時に復元して `--continue` で起動する。`--continue` で接続前に 30 秒以内に終了した場合（約 4 時間以内の記録が無い、など）は、素の起動へ fallback する（再起動回数は増やさない）。
@@ -253,3 +252,23 @@ npm run e2e
 - 認証（center ↔ server）。desktop ↔ center は Bearer token（上記）。
 - desktop からの起動と接続先の切り替え。
 - 本物の `claude remote-control` での運用確認（出力形式の変化、`Connected` の検出、`--continue` の挙動）。e2e は stub のみ。
+
+## 窓口の分離
+
+- 外向け `/mcp`: 認証は config の `token`（Bearer）。`session_*`、読み取り専用の `remote_list`、`rc_*`、`server_*`、`worker_resume`。`remote_create` / `remote_delete` / `cap_kick` は無い。
+- session 向け `/mcp/session`: `remote_create` / `remote_delete` / `remote_list` だけ。認証は session の起動ごとに center が作る使い捨て token（`Authorization: Bearer <token>`）と header `X-Bantou-Session: <session 名>` の組で、token はその名前に発行されたものだけ通る。不一致・外向け token・欠落は 401。owner は header の名前で、引数では受けない。MCP session id は窓口をまたいで使えない。
+- token は session の起動（再起動を含む）ごとに作り直し、停止で無効になる。master-cap には環境変数 `BANTOU_SESSION_TOKEN` で渡し、`--mcp-config` の JSON には `${BANTOU_SESSION_TOKEN}` と書く（引数に平文で残さない、ファイルも書かない）。
+
+## master-cap の起動（wrapper）
+
+- `session_create` の session は `bantou-pty-wrapper --cols N --rows N -- claude --remote-control <name> --permission-mode <m> --mcp-config '<JSON>' [--continue]` で起動する。wrapper は `dirname(process.execPath)/bantou-pty-wrapper`、env `BANTOU_PTY_WRAPPER` で上書き。config の `projects`（`rc_*`）は従来の `claude remote-control` のまま。supervisor は 1 つで、entry ごとに起動方式を選ぶ（再起動・`--continue`・素の起動への fallback・ログ・有効化確認への自動応答は共通）。
+- wrapper との間は 1 行 1 JSON（wrapper の stdout: `started` / `output`（base64）/ `text`（制御文字を除いた文字列）/ `exit`、stdin: `input` / `resize` / `stop`）。session URL と接続状態は `text` の直近 16 KiB の窓に対して照合する（行単位ではない）。有効化確認への自動応答は `input`（`y\r`）。
+- 停止は wrapper へ `stop` を送って待ち、`stopGraceMs` 内に終わらなければ SIGKILL。
+
+## core（出力の配信）
+
+center プロセス内のモジュール（`src/core.ts`）。session ごとのキュー（チャンク ID は 1 からの連番、デコード後 8 MiB を超えたら古い分から捨てる、wrapper の再起動をまたいで続く）。外向け token で次を提供する。
+
+- `GET /sessions/<name>/output`: SSE。続きは `Last-Event-ID` か `?after=<id>`。続きが残っていない / 指定なしは `event: reset` の後に積んである全部。各チャンクは `id: <id>` `event: output` `data: <base64>`。15 秒ごとに `: ka`。未知の session は 404。
+- `POST /sessions/<name>/input` `{"data":"<base64>"}` → 204（実行中でなければ 409）。
+- `POST /sessions/<name>/resize` `{"cols":N,"rows":N}` → 204。最後に送った側のサイズを覚え、次の wrapper 起動の初期値にする。

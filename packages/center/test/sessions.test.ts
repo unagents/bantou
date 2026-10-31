@@ -18,9 +18,9 @@ function fakeSupervisor(initial: ProjectConfig[]) {
   });
   for (const p of initial) map.set(p.name, mk(p));
   const sup = {
-    add: (p: ProjectConfig) => {
+    add: (p: ProjectConfig, o?: { wrapper?: boolean }) => {
       if (map.has(p.name)) throw new Error("既に存在");
-      calls.push(`add:${p.name}:${p.permissionMode}`);
+      calls.push(`add:${p.name}:${p.permissionMode}${o?.wrapper ? ":wrapper" : ""}`);
       map.set(p.name, mk(p));
     },
     remove: async (n: string) => {
@@ -65,7 +65,7 @@ test("create: path 省略は <workspace>/<name> を作り、起動して保存�
   assert.ok((await stat(r.path)).isDirectory());
   assert.equal(r.state, "connected");
   assert.equal(r.source, "session");
-  assert.deepEqual(calls, ["add:pm1:auto", "start:pm1"]);
+  assert.deepEqual(calls, ["add:pm1:auto:wrapper", "start:pm1"]);
   const saved = JSON.parse(await readFile(join(dir, "sessions.json"), "utf8")) as SavedSession[];
   assert.equal(saved.length, 1);
   assert.deepEqual({ name: saved[0].name, path: saved[0].path, permissionMode: saved[0].permissionMode }, { name: "pm1", path: r.path, permissionMode: "auto" });
@@ -77,7 +77,7 @@ test("create: path と permissionMode を指定できる。相対 path は拒否
   const { mgr, calls } = setup();
   const r = await mgr.create({ name: "a", path: join(dir, "elsewhere"), permissionMode: "plan" });
   assert.equal(r.path, join(dir, "elsewhere"));
-  assert.ok(calls.includes("add:a:plan"));
+  assert.ok(calls.includes("add:a:plan:wrapper"));
   await assert.rejects(mgr.create({ name: "b", path: "rel/x" }), /絶対パス/);
 });
 
@@ -130,7 +130,7 @@ test("restore: 保存済みを add して resume 付きで start。壊れた項�
     { name: "pm3", path: join(dir, "ws", "pm3"), permissionMode: "plan", createdAt: "t" },
   ]);
   await mgr.restore();
-  assert.deepEqual(calls, ["add:pm1:auto", "start:pm1:resume", "add:pm3:plan", "start:pm3:resume"]);
+  assert.deepEqual(calls, ["add:pm1:auto:wrapper", "start:pm1:resume", "add:pm3:plan:wrapper", "start:pm3:resume"]);
   assert.deepEqual(mgr.list().map((s) => s.name), ["cfg", "pm1", "pm3"]);
   // 復帰した session は delete できる
   await mgr.delete("pm1");
