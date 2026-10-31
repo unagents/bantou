@@ -9,8 +9,10 @@ import {
   assertServeAllowed,
   defaultCommand,
   isAlive,
+  readLock,
   readWorkspace,
   runSupervisor,
+  writeLock,
 } from "../../../../bin/supervisor.mjs";
 
 const fixture = fileURLToPath(new URL("../../../fixtures/fake-serve.mjs", import.meta.url));
@@ -42,7 +44,7 @@ async function until(what: string, fn: () => Promise<boolean>, ms = 10_000): Pro
 }
 
 /** FAKE_PLAN の振る舞いで動く偽の子を使う supervisor。spec はそのまま子の第 1 引数（ログ用）になる。 */
-function run(ws: string, configPath: string, plan: string[], extra: { readyTimeoutMs?: number; pid?: number } = {}): Promise<number> {
+function run(ws: string, configPath: string, plan: string[], extra: { readyTimeoutMs?: number; pid?: number; handoffToken?: string } = {}): Promise<number> {
   return runSupervisor({
     configPath,
     selfBin: "unused",
@@ -50,6 +52,8 @@ function run(ws: string, configPath: string, plan: string[], extra: { readyTimeo
     command: (spec) => ({ cmd: process.execPath, args: [fixture, String(spec)] }),
     env: { ...process.env, FAKE_WS: ws, FAKE_PLAN: JSON.stringify(plan) },
     log: () => {},
+    // 既存の子だけ入れ替えの確認では引き継ぎを使わない（probe 失敗 = 引き継ぎ非対応の版）
+    probe: async () => false,
     ...extra,
   });
 }
@@ -89,6 +93,54 @@ test("lock: 排他。生きている pid があれば拒否、死んだ pid は�
     assert.equal(isAlive(2 ** 22 + 12345), false);
     const release2 = acquireLock(ws, "1.0.0", process.pid);
     release2();
+  });
+});
+
+test("lock: 引き継ぎ中（next.pid が生きている）は lock.pid が死んでいても第三者の acquireLock を拒否する", async () => {
+  await withWs(async (ws) => {
+    await mkdir(ws, { recursive: true });
+    await writeFile(
+      join(ws, "server.lock"),
+      JSON.stringify({ pid: 2 ** 22 + 12345, version: "x", started_at: "", next: { token: "t", pid: process.pid } }),
+    );
+    assert.throws(() => acquireLock(ws, "1.0.0", process.pid + 100000), /引き継ぎ中 pid=/);
+    // 生きている lock.pid がある時も従来どおり拒否
+    await writeFile(join(ws, "server.lock"), JSON.stringify({ pid: process.pid, version: "x", started_at: "", next: { token: "t" } }));
+    assert.throws(() => acquireLock(ws, "1.0.0", process.pid + 100000), /既に起動中 pid=/);
+  });
+});
+
+test("lock: 持ち主が替わった後の release（試行側・旧 supervisor）は lock を消さない。launcher は lock に残る", async () => {
+  await withWs(async (ws) => {
+    const releaseOld = acquireLock(ws, "1.0.0", process.pid, 4242);
+    assert.equal(readLock(ws)?.launcher, 4242);
+    // 引き継ぎで持ち主が替わった
+    writeLock(ws, { pid: process.ppid, version: "2.0.0", started_at: "", launcher: 4242 });
+    releaseOld();
+    assert.equal(readLock(ws)?.pid, process.ppid, "旧持ち主の release は新しい lock を消さない");
+  });
+});
+
+test("assertServeAllowed: 引き継ぎ試行中は next.pid の supervisor の子も通る", async () => {
+  await withWs(async (ws) => {
+    await mkdir(ws, { recursive: true });
+    writeLock(ws, { pid: process.ppid, version: "1", started_at: "", next: { token: "t", pid: process.pid } });
+    assertServeAllowed(ws, { BANTOU_SUPERVISOR_PID: String(process.pid) });
+    assertServeAllowed(ws, { BANTOU_SUPERVISOR_PID: String(process.ppid) });
+    assert.throws(() => assertServeAllowed(ws, { BANTOU_SUPERVISOR_PID: "1" }), /supervisor 経由/);
+  });
+});
+
+test("runSupervisor: token が lock の next.token と合わない試行モードは join できない（lock は触らない）", async () => {
+  await withWs(async (ws, configPath) => {
+    await mkdir(ws, { recursive: true });
+    const before = { pid: process.ppid, version: "1", started_at: "", next: { token: "right" } };
+    writeLock(ws, before);
+    await assert.rejects(run(ws, configPath, ["serve"], { handoffToken: "wrong" }), /引き継ぎできない/);
+    assert.deepEqual(readLock(ws), before);
+    // lock が無い場合も不可
+    await rm(join(ws, "server.lock"));
+    await assert.rejects(run(ws, configPath, ["serve"], { handoffToken: "right" }), /引き継ぎできない/);
   });
 });
 

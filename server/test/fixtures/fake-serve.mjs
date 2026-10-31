@@ -2,6 +2,7 @@
 // 振る舞い: "serve"（ready を書いて待つ）/ "update:<spec>"（ready 後に restart を書いて終了）/ "crash"（ready 前に exit 3）/ "hang"（ready せず居座る）
 import { appendFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { assertServeAllowed, isAlive } from "../../bin/supervisor.mjs";
 
 const ws = process.env.FAKE_WS;
 const plan = JSON.parse(process.env.FAKE_PLAN ?? "[]");
@@ -10,10 +11,27 @@ const n = existsSync(startsLog) ? readFileSync(startsLog, "utf8").split("\n").fi
 const mode = plan[Math.min(n, plan.length - 1)] ?? "serve";
 const readyPath = join(ws, "server.ready");
 const readyAtStart = existsSync(readyPath);
+// 本物の子（bin/bantou.mjs --serve）と同じ起動条件。通らなければ記録して exit 1
+try {
+  assertServeAllowed(ws, process.env);
+} catch {
+  appendFileSync(startsLog, JSON.stringify({ n, mode: "rejected", pid: process.pid }) + "\n");
+  process.exit(1);
+}
 const lock = JSON.parse(readFileSync(join(ws, "server.lock"), "utf8"));
+const sup = Number(process.env.BANTOU_SUPERVISOR_PID);
+const earlier = existsSync(startsLog) ? readFileSync(startsLog, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l).pid) : [];
 appendFileSync(
   startsLog,
-  JSON.stringify({ n, mode, pid: process.pid, readyAtStart, lockMatches: lock.pid === Number(process.env.BANTOU_SUPERVISOR_PID) }) + "\n",
+  JSON.stringify({
+    n,
+    mode,
+    pid: process.pid,
+    readyAtStart,
+    lockMatches: lock.pid === sup || lock.next?.pid === sup,
+    // 起動時に生きている別の子（同時に 2 本走らない確認用）
+    aliveOthers: earlier.filter((p) => p !== process.pid && isAlive(p)).length,
+  }) + "\n",
 );
 
 const ready = () => writeFileSync(readyPath, JSON.stringify({ pid: process.pid, version: "fake" }));

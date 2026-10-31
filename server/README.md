@@ -26,17 +26,21 @@ npx bantou --config <path>
 
 - `--config` 省略時は `~/.config/bantou/config.json`。
 - `npx bantou --version` は package.json の版を 1 行出して exit 0。
+- `npx bantou --handoff-protocol` は引き継ぎ対応版であることを示す `1` を出して exit 0（旧 supervisor が引き継ぐ前に確かめる）。内部用に `--supervise` / `--serve` もある。
 - それ以外の引数は exit 2。実行時エラーは exit 1。
 - SIGTERM / SIGINT で実行中の claude を止め、peer 解除・broker 停止して exit 0（5 秒で打ち切り）。
 
-### supervisor と自己更新
+### launcher・supervisor と自己更新
 
-- `npx bantou` で起動した bin は supervisor（Nitro は読まない）で、常駐本体（`--serve`）を子に 1 本だけ持つ。SIGTERM / SIGINT は子の process group へ中継し、子の exit code で終わる。supervisor の PID は更新で変わらない。
-- 二重起動の防止: `<workspace>/server.lock`（`{pid, version, started_at}`）を supervisor が排他作成する。生きている pid があれば `既に起動中 pid=...` で exit 1、死んだ pid なら取り直す。`--serve` は env `BANTOU_SUPERVISOR_PID` が lock の pid と合わなければ exit 1（手起動を防ぐ）。最後の砦は broker / mcp の port bind 衝突。
-- 更新（protocol `bantou` の `update_server`、`docs/protocol.md`）: server は `npx -y --package=<spec> -- bantou --version` で取得を確かめ（失敗は `update_failed` で、動き続ける）、受理したら実行中の cap・worker・report が全部終わるのを待つ（待機中の `kick_cap` は `updating`（retryable）で断る）。終わったら `<workspace>/update.json`（`{"state":"restart","to","spec"}`）を書いて通常の終了処理で exit 0。supervisor は前の子の process が消えてから `npx -y --package=<spec> -- bantou --serve --config ...` を起動する。
-- 巻き戻し: 更新後の子が 120 秒以内に `<workspace>/server.ready`（`{pid, version}`）を書かない、または ready 前に終了したら、直前に ready だった版（最初は自分の `.output`）で起動し直し、`update.json` に `{"state":"failed","to","error","at"}` を書く。起動した server は `hello_result.last_update` で返す。
+- `npx bantou` で起動した bin は **launcher**（`bin/launcher.mjs`、凍結。node 組み込みのみ）。起動時に 1 回だけ同 package の `--supervise`（supervisor）を env `BANTOU_LAUNCHER_PID` 付きで起動し、以後は見張るだけ。SIGTERM / SIGINT は supervisor と、`server.lock` の `pid`（`launcher` が自分の時）へ 1 回ずつ中継する。supervisor の系列（更新で入れ替わる）が消えたら `<workspace>/server.exit`（`{launcher, code}`）の code で終わる（無ければ直下の supervisor の code、それも無ければ 1）。
+- supervisor（`--supervise`、Nitro は読まない）は常駐本体（`--serve`）を子に 1 本だけ持つ。SIGTERM / SIGINT は子の process group へ中継する。supervisor の PID は更新で**変わる**（新版の supervisor に引き継ぐ。下記）。launcher の PID は変わらない。子だけ入れ替える従来の更新（引き継ぎ非対応の版へ）では supervisor の PID は変わらない。
+- 二重起動の防止: `<workspace>/server.lock`（`{pid, version, started_at, launcher?, child?, next?}`）を supervisor が排他作成する。`pid` は supervisor 自身。生きている pid（または引き継ぎ中の `next.pid`）があれば `既に起動中 pid=...` / `引き継ぎ中 pid=...` で exit 1（launcher も exit 1）、死んだ pid なら取り直す。`--serve` は env `BANTOU_SUPERVISOR_PID` が lock の `pid`（引き継ぎの試行中は `next.pid`）と合わなければ exit 1（手起動を防ぐ）。最後の砦は broker / mcp の port bind 衝突。
+- 更新（protocol `bantou` の `update_server`、`docs/protocol.md`）: server は `npx -y --package=<spec> -- bantou --version` で取得を確かめ（失敗は `update_failed` で、動き続ける）、受理したら実行中の cap・worker・report が全部終わるのを待つ（待機中の `kick_cap` は `updating`（retryable）で断る）。終わったら `<workspace>/update.json`（`{"state":"restart","to","spec"}`）を書いて通常の終了処理で exit 0。
+- 引き継ぎ（supervisor も新版になる）: 子が終わると旧 supervisor（S2）は `npx -y --package=<spec> -- bantou --handoff-protocol` が `1` を出すか確かめる（0.3.0 など未対応の版は exit 2 → 従来どおり子だけ入れ替える）。対応版なら lock に `next:{token}` を付け、`npx -y --package=<spec> -- bantou --supervise --config ...` を別 group で起動する。新 supervisor（S3）は env `BANTOU_HANDOFF_TOKEN` が lock の token と合う時だけ試行モードに入り、`next.pid / version` を書き、自分の子を起動して ready を待つ（子が ready になるまで lock の持ち主は S2 のまま）。ready で `next.ready=true` を書くと、S2 が lock を `{pid:S3, ...}` に rename で書き換え、`update.json` の restart を消して exit 0 する（S3 の npx は残る）。S2 が昇格前に死んで ready 済みなら S3 が自分で昇格する。
+- 巻き戻し: S3 が ready 前に終了する、または 120 秒（+ 取得の猶予 60 秒）以内に ready にならないと、S2 が S3 の group と `next.child` / `next.pid` を止めて消えるまで待ち、lock を自分に戻し、`update.json` に `{"state":"failed","to","error","at"}` を書き、直前に ready だった版（最初は自分の `.output`）の子を同じ config で起動し直す。起動した server は `hello_result.last_update` で返す。引き継ぎ中に停止要求（SIGTERM）が来たら S2 が S3 の系列を片付け、巻き戻し扱いにせず停止する。子だけ入れ替える更新（引き継ぎ非対応の版）も、更新後の子が ready にならなければ従来どおり直前の版へ巻き戻す。
 - 取得元は config `update.spec`。`--version` を持たない版は更新先にできない（取得確認で失敗する）。
-- supervisor のコードは最初に起動した版のまま残る。supervisor と子の取り決め（`--serve`、`BANTOU_SUPERVISOR_PID`、`server.lock` / `server.ready` / `update.json`）は変えない。変えるなら手動で起動し直す。
+- 版をまたぐ取り決めは変えない（変えるなら後方互換を保つ）: launcher と supervisor の間（config の workspace、lock の `pid` / `launcher`、`server.exit` の `{launcher, code}`、信号の中継、`BANTOU_LAUNCHER_PID`）、supervisor と子の間（`--serve`、`BANTOU_SUPERVISOR_PID`、`server.lock` / `server.ready` / `update.json`、更新時の exit 0）、supervisor 同士（`--handoff-protocol`、`--supervise`、`next` の形、`BANTOU_HANDOFF_TOKEN`）。
+- 0.3.0 以前の server（launcher を持たず supervisor が最初の版のまま残る）から、この仕組みへは一度だけ手で起動し直す。0.3.0 の supervisor の下でも新版の子は動く（子だけ入れ替わる）が、supervisor は 0.3.0 のまま。
 
 ## config.json
 
