@@ -22,7 +22,9 @@ use tauri_plugin_store::StoreExt;
 const CENTER_KEY: &str = "center";
 const SIDECAR_NAME: &str = "bantou-center";
 const DEFAULT_PORT: u32 = 7910;
-const DEFAULT_BIND: &str = "127.0.0.1";
+/// What the center listens on: always every address (LAN, Tailscale ...); the token guards it.
+/// The IP the user picks (`CenterSettings::bind`) only decides the host of the connection settings.
+const LISTEN_BIND: &str = "0.0.0.0";
 /// Shortest token the center accepts (mirrors `MIN_TOKEN_LEN` in `packages/center/src/config.ts`).
 pub const MIN_TOKEN_LEN: usize = 12;
 const GENERATED_TOKEN_LEN: usize = 32;
@@ -68,6 +70,8 @@ pub struct CenterRemote {
 pub struct CenterSettings {
     pub enabled: bool,
     pub port: u32,
+    /// The IP the connection settings (mcp.json / claude mcp add) name as the URL host. Not what the
+    /// center listens on (always `LISTEN_BIND`). Empty: nothing saved, the default IP applies.
     pub bind: String,
     /// The one workspace directory handed to the center as its single project. `~` / `~/x` or absolute.
     pub workspace: String,
@@ -76,10 +80,6 @@ pub struct CenterSettings {
     pub claude_path: Option<String>,
     /// Bearer token the sidecar center requires on `/mcp`. Minted on first load when empty.
     pub token: String,
-    /// Legacy: the snippet IP of versions that kept it apart from `bind`. Read only, to migrate
-    /// the bind (see `load_settings`); never written back. The bind is now the single choice.
-    #[serde(skip_serializing)]
-    pub connect_host: String,
     /// Center on another host this desktop connects to (used instead of the sidecar when set).
     /// The old `remoteUrl` key of earlier versions is not read: serde drops unknown keys and
     /// the next save writes the new shape.
@@ -92,11 +92,10 @@ impl Default for CenterSettings {
         Self {
             enabled: false,
             port: DEFAULT_PORT,
-            bind: DEFAULT_BIND.to_string(),
+            bind: String::new(),
             workspace: DEFAULT_WORKSPACE.to_string(),
             claude_path: None,
             token: String::new(),
-            connect_host: String::new(),
             remote: None,
         }
     }
@@ -127,7 +126,7 @@ pub fn validate_settings(mut s: CenterSettings) -> Result<CenterSettings, String
         return Err(format!("port は 1〜65535: {}", s.port));
     }
     s.bind = s.bind.trim().to_string();
-    if s.bind.is_empty() || s.bind.chars().any(char::is_whitespace) {
+    if s.bind.chars().any(char::is_whitespace) {
         return Err("bind が不正".to_string());
     }
     s.workspace = s.workspace.trim().to_string();
@@ -193,7 +192,7 @@ pub fn sidecar_args(s: &CenterSettings, config: &Path) -> Vec<String> {
         "--port".into(),
         s.port.to_string(),
         "--bind".into(),
-        s.bind.clone(),
+        LISTEN_BIND.into(),
         "--config".into(),
         config.to_string_lossy().into_owned(),
     ]
@@ -206,12 +205,12 @@ fn config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 
 /// Whether applying `new` needs a stop/start. `running_with` is the settings the live
 /// center was started with (None when not running). `remote` is not passed to the
-/// center, so it never forces a restart. `claude_path` and `token` change what the child
+/// center, so it never forces a restart; neither does `bind` (the center always listens on every address). `claude_path` and `token` change what the child
 /// gets, so they do.
 pub fn needs_restart(running_with: Option<&CenterSettings>, new: &CenterSettings) -> bool {
     match running_with {
         Some(old) => {
-            !new.enabled || old.port != new.port || old.bind != new.bind
+            !new.enabled || old.port != new.port
                 || old.workspace != new.workspace
                 || old.claude_path != new.claude_path
                 || old.token != new.token
@@ -322,7 +321,15 @@ pub struct CenterStatus {
     /// Reason of the last unintended exit (exit code / signal).
     #[serde(skip_serializing_if = "Option::is_none")]
     last_exit: Option<String>,
+    /// The center could not listen (address / port unusable), judged from its log. The dialog then
+    /// shows the same IP status as for a vanished IP.
+    bind_failed: bool,
     logs: Vec<String>,
+}
+
+/// Whether the center's log says it could not listen (node's `listen EADDRINUSE` etc.).
+pub fn looks_like_bind_failure<'a>(logs: impl IntoIterator<Item = &'a str>) -> bool {
+    logs.into_iter().any(|l| ["EADDRNOTAVAIL", "EADDRINUSE", "EACCES"].iter().any(|c| l.contains(c)))
 }
 
 struct Inner {
@@ -447,7 +454,9 @@ fn push_log(inner: &mut Inner, line: String) {
 impl Center {
     fn status(&self) -> CenterStatus {
         let g = self.inner.lock().unwrap();
+        let failed_state = matches!(g.state, RunState::Restarting | RunState::Error);
         CenterStatus {
+            bind_failed: failed_state && looks_like_bind_failure(g.logs.iter().map(String::as_str)),
             state: g.state,
             pid: g.pid,
             error: g.error.clone(),
@@ -644,14 +653,10 @@ pub(crate) fn load_settings(app: &tauri::AppHandle) -> CmdResult<CenterSettings>
         .get(CENTER_KEY)
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default();
-    let (mut s, minted) = ensure_token(stored);
-    // The bind is one of this machine's addresses (it is also the host the snippets name). Older
-    // stores may hold a wildcard / unknown bind plus a separate connectHost: migrate once.
-    let migrated = crate::center_snippet::pick_bind(&s.bind, &s.connect_host, &crate::center_snippet::local_ips());
-    let moved = migrated != s.bind || !s.connect_host.is_empty();
-    s.bind = migrated;
-    s.connect_host.clear();
-    if minted || moved {
+    let (s, minted) = ensure_token(stored);
+    // A saved IP is kept as is, even when this machine no longer has it (the settings dialog
+    // reports that and the user chooses; see `center_ip_status`).
+    if minted {
         store.set(CENTER_KEY, serde_json::to_value(&s).map_err(CommandError::other)?);
         store.save().map_err(CommandError::other)?;
     }
@@ -690,9 +695,20 @@ pub fn autostart(app: &tauri::AppHandle) {
     });
 }
 
+/// Stored settings for the dialog. With no IP saved, `bind` shows the default IP (it is stored when
+/// the dialog saves).
 #[tauri::command]
 pub fn center_get_settings(app: tauri::AppHandle) -> CmdResult<CenterSettings> {
-    load_settings(&app)
+    let mut s = load_settings(&app)?;
+    s.bind = crate::center_snippet::resolve_bind(&s.bind, &crate::center_snippet::local_ips());
+    Ok(s)
+}
+
+/// The saved IP checked against this machine's addresses now (see `center_snippet::ip_status`).
+#[tauri::command]
+pub fn center_ip_status(app: tauri::AppHandle) -> CmdResult<crate::center_snippet::IpStatus> {
+    let s = load_settings(&app)?;
+    Ok(crate::center_snippet::ip_status(&s.bind, &crate::center_snippet::local_ips()))
 }
 
 #[tauri::command]
@@ -744,7 +760,7 @@ mod tests {
         let s = CenterSettings::default();
         assert!(!s.enabled);
         assert_eq!(s.port, 7910);
-        assert_eq!(s.bind, "127.0.0.1");
+        assert_eq!(s.bind, "");
         assert_eq!(s.workspace, "~/.bantou");
         assert!(validate_settings(s).is_ok());
     }
@@ -762,7 +778,9 @@ mod tests {
         for port in [0, 65536] {
             assert!(validate_settings(CenterSettings { port, ..ok.clone() }).is_err());
         }
-        assert!(validate_settings(CenterSettings { bind: " ".into(), ..ok.clone() }).is_err());
+        assert!(validate_settings(CenterSettings { bind: "a b".into(), ..ok.clone() }).is_err());
+        // empty = nothing saved (the default IP applies)
+        assert_eq!(validate_settings(CenterSettings { bind: " ".into(), ..ok.clone() }).unwrap().bind, "");
         let remote = |url: &str, token: Option<&str>| CenterSettings {
             remote: Some(CenterRemote { url: url.into(), token: token.map(str::to_string) }),
             ..ok.clone()
@@ -808,13 +826,20 @@ mod tests {
     }
 
     #[test]
-    fn connect_host_is_read_for_migration_but_never_written() {
-        let old: CenterSettings = serde_json::from_str(r#"{"enabled":true,"token":"abcdefghijkl"}"#).unwrap();
-        assert_eq!(old.connect_host, "");
+    fn old_connect_host_key_is_dropped_on_read() {
         let old: CenterSettings =
             serde_json::from_str(r#"{"bind":"0.0.0.0","connectHost":"192.168.1.204","token":"abcdefghijkl"}"#).unwrap();
-        assert_eq!(old.connect_host, "192.168.1.204");
+        // no migration: the saved bind is read as is
+        assert_eq!(old.bind, "0.0.0.0");
         assert!(!serde_json::to_string(&old).unwrap().contains("connectHost"));
+    }
+
+    #[test]
+    fn bind_failure_is_read_from_the_log() {
+        assert!(looks_like_bind_failure(["x", "Error: listen EADDRINUSE: address already in use 0.0.0.0:7910"]));
+        assert!(looks_like_bind_failure(["listen EADDRNOTAVAIL: address not available 192.168.1.50:7910"]));
+        assert!(!looks_like_bind_failure(["MCP http 待受: http://0.0.0.0:7910/mcp"]));
+        assert!(!looks_like_bind_failure([]));
     }
 
     #[test]
@@ -938,7 +963,8 @@ mod tests {
         assert!(needs_restart(Some(&on), &CenterSettings { token: "another-token-1".into(), ..on.clone() }));
         // running, effective change: restart
         assert!(needs_restart(Some(&on), &CenterSettings { port: 7911, ..on.clone() }));
-        assert!(needs_restart(Some(&on), &CenterSettings { bind: "0.0.0.0".into(), ..on.clone() }));
+        // the picked IP only names the connection settings' host: no restart
+        assert!(!needs_restart(Some(&on), &CenterSettings { bind: "192.168.1.50".into(), ..on.clone() }));
         assert!(needs_restart(Some(&on), &CenterSettings { workspace: "/y".into(), ..on.clone() }));
         assert!(needs_restart(Some(&on), &CenterSettings { claude_path: Some("/x/claude".into()), ..on.clone() }));
         // running, disabled: stop
@@ -950,7 +976,8 @@ mod tests {
 
     #[test]
     fn sidecar_args_follow_the_cli_contract() {
-        let s = CenterSettings { port: 8000, bind: "0.0.0.0".into(), ..Default::default() };
+        // always every address, whatever IP is picked for the connection settings
+        let s = CenterSettings { port: 8000, bind: "192.168.1.50".into(), ..Default::default() };
         assert_eq!(
             sidecar_args(&s, Path::new("/c.json")),
             ["--transport", "http", "--port", "8000", "--bind", "0.0.0.0", "--config", "/c.json"]

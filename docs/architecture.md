@@ -43,8 +43,8 @@
 - transport は MCP（center の Streamable HTTP `/mcp`）。agent-messenger は使わない。desktop の Rust 側が MCP client を持ち（`desktop/src-tauri/src/center_mcp.rs`）、webview は Tauri command（`center_call` / `center_connection`）経由でのみ center に触れる
 - 接続先: 設定 `remote`（別ホストの接続設定を貼り付けて保存した URL と token）があればその center、無ければ sidecar の center（center 有効時のみ）。旧 `remoteUrl` は廃止
 - 認証: Cork の MCP Server と同じ方式。center は `/mcp` で `Authorization: Bearer <token>` を検査し、合わない接続は 401。token は desktop が生成（32 文字 base62）して settings の `center.token` に保存し、`center.json` の `token` に書いて sidecar に渡す。再生成すると center を再起動して反映する。http で token が無い・12 文字未満なら center は起動しない
-- 接続設定の共有: 設定画面が token 入りの接続設定（`mcp.json` 形式と `claude mcp add --transport http ... --header 'Authorization: Bearer <token>'`）を出す。別ホストの desktop はそれを貼り付け、URL と token を取り出して保存し、MCP client が全リクエストに Bearer を付ける。snippet の URL は bind が loopback なら `127.0.0.1`、wildcard なら desktop 機の外向き（既定経路）のアドレス、それ以外はその bind 値
-- bind が loopback 以外の時、center は Host / Origin を絞らず Bearer だけで守る（TLS は無く平文）
+- 接続設定の共有: 設定画面が token 入りの接続設定（`mcp.json` 形式と `claude mcp add --transport http ... --header 'Authorization: Bearer <token>'`）を出す。別ホストの desktop はそれを貼り付け、URL と token を取り出して保存し、MCP client が全リクエストに Bearer を付ける。center は常に全アドレス（`0.0.0.0`）で待ち受ける。snippet の URL のホストは設定画面で選んだ IP（この PC の IP 一覧から選ぶ。保存値が無ければ外側 IPv4 の先頭、LAN 優先。外側 IP が無い時だけ `127.0.0.1`）。保存済みの IP が今のこの PC に無い時は設定画面が報告し、前のままか新しい IP かを選ばせる
+- 待ち受けは全アドレスで、center は Host / Origin を絞らず Bearer だけで守る（TLS は無く平文）
 
 ## 未決
 

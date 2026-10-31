@@ -58,21 +58,16 @@ pub(crate) fn normalize_remote(u: &str) -> String {
     }
 }
 
-/// Host to dial for the sidecar: loopback for wildcard / loopback binds, the bind itself otherwise.
-fn sidecar_host(bind: &str) -> String {
-    match bind {
-        "" | "0.0.0.0" | "::" | "::1" | "localhost" | "127.0.0.1" => "127.0.0.1".to_string(),
-        b if b.contains(':') && !b.starts_with('[') => format!("[{b}]"),
-        b => b.to_string(),
-    }
-}
+/// Host to dial for the sidecar: always loopback. The center listens on every address, and the IP
+/// picked in the settings (`bind`) is only for the connection settings handed to others.
+const SIDECAR_HOST: &str = "127.0.0.1";
 
 /// Where to connect: our own sidecar when the center is enabled (a stored `remote` is kept but
 /// ignored), else the stored `remote` if any, else nowhere.
 pub fn select_target(s: &CenterSettings) -> Option<Target> {
     if s.enabled {
         return Some(Target {
-            url: format!("http://{}:{}{MCP_PATH}", sidecar_host(&s.bind), s.port),
+            url: format!("http://{}:{}{MCP_PATH}", SIDECAR_HOST, s.port),
             token: Some(s.token.clone()).filter(|t| !t.is_empty()),
             source: TargetSource::Sidecar,
         });
@@ -515,12 +510,11 @@ mod tests {
     }
 
     #[test]
-    fn sidecar_host_follows_bind() {
-        assert_eq!(sidecar_host("0.0.0.0"), "127.0.0.1");
-        assert_eq!(sidecar_host("::"), "127.0.0.1");
-        assert_eq!(sidecar_host("127.0.0.1"), "127.0.0.1");
-        assert_eq!(sidecar_host("192.168.1.5"), "192.168.1.5");
-        assert_eq!(sidecar_host("fe80::1"), "[fe80::1]");
+    fn sidecar_is_dialed_on_loopback_whatever_ip_is_picked() {
+        for bind in ["", "0.0.0.0", "192.168.1.5", "fe80::1", "10.9.9.9"] {
+            let t = select_target(&CenterSettings { bind: bind.into(), ..settings(true, None) }).unwrap();
+            assert_eq!(t.url, "http://127.0.0.1:7910/mcp", "{bind}");
+        }
     }
 
     // -- body parsing ----------------------------------------------------------------

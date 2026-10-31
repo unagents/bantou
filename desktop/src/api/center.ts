@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { CenterConnection, CenterConnectSnippets, CenterParsedConnect, CenterSettings, CenterStatus, McpToolResult } from "~/types";
+import type { CenterConnection, CenterConnectSnippets, CenterIpStatus, CenterParsedConnect, CenterSettings, CenterStatus, McpToolResult } from "~/types";
 
 export const centerGetSettings = () => invoke<CenterSettings>("center_get_settings");
 
@@ -9,10 +9,13 @@ export const centerSetSettings = (settings: CenterSettings) =>
 /** Mint a new token, store it and restart a running center with it. Returns the token. */
 export const centerRegenerateToken = () => invoke<string>("center_regenerate_token");
 
-/** Addresses of this machine (IPv4 first, then IPv6): the choices for the center's bind. */
+/** Addresses of this machine (IPv4 first, then IPv6): the choices for the host of the connection settings. */
 export const centerLocalIps = () => invoke<string[]>("center_local_ips");
 
-/** Connection snippets (mcp.json / claude mcp add) for the given bind, port and token. The bind is the host they name. */
+/** The saved IP checked against this machine's addresses now (missing = the saved IP is gone). */
+export const centerIpStatus = () => invoke<CenterIpStatus>("center_ip_status");
+
+/** Connection snippets (mcp.json / claude mcp add) for the given IP, port and token. The IP is the host they name. */
 export const centerConnectSnippets = (bind: string, port: number, token: string) =>
   invoke<CenterConnectSnippets>("center_connect_snippets", { bind, port, token });
 

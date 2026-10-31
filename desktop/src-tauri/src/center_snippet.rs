@@ -14,8 +14,6 @@ use std::net::{IpAddr, Ipv4Addr};
 /// Name the snippets register the server under.
 pub const SERVER_NAME: &str = "bantou-center";
 
-const LOOPBACK_ALIASES: [&str; 3] = ["[::1]", "::1", "localhost"];
-
 /// This machine's addresses: IPv4 first (LAN etc. in interface order, then 127.0.0.1), then IPv6.
 /// Unspecified, multicast, link-local IPv6 (`fe80::/10`, unusable in a URL without a zone id)
 /// and `::1` are left out. Never empty: 127.0.0.1 is always there.
@@ -58,36 +56,67 @@ fn bare(host: &str) -> &str {
     host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host)
 }
 
-/// Addresses of this machine as strings, in `order_ips` order: the choices for the center's bind.
+/// Addresses of this machine as strings, in `order_ips` order: the choices for the connection settings' host.
 pub fn local_ip_strings() -> Vec<String> {
     local_ips().iter().map(ToString::to_string).collect()
 }
 
-/// The bind to use given what was saved: the bind itself if this machine has that address, else
-/// the old `connectHost` (the pre-unification snippet IP) if it does, else `127.0.0.1` (never widen
-/// the exposure by guessing a LAN address).
-/// A loopback alias (`localhost`, `::1`) maps to `127.0.0.1` so a loopback-only center never
-/// widens by migration. Idempotent.
-pub fn pick_bind(bind: &str, connect_host: &str, ips: &[IpAddr]) -> String {
-    let choices: Vec<String> = order_ips(ips).iter().map(ToString::to_string).collect();
-    let bind = bare(bind.trim());
-    if LOOPBACK_ALIASES.contains(&bind) {
-        return "127.0.0.1".to_string();
-    }
-    for cand in [bind, bare(connect_host.trim())] {
-        if choices.iter().any(|c| c == cand) {
-            return cand.to_string();
-        }
-    }
-    "127.0.0.1".to_string()
+/// Default host for the connection settings: the first external (non-loopback) IPv4 address,
+/// private (LAN) addresses before others (Tailscale etc.). Only when this machine has none,
+/// `127.0.0.1`.
+pub fn default_ip(ips: &[IpAddr]) -> String {
+    let v4: Vec<Ipv4Addr> = order_ips(ips)
+        .into_iter()
+        .filter_map(|ip| match ip {
+            IpAddr::V4(a) if !a.is_loopback() => Some(a),
+            _ => None,
+        })
+        .collect();
+    v4.iter()
+        .find(|a| a.is_private())
+        .or_else(|| v4.first())
+        .map_or_else(|| Ipv4Addr::LOCALHOST.to_string(), ToString::to_string)
 }
 
-/// Host the snippets name for `bind`: the bind itself. A leftover wildcard bind (not offered any
-/// more) names the first address of this machine.
+/// The saved IP checked against this machine's current addresses (settings dialog).
+#[derive(Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IpStatus {
+    /// This machine's addresses now (the choices).
+    pub ips: Vec<String>,
+    /// The saved IP; None when nothing is saved.
+    pub saved: Option<String>,
+    /// `default_ip`: what is used when nothing is saved, and the default of "a new IP".
+    pub default_ip: String,
+    /// The saved IP is not an address of this machine now. It is kept as is until the user chooses.
+    pub missing: bool,
+}
+
+/// Check `saved` (the stored IP, empty = none) against `ips`. A saved value is never replaced here.
+pub fn ip_status(saved: &str, ips: &[IpAddr]) -> IpStatus {
+    let choices: Vec<String> = order_ips(ips).iter().map(ToString::to_string).collect();
+    let saved = bare(saved.trim());
+    IpStatus {
+        missing: !saved.is_empty() && !choices.iter().any(|c| c == saved),
+        saved: (!saved.is_empty()).then(|| saved.to_string()),
+        default_ip: default_ip(ips),
+        ips: choices,
+    }
+}
+
+/// The IP in effect: the saved one as is (even when it is not on this machine any more), else
+/// the default.
+pub fn resolve_bind(saved: &str, ips: &[IpAddr]) -> String {
+    let st = ip_status(saved, ips);
+    st.saved.unwrap_or(st.default_ip)
+}
+
+/// Host the snippets name for `bind`: the bind itself. An empty or wildcard value names the
+/// default IP.
 fn snippet_host(bind: &str, ips: &[IpAddr]) -> String {
     let b = bare(bind.trim());
     if ["", "0.0.0.0", "::"].contains(&b) {
-        return order_ips(ips).first().map_or_else(|| "127.0.0.1".to_string(), ToString::to_string);
+        return default_ip(ips);
     }
     b.to_string()
 }
@@ -314,13 +343,13 @@ pub fn parse_connect(text: &str) -> Result<ParsedConnect, String> {
     Err("mcp.json 形式（{ \"mcpServers\": ... }）か claude mcp add コマンドを貼る".to_string())
 }
 
-/// This machine's addresses: the choices for the center's bind (and the snippets' host).
+/// This machine's addresses: the choices for the host the connection settings name.
 #[tauri::command]
 pub fn center_local_ips() -> Vec<String> {
     local_ip_strings()
 }
 
-/// Snippets for the given draft values. The bind is the host the snippets name.
+/// Snippets for the given draft values. The chosen IP (`bind`) is the host the snippets name; the center itself listens on all addresses.
 #[tauri::command]
 pub fn center_connect_snippets(bind: String, port: u32, token: String) -> ConnectSnippets {
     build_snippets(&snippet_host(&bind, &local_ips()), port, &token)
@@ -366,39 +395,56 @@ mod tests {
     }
 
     #[test]
-    fn pick_bind_keeps_a_bind_this_machine_has() {
+    fn default_ip_is_the_first_external_ipv4_lan_first() {
+        // saved none -> the first external IPv4
+        assert_eq!(default_ip(&ips(&["192.168.1.204", "100.64.0.9", "127.0.0.1", "fd7a::5"])), "192.168.1.204");
+        // a LAN (private) address wins over an earlier non-LAN one
+        assert_eq!(default_ip(&ips(&["100.64.0.9", "10.0.0.7"])), "10.0.0.7");
+        // no LAN address: the first external IPv4 as is
+        assert_eq!(default_ip(&ips(&["100.64.0.9", "203.0.113.5"])), "100.64.0.9");
+    }
+
+    #[test]
+    fn default_ip_is_loopback_only_without_an_external_ipv4() {
+        assert_eq!(default_ip(&[]), "127.0.0.1");
+        assert_eq!(default_ip(&ips(&["127.0.0.1"])), "127.0.0.1");
+        // IPv6 and link-local are not "external IPv4"
+        assert_eq!(default_ip(&ips(&["fd7a::5", "169.254.1.1", "fe80::1"])), "127.0.0.1");
+    }
+
+    #[test]
+    fn ip_status_none_saved_uses_the_default() {
+        let all = ips(&["192.168.1.204", "100.64.0.9"]);
+        let st = ip_status("", &all);
+        assert_eq!(st.saved, None);
+        assert!(!st.missing);
+        assert_eq!(st.default_ip, "192.168.1.204");
+        assert_eq!(st.ips, ["192.168.1.204", "100.64.0.9", "127.0.0.1"]);
+        assert_eq!(resolve_bind("", &all), "192.168.1.204");
+        assert_eq!(resolve_bind("  ", &[]), "127.0.0.1");
+    }
+
+    #[test]
+    fn ip_status_keeps_a_saved_ip_this_machine_has() {
         let all = ips(&["192.168.1.204", "100.64.0.9", "fd7a::5"]);
         for b in ["100.64.0.9", "127.0.0.1", "fd7a::5", "[fd7a::5]"] {
-            assert_eq!(pick_bind(b, "192.168.1.204", &all), b.trim_matches(|c| c == '[' || c == ']'), "{b}");
+            let st = ip_status(b, &all);
+            assert!(!st.missing, "{b}");
+            assert_eq!(resolve_bind(b, &all), b.trim_matches(|c| c == '[' || c == ']'), "{b}");
         }
     }
 
     #[test]
-    fn pick_bind_falls_back_to_connect_host_then_loopback() {
+    fn ip_status_flags_a_saved_ip_not_in_the_list_and_keeps_it() {
         let all = ips(&["192.168.1.204", "100.64.0.9"]);
-        // old wildcard bind: the snippet IP the user had picked
-        assert_eq!(pick_bind("0.0.0.0", "100.64.0.9", &all), "100.64.0.9");
-        // neither is on this machine: 127.0.0.1 (do not widen exposure)
-        assert_eq!(pick_bind("0.0.0.0", "", &all), "127.0.0.1");
-        assert_eq!(pick_bind("10.9.9.9", "10.8.8.8", &all), "127.0.0.1");
-        assert_eq!(pick_bind("mac204.local", "", &all), "127.0.0.1");
-        // nothing known at all
-        assert_eq!(pick_bind("0.0.0.0", "", &[]), "127.0.0.1");
-    }
-
-    #[test]
-    fn pick_bind_maps_loopback_aliases_to_127() {
-        let all = ips(&["192.168.1.204"]);
-        for b in ["localhost", "::1", "[::1]"] {
-            assert_eq!(pick_bind(b, "192.168.1.204", &all), "127.0.0.1", "{b}");
+        for b in ["192.168.1.50", "0.0.0.0", "mac204.local", "localhost"] {
+            let st = ip_status(b, &all);
+            assert!(st.missing, "{b}");
+            assert_eq!(st.saved.as_deref(), Some(b), "{b}");
+            // not replaced by the default or by 127.0.0.1
+            assert_eq!(resolve_bind(b, &all), b, "{b}");
+            assert_eq!(st.default_ip, "192.168.1.204");
         }
-    }
-
-    #[test]
-    fn pick_bind_is_idempotent() {
-        let all = ips(&["192.168.1.204", "100.64.0.9"]);
-        let once = pick_bind("0.0.0.0", "100.64.0.9", &all);
-        assert_eq!(pick_bind(&once, "", &all), once);
     }
 
     #[test]
@@ -407,9 +453,10 @@ mod tests {
         assert_eq!(snippet_host("100.64.0.9", &all), "100.64.0.9");
         assert_eq!(snippet_host("[fd7a::5]", &all), "fd7a::5");
         assert_eq!(snippet_host("127.0.0.1", &all), "127.0.0.1");
-        // leftover wildcard binds name the first address
+        // an empty or wildcard value names the default IP
         assert_eq!(snippet_host("0.0.0.0", &all), "192.168.1.204");
         assert_eq!(snippet_host("", &[]), "127.0.0.1");
+        assert_eq!(snippet_host("", &ips(&["100.64.0.9", "192.168.1.204"])), "192.168.1.204");
     }
 
     #[test]

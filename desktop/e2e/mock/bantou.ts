@@ -33,9 +33,14 @@ export class MockBantou {
   peers: Peer[];
   sessionsList: Session[];
   update: Seed["update"];
-  center: CenterSettings = { enabled: false, port: 7910, bind: "127.0.0.1", workspace: "~/.bantou", token: "mock-token-000000000000000000000001" };
+  /** bind "" = no IP saved: center_get_settings shows the default (first external IPv4). */
+  center: CenterSettings = { enabled: false, port: 7910, bind: "", workspace: "~/.bantou", token: "mock-token-000000000000000000000001" };
   /** Number of tokens minted by center_regenerate_token (the next one is mock-token-<n>). */
   private tokenSeq = 1;
+  /** This machine's addresses now (center_local_ips / center_ip_status); a spec can drop one to make a saved IP vanish. */
+  localIps: string[] = [...MOCK_IPS];
+  /** When set, center_status reports that the center could not listen. */
+  centerBindFailed = false;
   /** Whether the mocked center answers (center_connection). */
   centerReachable = true;
   centerRc = [
@@ -223,19 +228,34 @@ export class MockBantou {
         return null;
       }
       case "center_get_settings":
-        return structuredClone(this.center);
+        return { ...structuredClone(this.center), bind: this.center.bind || defaultIp(this.localIps) };
       case "center_set_settings":
         this.center = JSON.parse(JSON.stringify(args.settings)) as CenterSettings;
         return structuredClone(this.center);
       case "center_status":
-        return { state: this.center.enabled ? "running" : "stopped", pid: this.center.enabled ? 4242 : undefined, restartCount: 0, logs: [] };
+        return {
+          state: this.center.enabled ? "running" : "stopped",
+          pid: this.center.enabled ? 4242 : undefined,
+          restartCount: 0,
+          bindFailed: this.centerBindFailed,
+          logs: [],
+        };
       case "center_regenerate_token": {
         this.tokenSeq += 1;
         this.center.token = `mock-token-${String(this.tokenSeq).padStart(32, "0")}`;
         return this.center.token;
       }
       case "center_local_ips":
-        return [...MOCK_IPS];
+        return [...this.localIps];
+      case "center_ip_status": {
+        const saved = this.center.bind;
+        return {
+          ips: [...this.localIps],
+          ...(saved ? { saved } : {}),
+          defaultIp: defaultIp(this.localIps),
+          missing: !!saved && !this.localIps.includes(saved),
+        };
+      }
       case "center_connect_snippets": {
         const { bind, port, token } = args as { bind: string; port: number; token: string };
         const host = bind.replace(/^\[|\]$/g, "");
@@ -331,6 +351,13 @@ export class MockBantou {
 }
 
 /** This machine's addresses as `center_local_ips` returns them (IPv4 first, then IPv6). */
+/** Default IP as the backend picks it: first external IPv4 (private/LAN first), else 127.0.0.1. */
+function defaultIp(ips: string[]): string {
+  const ext = ips.filter((ip) => /^\d+\.\d+\.\d+\.\d+$/.test(ip) && !ip.startsWith("127."));
+  const lan = ext.find((ip) => /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(ip));
+  return lan ?? ext[0] ?? "127.0.0.1";
+}
+
 const MOCK_IPS = ["192.168.1.204", "100.64.0.9", "127.0.0.1", "fd7a::5"];
 
 /** Mock of `center_parse_connect`: mcp.json or `claude mcp add`; rejects with a message like the Rust side. */

@@ -96,6 +96,7 @@ pub fn run() {
             center::center_status,
             center::center_regenerate_token,
             center_snippet::center_local_ips,
+            center::center_ip_status,
             center_snippet::center_connect_snippets,
             center_snippet::center_parse_connect,
             center_mcp::center_call,

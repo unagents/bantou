@@ -95,6 +95,7 @@ export interface RegisterResult {
 export interface CenterSettings {
   enabled: boolean;
   port: number;
+  /** The IP the connection settings name as the URL host (the center itself listens on every address). */
   bind: string;
   /** The one workspace directory (default `~/.bantou`). */
   workspace: string;
@@ -134,7 +135,21 @@ export interface CenterStatus {
   restartCount: number;
   /** Reason of the last unintended exit (exit code / signal). */
   lastExit?: string;
+  /** The center could not listen (judged from its log). */
+  bindFailed: boolean;
   logs: string[];
+}
+
+/** Mirror of `src-tauri/src/center_snippet.rs::IpStatus`. */
+export interface CenterIpStatus {
+  /** This machine's addresses now. */
+  ips: string[];
+  /** The saved IP; unset when none is saved. */
+  saved?: string;
+  /** External IPv4 (LAN first), else 127.0.0.1. */
+  defaultIp: string;
+  /** The saved IP is not an address of this machine now. */
+  missing: boolean;
 }
 
 /** Mirror of `src-tauri/src/center_mcp.rs::CenterConnection`. */

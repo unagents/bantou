@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import {
   centerConnectSnippets,
+  centerIpStatus,
   centerLocalIps,
   centerGetSettings,
   centerParseConnect,
@@ -8,7 +9,7 @@ import {
   centerSetSettings,
   centerStatus,
 } from "~/api";
-import type { CenterConnectSnippets, CenterParsedConnect, CenterSettings, CenterStatus } from "~/types";
+import type { CenterConnectSnippets, CenterIpStatus, CenterParsedConnect, CenterSettings, CenterStatus } from "~/types";
 
 const open = defineModel<boolean>("open", { required: true });
 const toast = useToast();
@@ -37,7 +38,8 @@ async function load() {
   } catch (e) {
     error.value = String(e);
   }
-  await Promise.all([refreshStatus(), loadLocalIps()]);
+  ipChoice.value = null;
+  await Promise.all([refreshStatus(), loadLocalIps(), loadIpStatus()]);
 }
 
 const POLL_MS = 1000;
@@ -72,13 +74,7 @@ const tokenError = computed(() =>
   (settings.value?.token.length ?? 0) < MIN_TOKEN_LEN ? `token は ${MIN_TOKEN_LEN} 文字以上` : null,
 );
 
-const LOOPBACK = ["127.0.0.1", "::1", "localhost"];
-const bindExposed = computed(() => {
-  const b = settings.value?.bind.trim();
-  return !!b && !LOOPBACK.includes(b);
-});
-
-// This machine's addresses. The chosen one is the center's bind and the host the snippets name.
+// This machine's addresses. The chosen one is only the host the snippets name (the center listens on all).
 const localIps = ref<string[]>([]);
 async function loadLocalIps() {
   try {
@@ -87,6 +83,36 @@ async function loadLocalIps() {
     error.value = String(e);
   }
 }
+// The saved IP against this machine's addresses now. When it is gone (or the center could not
+// listen) the banner at the top lets the user keep it or pick a new one; nothing changes until then.
+const ipStatus = ref<CenterIpStatus | null>(null);
+// keep: stay with the saved IP. new: a new IP is picked (stored by save). done: it was saved.
+const ipChoice = ref<"keep" | "new" | "done" | null>(null);
+const newIp = ref("");
+async function loadIpStatus() {
+  try {
+    ipStatus.value = await centerIpStatus();
+    newIp.value = ipStatus.value.defaultIp;
+  } catch (e) {
+    error.value = String(e);
+  }
+}
+const ipBannerVisible = computed(
+  () =>
+    !!settings.value?.enabled &&
+    (!!ipStatus.value?.missing || !!status.value?.bindFailed) &&
+    ipChoice.value !== "keep" &&
+    ipChoice.value !== "done",
+);
+function keepIp() {
+  ipChoice.value = "keep";
+}
+function useNewIp(ip: string) {
+  newIp.value = ip;
+  ipChoice.value = "new";
+  if (settings.value) settings.value.bind = ip;
+}
+
 // Items for the select: this machine's addresses, plus the saved bind when it is not among them
 // (an address that went away), so the current value is never hidden.
 const bindItems = computed(() => {
@@ -187,7 +213,8 @@ async function save() {
   try {
     settings.value = await centerSetSettings({ ...settings.value, port: Number(settings.value.port) });
     toast.add({ title: "設定を保存した", color: "success" });
-    await refreshStatus();
+    if (ipChoice.value === "new") ipChoice.value = "done";
+    await Promise.all([refreshStatus(), loadIpStatus()]);
     pollStatus();
   } catch (e) {
     error.value = String(e);
@@ -203,6 +230,46 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
   <UModal v-model:open="open" title="設定" description="center（sidecar）の起動、token、接続設定" :ui="{ content: 'max-w-3xl' }">
     <template #body>
       <div v-if="settings" class="flex flex-col gap-4" data-testid="settings-dialog">
+        <div
+          v-if="ipBannerVisible"
+          class="border-cork-border bg-cork-elevated flex flex-col gap-2 border p-3 text-xs"
+          data-testid="center-ip-banner"
+        >
+          <p v-if="ipStatus?.missing" data-testid="center-ip-banner-missing">
+            保存の IP {{ ipStatus.saved }} は今このマシンに無い。今の候補: {{ ipStatus.ips.join(", ") }}
+          </p>
+          <p v-if="status?.bindFailed" data-testid="center-ip-banner-bind-failed">
+            center が待ち受けに失敗した（port の競合など。ログを参照）。今の候補: {{ ipStatus?.ips.join(", ") }}
+          </p>
+          <div class="flex flex-wrap items-center gap-2">
+            <UButton
+              size="xs"
+              variant="outline"
+              color="neutral"
+              :label="`前と同じ IP のまま${ipStatus?.saved ? ` (${ipStatus.saved})` : ''}`"
+              data-testid="center-ip-keep"
+              @click="keepIp"
+            />
+            <UButton
+              size="xs"
+              :variant="ipChoice === 'new' ? 'solid' : 'outline'"
+              label="新しい IP にする"
+              data-testid="center-ip-new"
+              @click="useNewIp(newIp)"
+            />
+            <USelect
+              :model-value="newIp"
+              :items="localIps"
+              size="xs"
+              class="w-48"
+              data-testid="center-ip-new-select"
+              @update:model-value="useNewIp(String($event))"
+            />
+          </div>
+          <p v-if="ipChoice === 'new'" class="text-cork-muted" data-testid="center-ip-banner-hint">
+            {{ newIp }} を選んだ。保存すると接続設定に反映する
+          </p>
+        </div>
         <span class="text-sm font-semibold">この PC の center</span>
         <USwitch v-model="settings.enabled" label="center を起動する" data-testid="center-enabled" />
         <!-- Everything below is this host's center: hidden (not reset) while it is off. -->
@@ -211,12 +278,12 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
           <UFormField label="port" class="w-32" :error="portError ?? undefined">
             <UInput v-model="settings.port" type="number" class="w-full" data-testid="center-port" />
           </UFormField>
-          <UFormField label="bind（この PC の IP）" class="flex-1" description="center はこの IP で待ち受け、接続設定にも同じ IP を書く">
+          <UFormField label="接続設定の IP（この PC の IP）" class="flex-1" description="接続設定の URL のホストになる IP（既定は外側 IP の先頭）。center 自体は全アドレス（0.0.0.0）で待ち受ける">
             <USelect v-model="settings.bind" :items="bindItems" class="w-full" data-testid="center-bind" />
           </UFormField>
         </div>
-        <p v-if="bindExposed" class="text-cork-danger-text text-xs" data-testid="center-bind-warning">
-          loopback 以外に公開される（接続は token で守られる）
+        <p class="text-cork-danger-text text-xs" data-testid="center-bind-warning">
+          center は全アドレスで待ち受ける（接続は token で守られる）
         </p>
 
         <div v-if="settings.enabled" class="flex flex-col gap-3" data-testid="center-mcp-section">
