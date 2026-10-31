@@ -182,6 +182,8 @@ test("fit and window resize go to session_resize", async ({ page }) => {
 
 test("the stream state is shown: reconnecting", async ({ page }) => {
   await page.goto("/");
+  // Rust emits the state only after the view is listening (the stream starts after `listen`): wait for that.
+  await streaming(page, "agent-messenger");
   await expect(page.getByTestId("terminal-retrying")).toHaveCount(0);
   await page.evaluate(() =>
     (window as unknown as { __BANTOU_MOCK__: Mock }).__BANTOU_MOCK__.sessionOutputStatus("agent-messenger", "retrying"),

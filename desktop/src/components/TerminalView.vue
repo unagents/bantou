@@ -78,7 +78,12 @@ onMounted(async () => {
 watch(
   () => props.session,
   async (next) => {
-    await close();
+    // From now on keystrokes belong to the session being shown, not to the one being left (detach is async).
+    const prev = current;
+    current = next;
+    term?.reset();
+    if (prev) await detach(prev).catch(() => {});
+    if (current !== next) return; // switched again while detaching
     await open(next);
   },
 );

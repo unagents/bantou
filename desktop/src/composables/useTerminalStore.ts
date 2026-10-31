@@ -59,6 +59,8 @@ export function useTerminalStore() {
   async function attach(session: string, sink: TerminalSink) {
     await ensureListening();
     sinks.set(session, sink);
+    // A state left over from an earlier stream of this session (an event that arrived after detach) is stale.
+    delete status[session];
     const b = buffer(session);
     for (const bytes of b.chunks) sink({ bytes });
     await sessionOutputStart(session, b.lastId);
