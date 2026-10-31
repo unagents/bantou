@@ -195,3 +195,31 @@ test("the stream state is shown: reconnecting", async ({ page }) => {
   await expect(page.getByTestId("terminal-retrying")).toHaveCount(0);
   await expect(sideRow(page, "agent-messenger")).toBeVisible();
 });
+
+test("the terminal pane does not keep growing and resize is not sent repeatedly", async ({ page }) => {
+  await page.goto("/");
+  await expect.poll(() => mock(page, (m) => m.resizes.length)).toBeGreaterThan(0);
+  // let any fit -> grow -> ResizeObserver feedback loop run
+  await page.waitForTimeout(1500);
+  const count = await mock(page, (m) => m.resizes.length);
+  const paneBefore = (await page.getByTestId("terminal-pane").boundingBox())!;
+  await page.waitForTimeout(1500);
+  const paneAfter = (await page.getByTestId("terminal-pane").boundingBox())!;
+
+  // height is fixed by the screen, not by the content
+  expect(paneAfter.height).toBe(paneBefore.height);
+  expect(paneAfter.height).toBeLessThanOrEqual(800);
+  expect((await page.getByTestId("right-col").boundingBox())!.height).toBeLessThanOrEqual(800);
+  expect(await page.evaluate(() => document.documentElement.scrollHeight)).toBeLessThanOrEqual(800);
+
+  // no more sends while idle; sizes valid, small and never the same twice in a row
+  expect(await mock(page, (m) => m.resizes.length)).toBe(count);
+  const resizes = await mock(page, (m) => m.resizes);
+  expect(resizes.length).toBeLessThan(10);
+  for (const r of resizes) {
+    expect(Number.isInteger(r.cols) && r.cols >= 1 && r.cols <= 1000).toBe(true);
+    expect(Number.isInteger(r.rows) && r.rows >= 1 && r.rows <= 1000).toBe(true);
+    expect(r.rows).toBeLessThan(100);
+  }
+  resizes.slice(1).forEach((r, i) => expect(r).not.toEqual(resizes[i]));
+});

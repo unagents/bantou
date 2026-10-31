@@ -83,6 +83,7 @@ export function buildWrapperArgs(opts: {
     opts.name,
     "--permission-mode",
     opts.permissionMode,
+    "--no-chrome", // Chrome 拡張があると対話型 claude が「Claude in Chrome extension detected」の確認で止まる
     ...(opts.mcpConfig ? ["--mcp-config", opts.mcpConfig] : []),
     ...(opts.resume ? ["--continue"] : []),
   ];

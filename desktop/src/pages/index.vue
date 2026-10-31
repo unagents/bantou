@@ -173,8 +173,11 @@ function onSessionCreated(name: string) {
             />
           </div>
           <!-- right: conversation history (the session's terminal) -->
-          <div class="min-h-0 min-w-0" data-testid="right-col">
-            <TerminalView :session="selectedGroup.name" class="h-[calc(100vh-var(--cork-header-height))]" />
+          <div
+            class="h-[calc(100vh-var(--cork-header-height))] max-h-[calc(100vh-var(--cork-header-height))] min-h-0 min-w-0 overflow-hidden"
+            data-testid="right-col"
+          >
+            <TerminalView :session="selectedGroup.name" />
           </div>
         </main>
         <main v-else class="min-w-0 flex-1 p-6">

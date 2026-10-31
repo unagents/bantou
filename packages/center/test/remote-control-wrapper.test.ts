@@ -125,10 +125,10 @@ test("wrapper 起動: wrapper -- claude --remote-control の引数、env の tok
   assert.equal(l.cmd, "/fake/bantou-pty-wrapper");
   assert.equal(l.cwd, "/tmp/pm1");
   assert.deepEqual(l.args.slice(0, 6), ["--cols", "120", "--rows", "40", "--", "fake-claude"]);
-  assert.deepEqual(l.args.slice(6, 10), ["--remote-control", "pm1", "--permission-mode", "plan"]);
-  assert.equal(l.args[10], "--mcp-config");
-  assert.equal(l.args.length, 12); // 初回は --continue 無し
-  const json = JSON.parse(l.args[11]) as { mcpServers: { bantou: Record<string, unknown> } };
+  assert.deepEqual(l.args.slice(6, 11), ["--remote-control", "pm1", "--permission-mode", "plan", "--no-chrome"]);
+  assert.equal(l.args[11], "--mcp-config");
+  assert.equal(l.args.length, 13); // 初回は --continue 無し
+  const json = JSON.parse(l.args[12]) as { mcpServers: { bantou: Record<string, unknown> } };
   assert.deepEqual(json.mcpServers.bantou, {
     type: "http",
     url: "http://127.0.0.1:4567/mcp/session",
@@ -329,7 +329,7 @@ test("add: wrapper 設定が無い supervisor では wrapper 起動の project �
 test("wrapper.ts: 引数組み立て / プロトコル行の解釈 / 窓の照合 / wrapper の場所", () => {
   assert.deepEqual(
     buildWrapperArgs({ claudePath: "c", name: "n", permissionMode: "auto", mcpConfig: null, resume: true, cols: 90, rows: 30 }),
-    ["--cols", "90", "--rows", "30", "--", "c", "--remote-control", "n", "--permission-mode", "auto", "--continue"],
+    ["--cols", "90", "--rows", "30", "--", "c", "--remote-control", "n", "--permission-mode", "auto", "--no-chrome", "--continue"],
   );
   assert.equal(JSON.parse(mcpConfigJson("http://h/mcp/session", "n")).mcpServers.bantou.headers["X-Bantou-Session"], "n");
   assert.deepEqual(parseWrapperLine('{"t":"started","pid":5}'), { t: "started", pid: 5 });

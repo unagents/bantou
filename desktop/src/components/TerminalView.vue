@@ -31,13 +31,33 @@ function sendInput(session: string, b64: string) {
   );
 }
 
+// center accepts cols / rows as integers in 1..1000.
+const clampSize = (n: number) => Math.min(1000, Math.max(1, Math.floor(n)));
+const RESIZE_DEBOUNCE_MS = 100;
+let lastSent: { session: string; cols: number; rows: number } | null = null;
+let sizeTimer: ReturnType<typeof setTimeout> | null = null;
+let fitFrame = 0;
+
+// Sends the size only when it differs from the last one sent for this session.
 function sendSize(session: string) {
   if (!term) return;
-  const { cols, rows } = term;
+  const cols = clampSize(term.cols);
+  const rows = clampSize(term.rows);
+  if (lastSent && lastSent.session === session && lastSent.cols === cols && lastSent.rows === rows) return;
+  lastSent = { session, cols, rows };
   sessionResize(session, cols, rows).catch((e) => {
     logWebview("warn", `terminal resize failed [${session}] (${cols}x${rows}): ${String(e)}`);
     report(e);
   });
+}
+
+// Fit bursts (layout, window drag) are collapsed into one send.
+function scheduleSize() {
+  if (sizeTimer) clearTimeout(sizeTimer);
+  sizeTimer = setTimeout(() => {
+    sizeTimer = null;
+    if (current) sendSize(current);
+  }, RESIZE_DEBOUNCE_MS);
 }
 
 async function open(session: string) {
@@ -52,6 +72,7 @@ async function open(session: string) {
     else term.write(ev.bytes);
   });
   // The last desktop to send a size wins (the pty follows it): announce ours when a session is shown.
+  lastSent = null;
   sendSize(session);
 }
 
@@ -79,8 +100,15 @@ onMounted(async () => {
     if (!current) return;
     sendInput(current, btoa(d));
   });
-  term.onResize(() => current && sendSize(current));
-  observer = new ResizeObserver(() => fit?.fit());
+  term.onResize(() => current && scheduleSize());
+  // Fit on the next frame: fitting inside the observer callback re-triggers it ("ResizeObserver loop").
+  observer = new ResizeObserver(() => {
+    if (fitFrame) return;
+    fitFrame = requestAnimationFrame(() => {
+      fitFrame = 0;
+      fit?.fit();
+    });
+  });
   observer.observe(host.value!);
   await open(props.session);
 });
@@ -100,6 +128,8 @@ watch(
 
 onBeforeUnmount(async () => {
   observer?.disconnect();
+  if (fitFrame) cancelAnimationFrame(fitFrame);
+  if (sizeTimer) clearTimeout(sizeTimer);
   await close();
   term?.dispose();
   term = null;
@@ -109,7 +139,7 @@ const link = computed(() => status[props.session]);
 </script>
 
 <template>
-  <div class="flex h-full min-h-0 flex-col" role="region" :aria-label="`${session} のターミナル`" data-testid="terminal-pane">
+  <div class="flex h-full max-h-full min-h-0 flex-col overflow-hidden" role="region" :aria-label="`${session} のターミナル`" data-testid="terminal-pane">
     <div class="bg-cork-elevated border-cork-border flex items-center gap-2 border-b px-3 py-1.5 text-xs">
       <UIcon name="i-lucide-square-terminal" class="text-cork-accent size-4" />
       <span class="font-display truncate font-semibold">{{ session }}</span>
@@ -129,6 +159,6 @@ const link = computed(() => status[props.session]);
       />
       <span v-if="error" class="text-cork-danger-text ml-auto truncate" data-testid="terminal-error">{{ error }}</span>
     </div>
-    <div ref="host" class="min-h-0 flex-1 bg-[#020617] p-2" data-testid="terminal" />
+    <div ref="host" class="min-h-0 flex-1 overflow-hidden bg-[#020617] p-2" data-testid="terminal" />
   </div>
 </template>
