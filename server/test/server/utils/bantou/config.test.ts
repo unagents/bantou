@@ -32,6 +32,7 @@ test("config: 全項目指定はそのまま返る", async () => {
       capBashSandbox: true,
       env: { CLAUDE_CONFIG_DIR: "/c" },
     },
+    update: { spec: "file:/x/bantou-{version}.tgz" },
   };
   assert.deepEqual(await load(full), full);
 });
@@ -101,3 +102,13 @@ for (const [label, cfg, re] of bad) {
     await assert.rejects(load(cfg), re);
   });
 }
+
+test("config: update.spec は既定 bantou@{version}、{version} 必須、- 始まりは拒否", async () => {
+  assert.deepEqual((await load({ workspace: "/w" })).update, { spec: "bantou@{version}" });
+  assert.deepEqual((await load({ workspace: "/w", update: {} })).update, { spec: "bantou@{version}" });
+  assert.equal((await load({ workspace: "/w", update: { spec: "file:/t/b-{version}.tgz" } })).update.spec, "file:/t/b-{version}.tgz");
+  for (const spec of ["bantou", "", 1, "-x{version}"]) {
+    await assert.rejects(load({ workspace: "/w", update: { spec } }), /update\.spec/, String(spec));
+  }
+  await assert.rejects(load({ workspace: "/w", update: "x" }), /update はオブジェクト/);
+});

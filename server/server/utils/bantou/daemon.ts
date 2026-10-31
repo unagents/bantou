@@ -21,6 +21,13 @@ import { agentDir, runLogDir } from "./paths";
 import { CAP_GUIDE, WORKER_GUIDE } from "./prompts";
 import { createReportHub, setReportHandler } from "./reports";
 import { cliRunner } from "./runner";
+import {
+  createUpdateController,
+  removeReadyFile,
+  UpdateError,
+  writeReadyFile,
+  type UpdateController,
+} from "./update";
 import { createWorkerHub, readOwner, setWorkerHandler, writeOwner } from "./workers";
 import { prepareWorkspace } from "./workspace";
 
@@ -52,6 +59,7 @@ export function maskUserinfo(text: string): string {
 /** 指示の概要。prompt は先頭 80 文字のみ、repo の userinfo は伏せる。 */
 export function describeCommand(cmd: ServerCommand): string {
   if (cmd.type === "stop_cap") return `cap_id=${cmd.cap_id}`;
+  if (cmd.type === "update_server") return `version=${cmd.version}`;
   if (cmd.type !== "kick_cap") return "";
   const parts = [`cap_id=${cmd.cap_id}`];
   if (cmd.repo) parts.push(`repo=${maskUserinfo(cmd.repo)}`);
@@ -76,6 +84,10 @@ export async function execute(cmd: ServerCommand, manager: AgentManager): Promis
       // worker は cap の依頼（/mcp の worker_start）で起動する。型は protocol に残るが center からの指示としては処理しない
       throw new Error("resume_worker は未対応");
     }
+    if (cmd.type === "hello" || cmd.type === "update_server") {
+      // daemon の handle が UpdateController で処理する。ここへは来ない
+      throw new Error(`${cmd.type} は execute では処理しない`);
+    }
     const st = await manager.status();
     return { bantou: PROTOCOL_VERSION, type: "status_result", ok: true, ...st };
   } catch (e) {
@@ -83,6 +95,36 @@ export async function execute(cmd: ServerCommand, manager: AgentManager): Promis
     log(`エラー: ${cmd.type}: ${message}`);
     const id = cmd.type === "kick_cap" || cmd.type === "stop_cap" ? { cap_id: cmd.cap_id } : {};
     return { bantou: PROTOCOL_VERSION, type: "error", ok: false, message, command: cmd.type, ...id };
+  }
+}
+
+/** 更新待機中に断る kick_cap の error。center は同じ指示を再送できる。 */
+export function updatingError(cmd: { cap_id: string }, update: { from: string; to: string }): ServerReply {
+  return {
+    bantou: PROTOCOL_VERSION,
+    type: "error",
+    ok: false,
+    message: `server 更新待ち（${update.from}→${update.to}）。実行中の cap/worker の終了後に再起動する。再起動後に再送`,
+    command: "kick_cap",
+    cap_id: cmd.cap_id,
+    code: "updating",
+    retryable: true,
+  };
+}
+
+/** hello / update_server を UpdateController で処理して返信を作る。 */
+export async function executeUpdate(cmd: ServerCommand, update: UpdateController): Promise<ServerReply> {
+  if (cmd.type === "hello") return update.hello();
+  if (cmd.type !== "update_server") throw new Error(`更新系でない指示: ${cmd.type}`);
+  try {
+    return await update.request(cmd.version);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    log(`エラー: ${cmd.type}: ${message}`);
+    if (e instanceof UpdateError) {
+      return { bantou: PROTOCOL_VERSION, type: "error", ok: false, message, command: cmd.type, code: e.code, retryable: e.retryable };
+    }
+    return { bantou: PROTOCOL_VERSION, type: "error", ok: false, message, command: cmd.type };
   }
 }
 
@@ -96,6 +138,14 @@ export interface DaemonDeps {
   /** bantou protocol 定義（protocol.json を含む dir）。空なら protocol 登録を行わず名前待受のみ。 */
   protocolDir?: string;
   startMcp: (opts: { port: number; bind: string }) => Promise<McpListener>;
+  /** 自分の npm 版（hello_result の server_version、更新先との比較）。未指定は "unknown"。 */
+  serverVersion?: string;
+  /** 更新のための終了を頼む（plugin の shutdown）。未指定なら更新は受け付けるが再起動できない。 */
+  requestExit?: (reason: string) => void;
+  /** 更新先の取得確認（テスト用に差し替える。既定は npx）。 */
+  updateFetch?: (spec: string, version: string) => Promise<void>;
+  /** 待機中の監視間隔 ms（テスト用）。 */
+  updatePollMs?: number;
 }
 
 /** 設定を読み込んで起動し、常駐物を返す。シグナルと exit は呼び出し側（plugin）が担う。 */
@@ -170,6 +220,21 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
   log(`mcp 起動: url=${mcpUrl} bind=${config.mcp.bind}`);
 
   let closing = false;
+  /** kick_cap の受け付けから返信までの件数（manager に登録される前の隙間も含めて、更新の再起動を待たせる）。 */
+  let kicking = 0;
+  const serverVersion = deps.serverVersion ?? "unknown";
+  const update = createUpdateController({
+    workspace: config.workspace,
+    serverVersion,
+    specTemplate: config.update.spec,
+    running: () => ({ ...manager.activeCount(), reports: hub.pendingCount() }),
+    extraBusy: () => kicking,
+    fetch: deps.updateFetch,
+    requestExit: (reason) => (deps.requestExit ?? (() => log("終了を頼む先が無いため再起動できない")))(reason),
+    log,
+    pollMs: deps.updatePollMs,
+  });
+  await update.loadLastFailure();
   let client!: MessengerClient;
   let protocolSet = false;
   const hub = createReportHub({
@@ -185,6 +250,7 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
   const inflight = new Set<Promise<void>>();
 
   const handle = async (m: InboundMessage): Promise<void> => {
+    let counted = false;
     try {
       if (m.mode === "ping") return;
       const from = `${m.from_name}(${m.from_id})`;
@@ -202,9 +268,22 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
         return;
       }
       log(`指示受信: type=${cmd.type} from=${from} ${describeCommand(cmd)}`.trimEnd());
-      // 以降この cap の結果（report 起因の resume を含む）はこの center へ返す
-      if (cmd.type === "kick_cap") await hub.rememberCenter(cmd.cap_id, m.from_id);
-      const reply = await execute(cmd, manager);
+      let reply: ServerReply;
+      if (cmd.type === "hello" || cmd.type === "update_server") {
+        reply = await executeUpdate(cmd, update);
+      } else if (cmd.type === "kick_cap" && update.isUpdating()) {
+        // 更新待機中は新しい指示を受け付けず、理由付きで断る（center は再起動後に再送できる）
+        const p = update.progress();
+        reply = updatingError(cmd, { from: serverVersion, to: p?.to ?? "?" });
+      } else {
+        if (cmd.type === "kick_cap") {
+          kicking++;
+          counted = true;
+          // 以降この cap の結果（report 起因の resume を含む）はこの center へ返す
+          await hub.rememberCenter(cmd.cap_id, m.from_id);
+        }
+        reply = await execute(cmd, manager);
+      }
       try {
         await client.send(m.from_id, JSON.stringify(reply), "pull", REPLY_META);
         log(`返信: to=${m.from_id} type=${reply.type} meta=${REPLY_META.protocol}@${REPLY_META.version}`);
@@ -213,6 +292,9 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
       }
     } catch (e) {
       log(`エラー: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      // 返信を出し切るまで更新の再起動を待たせる
+      if (counted) kicking--;
     }
   };
 
@@ -273,6 +355,8 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
         new Promise((r) => setTimeout(r, 2500)),
       ]);
       tracker.close();
+      update.close();
+      await removeReadyFile(config.workspace).catch(() => {});
       if (protocolSet) {
         await client.unsetProtocol().then(
           () => log("protocol 解除"),
@@ -288,6 +372,10 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
       log(`終了処理エラー: ${e instanceof Error ? e.message : String(e)}`);
     }
   };
-  log("常駐開始");
+  // supervisor への「起動できた」合図（更新後の子はこれが無いと巻き戻される）
+  await writeReadyFile(config.workspace, serverVersion).catch((e: unknown) =>
+    log(`server.ready を書けない: ${e instanceof Error ? e.message : String(e)}`),
+  );
+  log(`常駐開始: version=${serverVersion}`);
   return { stop };
 }

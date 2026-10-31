@@ -197,3 +197,24 @@ test("list: activity の store が無ければ activity キーは付かない", 
   await mgr.create({ owner: "a", prompt: "p" });
   assert.equal("activity" in mgr.list()[0]!, false);
 });
+
+test("create: 門が断る（protocol の版違い・更新待ち）時は投げ、記録も kick_cap も作らない", async () => {
+  const gated: Array<[string, string]> = [];
+  const { mgr, kicks } = setup({
+    gate: (p: ServerPeer, c: string) => {
+      gated.push([p.id, c]);
+      return { bantou: 1, type: "error", ok: false, message: "server 更新待ち（0.3.0→0.3.1）。再起動後に再送", code: "updating", retryable: true };
+    },
+  } as unknown as Partial<ServerLink>);
+  await assert.rejects(mgr.create({ owner: "pm1", prompt: "go" }), /更新待ち.*再送/);
+  assert.deepEqual(gated, [["id-a", "kick_cap"]]);
+  assert.equal(kicks.length, 0);
+  assert.deepEqual(mgr.list(), []);
+});
+
+test("create: 門が通せば従来どおり記録を作って kick_cap を送る", async () => {
+  const { mgr, kicks } = setup({ gate: () => undefined } as unknown as Partial<ServerLink>);
+  const r = await mgr.create({ owner: "pm1", prompt: "go" });
+  assert.equal(r.state, "running");
+  assert.equal(kicks.length, 1);
+});

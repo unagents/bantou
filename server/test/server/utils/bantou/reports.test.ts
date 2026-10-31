@@ -211,3 +211,22 @@ test("notify: 記録済み center へ通知を送る。center 不明なら何も
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("pendingCount: report 起因の処理中は 1 以上、drain 後は 0", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  await withHub(
+    async () => {
+      await gate;
+      return { session_id: "s", ok: true, result_text: "" };
+    },
+    async ({ hub }) => {
+      assert.equal(hub.pendingCount(), 0);
+      await hub.report("c1", "w1", "progress", "a");
+      assert.equal(hub.pendingCount(), 1);
+      release();
+      await hub.drain();
+      assert.equal(hub.pendingCount(), 0);
+    },
+  );
+});

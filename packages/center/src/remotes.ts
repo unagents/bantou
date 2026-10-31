@@ -103,6 +103,9 @@ export function createRemoteManager(opts: {
     async create(input) {
       if (!OWNER_PATTERN.test(input.owner)) throw new Error("owner は英数字と _ - のみ");
       const peer = await link.selectPeer(input.server);
+      // protocol の版が合わない・更新待ちの server へは、記録を作らず isError で返す（master-cap が後で再送できる）
+      const blocked = link.gate?.(peer, "kick_cap");
+      if (blocked) throw new Error(blocked.message);
       const remote_id = newId();
       const rec: RemoteRecord = {
         remote_id,

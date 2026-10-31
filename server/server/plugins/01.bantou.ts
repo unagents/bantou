@@ -10,14 +10,14 @@ import { startMcpListener } from "../utils/bantou/mcp";
  * signal と exit はここで握る。
  */
 export default defineNitroPlugin((nitro) => {
-  const { configPath, protocolDir } = useRuntimeConfig().bantou;
+  const { configPath, protocolDir, serverVersion } = useRuntimeConfig().bantou;
   let daemon: Daemon | undefined;
   let stopping = false;
 
   const shutdown = (signal: string): void => {
     if (stopping) return;
     stopping = true;
-    log(`${signal} 受信、終了処理`);
+    log(signal === "update" ? "更新のため終了処理" : `${signal} 受信、終了処理`);
     const hard = setTimeout(() => {
       log("終了処理タイムアウト");
       process.exit(0);
@@ -37,7 +37,13 @@ export default defineNitroPlugin((nitro) => {
   process.on("SIGTERM", () => shutdown("SIGTERM"));
   process.on("SIGINT", () => shutdown("SIGINT"));
 
-  void startDaemon(configPath, { protocolDir, startMcp: (opts) => startMcpListener(toNodeListener(nitro.h3App), opts) })
+  void startDaemon(configPath, {
+    protocolDir,
+    serverVersion: serverVersion || undefined,
+    // 更新の再起動: 通常の終了処理を通して exit 0（supervisor が update.json を見て次の子を起動する）
+    requestExit: (reason) => shutdown(reason),
+    startMcp: (opts) => startMcpListener(toNodeListener(nitro.h3App), opts),
+  })
     .then((d) => {
       daemon = d;
     })

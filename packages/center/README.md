@@ -115,6 +115,7 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 | `rc_start` | `project` | `RcStatus`（起動済みなら現状を返す） |
 | `rc_stop` | `project` | `RcStatus` |
 | `rc_status` | `project` | `RcStatus` |
+| `server_peers` | `refresh?` | `{ pair: { server, protocol }, peers: FollowEntry[] }`。下記「server の版合わせ」 |
 | `server_list` | なし | `{ name, connected, reachable, peerId, serverPeer }[]`（`reachable` は broker への接続を確保できたか、`peerId` は center 自身の peer id、`serverPeer` は直近に解決した server の送信先（peer id か名前、未解決は null）） |
 | `cap_kick` | `server`, `cap_id`, `prompt`, `repo?`, `branch?`, `reason?` | bantou-server の `cap_result` / `error` 返信そのまま |
 | `worker_resume` | `server`, `worker_id`, `prompt`, `repo?`, `branch?` | `worker_result` / `error` 返信そのまま |
@@ -167,6 +168,14 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 - **owner**（呼んだ master-cap の識別）: http では header `X-Bantou-Session: <session 名>`（または URL query `?session=<名>`）があればそれ、無ければ tool 引数 `owner`。優先順は header > query > 引数。`remote_create` はどれも無ければ error。`remote_delete` は owner が分かる時だけ記録の owner と照合する。`remote_list` は分からなければ絞らない。stdio には header が無いので引数のみ。
   - **今は**: master-cap 側に header 付きの接続を自動で持たせる仕組みは入れていない。理由: `claude remote-control` は `--mcp-config` / `--settings` を受けず（remote-control の前の global flag は spawn した session に引き継がれない）、`~/.claude.json` の書換えはユーザー設定の変更、`.mcp.json` の配置は承認プロンプト・未 trust・token 平文の問題がある。そのため、master-cap が center に繋ぐ MCP 設定（header 付き）を用意する側（番頭など）が `X-Bantou-Session` を付けるか、master-cap が `owner` 引数を渡す。
   - owner は自己申告で、認証はしない（Bearer token は center 全体で 1 つ）。
+
+## server の版合わせ
+
+- 組の版: `pair.server` = 組になる server の npm `bantou` の版、`pair.protocol` = このバイナリに bundle した protocol `bantou` の版。server の版は desktop のビルド（`desktop/scripts/build-sidecar.ts`）が `bun build --compile --env=BANTOU_PAIR_*` で env `BANTOU_PAIR_SERVER_VERSION` を埋め込む（値はビルド時に固定され、実行時の env では変わらない）。埋め込みが無い時は作業ツリーの `server/package.json`（`npm run dev` / tsx / dist 用）、それも無ければ不明（版合わせは無効で、protocol の版の門だけ効く）。単体バイナリ（`build:bin`）は埋め込まないので、`BANTOU_PAIR_SERVER_VERSION` を付けてビルドしない限り不明になる。
+- 確認: 起動後（`connectAll` の後）と 30 秒ごと（更新中の server がいる間は 5 秒ごと）に、発見した server へ `hello` を送る。server の版が組と違えば `update_server {version: pair.server}` を送る（新旧は比べない）。server は peer の `summary`（`<host> <workspace>`）で同一視する（peer id は再登録で変わる）。
+- 状態: `ok` / `updating`（`update.running` = 待っている cap・worker の件数）/ `unsupported`（protocol 1.3.0 未満。自動更新できず、手動で起動し直す）/ `mismatch`（server の版は組と同じなのに protocol の版が違う）/ `failed`（更新指示が断られた。同じ版は center が再起動するまで再指示しない）/ `lost`（更新中のまま 15 分戻らない）/ `unknown`（hello に答えない）。
+- 門: protocol の版が `pair.protocol` と違う server には、`hello` / `update_server` 以外（`kick_cap` / `stop_cap` / `status`）を送らず `error`（`code:"version_mismatch"`、`retryable:true`）を返す。版が分からない（名前宛てへのフォールバック）時は従来どおり送る。更新中の server への `kick_cap` は送らず `code:"updating"`（retryable）で断る。`remote_create` は断られたら記録を作らず isError で返すので、master-cap が後で再送できる。center は自動では再送しない。
+- 更新中に server の broker が止まる構成（server の内蔵 broker に center もつなぐ）では、再起動中は接続が切れる。送信失敗で次の使用時に接続を作り直す。
 
 ## claude の解決
 

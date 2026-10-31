@@ -73,6 +73,8 @@ export interface AgentManager {
   stop(kind: AgentKind, id: string): Promise<{ stopped: boolean }>;
   status(): Promise<{ caps: AgentStatus[]; workers: AgentStatus[] }>;
   reapOrphans(): Promise<ReapSummary>;
+  /** invoke 中（待ち + 実行）の件数を kind 別に返す。server 更新の「全部終わった」判定に使う。 */
+  activeCount(): { caps: number; workers: number };
   shutdown(): Promise<void>;
 }
 
@@ -531,5 +533,15 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
     await Promise.allSettled([...chains.values()]);
   }
 
-  return { invoke, stop, status, reapOrphans, shutdown };
+  function activeCount(): { caps: number; workers: number } {
+    let caps = 0;
+    let workers = 0;
+    for (const [key, n] of inflight) {
+      if (key.startsWith("cap:")) caps += n;
+      else workers += n;
+    }
+    return { caps, workers };
+  }
+
+  return { invoke, stop, status, reapOrphans, activeCount, shutdown };
 }

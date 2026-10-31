@@ -50,6 +50,13 @@ export class MockBantou {
       workers: [{ kind: "worker", id: "w1", state: "running" }],
     },
   };
+  /** `server_peers` result (center `Follow.snapshot()`). */
+  centerVersions: unknown = {
+    pair: { server: "0.3.0", protocol: "1.3.0" },
+    peers: [
+      { key: "mac200 /ws", id: "p2", name: "bantou-server", hostname: "mac200", server_version: "0.3.0", protocol_version: "1.3.0", state: "ok", detail: "版が一致", since: "2026-10-31T00:00:00.000Z" },
+    ],
+  };
   /** `remote_list` result (center `RemoteView[]`). */
   centerRemotes: unknown[] = [];
   /** `session_list` result (center `SessionInfo[]`); `session_create` appends to it. */
@@ -283,6 +290,8 @@ export class MockBantou {
           }
           case "server_list":
             return text(this.centerServers);
+          case "server_peers":
+            return text(this.centerVersions);
           case "server_status": {
             const name = (args.arguments as { server: string }).server;
             return text(this.centerAgents[name] ?? { ok: true, caps: [], workers: [] });

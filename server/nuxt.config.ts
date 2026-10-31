@@ -16,6 +16,8 @@ export default defineNuxtConfig({
       configPath: "",
       // NUXT_BANTOU_PROTOCOL_DIR（bin wrapper が設定）で上書きされる。bantou protocol 定義（protocol.json）の dir
       protocolDir: "",
+      // NUXT_BANTOU_SERVER_VERSION（bin wrapper が設定）で上書きされる。この server の npm 版（package.json の version）
+      serverVersion: "",
     },
   },
 });

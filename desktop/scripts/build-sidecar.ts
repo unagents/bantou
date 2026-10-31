@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -18,6 +18,18 @@ const BUN_TARGETS: Record<string, string> = {
   "x86_64-unknown-linux-gnu": "bun-linux-x64",
   "aarch64-unknown-linux-gnu": "bun-linux-arm64",
 };
+
+// The server (npm `bantou`) version that pairs with this build. The center compares the servers it finds
+// against it and tells a different one to update itself. Embedded via `bun build --env=BANTOU_PAIR_*`
+// (a compiled binary cannot read package.json). The protocol `bantou` version needs no embedding: the
+// center bundles @agent-hand/bantou-protocol.
+function pairServerVersion(): string {
+  const pkg = JSON.parse(readFileSync(join(packagesDir, "..", "server", "package.json"), "utf8")) as { version?: unknown };
+  if (typeof pkg.version !== "string" || !/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(pkg.version)) {
+    throw new Error(`server/package.json has no valid version: ${String(pkg.version)}`);
+  }
+  return pkg.version;
+}
 
 function hostTargetTriple(): string {
   const out = execFileSync("rustc", ["-vV"], { encoding: "utf8" });
@@ -51,11 +63,21 @@ function main() {
   const dest = join(binariesDir, `bantou-center-${triple}`);
   mkdirSync(binariesDir, { recursive: true });
 
-  console.log(`Building bantou-center (${bunTarget})...`);
+  const serverVersion = pairServerVersion();
+  console.log(`Building bantou-center (${bunTarget}), paired server version ${serverVersion}...`);
   execFileSync(
     "bun",
-    ["build", "--compile", join(packagesDir, "center", "src", "cli.ts"), "--target", bunTarget, "--outfile", dest],
-    { cwd: desktopDir, stdio: "inherit" },
+    [
+      "build",
+      "--compile",
+      join(packagesDir, "center", "src", "cli.ts"),
+      "--target",
+      bunTarget,
+      "--env=BANTOU_PAIR_*",
+      "--outfile",
+      dest,
+    ],
+    { cwd: desktopDir, stdio: "inherit", env: { ...process.env, BANTOU_PAIR_SERVER_VERSION: serverVersion } },
   );
   chmodSync(dest, 0o755);
 

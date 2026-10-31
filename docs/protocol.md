@@ -114,8 +114,8 @@ sender peer as one JSON object.
 ### Messenger protocol `bantou`
 
 The protocol definition is `packages/protocol/messenger/protocol.json` (JSON
-Schemas of `kick_cap`, `stop_cap`, `status`, `cap_result`, `stop_result`, `status_result`, `error`, `activity`)
-and `PROTOCOL.md`. It is the agent-messenger protocol version (`1.2.0`,
+Schemas of `kick_cap`, `stop_cap`, `status`, `hello`, `update_server`, `cap_result`, `stop_result`, `status_result`, `hello_result`, `update_result`, `error`, `activity`)
+and `PROTOCOL.md`. It is the agent-messenger protocol version (`1.3.0`,
 `MESSENGER_PROTOCOL` in `server.ts`); the body field `bantou: 1` is a separate
 version of the JSON bodies below. Changing the definition needs a new protocol
 `version` (same name and version with other content is `PROTOCOL_CONFLICT`).
@@ -138,7 +138,7 @@ version of the JSON bodies below. Changing the definition needs a new protocol
 | key | required | meaning |
 |---|---|---|
 | `bantou` | yes | protocol version, always `1` |
-| `type` | yes | `kick_cap`, `stop_cap` or `status` |
+| `type` | yes | `kick_cap`, `stop_cap`, `status`, `hello` or `update_server` |
 
 ### `kick_cap` — start or resume a cap
 
@@ -177,6 +177,51 @@ process group (see server README).
 
 No other fields. Reply: `status_result` or `error`. Answered immediately, even
 while agents are running.
+
+### `hello` — ask the server's version
+
+```json
+{"bantou":1,"type":"hello"}
+```
+
+No other fields. Reply: `hello_result`
+`{"bantou":1,"type":"hello_result","ok":true,"server_version":"0.3.0","protocol_version":"1.3.0","update":null,"last_update":null}`.
+`server_version` is the npm `bantou` version of the running server. `update` is
+`{"state":"waiting"|"restarting","from","to","running":{"caps","workers","reports"}}` while an update is
+in progress. `last_update` is `{"to","ok":false,"error","at"}` for the last update that failed (kept until the
+next attempt). Servers older than protocol `1.3.0` do not know `hello` and do not answer, so a center
+decides by the protocol version the peer declares and sends nothing there.
+
+### `update_server` — update the server to a version
+
+```json
+{"bantou":1,"type":"update_server","version":"0.3.1"}
+```
+
+`version` is semver (`^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`). The server fetches `bantou@<version>` with
+`npx -y` (the package source is the server's config `update.spec`, never this message: there is no
+authentication), then replies `update_result`
+`{"bantou":1,"type":"update_result","ok":true,"state":"current"|"waiting"|"restarting","from","to","running":{...}}`
+right away. It does **not** wait for the runs. `current` means it already runs that version. A failed fetch is
+an `error` with `code:"update_failed"` (the server keeps serving normally).
+
+While `waiting`, the server restarts itself only after every running cap and worker (and worker reports being
+handled) are done. Meanwhile:
+
+- `kick_cap` is refused with `error` `{"code":"updating","retryable":true,"command":"kick_cap","cap_id":...}`
+  and a reason (`server 更新待ち（<from>→<to>）...再起動後に再送`). The center may send it again after the restart.
+- `stop_cap`, `status` and `hello` are still served. Worker `report` and `worker_start` over MCP are
+  still accepted (they belong to the caps that are running).
+- `update_server` with the same version answers `waiting` again; another version is
+  `error` `code:"update_conflict"`.
+
+`hello` / `update_server` and their replies keep this shape for good, and a center sends them to servers of
+any protocol version (1.3.0 and later): they are the only way to update a server whose protocol version differs
+from the center's. All other commands are not sent to a server whose protocol version differs (the center
+refuses with `error` `code:"version_mismatch"`, `retryable:true`).
+
+`error` replies may carry `code` (`updating` | `update_failed` | `update_conflict` | `invalid_version` |
+`version_mismatch`) and `retryable` (boolean).
 
 ### Worker reports (MCP `/mcp`)
 
@@ -412,6 +457,7 @@ Tool outputs are JSON text. A failure sets `isError`.
 | `rc_stop` | `project` | remote-control record |
 | `rc_status` | `project` | remote-control record |
 | `server_list` | none | `[{ name, connected, reachable, peerId, serverPeer }]` |
+| `server_peers` | `refresh?` | `{ pair: { server, protocol }, peers: [{ key, id, name, hostname?, server_version?, protocol_version?, state, detail, update?, since }] }`. `pair` = the versions built into this center (npm `bantou` and protocol). `state`: `ok` / `updating` (`update.running` = caps / workers being waited for) / `mismatch` / `unsupported` / `failed` / `lost` / `unknown`. `refresh: true` checks now |
 | `cap_kick` | `server`, `cap_id`, `prompt`, `repo?`, `branch?`, `reason?` | `cap_result` or `error` reply, verbatim JSON |
 | `worker_resume` | `server`, `worker_id`, `prompt`, `repo?`, `branch?` | `worker_result` or `error` reply, verbatim JSON |
 | `server_status` | `server` | `status_result` or `error` reply, verbatim JSON |

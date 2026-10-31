@@ -2,8 +2,10 @@
 import { centerConnection, centerTool } from "~/api";
 import type {
   CenterConnection,
+  CenterFollowState,
   CenterRcStatus,
   CenterServerInfo,
+  CenterServerPeers,
   CenterServerStatus,
 } from "~/types";
 
@@ -18,10 +20,22 @@ interface ServerView {
 const connection = ref<CenterConnection | null>(null);
 const rc = ref<CenterRcStatus[]>([]);
 const servers = ref<ServerView[]>([]);
+const versions = ref<CenterServerPeers | null>(null);
+const versionsError = ref<string | null>(null);
 const error = ref<string | null>(null);
 const loading = ref(false);
 
 const errorOf = (e: unknown) => String(e);
+
+/** Which server versions are paired with this build, and each server's state. refresh asks the center to check now. */
+async function loadVersions(refreshNow: boolean) {
+  try {
+    versions.value = await centerTool<CenterServerPeers>("server_peers", refreshNow ? { refresh: true } : undefined);
+    versionsError.value = null;
+  } catch (e) {
+    versionsError.value = errorOf(e);
+  }
+}
 
 async function refresh() {
   loading.value = true;
@@ -31,8 +45,10 @@ async function refresh() {
     if (!connection.value.connected) {
       rc.value = [];
       servers.value = [];
+      versions.value = null;
       return;
     }
+    void loadVersions(true);
     rc.value = await centerTool<CenterRcStatus[]>("rc_list");
     const infos = await centerTool<CenterServerInfo[]>("server_list");
     servers.value = await Promise.all(
@@ -54,6 +70,24 @@ async function refresh() {
 watch(open, (v) => v && void refresh(), { immediate: true });
 
 const rcColor = { stopped: "neutral", starting: "warning", connected: "success", error: "error" } as const;
+const versionColor: Record<CenterFollowState, "success" | "warning" | "neutral" | "error"> = {
+  ok: "success",
+  updating: "warning",
+  unknown: "neutral",
+  mismatch: "error",
+  unsupported: "error",
+  failed: "error",
+  lost: "error",
+};
+const versionLabel: Record<CenterFollowState, string> = {
+  ok: "一致",
+  updating: "更新中",
+  unknown: "確認中",
+  mismatch: "版違い",
+  unsupported: "版違い",
+  failed: "更新失敗",
+  lost: "更新失敗",
+};
 const sourceLabel = { remote: "remote", sidecar: "sidecar" } as const;
 </script>
 
@@ -116,6 +150,45 @@ const sourceLabel = { remote: "remote", sidecar: "sidecar" } as const;
           </div>
 
           <RemoteActivity />
+
+          <div class="flex flex-col gap-2" data-testid="center-versions">
+            <span class="text-sm font-medium">server の版</span>
+            <p v-if="versions" class="text-cork-muted text-xs" data-testid="center-pair">
+              この desktop と組の版: server {{ versions.pair.server ?? "不明" }} / protocol {{ versions.pair.protocol }}
+            </p>
+            <p v-if="versionsError" class="text-cork-danger-text text-xs whitespace-pre-wrap" data-testid="center-versions-error">
+              {{ versionsError }}
+            </p>
+            <div
+              v-for="v in versions?.peers ?? []"
+              :key="v.key"
+              class="flex flex-col gap-0.5"
+              :data-state="v.state"
+              data-testid="center-version-row"
+            >
+              <div class="flex items-center gap-2 text-xs">
+                <span class="w-32 truncate font-medium">{{ v.hostname ?? v.name }}</span>
+                <UBadge
+                  :color="versionColor[v.state]"
+                  variant="subtle"
+                  :label="versionLabel[v.state]"
+                  data-testid="center-version-badge"
+                />
+                <span class="text-cork-muted">server {{ v.server_version ?? "?" }} / protocol {{ v.protocol_version ?? "?" }}</span>
+                <span
+                  v-if="v.state === 'updating' && v.update?.running"
+                  class="text-cork-muted"
+                  data-testid="center-version-running"
+                >
+                  待機 cap {{ v.update.running.caps }} / worker {{ v.update.running.workers }}
+                </span>
+              </div>
+              <p class="text-cork-muted pl-2 text-xs" data-testid="center-version-detail">{{ v.detail }}</p>
+            </div>
+            <p v-if="versions && !versions.peers.length" class="text-cork-muted text-xs" data-testid="center-versions-none">
+              server なし
+            </p>
+          </div>
 
           <div class="flex flex-col gap-3">
             <span class="text-sm font-medium">servers</span>

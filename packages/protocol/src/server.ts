@@ -11,7 +11,17 @@ export const SERVER_NAME = "bantou-server";
  * agent-messenger protocol registration (messenger/protocol.json) used in `meta` of send / listPeers.
  * Not the body schema version (`bantou: 1`, PROTOCOL_VERSION). Keep in sync with messenger/protocol.json.
  */
-export const MESSENGER_PROTOCOL = { protocol: "bantou", version: "1.2.0" } as const;
+export const MESSENGER_PROTOCOL = { protocol: "bantou", version: "1.3.0" } as const;
+
+/**
+ * hello / update_server (and their replies) exist from this protocol version. A server older than this
+ * ignores them, so a center must not send them there. Their shape is fixed for good: they are the only way
+ * to update a server whose protocol version differs from the center's.
+ */
+export const FOLLOW_MIN_PROTOCOL = "1.3.0";
+
+/** Version string accepted by update_server (semver; never starts with '-', it ends up in an npx argument). */
+export const SERVER_VERSION_PATTERN = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
 
 /** Allowed cap / worker ids (also directory names under <workspace>/caps and <workspace>/workers). */
 export const AGENT_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
@@ -21,7 +31,7 @@ export type AgentKind = "cap" | "worker";
 /** Lifecycle of one cap / worker as kept in its state.json. */
 export type AgentState = "idle" | "running" | "failed" | "error";
 
-export type ServerCommandType = "kick_cap" | "resume_worker" | "stop_cap" | "status";
+export type ServerCommandType = "kick_cap" | "resume_worker" | "stop_cap" | "status" | "hello" | "update_server";
 
 export interface ServerCommandBase {
   /** Protocol version, always 1. */
@@ -70,9 +80,85 @@ export interface StatusCommand extends ServerCommandBase {
   type: "status";
 }
 
-export type ServerCommand = KickCapCommand | ResumeWorkerCommand | StopCapCommand | StatusCommand;
+/** Ask the server for its own version and update state. Reply: hello_result. Accepted whatever the sender's protocol version is. */
+export interface HelloCommand extends ServerCommandBase {
+  type: "hello";
+}
 
-export type ServerReplyType = "cap_result" | "worker_result" | "stop_result" | "status_result" | "error";
+/**
+ * Tell the server to update itself to npm `bantou@<version>` and restart once every running cap / worker is done.
+ * Reply: update_result, or error. The package source is the server's own config, never this message.
+ */
+export interface UpdateServerCommand extends ServerCommandBase {
+  type: "update_server";
+  /** SERVER_VERSION_PATTERN. */
+  version: string;
+}
+
+export type ServerCommand =
+  | KickCapCommand
+  | ResumeWorkerCommand
+  | StopCapCommand
+  | StatusCommand
+  | HelloCommand
+  | UpdateServerCommand;
+
+export type ServerReplyType =
+  | "cap_result"
+  | "worker_result"
+  | "stop_result"
+  | "status_result"
+  | "hello_result"
+  | "update_result"
+  | "error";
+
+/** Runs still alive on the server. An update waits until all of them are 0. */
+export interface UpdateRunning {
+  caps: number;
+  workers: number;
+  reports: number;
+}
+
+/** An update in progress. waiting = refusing kick_cap until the runs end; restarting = shutting down for the swap. */
+export interface UpdateProgress {
+  state: "waiting" | "restarting";
+  from: string;
+  to: string;
+  running: UpdateRunning;
+}
+
+/** The last update that failed (kept by the server until the next attempt). */
+export interface UpdateFailure {
+  to: string;
+  ok: false;
+  error: string;
+  /** ISO 8601. */
+  at: string;
+}
+
+/** Reply to hello. */
+export interface HelloResultReply {
+  bantou: typeof PROTOCOL_VERSION;
+  type: "hello_result";
+  ok: true;
+  /** npm `bantou` version of the running server. */
+  server_version: string;
+  /** Registered messenger protocol version of the running server. */
+  protocol_version: string;
+  update: UpdateProgress | null;
+  last_update: UpdateFailure | null;
+}
+
+/** Reply to update_server. state "current" = already running that version. */
+export interface UpdateResultReply {
+  bantou: typeof PROTOCOL_VERSION;
+  type: "update_result";
+  ok: true;
+  state: "current" | "waiting" | "restarting";
+  from: string;
+  to: string;
+  running: UpdateRunning;
+}
 
 /** Outcome of one headless run. */
 export interface RunOutcome {
@@ -143,9 +229,29 @@ export interface ErrorReply {
   cap_id?: string;
   /** `worker_id` of the failed `resume_worker`, when known. */
   worker_id?: string;
+  /** Machine-readable cause, when there is one. */
+  code?: ErrorCode;
+  /** true when the same command may be sent again later. */
+  retryable?: boolean;
 }
 
-export type ServerReply = CapResultReply | WorkerResultReply | StopResultReply | StatusReply | ErrorReply;
+/**
+ * updating = server is waiting to restart for an update (retryable);
+ * update_failed = the version could not be fetched; update_conflict = another update is in progress;
+ * invalid_version = bad version string; version_mismatch = refused by a center because the protocol versions differ.
+ */
+export type ErrorCode = "updating" | "update_failed" | "update_conflict" | "invalid_version" | "version_mismatch";
+
+export const ERROR_CODES: readonly ErrorCode[] = ["updating", "update_failed", "update_conflict", "invalid_version", "version_mismatch"];
+
+export type ServerReply =
+  | CapResultReply
+  | WorkerResultReply
+  | StopResultReply
+  | StatusReply
+  | HelloResultReply
+  | UpdateResultReply
+  | ErrorReply;
 
 /** Liveness of one cap / worker as seen from its `claude -p` stream-json output. */
 export type ActivityState = "running" | "stalled" | "idle" | "done" | "failed" | "lost";
@@ -219,7 +325,41 @@ function strOrNull(v: unknown): boolean {
 }
 
 function isCommandType(v: unknown): v is ServerCommandType {
-  return v === "kick_cap" || v === "resume_worker" || v === "stop_cap" || v === "status";
+  return (
+    v === "kick_cap" ||
+    v === "resume_worker" ||
+    v === "stop_cap" ||
+    v === "status" ||
+    v === "hello" ||
+    v === "update_server"
+  );
+}
+
+/** A string matching SERVER_VERSION_PATTERN. */
+export function isValidServerVersion(v: unknown): v is string {
+  return typeof v === "string" && SERVER_VERSION_PATTERN.test(v);
+}
+
+export function isErrorCode(v: unknown): v is ErrorCode {
+  return typeof v === "string" && (ERROR_CODES as readonly string[]).includes(v);
+}
+
+function isUpdateRunning(v: unknown): v is UpdateRunning {
+  return isRecord(v) && typeof v.caps === "number" && typeof v.workers === "number" && typeof v.reports === "number";
+}
+
+function isUpdateProgress(v: unknown): v is UpdateProgress {
+  return (
+    isRecord(v) &&
+    (v.state === "waiting" || v.state === "restarting") &&
+    typeof v.from === "string" &&
+    typeof v.to === "string" &&
+    isUpdateRunning(v.running)
+  );
+}
+
+function isUpdateFailure(v: unknown): v is UpdateFailure {
+  return isRecord(v) && typeof v.to === "string" && v.ok === false && typeof v.error === "string" && typeof v.at === "string";
 }
 
 /** A string matching AGENT_ID_PATTERN. */
@@ -256,7 +396,10 @@ export function isServerCommand(v: unknown): v is ServerCommand {
     case "stop_cap":
       return isValidAgentId(v.cap_id);
     case "status":
+    case "hello":
       return true;
+    case "update_server":
+      return isValidServerVersion(v.version);
     default:
       return false;
   }
@@ -276,6 +419,14 @@ export function isStopCapCommand(v: unknown): v is StopCapCommand {
 
 export function isStatusCommand(v: unknown): v is StatusCommand {
   return isServerCommand(v) && v.type === "status";
+}
+
+export function isHelloCommand(v: unknown): v is HelloCommand {
+  return isServerCommand(v) && v.type === "hello";
+}
+
+export function isUpdateServerCommand(v: unknown): v is UpdateServerCommand {
+  return isServerCommand(v) && v.type === "update_server";
 }
 
 /** Parse message text as a server command; `undefined` for non-JSON or non-command. */
@@ -330,13 +481,31 @@ export function isServerReply(v: unknown): v is ServerReply {
         Array.isArray(v.workers) &&
         v.workers.every(isAgentStatus)
       );
+    case "hello_result":
+      return (
+        v.ok === true &&
+        typeof v.server_version === "string" &&
+        typeof v.protocol_version === "string" &&
+        (v.update === null || isUpdateProgress(v.update)) &&
+        (v.last_update === null || isUpdateFailure(v.last_update))
+      );
+    case "update_result":
+      return (
+        v.ok === true &&
+        (v.state === "current" || v.state === "waiting" || v.state === "restarting") &&
+        typeof v.from === "string" &&
+        typeof v.to === "string" &&
+        isUpdateRunning(v.running)
+      );
     case "error":
       return (
         v.ok === false &&
         typeof v.message === "string" &&
         (v.command === undefined || isCommandType(v.command)) &&
         (v.cap_id === undefined || isValidAgentId(v.cap_id)) &&
-        (v.worker_id === undefined || isValidAgentId(v.worker_id))
+        (v.worker_id === undefined || isValidAgentId(v.worker_id)) &&
+        (v.code === undefined || isErrorCode(v.code)) &&
+        (v.retryable === undefined || typeof v.retryable === "boolean")
       );
     default:
       return false;

@@ -186,6 +186,31 @@ export interface CenterServerStatus {
   workers: CenterAgentState[];
 }
 
+/** State of one server in `server_peers` (center `FollowState`). */
+export type CenterFollowState = "ok" | "unsupported" | "updating" | "mismatch" | "failed" | "lost" | "unknown";
+
+/** One server of `server_peers` (center `FollowEntry`): its version against the one paired with this build. */
+export interface CenterServerPeer {
+  key: string;
+  id: string;
+  name: string;
+  hostname?: string;
+  server_version?: string;
+  protocol_version?: string;
+  state: CenterFollowState;
+  /** One-line reason to show. */
+  detail: string;
+  /** While updating: the target version and how many caps / workers are being waited for. */
+  update?: { to: string; running?: { caps: number; workers: number; reports: number } };
+  since: string;
+}
+
+/** `server_peers` result: the versions paired with this build (npm `bantou` and protocol `bantou`) and each server's state. */
+export interface CenterServerPeers {
+  pair: { server: string | null; protocol: string };
+  peers: CenterServerPeer[];
+}
+
 /** `activity.agents[].state` of `remote_list` (bantou-server `ActivityState`). */
 export type CenterActivityState = "running" | "stalled" | "idle" | "done" | "failed" | "lost";
 

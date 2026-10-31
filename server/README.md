@@ -25,8 +25,18 @@ npx bantou --config <path>
 ```
 
 - `--config` 省略時は `~/.config/bantou/config.json`。
+- `npx bantou --version` は package.json の版を 1 行出して exit 0。
 - それ以外の引数は exit 2。実行時エラーは exit 1。
 - SIGTERM / SIGINT で実行中の claude を止め、peer 解除・broker 停止して exit 0（5 秒で打ち切り）。
+
+### supervisor と自己更新
+
+- `npx bantou` で起動した bin は supervisor（Nitro は読まない）で、常駐本体（`--serve`）を子に 1 本だけ持つ。SIGTERM / SIGINT は子の process group へ中継し、子の exit code で終わる。supervisor の PID は更新で変わらない。
+- 二重起動の防止: `<workspace>/server.lock`（`{pid, version, started_at}`）を supervisor が排他作成する。生きている pid があれば `既に起動中 pid=...` で exit 1、死んだ pid なら取り直す。`--serve` は env `BANTOU_SUPERVISOR_PID` が lock の pid と合わなければ exit 1（手起動を防ぐ）。最後の砦は broker / mcp の port bind 衝突。
+- 更新（protocol `bantou` の `update_server`、`docs/protocol.md`）: server は `npx -y --package=<spec> -- bantou --version` で取得を確かめ（失敗は `update_failed` で、動き続ける）、受理したら実行中の cap・worker・report が全部終わるのを待つ（待機中の `kick_cap` は `updating`（retryable）で断る）。終わったら `<workspace>/update.json`（`{"state":"restart","to","spec"}`）を書いて通常の終了処理で exit 0。supervisor は前の子の process が消えてから `npx -y --package=<spec> -- bantou --serve --config ...` を起動する。
+- 巻き戻し: 更新後の子が 120 秒以内に `<workspace>/server.ready`（`{pid, version}`）を書かない、または ready 前に終了したら、直前に ready だった版（最初は自分の `.output`）で起動し直し、`update.json` に `{"state":"failed","to","error","at"}` を書く。起動した server は `hello_result.last_update` で返す。
+- 取得元は config `update.spec`。`--version` を持たない版は更新先にできない（取得確認で失敗する）。
+- supervisor のコードは最初に起動した版のまま残る。supervisor と子の取り決め（`--serve`、`BANTOU_SUPERVISOR_PID`、`server.lock` / `server.ready` / `update.json`）は変えない。変えるなら手動で起動し直す。
 
 ## config.json
 
@@ -67,8 +77,9 @@ npx bantou --config <path>
 | `session.extraArgs` | 任意 | `[]` | `--` の前にそのまま付ける追加引数。文字列の配列。`--settings` の後ろに並ぶため、同じ指定が重なれば extraArgs が後勝ち |
 | `session.capBashSandbox` | 任意 | `false` | cap の `claude -p` の Bash sandbox。`false` は `--settings {"sandbox":{"enabled":false}}` を付けて切る（新規・resume とも）。`true` は付けず claude の設定のまま（sandbox が有効だと worker が cap の終了で消える）。真偽値 |
 | `session.env` | 任意 | `{}` | spawn する claude に追加で渡す環境変数。文字列値のオブジェクト。bantou-server 自身の環境変数に上書きで合成する |
+| `update.spec` | 任意 | `"bantou@{version}"` | 自己更新の取得元。`{version}` を更新先の版に置き換えて npx の `--package` に渡す。`{version}` 必須、`-` で始められない。テストでは `file:/path/bantou-{version}.tgz` で npm 未公開の tarball を指せる。本番は指定しない |
 
-- `broker` / `mcp` / `session` は省略可。書く場合はオブジェクト。
+- `broker` / `mcp` / `session` / `update` は省略可。書く場合はオブジェクト。
 - LAN に公開するには `broker.bind`（例 `0.0.0.0`）を明示する。その場合は `broker.token` の設定を推奨する。
 - 例: 204 の claudeAgent ユーザーは `"env": { "CLAUDE_CONFIG_DIR": "/home/vagrant/.claude-agent" }` を指定する。
 - 旧 `session.command` は廃止。残っていると起動時にエラーになる。`session.claude` を使う。

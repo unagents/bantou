@@ -51,6 +51,8 @@ export interface ReportHub {
   notify(capId: string, notice: ActivityNotice): Promise<void>;
   /** report 起因の実行がすべて終わる（返信を出し切る）のを待つ。 */
   drain(): Promise<void>;
+  /** report 起因で処理中（cap の resume と返信の送信）の件数。 */
+  pendingCount(): number;
   /** 以降の report を拒否する。 */
   close(): void;
 }
@@ -166,6 +168,7 @@ export function createReportHub(deps: ReportHubDeps): ReportHub {
     drain: async () => {
       await Promise.allSettled([...pending]);
     },
+    pendingCount: () => pending.size,
     close: () => {
       closed = true;
     },

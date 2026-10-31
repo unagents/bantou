@@ -39,6 +39,7 @@ async function withFixture(
       broker: { port: 0, bind: "127.0.0.1", discovery: "off", token: "" },
       mcp: { port: 0, bind: "127.0.0.1" },
       session: { ...structuredClone(DEFAULT_SESSION), maxRetries },
+      update: { spec: "bantou@{version}" },
     };
     await fn({ ws, config, calls: [], logs: [] });
   } finally {
@@ -602,5 +603,25 @@ test("agents: runExtras が投げたら指示は失敗し state は failed", asy
     });
     await assert.rejects(m.invoke("cap", "c1", { prompt: "p" }), /mcp が未起動/);
     assert.equal((await readState(join(f.ws, "caps", "c1"))).state, "failed");
+  });
+});
+
+test("agents: activeCount は invoke 中（待ち + 実行）を cap / worker 別に数え、終われば 0", async () => {
+  await withFixture(0, async (f) => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const m = mgr(f, async () => {
+      await gate;
+      return ok("r");
+    });
+    assert.deepEqual(m.activeCount(), { caps: 0, workers: 0 });
+    const a = m.invoke("cap", "c1", { prompt: "p" });
+    const b = m.invoke("cap", "c1", { prompt: "q" }); // 同じ cap の待ち
+    const c = m.invoke("worker", "w1", { prompt: "p" });
+    assert.deepEqual(m.activeCount(), { caps: 2, workers: 1 });
+    release();
+    await Promise.all([a, b, c]);
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(m.activeCount(), { caps: 0, workers: 0 });
   });
 });

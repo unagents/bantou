@@ -9,6 +9,7 @@ import { createCenterServer } from "../src/server.js";
 import type { SessionManager } from "../src/sessions.js";
 import { resolveOwner } from "../src/tools.js";
 import type { ServerLink } from "../src/server-link.js";
+import type { Follow } from "../src/follow.js";
 
 const rc = (project: string): RcStatus => ({
   project, path: "/p", state: "connected", pid: 1, sessionUrl: null, environmentUrl: null,
@@ -16,7 +17,7 @@ const rc = (project: string): RcStatus => ({
   claude: { path: "claude", source: "PATH" },
 });
 
-async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partial<SessionManager>; remotes?: Partial<RemoteManager> } = {}) {
+async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partial<SessionManager>; remotes?: Partial<RemoteManager>; follow?: Follow } = {}) {
   const calls: unknown[] = [];
   const supervisor: RemoteControlSupervisor = {
     start: async (p) => rc(p),
@@ -49,7 +50,7 @@ async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partia
     list: (f: unknown) => (calls.push({ remoteList: f }), []),
     ...mgrs.remotes,
   } as unknown as RemoteManager;
-  const server = createCenterServer({ config: parseConfig({}, "/x/c.json"), supervisor, link: fullLink, sessions, remotes });
+  const server = createCenterServer({ config: parseConfig({}, "/x/c.json"), supervisor, link: fullLink, sessions, remotes, follow: mgrs.follow });
   const [ct, st] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "t", version: "0" });
   await Promise.all([server.connect(st), client.connect(ct)]);
@@ -58,12 +59,12 @@ async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partia
 
 const text = (r: unknown): string => (r as { content: { text: string }[] }).content[0].text;
 
-test("14 個の tool が登録される", async () => {
+test("15 個の tool が登録される", async () => {
   const { client, close } = await connect();
   const names = (await client.listTools()).tools.map((t) => t.name).sort();
   assert.deepEqual(names, [
     "cap_kick", "rc_list", "rc_start", "rc_status", "rc_stop", "remote_create", "remote_delete", "remote_list",
-    "server_list", "server_status", "session_create", "session_delete", "session_list", "worker_resume",
+    "server_list", "server_peers", "server_status", "session_create", "session_delete", "session_list", "worker_resume",
   ]);
   await close();
 });
@@ -205,4 +206,28 @@ test("resolveOwner: header > query > 引数。不正な形式は投げる", () =
   assert.equal(resolveOwner({ requestInfo: { headers: {} } }, "a"), "a");
   assert.equal(resolveOwner(undefined), undefined);
   assert.throws(() => resolveOwner({ requestInfo: { headers: { "x-bantou-session": "a b" } } }), /owner/);
+});
+
+test("server_peers: follow の snapshot（pair と server ごとの状態）をそのまま返す。refresh: true なら先に確認する", async () => {
+  const checks: string[] = [];
+  const snap = {
+    pair: { server: "0.3.1", protocol: "1.3.0" },
+    peers: [{ key: "h /ws", id: "id-1", name: "bantou-server", server_version: "0.3.0", protocol_version: "1.3.0", state: "updating", detail: "更新中", update: { to: "0.3.1", running: { caps: 1, workers: 0, reports: 0 } }, since: "2026-10-31T00:00:00.000Z" }],
+  };
+  const follow = { check: async () => void checks.push("check"), snapshot: () => snap } as unknown as Follow;
+  const { client, close } = await connect({}, { follow });
+  const a = await client.callTool({ name: "server_peers", arguments: {} });
+  assert.notEqual(a.isError, true);
+  assert.deepEqual(JSON.parse(text(a)), snap);
+  assert.deepEqual(checks, []);
+  await client.callTool({ name: "server_peers", arguments: { refresh: true } });
+  assert.deepEqual(checks, ["check"]);
+  await close();
+});
+
+test("server_peers: follow が無ければ isError", async () => {
+  const { client, close } = await connect();
+  const r = await client.callTool({ name: "server_peers", arguments: {} });
+  assert.equal(r.isError, true);
+  await close();
 });

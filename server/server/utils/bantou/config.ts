@@ -14,6 +14,11 @@ export const DEFAULT_MCP = {
   bind: "127.0.0.1",
 } as const;
 
+/** 自己更新の取得元。{version} を更新先の版に置き換えて npx の --package に渡す。 */
+export const DEFAULT_UPDATE = {
+  spec: "bantou@{version}",
+} as const;
+
 /** `claude --permission-mode` の選択肢。 */
 export const PERMISSION_MODES = [
   "acceptEdits",
@@ -66,6 +71,8 @@ export interface Config {
   mcp: { port: number; bind: string };
   /** headless 実行（claude -p）の設定。 */
   session: SessionConfig;
+  /** 自己更新の設定。 */
+  update: { spec: string };
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -106,6 +113,16 @@ function parseMcp(v: unknown, path: string): Config["mcp"] {
     throw new Error(`config の mcp.bind は空でない文字列: ${path}`);
   }
   return { port, bind };
+}
+
+function parseUpdate(v: unknown, path: string): Config["update"] {
+  if (v === undefined) return { ...DEFAULT_UPDATE };
+  if (!isRecord(v)) throw new Error(`config の update はオブジェクト: ${path}`);
+  const spec = v.spec ?? DEFAULT_UPDATE.spec;
+  if (typeof spec !== "string" || !spec.includes("{version}") || spec.startsWith("-") || spec.includes("\0")) {
+    throw new Error(`config の update.spec は {version} を含む文字列（- で始められない）: ${path}`);
+  }
+  return { spec };
 }
 
 function parseStringList(v: unknown, key: string, path: string): string[] {
@@ -190,5 +207,6 @@ export async function loadConfig(path: string): Promise<Config> {
     broker: parseBroker(obj.broker, path),
     mcp: parseMcp(obj.mcp, path),
     session: parseSession(obj.session, path),
+    update: parseUpdate(obj.update, path),
   };
 }

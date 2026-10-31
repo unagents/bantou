@@ -161,6 +161,14 @@ async function main(): Promise<void> {
       return r;
     };
 
+    // 0. hello: supervisor 経由の起動でも版（package.json の version）と protocol 版が返る
+    await send({ bantou: 1, type: "hello" });
+    const hello = await nextReply("hello_result", 15_000);
+    const pkgVersion = (JSON.parse(await readFile(join(serverDir, "package.json"), "utf8")) as { version: string }).version;
+    if (hello.type !== "hello_result" || hello.server_version !== pkgVersion || hello.protocol_version !== MESSENGER_PROTOCOL.version || hello.update !== null) {
+      fail(`hello_result が不正（期待 version=${pkgVersion}）: ${JSON.stringify(hello)}`);
+    }
+
     // 1. kick_cap（new）
     await send({
       bantou: 1,

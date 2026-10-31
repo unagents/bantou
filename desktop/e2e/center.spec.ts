@@ -182,3 +182,78 @@ test("the remotes section says so when there is no remote", async ({ page }) => 
   await page.getByTestId("open-center").click();
   await expect(page.getByTestId("center-remotes-none")).toHaveText("remote なし");
 });
+
+const seedVersions = (page: Page, v: unknown) =>
+  page.evaluate((x) => {
+    (window as unknown as { __BANTOU_MOCK__: { centerVersions: unknown } }).__BANTOU_MOCK__.centerVersions = x;
+  }, v);
+
+const versionPeer = (over: Record<string, unknown>) => ({
+  key: "mac200 /ws",
+  id: "p2",
+  name: "bantou-server",
+  hostname: "mac200",
+  server_version: "0.3.0",
+  protocol_version: "1.3.0",
+  state: "ok",
+  detail: "版が一致",
+  since: "2026-10-31T00:00:00.000Z",
+  ...over,
+});
+
+test("the server versions section shows the paired versions and a matching server as 一致", async ({ page }) => {
+  await page.goto("/");
+  await mock(page, { enabled: true });
+  await page.getByTestId("open-center").click();
+  await expect(page.getByTestId("center-pair")).toContainText("server 0.3.0");
+  await expect(page.getByTestId("center-pair")).toContainText("protocol 1.3.0");
+  const row = page.getByTestId("center-version-row");
+  await expect(row).toHaveCount(1);
+  await expect(row).toHaveAttribute("data-state", "ok");
+  await expect(row.getByTestId("center-version-badge")).toHaveText("一致");
+  await expect(row).toContainText("mac200");
+});
+
+test("the server versions section shows 更新中 with the waiting caps and workers, 版違い and 更新失敗 with the reason", async ({ page }) => {
+  await page.goto("/");
+  await mock(page, { enabled: true });
+  await seedVersions(page, {
+    pair: { server: "0.3.1", protocol: "1.3.0" },
+    peers: [
+      versionPeer({ key: "a", id: "a", hostname: "host-a", state: "updating", detail: "更新中（0.3.0→0.3.1）: cap 1 / worker 2 の終了待ち", update: { to: "0.3.1", running: { caps: 1, workers: 2, reports: 0 } } }),
+      versionPeer({ key: "b", id: "b", hostname: "host-b", server_version: "0.2.3", protocol_version: "1.2.0", state: "unsupported", detail: "自動更新できない版（protocol 1.2.0）。server を手動で起動し直す" }),
+      versionPeer({ key: "c", id: "c", hostname: "host-c", state: "failed", detail: "更新に失敗（→0.3.1）: 版 0.3.1 を取得できない" }),
+      versionPeer({ key: "d", id: "d", hostname: "host-d", state: "mismatch", detail: "protocol の版が違う" }),
+    ],
+  });
+  await page.getByTestId("open-center").click();
+  const rows = page.getByTestId("center-version-row");
+  await expect(rows).toHaveCount(4);
+  await expect(rows.nth(0).getByTestId("center-version-badge")).toHaveText("更新中");
+  await expect(rows.nth(0).getByTestId("center-version-running")).toContainText("cap 1 / worker 2");
+  await expect(rows.nth(1).getByTestId("center-version-badge")).toHaveText("版違い");
+  await expect(rows.nth(1).getByTestId("center-version-detail")).toContainText("手動で起動し直す");
+  await expect(rows.nth(2).getByTestId("center-version-badge")).toHaveText("更新失敗");
+  await expect(rows.nth(2).getByTestId("center-version-detail")).toContainText("取得できない");
+  await expect(rows.nth(3).getByTestId("center-version-badge")).toHaveText("版違い");
+  await expect(rows.nth(3)).toHaveAttribute("data-state", "mismatch");
+});
+
+test("pressing update re-reads the server versions", async ({ page }) => {
+  await page.goto("/");
+  await mock(page, { enabled: true });
+  await page.getByTestId("open-center").click();
+  await expect(page.getByTestId("center-version-row").getByTestId("center-version-badge")).toHaveText("一致");
+  await seedVersions(page, { pair: { server: "0.3.0", protocol: "1.3.0" }, peers: [versionPeer({ state: "updating", detail: "更新中", update: { to: "0.3.0", running: { caps: 0, workers: 1, reports: 0 } } })] });
+  await page.getByTestId("center-refresh").click();
+  await expect(page.getByTestId("center-version-row").getByTestId("center-version-badge")).toHaveText("更新中");
+});
+
+test("the server versions section says so when there is no server", async ({ page }) => {
+  await page.goto("/");
+  await mock(page, { enabled: true });
+  await seedVersions(page, { pair: { server: null, protocol: "1.3.0" }, peers: [] });
+  await page.getByTestId("open-center").click();
+  await expect(page.getByTestId("center-versions-none")).toHaveText("server なし");
+  await expect(page.getByTestId("center-pair")).toContainText("server 不明");
+});

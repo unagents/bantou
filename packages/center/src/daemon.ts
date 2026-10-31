@@ -8,6 +8,8 @@ import { mkdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { log, setLogFile } from "./log.js";
 import { watchParent } from "./parent-watch.js";
+import { createFollow } from "./follow.js";
+import { resolvePair } from "./pair.js";
 import { createRemoteManager } from "./remotes.js";
 import { createRemoteControlSupervisor } from "./remote-control.js";
 import { createSessionManager } from "./sessions.js";
@@ -57,6 +59,11 @@ export async function runDaemon(args: CliArgs): Promise<void> {
       }
     },
   });
+  // desktop のビルドと組になる版。違う server には更新を指示し、版が揃うまで指示を送らない
+  const pair = resolvePair({ warn: log });
+  log(`組の版: server=${pair.server ?? "(不明、版合わせは無効)"} protocol=${pair.protocol}`);
+  const follow = createFollow({ link, pair, log });
+  link.setGate((peer, command) => follow.gate(peer, command));
   // session / remote の保存先は config と同じ dir（config の projects には書かない）
   const stateDir = dirname(resolve(configPath));
   const sessions = createSessionManager({
@@ -81,6 +88,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     hard.unref();
     try {
       // 子の停止を最優先にする（http.close が長引いても子に signal が届くように）
+      follow.stop();
       const results = await Promise.allSettled([supervisor.shutdown(), http?.close(), link.close()]);
       for (const r of results) {
         if (r.status === "rejected") throw r.reason;
@@ -109,7 +117,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   process.stderr.on("error", () => {});
   process.stdout.on("error", () => {});
 
-  const makeServer = () => createCenterServer({ config, supervisor, link, sessions, remotes });
+  const makeServer = () => createCenterServer({ config, supervisor, link, sessions, remotes, follow });
   if (args.transport === "http") {
     if (!config.token || config.token.length < MIN_TOKEN_LEN) {
       throw new Error(`http transport には config の token（${MIN_TOKEN_LEN} 文字以上）が必要: ${configPath}`);
@@ -127,7 +135,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   }
 
   // transport を先に繋いでから、接続と autostart をバックグラウンドで進める
-  void link.connectAll();
+  void link.connectAll().finally(() => follow.start());
   void remotes.restore().catch((e: unknown) => log(`remote 記録の復元失敗: ${e instanceof Error ? e.message : String(e)}`));
   void sessions.restore().catch((e: unknown) => log(`session の復帰失敗: ${e instanceof Error ? e.message : String(e)}`));
   for (const p of config.projects) {

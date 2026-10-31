@@ -4,6 +4,7 @@ import { z } from "zod";
 import { OWNER_HEADER, OWNER_PATTERN, OWNER_QUERY, remoteCreateSchema, type RemoteManager } from "./remotes.js";
 import type { RemoteControlSupervisor } from "./remote-control.js";
 import { sessionCreateSchema, SESSION_NAME, type SessionManager } from "./sessions.js";
+import type { Follow } from "./follow.js";
 import type { ServerLink } from "./server-link.js";
 
 type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean };
@@ -58,9 +59,9 @@ const ownerArg = z.string().optional().describe(
 
 export function registerTools(
   server: McpServer,
-  deps: { supervisor: RemoteControlSupervisor; link: ServerLink; sessions: SessionManager; remotes: RemoteManager },
+  deps: { supervisor: RemoteControlSupervisor; link: ServerLink; sessions: SessionManager; remotes: RemoteManager; follow?: Follow },
 ): void {
-  const { supervisor, link, sessions, remotes } = deps;
+  const { supervisor, link, sessions, remotes, follow } = deps;
 
   // -- A. center 上の session（番頭が使う） --
   server.registerTool(
@@ -179,6 +180,21 @@ export function registerTools(
       description: "設定済みの bantou-server と、その接続・到達状況を返す。server の peer は bantou protocol で自動発見し（servers[].peer 指定があればその名前）、serverPeer に直近の送信先を返す",
     },
     () => guard(async () => json(await link.list())),
+  );
+  server.registerTool(
+    "server_peers",
+    {
+      title: "server の版の状態",
+      description:
+        "protocol bantou で発見した server ごとの版の状態。pair = この center と組になる版（server = npm bantou の版、protocol）。peers[].state は ok（一致）/ updating（更新中。update.running = 待っている cap/worker の件数）/ mismatch・unsupported（版違い）/ failed（更新失敗。detail に理由）/ lost / unknown。版が違う server へは center が自動で更新を指示する。refresh: true で今すぐ確認してから返す",
+      inputSchema: { refresh: z.boolean().optional() },
+    },
+    ({ refresh }) =>
+      guard(async () => {
+        if (!follow) throw new Error("版の確認が無効");
+        if (refresh) await follow.check();
+        return json(follow.snapshot());
+      }),
   );
   server.registerTool(
     "cap_kick",

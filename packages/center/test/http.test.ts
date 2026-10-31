@@ -16,7 +16,7 @@ const AUTH = { authorization: `Bearer ${TOKEN}` };
 
 const TOOLS = [
   "cap_kick", "rc_list", "rc_start", "rc_status", "rc_stop", "remote_create", "remote_delete", "remote_list",
-  "server_list", "server_status", "session_create", "session_delete", "session_list", "worker_resume",
+  "server_list", "server_peers", "server_status", "session_create", "session_delete", "session_list", "worker_resume",
 ];
 
 async function boot(

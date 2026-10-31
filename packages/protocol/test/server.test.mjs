@@ -6,6 +6,8 @@ import {
   parseServerCommand, isServerReply, parseServerReply,
   isActivityState, isServerNotice, parseServerNotice, ACTIVITY_STATES,
   isValidAgentId, isAgentState, SERVER_NAME, MESSENGER_PROTOCOL, AGENT_ID_PATTERN,
+  isHelloCommand, isUpdateServerCommand, isValidServerVersion, isErrorCode, ERROR_CODES,
+  FOLLOW_MIN_PROTOCOL, SERVER_VERSION_PATTERN,
 } from "../dist/index.js";
 
 const activityAgent = {
@@ -25,6 +27,19 @@ const resumeMin = { bantou: 1, type: "resume_worker", worker_id: "w1", prompt: "
 const resumeRepo = { ...resumeMin, repo: "https://example.com/r.git", branch: "main" };
 const status = { bantou: 1, type: "status" };
 const stopCap = { bantou: 1, type: "stop_cap", cap_id: "c1" };
+const hello = { bantou: 1, type: "hello" };
+const updateServer = { bantou: 1, type: "update_server", version: "0.3.1" };
+const running = { caps: 1, workers: 2, reports: 0 };
+const helloResult = {
+  bantou: 1, type: "hello_result", ok: true, server_version: "0.3.0", protocol_version: "1.3.0",
+  update: { state: "waiting", from: "0.3.0", to: "0.3.1", running },
+  last_update: { to: "0.3.2", ok: false, error: "npx failed", at: "2026-10-31T00:00:00.000Z" },
+};
+const updateResult = { bantou: 1, type: "update_result", ok: true, state: "waiting", from: "0.3.0", to: "0.3.1", running };
+const updatingErr = {
+  bantou: 1, type: "error", ok: false, message: "server 更新待ち", command: "kick_cap", cap_id: "c1",
+  code: "updating", retryable: true,
+};
 const stopResult = { bantou: 1, type: "stop_result", ok: true, cap_id: "c1", stopped: true };
 
 test("server name", () => {
@@ -153,7 +168,7 @@ test("messenger/protocol.json matches MESSENGER_PROTOCOL and the message set", (
   assert.equal(manifest.version, MESSENGER_PROTOCOL.version);
   assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
   assert.equal(typeof manifest.description, "string");
-  assert.deepEqual(Object.keys(manifest.messages).sort(), ["activity", "cap_result", "error", "kick_cap", "status", "status_result", "stop_cap", "stop_result"]);
+  assert.deepEqual(Object.keys(manifest.messages).sort(), ["activity", "cap_result", "error", "hello", "hello_result", "kick_cap", "status", "status_result", "stop_cap", "stop_result", "update_result", "update_server"]);
   for (const [k, schema] of Object.entries(manifest.messages)) {
     assert.equal(schema.type, "object", k);
     assert.equal(schema.properties.type.const, k, k);
@@ -164,7 +179,7 @@ test("messenger/protocol.json matches MESSENGER_PROTOCOL and the message set", (
 test("protocol.json required fields agree with the guards", () => {
   const m = manifest.messages;
   // every sample accepted by the guards carries all required fields of its schema
-  const samples = { activity: activityNotice, kick_cap: kickMin, stop_cap: stopCap, stop_result: stopResult, status, cap_result: capResult, status_result: statusReply, error: errReply };
+  const samples = { activity: activityNotice, kick_cap: kickMin, stop_cap: stopCap, stop_result: stopResult, status, cap_result: capResult, status_result: statusReply, error: errReply, hello, hello_result: helloResult, update_server: updateServer, update_result: updateResult };
   for (const [k, v] of Object.entries(samples)) {
     for (const f of m[k].required) assert.ok(f in v, `${k} sample lacks required ${f}`);
     for (const f of Object.keys(v)) assert.ok(f in m[k].properties, `${k}.${f} not in schema`);
@@ -186,8 +201,8 @@ test("stop_cap / stop_result", () => {
   assert.equal(isServerReply({ ...stopResult, ok: false }), false);
   assert.equal(isServerReply({ ...stopResult, cap_id: "a b" }), false);
   assert.ok(isServerReply({ bantou: 1, type: "error", ok: false, message: "x", command: "stop_cap", cap_id: "c1" }));
-  assert.deepEqual(manifest.messages.error.properties.command.enum, ["kick_cap", "resume_worker", "stop_cap", "status"]);
-  assert.equal(MESSENGER_PROTOCOL.version, "1.2.0");
+  assert.deepEqual(manifest.messages.error.properties.command.enum, ["kick_cap", "resume_worker", "stop_cap", "status", "hello", "update_server"]);
+  assert.equal(MESSENGER_PROTOCOL.version, "1.3.0");
 });
 
 test("activity notice guard", () => {
@@ -214,4 +229,38 @@ test("an activity notice is not a reply or a command", () => {
   assert.equal(parseServerReply(JSON.stringify(activityNotice)), undefined);
   assert.equal(isServerCommand(activityNotice), false);
   assert.equal(isServerNotice(capResult), false);
+});
+
+test("hello / update_server / hello_result / update_result", () => {
+  assert.ok(isServerCommand(hello) && isHelloCommand(hello) && !isUpdateServerCommand(hello));
+  assert.ok(isServerCommand(updateServer) && isUpdateServerCommand(updateServer) && !isHelloCommand(updateServer));
+  assert.deepEqual(parseServerCommand(JSON.stringify(updateServer)), updateServer);
+  for (const v of ["", "1", "1.2", "latest", "-1.0.0", "1.0.0 --x", "1.0.0\n", "a.b.c", 1, null, undefined]) {
+    assert.equal(isServerCommand({ ...updateServer, version: v }), false, String(v));
+  }
+  for (const v of ["0.3.1", "10.20.30", "0.0.0-e2e.1", "1.0.0-rc.1"]) assert.ok(isValidServerVersion(v), v);
+  assert.equal(SERVER_VERSION_PATTERN.source, manifest.messages.update_server.properties.version.pattern);
+  assert.equal(FOLLOW_MIN_PROTOCOL, "1.3.0");
+  assert.ok(isServerReply(helloResult));
+  assert.deepEqual(parseServerReply(JSON.stringify(helloResult)), helloResult);
+  assert.ok(isServerReply({ ...helloResult, update: null, last_update: null }));
+  assert.equal(isServerReply({ ...helloResult, update: undefined }), false);
+  assert.equal(isServerReply({ ...helloResult, update: { ...helloResult.update, state: "x" } }), false);
+  assert.equal(isServerReply({ ...helloResult, last_update: { ...helloResult.last_update, ok: true } }), false);
+  assert.equal(isServerReply({ ...helloResult, server_version: 1 }), false);
+  assert.ok(isServerReply(updateResult));
+  assert.ok(isServerReply({ ...updateResult, state: "current" }) && isServerReply({ ...updateResult, state: "restarting" }));
+  assert.equal(isServerReply({ ...updateResult, state: "done" }), false);
+  assert.equal(isServerReply({ ...updateResult, running: { caps: 1 } }), false);
+  assert.equal(isServerReply({ ...updateResult, ok: false }), false);
+});
+
+test("error code / retryable", () => {
+  assert.ok(isServerReply(updatingErr));
+  for (const c of ERROR_CODES) assert.ok(isErrorCode(c) && isServerReply({ ...updatingErr, code: c }), c);
+  assert.deepEqual([...ERROR_CODES], manifest.messages.error.properties.code.enum);
+  assert.equal(isServerReply({ ...updatingErr, code: "nope" }), false);
+  assert.equal(isServerReply({ ...updatingErr, retryable: "yes" }), false);
+  assert.ok(isServerReply({ ...updatingErr, command: "update_server", code: "update_failed", retryable: false }));
+  assert.ok(isServerReply({ bantou: 1, type: "error", ok: false, message: "x" }));
 });

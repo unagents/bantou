@@ -8,6 +8,8 @@ import {
   parseServerReply,
   type CapResultReply,
   type ErrorReply,
+  type ErrorCode,
+  type HelloResultReply,
   type KickCapCommand,
   type ServerNotice,
   type ResumeWorkerCommand,
@@ -15,6 +17,7 @@ import {
   type StatusReply,
   type StopCapCommand,
   type StopResultReply,
+  type UpdateResultReply,
   type WorkerResultReply,
 } from "@agent-hand/bantou-protocol";
 import { DEFAULT_SERVER_TIMEOUT_MS, type Config, type ServerConfig } from "./config.js";
@@ -30,6 +33,9 @@ export interface LinkMeta {
 export interface LinkPeer {
   id: string;
   name: string;
+  /** peer の summary（server は `<host> <workspace>`。peer id が変わっても同じ server を指す key に使う）。 */
+  summary?: string;
+  hostname?: string;
   protocols?: Array<{ name: string; version: string }>;
 }
 
@@ -72,9 +78,23 @@ export type StopCapInput = Omit<StopCapCommand, "bantou" | "type">;
 export interface ServerPeer {
   id: string;
   name: string;
+  summary?: string;
+  hostname?: string;
   /** peer が宣言している bantou protocol の version（無ければ undefined）。 */
   version?: string;
 }
+
+/** 版が違っても送る制御メッセージ（server の更新に使う）。protocol の版の門を通さない。 */
+const CONTROL_COMMANDS: readonly ServerCommandType[] = ["hello", "update_server"];
+
+/** hello / update_server の返信待ち。 */
+export const FOLLOW_TIMEOUT_MS = 10_000;
+
+/**
+ * 送信前の門。protocol の版が合わない、または更新待ちの server への指示を、送る前に断る。
+ * 断る時は retryable な error 返信（code 付き）を返す。通すなら undefined。
+ */
+export type Gate = (peer: { id: string; version?: string }, command: ServerCommandType) => ErrorReply | undefined;
 
 /** stop_cap の返信待ち（server は kill を待つので、通常の指示より短く切る）。 */
 export const STOP_TIMEOUT_MS = 30_000;
@@ -96,10 +116,18 @@ export interface ServerLink {
   kickCapOn(peer: ServerPeer, cmd: KickCapInput): Promise<CapResultReply | ErrorReply>;
   /** 指定 peer へ stop_cap を送り、返信（stop_result / error）まで待つ。 */
   stopCapOn(peer: ServerPeer, cmd: StopCapInput): Promise<StopResultReply | ErrorReply>;
+  /** 指定 peer へ hello を送り、hello_result（または error）を待つ。protocol の版の門は通らない。 */
+  hello(peer: ServerPeer): Promise<HelloResultReply | ErrorReply>;
+  /** 指定 peer へ update_server を送り、update_result（または error）を待つ。protocol の版の門は通らない。 */
+  updateServer(peer: ServerPeer, version: string): Promise<UpdateResultReply | ErrorReply>;
+  /** 送る前の門（protocol の版と更新待ち）。断るなら error 返信、通すなら undefined。 */
+  gate(peer: ServerPeer, command: ServerCommandType): ErrorReply | undefined;
+  /** 追加の門（更新待ちの判定）を差し込む。protocol の版の門はこの前に常に効く。 */
+  setGate(g: Gate | undefined): void;
   close(): Promise<void>;
 }
 
-type ReplyKind = "cap_result" | "worker_result" | "stop_result" | "status_result";
+type ReplyKind = "cap_result" | "worker_result" | "stop_result" | "status_result" | "hello_result" | "update_result";
 
 interface Pending {
   kind: ReplyKind;
@@ -132,6 +160,10 @@ interface Slot {
 export interface Target {
   to: string;
   meta: LinkMeta;
+  /** 宛先が宣言している protocol の版（発見で分かった時のみ。名前宛てのフォールバックでは undefined = 不明）。 */
+  declared?: string;
+  /** 宛先の peer id（発見で分かった時のみ）。 */
+  peerId?: string;
 }
 
 const KIND_COMMAND: Record<ReplyKind, ServerCommandType> = {
@@ -139,6 +171,8 @@ const KIND_COMMAND: Record<ReplyKind, ServerCommandType> = {
   worker_result: "resume_worker",
   stop_result: "stop_cap",
   status_result: "status",
+  hello_result: "hello",
+  update_result: "update_server",
 };
 
 /** config.servers に無い、発見ベースの要求に使う内部 slot の名前。list / connectAll には出さない。 */
@@ -154,13 +188,24 @@ export function stripWarning(text: string): string {
   return t;
 }
 
-const errorReply = (message: string, command?: ServerCommandType): ErrorReply => ({
+const errorReply = (message: string, command?: ServerCommandType, extra: { code?: ErrorCode; retryable?: boolean } = {}): ErrorReply => ({
   bantou: PROTOCOL_VERSION,
   type: "error",
   ok: false,
   message,
   ...(command ? { command } : {}),
+  ...(extra.code ? { code: extra.code } : {}),
+  ...(extra.retryable !== undefined ? { retryable: extra.retryable } : {}),
 });
+
+/** protocol の版が合わない server への指示を断る error。 */
+export function versionMismatchError(declared: string | undefined, command: ServerCommandType): ErrorReply {
+  return errorReply(
+    `server の protocol の版が合わない（server=${declared ?? "不明"}, center=${MESSENGER_PROTOCOL.version}）。版が揃うまで指示を送らない。server の更新後に再送`,
+    command,
+    { code: "version_mismatch", retryable: true },
+  );
+}
 
 /**
  * 実 client を作る。普通の agent-messenger client として、通常の解決
@@ -188,6 +233,7 @@ export function createServerLink(opts: {
   onNotice?: (n: ServerNotice) => void;
 }): ServerLink {
   const { config, log } = opts;
+  let extraGate: Gate | undefined;
   const clientFactory = opts.clientFactory ?? ((s: ServerConfig): LinkClient => createClient(s, log));
   const healthCheck =
     opts.healthCheck ??
@@ -213,7 +259,16 @@ export function createServerLink(opts: {
   const peerTarget = (peer: ServerPeer): Target => ({
     to: peer.id,
     meta: { protocol: MESSENGER_PROTOCOL.protocol, version: peer.version ?? MESSENGER_PROTOCOL.version },
+    ...(peer.version ? { declared: peer.version } : {}),
+    peerId: peer.id,
   });
+
+  /** 門。制御メッセージは通す。宣言された protocol の版が違えば断り、次に更新待ちの判定。版が不明（名前宛て）は通す。 */
+  const gateOf = (peer: { id: string; version?: string }, command: ServerCommandType): ErrorReply | undefined => {
+    if (CONTROL_COMMANDS.includes(command)) return undefined;
+    if (peer.version !== undefined && peer.version !== MESSENGER_PROTOCOL.version) return versionMismatchError(peer.version, command);
+    return extraGate?.(peer, command);
+  };
 
   /** pending を取り出して解決する。 */
   const settle = (slot: Slot, p: Pending, value: unknown): void => {
@@ -226,6 +281,8 @@ export function createServerLink(opts: {
   /** 送信元が server か。解決済みの peer id、bantou protocol の meta、SERVER_NAME、servers[].peer のいずれか。 */
   const fromServer = (slot: Slot, m: LinkInbound): boolean =>
     (m.from_id !== undefined && m.from_id === slot.serverId) ||
+    // hello / update_server は送り先の peer id が key。その peer からの返信は server の返信として受ける
+    (m.from_id !== undefined && slot.pending.some((p) => (p.kind === "hello_result" || p.kind === "update_result") && p.key === m.from_id)) ||
     m.meta?.protocol === MESSENGER_PROTOCOL.protocol ||
     m.from_name === SERVER_NAME ||
     (slot.cfg.peer !== undefined && (m.from_name === slot.cfg.peer || m.from_id === slot.cfg.peer));
@@ -256,6 +313,11 @@ export function createServerLink(opts: {
       target = slot.pending.find((p) => p.kind === "stop_result" && p.key === r.cap_id);
     } else if (r.type === "status_result") {
       target = slot.pending.find((p) => p.kind === "status_result");
+    } else if (r.type === "hello_result" || r.type === "update_result") {
+      // 複数 server へ同時に送るので、送り先の peer id（from_id）で照合する
+      target = slot.pending.find((p) => p.kind === r.type && (m.from_id === undefined || p.key === m.from_id));
+    } else if (r.command === "hello" || r.command === "update_server") {
+      target = slot.pending.find((p) => p.command === r.command && (m.from_id === undefined || p.key === m.from_id));
     } else if (r.command === "stop_cap" && r.cap_id !== undefined) {
       // stop_cap の error は、同じ cap_id の kick_cap の待ちと取り違えない
       target = slot.pending.find((p) => p.kind === "stop_result" && p.key === r.cap_id);
@@ -343,7 +405,12 @@ export function createServerLink(opts: {
           const v = pick.protocols?.find((p) => p.name === MESSENGER_PROTOCOL.protocol)?.version;
           slot.serverId = pick.id;
           slot.serverPeer = pick.id;
-          return { to: pick.id, meta: { protocol: meta.protocol, version: v ?? meta.version } };
+          return {
+            to: pick.id,
+            meta: { protocol: meta.protocol, version: v ?? meta.version },
+            ...(v ? { declared: v } : {}),
+            peerId: pick.id,
+          };
         }
         log(`protocol 発見 0 件、名前宛てにフォールバック: server=${slot.cfg.name}`);
       } catch (e) {
@@ -381,6 +448,12 @@ export function createServerLink(opts: {
       if (closed) return errorReply("center 終了", command);
       const target = opts.target ?? (await resolveTarget(slot, client));
       if (closed) return errorReply("center 終了", command);
+      // 版の門: protocol の版が合わない server、更新待ちの server へは送らない（hello / update_server は別）
+      const blocked = gateOf({ id: target.peerId ?? target.to, ...(target.declared ? { version: target.declared } : {}) }, command);
+      if (blocked) {
+        log(`指示を送らない: server=${server} to=${target.to} type=${command} ${blocked.code ?? ""} ${blocked.message}`);
+        return blocked;
+      }
       return new Promise<R | ErrorReply>((resolve) => {
         const timeoutMs = opts.timeoutMs ?? slot.cfg.timeoutMs;
         const p: Pending = {
@@ -428,7 +501,13 @@ export function createServerLink(opts: {
     const peers = await client.listPeers("all", { protocol: MESSENGER_PROTOCOL.protocol });
     return peers.map((p) => {
       const version = p.protocols?.find((x) => x.name === MESSENGER_PROTOCOL.protocol)?.version;
-      return { id: p.id, name: p.name, ...(version ? { version } : {}) };
+      return {
+        id: p.id,
+        name: p.name,
+        ...(p.summary ? { summary: p.summary } : {}),
+        ...(p.hostname ? { hostname: p.hostname } : {}),
+        ...(version ? { version } : {}),
+      };
     });
   };
 
@@ -482,6 +561,14 @@ export function createServerLink(opts: {
       request<CapResultReply>(discoveryName, "cap_result", cmd.cap_id, cmd, { target: peerTarget(peer) }),
     stopCapOn: (peer, cmd) =>
       request<StopResultReply>(discoveryName, "stop_result", cmd.cap_id, cmd, { target: peerTarget(peer), timeoutMs: STOP_TIMEOUT_MS }),
+    hello: (peer) =>
+      request<HelloResultReply>(discoveryName, "hello_result", peer.id, {}, { target: peerTarget(peer), timeoutMs: FOLLOW_TIMEOUT_MS }),
+    updateServer: (peer, version) =>
+      request<UpdateResultReply>(discoveryName, "update_result", peer.id, { version }, { target: peerTarget(peer), timeoutMs: FOLLOW_TIMEOUT_MS }),
+    gate: (peer, command) => gateOf(peer, command),
+    setGate: (g) => {
+      extraGate = g;
+    },
     async close() {
       closed = true;
       clearInterval(watcher);
