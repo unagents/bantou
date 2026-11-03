@@ -58,6 +58,14 @@ watch(modalOpen, (v) => {
 // --- session side menu (the connected center's session_list; selection lives in memory only) ----
 
 const selectedName = ref<string | null>(null);
+/** Session whose project settings dialog is open. */
+const settingsFor = ref<string | null>(null);
+const settingsDialogOpen = computed({
+  get: () => settingsFor.value !== null,
+  set: (v) => {
+    if (!v) settingsFor.value = null;
+  },
+});
 watch(
   sessions,
   (list) => {
@@ -137,13 +145,13 @@ function onSessionCreated(name: string) {
             />
           </UTooltip>
           <ul class="flex flex-col">
-            <li v-for="g in sessions" :key="g.name">
+            <li v-for="g in sessions" :key="g.name" class="border-cork-border relative flex items-stretch border-b">
               <button
                 type="button"
                 data-testid="side-row"
                 :data-name="g.name"
                 :aria-current="g.name === selectedName ? 'true' : undefined"
-                class="border-cork-border flex w-full items-center gap-2 border-b px-3 py-2 text-left text-sm hover:bg-cork-elevated"
+                class="flex min-w-0 flex-1 items-center gap-2 px-3 py-2 text-left text-sm hover:bg-cork-elevated"
                 :class="g.name === selectedName ? 'bg-cork-elevated font-semibold' : ''"
                 @click="selectedName = g.name"
               >
@@ -162,6 +170,17 @@ function onSessionCreated(name: string) {
                   {{ g.working.length }} / {{ g.queued.length }}
                 </span>
               </button>
+              <UButton
+                class="rounded-none"
+                variant="ghost"
+                color="neutral"
+                size="xs"
+                icon="i-lucide-settings"
+                :aria-label="`${g.name} の設定`"
+                data-testid="session-settings-open"
+                :data-name="g.name"
+                @click="settingsFor = g.name"
+              />
             </li>
           </ul>
         </nav>
@@ -219,6 +238,7 @@ function onSessionCreated(name: string) {
       :existing="centerList.sessions.map((s) => s.name)"
       @done="onSessionCreated"
     />
+    <ProjectSettingsDialog v-if="settingsFor !== null" v-model:open="settingsDialogOpen" :name="settingsFor" />
     <SettingsDialog v-if="settingsOpen" v-model:open="settingsOpen" />
     <CenterDialog v-if="centerOpen" v-model:open="centerOpen" />
   </div>

@@ -16,14 +16,14 @@ export {
 export {
   CENTER_SESSIONS_CHANGED_EVENT,
   createSession,
-  getSessionInstructions,
+  getSessionSettings,
   listSessions,
   OS_NETWORK_EVENT,
   OS_WAKE_EVENT,
   CENTER_RUNNING_EVENT,
   refreshSessions,
   SESSIONS_CHANGED_EVENT,
-  setSessionInstructions,
+  updateSessionSettings,
 } from "./sessions";
 export {
   CHECK_FOR_UPDATES_EVENT,

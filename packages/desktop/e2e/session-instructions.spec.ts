@@ -5,7 +5,7 @@ import { boardSeed } from "./seed";
 
 type Mock = {
   centerSessions: Record<string, unknown>[];
-  sessionDefs: Record<string, { instructions?: string }>;
+  centerSettings: Record<string, Record<string, unknown>>;
   calls: { cmd: string; args?: Record<string, unknown> }[];
 };
 
@@ -30,39 +30,51 @@ test.describe("session instructions", () => {
     await expect(page.getByText("master-cap への追加指示（system prompt に追記）")).toHaveCount(0);
   });
 
-  test.describe("heading edit", () => {
+  test.describe("sidebar gear", () => {
     test.use({ seed: boardSeed });
 
-    test("the heading opens a multi-line editor with the note; saving keeps it per session and shows it again", async ({ page }) => {
+    test("the gear on a side row opens the project settings; saving keeps it on the center per session and shows it again", async ({ page }) => {
       await page.goto("/");
-      await pickSession(page, "careery");
-      const section = page.locator('section[aria-label="careery"]');
-      await section.getByTestId("session-instructions-open").click();
-      const dlg = page.getByTestId("instructions-dialog");
-      await expect(dlg.getByTestId("instructions-text")).toHaveValue("");
-      await expect(dlg.getByTestId("instructions-note")).toHaveText(NOTE);
-      await expect(dlg.getByTestId("instructions-save")).toBeDisabled();
-      await dlg.getByTestId("instructions-text").fill(MULTI);
-      await dlg.getByTestId("instructions-save").click();
+      const gear = (name: string) => page.locator(`[data-testid=session-settings-open][data-name="${name}"]`);
+      await gear("careery").click();
+      const dlg = page.getByTestId("settings-dialog");
+      await expect(dlg.getByTestId("settings-section-instructions")).toBeVisible();
+      await expect(dlg.getByTestId("settings-instructions")).toHaveValue("");
+      await expect(dlg.getByTestId("settings-instructions-note")).toHaveText(NOTE);
+      await expect(dlg.getByTestId("settings-save")).toBeDisabled();
+      await dlg.getByTestId("settings-instructions").fill(MULTI);
+      await dlg.getByTestId("settings-save").click();
       await expect(dlg).toBeHidden();
-      expect(await mock(page, (m) => m.sessionDefs)).toEqual({ careery: { instructions: MULTI } });
+      expect(await mock(page, (m) => m.centerSettings)).toEqual({ careery: { instructions: MULTI } });
 
       // reopen: the saved text; another session has none
-      await section.getByTestId("session-instructions-open").click();
-      await expect(page.getByTestId("instructions-text")).toHaveValue(MULTI);
+      await gear("careery").click();
+      await expect(page.getByTestId("settings-instructions")).toHaveValue(MULTI);
       await page.keyboard.press("Escape");
-      await pickSession(page, "stroke-board");
-      await page.locator('section[aria-label="stroke-board"]').getByTestId("session-instructions-open").click();
-      await expect(page.getByTestId("instructions-text")).toHaveValue("");
+      await gear("stroke-board").click();
+      await expect(page.getByTestId("settings-instructions")).toHaveValue("");
       await page.keyboard.press("Escape");
 
       // clearing is a change that removes it
+      await gear("careery").click();
+      await page.getByTestId("settings-instructions").fill("");
+      await page.getByTestId("settings-save").click();
+      await expect(page.getByTestId("settings-dialog")).toBeHidden();
+      expect(await mock(page, (m) => m.centerSettings)).toEqual({});
+    });
+
+    test("the gear does not select the row; an over-long text cannot be saved", async ({ page }) => {
+      await page.goto("/");
       await pickSession(page, "careery");
-      await section.getByTestId("session-instructions-open").click();
-      await page.getByTestId("instructions-text").fill("");
-      await page.getByTestId("instructions-save").click();
-      await expect(page.getByTestId("instructions-dialog")).toBeHidden();
-      expect(await mock(page, (m) => m.sessionDefs)).toEqual({});
+      await page.locator(`[data-testid=session-settings-open][data-name="stroke-board"]`).click();
+      await expect(sideRow(page, "careery")).toHaveAttribute("aria-current", "true");
+      const dlg = page.getByTestId("settings-dialog");
+      await dlg.getByTestId("settings-instructions").fill("あ".repeat(16001));
+      await expect(dlg.getByTestId("settings-problem")).toBeVisible();
+      await expect(dlg.getByTestId("settings-save")).toBeDisabled();
+      await dlg.getByTestId("settings-instructions").fill("あ".repeat(16000));
+      await expect(dlg.getByTestId("settings-problem")).toHaveCount(0);
+      await expect(dlg.getByTestId("settings-save")).toBeEnabled();
     });
   });
 
@@ -80,8 +92,8 @@ test.describe("session instructions", () => {
     await dlg.getByTestId("add-create").click();
     await expect(dlg).toBeHidden();
     const call = await mock(page, (m) => m.calls.filter((c) => c.cmd === "create_session").at(-1));
-    expect(call?.args).toEqual({ name: "pm-ins", instructions: MULTI });
-    expect(await mock(page, (m) => m.sessionDefs)).toEqual({ "pm-ins": { instructions: MULTI } });
+    expect(call?.args).toEqual({ name: "pm-ins", settings: { instructions: MULTI } });
+    expect(await mock(page, (m) => m.centerSettings)).toEqual({ "pm-ins": { instructions: MULTI } });
   });
 
   test("creating without instructions sends none and saves none", async ({ page }) => {
@@ -92,8 +104,8 @@ test.describe("session instructions", () => {
     await page.getByTestId("add-create").click();
     await expect(page.getByTestId("add-dialog")).toBeHidden();
     const call = await mock(page, (m) => m.calls.filter((c) => c.cmd === "create_session").at(-1));
-    expect(call?.args?.instructions ?? null).toBeNull();
-    expect(await mock(page, (m) => m.sessionDefs)).toEqual({});
+    expect(call?.args?.settings?.instructions ?? null).toBeNull();
+    expect(await mock(page, (m) => m.centerSettings)).toEqual({});
   });
   });
 

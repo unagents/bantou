@@ -43,4 +43,26 @@ branch: `feature/session-instructions-per-session`（base: develop）。
 
 ## desktop（w-si-desktop）
 
-（desktop worker が追記）
+### 内容
+
+- 保存先は center のプロジェクト設定（`session_settings_get` / `session_settings_update` / `session_create` の `settings`）。desktop の `settings.json` には持たない（前の作りは破棄）。
+- Rust（`session.rs`）: `session_get_settings` / `session_update_settings`（center の tool を呼ぶ）、`create_session` が `settings` を受ける。16000 文字・型の検査と、空の `instructions` を `null` にする処理を持つ。未知の項目は素通し。
+- 画面: 左サイドバーの各行の歯車 → `ProjectSettingsDialog`（項目ごとの節。今は追加指示のみ）。追加ダイアログも同じ欄（`ProjectSettingsFields`）。注意文あり。巻物印は据え置き。ヘッダーの「指示」ボタンと、設定ダイアログの center 共通の欄は削除。
+- 将来項目（skills / outputStyle）は `SettingsDraft` と `ProjectSettingsFields` の節を足す形にしただけで、実装していない。
+
+### テスト
+
+- cargo test 259 passed / 0 failed（5 ignored）。設定の検査、create / update の body、center の返答（`{ name, settings }`）の読み取り。
+- e2e 92 passed / 0 failed（静的ビルド + ms-playwright chromium）。歯車 → ダイアログ → 保存・再表示・消去、行を選択しない、上限超過で保存不可、追加ダイアログの欄・注意文・body の `settings`、設定ダイアログに共通欄が無いこと。
+
+### 変更ファイル
+
+- `packages/desktop/src-tauri/src/{session,center,lib}.rs`
+- `packages/desktop/src/{api/index.ts,api/sessions.ts,types/index.ts,pages/index.vue}`
+- `packages/desktop/src/components/{ProjectSettingsDialog,ProjectSettingsFields}.vue`（新規）、`AddSessionDialog.vue`、`SessionColumn.vue`、`SettingsDialog.vue`
+- `packages/desktop/src/composables/sessionInstructions.ts`（新規）
+- `packages/desktop/e2e/{mock/bantou.ts,session-instructions.spec.ts}`、`packages/desktop/README.md`
+
+### 未検証
+
+- 実 center との結合（mock の center 応答のみ）。

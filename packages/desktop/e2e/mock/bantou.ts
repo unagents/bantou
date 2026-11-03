@@ -70,8 +70,8 @@ export class MockBantou {
   sessionCache: SessionList = { sessions: [], reachable: true, reason: null, rev: 0 };
   /** When set, `session_create` fails with this message (center error). */
   centerSessionCreateError: string | null = null;
-  /** `settings.json` `sessions`: instructions saved per session name. */
-  sessionDefs: Record<string, { instructions?: string }> = {};
+  /** Project settings the center keeps per session name (`session_settings_get` / `_update`, merged; `null` removes an item). */
+  centerSettings: Record<string, Record<string, unknown>> = {};
   /** When set, center_set_settings fails with this message (a failed save). */
   centerSetSettingsError: string | null = null;
   /** sessionUrl `session_create` returns (null: not connected yet). */
@@ -311,20 +311,25 @@ export class MockBantou {
         return structuredClone(this.readList());
       case "create_session": {
         const name = (args.name as string).trim();
-        const text = (args.instructions as string | null | undefined) ?? "";
         const s = this.toSession(this.createCenterSession(name));
-        if (text.trim()) this.sessionDefs[name] = { ...this.sessionDefs[name], instructions: text };
+        const settings = (args.settings as Record<string, unknown> | null | undefined) ?? {};
+        const kept = Object.fromEntries(Object.entries(settings).filter(([, v]) => v !== null && v !== ""));
+        if (Object.keys(kept).length) this.centerSettings[name] = kept;
         this.readList();
         return structuredClone(s);
       }
-      case "session_get_instructions":
-        return this.sessionDefs[(args.name as string).trim()]?.instructions ?? "";
-      case "session_set_instructions": {
+      case "session_get_settings":
+        return structuredClone(this.centerSettings[(args.name as string).trim()] ?? {});
+      case "session_update_settings": {
         const name = (args.name as string).trim();
-        const text = args.instructions as string;
-        if (text.trim()) this.sessionDefs[name] = { ...this.sessionDefs[name], instructions: text };
-        else delete this.sessionDefs[name];
-        return null;
+        const next = { ...(this.centerSettings[name] ?? {}) };
+        for (const [k, v] of Object.entries(args.settings as Record<string, unknown>)) {
+          if (v === null || v === "") delete next[k];
+          else next[k] = v;
+        }
+        if (Object.keys(next).length) this.centerSettings[name] = next;
+        else delete this.centerSettings[name];
+        return structuredClone(next);
       }
       case "session_output_start":
         this.outputStarts.push({ session: args.session as string, after: (args.after as number | null) ?? null });

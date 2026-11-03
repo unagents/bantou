@@ -86,6 +86,16 @@ export interface Session {
   instructions: boolean;
 }
 
+/**
+ * Project (= session) settings kept by the center (`settings` of `session_settings_get`). Only
+ * `instructions` for now; the center keeps items this desktop does not know and returns them as they are.
+ * In an update, `null` removes an item.
+ */
+export interface ProjectSettings {
+  /** Appended to master-cap's system prompt (`claude --append-system-prompt`). */
+  instructions?: string | null;
+}
+
 /** The center's list as last fetched (mirror of `src-tauri/src/session.rs::SessionList`). Memory only. */
 export interface SessionList {
   sessions: Session[];

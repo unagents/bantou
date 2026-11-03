@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Session, SessionList } from "~/types";
+import type { ProjectSettings, Session, SessionList } from "~/types";
 
 export const SESSIONS_CHANGED_EVENT = "bantou://sessions-changed";
 /** The machine woke from sleep (emitted by the Rust side). */
@@ -18,14 +18,13 @@ export const CENTER_SESSIONS_CHANGED_EVENT = "center-sessions-changed";
 /** Ask the center for `session_list` again. When it cannot be asked, the last list comes back with `reachable: false`. */
 export const refreshSessions = () => invoke<SessionList>("refresh_sessions");
 
-/** Create a session on the center (`session_create`). It shows up in the list the center returns. */
-export const createSession = (name: string, instructions?: string) =>
-  invoke<Session>("create_session", { name, instructions: instructions?.trim() ? instructions : null });
+/** Create a session on the center (`session_create`). `settings` is the project settings to start with. */
+export const createSession = (name: string, settings?: ProjectSettings) =>
+  invoke<Session>("create_session", { name, settings: settings ?? null });
 
-/** The instructions saved on this desktop for a session (empty when none). */
-export const getSessionInstructions = (name: string) => invoke<string>("session_get_instructions", { name });
+/** The project settings of a session, kept by the center (`session_settings_get`). `{}` when none. */
+export const getSessionSettings = (name: string) => invoke<ProjectSettings>("session_get_settings", { name });
 
-/** Save the instructions of a session in `settings.json` (blank removes them). */
-export const setSessionInstructions = (name: string, instructions: string) =>
-  invoke<void>("session_set_instructions", { name, instructions });
-
+/** Merge `settings` into the session's project settings on the center; `null` removes an item. Returns the whole settings after. */
+export const updateSessionSettings = (name: string, settings: ProjectSettings) =>
+  invoke<ProjectSettings>("session_update_settings", { name, settings });
