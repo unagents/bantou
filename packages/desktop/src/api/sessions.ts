@@ -19,5 +19,13 @@ export const CENTER_SESSIONS_CHANGED_EVENT = "center-sessions-changed";
 export const refreshSessions = () => invoke<SessionList>("refresh_sessions");
 
 /** Create a session on the center (`session_create`). It shows up in the list the center returns. */
-export const createSession = (name: string) => invoke<Session>("create_session", { name });
+export const createSession = (name: string, instructions?: string) =>
+  invoke<Session>("create_session", { name, instructions: instructions?.trim() ? instructions : null });
+
+/** The instructions saved on this desktop for a session (empty when none). */
+export const getSessionInstructions = (name: string) => invoke<string>("session_get_instructions", { name });
+
+/** Save the instructions of a session in `settings.json` (blank removes them). */
+export const setSessionInstructions = (name: string, instructions: string) =>
+  invoke<void>("session_set_instructions", { name, instructions });
 

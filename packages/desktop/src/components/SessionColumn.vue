@@ -5,6 +5,7 @@ import type { Task, Thread } from "~/types";
 defineProps<{ group: SessionGroup; threads: Record<string, Thread>; running: Record<string, boolean> }>();
 defineEmits<{ openThread: [task: Task] }>();
 const showDone = ref(false);
+const editInstructions = ref(false);
 </script>
 
 <template>
@@ -18,11 +19,21 @@ const showDone = ref(false);
       <UTooltip v-if="group.instructions" text="追加指示つきで起動した">
         <UIcon name="i-lucide-scroll-text" class="text-cork-muted size-3.5 shrink-0" data-testid="session-instructions-mark" data-scope="header" />
       </UTooltip>
+      <UButton
+        size="xs"
+        variant="ghost"
+        color="neutral"
+        icon="i-lucide-pencil"
+        label="指示"
+        data-testid="session-instructions-open"
+        @click="editInstructions = true"
+      />
       <ContextUsage :usage="group.contextUsage" class="ml-auto" data-scope="header" />
       <span class="text-cork-muted text-xs font-normal" :class="group.contextUsage ? '' : 'ml-auto'">
         {{ group.working.length }} / {{ group.queued.length }}
       </span>
     </h2>
+    <SessionInstructionsDialog v-model:open="editInstructions" :name="group.name" />
     <ul class="divide-cork-border flex flex-col divide-y">
       <TaskRow
         v-for="t in group.working"

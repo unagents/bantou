@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { createSession } from "~/api";
+import { INSTRUCTIONS_NOTE } from "~/composables/sessionInstructions";
 
 const open = defineModel<boolean>("open", { required: true });
 const props = defineProps<{ existing: string[] }>();
@@ -8,6 +9,7 @@ const emit = defineEmits<{ done: [name: string] }>();
 const NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 const name = ref("");
+const instructions = ref("");
 const busy = ref(false);
 const actionError = ref<string | null>(null);
 
@@ -24,7 +26,7 @@ async function create() {
   busy.value = true;
   actionError.value = null;
   try {
-    await createSession(trimmed.value);
+    await createSession(trimmed.value, instructions.value);
     emit("done", trimmed.value);
     open.value = false;
   } catch (e) {
@@ -41,6 +43,10 @@ async function create() {
       <div class="flex flex-col gap-4" data-testid="add-dialog">
         <UFormField label="新しく作る" :error="nameError ?? undefined" help="英数字と _ - のみ。center の一覧にある名前とは重複できない">
           <UInput v-model="name" class="w-full" placeholder="セッション名" data-testid="add-name" @keydown.enter="create" />
+        </UFormField>
+        <UFormField label="追加指示（任意）" description="master-cap の system prompt に追記する文。空なら付けない">
+          <UTextarea v-model="instructions" :rows="4" autoresize :maxrows="12" class="w-full" data-testid="add-instructions" />
+          <p class="text-cork-muted mt-1 text-xs" data-testid="add-instructions-note">{{ INSTRUCTIONS_NOTE }}</p>
         </UFormField>
         <UButton
           class="self-end"

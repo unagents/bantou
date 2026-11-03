@@ -34,7 +34,7 @@ export class MockBantou {
   supplement: string;
   update: Seed["update"];
   /** bind "" = no IP saved: center_get_settings shows the default (first external IPv4). */
-  center: CenterSettings = { enabled: false, port: 7910, bind: "", workspace: "~/.bantou", sessionInstructions: "", token: "mock-token-000000000000000000000001" };
+  center: CenterSettings = { enabled: false, port: 7910, bind: "", workspace: "~/.bantou", token: "mock-token-000000000000000000000001" };
   /** Number of tokens minted by center_regenerate_token (the next one is mock-token-<n>). */
   private tokenSeq = 1;
   /** This machine's addresses now (center_local_ips / center_ip_status); a spec can drop one to make a saved IP vanish. */
@@ -70,6 +70,8 @@ export class MockBantou {
   sessionCache: SessionList = { sessions: [], reachable: true, reason: null, rev: 0 };
   /** When set, `session_create` fails with this message (center error). */
   centerSessionCreateError: string | null = null;
+  /** `settings.json` `sessions`: instructions saved per session name. */
+  sessionDefs: Record<string, { instructions?: string }> = {};
   /** When set, center_set_settings fails with this message (a failed save). */
   centerSetSettingsError: string | null = null;
   /** sessionUrl `session_create` returns (null: not connected yet). */
@@ -308,9 +310,21 @@ export class MockBantou {
       case "refresh_sessions":
         return structuredClone(this.readList());
       case "create_session": {
-        const s = this.toSession(this.createCenterSession((args.name as string).trim()));
+        const name = (args.name as string).trim();
+        const text = (args.instructions as string | null | undefined) ?? "";
+        const s = this.toSession(this.createCenterSession(name));
+        if (text.trim()) this.sessionDefs[name] = { ...this.sessionDefs[name], instructions: text };
         this.readList();
         return structuredClone(s);
+      }
+      case "session_get_instructions":
+        return this.sessionDefs[(args.name as string).trim()]?.instructions ?? "";
+      case "session_set_instructions": {
+        const name = (args.name as string).trim();
+        const text = args.instructions as string;
+        if (text.trim()) this.sessionDefs[name] = { ...this.sessionDefs[name], instructions: text };
+        else delete this.sessionDefs[name];
+        return null;
       }
       case "session_output_start":
         this.outputStarts.push({ session: args.session as string, after: (args.after as number | null) ?? null });

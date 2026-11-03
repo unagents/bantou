@@ -106,8 +106,6 @@ export interface CenterSettings {
   /** The one workspace directory (default `~/.bantou`). */
   workspace: string;
   claudePath?: string;
-  /** Extra instructions for master-cap, appended to its system prompt (`claude --append-system-prompt`) when the center starts a session. Empty: none. */
-  sessionInstructions: string;
   /** Bearer token the sidecar center requires on /mcp. Minted by the backend when empty. */
   token: string;
   /** Center on another host, taken from a pasted connection snippet (used instead of the sidecar). */
