@@ -126,6 +126,7 @@ center は wrapper 経由の session（master-cap）を起動するたび（新�
 | `session_settings_update` | `name`, `settings`（項目ごとにマージ。`null` で項目を削除） | `{ name, settings }`（更新後の全体） |
 | `session_delete` | `name` | `{ name, deleted }` |
 | `session_list` | なし | `SessionInfo[]` |
+| `center_info` | なし | `{ workspace: string \| null }`（config の `workspace`。未設定は `null`。項目は今後増える。desktop の追加ダイアログがフォルダ欄の既定 `<workspace>/<name>` を出すのに使う） |
 | `remote_send`（session 向けのみ） | `goal`, `deliverables?`, `verify?`, `constraints?`, `workers?`, `worker_model?`, `repo?`, `branch?`, `server?` | `{ remote_id, server, serverName, state, created, task_id, worker_model? }`（返信を待たない）。server の remote-cap（1 つ）へ `task` を送る。owner は header の session 名。`goal` だけなら `deliverables: {}` / `verify: {}` / `constraints: []` / `workers: {}`（items 無し = implement + review の最低 2 体）。`task_id` は center が採番。`worker_model` は新規の cap なら「引数 ?? config `servers[].workerModel`」、既存の cap は引数があった時だけ載せる（server が cap の既定として記憶する）。protocol の版が合わない server へは送らず isError |
 | `remote_create`（session 向けのみ） | 同上 | `remote_send` の互換の別名（同じ処理） |
 | `worker_reply` | `remote_id?`, `worker_id`, `text`, `server?` | `{ remote_id, server, worker_id, accepted: true }`。server の worker へ返答を送る（`worker_report` の ask / approve への回答。server が同じ `worker_id` で worker を起動し直して `text` を渡す）。`remote_id` 省略時は記録が 1 件ならその cap（複数あれば `server` で絞る）。protocol の版が合わない server へは送らず isError。session 向け・外向けの両方 |

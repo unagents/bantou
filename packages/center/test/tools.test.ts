@@ -17,7 +17,7 @@ const rc = (project: string): RcStatus => ({
   claude: { path: "claude", source: "PATH" },
 });
 
-async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partial<SessionManager>; remotes?: Partial<RemoteManager>; follow?: Follow } = {}) {
+async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partial<SessionManager>; remotes?: Partial<RemoteManager>; follow?: Follow; workspace?: string } = {}) {
   const calls: unknown[] = [];
   const supervisor: RemoteControlSupervisor = {
     start: async (p) => rc(p),
@@ -51,7 +51,7 @@ async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partia
     list: (f: unknown) => (calls.push({ remoteList: f }), []),
     ...mgrs.remotes,
   } as unknown as RemoteManager;
-  const server = createCenterServer({ config: parseConfig({}, "/x/c.json"), supervisor, link: fullLink, sessions, remotes, follow: mgrs.follow });
+  const server = createCenterServer({ config: parseConfig(mgrs.workspace ? { workspace: mgrs.workspace } : {}, "/x/c.json"), supervisor, link: fullLink, sessions, remotes, follow: mgrs.follow });
   const [ct, st] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "t", version: "0" });
   await Promise.all([server.connect(st), client.connect(ct)]);
@@ -68,15 +68,26 @@ async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partia
 
 const text = (r: unknown): string => (r as { content: { text: string }[] }).content[0].text;
 
-test("外向けの tool は 16 個。remote_create / remote_delete / remote_send / cap_kick は無い", async () => {
+test("外向けの tool は 17 個。remote_create / remote_delete / remote_send / cap_kick は無い", async () => {
   const { client, close } = await connect();
   const names = (await client.listTools()).tools.map((t) => t.name).sort();
   assert.deepEqual(names, [
-    "rc_list", "rc_start", "rc_status", "rc_stop", "remote_list", "remote_wait",
+    "center_info", "rc_list", "rc_start", "rc_status", "rc_stop", "remote_list", "remote_wait",
     "server_list", "server_peers", "server_status", "session_create", "session_delete", "session_list", "session_settings_get", "session_settings_update", "worker_reply", "worker_resume",
   ]);
   for (const gone of ["remote_create", "remote_send", "remote_delete", "cap_kick"]) assert.ok(!names.includes(gone), gone);
   await close();
+});
+
+test("center_info は { workspace } を返す。未設定は null", async () => {
+  const a = await connect({}, { workspace: "/w/ws" });
+  const r = await a.client.callTool({ name: "center_info", arguments: {} });
+  assert.notEqual(r.isError, true);
+  assert.deepEqual(JSON.parse(text(r)), { workspace: "/w/ws" });
+  await a.close();
+  const b = await connect();
+  assert.deepEqual(JSON.parse(text(await b.client.callTool({ name: "center_info", arguments: {} }))), { workspace: null });
+  await b.close();
 });
 
 test("session 向けの tool は remote_send / remote_create（別名）/ remote_delete / remote_list / remote_wait / worker_reply の 6 つだけ", async () => {

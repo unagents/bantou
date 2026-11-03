@@ -67,9 +67,9 @@ const ownerArg = z.string().optional().describe(
 
 export function registerTools(
   server: McpServer,
-  deps: { supervisor: RemoteControlSupervisor; link: ServerLink; sessions: SessionManager; remotes: RemoteManager; follow?: Follow },
+  deps: { supervisor: RemoteControlSupervisor; link: ServerLink; sessions: SessionManager; remotes: RemoteManager; follow?: Follow; workspace?: string },
 ): void {
-  const { supervisor, link, sessions, remotes, follow } = deps;
+  const { supervisor, link, sessions, remotes, follow, workspace } = deps;
 
   // -- A. center 上の session（番頭が使う） --
   server.registerTool(
@@ -118,6 +118,16 @@ export function registerTools(
       description: "center が監視する全 session（config の project と session_create で作ったもの）の状態を返す。source で区別できる",
     },
     () => guard(() => json(sessions.list())),
+  );
+
+  server.registerTool(
+    "center_info",
+    {
+      title: "center の情報",
+      description:
+        "center の情報 { workspace: string | null } を返す。workspace は config の workspace（session_create で path を省いた時の置き場所の親。<workspace>/<name>）。未設定は null。将来の項目はこの object に足す",
+    },
+    () => guard(() => json({ workspace: workspace ?? null })),
   );
 
   // -- B. remote の読み取り（外向けは一覧だけ。作成・削除は session 向けの窓口 /mcp/session） --
