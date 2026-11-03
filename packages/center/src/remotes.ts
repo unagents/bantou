@@ -213,7 +213,7 @@ export interface RemoteManager {
    * あわせて、全ての記録の server へ status（cap_id 付き）を送り、server の通知先（activity / task_result / worker_report の送り先）を取り戻す
    * （server が居なければ再試行する。状態の追従で status を送る記録はそれが兼ねる）。
    * 旧形式（作業ごとの cap。remote_id が center の cap_id と違う・history 形式など）の記録は、その server の cap として新しい形に引き継ぐ（cap_id はそのまま）。
-   * 同じ server に複数あれば最新の 1 件を残し、他は stop_cap を送って（届かなくても）記録を消す（作業ごとの cap の後始末。1 回限り。結果は center.log）。
+   * 同じ server に複数あれば、動いている記録（isActiveRec）を最優先、同順位なら最新の 1 件を残し、他は stop_cap を送って（届かなくても）記録を消す（作業ごとの cap の後始末。1 回限り。結果は center.log）。
    */
   restore(): Promise<void>;
   /**
@@ -247,7 +247,7 @@ export interface RemoteManager {
 /** unknown にした時の error の接頭辞（回復時に消す印）。 */
 const STATUS_ERR = "status を取れない";
 
-/** 記録の最も新しい時刻（ISO 8601）。旧形式の「最新の 1 件」の判定に使う。 */
+/** 記録の最も新しい時刻（ISO 8601）。旧形式の引き継ぎで、動いている記録が同順位の時に最新を選ぶ判定に使う。 */
 const lastAt = (r: RemoteRecord): string =>
   [r.createdAt, r.finishedAt, r.result_at, r.error_at].filter((t): t is string => typeof t === "string").sort().pop() ?? "";
 
