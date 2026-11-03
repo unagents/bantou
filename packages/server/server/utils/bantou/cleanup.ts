@@ -1,4 +1,4 @@
-import { lstat, mkdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isValidAgentId, type AgentActivity } from "@agent-hand/bantou-protocol";
 import { STOP_MSG } from "./agents";
@@ -43,8 +43,15 @@ export async function cleanWorkerDir(dir: string): Promise<number> {
     throw e;
   }
   if (!st.isDirectory()) throw new Error(`dir が通常の directory でない: ${dir}`);
+  // logs/ が symlink だと印の書き込みが dir の外へ出る。通常の directory（または無い）時だけ進む
+  try {
+    if (!(await lstat(runLogDir(dir))).isDirectory()) throw new Error(`logs が通常の directory でないので掃除しない: ${runLogDir(dir)}`);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+  }
   // 印を先に書き、.git を先に消す。途中で失敗しても「印あり・.git 無し」になり、再開で clone し直せる
   await mkdir(runLogDir(dir), { recursive: true });
+  await rm(cleanedFile(dir), { force: true }); // 印が symlink でも、先を書かず印そのものを置き換える
   await writeFile(cleanedFile(dir), JSON.stringify({ cleaned_at: new Date().toISOString() }) + "\n");
   return await removeNonKept(dir);
 }
@@ -61,6 +68,10 @@ export function createWorkerCleaner(deps: WorkerCleanerDeps): WorkerCleaner {
   /** worker_start を受けた時刻。待ち時間はここからも数え直す。 */
   const touched = new Map<string, number>();
   const cleaning = new Map<string, Promise<void>>();
+  /** 直近の掃除失敗（同じ理由はログに 1 回だけ出す。成功か再開で消す）。 */
+  const lastFailure = new Map<string, string>();
+  /** 持ち主記録が無いと知らせた worker（1 回だけ出す）。 */
+  const noOwnerLogged = new Set<string>();
   let timer: NodeJS.Timeout | undefined;
   let closed = false;
 
@@ -74,22 +85,38 @@ export function createWorkerCleaner(deps: WorkerCleanerDeps): WorkerCleaner {
     const dir = agentDir(workspace, "worker", w.id);
     try {
       // 持ち主の cap が activity と一致する worker だけ消す
-      if ((await readOwner(workspace, w.id)) !== w.cap_id) return false;
+      const owner = await readOwner(workspace, w.id);
+      if (owner === undefined) {
+        if (!noOwnerLogged.has(w.id)) {
+          noOwnerLogged.add(w.id);
+          log(`持ち主記録が無いので掃除しない: ${w.id}`);
+        }
+        return false;
+      }
+      if (owner !== w.cap_id) return false;
       // 判定から削除までの間に worker_start が来ていたら消さない
       if (touched.has(w.id) && now() - (touched.get(w.id) as number) < deps.keepMs) return false;
       if (deps.isActive(w.id)) return false;
       const removed = await cleanWorkerDir(dir);
       deps.forget(w.id);
+      touched.delete(w.id);
+      lastFailure.delete(w.id);
       log(`worker 掃除: worker_id=${w.id} cap_id=${w.cap_id} state=${w.state} 削除=${removed}件 残す=${KEEP_ENTRIES.join(",")} dir=${dir}`);
       return true;
     } catch (e) {
-      log(`エラー: worker 掃除: worker_id=${w.id} ${errMsg(e)}`);
+      const msg = errMsg(e);
+      if (lastFailure.get(w.id) !== msg) {
+        lastFailure.set(w.id, msg);
+        log(`エラー: worker 掃除: worker_id=${w.id} ${msg}`);
+      }
       return false;
     }
   }
 
   async function sweep(): Promise<string[]> {
     if (deps.keepMs <= 0 || closed) return [];
+    // keepMs を過ぎた touched は判定に効かない（base は finished_at 側が支配する）ので落とす
+    for (const [id, t] of touched) if (now() - t >= deps.keepMs && !cleaning.has(id)) touched.delete(id);
     const all = deps.snapshot();
     const caps = new Map(all.filter((a) => a.kind === "cap").map((a) => [a.id, a]));
     const picked: AgentActivity[] = [];
@@ -123,6 +150,7 @@ export function createWorkerCleaner(deps: WorkerCleanerDeps): WorkerCleaner {
   return {
     async begin(workerId) {
       touched.set(workerId, now());
+      lastFailure.delete(workerId);
       const p = cleaning.get(workerId);
       if (p) await p;
     },

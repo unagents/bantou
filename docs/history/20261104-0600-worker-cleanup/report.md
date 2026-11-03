@@ -19,7 +19,7 @@
 
 ## テスト
 
-- server: npm test 248 件 pass / 0 fail（既存 232 + 新規 16）、typecheck エラー 0。3 回実行して同じ。
+- server: npm test 253 件 pass / 0 fail（既存 232 + 新規 21）、typecheck エラー 0。3 回実行して同じ（初回実装時は 248 件）。
 - 新規: 判定（done / 停止 / idle・failed は対象外 / cap running 中は対象外 / invoke 中は対象外 / 他 cap の持ち主は対象外）、keepMs 0 の無効化、再開による中断（begin で数え直し、判定後・削除前の begin は削除を見送る）、logs の保持、実 git での clone し直し（repo 省略・掃除途中の残骸・記録なしのエラー）、config、activity の forget、他 cap の worker_id では数え直さない。
 - center / desktop は未変更のためテストしていない。
 
@@ -31,11 +31,21 @@
 |---|---|
 | High: 掃除が途中で失敗すると .git だけ消えて印が無く、再開が「git repo でない」で永久に失敗 | 印を先に書き .git を先に消す。clone し直しは先に残骸を消す。テスト追加 |
 | High: clone し直しの途中失敗で .git だけ先に移ると、欠けた tree で fetch 経路に進む | .git を最後に移す |
-| Medium: 掃除済みで clone 元の記録が無いと、空 dir で黙って走る | 明示エラー（repo を指定して worker_start）。テスト追加 |
+| Medium: 掃除済みで clone 元の記録が無いと、空 dir で黙って走る | 一度は明示エラーにしたが、2 回目の review で撤回（下記） |
 | Medium: 他の cap が worker_id を指定して worker_start すると掃除が先延ばしされる | begin を持ち主確認の後へ。テスト追加 |
 | Medium: 掃除後の worker_status が state.json 由来で done / 停止が idle に見える。server 再起動で記録が消え掃除されない | 仕様の制限として README に明記。未対応 |
 | Low: touched が増え続ける / 未 push・未 commit も消える / repo.json に認証情報が残る | 未対応。README に明記（repo.json は 0600） |
 | 確認済み（問題なし）: sweep と worker_start の競合（worker_reply 経路含む）、循環 import、別 dir の誤削除、symlink | — |
+
+## review 2 回目（w-review-wc）の指摘と対応
+
+| 指摘 | 対応 |
+|---|---|
+| 高: repo 引数なしの worker（dir の中で自分で clone）は repo.json が無く、掃除後の repo なし再開が「記録が無い」エラーで失敗 | 撤回してエラーにしない。repo.json が無い掃除済み worker は clone 元が無いのが正常として、空の dir（logs/ と state.json は残る）で起動する。再開の prompt の末尾に「この dir は掃除されて空。必要なら自分で clone し直すこと」を 1 行足す（manager が prepareDir の結果で付ける最小の変更）。repo.json がある場合は従来どおり clone し直す。cleaned.json の印はそのまま。テスト: repo なしの worker → 掃除 → 同じ id で repo なし worker_start が成功（空 dir・logs/state 残る・prompt に注記）。repo 付きの clone し直しのテストは維持 |
+| 中: 掃除失敗が毎分ログに出続ける | 同じ worker・同じ理由は 1 回だけ出し、成功か再開（begin）で出し直す。テスト追加 |
+| 中: owner.json が無い worker が黙って永久に残る | 掃除しないまま、worker ごとに 1 回だけ「持ち主記録が無いので掃除しない: <id>」を出す。テスト追加 |
+| 低: touched が増え続ける | 掃除成功時に消す。sweep ごとに keepMs を過ぎたものも落とす（判定に効かないため）。観測できる挙動が変わらないので専用テストは無し（判定のテストが通ること） |
+| 低: logs が symlink だと印の書き込みが dir の外へ出る | cleanWorkerDir の先頭で logs が通常の directory（または無い）ことを lstat で確認し、違えば何も消さず投げる（失敗としてログ）。cleaned.json が symlink でも先を書かず、印そのものを置き換える。テスト追加（2 件） |
 
 ## (3) 一覧（読むだけ。何も消していない）
 

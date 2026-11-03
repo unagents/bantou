@@ -100,7 +100,7 @@ cap は worker の report のたびに再開するので、最終ではない返
 - worker の dir（`<workspace>/workers/<id>`）には clone・node_modules・ビルド生成物が溜まる。cap は指示（`[worker への指示]` の後始末）で worker 自身に消させ、それでも残るものは server が消す。
 - server の掃除（config `session.workerKeepMs`、既定 30 分、0 は掃除しない）: worker が done（report kind=done を送って終了）か、worker_stop で止められ、かつその cap が idle（turn が終わっている）のまま `workerKeepMs` 経ったら、dir のうち `logs/` と `state.json` 以外を消す。cap の turn が続いている間・その worker に再開の指示が来ている間は消さない。同じ worker_id の `worker_start`（`worker_reply` 含む）が来たら待ち時間を数え直す。
 - 消したら server.log に `worker 掃除: worker_id=...` を出し、その worker を activity の `agents[]` から外す（protocol は変えない）。`worker_status` は state.json から引くので掃除後も返る。
-- 掃除後の同じ worker_id の `worker_start` は、dir に clone し直して起動する（`repo` を省いても、最初の clone の repo / branch を `logs/repo.json` から使う）。session_id は state.json に残るので `--resume` は同じ。
+- 掃除後の同じ worker_id の `worker_start` は、dir に clone し直して起動する（`repo` を省いても、最初の clone の repo / branch を `logs/repo.json` から使う）。`repo` 引数なしで作った worker（dir の中で自分で clone する運用）は `repo.json` が無く clone 元が無いのが正常なので、空の dir（`logs/` と `state.json` は残る）でそのまま起動し、prompt に「この dir は掃除されて空。必要なら自分で clone し直すこと」を 1 行足す。session_id は state.json に残るので `--resume` は同じ。
 - 消すのは server が動いている間に done / stop を観測した worker だけ（記録はメモリ。server の再起動前に終わった worker は対象外）。
 
 ## 根拠・補足

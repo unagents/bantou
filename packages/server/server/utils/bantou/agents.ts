@@ -233,17 +233,23 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
     }
   }
 
-  async function prepareDir(kind: AgentKind, dir: string, input: InvokeInput): Promise<void> {
+  /** 掃除済みで clone 元の記録が無い（repo 引数なしで作った）worker の再開の prompt に足す 1 行。 */
+  const EMPTIED_NOTE = "（server 注記: この dir は掃除されて空。必要なら自分で clone し直すこと）";
+
+  /** 戻り値 true = 掃除済みの dir を、clone し直さず空のまま使う。 */
+  async function prepareDir(kind: AgentKind, dir: string, input: InvokeInput): Promise<boolean> {
     let { repo, branch } = input;
-    // 掃除済みの worker は、repo の指定が無くても前回の clone 元で clone し直す
+    let emptied = false;
+    // 掃除済みの worker は、repo の指定が無くても前回の clone 元で clone し直す。
+    // 記録（repo 引数付きで作った worker のみ書かれる）が無ければ clone 元は無い（worker が自分で clone する運用）ので、空の dir で起動する
     if (!repo && kind === "worker" && (await isCleaned(dir))) {
       const rec = await readRepoRecord(dir);
-      if (!rec) throw new Error(`worker は掃除済みで clone 元の記録（logs/repo.json）が無い。repo を指定して worker_start する: ${dir}`);
-      ({ repo, branch } = rec);
+      if (rec) ({ repo, branch } = rec);
+      else emptied = true;
     }
     if (!repo) {
       await mkdir(dir, { recursive: true });
-      return;
+      return emptied;
     }
     if (repo.startsWith("-") || (branch !== undefined && branch.startsWith("-"))) {
       throw new Error("repo / branch は - で始められない");
@@ -261,6 +267,7 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
     } else {
       throw new Error(`${kind} の path は git repo でない: ${dir}`);
     }
+    return false;
   }
 
   async function execute(kind: AgentKind, id: string, input: InvokeInput): Promise<RunOutcome> {
@@ -282,7 +289,7 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
       return { session_id: (await readState(dir).catch(() => null))?.session_id ?? "", ok: false, result_text: "", error: STOP_MSG };
     }
     try {
-      await prepareDir(kind, dir, input);
+      if (await prepareDir(kind, dir, input)) input = { ...input, prompt: `${input.prompt}\n\n${EMPTIED_NOTE}` };
     } catch (e) {
       await markFailed(dir, errMsg(e));
       throw e;

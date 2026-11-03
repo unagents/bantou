@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -213,7 +213,7 @@ function mkRepo(root: string): string {
   return repo;
 }
 
-async function withGit(fn: (o: { ws: string; repo: string; config: Config; cwds: string[]; hub: ReturnType<typeof createWorkerHub> }) => Promise<void>): Promise<void> {
+async function withGit(fn: (o: { ws: string; repo: string; config: Config; cwds: string[]; prompts: string[]; hub: ReturnType<typeof createWorkerHub> }) => Promise<void>): Promise<void> {
   const base = await mkdtemp(join(tmpdir(), "bantou-cleanup-git-"));
   try {
     const repo = mkRepo(base);
@@ -231,17 +231,18 @@ async function withGit(fn: (o: { ws: string; repo: string; config: Config; cwds:
       update: { spec: "bantou@{version}" },
     };
     const cwds: string[] = [];
+    const prompts: string[] = [];
     const manager = createAgentManager({
       config,
       log: () => {},
-      runner: { run: async (o) => (cwds.push(o.cwd), { ok: true, sessionId: "x", resultText: "", durationMs: 1 }) },
+      runner: { run: async (o) => (cwds.push(o.cwd), prompts.push(o.prompt), { ok: true, sessionId: "x", resultText: "", durationMs: 1 }) },
       runExtras: async (kind, id, input) => {
         if (kind === "worker") await writeOwner(ws, id, input.capId as string);
         return {};
       },
     });
     const hub = createWorkerHub({ workspace: ws, manager, activity: { snapshot: () => [] }, log: () => {} });
-    await fn({ ws, repo, config, cwds, hub });
+    await fn({ ws, repo, config, cwds, prompts, hub });
   } finally {
     await rm(base, { recursive: true, force: true });
   }
@@ -294,7 +295,7 @@ test("再開: 掃除していない（.git が残る）worker は従来どおり
   });
 });
 
-test("再開: 掃除が途中で止まった dir（印あり・.git 無し・残骸あり）でも clone し直せる。記録が無ければ明示エラー", async () => {
+test("再開: 掃除が途中で止まった dir（印あり・.git 無し・残骸あり）でも clone し直せる。記録が無ければ空 dir で起動", async () => {
   await withGit(async ({ ws, repo, hub }) => {
     await hub.start("c1", { worker_id: "w4", prompt: "p", repo });
     await settleRuns();
@@ -307,14 +308,13 @@ test("再開: 掃除が途中で止まった dir（印あり・.git 無し・残
     assert.equal(await readFile(join(dir, "a.txt"), "utf8"), "A\n");
     assert.equal((await names(dir)).includes("node_modules"), false);
 
-    // clone 元の記録が無い掃除済み dir は、repo 無しの再開を失敗にする（空の dir で走らせない）
+    // clone 元の記録が無い掃除済み dir（repo 無しで作った worker 相当）は、空のまま起動する
     await cleanWorkerDir(dir);
     await rm(join(dir, "logs", "repo.json"));
     await hub.start("c1", { worker_id: "w4", prompt: "norepo" });
     await settleRuns();
-    const st = await readState(dir);
-    assert.equal(st.state, "failed");
-    assert.match(st.last_error ?? "", /repo を指定/);
+    assert.equal((await readState(dir)).state, "idle");
+    assert.deepEqual(await names(dir), ["logs", "state.json"]);
   });
 });
 
@@ -340,4 +340,84 @@ test("worker_start: 別の cap の worker_id では掃除の待ち時間を数�
   } finally {
     await rm(base, { recursive: true, force: true });
   }
+});
+
+test("再開: repo 無しで作った worker（自分で clone する運用）は掃除後も repo 無しの worker_start が成功し、空 dir で起動する", async () => {
+  await withGit(async ({ ws, prompts, hub }) => {
+    await hub.start("c1", { worker_id: "w5", prompt: "first" }); // repo 引数なし: repo.json は書かれない
+    await settleRuns();
+    const dir = join(ws, "workers", "w5");
+    await assert.rejects(stat(join(dir, "logs", "repo.json")), /ENOENT/);
+    await mkdir(join(dir, "own-clone", ".git"), { recursive: true }); // worker が dir 内で自分で clone したもの
+    await mkdir(join(dir, ".git"), { recursive: true });
+    await writeFile(join(dir, "own-clone", "x.ts"), "x");
+    const sid = (await readState(dir)).session_id;
+
+    await cleanWorkerDir(dir);
+    assert.deepEqual(await names(dir), ["logs", "state.json"]);
+    await hub.start("c1", { worker_id: "w5", prompt: "again" });
+    await settleRuns();
+    assert.equal((await readState(dir)).state, "idle");
+    assert.deepEqual(await names(dir), ["logs", "state.json"]); // 空のまま
+    assert.equal((await readState(dir)).session_id, sid);
+    assert.equal(prompts.at(-1)?.startsWith("again"), true);
+    assert.ok(prompts.at(-1)?.includes("掃除されて空"));
+    assert.equal(prompts[0], "first"); // 掃除前の prompt には足さない
+  });
+});
+
+test("掃除の失敗は同じ理由なら 1 回だけログに出す。再開（begin）か成功で出し直す", async () => {
+  await withFx(KEEP, async (f) => {
+    const dir = await populate(f.ws, "w1");
+    await rename(join(dir, "logs"), join(f.ws, "logs-elsewhere"));
+    await symlink(join(f.ws, "logs-elsewhere"), join(dir, "logs")); // logs が symlink（owner.json は読める）→ 掃除は失敗
+    f.acts = [cap("c1", "idle", T0 - 9000), worker("w1", "c1", "done", T0 - 9000)];
+    f.t.now = T0 + 10 * KEEP;
+    await f.cleaner.sweep();
+    await f.cleaner.sweep();
+    await f.cleaner.sweep();
+    assert.equal(f.logs.filter((l) => l.includes("エラー: worker 掃除")).length, 1);
+    await f.cleaner.begin("w1"); // 再開で抑制を解く → 次の失敗は出し直す
+    f.t.now += 10 * KEEP;
+    await f.cleaner.sweep();
+    assert.equal(f.logs.filter((l) => l.includes("エラー: worker 掃除")).length, 2);
+  });
+});
+
+test("持ち主記録（logs/owner.json）が無い worker は掃除せず、worker ごとに 1 回だけログに出す", async () => {
+  await withFx(KEEP, async (f) => {
+    const dir = await populate(f.ws, "w1");
+    await rm(join(dir, "logs", "owner.json"));
+    f.acts = [cap("c1", "idle", T0 - 9000), worker("w1", "c1", "done", T0 - 9000)];
+    f.t.now = T0 + 10 * KEEP;
+    for (let i = 0; i < 3; i++) assert.deepEqual(await f.cleaner.sweep(), []);
+    assert.equal((await names(dir)).length, 5);
+    assert.deepEqual(f.logs.filter((l) => l.includes("持ち主記録が無いので掃除しない")), ["持ち主記録が無いので掃除しない: w1"]);
+    assert.deepEqual(f.forgot, []);
+  });
+});
+
+test("cleanWorkerDir: logs が symlink なら何も書かず消さず、投げる（dir の外へ書かせない）", async () => {
+  await withFx(KEEP, async (f) => {
+    const outside = join(f.ws, "outside");
+    await mkdir(outside, { recursive: true });
+    const dir = join(f.ws, "workers", "w1");
+    await mkdir(join(dir, "node_modules"), { recursive: true });
+    await symlink(outside, join(dir, "logs"));
+    await assert.rejects(cleanWorkerDir(dir), /logs が通常の directory でない/);
+    assert.deepEqual(await readdir(outside), []);
+    assert.equal((await names(dir)).includes("node_modules"), true);
+  });
+});
+
+test("cleanWorkerDir: 印 cleaned.json が symlink でも、先を書き換えず印そのものを置き換える", async () => {
+  await withFx(KEEP, async (f) => {
+    const dir = await populate(f.ws, "w1");
+    const target = join(f.ws, "target.txt");
+    await writeFile(target, "keep");
+    await symlink(target, join(dir, "logs", "cleaned.json"));
+    await cleanWorkerDir(dir);
+    assert.equal(await readFile(target, "utf8"), "keep");
+    assert.match(await readFile(join(dir, "logs", "cleaned.json"), "utf8"), /cleaned_at/);
+  });
 });

@@ -112,7 +112,7 @@ npx bantou --config <path>
 - `cap_id` / `worker_id` は `[A-Za-z0-9_-]+`。
 - `repo` を指定した指示では、path を git repo として扱う。path が無ければ clone、`.git` があれば fetch、`.git` が無い既存 path はエラー。clone 後は `.git/info/exclude` に `state.json` と `logs/` を追記する。
 - 既存の `.git` がある場合は `fetch` だけ行う。`repo` / `branch` の違いは検知しない。
-- `repo` 無しなら path を作るだけ（掃除済みの worker は `logs/repo.json` の clone 元で clone し直す）。
+- `repo` 無しなら path を作るだけ（掃除済みの worker は `logs/repo.json` の clone 元で clone し直す。`repo.json` が無ければ空のまま）。
 - 掃除済み（`logs/cleaned.json` があり `.git` が無い）の worker に `repo` 付きの指示が来たら、tmp に clone して中身を移し、clone し直す。`logs/` と `state.json`（session_id）はそのまま。
 
 ## 内蔵 broker と peer
@@ -176,10 +176,11 @@ npx bantou --config <path>
 - 時機: その cap が running / stalled でなくなり（turn が終わり）、worker の終了からも `session.workerKeepMs`（既定 30 分）経った時。cap の turn が続いている間や、worker に再開の指示（invoke 中）がある間は消さない。確認は 60 秒ごと。
 - 消すもの: `workers/<id>/` 直下の `logs/` と `state.json` 以外すべて（`logs/` の中は消さない）。消したら `logs/cleaned.json` を書く。持ち主 cap（`logs/owner.json`）が activity と合わない worker は消さない。
 - 通知: server.log に `worker 掃除: worker_id=<id> cap_id=<id> state=<state> 削除=<n>件 ...` を出し、その worker を activity の `agents[]` から外して center へ送る。`worker_status` は state.json から返すので掃除後も引ける。
-- 再開: 同じ `worker_id` の `worker_start`（`worker_reply` 含む）が来たら待ち時間を数え直す。掃除の途中ならその完了を待ってから進み、dir が消えた後なら clone し直して起動する（`repo` を省いても `logs/repo.json` の clone 元を使う）。session_id は残るので `--resume` は続く。
+- 再開: 同じ `worker_id` の `worker_start`（`worker_reply` 含む）が来たら待ち時間を数え直す。掃除の途中ならその完了を待ってから進み、dir が消えた後なら clone し直して起動する（`repo` を省いても `logs/repo.json` の clone 元を使う。`repo.json` が無い worker は空の dir で起動する）。session_id は残るので `--resume` は続く。
 - 無効化: `session.workerKeepMs: 0`。
 - 制限: 対象の記録はメモリ。server を再起動する前に終わった worker は自動では消えない。掃除後の `worker_status` は state.json から返すため、done / 停止は `idle` などに見える。未 push の変更や未 commit の作業も消える（確認はしない）。`logs/repo.json` は掃除後も残る。
-- 途中で失敗した時: 印（`logs/cleaned.json`）を先に書き `.git` を先に消すので、残骸があっても再開は clone し直しで進む（残骸は clone し直しの前に消す）。clone 元の記録が無い掃除済みの worker は、`repo` を指定しない `worker_start` を失敗にする。
+- 途中で失敗した時: 印（`logs/cleaned.json`）を先に書き `.git` を先に消すので、残骸があっても再開は clone し直しで進む（残骸は clone し直しの前に消す）。`logs/repo.json` が無い掃除済みの worker（`repo` 引数なしで作り、worker が dir の中で自分で clone する運用のもの）は clone 元が無いのが正常なので、`repo` なしの `worker_start` は失敗にせず、空の dir（`logs/` と `state.json` は残る）で起動する。その時の prompt の末尾に「この dir は掃除されて空。必要なら自分で clone し直すこと」の 1 行を足す。
+- 掃除の失敗は、同じ worker・同じ理由ならログに 1 回だけ出し、成功か再開まで出し直さない。`logs/owner.json` が無い worker は掃除せず（安全側）、`持ち主記録が無いので掃除しない: <id>` を worker ごとに 1 回だけ出す。`logs/` が通常の directory でない（symlink）worker は掃除しない（失敗としてログに出す）。
 
 ## 活動情報（activity）
 
