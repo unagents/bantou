@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { z } from "zod";
-import { AGENT_ID_PATTERN } from "@agent-hand/bantou-protocol";
+import { AGENT_ID_PATTERN, type CapResultReply, type ErrorReply } from "@agent-hand/bantou-protocol";
 import type { ActivityStore, RemoteActivity } from "./activity.js";
 import type { Logger } from "./log.js";
 import type { ServerLink, ServerPeer } from "./server-link.js";
@@ -27,7 +27,7 @@ export interface RemoteRecord {
   state: RemoteState;
   createdAt: string;
   finishedAt?: string;
-  /** 結果の本文（cap_result.result_text）。RESULT_MAX で切る。 */
+  /** 結果の本文（cap_result.result_text）。RESULT_MAX で切る。後の turn（report 起因の再開）の cap_result で最新に更新される。 */
   result?: string;
   error?: string;
 }
@@ -49,6 +49,11 @@ export interface RemoteManager {
   create(input: { owner: string; prompt: string; server?: string; repo?: string; branch?: string }): Promise<RemoteRecord>;
   /** stop_cap を送って記録を外す。owner が分かっていて記録の owner と違えば拒否。 */
   delete(input: { remote_id: string; owner?: string; force?: boolean }): Promise<{ remote_id: string; deleted: true; stopped: boolean; warning?: string }>;
+  /**
+   * 最初の返信の後に server が送ってきた cap_result / error（kick_cap）を記録に反映する。
+   * 記録が無い（delete 済み・cap_kick の cap）・まだ最初の返信待ちの時は何もしない。反映したら true。
+   */
+  applyLateReply(reply: CapResultReply | ErrorReply): boolean;
   list(filter?: { owner?: string }): RemoteView[];
 }
 
@@ -165,12 +170,32 @@ export function createRemoteManager(opts: {
       return { remote_id, deleted: true, stopped, ...(warning ? { warning } : {}) };
     },
 
+    applyLateReply(reply) {
+      const id = reply.cap_id;
+      const rec = id === undefined ? undefined : records.get(id);
+      // running は最初の返信待ち。ここへ来る返信は待ちに照合されるはずなので、取り違えを避けて触らない
+      if (!rec || rec.state === "running") return false;
+      if (reply.type === "cap_result" && reply.ok) {
+        finish(rec, { state: "done", result: truncate(reply.result_text), error: undefined });
+      } else if (reply.type === "cap_result") {
+        finish(rec, { state: "failed", error: reply.error ?? "失敗", result: truncate(reply.result_text) });
+      } else {
+        finish(rec, { state: "failed", error: reply.message });
+      }
+      log(`remote 結果を更新: ${rec.remote_id} state=${rec.state}`);
+      return true;
+    },
+
     list: (filter) =>
       [...records.values()]
         .filter((r) => filter?.owner === undefined || r.owner === filter.owner)
         .map((r) => {
           const activity = opts.activity?.get(r.remote_id);
-          return { ...r, ...(activity ? { activity } : {}) };
+          // cap の turn は終わっていても、配下の worker が動いている間は done にしない（report で cap が再開される）
+          const busy = r.state === "done" && activity?.agents.some((a) => a.kind === "worker" && (a.state === "running" || a.state === "stalled"));
+          const base = busy ? { ...r, state: "running" as const } : { ...r };
+          if (busy) delete base.finishedAt;
+          return { ...base, ...(activity ? { activity } : {}) };
         }),
   };
 }

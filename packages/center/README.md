@@ -157,6 +157,7 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 
 - `remote_create`: center が `remote_id`（= server 上の cap_id、`r-<hex10>`）を採番し、発見した server に `kick_cap`（`reason: remote_create owner=<owner>`）を送る。**返信を待たず**`{ remote_id, server, serverName, state: "running" }` を返す。返信（`cap_result` / `error`）が来たら記録の `state` を `done` / `failed` にし、`result`（結果本文、8000 文字まで）と `error` を入れる。
 - `remote_delete`: server へ `stop_cap`（protocol `bantou` 1.1.0）を送って走行中の `claude -p` を止め、記録から外す。止められない（server が見つからない・error 返信）時、記録が `running` なら error（`force: true` なら記録だけ消し、`warning` に理由）。終わった記録は警告付きで消える。別の owner の remote は消せない。
+- `remote_list` の `state` / `result`: 最初の `cap_result` で done / failed になるが、report 起因の再開など後から届く `cap_result`（と `kick_cap` の error）でも `result` / `state` / `error` を最新に更新する。cap が done でも、activity で配下の worker が running / stalled の間は `remote_list` の `state` は running（`finishedAt` なし）で返す。
 - `remote_list`: `owner` が分かればその owner の分だけ、分からなければ全件。`RemoteRecord` = `remote_id`, `owner`, `server`（作成時の peer id）, `serverName`, `state`, `createdAt`, `finishedAt?`, `result?`, `error?`。
 - `activity`（`remote_list` の各要素）: server が protocol `bantou`（1.2.0）の `activity` 通知で送ってくる remote-cap と worker の生存・進捗。通知がまだ無い remote には `activity` キーが無い。中身は `{ at, received_ms_ago, stale, agents }`。
   - `agents`: `AgentActivity[]`（cap → worker）。`kind`, `id`, `cap_id`, `state`（`running` / `stalled` / `idle` / `done` / `failed` / `lost`）, `task`（prompt の冒頭）, `last_activity`, `last_output_at`, `silent_ms`, `started_at`, `finished_at`, `error?`。仕様は `docs/protocol.md` の「Activity notices」。

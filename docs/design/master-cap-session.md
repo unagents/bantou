@@ -108,5 +108,5 @@ desktop ──(1 か所)── center ホスト
 ## 別件（同日の観測）
 
 - server 0.3.1: `remote_create` に repo を渡すと、clone 前に `logs/center.json` が cap の dir を作るため `cap の path は git repo でない` で必ず失敗する。
-- center の remote 記録は最初の `cap_result` だけが残り、worker 完了後の `cap_result`（report 起因）で更新されない。
+- center の remote 記録は最初の `cap_result` だけが残り、worker 完了後の `cap_result`（report 起因）で更新されない。→ 修正済み（`docs/history/20261103-1210-remote-result-followup/report.md`）。
 - 0.1.23 へアプリ内更新した直後の起動で、center（sidecar）だけ broker に届かなかった。同じ binary を ssh から単独起動すると届く。アプリを再起動すると直った。原因は未確定。
