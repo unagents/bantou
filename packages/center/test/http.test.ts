@@ -23,7 +23,7 @@ const AUTH = { authorization: `Bearer ${TOKEN}` };
 const AUTH_WITH = (name: string): Record<string, string> => ({ ...AUTH, "x-bantou-session": name });
 
 const TOOLS = [
-  "rc_list", "rc_start", "rc_status", "rc_stop", "remote_list", "remote_wait",
+  "center_info", "rc_list", "rc_start", "rc_status", "rc_stop", "remote_list", "remote_wait",
   "server_list", "server_peers", "server_status", "session_create", "session_delete", "session_list", "session_settings_get", "session_settings_update", "worker_reply", "worker_resume",
 ];
 

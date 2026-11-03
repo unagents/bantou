@@ -19,6 +19,7 @@
 | `session_settings_get` | `name` | `{name, settings}` | session のプロジェクト設定を返す（未設定・config 由来は `settings: {}`） |
 | `session_settings_update` | `name`、`settings`（項目ごとにマージ。`null` で項目を削除） | `{name, settings}` | プロジェクト設定を更新して `sessions.json` に保存。次の起動から効く。config 由来の project は拒否 |
 | `session_list` | なし | 同上の配列 | config の project と session の全部（`source` で区別） |
+| `center_info` | なし | `{ workspace: string \| null }` | center の情報。`workspace` は config の `workspace`（未設定は `null`）。`session_create` が `path` 省略時に使う `<workspace>/<name>` の親を、desktop の追加ダイアログが既定表示に使う。object のまま将来の項目を足す |
 
 決めた点（今は）:
 

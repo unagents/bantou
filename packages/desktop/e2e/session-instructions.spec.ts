@@ -127,7 +127,7 @@ test.describe("session instructions", () => {
     await dlg.getByTestId("add-create").click();
     await expect(dlg).toBeHidden();
     const call = await mock(page, (m) => m.calls.filter((c) => c.cmd === "create_session").at(-1));
-    expect(call?.args).toEqual({ name: "pm-ins", settings: { instructions: MULTI } });
+    expect(call?.args).toEqual({ name: "pm-ins", path: null, settings: { instructions: MULTI } });
     expect(await mock(page, (m) => m.centerSettings)).toEqual({ "pm-ins": { instructions: MULTI } });
   });
 
