@@ -74,3 +74,54 @@
 - 起動した静的サーバー（node）は停止、一時 config・結果・ログは作業 dir の `scratch/` ごと `find -delete` で削除済み（下の確認を参照）。pgrep / ss で残存なし（`/tmp/center-rem-*` に 11/3 05:06 作成の他の実行の残骸が 1 つあるが、今回のものではないので触っていない。他の chrome は puppeteer の別プロセス）。
 - 残る: 作業 dir 内の clone（`bantou/`）、その `node_modules`、desktop の `.output` `.nuxt`、`src-tauri/target`、`src-tauri/binaries`（いずれも git 管理外）。
 - `bun install` で `bun.lock` は変わっていない。一時 config は commit していない。develop / main へ push・merge なし。
+
+## 追記: model の幅と完了判定・再起動
+
+### 仕様
+
+- model の幅（利用者の決定）:
+  - `remote_send`（と別名 `remote_create`）に `model?` / `worker_model?` を追加。形式は protocol の `MODEL_PATTERN` と同じ検証（不正なら送らず拒否）。
+  - 新規の cap: `model` = 引数 ?? config `servers[].model`、`worker_model` = 引数 ?? config `servers[].workerModel` を最初の `kick_cap` に載せる。
+  - 既存の cap: `model` は無視して返り値に `model_ignored: true` と note「cap は既存なので model は無視した」。`worker_model` は引数があった時だけ resume の `kick_cap` に載せ、記録の `worker_model` を更新する（config の既定は再送しない）。
+  - config の `servers[]` は `remote_send` のたびに読み直す（`sessionInstructions` と同じ。読めない時は直前に読めた値で送り、center.log に残す）。daemon は `configPath` を渡す。
+  - worker ごとの model は prompt の中で cap に `worker_start` の `model` を指定させる使い方。`docs/protocol.md`（bantou-center tools）と `packages/center/README.md` に記載。
+- 完了判定の競合:
+  - `cap_result` を受けても即座に完了にしない。未完了の指示があれば「判定待ち」にして、次の activity が来るまで、または猶予 15 秒が過ぎるまで `running` で見せる。
+  - 猶予の根拠: server の activity 通知は 5 秒ごと。3 回分なので 1〜2 回欠けても待てて、完了通知の遅れは 15 秒以内。
+  - activity が来たらその activity（cap が idle かつ worker に running / stalled が無い）で判定。activity が来ないまま猶予を過ぎたら server の `status`（cap が idle・`queued` 0・worker に running 無し）で判定。status は worker と cap の対応を持たないので worker は server 全体で見る。
+  - cap か worker が動いていれば 15 秒ごとに status で追従。
+- center 再起動:
+  - 未完了の指示を `failed` で閉じない。`running` と未完了の指示を復元し、status で追従する。再起動後の `cap_result`（`onLateCapReply`）は履歴と最新 result に反映し、完了になれば owner に通知する。
+  - 前提: 再起動の前後で messenger の peer 名が同じ（docs に明記）。旧形式（legacy）の `running` だけは従来どおり `failed`。
+- 状態 `unknown`: server に届かない（`kick_cap` の送信失敗・タイムアウト）・status も取れない時は `failed` でなく `unknown`。15 秒ごとに status を再試行し、取れたら `running` / `done` に戻る（activity が来ても戻る）。`unknown` の間は通知しない。`remote_wait` は `unknown` では返らず待ち続け、timeout で現状を返す。`failed` は `ok: false` の `cap_result` と server の `error` 返信に限る。desktop の型に `unknown` を追加（表示の変更なし）。
+
+### server を変えたか
+
+- 変えていない。`packages/server` は resume の `kick_cap` でも `worker_model` を記録する（`agents.ts` の `executeInner` が毎回 patch に入れる）ので protocol の文言「The server remembers it as the cap's default」どおり。version bump なし、release.sh の npm publish の対象外。
+- 確認として server のテストを 1 件追加（resume で `worker_model` が更新され、渡さなければそのまま）。
+
+### 変更ファイル
+
+- center: `src/remotes.ts`（判定待ち・status の追従・unknown・restore・model / worker_model・config 読み直し）、`src/tools.ts`、`src/daemon.ts`（`configPath`）。
+- テスト: center `test/remotes.test.ts`、`test/tools.test.ts`。server `test/server/utils/bantou/model.test.ts`（1 件追加）。
+- desktop: `src/types/index.ts`（`state` に `unknown`）。
+- docs: `docs/protocol.md`、`docs/architecture.md`、`docs/design/center-tools.md`、`packages/center/README.md`、この report。
+
+### テスト
+
+- center: `bun run test` 311 件 pass / 0 fail（前回 296 → 311）、`bun run typecheck` エラーなし。新規・書き換え: cap_result 直後に activity が来る競合 2 件（実機の順序・store に前回の idle が残る場合）、猶予後の status 判定 2 件（idle で完了・worker running で追従）、unknown（送信失敗・status 不可から回復）、restore 5 件（running のまま復元・status で追従・idle で完了通知・late cap_result の反映と通知・activity での追従）、`remote_send` の model / worker_model（新規時・片方指定・既存時の無視と worker_model の記録更新・不正形式）、config 読み直し（読めない時は直前の値）、schema・tools の引数。
+- server: `npm test` 203 件 pass（1 件追加。初回に launcher の 1 件が落ちたが、再実行と変更前の stash で通る = 既存の不安定なテスト）。
+- desktop e2e: 81 件 pass、`cargo test`（`src-tauri`）251 passed / 0 failed / 5 ignored、`bun run build:sidecar` 成功。手順は前回と同じ（`bun run generate` の静的ビルドを node の簡易静的サーバーで配信、ms-playwright の chromium-1243 を clone の外の一時 config で指定）。
+- desktop `nuxt typecheck` は前回と同じ理由で未確認。
+
+### 未確認・注意
+
+- 実機の server・messenger での動作は未確認。確認項目: cap_result 直後に activity が来る順序で完了にならない・再起動をまたいだ指示が status で追従して完了通知が届く。
+- status 判定の worker は server 全体で見る。server に旧形式（作業ごと）の cap の worker が動いていると、status 判定では running のままになり得る（activity が来る場合は cap_id で見るので影響しない）。
+- 判定待ちの間、`cap_result` が最後の通知でも完了通知は最大 15 秒遅れる。
+
+### 後始末と残存物
+
+- 静的サーバー（node）は停止、port 1420 解放を確認。一時 config・スクリプト・symlink は作業 dir の `scratch/` ごと `find -delete` で削除。一時 config は commit していない。
+- 残る: 作業 dir 内の clone（`bantou/`）、その `node_modules`、desktop の `.output` `.nuxt`、`src-tauri/target`、`src-tauri/binaries`（いずれも git 管理外）。
+- ps に残る chrome は他の puppeteer のもの（今回のものではない）。

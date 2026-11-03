@@ -93,6 +93,20 @@ test("agents: model は claude に渡り、指定が無い再開（report 起因
   });
 });
 
+test("agents: resume の kick_cap で worker_model を渡すと cap の既定が更新される（渡さなければそのまま）", async () => {
+  await withWs(async (ws, config) => {
+    const calls: ClaudeRunOptions[] = [];
+    const m = mgr(config, calls);
+    const dir = join(ws, "caps", "c1");
+    await m.invoke("cap", "c1", { prompt: "a", model: "opus", worker_model: "haiku" } as InvokeInput);
+    await m.invoke("cap", "c1", { prompt: "b", worker_model: "sonnet" } as InvokeInput);
+    assert.deepEqual(calls.map((c) => c.mode), ["new", "resume"]);
+    assert.deepEqual(await readModelRecord(dir), { model: "opus", worker_model: "sonnet" });
+    await m.invoke("cap", "c1", { prompt: "c" });
+    assert.deepEqual(await readModelRecord(dir), { model: "opus", worker_model: "sonnet" });
+  });
+});
+
 test("agents: model 指定が一度も無ければ --model 用の値は渡さず、記録ファイルも作らない", async () => {
   await withWs(async (ws, config) => {
     const calls: ClaudeRunOptions[] = [];

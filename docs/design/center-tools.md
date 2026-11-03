@@ -32,7 +32,7 @@
 
 | tool | 引数 | 返り値 | 動作 |
 |---|---|---|---|
-| `remote_send` | `prompt`、`server?` | `{remote_id, server, serverName, state, created, model?, worker_model?}` | server の remote-cap（1 つ）に次の指示を送る。cap が無い時だけ作る。返信は待たない |
+| `remote_send` | `prompt`、`server?`、`model?`、`worker_model?` | `{remote_id, server, serverName, state, created, model?, worker_model?, model_ignored?, note?}` | server の remote-cap（1 つ）に次の指示を送る。cap が無い時だけ作る。返信は待たない |
 | `remote_create` | 同上 | 同上 | `remote_send` の互換の別名（同じ処理） |
 | `remote_delete` | `remote_id?`、`server?`、`force?` | `{remote_id, deleted, stopped, warning?}` | server に `stop_cap` を送って実行を止め、記録を外す |
 | `remote_list` | `owner?` | `RemoteView[]` | server の cap 単位。指示と結果の履歴 `history`、`owners`、`activity?` を含む。owner が分かればその session が指示を送った cap、分からなければ全件 |
@@ -43,8 +43,8 @@
 - （概念）master-cap から server が見えること自体は構わないが、選ばなくても動く。`server` 省略で自動選択。
 - （今は）server 選択は発見ベース: messenger の `listPeers("all", {protocol: "bantou"})` の先頭。`server` 引数は peer id、一致しなければ name。`config.servers` には依存しない（desktop は 2eceed7 以降 `servers` を書かない）。`config.servers` があれば先頭の client を共有し、無ければ内部 client 1 本（接続を増やさない）。既存 tool の挙動は変えていない。
 - （確定: 2026-11-04）**remote-cap は 1 つの server につき 1 つだけ**。作業が何であれ、center はその cap に次の指示を送る。作業ごとに cap を作るのは資源（cap の path・プロセス・state）と設計（同じ server の cap が際限なく増え、片付けも要る）の両面で無意味なので止めた。protocol の `kick_cap` は同じ cap_id なら resume で、server は cap ごとに直列実行し worker の report で cap を再開するので、server 側の取り決めは変えていない。
-- （今は）`remote_id` = cap_id = `c-<10 桁 hex>`。center の状態 dir の `center-id` に持つ center ごとに固定の値（center を再起動しても同じ）。指示のたびに server の `status` で cap の有無を確かめ、無い時だけ最初の `kick_cap`（`model` / `worker_model` は config の `servers[]`、設定に無ければ付けない）。あれば同じ cap_id の `kick_cap`（resume）。返信は待たず `{state: "running", created}` を返す。返信（`cap_result` / `error`）で記録を更新し、結果本文（8000 文字まで）を履歴に積む。cap が実行中なら center の link が同じ cap_id の指示を直列にし（返信の取り違え防止）、server 側も cap ごとに直列。
-- （今は）center が remote 記録（server の cap 単位: remote_id, server, state, 時刻, 最新の result・error, 指示と結果の `history`）をメモリ + `remotes.json` に持つ。指示 = 送った session（owner）、時刻、prompt の先頭。結果 = `cap_result`、時刻。center 再起動で返信を失った `running` は復元時に `failed`（server 側は続行している可能性）、未完了の指示は閉じる（通知しない）。
+- （今は）`remote_id` = cap_id = `c-<10 桁 hex>`。center の状態 dir の `center-id` に持つ center ごとに固定の値（center を再起動しても同じ）。指示のたびに server の `status` で cap の有無を確かめ、無い時だけ最初の `kick_cap`（`model` / `worker_model` は引数 ?? config の `servers[]`（送信のたびに読み直す）、無ければ付けない。既存の cap では `model` は無視して `model_ignored` を返し、`worker_model` は引数があった時だけ載せる）。あれば同じ cap_id の `kick_cap`（resume）。返信は待たず `{state: "running", created}` を返す。返信（`cap_result` / `error`）で記録を更新し、結果本文（8000 文字まで）を履歴に積む。cap が実行中なら center の link が同じ cap_id の指示を直列にし（返信の取り違え防止）、server 側も cap ごとに直列。
+- （今は）center が remote 記録（server の cap 単位: remote_id, server, state, 時刻, 最新の result・error, 指示と結果の `history`）をメモリ + `remotes.json` に持つ。指示 = 送った session（owner）、時刻、prompt の先頭。結果 = `cap_result`、時刻。center 再起動後は `running` と未完了の指示を失敗にせず復元し、server の status で追従する（取れなければ `unknown`）。完了は `cap_result` の即時ではなく、次の activity か猶予 15 秒の後の status で判定する（`cap_result` と activity の競合の対策）。
 - （今は）完了 = cap が idle かつ配下の worker に running / stalled が無い。その時点で未完了の指示を全て完了にし、指示を送った session ごとに 1 回通知する（`cap_result` が来るたびに古い指示から順に完了にはしない。cap の返答本文がどの指示の結果かを含む）。どの session からでも同じ cap に行く。
 - （今は）旧形式（作業ごとの cap）の記録は読み捨てず `legacy` として一覧に残し、`remote_delete` で止めて消せる。新しい指示は混ぜない・通知しない。
 - （今は）`remote_delete` は server に新命令 `stop_cap`（protocol `bantou` 1.1.0）を送る。止められない時、記録が `running` なら error（`force` で記録だけ消す）。cap は共有なので owner は見ない。

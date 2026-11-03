@@ -1,7 +1,7 @@
 import { z } from "zod";
-import { AGENT_ID_PATTERN, MODEL_PATTERN, type CapResultReply, type ErrorReply } from "@agent-hand/bantou-protocol";
+import { AGENT_ID_PATTERN, MODEL_PATTERN, type CapResultReply, type ErrorReply, type StatusReply } from "@agent-hand/bantou-protocol";
 import type { ActivityStore, RemoteActivity } from "./activity.js";
-import type { ServerConfig } from "./config.js";
+import { loadConfigSync, type ServerConfig } from "./config.js";
 import type { Logger } from "./log.js";
 import type { ServerLink, ServerPeer } from "./server-link.js";
 import type { JsonListStore } from "./store.js";
@@ -21,7 +21,13 @@ export const HISTORY_MAX = 200;
 /** 通知に載せる指示の先頭の長さ。 */
 const NOTIFY_PROMPT_MAX = 80;
 
-export type RemoteState = "running" | "done" | "failed";
+/** unknown = server に届かない・status も取れず、cap の状態が分からない（次に status が取れた時に running / done に戻る）。 */
+export type RemoteState = "running" | "done" | "failed" | "unknown";
+
+/** cap_result を受けた後、次の activity を待つ猶予（ms）。server の activity 通知は 5 秒ごとなので 3 回分。超えたら status で判定する。 */
+export const SETTLE_GRACE_MS = 15_000;
+/** status で追従する間隔（ms）。unknown の再試行・再起動後や cap 再開中の追従。 */
+export const PROBE_POLL_MS = 15_000;
 
 /** 履歴: session から送った指示。done_at が無い間は未完了。 */
 export interface InstructionEntry {
@@ -108,10 +114,15 @@ export function formatDoneNotice(r: { remote_id: string; state: string; result?:
   ].join("\n");
 }
 
-/** remote_send（別名 remote_create）の入力。model / worker_model は呼び出しごとに取らない（config の servers[] で決める）。 */
+const modelArg = (what: string) =>
+  z.string().regex(MODEL_PATTERN, "英数字と . _ [ ] - のみ（先頭は - 不可）").optional().describe(what);
+
+/** remote_send（別名 remote_create）の入力。model / worker_model の既定は config の servers[]（送信のたびに読み直す）。 */
 export const remoteSendSchema = {
-  prompt: z.string().min(1).refine((s) => !s.includes("\0"), { message: "NUL 文字を含められない" }).describe("server の remote-cap への次の指示"),
+  prompt: z.string().min(1).refine((s) => !s.includes("\0"), { message: "NUL 文字を含められない" }).describe("server の remote-cap への次の指示。worker ごとにモデルを変えたい時は、prompt の中で cap に worker_start の model を指定させる"),
   server: serverArg,
+  model: modelArg("cap のモデル（--model）。cap を最初に作る時だけ使う。cap が既にあれば無視する（返り値に model_ignored）。省略時は config servers[].model"),
+  worker_model: modelArg("この指示で cap が起動する worker の既定モデル（worker_start に model が無い時に使う）。cap が既にあっても送り、server が cap の既定として記憶する。省略時、新規の cap は config servers[].workerModel、既存の cap は送らない（server の記憶のまま）"),
 };
 /** 互換: remote_create の入力は remote_send と同じ。 */
 export const remoteCreateSchema = remoteSendSchema;
@@ -125,11 +136,15 @@ export interface RemoteSendResult {
   created: boolean;
   model?: string;
   worker_model?: string;
+  /** cap が既存で、指定された model を使わなかった。 */
+  model_ignored?: true;
+  note?: string;
 }
 
 export interface RemoteManager {
   /**
-   * 保存済みの記録を読み込む。返信を待っていた running は center 再起動で返信を失うので failed にし、未完了の指示は閉じる（通知しない）。
+   * 保存済みの記録を読み込む。running と未完了の指示はそのまま復元し、server の status で cap と worker の状態を取り直して追従する
+   * （取れなければ unknown。再起動後に届く cap_result は applyLateReply が反映する。messenger の peer 名が再起動前と同じ前提）。
    * 旧形式（作業ごとの cap）の記録は legacy として残す。
    */
   restore(): Promise<void>;
@@ -138,7 +153,7 @@ export interface RemoteManager {
    * server の status で cap の有無を確かめ、無い時だけ最初の kick_cap（model / worker_model は config の servers[]）。
    * 返信は待たず、running で返る。cap が実行中なら server 側で直列に待たされる。
    */
-  send(input: { owner: string; prompt: string; server?: string }): Promise<RemoteSendResult>;
+  send(input: { owner: string; prompt: string; server?: string; model?: string; worker_model?: string }): Promise<RemoteSendResult>;
   /** stop_cap を送って記録を外す。remote_id 省略時は center の cap。server で複数から絞る。 */
   delete(input: { remote_id?: string; server?: string; force?: boolean }): Promise<{ remote_id: string; deleted: true; stopped: boolean; warning?: string }>;
   /**
@@ -157,6 +172,9 @@ export interface RemoteManager {
   wait(input: { remote_id?: string; server?: string; owner?: string; timeoutSec?: number }): Promise<RemoteView>;
 }
 
+/** unknown にした時の error の接頭辞（回復時に消す印）。 */
+const STATUS_ERR = "status を取れない";
+
 const truncate = (s: string): string => (s.length > RESULT_MAX ? `${s.slice(0, RESULT_MAX)}…(省略)` : s);
 
 const isPending = (e: HistoryEntry): e is InstructionEntry => e.type === "instruction" && e.done_at === undefined;
@@ -174,15 +192,28 @@ export function createRemoteManager(opts: {
   log: Logger;
   /** center ごとに固定の cap_id（`c-<center の安定 id>`。center-id.ts）。 */
   capId: string;
-  /** config の servers[]。server ごとの model / workerModel を引く（無ければ指定しない）。 */
+  /** config の servers[]。server ごとの model / workerModel を引く（無ければ指定しない）。configPath があれば送信のたびに読み直し、読めない時はこの値。 */
   servers?: ServerConfig[];
+  /** 指定すると、send のたびにこの config ファイルを読み直して servers[] を取る（sessionInstructions と同じ）。 */
+  configPath?: string;
+  /** cap_result の後、次の activity を待つ猶予（ms）。既定 SETTLE_GRACE_MS。 */
+  graceMs?: number;
+  /** status での追従・再試行の間隔（ms）。既定 PROBE_POLL_MS。 */
+  pollMs?: number;
   /** server からの activity 通知の保持。省けば list に activity は付かない。 */
   activity?: ActivityStore;
   /** 完了通知の送り先。owner の session へ text を送る。省けば通知しない。 */
   notify?: (owner: string, text: string) => Promise<{ ok: true } | { ok: false; reason: string }>;
 }): RemoteManager {
   const { link, store, log, capId } = opts;
+  const graceMs = opts.graceMs ?? SETTLE_GRACE_MS;
+  const pollMs = opts.pollMs ?? PROBE_POLL_MS;
+  let lastGoodServers = opts.servers;
   const records: RemoteRecord[] = [];
+  /** cap_result（や再起動）の後、次の activity か猶予の経過を待っている記録 → 待ち始めた時刻。この間は完了にしない（メモリのみ）。 */
+  const settling = new Map<RemoteRecord, number>();
+  /** status で状態を確かめる予約（メモリのみ）。 */
+  const probes = new Map<RemoteRecord, ReturnType<typeof setTimeout>>();
   /** 返信待ちの kick_cap の数（メモリのみ）。center の link は同じ cap_id の指示を直列にするので、2 本目以降は 1 本目の返信後に送られる。 */
   const inflight = new Map<RemoteRecord, number>();
   const waiters = new Set<() => void>();
@@ -197,12 +228,34 @@ export function createRemoteManager(opts: {
   const activityOf = (r: RemoteRecord): RemoteActivity | undefined =>
     opts.activity?.get(r.remote_id, r.server) ?? opts.activity?.get(r.remote_id, "");
 
-  /** list と同じ見え方の state。返信待ちの指示がある間・cap の turn が終わっていても cap か worker が動いている間は running。 */
+  const activityBusy = (r: RemoteRecord): boolean =>
+    activityOf(r)?.agents.some((a) => (a.kind === "worker" || a.kind === "cap") && (a.state === "running" || a.state === "stalled")) ?? false;
+
+  /**
+   * list と同じ見え方の state。返信待ちの指示がある間・cap_result の後の判定待ち（settling）の間・
+   * cap の turn が終わっていても cap か worker が動いている間は running。
+   */
   const stateOf = (r: RemoteRecord): RemoteState => {
     if (r.state === "running" || (inflight.get(r) ?? 0) > 0) return "running";
+    if (r.state === "unknown") return "unknown";
+    if (settling.has(r)) return "running";
     if (r.state !== "done") return r.state;
-    const busy = activityOf(r)?.agents.some((a) => (a.kind === "worker" || a.kind === "cap") && (a.state === "running" || a.state === "stalled"));
-    return busy ? "running" : "done";
+    return activityBusy(r) ? "running" : "done";
+  };
+
+  const unschedule = (r: RemoteRecord): void => {
+    const t = probes.get(r);
+    if (t) clearTimeout(t);
+    probes.delete(r);
+  };
+  const schedule = (r: RemoteRecord, ms: number): void => {
+    unschedule(r);
+    const t = setTimeout(() => {
+      probes.delete(r);
+      void probe(r);
+    }, Math.max(0, ms));
+    t.unref?.();
+    probes.set(r, t);
   };
 
   const viewOf = (r: RemoteRecord): RemoteView => {
@@ -223,7 +276,8 @@ export function createRemoteManager(opts: {
    * 完了にするのは同期で行うので、同じ指示を二重に通知しない。
    */
   const completeIfIdle = (r: RemoteRecord): void => {
-    if (!has(r) || r.legacy || stateOf(r) === "running") return;
+    const s = stateOf(r);
+    if (!has(r) || r.legacy || s === "running" || s === "unknown") return;
     const pending = r.history.filter(isPending);
     if (pending.length === 0) return;
     const now = new Date().toISOString();
@@ -268,13 +322,23 @@ export function createRemoteManager(opts: {
     }
   };
 
-  /** 結果（cap_result / 失敗）を履歴と最新の状態に反映する。 */
-  const applyResult = (r: RemoteRecord, res: { ok: boolean; text: string; error?: string }): void => {
+  /**
+   * 結果を履歴と最新の状態に反映する。kind: cap_result = cap の turn が終わった（成功・失敗とも）/ error = server の error 返信 /
+   * transport = server に届かない・返信が来ない（state は failed でなく unknown）。
+   * cap_result は即座に完了にしない: 未完了の指示があれば settling にして、次の activity か猶予（graceMs）の後の status で判定する。
+   */
+  const applyResult = (r: RemoteRecord, res: { ok: boolean; text: string; error?: string }, kind: "cap_result" | "error" | "transport"): void => {
     if (!has(r)) return;
     const now = new Date().toISOString();
     r.history.push({ type: "result", at: now, ok: res.ok, text: truncate(res.text), ...(res.error ? { error: res.error } : {}) });
-    r.state = res.ok ? "done" : "failed";
+    r.state = kind === "transport" ? "unknown" : res.ok ? "done" : "failed";
     r.finishedAt = now;
+    if (kind === "cap_result" && r.history.some(isPending)) {
+      settling.set(r, Date.now());
+      schedule(r, graceMs);
+    } else if (kind === "transport") {
+      schedule(r, pollMs);
+    }
     if (res.ok) {
       r.result = truncate(res.text);
       delete r.error;
@@ -283,6 +347,64 @@ export function createRemoteManager(opts: {
       if (res.text) r.result = truncate(res.text);
     }
     trim(r);
+    void persist();
+    completeIfIdle(r);
+    wake();
+  };
+
+  /** server の status から、cap か worker が動いているか。worker は cap との対応が status に無いので server 全体で見る。 */
+  const statusBusy = (st: StatusReply): boolean => {
+    const cap = st.caps.find((c) => c.id === capId);
+    return (cap !== undefined && (cap.state === "running" || (cap.queued ?? 0) > 0)) || st.workers.some((w) => w.state === "running");
+  };
+
+  /**
+   * server の status で記録の状態を確かめる。取れなければ unknown（再試行を予約）。取れたら:
+   * 動いている → running で追従（pollMs ごと）。動いていない → 猶予内なら猶予の終わりまで待ち（遅れた cap_result を拾う）、
+   * 過ぎたら running / unknown を done にして完了判定。返信待ちの kick_cap がある間は返信が進めるので何もしない。
+   */
+  const probe = async (r: RemoteRecord): Promise<void> => {
+    if (!has(r) || r.legacy || (inflight.get(r) ?? 0) > 0) return;
+    let st: StatusReply;
+    try {
+      const reply = await link.statusOn(await findPeer(r));
+      if (reply.type === "error") throw new Error(reply.message);
+      st = reply;
+    } catch (e) {
+      if (!has(r) || (inflight.get(r) ?? 0) > 0) return;
+      const msg = e instanceof Error ? e.message : String(e);
+      if (r.state !== "unknown") log(`remote 状態不明: ${r.remote_id} status を取れない: ${msg}`);
+      r.state = "unknown";
+      r.error = `${STATUS_ERR}: ${msg}`;
+      void persist();
+      wake();
+      schedule(r, pollMs);
+      return;
+    }
+    if (!has(r) || (inflight.get(r) ?? 0) > 0) return;
+    if (statusBusy(st)) {
+      settling.delete(r);
+      if (r.state !== "running") log(`remote 追従: ${r.remote_id} cap / worker が動いている（status）`);
+      r.state = "running";
+      delete r.finishedAt;
+      if (r.error?.startsWith(STATUS_ERR)) delete r.error;
+      void persist();
+      wake();
+      schedule(r, pollMs);
+      return;
+    }
+    const since = settling.get(r);
+    if (since !== undefined && Date.now() - since < graceMs) {
+      schedule(r, graceMs - (Date.now() - since));
+      return;
+    }
+    settling.delete(r);
+    if (r.state === "running" || r.state === "unknown") {
+      r.state = "done";
+      r.finishedAt = new Date().toISOString();
+      if (r.error?.startsWith(STATUS_ERR)) delete r.error;
+    }
+    log(`remote 完了判定（status）: ${r.remote_id} state=${stateOf(r)}`);
     void persist();
     completeIfIdle(r);
     wake();
@@ -343,9 +465,20 @@ export function createRemoteManager(opts: {
     return cands[0];
   };
 
+  /** 送信のたびに config を読み直した servers[]。読めない・不正な時は直前に読めた値。 */
+  const currentServers = (): ServerConfig[] | undefined => {
+    if (!opts.configPath) return lastGoodServers;
+    try {
+      lastGoodServers = loadConfigSync(opts.configPath).servers;
+    } catch (e) {
+      log(`config の読み直しに失敗。直前の servers で送信: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    return lastGoodServers;
+  };
+
   /** config の servers[] から、この server の model / workerModel を引く（peer id・peer 名・name・指定された sel のどれかで一致）。 */
   const serverModels = (peer: ServerPeer, sel?: string): { model?: string; worker_model?: string } => {
-    const cfg = opts.servers?.find((s) => s.peer === peer.id || s.peer === peer.name || s.name === peer.name || (sel !== undefined && s.name === sel));
+    const cfg = currentServers()?.find((s) => s.peer === peer.id || s.peer === peer.name || s.name === peer.name || (sel !== undefined && s.name === sel));
     return { ...(cfg?.model ? { model: cfg.model } : {}), ...(cfg?.workerModel ? { worker_model: cfg.workerModel } : {}) };
   };
 
@@ -371,26 +504,28 @@ export function createRemoteManager(opts: {
           r.history = [];
           r.legacy = true;
         }
-        const now = new Date().toISOString();
-        if (r.state === "running") {
+        if (r.state !== "running" && r.state !== "done" && r.state !== "failed" && r.state !== "unknown") r.state = "unknown";
+        if (r.legacy && r.state === "running") {
+          // 旧形式は追従しない。返信を受け取れないので従来どおり failed
           r.state = "failed";
-          r.finishedAt = now;
+          r.finishedAt = new Date().toISOString();
           r.error = "center 再起動で返信を受け取れなかった（server 側は実行を続けている可能性がある）";
         }
-        // 再起動前の未完了の指示は閉じる。完了を見届けられないので通知しない
-        for (const e of r.history) {
-          if (isPending(e)) {
-            e.done_at = now;
-            e.notify_error = "center 再起動のため通知しない";
-          }
-        }
         records.push(r);
+        // running・unknown・未完了の指示がある記録は、failed にせず復元して server の status で追従する
+        if (!r.legacy && (r.state === "running" || r.state === "unknown" || r.history.some(isPending))) {
+          settling.set(r, Date.now());
+          schedule(r, 0);
+        }
       }
       if (records.length > 0) await persist();
       log(`remote 記録を読込: ${records.length} 件${records.some((r) => r.legacy) ? `（旧形式 ${records.filter((r) => r.legacy).length} 件）` : ""}`);
     },
 
     async send(input) {
+      for (const [k, v] of [["model", input.model], ["worker_model", input.worker_model]] as const) {
+        if (v !== undefined && !MODEL_PATTERN.test(v)) throw new Error(`${k} が不正: 英数字と . _ [ ] - のみ（先頭は - 不可）`);
+      }
       if (!OWNER_PATTERN.test(input.owner)) throw new Error("owner は英数字と _ - のみ");
       const peer = await link.selectPeer(input.server);
       // protocol の版が合わない・更新待ちの server へは、記録を作らず isError で返す（session が後で再送できる）
@@ -400,7 +535,11 @@ export function createRemoteManager(opts: {
         const st = await link.statusOn(peer);
         if (st.type === "error") throw new Error(`server の cap を確かめられない: ${st.message}`);
         const exists = st.caps.some((c) => c.id === capId);
-        const models = exists ? {} : serverModels(peer, input.server);
+        // 新規の cap: 指定 > config。既存の cap: model は無視、worker_model は指定された時だけ送る（server が cap の既定として記憶する）
+        const cfgModels = exists ? {} : serverModels(peer, input.server);
+        const model = exists ? undefined : (input.model ?? cfgModels.model);
+        const workerModel = input.worker_model ?? cfgModels.worker_model;
+        const models = { ...(model ? { model } : {}), ...(workerModel ? { worker_model: workerModel } : {}) };
         const now = new Date().toISOString();
         let rec = findRecord(peer);
         if (!rec) {
@@ -414,27 +553,29 @@ export function createRemoteManager(opts: {
         if (!exists) {
           if (models.model) rec.model = models.model;
           else delete rec.model;
-          if (models.worker_model) rec.worker_model = models.worker_model;
-          else delete rec.worker_model;
+          if (!models.worker_model) delete rec.worker_model;
         }
+        if (models.worker_model) rec.worker_model = models.worker_model;
         const target = rec;
         target.history.push({ type: "instruction", at: now, owner: input.owner, prompt: input.prompt.slice(0, PROMPT_HEAD_MAX) });
         target.state = "running";
         delete target.finishedAt;
+        settling.delete(target);
+        unschedule(target);
         trim(target);
         inflight.set(target, (inflight.get(target) ?? 0) + 1);
         await persist();
         log(`remote 指示: ${capId} owner=${input.owner} server=${peer.name}(${peer.id}) ${exists ? "既存の cap へ" : "cap を作成（最初の kick_cap）"}`);
-        const settle = (res: { ok: boolean; text: string; error?: string }): void => {
+        const settle = (res: { ok: boolean; text: string; error?: string }, kind: "cap_result" | "error" | "transport"): void => {
           inflight.set(target, Math.max(0, (inflight.get(target) ?? 1) - 1));
-          applyResult(target, res);
+          applyResult(target, res, kind);
           log(`remote 結果: ${capId} state=${stateOf(target)}`);
         };
         void link
           .kickCapOn(peer, { cap_id: capId, prompt: input.prompt, ...models, reason: `remote_send owner=${input.owner}` })
           .then(
-            (reply) => settle(resultOf(reply)),
-            (e: unknown) => settle({ ok: false, text: "", error: e instanceof Error ? e.message : String(e) }),
+            (reply) => settle(resultOf(reply), reply.type === "cap_result" ? "cap_result" : "error"),
+            (e: unknown) => settle({ ok: false, text: "", error: e instanceof Error ? e.message : String(e) }, "transport"),
           );
         return {
           remote_id: capId,
@@ -444,6 +585,7 @@ export function createRemoteManager(opts: {
           created: !exists,
           ...(target.model ? { model: target.model } : {}),
           ...(target.worker_model ? { worker_model: target.worker_model } : {}),
+          ...(exists && input.model ? { model_ignored: true as const, note: "cap は既存なので model は無視した" } : {}),
         };
       });
     },
@@ -466,6 +608,8 @@ export function createRemoteManager(opts: {
       const i = records.indexOf(rec);
       if (i >= 0) records.splice(i, 1);
       inflight.delete(rec);
+      settling.delete(rec);
+      unschedule(rec);
       opts.activity?.forget(rec.remote_id, rec.server);
       wake();
       await persist();
@@ -478,7 +622,7 @@ export function createRemoteManager(opts: {
       const rec = id === undefined ? undefined : resolveRecord(id, fromId);
       // 返信待ちがある間（inflight）はここへ来る返信も待ちに照合されるはずなので、取り違えを避けて触らない
       if (!rec || (inflight.get(rec) ?? 0) > 0) return false;
-      applyResult(rec, resultOf(reply));
+      applyResult(rec, resultOf(reply), reply.type === "cap_result" ? "cap_result" : "error");
       log(`remote 結果を更新: ${rec.remote_id} state=${stateOf(rec)}`);
       return true;
     },
@@ -488,7 +632,23 @@ export function createRemoteManager(opts: {
 
     onActivity(id, fromId) {
       const r = resolveRecord(id, fromId);
-      if (r) completeIfIdle(r);
+      if (r) {
+        // 新しい activity が来たので、cap_result 後・再起動後の判定待ちは終わり。以後は activity で判定する
+        settling.delete(r);
+        if ((inflight.get(r) ?? 0) === 0 && (r.state === "running" || r.state === "unknown")) {
+          // 返信待ちでない running（再起動後・status 追従）と unknown は、activity で動いていなければ done に戻す
+          if (activityBusy(r)) {
+            r.state = "running";
+          } else {
+            r.state = "done";
+            r.finishedAt = new Date().toISOString();
+            unschedule(r);
+          }
+          if (r.error?.startsWith(STATUS_ERR)) delete r.error;
+          void persist();
+        }
+        completeIfIdle(r);
+      }
       wake();
     },
 

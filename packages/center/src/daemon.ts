@@ -118,6 +118,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     link,
     capId,
     servers: config.servers,
+    configPath,
     store: createJsonListStore(join(stateDir, "remotes.json"), log),
     log,
     activity,

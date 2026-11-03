@@ -25,7 +25,7 @@ const peerB: ServerPeer = { id: "id-b", name: "other", hostname: "host-b" };
 
 type Notify = NonNullable<Parameters<typeof createRemoteManager>[0]["notify"]>;
 
-function setup(over: Partial<ServerLink> = {}, activity?: ActivityStore, notify?: Notify, servers?: ReturnType<typeof parseConfig>["servers"]) {
+function setup(over: Partial<ServerLink> = {}, activity?: ActivityStore, notify?: Notify, servers?: ReturnType<typeof parseConfig>["servers"], extra: Partial<Parameters<typeof createRemoteManager>[0]> = {}) {
   const kicks: { peer: ServerPeer; cmd: Record<string, unknown>; resolve: (r: unknown) => void }[] = [];
   const stops: { peer: ServerPeer; cmd: unknown }[] = [];
   /** server ごとの cap の有無（status_result.caps）。 */
@@ -61,9 +61,13 @@ function setup(over: Partial<ServerLink> = {}, activity?: ActivityStore, notify?
     ...over,
   } as unknown as ServerLink;
   const store = createJsonListStore<RemoteRecord>(join(dir, "remotes.json"), () => {});
-  const mgr = createRemoteManager({ link, store, log: () => {}, capId: CAP, ...(servers ? { servers } : {}), ...(activity ? { activity } : {}), ...(notify ? { notify } : {}) });
+  const mgr = createRemoteManager({ link, store, log: () => {}, capId: CAP, graceMs: GRACE, pollMs: POLL, ...(servers ? { servers } : {}), ...(activity ? { activity } : {}), ...(notify ? { notify } : {}), ...extra });
   return { mgr, kicks, stops, store, caps, setPeers: (p: ServerPeer[]) => (peers = p) };
 }
+/** テストでは猶予・追従間隔を短くする（本番は 15 秒）。 */
+const GRACE = 60;
+const POLL = 40;
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 10));
 const ok = (text: string) => ({ bantou: 1, type: "cap_result", cap_id: CAP, session_id: "s", ok: true, result_text: text });
 const lateOk = (text: string) => ok(text) as never;
@@ -192,10 +196,15 @@ test("send: 門が断る（protocol の版違い・更新待ち）時は投げ�
   assert.equal(kicks.length, 0);
 });
 
-test("schema: remote_send / remote_create は prompt と server だけ（model・repo は受けない）", () => {
+test("schema: remote_send / remote_create は prompt・server・model・worker_model（repo は受けない）。model は protocol と同じ形式で検証", () => {
   assert.equal(remoteCreateSchema, remoteSendSchema);
   const s = z.object(remoteSendSchema);
-  assert.deepEqual(s.parse({ prompt: "x", server: "s", model: "opus", repo: "r", worker_model: "haiku" }), { prompt: "x", server: "s" });
+  assert.deepEqual(s.parse({ prompt: "x", server: "s", model: "opus", repo: "r", worker_model: "haiku" }), { prompt: "x", server: "s", model: "opus", worker_model: "haiku" });
+  assert.deepEqual(s.parse({ prompt: "x", model: "claude-opus-4-8[1m]" }), { prompt: "x", model: "claude-opus-4-8[1m]" });
+  for (const bad of ["a b", "-x", "a;b", ""]) {
+    assert.ok(!s.safeParse({ prompt: "x", model: bad }).success, `model=${bad}`);
+    assert.ok(!s.safeParse({ prompt: "x", worker_model: bad }).success, `worker_model=${bad}`);
+  }
   assert.ok(!s.safeParse({ prompt: "" }).success);
   assert.ok(!s.safeParse({ prompt: "a\0b" }).success);
 });
@@ -207,12 +216,16 @@ test("返信で state が done / failed に更新され、結果が履歴（指�
   await mgr.send({ owner: "pm1", prompt: "one" });
   kicks[0].resolve(ok("OK!"));
   await tick();
+  mgr.onActivity(CAP);
+  await tick();
   let r = mgr.list()[0];
   assert.equal(r.state, "done");
   assert.equal(r.result, "OK!");
   assert.ok(r.finishedAt);
   await mgr.send({ owner: "pm2", prompt: "two" });
   kicks[1].resolve({ bantou: 1, type: "error", ok: false, message: "boom", command: "kick_cap", cap_id: CAP });
+  await tick();
+  mgr.onActivity(CAP);
   await tick();
   r = mgr.list()[0];
   assert.deepEqual([r.state, r.error, r.result], ["failed", "boom", "OK!"]);
@@ -233,11 +246,30 @@ test("履歴の prompt は先頭 200 文字だけ。kick_cap には全文", asyn
   assert.equal(kicks[0].cmd.prompt, long);
 });
 
-test("送信自体の失敗（reject）も failed", async () => {
-  const { mgr } = setup({ kickCapOn: async () => { throw new Error("link down"); } });
+test("送信自体の失敗（server に届かない reject）は failed でなく unknown。status が取れたら戻り、完了を通知する", async () => {
+  const n = notifier();
+  let down = false;
+  const { mgr } = setup({ kickCapOn: async () => { throw new Error("link down"); }, statusOn: async () => { if (down) throw new Error("no peer"); return { bantou: 1, type: "status_result", ok: true, caps: [{ kind: "cap", id: CAP, state: "idle" }], workers: [] } as never; } }, undefined, n.notify);
   await mgr.send({ owner: "o", prompt: "p" });
+  down = true; // 送信後は status も取れない
   await tick();
-  assert.deepEqual([mgr.list()[0].state, mgr.list()[0].error], ["failed", "link down"]);
+  assert.deepEqual([mgr.list()[0].state, mgr.list()[0].error], ["unknown", "link down"]);
+  await sleep(POLL * 2 + 30); // status も取れない間は unknown のまま。通知しない
+  assert.equal(mgr.list()[0].state, "unknown");
+  assert.match(mgr.list()[0].error ?? "", /status を取れない/);
+  assert.equal(n.sent.length, 0);
+  down = false;
+  await sleep(POLL * 2 + 30);
+  assert.equal(mgr.list()[0].state, "done");
+  assert.equal(n.sent.length, 1);
+});
+
+test("送信の error 返信（server が断った）は failed のまま", async () => {
+  const { mgr, kicks } = setup();
+  await mgr.send({ owner: "o", prompt: "p" });
+  kicks[0].resolve({ bantou: 1, type: "error", ok: false, message: "updating", command: "kick_cap", cap_id: CAP });
+  await tick();
+  assert.equal(mgr.list()[0].state, "failed");
 });
 
 test("list: owner はその owner が指示を送った cap だけ。返り値の変更は内部に影響しない", async () => {
@@ -274,6 +306,8 @@ test("通知: 指示を送った session へ、cap が idle で worker 無しに
   assert.equal(n.sent.length, 0);
   kicks[0].resolve(ok("調査結果"));
   await tick();
+  mgr.onActivity(CAP);
+  await tick();
   assert.equal(n.sent.length, 1);
   assert.equal(n.sent[0].owner, "pm1");
   assert.match(n.sent[0].text, new RegExp(`remote_id=${CAP} state=done`));
@@ -307,13 +341,19 @@ test("通知: 複数 session の指示が重なっても、cap が idle にな�
   // 1 本目の返信: 後ろに返信待ちの指示がある間は完了にしない
   kicks[0].resolve(ok("r-A"));
   await tick();
+  mgr.onActivity(CAP);
+  await tick();
   assert.equal(n.sent.length, 0);
   assert.equal(mgr.list()[0].state, "running");
   kicks[1].resolve(ok("r-B"));
   await tick();
+  mgr.onActivity(CAP);
+  await tick();
   assert.equal(n.sent.length, 0);
   // 最後の返信で、3 本とも完了。owner ごとに 1 通
   kicks[2].resolve(ok("r-C"));
+  await tick();
+  mgr.onActivity(CAP);
   await tick();
   assert.deepEqual(n.sent.map((s) => s.owner).sort(), ["pm1", "pm2"]);
   const pm1 = n.sent.find((s) => s.owner === "pm1")!;
@@ -330,9 +370,13 @@ test("通知: 通知先は指示を送った session だけ（別 session の指
   await mgr.send({ owner: "pm1", prompt: "A" });
   kicks[0].resolve(ok("rA"));
   await tick();
+  mgr.onActivity(CAP);
+  await tick();
   assert.deepEqual(n.sent.map((s) => s.owner), ["pm1"]);
   await mgr.send({ owner: "pm2", prompt: "B" });
   kicks[1].resolve(ok("rB"));
+  await tick();
+  mgr.onActivity(CAP);
   await tick();
   assert.deepEqual(n.sent.map((s) => s.owner), ["pm1", "pm2"]);
   assert.match(n.sent[1].text, /result: rB/);
@@ -383,6 +427,8 @@ test("通知: 送れない時は指示に notify_error を残し、再送しな�
   await mgr.send({ owner: "pm1", prompt: "p" });
   kicks[0].resolve(ok("r"));
   await tick();
+  mgr.onActivity(CAP);
+  await tick();
   const i = mgr.list()[0].history[0] as { notified_at?: string; notify_error?: string };
   assert.equal(i.notify_error, "peer がいない");
   assert.equal(i.notified_at, undefined);
@@ -396,10 +442,14 @@ test("通知: notify が throw しても記録に残り、落ちない。notify 
   await mgr.send({ owner: "pm1", prompt: "p" });
   kicks[0].resolve(ok("r"));
   await tick();
+  mgr.onActivity(CAP);
+  await tick();
   assert.equal((mgr.list()[0].history[0] as { notify_error?: string }).notify_error, "push 失敗");
   const b = setup();
   await b.mgr.send({ owner: "pm1", prompt: "p" });
   b.kicks[0].resolve(ok("r"));
+  await tick();
+  b.mgr.onActivity(CAP);
   await tick();
   assert.match((b.mgr.list()[0].history[0] as { notify_error?: string }).notify_error ?? "", /通知の送り先が無い/);
 });
@@ -410,6 +460,8 @@ test("applyLateReply: 最初の返信の後の cap_result で result が最新�
   const { mgr, kicks } = setup();
   await mgr.send({ owner: "o", prompt: "p" });
   kicks[0].resolve(ok("first"));
+  await tick();
+  mgr.onActivity(CAP);
   await tick();
   assert.equal(mgr.applyLateReply(lateOk("second")), true);
   assert.equal(mgr.list()[0].result, "second");
@@ -426,6 +478,8 @@ test("applyLateReply: kick_cap の error は failed + error。結果本文は残
   const { mgr, kicks } = setup();
   await mgr.send({ owner: "o", prompt: "p" });
   kicks[0].resolve(ok("keep"));
+  await tick();
+  mgr.onActivity(CAP);
   await tick();
   mgr.applyLateReply({ bantou: 1, type: "error", ok: false, message: "resume 失敗", command: "kick_cap", cap_id: CAP });
   const r = mgr.list()[0];
@@ -468,6 +522,8 @@ test("list: cap が done でも配下の worker が running / stalled の間は 
   const { mgr, kicks } = setup({}, activity);
   await mgr.send({ owner: "o", prompt: "p" });
   kicks[0].resolve(ok("done"));
+  await tick();
+  mgr.onActivity(CAP);
   await tick();
   activity.apply(act("idle", "running"), "id-a");
   assert.equal(mgr.list()[0].state, "running");
@@ -517,6 +573,8 @@ test("remote_wait: cap が idle で worker 無しになるまで待って結果�
   const w = mgr.wait({ remote_id: CAP, timeoutSec: 5 });
   await tick();
   kicks[0].resolve(ok("fin"));
+  await tick();
+  mgr.onActivity(CAP);
   const v = await w;
   assert.deepEqual([v.state, v.result], ["done", "fin"]);
   assert.equal((await mgr.wait({ remote_id: CAP, timeoutSec: 1 })).state, "done");
@@ -546,6 +604,8 @@ test("remote_wait: remote_id 省略は owner の未完了の指示がある cap�
   await assert.rejects(mgr.wait({}), /owner/);
   await assert.rejects(mgr.wait({ remote_id: "zzz" }), /未定義/);
   kicks[0].resolve(ok("x"));
+  await tick();
+  mgr.onActivity(CAP);
   await tick();
   await assert.rejects(mgr.wait({ owner: "pm1" }), /running の remote が無い/);
   // どの session からでも同じ cap を remote_id で待てる
@@ -631,28 +691,291 @@ test("remote_delete: stop が error 返信なら running は拒否。終わっ�
   await assert.rejects(mgr.delete({}), /kill 失敗/);
   kicks[0].resolve(ok("x"));
   await tick();
+  mgr.onActivity(CAP);
+  await tick();
   const r = await mgr.delete({});
   assert.match(r.warning ?? "", /kill 失敗/);
 });
 
 // -- restore / 旧形式 --
 
-test("restore: 記録を読み、running は failed、未完了の指示は閉じて通知しない。center 再起動後の遅れた返信は反映する", async () => {
+// -- 完了判定の競合（cap_result 直後の activity）と status 判定 --
+
+/** server の status の差し替え。caps は常に CAP を 1 つ持つ。 */
+const statusOf = (capState: string, workers: string[] = []) =>
+  ({ bantou: 1, type: "status_result", ok: true, caps: [{ kind: "cap", id: CAP, state: capState, queued: 0 }], workers: workers.map((state, i) => ({ kind: "worker", id: `w-${i}`, state })) }) as never;
+
+test("競合: activity（cap=running, worker=running）の後に最初の cap_result が来ても完了にしない。直後の activity（cap=idle, worker=running）も無視せず、worker が終わるまで完了にしない", async () => {
   const n = notifier();
-  const a = setup({}, undefined, n.notify);
-  await a.mgr.send({ owner: "pm1", prompt: "p" });
-  const b = setup({}, undefined, n.notify);
-  await b.mgr.restore();
-  const r = b.mgr.list()[0];
-  assert.equal(r.state, "failed");
-  assert.match(r.error ?? "", /center 再起動/);
-  const i = r.history[0] as { done_at?: string; notify_error?: string };
-  assert.ok(i.done_at);
-  assert.match(i.notify_error ?? "", /再起動/);
+  const activity = createActivityStore();
+  const { mgr, kicks } = setup({}, activity, n.notify);
+  await mgr.send({ owner: "pm1", prompt: "p" });
+  activity.apply(act("running", "running"), "id-a");
+  mgr.onActivity(CAP, "id-a");
+  // 実機で起きた順序: cap_result の直後に cap=idle の activity が来る（activity の store を更新しない先に cap_result が処理される）
+  activity.apply(act("running", "running"), "id-a"); // store の内容はまだ古い
+  kicks[0].resolve(ok("first"));
+  await tick();
+  assert.equal(mgr.list()[0].state, "running");
   assert.equal(n.sent.length, 0);
-  assert.equal(b.mgr.applyLateReply(lateOk("遅れて届いた")), true);
-  assert.equal(b.mgr.list()[0].state, "done");
+  activity.apply(act("idle", "running"), "id-a");
+  mgr.onActivity(CAP, "id-a");
+  await tick();
+  assert.equal(mgr.list()[0].state, "running");
   assert.equal(n.sent.length, 0);
+  // 猶予が過ぎても、activity が来ていれば（settling は解けている）status を取らず activity で判定し続ける
+  await sleep(GRACE + 40);
+  assert.equal(mgr.list()[0].state, "running");
+  assert.equal(n.sent.length, 0);
+  activity.apply(act("idle", "done"), "id-a");
+  mgr.onActivity(CAP, "id-a");
+  await tick();
+  assert.equal(n.sent.length, 1);
+  assert.equal(mgr.list()[0].state, "done");
+});
+
+test("競合: cap_result の時点で store の activity が cap=idle・worker 無しでも、次の activity（または猶予）まで完了にしない", async () => {
+  const n = notifier();
+  const activity = createActivityStore();
+  const { mgr, kicks } = setup({}, activity, n.notify);
+  await mgr.send({ owner: "pm1", prompt: "p" });
+  activity.apply(act("idle"), "id-a"); // 前の指示のときの idle が残っている
+  kicks[0].resolve(ok("first"));
+  await tick();
+  assert.equal(mgr.list()[0].state, "running");
+  assert.equal(n.sent.length, 0);
+  // 次の activity が worker=running を運んでくる
+  activity.apply(act("idle", "running"), "id-a");
+  mgr.onActivity(CAP, "id-a");
+  await tick();
+  assert.equal(n.sent.length, 0);
+  activity.apply(act("idle", "done"), "id-a");
+  mgr.onActivity(CAP, "id-a");
+  await tick();
+  assert.equal(n.sent.length, 1);
+});
+
+test("猶予後の status 判定: activity が来ないまま猶予を過ぎたら status を取り、cap idle・worker 無しなら完了にして通知（1 回）", async () => {
+  const n = notifier();
+  let statusCalls = 0;
+  const { mgr, kicks } = setup({ statusOn: async () => (statusCalls++ === 0 ? statusOf("idle") : statusOf("idle")) }, undefined, n.notify);
+  await mgr.send({ owner: "pm1", prompt: "p" }); // status 1 回目（send の cap 確認）
+  const before = statusCalls;
+  kicks[0].resolve(ok("fin"));
+  await tick();
+  assert.equal(mgr.list()[0].state, "running");
+  assert.equal(n.sent.length, 0);
+  assert.equal(statusCalls, before); // 猶予の間は status を取らない
+  await sleep(GRACE + 60);
+  assert.ok(statusCalls > before);
+  assert.equal(mgr.list()[0].state, "done");
+  assert.equal(n.sent.length, 1);
+  assert.match(n.sent[0].text, /result: fin/);
+});
+
+test("猶予後の status 判定: worker が running なら完了にせず追従し、終わったら完了にして 1 回だけ通知", async () => {
+  const n = notifier();
+  let workers: string[] = [];
+  let sends = true;
+  const { mgr, kicks } = setup({ statusOn: async () => (sends ? statusOf("idle") : statusOf("idle", workers)) }, undefined, n.notify);
+  await mgr.send({ owner: "pm1", prompt: "p" });
+  sends = false;
+  workers = ["running"];
+  kicks[0].resolve(ok("fin"));
+  await tick();
+  await sleep(GRACE + POLL * 2);
+  assert.equal(mgr.list()[0].state, "running");
+  assert.equal(n.sent.length, 0);
+  workers = [];
+  await sleep(POLL * 2 + 40);
+  assert.equal(mgr.list()[0].state, "done");
+  assert.equal(n.sent.length, 1);
+});
+
+// -- center 再起動 --
+
+/** 再起動前の記録（running、未完了の指示 1 件）を store に書く。 */
+async function seedRunning(extra: Partial<RemoteRecord> = {}): Promise<void> {
+  const rec: RemoteRecord = {
+    remote_id: CAP, server: "id-old", serverName: "bantou-server", serverHost: "host-a", state: "running", createdAt: "2026-11-04T00:00:00.000Z",
+    history: [{ type: "instruction", at: "2026-11-04T00:00:01.000Z", owner: "pm1", prompt: "再起動をまたぐ指示" }], ...extra,
+  };
+  await writeFile(join(dir, "remotes.json"), JSON.stringify([rec]));
+}
+
+test("restore: running は failed にせず running のまま復元し、未完了の指示も閉じない。status で cap が動いていれば追従", async () => {
+  await seedRunning();
+  const n = notifier();
+  const { mgr } = setup({ statusOn: async () => statusOf("running") }, undefined, n.notify);
+  await mgr.restore();
+  assert.equal(mgr.list()[0].state, "running");
+  await sleep(GRACE + POLL * 2);
+  const r = mgr.list()[0];
+  assert.equal(r.state, "running");
+  assert.equal(r.error, undefined);
+  assert.equal((r.history[0] as { done_at?: string }).done_at, undefined);
+  assert.equal(n.sent.length, 0);
+});
+
+test("restore: status で cap idle・worker 無しなら（猶予の後）完了にして owner へ 1 回通知。peer id が変わっていても名前 + host で探す", async () => {
+  await seedRunning();
+  const n = notifier();
+  const { mgr } = setup({ statusOn: async () => statusOf("idle") }, undefined, n.notify);
+  await mgr.restore();
+  assert.equal(mgr.list()[0].state, "running"); // 猶予の間は遅れた cap_result を待つ
+  await sleep(GRACE + POLL * 2);
+  assert.equal(mgr.list()[0].state, "done");
+  assert.equal(n.sent.length, 1);
+  assert.equal(n.sent[0].owner, "pm1");
+  assert.match(n.sent[0].text, /指示: 再起動をまたぐ指示/);
+});
+
+test("restore: 再起動後に届く cap_result（onLateCapReply）は履歴と最新 result に反映し、完了になれば owner へ通知する", async () => {
+  await seedRunning();
+  const n = notifier();
+  const activity = createActivityStore();
+  const { mgr } = setup({ statusOn: async () => statusOf("idle") }, activity, n.notify);
+  await mgr.restore();
+  assert.equal(mgr.applyLateReply(lateOk("再起動後に届いた結果"), "id-a"), true);
+  let r = mgr.list()[0];
+  assert.equal(r.result, "再起動後に届いた結果");
+  assert.deepEqual(r.history.map((e) => e.type), ["instruction", "result"]);
+  assert.equal(n.sent.length, 0); // 即座には完了にしない
+  activity.apply(act("idle"), "id-a");
+  mgr.onActivity(CAP, "id-a");
+  await tick();
+  r = mgr.list()[0];
+  assert.equal(r.state, "done");
+  assert.equal(n.sent.length, 1);
+  assert.match(n.sent[0].text, /result: 再起動後に届いた結果/);
+  assert.equal(r.server, "id-a"); // 送信元の peer id に更新される
+  await sleep(GRACE + POLL * 2); // status 予約が残っていても二重に通知しない
+  assert.equal(n.sent.length, 1);
+});
+
+test("restore: status が取れない間は failed でなく unknown。取れたら戻って完了を通知する", async () => {
+  await seedRunning();
+  const n = notifier();
+  let down = true;
+  const { mgr } = setup({ statusOn: async () => { if (down) throw new Error("broker 未接続"); return statusOf("idle"); } }, undefined, n.notify);
+  await mgr.restore();
+  await sleep(POLL * 2 + 30);
+  assert.equal(mgr.list()[0].state, "unknown");
+  assert.match(mgr.list()[0].error ?? "", /broker 未接続/);
+  assert.equal(n.sent.length, 0);
+  down = false;
+  await sleep(GRACE + POLL * 3);
+  const r = mgr.list()[0];
+  assert.equal(r.state, "done");
+  assert.equal(r.error, undefined);
+  assert.equal(n.sent.length, 1);
+});
+
+test("restore: 再起動後の activity（cap idle・worker 無し）でも追従して完了にできる。running の worker があれば完了にしない", async () => {
+  await seedRunning();
+  const n = notifier();
+  const activity = createActivityStore();
+  const { mgr } = setup({ statusOn: async () => statusOf("running") }, activity, n.notify);
+  await mgr.restore();
+  activity.apply(act("idle", "running"), "id-a");
+  mgr.onActivity(CAP, "id-a");
+  await tick();
+  assert.equal(mgr.list()[0].state, "running");
+  activity.apply(act("idle", "done"), "id-a");
+  mgr.onActivity(CAP, "id-a");
+  await tick();
+  assert.equal(mgr.list()[0].state, "done");
+  assert.equal(n.sent.length, 1);
+});
+
+test("restore: store に保存した unknown / 未完了の指示付き done も追従対象。delete すれば予約は消える", async () => {
+  await seedRunning({ state: "done", finishedAt: "2026-11-04T00:00:05.000Z", result: "r" });
+  const n = notifier();
+  const { mgr } = setup({ statusOn: async () => statusOf("idle") }, undefined, n.notify);
+  await mgr.restore();
+  await sleep(GRACE + POLL * 2);
+  assert.equal(n.sent.length, 1);
+  await mgr.delete({});
+  assert.equal(mgr.list().length, 0);
+});
+
+// -- model / worker_model --
+
+const cfgServers = (s: object[]) => parseConfig({ servers: s }, "/x/c.json").servers;
+
+test("send: model / worker_model の指定（新規の cap）。指定が config より優先され、kick_cap と記録と返り値に出る", async () => {
+  const servers = cfgServers([{ name: "s1", peer: "bantou-server", model: "opus", workerModel: "haiku" }]);
+  const { mgr, kicks } = setup({}, undefined, undefined, servers);
+  const r = await mgr.send({ owner: "pm1", prompt: "go", model: "sonnet", worker_model: "claude-haiku-4-5" });
+  assert.deepEqual(r, { remote_id: CAP, server: "id-a", serverName: "bantou-server", state: "running", created: true, model: "sonnet", worker_model: "claude-haiku-4-5" });
+  assert.deepEqual(kicks[0].cmd, { cap_id: CAP, prompt: "go", model: "sonnet", worker_model: "claude-haiku-4-5", reason: "remote_send owner=pm1" });
+  const rec = mgr.list()[0];
+  assert.deepEqual([rec.model, rec.worker_model], ["sonnet", "claude-haiku-4-5"]);
+  assert.ok(!("model_ignored" in r));
+});
+
+test("send: 新規の cap で片方だけ指定したら、もう片方は config の既定", async () => {
+  const servers = cfgServers([{ name: "s1", peer: "bantou-server", model: "opus", workerModel: "haiku" }]);
+  const { mgr, kicks } = setup({}, undefined, undefined, servers);
+  await mgr.send({ owner: "pm1", prompt: "go", worker_model: "sonnet" });
+  assert.deepEqual(kicks[0].cmd, { cap_id: CAP, prompt: "go", model: "opus", worker_model: "sonnet", reason: "remote_send owner=pm1" });
+});
+
+test("send: 既存の cap では model を無視して返り値に残す。worker_model は resume の kick_cap に載せて記録を更新（config の既定は載せない）", async () => {
+  const servers = cfgServers([{ name: "s1", peer: "bantou-server", model: "opus", workerModel: "haiku" }]);
+  const { mgr, kicks } = setup({}, undefined, undefined, servers);
+  await mgr.send({ owner: "pm1", prompt: "one" });
+  kicks[0].resolve(ok("r1"));
+  await tick();
+  mgr.onActivity(CAP);
+  // 既存の cap: 指定なしなら何も載せない
+  const plain = await mgr.send({ owner: "pm1", prompt: "two" });
+  assert.deepEqual(kicks[1].cmd, { cap_id: CAP, prompt: "two", reason: "remote_send owner=pm1" });
+  assert.ok(!("model_ignored" in plain));
+  kicks[1].resolve(ok("r2"));
+  await tick();
+  // model だけ: 無視（kick_cap に載せない）、返り値で知らせる
+  const ign = await mgr.send({ owner: "pm1", prompt: "three", model: "sonnet" });
+  assert.equal(ign.created, false);
+  assert.equal(ign.model_ignored, true);
+  assert.match(ign.note ?? "", /cap は既存なので model は無視した/);
+  assert.deepEqual(kicks[2].cmd, { cap_id: CAP, prompt: "three", reason: "remote_send owner=pm1" });
+  assert.equal(mgr.list()[0].model, "opus"); // 記録は cap を作った時の値のまま
+  kicks[2].resolve(ok("r3"));
+  await tick();
+  // worker_model: resume の kick_cap に載せ、記録を更新
+  const wm = await mgr.send({ owner: "pm1", prompt: "four", model: "sonnet", worker_model: "sonnet" });
+  assert.deepEqual(kicks[3].cmd, { cap_id: CAP, prompt: "four", worker_model: "sonnet", reason: "remote_send owner=pm1" });
+  assert.deepEqual([wm.worker_model, wm.model_ignored], ["sonnet", true]);
+  assert.equal(mgr.list()[0].worker_model, "sonnet");
+});
+
+test("send: 形式が不正な model / worker_model は、送らず記録も作らず拒否（protocol の MODEL_PATTERN）", async () => {
+  const { mgr, kicks } = setup();
+  await assert.rejects(mgr.send({ owner: "o", prompt: "p", model: "a b" }), /model が不正/);
+  await assert.rejects(mgr.send({ owner: "o", prompt: "p", worker_model: "-x" }), /worker_model が不正/);
+  assert.equal(kicks.length, 0);
+  assert.equal(mgr.list().length, 0);
+});
+
+test("send: config の servers[] は送信のたびに読み直す（読めない時は直前の値で送り、ログに残す）", async () => {
+  const path = join(dir, "config.json");
+  const write = (s: object[] | string) => writeFile(path, typeof s === "string" ? s : JSON.stringify({ servers: s }));
+  await write([{ name: "s1", peer: "bantou-server", model: "opus", workerModel: "haiku" }]);
+  const logs: string[] = [];
+  const { mgr, kicks, caps } = setup({}, undefined, undefined, cfgServers([{ name: "s1", peer: "bantou-server", model: "boot-time" }]), { configPath: path, log: (m) => logs.push(m) });
+  await mgr.send({ owner: "o", prompt: "a" });
+  assert.deepEqual([kicks[0].cmd.model, kicks[0].cmd.worker_model], ["opus", "haiku"]); // 起動時の値ではなく、今の config
+  // cap を作り直す（server から消えた）ので、変更した config が次の最初の kick に反映される
+  caps.set("id-a", []);
+  await write([{ name: "s1", peer: "bantou-server", model: "sonnet" }]);
+  await mgr.send({ owner: "o", prompt: "b" });
+  assert.deepEqual([kicks[1].cmd.model, kicks[1].cmd.worker_model], ["sonnet", undefined]);
+  caps.set("id-a", []);
+  await write("{ 壊れた");
+  await mgr.send({ owner: "o", prompt: "c" });
+  assert.equal(kicks[2].cmd.model, "sonnet"); // 直前に読めた値
+  assert.ok(logs.some((l) => /config の読み直しに失敗/.test(l)));
 });
 
 test("restore: 旧形式（作業ごとの cap、history 無し）は読み捨てず legacy として一覧に出す。指示・通知・遅れた返信の対象外。delete で止めて消せる", async () => {

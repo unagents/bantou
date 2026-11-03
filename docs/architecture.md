@@ -41,7 +41,7 @@
 ## center の remote-cap（確定: 2026-11-04）
 
 - **remote-cap は 1 つの server につき 1 つだけ**。作業が何であれ、center はその cap に次の指示を送る。作業ごとに cap を作ると、cap の path・プロセス・state が際限なく増える（資源）うえ、同じ server に cap が溜まって片付けも要る（設計）ので止めた。server 側の取り決め（protocol）は変えていない: `kick_cap` は同じ cap_id なら resume で、server は cap ごとに直列実行し、worker の report で cap を再開する
-- cap_id は center ごとに固定の `c-<10 桁 hex>`（center の状態 dir の `center-id` に保存。center を再起動しても同じ）。session からの依頼（MCP `remote_send`、別名 `remote_create`）は、server の `status` で cap の有無を確かめ、無い時だけ最初の `kick_cap`（`model` / `worker_model` は center の設定 `servers[]` で server ごとに決める）、あれば同じ cap_id の `kick_cap` を送る
+- cap_id は center ごとに固定の `c-<10 桁 hex>`（center の状態 dir の `center-id` に保存。center を再起動しても同じ）。session からの依頼（MCP `remote_send`、別名 `remote_create`）は、server の `status` で cap の有無を確かめ、無い時だけ最初の `kick_cap`（`model` / `worker_model` は `remote_send` の引数、無ければ center の設定 `servers[]`（送信のたびに読み直す）で決める）、あれば同じ cap_id の `kick_cap` を送る
 - center は「server の cap」単位で記録を持つ（`remote_id` = cap_id、指示と結果の履歴つき）。完了は「cap が idle かつ配下の worker に running / stalled が無い」。その時点で未完了の指示を全て完了にし、指示を送った session ごとに 1 回通知する。desktop は cap 単位＋履歴を表示する
 - 旧形式（作業ごとの cap）の記録は読み捨てず、旧形式として一覧に残し `remote_delete` で片付けられる
 

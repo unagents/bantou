@@ -495,14 +495,23 @@ cap; it never creates a cap per task. The center's cap id is fixed per center (`
 
 | tool | input | output |
 |---|---|---|
-| `remote_send` | `prompt`, `server?` | `{ remote_id, server, serverName, state: "running", created, model?, worker_model? }` |
+| `remote_send` | `prompt`, `server?`, `model?`, `worker_model?` | `{ remote_id, server, serverName, state: "running", created, model?, worker_model?, model_ignored?, note? }` |
 | `remote_create` | same | alias of `remote_send` (same handling) |
 | `remote_delete` | `remote_id?`, `server?`, `force?` | `{ remote_id, deleted, stopped, warning? }` (`stop_cap` + drop the record) |
 
 `remote_send` first asks the server for `status`. If the cap (`remote_id`) is not there it sends the first `kick_cap`
-(`created: true`, with `model` / `worker_model` from the center's `servers[]` config when set); otherwise it sends
-`kick_cap` with the same `cap_id` (a resume, no `model`). The server runs a cap's commands one at a time, so a busy cap
-makes the instruction wait. `model` and `worker_model` are not arguments. The protocol and the server are unchanged.
+(`created: true`); otherwise it sends `kick_cap` with the same `cap_id` (a resume). The server runs a cap's commands
+one at a time, so a busy cap makes the instruction wait.
+
+Models (same format as `kick_cap`'s `model`, checked before sending). `model` is used only when the cap is created; if the
+cap already exists it is ignored and the result carries `model_ignored: true` and `note: "cap は既存なので model は無視した"`.
+`worker_model` is the default model of the workers this instruction's cap starts; it is sent on every `kick_cap` where it is
+given (including a resume), and the server remembers it as the cap's default. Defaults come from the center's `servers[]` config
+(`model` / `workerModel`), **read again at every `remote_send`** like `sessionInstructions`: a new cap gets
+`model` = argument ?? config and `worker_model` = argument ?? config; an existing cap gets `worker_model` only when given
+(the config default is not re-sent). To choose a model per worker, say so in `prompt`: the cap passes `model` to
+`worker_start` (precedence: `worker_start` `model` > the worker's recorded model > the cap's `worker_model` > none). The
+protocol and the server are unchanged (the server already updates `worker_model` on a resume).
 
 `remote_list` returns one `RemoteView` per server cap: `RemoteRecord` (`remote_id` = cap id, `server`, `serverName`,
 `serverHost?`, `state`, `model?`, `worker_model?`, `createdAt`, `finishedAt?`, latest `result?` / `error?`, `history`,
@@ -510,9 +519,30 @@ makes the instruction wait. `model` and `worker_model` are not arguments. The pr
 (`{type:"instruction", at, owner, prompt (first 200 chars), done_at?, notified_at?, notify_error?}`) and results
 (`{type:"result", at, ok, text, error?}`, one per `cap_result`, late ones included) in order. `remote_wait`
 (`remote_id?`, `server?`, `timeout_sec?` default 600, max 1800) waits until the cap is idle and none of its workers is
-`running` / `stalled`, and returns its record, or returns it with `state: "running"` on timeout. When the cap
-becomes idle with no worker running, the center closes **all** pending instructions and sends one done notice
-(messenger `push`) to each session that sent one, not one per `cap_result`. A record of the old format (one cap per task, no `history`) is kept as `legacy: true`
+`running` / `stalled`, and returns its record, or returns it with the current `state` (`running` / `unknown`) on timeout.
+When the cap becomes idle with no worker running, the center closes **all** pending instructions and sends one done notice
+(messenger `push`) to each session that sent one, not one per `cap_result`.
+
+Completion is decided only when all of these hold: no `kick_cap` reply is pending, and the latest `activity` shows the cap
+`idle` and no worker `running` / `stalled`. A `cap_result` does **not** complete a remote by itself, because the
+`activity` that follows it may still show a running worker (seen in practice: the first `cap_result` arrived 10 s after an
+activity with cap=running / worker=running, and an activity with cap=idle / worker=running came 21 ms later). After a
+`cap_result` the center waits for the next `activity` (which settles it), or for a grace of **15 s** (3 of the server's 5 s notice
+intervals); if no `activity` comes by then it fetches the server's `status` and judges from that (cap `idle`, `queued` 0, no
+worker `running`; the status has no cap-to-worker link, so workers are checked server-wide). While the cap or a worker is running
+the center follows it by `status` every 15 s.
+
+`state` is `running` / `done` / `failed` / `unknown`. `unknown` = the center cannot tell: the `kick_cap` never reached the
+server (the send itself failed or timed out), or `status` cannot be fetched. It is not `failed` (that is a `cap_result` with
+`ok: false` or an `error` reply from the server). The center retries `status` every 15 s and the state returns to `running` /
+`done` when it succeeds (or when an `activity` arrives); nothing is notified while `unknown`.
+
+**Center restart** (the desktop release replaces the app, so the center restarts). Unfinished records are **not** closed as
+`failed`: a record is restored as it was (`running`, pending instructions kept), then the center fetches the server's `status` and
+follows it as above (`unknown` if `status` fails). A `cap_result` that arrives after the restart is added to `history` and the latest
+`result`, and completes the remote (with the notice) the same way. This relies on the messenger peer name of the center and the
+sessions being the same after the restart (notices go to the session's peer name; a late reply comes back to `bantou-center`). If it
+changed, the notice is not delivered (`notify_error`), and use `remote_wait` / `remote_list`. A record of the old format (one cap per task, no `history`) is kept as `legacy: true`
 for listing and `remote_delete`; it gets no instructions and no notices.
 
 A remote that has received `activity` notices also has `activity`:

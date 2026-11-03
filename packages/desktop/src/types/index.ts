@@ -298,7 +298,7 @@ export interface CenterRemoteRecord {
   owners: string[];
   server: string;
   serverName?: string;
-  state: "running" | "done" | "failed";
+  state: "running" | "done" | "failed" | "unknown";
   /** Model given when the cap was created (absent = none). */
   model?: string;
   worker_model?: string;

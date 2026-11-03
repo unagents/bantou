@@ -185,20 +185,26 @@ test("session_create / session_delete / session_list は SessionManager に委�
   await close();
 });
 
-test("remote_send / remote_create（別名）: owner は session の認証済み名で固定。同じ処理。引数 owner・repo・model は受けない", async () => {
+test("remote_send / remote_create（別名）: owner は session の認証済み名で固定。同じ処理。model / worker_model は渡せる。引数 owner・repo は受けない", async () => {
   const { session, calls, close } = await connect();
   const c = await session("pm1");
   const ok = await c.callTool({ name: "remote_send", arguments: { prompt: "go", server: "id" } });
   assert.deepEqual(JSON.parse(text(ok)), { remote_id: "c-1", server: "id", serverName: "n", state: "running", created: false });
   const alias = await c.callTool({ name: "remote_create", arguments: { prompt: "go2" } });
   assert.deepEqual(JSON.parse(text(alias)), JSON.parse(text(ok)));
-  // 自己申告の owner・呼び出しごとの model / repo は schema に無いので、渡しても無視される
+  // 自己申告の owner・repo は schema に無いので、渡しても無視される。model / worker_model は remotes.send へ渡る
   await c.callTool({ name: "remote_send", arguments: { prompt: "go3", owner: "evil", model: "opus", worker_model: "haiku", repo: "https://x/y.git" } });
+  await c.callTool({ name: "remote_create", arguments: { prompt: "go4", worker_model: "sonnet" } });
   assert.deepEqual(calls, [
     { remoteSend: { owner: "pm1", prompt: "go", server: "id" } },
     { remoteSend: { owner: "pm1", prompt: "go2" } },
-    { remoteSend: { owner: "pm1", prompt: "go3" } },
+    { remoteSend: { owner: "pm1", prompt: "go3", model: "opus", worker_model: "haiku" } },
+    { remoteSend: { owner: "pm1", prompt: "go4", worker_model: "sonnet" } },
   ]);
+  // 形式が不正な model は schema で拒否され、remotes.send は呼ばれない
+  const bad = await c.callTool({ name: "remote_send", arguments: { prompt: "x", model: "a b" } });
+  assert.equal(bad.isError, true);
+  assert.equal(calls.length, 4);
   await c.close();
   await close();
 });

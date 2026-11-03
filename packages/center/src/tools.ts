@@ -222,14 +222,15 @@ export function registerTools(
 export function registerSessionTools(server: McpServer, deps: { remotes: RemoteManager; owner: string }): void {
   const { remotes, owner } = deps;
 
-  const sendHandler = (args: { prompt: string; server?: string }): Promise<ToolResult> =>
-    guard(async () => json(await remotes.send({ owner, prompt: args.prompt, ...(args.server ? { server: args.server } : {}) })));
+  const sendHandler = (args: { prompt: string; server?: string; model?: string; worker_model?: string }): Promise<ToolResult> =>
+    guard(async () =>
+      json(await remotes.send({ owner, prompt: args.prompt, ...(args.server ? { server: args.server } : {}), ...(args.model ? { model: args.model } : {}), ...(args.worker_model ? { worker_model: args.worker_model } : {}) })));
   server.registerTool(
     "remote_send",
     {
       title: "remote-cap へ指示",
       description:
-        "server の remote-cap に次の指示を送る（cap は server ごとに 1 つ。無ければ作る）。どの session からでも同じ cap に行く。cap が実行中なら server 側で順番に待たされる。完了を待たず {remote_id, state:\"running\", created} を返す。完了は通知（push）か remote_wait / remote_list で確認する。server は protocol bantou で発見した先頭、server 引数で peer id か名前を指定できる。model などは center の設定で決まる",
+        "server の remote-cap に次の指示を送る（cap は server ごとに 1 つ。無ければ作る）。どの session からでも同じ cap に行く。cap が実行中なら server 側で順番に待たされる。完了を待たず {remote_id, state:\"running\", created} を返す。完了は通知（push）か remote_wait / remote_list で確認する。server は protocol bantou で発見した先頭、server 引数で peer id か名前を指定できる。model（cap を最初に作る時だけ有効。既存の cap なら無視して返り値に model_ignored）と worker_model（この指示で cap が起動する worker の既定。server が cap の既定として記憶する）の既定は center の設定 servers[]。worker ごとにモデルを変えたい時は、prompt の中で cap に worker_start の model を指定させる。state は running / done / failed / unknown（server に届かない・status も取れず不明。取れたら戻る）",
       inputSchema: remoteSendSchema,
     },
     sendHandler,
