@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { prepareWorkspace } from "../../../../server/utils/bantou/workspace";
-import { REPLY_META, classifyMeta, describeCommand, execute, executeUpdate, maskUserinfo, updatingError } from "../../../../server/utils/bantou/daemon";
+import { REPLY_META, classifyMeta, commandCapId, describeCommand, execute, executeUpdate, maskUserinfo, updatingError } from "../../../../server/utils/bantou/daemon";
 import { UpdateError, createUpdateController } from "../../../../server/utils/bantou/update";
 import type { AgentManager } from "../../../../server/utils/bantou/agents";
 
@@ -178,11 +178,11 @@ test("task: ログ概要は task_id・goal 先頭・repo の userinfo を伏せ�
 });
 
 test("task: 更新待機中の断りは command=task、task_id 付き。kick_cap は従来どおり", () => {
-  const t = updatingError({ cap_id: "c1", task_id: "t-1" }, { from: "0.5.0", to: "0.5.1" });
+  const t = updatingError({ cap_id: "c1", task_id: "t-1" }, { from: "0.6.0", to: "0.6.1" });
   assert.equal((t as { command?: string }).command, "task");
   assert.equal((t as { task_id?: string }).task_id, "t-1");
   assert.equal((t as { code?: string }).code, "updating");
-  const k = updatingError({ cap_id: "c1" }, { from: "0.5.0", to: "0.5.1" });
+  const k = updatingError({ cap_id: "c1" }, { from: "0.6.0", to: "0.6.1" });
   assert.equal((k as { command?: string }).command, "kick_cap");
   assert.equal("task_id" in k, false);
 });
@@ -206,6 +206,18 @@ test("worker_reply: 失敗は error（cap_id・worker_id 付き）。worker 機�
   assert.equal((e2 as { command?: string }).command, "worker_reply");
 });
 
-test("protocol 1.5.0: 返信 meta と hello の版は 1.5.0（1.4.0 の center / server とは版違いになる）", () => {
-  assert.equal(REPLY_META.version, "1.5.0");
+test("protocol 1.6.0: 返信 meta と hello の版は 1.6.0（1.5.0 の center / server とは版違いになる）", () => {
+  assert.equal(REPLY_META.version, "1.6.0");
+});
+
+test("commandCapId: cap を指す命令は cap_id、status は cap_id 付きの時だけ。hello / update_server は無し", () => {
+  assert.equal(commandCapId({ bantou: 1, type: "kick_cap", cap_id: "c1", prompt: "p" }), "c1");
+  assert.equal(commandCapId({ bantou: 1, type: "stop_cap", cap_id: "c2" }), "c2");
+  assert.equal(commandCapId({ bantou: 1, type: "worker_reply", cap_id: "c3", worker_id: "w", text: "x" }), "c3");
+  assert.equal(commandCapId({ bantou: 1, type: "status", cap_id: "c4" }), "c4");
+  assert.equal(commandCapId({ bantou: 1, type: "status" }), undefined);
+  assert.equal(commandCapId({ bantou: 1, type: "hello" }), undefined);
+  assert.equal(commandCapId({ bantou: 1, type: "update_server", version: "0.6.0" }), undefined);
+  assert.equal(describeCommand({ bantou: 1, type: "status", cap_id: "c4" }), "cap_id=c4");
+  assert.equal(describeCommand({ bantou: 1, type: "status" }), "");
 });

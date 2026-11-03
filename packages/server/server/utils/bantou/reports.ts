@@ -41,12 +41,25 @@ export interface ReportHubDeps {
   invoke: (capId: string, input: InvokeInput) => Promise<RunOutcome>;
   /** center（messenger の peer id）へ返信・通知を送る。 */
   send: (centerId: string, reply: ServerReply | ServerNotice) => Promise<void>;
+  /**
+   * 今 messenger にいる、この名前の peer を返す（center の再起動で peer id が変わるので、送る時に名前から id を引く）。
+   * 省略時・失敗時は、覚えている peer id へそのまま送る。
+   */
+  resolvePeers?: (name: string) => Promise<ReadonlyArray<{ id: string; registered_at?: string }>>;
   log: (msg: string) => void;
 }
 
 export interface ReportHub {
-  /** cap を依頼した center を記録する（メモリと logs/center.json）。 */
-  rememberCenter(capId: string, centerId: string): Promise<void>;
+  /**
+   * cap を依頼した center を記録する（メモリと logs/center.json。cap の dir が無ければ作る）。
+   * name = center の peer 名。名前で覚えると、center の再起動で peer id が変わっても送る時に今の id へ引ける。
+   */
+  rememberCenter(capId: string, centerId: string, centerName?: string): Promise<void>;
+  /**
+   * 通知先の center を更新する（status / stop_cap / worker_reply など、cap を作らない命令の送信元）。
+   * メモリは常に更新し、logs/center.json は cap の dir がある時だけ書く（無い cap の dir を作らない）。
+   */
+  noteCenter(capId: string, centerId: string, centerName?: string): Promise<void>;
   /** cap の最新の task_id を記録する（メモリと logs/task.json）。worker_report と report 起因の task_result に使う。 */
   rememberTask(capId: string, taskId: string): Promise<void>;
   /** worker の report を記録し、cap の resume を queue に積む。積んだ時点で戻る。 */
@@ -70,7 +83,8 @@ const reportsFile = (capDir: string): string => join(runLogDir(capDir), "reports
 
 export function createReportHub(deps: ReportHubDeps): ReportHub {
   const { log } = deps;
-  const centers = new Map<string, string>();
+  /** cap → 通知先 center。id = 最後に命令を送ってきた peer id、name = その peer 名。 */
+  const centers = new Map<string, { id: string; name?: string }>();
   const tasks = new Map<string, string>();
   const pending = new Set<Promise<void>>();
   /** worker_report 通知の送信中。更新の再起動待ち（pendingCount）には数えず、drain だけが待つ。 */
@@ -117,16 +131,19 @@ export function createReportHub(deps: ReportHubDeps): ReportHub {
     }
   }
 
-  async function centerOf(capId: string): Promise<string | undefined> {
+  /** 覚えている center（メモリ → logs/center.json）。旧形式の記録は peer id のみで名前が無い。 */
+  async function centerRecord(capId: string): Promise<{ id: string; name?: string } | undefined> {
     const known = centers.get(capId);
     if (known) return known;
     try {
       const d = JSON.parse(await readFile(centerFile(agentDir(deps.workspace, "cap", capId)), "utf8")) as {
         center_id?: unknown;
+        center_name?: unknown;
       };
       if (typeof d.center_id === "string" && d.center_id !== "") {
-        centers.set(capId, d.center_id);
-        return d.center_id;
+        const rec = { id: d.center_id, ...(typeof d.center_name === "string" && d.center_name !== "" ? { name: d.center_name } : {}) };
+        centers.set(capId, rec);
+        return rec;
       }
     } catch {
       // 記録が無い・壊れている場合は返信先なし
@@ -134,16 +151,45 @@ export function createReportHub(deps: ReportHubDeps): ReportHub {
     return undefined;
   }
 
-  async function rememberCenter(capId: string, centerId: string): Promise<void> {
-    centers.set(capId, centerId);
-    const dir = runLogDir(agentDir(deps.workspace, "cap", capId));
+  /**
+   * 送る時点の center の peer id。名前を覚えていれば messenger の今の peer から引く:
+   * 覚えている id がまだいればそれ（同名が複数いる時に最後に命令を送ってきた id を優先）、いなければ最後に登録した同名の peer。
+   * 名前が無い・引けない・同名が居ない時は覚えている id。
+   */
+  async function centerOf(capId: string): Promise<string | undefined> {
+    const rec = await centerRecord(capId);
+    if (!rec) return undefined;
+    if (!rec.name || !deps.resolvePeers) return rec.id;
+    let peers: ReadonlyArray<{ id: string; registered_at?: string }>;
     try {
-      await mkdir(dir, { recursive: true });
-      await writeFile(centerFile(agentDir(deps.workspace, "cap", capId)), JSON.stringify({ center_id: centerId }) + "\n");
+      peers = await deps.resolvePeers(rec.name);
     } catch (e) {
+      log(`center の peer を引けない（覚えている id へ送る）: name=${rec.name} ${e instanceof Error ? e.message : String(e)}`);
+      return rec.id;
+    }
+    if (peers.length === 0 || peers.some((p) => p.id === rec.id)) return rec.id;
+    const latest = [...peers].sort((x, y) => (y.registered_at ?? "").localeCompare(x.registered_at ?? ""))[0]!;
+    log(`center の peer id が変わった: cap_id=${capId} name=${rec.name} ${rec.id} -> ${latest.id}`);
+    centers.set(capId, { id: latest.id, name: rec.name });
+    return latest.id;
+  }
+
+  async function writeCenter(capId: string, centerId: string, centerName: string | undefined, create: boolean): Promise<void> {
+    centers.set(capId, { id: centerId, ...(centerName ? { name: centerName } : {}) });
+    const capDir = agentDir(deps.workspace, "cap", capId);
+    try {
+      if (!create) await stat(capDir);
+      await mkdir(runLogDir(capDir), { recursive: true });
+      await writeFile(centerFile(capDir), JSON.stringify({ center_id: centerId, ...(centerName ? { center_name: centerName } : {}) }) + "\n");
+    } catch (e) {
+      // cap の dir が無い（noteCenter）時はメモリだけ。それ以外の失敗はログ
+      if (!create && (e as NodeJS.ErrnoException).code === "ENOENT") return;
       log(`center 記録失敗: cap_id=${capId} ${e instanceof Error ? e.message : String(e)}`);
     }
   }
+
+  const rememberCenter = (capId: string, centerId: string, centerName?: string): Promise<void> => writeCenter(capId, centerId, centerName, true);
+  const noteCenter = (capId: string, centerId: string, centerName?: string): Promise<void> => writeCenter(capId, centerId, centerName, false);
 
   async function route(capId: string, reply: ServerReply): Promise<void> {
     const to = await centerOf(capId);
@@ -228,6 +274,7 @@ export function createReportHub(deps: ReportHubDeps): ReportHub {
 
   return {
     rememberCenter,
+    noteCenter,
     rememberTask,
     report,
     notify,

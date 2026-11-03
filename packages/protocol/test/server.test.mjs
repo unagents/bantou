@@ -229,7 +229,7 @@ test("stop_cap / stop_result", () => {
   assert.equal(isServerReply({ ...stopResult, cap_id: "a b" }), false);
   assert.ok(isServerReply({ bantou: 1, type: "error", ok: false, message: "x", command: "stop_cap", cap_id: "c1" }));
   assert.deepEqual(manifest.messages.error.properties.command.enum, ["kick_cap", "resume_worker", "stop_cap", "status", "hello", "update_server", "task", "worker_reply"]);
-  assert.equal(MESSENGER_PROTOCOL.version, "1.5.0");
+  assert.equal(MESSENGER_PROTOCOL.version, "1.6.0");
 });
 
 test("model: kick_cap の model / worker_model は省略可、形式を検証、知らない版は無視できる", () => {
@@ -318,9 +318,18 @@ test("error code / retryable", () => {
   assert.ok(isServerReply({ bantou: 1, type: "error", ok: false, message: "x" }));
 });
 
-test("protocol version 1.5.0 (task / worker_reply / worker_report)", () => {
-  assert.equal(MESSENGER_PROTOCOL.version, "1.5.0");
-  assert.equal(manifest.version, "1.5.0");
+test("protocol version 1.6.0 (status cap_id)", () => {
+  assert.equal(MESSENGER_PROTOCOL.version, "1.6.0");
+  assert.equal(manifest.version, "1.6.0");
+});
+
+test("status accepts an optional cap_id (1.6.0)", () => {
+  assert.ok(isStatusCommand({ ...status, cap_id: "c-0a1b2c3d4e" }));
+  assert.deepEqual(parseServerCommand(JSON.stringify({ ...status, cap_id: "c1" })), { ...status, cap_id: "c1" });
+  for (const id of ["", "a b", "../x", 1, null]) assert.equal(isServerCommand({ ...status, cap_id: id }), false, String(id));
+  assert.ok("cap_id" in manifest.messages.status.properties);
+  assert.deepEqual(manifest.messages.status.required, ["bantou", "type"]);
+  assert.equal(manifest.messages.status.properties.cap_id.pattern, AGENT_ID_PATTERN.source);
 });
 
 test("task command guard", () => {

@@ -928,6 +928,17 @@ test("statusOn: 選んだ peer へ status を送り status_result を返す（ca
   await link.close();
 });
 
+test("statusOn: cap_id を渡すと status に cap_id が付く（server が通知先にする。返信は同じ status_result）", async () => {
+  const peer = { id: "id-a", name: "bantou-server", version: MESSENGER_PROTOCOL.version };
+  const { link, clients } = setupNoServers([peerOf("id-a", "bantou-server", MESSENGER_PROTOCOL.version)]);
+  const p = link.statusOn(peer, { cap_id: "c-0123456789" });
+  await sleep(20);
+  assert.deepEqual(clients[0].sent[0], { bantou: 1, type: "status", cap_id: "c-0123456789" });
+  clients[0].reply(statusResult(1), "bantou-server", { from_id: "id-a" });
+  assert.equal(((await p) as { type: string }).type, "status_result");
+  await link.close();
+});
+
 test("通知・遅れた返信には送信元の peer id（from_id）が渡る", async () => {
   const notices: { cap: string; from?: string }[] = [];
   const late: { text?: string; from?: string }[] = [];

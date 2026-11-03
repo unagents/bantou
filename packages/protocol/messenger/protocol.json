@@ -1,6 +1,6 @@
 {
   "name": "bantou",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "bantou-server commands (kick_cap, stop_cap, status, hello, update_server, task, worker_reply), replies (cap_result, stop_result, status_result, hello_result, update_result, task_result, worker_reply_result, error) and notices (activity, worker_report). Message body is one JSON object in the text; `bantou: 1` is the body schema version.",
   "messages": {
     "hello": {
@@ -143,11 +143,12 @@
     },
     "status": {
       "type": "object",
-      "description": "List caps and workers with their state. Reply: status_result.",
+      "description": "List caps and workers with their state. Reply: status_result. With cap_id the server also takes the sender as the center to notify for that cap (by the sender's peer name, resolved to its current peer id at send time). Since 1.6.0 (cap_id).",
       "required": ["bantou", "type"],
       "properties": {
         "bantou": { "const": 1 },
-        "type": { "const": "status" }
+        "type": { "const": "status" },
+        "cap_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" }
       },
       "additionalProperties": true
     },

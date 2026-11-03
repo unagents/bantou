@@ -96,7 +96,7 @@ npx bantou --config <path>
   caps/<cap-id>/                     cap の path（claude の cwd）
     state.json                       状態
     logs/<session_id>.jsonl          claude の生出力（stream-json）
-    logs/center.json                 この cap を依頼した center（messenger の peer id）
+    logs/center.json                 この cap の通知先 center（peer 名と最後の peer id。送る時に名前から今の peer id へ引く）
     logs/reports.jsonl               worker から受けた report の記録（1 行 1 件）
     logs/model.json                  指定されたモデル（`{"model":"...","worker_model":"..."}`、指定が無ければ作らない）
     logs/mcp.json                    cap の `--mcp-config`（実行ごとに上書き）
@@ -134,7 +134,7 @@ npx bantou --config <path>
 - 送信元は header `x-bantou-cap-id` / `x-bantou-worker-id` で判定する（token は使わない。認証は全体で後回し）。
 - tool は記録して queue に積んだ時点で `accepted` を返す。worker はそこでターンを終える。不正な id・存在しない cap・終了中は `isError` で返す。
 - 受けた report は `logs/reports.jsonl` に追記し、該当 cap の queue に積んで `--resume` で起動する。prompt は `worker <id> から <kind>: <text>` と、worker へ返す時の MCP 情報（URL・header 名）。実行中の cap には、終わってから渡す。
-- cap の結果（stdout の result）は、`kick_cap` の送信元 center へ `cap_result` で返す。report 起因の resume の結果も同じ。center は cap ごとに `logs/center.json` へ保存する（再起動後も復元）。resume が失敗した時は `error`（`command: "kick_cap"`、`cap_id`）を返す。
+- cap の結果（stdout の result）は、`kick_cap` の送信元 center へ `cap_result` で返す。report 起因の resume の結果も同じ。center は peer の**名前**（`bantou-center`）で覚え（cap ごとに `logs/center.json` へ保存、再起動後も復元）、送る時に messenger の今の peer id へ引く（center の再起動で peer id が変わっても届く。protocol 1.6.0）。`task` / `kick_cap` / `worker_reply` / `stop_cap` / cap_id 付きの `status` を受けるたびに通知先を更新する（cap を作るのは `kick_cap` / `task` だけ）。resume が失敗した時は `error`（`command: "kick_cap"`、`cap_id`）を返す。
 - worker の MCP 設定は server が付ける。worker 起動のたびに `<path>/logs/mcp.json` を書き、`--mcp-config <file>` で渡す（resume でも毎回）。cap が渡す必要は無い:
 
 ```json

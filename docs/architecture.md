@@ -41,9 +41,9 @@
 ## center の remote-cap（確定: 2026-11-04）
 
 - **remote-cap は 1 つの server につき 1 つだけ**。作業が何であれ、center はその cap に次の指示を送る。作業ごとに cap を作ると、cap の path・プロセス・state が際限なく増える（資源）うえ、同じ server に cap が溜まって片付けも要る（設計）ので止めた。server 側の取り決め（protocol）は変えていない: `task` / `kick_cap` は同じ cap_id なら resume で、server は cap ごとに直列実行し、worker の report で cap を再開する
-- cap_id は center ごとに固定の `c-<10 桁 hex>`（center の状態 dir の `center-id` に保存。center を再起動しても同じ）。session からの依頼（MCP `remote_send`、別名 `remote_create`）は、server の `status` で cap の有無を確かめ、`task`（`goal` と、省略可の `deliverables` / `verify` / `constraints` / `workers` / `repo` / `branch`。`task_id` は center が採番。新規の cap の `worker_model` の既定は center の設定 `servers[]`（送信のたびに読み直す））を同じ cap_id へ送る（cap は無ければ server が作る）。protocol の版が合わない server（旧 server 1.4.0 など）へは送らず isError
+- cap_id は、記録の無い server では center ごとに固定の `c-<10 桁 hex>`（center の状態 dir の `center-id` に保存。center を再起動しても同じ）。記録のある server は記録の cap_id（旧形式から引き継いだ cap はその cap_id のまま。cap_id は server ごとに記録が持つ）。session からの依頼（MCP `remote_send`、別名 `remote_create`）は、server の `status` で cap の有無を確かめ、`task`（`goal` と、省略可の `deliverables` / `verify` / `constraints` / `workers` / `repo` / `branch`。`task_id` は center が採番。新規の cap の `worker_model` の既定は center の設定 `servers[]`（送信のたびに読み直す））を同じ cap_id へ送る（cap は無ければ server が作る）。protocol の版が合わない server（旧 server 1.4.0 など）へは送らず isError
 - center は「server の cap」単位で記録を持つ（`remote_id` = cap_id。持つのは cap の state・未完了の指示・最新の result / error と時刻・最新の `task_result`・直近の `worker_reports`・activity だけで、履歴は持たない）。完了は「cap が idle かつ配下の worker に running / stalled が無い」。その時点で未完了の指示を全て完了にし、指示を送った session ごとに 1 回通知する。desktop は server ごとに 1 行（cap の state・最新の result の先頭・配下の worker の一覧と状態。idle で worker・未完了の指示が無ければ「待機中」）に、`worker_reports` と ask / approve への返信欄を表示する
-- 旧形式（作業ごとの cap）の記録は一覧に出さない。center の起動時に見つけたら server へ `stop_cap` を送り（届かなくてもよい。結果は center.log）、記録を消す
+- 記録を消すのは `remote_delete` だけ（再起動では消えない）。旧形式（作業ごとの cap）の記録は、center の起動時に、その server の cap として引き継ぐ（cap_id はそのまま）。同じ server に複数あれば最新の 1 件を残し、他は `stop_cap` を送って（届かなくてもよい。結果は center.log）記録を消す（1 回限りの後始末）。server は center を peer 名（`bantou-center`）で覚えて送る時に今の peer id へ引き（protocol 1.6.0）、center は起動時に各 cap の `status`（cap_id 付き）を送って通知先を取り戻す
 
 ## desktop ↔ center（確定）
 

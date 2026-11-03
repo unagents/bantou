@@ -56,9 +56,17 @@ export function maskUserinfo(text: string): string {
   return text.replace(/:\/\/[^/\s"@]*@/g, "://***@");
 }
 
+/** 指示が指す cap_id。cap を指さない指示（hello / update_server / cap_id 無しの status など）は undefined。 */
+export function commandCapId(cmd: ServerCommand): string | undefined {
+  if (cmd.type === "task" || cmd.type === "kick_cap" || cmd.type === "worker_reply" || cmd.type === "stop_cap") return cmd.cap_id;
+  if (cmd.type === "status") return cmd.cap_id;
+  return undefined;
+}
+
 /** 指示の概要。prompt は先頭 80 文字のみ、repo の userinfo は伏せる。 */
 export function describeCommand(cmd: ServerCommand): string {
   if (cmd.type === "stop_cap") return `cap_id=${cmd.cap_id}`;
+  if (cmd.type === "status") return cmd.cap_id ? `cap_id=${cmd.cap_id}` : "";
   if (cmd.type === "update_server") return `version=${cmd.version}`;
   if (cmd.type === "worker_reply") return `cap_id=${cmd.cap_id} worker_id=${cmd.worker_id} text=${ignoreText(cmd.text).slice(0, 80)}`;
   if (cmd.type === "task") {
@@ -287,6 +295,11 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
     send: async (to, reply) => {
       await client.send(to, JSON.stringify(reply), "pull", REPLY_META);
     },
+    // center は名前（bantou-center）で覚え、送る時に今の peer id へ引く（center の再起動で peer id が変わる）
+    resolvePeers: async (name) => {
+      const own = client.peer.id;
+      return (await client.listPeers("all")).filter((p) => p.name === name && p.id !== own).map((p) => ({ id: p.id, registered_at: p.registered_at }));
+    },
     log,
   });
   // 実行中の指示。claude の実行は数分かかるので全体は直列にしない。
@@ -319,15 +332,20 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
         // 更新待機中は新しい指示を受け付けず、理由付きで断る（center は再起動後に再送できる）
         const p = update.progress();
         reply = updatingError(cmd.type === "task" ? { cap_id: cmd.cap_id, task_id: cmd.task_id } : cmd, { from: serverVersion, to: p?.to ?? "?" });
+        // 断っても、通知先は今の center にしておく（cap が動いていれば、その通知は今の center へ）
+        await hub.noteCenter(cmd.cap_id, m.from_id, m.from_name || undefined);
       } else {
         if (cmd.type === "kick_cap" || cmd.type === "task") {
           kicking++;
           counted = true;
-          // 以降この cap の結果（report 起因の resume を含む）はこの center へ返す
-          await hub.rememberCenter(cmd.cap_id, m.from_id);
+          // 以降この cap の結果（report 起因の resume を含む）はこの center へ返す。名前で覚える（peer id は center の再起動で変わる）
+          await hub.rememberCenter(cmd.cap_id, m.from_id, m.from_name || undefined);
           // 以降の worker_report と report 起因の task_result はこの task_id を付ける
           if (cmd.type === "task") await hub.rememberTask(cmd.cap_id, cmd.task_id);
         }
+        // cap を指す他の命令（status・stop_cap・worker_reply）の送信元も通知先にする（center の再起動後に通知先を取り戻す）
+        const capId = commandCapId(cmd);
+        if (capId !== undefined && cmd.type !== "kick_cap" && cmd.type !== "task") await hub.noteCenter(capId, m.from_id, m.from_name || undefined);
         reply = await execute(cmd, manager, workerHub);
       }
       try {

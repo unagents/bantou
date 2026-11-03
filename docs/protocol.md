@@ -114,7 +114,7 @@ sender peer as one JSON object.
 
 The protocol definition is `packages/protocol/messenger/protocol.json` (JSON
 Schemas of `kick_cap`, `stop_cap`, `status`, `hello`, `update_server`, `task`, `worker_reply`, `cap_result`, `stop_result`, `status_result`, `hello_result`, `update_result`, `task_result`, `worker_reply_result`, `error`, `activity`, `worker_report`)
-and `PROTOCOL.md`. It is the agent-messenger protocol version (`1.5.0`,
+and `PROTOCOL.md`. It is the agent-messenger protocol version (`1.6.0`,
 `MESSENGER_PROTOCOL` in `server.ts`); the body field `bantou: 1` is a separate
 version of the JSON bodies below. Changing the definition needs a new protocol
 `version` (same name and version with other content is `PROTOCOL_CONFLICT`).
@@ -216,10 +216,12 @@ process group (see server README).
 
 ```json
 {"bantou":1,"type":"status"}
+{"bantou":1,"type":"status","cap_id":"c-0a1b2c3d4e"}
 ```
 
-No other fields. Reply: `status_result` or `error`. Answered immediately, even
-while agents are running.
+`cap_id` is optional (1.6.0, `AGENT_ID_PATTERN`). Reply: `status_result` or `error`, the same with or without it. Answered immediately, even
+while agents are running. With `cap_id` the server also takes the sender as the center to notify for that cap (see "Who is notified" below);
+a center sends it after a restart to take its caps' notices back. A server older than 1.6.0 ignores `cap_id`.
 
 ### `hello` — ask the server's version
 
@@ -228,7 +230,7 @@ while agents are running.
 ```
 
 No other fields. Reply: `hello_result`
-`{"bantou":1,"type":"hello_result","ok":true,"server_version":"0.3.0","protocol_version":"1.5.0","update":null,"last_update":null}`.
+`{"bantou":1,"type":"hello_result","ok":true,"server_version":"0.3.0","protocol_version":"1.6.0","update":null,"last_update":null}`.
 `server_version` is the npm `bantou` version of the running server. `update` is
 `{"state":"waiting"|"restarting","from","to","running":{"caps","workers","reports"}}` while an update is
 in progress. `last_update` is `{"to","ok":false,"error","at"}` for the last update that failed (kept until the
@@ -325,10 +327,16 @@ Results are JSON text; a failure sets `isError` with `{"error":"..."}`.
 - `model` (same format as `kick_cap`) is the worker's `--model`. Without it the cap's `worker_model` is used, and without that no `--model`. A resumed worker keeps using the same model.
 - `worker_stop` sends SIGTERM to the worker's process group, SIGKILL after 3 s.
 
+### Who is notified (1.6.0)
+
+The server keeps one **center** per cap: the peer **name** of the sender (`bantou-center`, from `from_name`) and the peer id it last used. `activity`, `worker_report`, and the `cap_result` / `task_result` / `error` that follow a worker report (the resume of the cap) go to it. The name is resolved to the current peer id **at send time** (`listPeers`), because a center that restarts gets a new peer id: if the remembered id is still registered under that name it is used (so with several peers of the same name, the one that sent the last command wins); otherwise the peer of that name that registered last is used (and remembered). With no peer of that name, or when the lookup fails, the remembered id is tried as it is. A record from before 1.6.0 holds a peer id only and is used as it is until the next command.
+
+The center is updated by every command that carries a `cap_id`: `kick_cap`, `task`, `worker_reply`, `stop_cap` and `status` with `cap_id`. A center that restarted therefore sends `status` with `cap_id` for each cap it remembers, and gets its notices back without sending a new instruction. `status` / `stop_cap` / `worker_reply` update the memory of the server, and the cap's record file only when the cap exists (they never create a cap).
+
 ### Activity notices (server to center)
 
 `activity` is a notice, not a reply: it is never matched with a pending command.
-The server sends it to the peer that sent the cap's `kick_cap`, as a snapshot of
+The server sends it to the center of the cap (see "Who is notified"), as a snapshot of
 the cap and all its workers. Messages carry the same `meta` as replies.
 
 ```json
@@ -375,7 +383,7 @@ that does not know `activity` ignores it.
 
 ### `worker_report` notices (server to center, 1.5.0)
 
-A notice, like `activity`: it is never matched with a pending command. Every time a worker calls its `report` tool, the server sends it to the center that sent the cap's `kick_cap` / `task`, in parallel with the resume of the cap (it does not wait for the resume; a failed send is logged and the cap is resumed anyway).
+A notice, like `activity`: it is never matched with a pending command. Every time a worker calls its `report` tool, the server sends it to the center of the cap (see "Who is notified"), in parallel with the resume of the cap (it does not wait for the resume; a failed send is logged and the cap is resumed anyway).
 
 ```json
 {"bantou":1,"type":"worker_report","cap_id":"c-0a1b2c3d4e","task_id":"t-20261104-1","worker_id":"w-1f2e3d4c5b","kind":"ask","text":"push 先の branch はどれか","at":"2026-11-04T00:00:00.000Z"}
@@ -505,7 +513,7 @@ Typical causes: git failure, agent state `running` / `error`, broken `state.json
 | `<workspace>/caps/<cap_id>/` | cap path = cwd of claude |
 | `<workspace>/workers/<worker_id>/` | worker path, same layout as a cap |
 | `<path>/state.json` | agent state (shape below) |
-| `<cap path>/logs/center.json` | center that sent the cap's `kick_cap` (`{"center_id":"..."}`) |
+| `<cap path>/logs/center.json` | center of the cap (`{"center_id":"<last peer id>","center_name":"<peer name>"}`; `center_name` is absent in a record from before 1.6.0) |
 | `<worker path>/logs/owner.json` | cap that owns the worker (`{"cap_id":"..."}`) |
 | `<path>/logs/mcp.json` / `logs/system-prompt.md` | `--mcp-config` / `--append-system-prompt-file` of the latest run, rewritten every run |
 | `<path>/logs/<session_id>.jsonl` | raw claude output (stream-json), appended per run with a `# <ISO> mode=<mode> session=<id>` header line |
@@ -572,7 +580,7 @@ Remote-control record:
 
 **One remote-cap per bantou-server.** Whatever the work is, the center sends the next instruction to that
 cap; it never creates a cap per task. The center's cap id is fixed per center (`c-<10 hex>`, kept in
-`center-id` next to `center.json`, so it survives a restart). In the session window (`/mcp/session`):
+`center-id` next to `center.json`, so it survives a restart; a cap taken over from the old format keeps its own cap id, so the cap id is decided **per server** from its record, and the center's id is only used for a server that has no record). In the session window (`/mcp/session`):
 
 | tool | input | output |
 |---|---|---|
@@ -620,9 +628,8 @@ server (the send itself failed or timed out), or `status` cannot be fetched. It 
 follows it as above (`unknown` if `status` fails). A `cap_result` that arrives after the restart updates the latest
 `result`, and completes the remote (with the notice) the same way. This relies on the messenger peer name of the center and the
 sessions being the same after the restart (notices go to the session's peer name; a late reply comes back to `bantou-center`). If it
-changed, the notice is not delivered (logged in `center.log`), and use `remote_wait` / `remote_list`. Records of the old format (one cap per task, `remote_id` is not the center's cap id) are not
-listed: at startup the center sends `stop_cap` for each to its server (it may not arrive) and deletes the record, logging the result in `center.log`.
-A record from the version that kept `history` is migrated: only its pending instructions are kept.
+changed, the notice is not delivered (logged in `center.log`), and use `remote_wait` / `remote_list`. A record is deleted only by `remote_delete`, never by a restart. At startup the center also sends `status` with `cap_id` for every record to its server, so the server notifies this center again (it retries while the server is not visible yet; a record that follows `status` anyway sends it as part of that).
+Records of the old format (one cap per task: `remote_id` is not the center's cap id, `history` form, ...) are **taken over** as the cap of their server in the new form (the cap id is kept; `history`, `legacy` and a record-level `owner` are dropped, only the pending instructions are kept). When one server has several, the record of the center's cap id is kept if there is one, otherwise the newest one (the latest of `createdAt` / `finishedAt` / `result_at` / `error_at`), and the others get `stop_cap` (it may not arrive) and their records are deleted, logging the result in `center.log` (one-time cleanup of the per-task caps).
 
 A remote that has received `activity` notices also has `activity`:
 

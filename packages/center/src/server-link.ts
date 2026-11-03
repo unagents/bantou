@@ -127,8 +127,11 @@ export interface ServerLink {
   taskOn(peer: ServerPeer, cmd: TaskInput): Promise<TaskResultReply | ErrorReply>;
   /** 指定 peer へ worker_reply を送り、返信（worker_reply_result / error）を待つ（FOLLOW_TIMEOUT_MS で切る）。 */
   workerReplyOn(peer: ServerPeer, cmd: WorkerReplyInput): Promise<WorkerReplyResultReply | ErrorReply>;
-  /** 指定 peer へ status を送り、status_result（または error）を待つ（cap の有無の確認用。FOLLOW_TIMEOUT_MS で切る）。 */
-  statusOn(peer: ServerPeer): Promise<StatusReply | ErrorReply>;
+  /**
+   * 指定 peer へ status を送り、status_result（または error）を待つ（cap の有無の確認用。FOLLOW_TIMEOUT_MS で切る）。
+   * cap_id を付けると、server はこの center をその cap の通知先にする（protocol 1.6.0。center の再起動後に通知先を取り戻すのに使う）。
+   */
+  statusOn(peer: ServerPeer, opts?: { cap_id?: string }): Promise<StatusReply | ErrorReply>;
   /** 指定 peer へ stop_cap を送り、返信（stop_result / error）まで待つ。 */
   stopCapOn(peer: ServerPeer, cmd: StopCapInput): Promise<StopResultReply | ErrorReply>;
   /** 指定 peer へ hello を送り、hello_result（または error）を待つ。protocol の版の門は通らない。 */
@@ -609,8 +612,8 @@ export function createServerLink(opts: {
       request<TaskResultReply>(discoveryName, "task_result", cmd.cap_id, cmd, { target: peerTarget(peer), taskId: cmd.task_id }),
     workerReplyOn: (peer, cmd) =>
       request<WorkerReplyResultReply>(discoveryName, "worker_reply_result", `${cmd.cap_id}:${cmd.worker_id}`, cmd, { target: peerTarget(peer), timeoutMs: FOLLOW_TIMEOUT_MS }),
-    statusOn: (peer) =>
-      request<StatusReply>(discoveryName, "status_result", undefined, {}, { target: peerTarget(peer), timeoutMs: FOLLOW_TIMEOUT_MS }),
+    statusOn: (peer, opts) =>
+      request<StatusReply>(discoveryName, "status_result", undefined, opts?.cap_id !== undefined ? { cap_id: opts.cap_id } : {}, { target: peerTarget(peer), timeoutMs: FOLLOW_TIMEOUT_MS }),
     stopCapOn: (peer, cmd) =>
       request<StopResultReply>(discoveryName, "stop_result", cmd.cap_id, cmd, { target: peerTarget(peer), timeoutMs: STOP_TIMEOUT_MS }),
     hello: (peer) =>

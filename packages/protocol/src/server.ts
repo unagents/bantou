@@ -11,7 +11,7 @@ export const SERVER_NAME = "bantou-server";
  * agent-messenger protocol registration (messenger/protocol.json) used in `meta` of send / listPeers.
  * Not the body schema version (`bantou: 1`, PROTOCOL_VERSION). Keep in sync with messenger/protocol.json.
  */
-export const MESSENGER_PROTOCOL = { protocol: "bantou", version: "1.5.0" } as const;
+export const MESSENGER_PROTOCOL = { protocol: "bantou", version: "1.6.0" } as const;
 
 /**
  * hello / update_server (and their replies) exist from this protocol version. A server older than this
@@ -93,9 +93,16 @@ export interface StopCapCommand extends ServerCommandBase {
   cap_id: string;
 }
 
-/** List caps and workers with their state. */
+/**
+ * List caps and workers with their state. Reply: status_result.
+ * With `cap_id` the server also takes the sender as the center to notify for that cap (activity / cap_result /
+ * task_result / worker_report go to the sender's name). A center sends it after a restart to take the notices back.
+ * Protocol 1.6.0; a server older than that ignores `cap_id`.
+ */
 export interface StatusCommand extends ServerCommandBase {
   type: "status";
+  /** AGENT_ID_PATTERN. Optional. */
+  cap_id?: string;
 }
 
 /** Ask the server for its own version and update state. Reply: hello_result. Accepted whatever the sender's protocol version is. */
@@ -665,6 +672,7 @@ export function isServerCommand(v: unknown): v is ServerCommand {
     case "stop_cap":
       return isValidAgentId(v.cap_id);
     case "status":
+      return v.cap_id === undefined || isValidAgentId(v.cap_id);
     case "hello":
       return true;
     case "update_server":

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ActivityNotice, ServerNotice, ServerReply } from "@agent-hand/bantou-protocol";
@@ -349,4 +349,146 @@ test("report: task_id は logs/task.json から復元できる（hub 作り直�
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+// -- center を名前で覚え、送る時に今の peer id へ引く（center 再起動で peer id が変わる） --
+
+type Peers = Array<{ id: string; registered_at?: string }>;
+
+async function withNamedHub(
+  peersOf: (name: string) => Peers | Promise<Peers>,
+  fn: (h: { ws: string; hub: ReturnType<typeof createReportHub>; sent: string[]; logs: string[]; asked: string[]; remake: () => ReturnType<typeof createReportHub> }) => Promise<void>,
+): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), "bantou-reports-test-"));
+  try {
+    const ws = join(dir, "ws");
+    await mkdir(join(ws, "caps", "c1"), { recursive: true });
+    const sent: string[] = [];
+    const logs: string[] = [];
+    const asked: string[] = [];
+    const mk = () =>
+      createReportHub({
+        workspace: ws,
+        invoke: async () => ({ session_id: "s", ok: true, result_text: "" }),
+        send: async (to) => {
+          sent.push(to);
+        },
+        resolvePeers: async (name) => {
+          asked.push(name);
+          return peersOf(name);
+        },
+        log: (m) => logs.push(m),
+      });
+    await fn({ ws, hub: mk(), sent, logs, asked, remake: mk });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+const noticeOf = (capId: string): ActivityNotice => ({ bantou: 1, type: "activity", cap_id: capId, at: "2026-11-04T00:00:00.000Z", agents: [] });
+
+test("center: 名前で覚え、peer id が変わったら今の peer id へ送る（古い id へは送らない）", async () => {
+  let peers: Peers = [{ id: "old-id", registered_at: "2026-11-04T00:00:00.000Z" }];
+  await withNamedHub(
+    () => peers,
+    async ({ hub, sent, asked }) => {
+      await hub.rememberCenter("c1", "old-id", "bantou-center");
+      await hub.notify("c1", noticeOf("c1"));
+      assert.deepEqual(sent, ["old-id"]);
+      // center 再起動: 同名で別 id
+      peers = [{ id: "new-id", registered_at: "2026-11-04T01:00:00.000Z" }];
+      await hub.notify("c1", noticeOf("c1"));
+      assert.deepEqual(sent, ["old-id", "new-id"]);
+      assert.deepEqual(asked, ["bantou-center", "bantou-center"]);
+    },
+  );
+});
+
+test("center: 同名が複数なら、最後に命令を送ってきた id を優先。無ければ最後に登録した peer", async () => {
+  const peers: Peers = [
+    { id: "a", registered_at: "2026-11-04T01:00:00.000Z" },
+    { id: "b", registered_at: "2026-11-04T02:00:00.000Z" },
+  ];
+  await withNamedHub(
+    () => peers,
+    async ({ hub, sent }) => {
+      await hub.rememberCenter("c1", "a", "bantou-center"); // a が最後に命令を送ってきた（b の方が新しい登録）
+      await hub.notify("c1", noticeOf("c1"));
+      assert.deepEqual(sent, ["a"]);
+      await hub.noteCenter("c1", "zombie", "bantou-center"); // 覚えている id がもういない
+      await hub.notify("c1", noticeOf("c1"));
+      assert.deepEqual(sent, ["a", "b"]);
+    },
+  );
+});
+
+test("center: 命令で通知先を更新する（noteCenter は id と名前を置き換え、ファイルにも残る）", async () => {
+  const peers: Peers = [{ id: "x1" }, { id: "x2" }];
+  await withNamedHub(
+    () => peers,
+    async ({ ws, hub, remake, sent }) => {
+      await hub.rememberCenter("c1", "x1", "bantou-center");
+      await hub.noteCenter("c1", "x2", "bantou-center");
+      const d = JSON.parse(await readFile(join(ws, "caps", "c1", "logs", "center.json"), "utf8")) as Record<string, string>;
+      assert.deepEqual(d, { center_id: "x2", center_name: "bantou-center" });
+      await remake().notify("c1", noticeOf("c1")); // hub 作り直し後もファイルから復元して x2 へ
+      assert.deepEqual(sent, ["x2"]);
+    },
+  );
+});
+
+test("center: noteCenter は無い cap の dir を作らない（メモリだけ更新）", async () => {
+  await withNamedHub(
+    () => [],
+    async ({ ws, hub, logs }) => {
+      await hub.noteCenter("nocap", "x1", "bantou-center");
+      await assert.rejects(stat(join(ws, "caps", "nocap")));
+      assert.ok(!logs.some((l) => l.includes("center 記録失敗")));
+      await hub.notify("nocap", noticeOf("nocap")); // メモリの記録で送ろうとする（同名が居なければ覚えている id）
+    },
+  );
+});
+
+test("center: 旧形式（center_id のみ・名前無し）は peer id のまま送る。名前を引かない", async () => {
+  await withNamedHub(
+    () => [{ id: "other" }],
+    async ({ ws, hub, sent, asked }) => {
+      await mkdir(join(ws, "caps", "c1", "logs"), { recursive: true });
+      await writeFile(join(ws, "caps", "c1", "logs", "center.json"), JSON.stringify({ center_id: "legacy-id" }) + "\n");
+      await hub.notify("c1", noticeOf("c1"));
+      assert.deepEqual(sent, ["legacy-id"]);
+      assert.deepEqual(asked, []);
+    },
+  );
+});
+
+test("center: 同名の peer が居ない・引けない時は覚えている id へ送る", async () => {
+  let mode: "none" | "fail" = "none";
+  await withNamedHub(
+    () => {
+      if (mode === "fail") throw new Error("broker down");
+      return [];
+    },
+    async ({ hub, sent, logs }) => {
+      await hub.rememberCenter("c1", "keep-id", "bantou-center");
+      await hub.notify("c1", noticeOf("c1"));
+      mode = "fail";
+      await hub.notify("c1", noticeOf("c1"));
+      assert.deepEqual(sent, ["keep-id", "keep-id"]);
+      assert.ok(logs.some((l) => l.includes("center の peer を引けない")));
+    },
+  );
+});
+
+test("center: report 起因の cap_result と worker_report も今の peer id へ届く", async () => {
+  const peers: Peers = [{ id: "new-id" }];
+  await withNamedHub(
+    () => peers,
+    async ({ hub, sent }) => {
+      await hub.rememberCenter("c1", "old-id", "bantou-center");
+      await hub.report("c1", "w1", "done", "x");
+      await hub.drain();
+      assert.deepEqual(sent, ["new-id", "new-id"]); // worker_report 通知と cap_result
+    },
+  );
 });
