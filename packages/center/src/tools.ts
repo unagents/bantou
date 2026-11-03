@@ -3,7 +3,7 @@ import { AGENT_ID_PATTERN } from "@agent-hand/bantou-protocol";
 import { z } from "zod";
 import { OWNER_HEADER, OWNER_PATTERN, OWNER_QUERY, remoteSendSchema, remoteWaitSchema, WAIT_DEFAULT_SEC, type RemoteManager } from "./remotes.js";
 import type { RemoteControlSupervisor } from "./remote-control.js";
-import { sessionCreateSchema, SESSION_NAME, type SessionManager } from "./sessions.js";
+import { instructionsSchema, sessionCreateSchema, SESSION_NAME, type SessionManager } from "./sessions.js";
 import type { Follow } from "./follow.js";
 import type { ServerLink } from "./server-link.js";
 
@@ -134,10 +134,12 @@ export function registerTools(
     "rc_start",
     {
       title: "remote-control 起動",
-      description: "project の claude remote-control を起動する（起動済みなら現状を返す）",
-      inputSchema: { project: projectName },
+      description:
+        "project の claude remote-control を起動する（起動済みなら現状を返す）。instructions を渡すと追加指示（--append-system-prompt）を更新して起動する（session_create で作った session のみ。空文字で解除）。省略時は記録済みの値を使う",
+      inputSchema: { project: projectName, instructions: instructionsSchema.optional() },
     },
-    ({ project }) => guard(async () => json(await supervisor.start(project))),
+    ({ project, instructions }) =>
+      guard(async () => json(instructions === undefined ? await supervisor.start(project) : await sessions.start(project, { instructions }))),
   );
   server.registerTool(
     "rc_stop",

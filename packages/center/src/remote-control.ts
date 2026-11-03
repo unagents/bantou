@@ -36,7 +36,7 @@ export interface RcStatus {
   lastError?: string;
   startedAt: string | null;
   args: string[] | null;
-  /** この起動で `--append-system-prompt`（sessionInstructions）を付けたか。本文は持たない。 */
+  /** この起動で `--append-system-prompt`（session の instructions）を付けたか。本文は持たない。 */
   instructions: boolean;
   /** 起動に使う claude 実行ファイルとその決定元。 */
   claude: ResolvedClaude;
@@ -93,12 +93,12 @@ export interface RemoteControlSupervisor {
    * 起動する。resume: true なら `--continue` で前回の会話に復帰を試み、接続前に早期終了したら素の起動へ fallback する
    * （claude は約 4 時間以内の記録が無いと --continue で error exit する）。
    */
-  start(project: string, opts?: { resume?: boolean }): Promise<RcStatus>;
+  start(project: string, opts?: { resume?: boolean; instructions?: string }): Promise<RcStatus>;
   /**
    * 実行中に project を足す（起動はしない）。同名は拒否。remove で外せるのはこの add で足したものだけ。
    * wrapper: true なら pty wrapper 経由の対話型（`claude --remote-control`）で起動する。省略は従来の `claude remote-control`。
    */
-  add(project: ProjectConfig, opts?: { wrapper?: boolean }): void;
+  add(project: ProjectConfig, opts?: { wrapper?: boolean; instructions?: string }): void;
   /** add で足した project を停止して外す。config 由来の project は外せない。 */
   remove(name: string): Promise<void>;
   stop(project: string): Promise<RcStatus>;
@@ -183,6 +183,8 @@ interface Entry {
   logStream: WriteStream | null;
   /** pty wrapper 経由で起動する entry か。 */
   wrapper: boolean;
+  /** `--append-system-prompt` に渡す追加指示。空なら付けない。再起動・--continue でも同じ値を使う。 */
+  instructions: string;
 }
 
 /** wrapper 経由の起動に必要なもの。 */
@@ -216,7 +218,7 @@ export function createRemoteControlSupervisor(opts: {
   config: Config;
   /**
    * 指定すると、session を起動するたび（新規・再起動・--continue・resume 失敗後の素の起動）にこの config ファイルを読み直し、
-   * remoteControl の項目のうち model / sessionInstructions / env / autoConsent / maxRestarts / restartDelayMs / continueOnRestart をその時点の値にする。
+   * remoteControl の項目のうち model / env / autoConsent / maxRestarts / restartDelayMs / continueOnRestart をその時点の値にする。
    * 読めない・不正な時は直前に読めた値（初回は config）で起動し、理由を log に残す。
    */
   configPath?: string;
@@ -242,7 +244,7 @@ export function createRemoteControlSupervisor(opts: {
   const entries = new Map<string, Entry>();
   /** add() で足した project の名前（remove できるのはこれだけ）。 */
   const dynamic = new Set<string>();
-  const newEntry = (p: ProjectConfig, wrapper = false): Entry => ({
+  const newEntry = (p: ProjectConfig, wrapper = false, instructions = ""): Entry => ({
       project: p,
       status: {
         project: p.name,
@@ -266,6 +268,7 @@ export function createRemoteControlSupervisor(opts: {
       exited: null,
       logStream: null,
       wrapper,
+      instructions,
   });
   for (const p of config.projects) entries.set(p.name, newEntry(p));
 
@@ -316,7 +319,7 @@ export function createRemoteControlSupervisor(opts: {
         mcpConfig: mcpConfigJson(mcpUrl, name),
         resume: useContinue,
         ...(rc.model ? { model: rc.model } : {}),
-        ...(rc.sessionInstructions ? { appendSystemPrompt: rc.sessionInstructions } : {}),
+        ...(e.instructions ? { appendSystemPrompt: e.instructions } : {}),
         ...(wd.core.size(name) ?? {}),
       });
       command = wd.path ?? resolveWrapperPath();
@@ -336,7 +339,7 @@ export function createRemoteControlSupervisor(opts: {
       environmentUrl: null,
       startedAt: new Date().toISOString(),
       args: shownArgs,
-      instructions: e.wrapper && !!rc.sessionInstructions,
+      instructions: e.wrapper && !!e.instructions,
     };
     delete e.status.lastError;
 
@@ -578,7 +581,7 @@ export function createRemoteControlSupervisor(opts: {
 
   let closing = false;
 
-  const start = async (name: string, startOpts: { resume?: boolean } = {}): Promise<RcStatus> => {
+  const start = async (name: string, startOpts: { resume?: boolean; instructions?: string } = {}): Promise<RcStatus> => {
     const e = get(name);
     if (isActive(e) || closing) return snapshot(e);
     const stopSeq = e.stopSeq;
@@ -602,6 +605,7 @@ export function createRemoteControlSupervisor(opts: {
       return snapshot(e);
     }
     e.status.restarts = 0;
+    if (startOpts.instructions !== undefined) e.instructions = startOpts.instructions;
     launch(e, startOpts.resume === true, startOpts.resume === true);
     return snapshot(e);
   };
@@ -637,10 +641,10 @@ export function createRemoteControlSupervisor(opts: {
     return snapshot(e);
   };
 
-  const add = (project: ProjectConfig, addOpts: { wrapper?: boolean } = {}): void => {
+  const add = (project: ProjectConfig, addOpts: { wrapper?: boolean; instructions?: string } = {}): void => {
     if (entries.has(project.name)) throw new Error(`project が既に存在: ${project.name}`);
     if (addOpts.wrapper && !opts.wrapper) throw new Error("wrapper の設定が無いので wrapper 起動の project は足せない");
-    entries.set(project.name, newEntry(project, addOpts.wrapper === true));
+    entries.set(project.name, newEntry(project, addOpts.wrapper === true, addOpts.instructions));
     if (addOpts.wrapper) opts.wrapper?.core.register(project.name);
     dynamic.add(project.name);
   };

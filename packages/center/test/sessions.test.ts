@@ -13,13 +13,15 @@ import { createEventHub, type SessionsEvent } from "../src/events.js";
 function fakeSupervisor(initial: ProjectConfig[]) {
   const map = new Map<string, RcStatus>();
   const calls: string[] = [];
+  const opts: { add: Record<string, unknown>; start: Record<string, unknown> } = { add: {}, start: {} };
   const mk = (p: ProjectConfig): RcStatus => ({
     project: p.name, path: p.path, state: "stopped", pid: null, sessionUrl: null, environmentUrl: null,
     restarts: 0, lastExit: null, startedAt: null, args: null, instructions: false, claude: { path: "claude", source: "PATH" },
   });
   for (const p of initial) map.set(p.name, mk(p));
   const sup = {
-    add: (p: ProjectConfig, o?: { wrapper?: boolean }) => {
+    add: (p: ProjectConfig, o?: { wrapper?: boolean; instructions?: string }) => {
+      opts.add[p.name] = o;
       if (map.has(p.name)) throw new Error("既に存在");
       calls.push(`add:${p.name}:${p.permissionMode}${o?.wrapper ? ":wrapper" : ""}`);
       map.set(p.name, mk(p));
@@ -28,7 +30,8 @@ function fakeSupervisor(initial: ProjectConfig[]) {
       calls.push(`remove:${n}`);
       map.delete(n);
     },
-    start: async (n: string, o?: { resume?: boolean }) => {
+    start: async (n: string, o?: { resume?: boolean; instructions?: string }) => {
+      opts.start[n] = o;
       calls.push(`start:${n}${o?.resume ? ":resume" : ""}`);
       const s = map.get(n)!;
       s.state = "connected";
@@ -38,7 +41,7 @@ function fakeSupervisor(initial: ProjectConfig[]) {
     status: (n: string) => ({ ...map.get(n)! }),
     list: () => [...map.values()].map((s) => ({ ...s })),
   } as unknown as RemoteControlSupervisor;
-  return { sup, calls };
+  return { sup, calls, opts };
 }
 
 let dir: string;
@@ -203,4 +206,53 @@ test("list: instructions は supervisor の status の真偽（本文は出さ�
   assert.equal((await mgr.create({ name: "pm1" })).instructions, false);
   assert.ok(mgr.list().every((s) => typeof s.instructions === "boolean"));
   assert.ok(!JSON.stringify(mgr.list()).includes("追加指示"));
+});
+
+test("create: instructions は add に渡り、sessions.json に保存される。無し・空は保存しない", async () => {
+  const { mgr, opts } = setup();
+  await mgr.create({ name: "a", instructions: "日本語で答える\n二行目" });
+  await mgr.create({ name: "b", instructions: "" });
+  await mgr.create({ name: "c" });
+  assert.equal((opts.add.a as { instructions?: string }).instructions, "日本語で答える\n二行目");
+  assert.equal((opts.add.b as { instructions?: string }).instructions, undefined);
+  assert.equal((opts.add.c as { instructions?: string }).instructions, undefined);
+  const saved = JSON.parse(await readFile(join(dir, "sessions.json"), "utf8")) as SavedSession[];
+  assert.equal(saved.find((x) => x.name === "a")?.instructions, "日本語で答える\n二行目");
+  assert.ok(!("instructions" in saved.find((x) => x.name === "b")!));
+  assert.ok(!("instructions" in saved.find((x) => x.name === "c")!));
+});
+
+test("restore: 保存済みの instructions を add に渡して resume 付きで start", async () => {
+  const store = createJsonListStore<SavedSession>(join(dir, "sessions.json"), () => {});
+  await store.save([
+    { name: "r1", path: join(dir, "r1"), permissionMode: "auto", instructions: "保存された指示", createdAt: "2026-01-01T00:00:00Z" },
+    { name: "r2", path: join(dir, "r2"), permissionMode: "auto", createdAt: "2026-01-01T00:00:00Z" },
+  ]);
+  const { mgr, opts, calls } = setup();
+  await mgr.restore();
+  assert.ok(calls.includes("start:r1:resume"));
+  assert.equal((opts.add.r1 as { instructions?: string }).instructions, "保存された指示");
+  assert.equal((opts.add.r2 as { instructions?: string }).instructions, undefined);
+});
+
+test("start: instructions を渡すと記録を更新して start に渡す。省略は渡さない（記録の値を使う）。空文字で解除", async () => {
+  const { mgr, opts } = setup();
+  await mgr.create({ name: "pm1", instructions: "旧" });
+  const read = async () => (JSON.parse(await readFile(join(dir, "sessions.json"), "utf8")) as SavedSession[]).find((x) => x.name === "pm1")!;
+  await mgr.start("pm1");
+  assert.deepEqual(opts.start.pm1, {});
+  assert.equal((await read()).instructions, "旧");
+  await mgr.start("pm1", { instructions: "新" });
+  assert.deepEqual(opts.start.pm1, { instructions: "新" });
+  assert.equal((await read()).instructions, "新");
+  await mgr.start("pm1", { instructions: "" });
+  assert.deepEqual(opts.start.pm1, { instructions: "" });
+  assert.ok(!("instructions" in (await read())));
+});
+
+test("start: instructions は config 由来の project・未定義の session には指定できない", async () => {
+  const { mgr } = setup();
+  await assert.rejects(mgr.start("cfg", { instructions: "x" }), /session_create で作った session のみ/);
+  await assert.rejects(mgr.start("nope", { instructions: "x" }), /未定義の session/);
+  assert.equal((await mgr.start("cfg")).name, "cfg");
 });
