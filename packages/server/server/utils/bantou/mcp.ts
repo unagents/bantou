@@ -66,6 +66,8 @@ function registerWorkerTools(server: McpServer, capId: string): void {
     {
       description:
         "Start a worker (headless claude -p run by the server) with a prompt, or give an existing worker (same worker_id) its next instruction. " +
+        "Use it to start a review worker too (separate clone, reads the diff, runs the tests, reports problems), and to send its findings back to the implementing worker with the same worker_id until fixed. " +
+        "Start independent parts as separate workers in parallel. Always state in the prompt the deliverable (branch, commit, report location) and how to verify (which tests). " +
         "Optional model (e.g. sonnet, opus, haiku, or a full model id) is passed to claude --model; without it the worker keeps its earlier model, else uses your default worker model, else claude's own default. " +
         "Returns {worker_id, accepted} immediately without waiting for the work; the worker reports back with its own report tool, which resumes you.",
       inputSchema: {

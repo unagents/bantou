@@ -157,6 +157,7 @@ npx bantou --config <path>
 | `worker_stop` | `worker_id` | `{"worker_id":"w-...","stopped":true}` |
 
 - `worker_start`: `worker_id` を省くと `w-<hex10>` を採番して新規、既存の id なら同じ session を `--resume`（続きの指示）。完了を待たずに返る。実行中なら queue で直列。失敗は activity と `state.json` に出る。path は `<workspace>/workers/<worker_id>/`（`repo` 指定時は clone / fetch）。cap の存在を確かめる（無ければ `cap が存在しない`）。
+- cap の運用の決まり: `CAP_GUIDE`（system prompt の固定部分。正本は `docs/design/cap-orchestration.md`）に、cap は自分で実装せず worker にさせる、最小の分担は実装 worker と review worker の 2 体（review は別 clone で差分を読みテストを回して report、指摘は同じ `worker_id` の `worker_start` で実装 worker に戻し、最大 3 回）、独立な部分は別 worker で並列、worker への指示に成果物（branch・commit・report の置き場）と確認方法（回すテスト）を入れる、最終返答に各 worker の結果・review の結論・残った問題を書く、を入れてある。`kick_cap` の prompt には触らない。
 - `worker_start` の `model`: worker の `claude --model` にそのまま渡す（`sonnet` / `opus` / `haiku` / `claude-sonnet-5-5` などフル ID も可。`[A-Za-z0-9._[]-]` のみ、先頭 `-` 不可。不正は error）。優先順位は 指定 > その worker の前回のモデル > cap の `worker_model`（`kick_cap`） > 付けない。続きの指示（同じ `worker_id`）でも同じモデルを使い続ける。
 - 持ち主は `workers/<worker_id>/logs/owner.json` に記録する。別の cap の worker は `worker_start` / `worker_status` / `worker_stop` とも `別の cap の worker: <id>` で拒否する。
 - `worker_status`: 呼んだ cap の worker だけ。server 再起動後など活動情報が無い worker は `state.json` から補う（idle → idle、failed / error → failed、running → running。起動直後で `state.json` が無いものは running / `starting`）。
