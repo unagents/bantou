@@ -14,7 +14,7 @@ beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "center-rem-"));
 });
 afterEach(async () => {
-  await rm(dir, { recursive: true, force: true });
+  await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
 });
 
 const peerA: ServerPeer = { id: "id-a", name: "bantou-server", version: "1.1.0" };
