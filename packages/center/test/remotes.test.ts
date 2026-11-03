@@ -1117,6 +1117,43 @@ test("restore: 残す 1 件は動いている記録（running・unknown・指示
   assert.deepEqual(o, { kept: ["r-9f8e7d6c5b"], stopIds: ["r-0a1b2c3d4e", "r-5a5a5a5a5a"] });
 });
 
+test("restore: 新形式（center の cap_id）の active 記録は、より新しい finished の旧記録があっても残る。stop_cap は旧記録へ", async () => {
+  const own: RemoteRecord = { remote_id: CAP, server: "id-a", serverName: "bantou-server", serverHost: "host-a", state: "running", createdAt: "2026-11-03T00:00:00.000Z", pending: [] };
+  await writeFile(join(dir, "remotes.json"), JSON.stringify([own, legacyRec("r-0a1b2c3d4e", { finishedAt: "2026-11-03T20:00:00.000Z" })]));
+  const { mgr, stops } = setup({}, undefined, undefined, undefined, { log: () => {} });
+  await mgr.restore();
+  assert.deepEqual(mgr.list().map((r) => r.remote_id), [CAP]);
+  assert.deepEqual(stops.map((x) => (x.cmd as { cap_id: string }).cap_id), ["r-0a1b2c3d4e"]);
+});
+
+test("restore: 同名で host が違う 2 つの server は別の server。host 無しの旧記録が確かめられない（同名 peer が複数・peer が引けない）時は、グループ化も stop_cap もせずそのまま残す", async () => {
+  const peerA3: ServerPeer = { id: "id-a3", name: "bantou-server", hostname: "host-z", version: "1.1.0" };
+  const noHost = (id: string, over: Record<string, unknown> = {}) => {
+    const r = legacyRec(id, over) as Record<string, unknown>;
+    delete r.serverHost;
+    return r;
+  };
+  const recs = [
+    legacyRec("r-0a1b2c3d4e", { finishedAt: "2026-11-03T01:00:00.000Z" }), // host-a
+    legacyRec("r-9f8e7d6c5b", { server: "id-a3", serverHost: "host-z", finishedAt: "2026-11-03T02:00:00.000Z" }), // host-z（同名の別 server）
+    noHost("r-5a5a5a5a5a", { server: "old-id", finishedAt: "2026-11-03T03:00:00.000Z" }),
+    noHost("r-6b6b6b6b6b", { server: "old-id2", finishedAt: "2026-11-03T04:00:00.000Z" }),
+  ];
+  // 同名 peer が 2 つ
+  await writeFile(join(dir, "remotes.json"), JSON.stringify(recs));
+  const a = setup({}, undefined, undefined, undefined, { log: () => {} });
+  a.setPeers([peerA, peerA3, peerB]);
+  await a.mgr.restore();
+  assert.deepEqual(a.mgr.list().map((r) => r.remote_id).sort(), ["r-0a1b2c3d4e", "r-5a5a5a5a5a", "r-6b6b6b6b6b", "r-9f8e7d6c5b"]);
+  assert.equal(a.stops.length, 0);
+  // peer が引けない
+  await writeFile(join(dir, "remotes.json"), JSON.stringify(recs));
+  const b = setup({ peers: async () => { throw new Error("link down"); } }, undefined, undefined, undefined, { log: () => {} });
+  await b.mgr.restore();
+  assert.deepEqual(b.mgr.list().map((r) => r.remote_id).sort(), ["r-0a1b2c3d4e", "r-5a5a5a5a5a", "r-6b6b6b6b6b", "r-9f8e7d6c5b"]);
+  assert.equal(b.stops.length, 0);
+});
+
 test("restore: host の無い旧記録（serverHost を持つ前）は名前で同じ server とみなし、1 件に畳む。peer id が変わっても旧 cap_id へ送り、記録は 1 件のまま。status で host が埋まる", async () => {
   const noHost = (id: string, over: Record<string, unknown> = {}) => {
     const r = legacyRec(id, over) as Record<string, unknown>;

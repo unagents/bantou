@@ -646,12 +646,28 @@ export function createRemoteManager(opts: {
         if (r.state !== "running" && r.state !== "done" && r.state !== "failed" && r.state !== "unknown") r.state = "unknown";
         loaded.push(r);
       }
-      // server ごとに 1 件にする。同じ server に複数ある（作業ごとの cap の名残）時は最新の 1 件を残し、他は stop_cap を送って消す（1 回限りの後始末）。
-      // 同じ server = peer id が同じ、または名前が同じで host が同じ（host の無い旧形式の記録は名前だけで同じとみなす）
+      // server ごとに 1 件にする。同じ server に複数ある（作業ごとの cap の名残）時は、動いている記録を最優先、同順位なら最新の 1 件を残し、他は stop_cap を送って消す（1 回限りの後始末）。
+      // 同じ server = peer id が同じ、または名前 + host が同じ。host の無い旧記録は、今の peer で同名の server が 1 つだけと確かめられた時だけ、その host の server とみなす。
+      // 確かめられない（peer が引けない・同名の peer が複数）host 無しの記録は、どの記録とも一緒にせず、stop_cap も送らずにそのまま残す（次の status 成功時に host が埋まる）
+      let livePeers: ServerPeer[] = [];
+      try {
+        livePeers = await link.peers();
+      } catch {
+        // peer が引けない
+      }
+      const hostOf = (r: RemoteRecord): string | undefined => {
+        if (r.serverHost !== undefined) return r.serverHost;
+        const same = livePeers.filter((p) => p.name === r.serverName);
+        return same.length === 1 ? same[0].hostname : undefined;
+      };
       const surplus: RemoteRecord[] = [];
       const groups: RemoteRecord[][] = [];
       for (const r of loaded) {
-        const g = groups.find((m) => m.some((x) => x.server === r.server || (x.serverName === r.serverName && (x.serverHost === undefined || r.serverHost === undefined || x.serverHost === r.serverHost))));
+        const h = hostOf(r);
+        const g =
+          h === undefined && r.serverHost === undefined
+            ? undefined
+            : groups.find((m) => m.some((x) => x.server === r.server || (x.serverName === r.serverName && hostOf(x) !== undefined && hostOf(x) === h)));
         if (g) g.push(r);
         else groups.push([r]);
       }

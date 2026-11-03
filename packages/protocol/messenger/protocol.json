@@ -69,7 +69,7 @@
     },
     "update_server": {
       "type": "object",
-      "description": "Tell the server to update itself to npm `bantou@<version>` and restart after every running cap / worker is done. While it waits, kick_cap is refused with error code `updating` (retryable). Reply: update_result or error. The package source is the server's config, never this message.",
+      "description": "Tell the server to update itself to npm `bantou@<version>` and restart after every running cap / worker is done. While it waits, kick_cap and task are refused with error code `updating` (retryable). Reply: update_result or error. The package source is the server's config, never this message.",
       "required": ["bantou", "type", "version"],
       "properties": {
         "bantou": { "const": 1 },
