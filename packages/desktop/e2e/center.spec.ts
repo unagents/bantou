@@ -212,6 +212,108 @@ test("the remotes section refreshes by itself without pressing update", async ({
   await expect(worker).toHaveAttribute("data-state", "lost", { timeout: 5_000 });
 });
 
+const withTask = () => {
+  const [first, ...rest] = remotes("running");
+  return [
+    {
+      ...first,
+      task_result: {
+        cap_id: "c-0a1b2c3d4e",
+        task_id: "t-1",
+        state: "done",
+        summary: "task メッセージを追加した",
+        workers: [
+          { worker_id: "w-1f2e3d4c5b", role: "implement", state: "done", branch: "feature/x", commit: "abc1234", tests: "npm test: 28 pass", result: "型とガードを追加した" },
+          { worker_id: "w-2a3b4c5d6e", role: "review", state: "done", result: "指摘 2 件" },
+        ],
+        review: {
+          verdict: "issues",
+          items: [
+            { severity: "high", text: "検証が無い", resolved: true },
+            { severity: "low", text: "命名", resolved: false },
+          ],
+          rounds: 2,
+        },
+        remaining: ["命名の整理"],
+        error: "tests 一部失敗",
+      },
+      worker_reports: [
+        { cap_id: "c-0a1b2c3d4e", task_id: "t-1", worker_id: "w-1f2e3d4c5b", kind: "ask", text: "古い質問", at: "2026-10-29T01:00:00.000Z" },
+        { cap_id: "c-0a1b2c3d4e", task_id: "t-1", worker_id: "w-1f2e3d4c5b", kind: "progress", text: "続行した", at: "2026-10-29T01:00:30.000Z" },
+        { cap_id: "c-0a1b2c3d4e", task_id: "t-1", worker_id: "w-2a3b4c5d6e", kind: "approve", text: "push してよいか", at: "2026-10-29T01:01:00.000Z" },
+        { cap_id: "c-0a1b2c3d4e", task_id: "t-1", worker_id: "w-3c4d5e6f7a", kind: "done", text: "完了", at: "2026-10-29T01:02:00.000Z" },
+      ],
+    },
+    ...rest,
+  ];
+};
+
+test("a cap shows the task_result: workers, review verdict and items, remaining and error", async ({ page }) => {
+  await page.goto("/");
+  await mock(page, { enabled: true });
+  await seedRemotes(page, withTask());
+  await page.getByTestId("open-center").click();
+
+  const first = page.getByTestId("center-remote").nth(0);
+  await expect(first.getByTestId("center-task-summary")).toHaveText("task メッセージを追加した");
+  await expect(first.getByTestId("center-task-error")).toHaveText("tests 一部失敗");
+  const workers = first.getByTestId("center-task-worker");
+  await expect(workers).toHaveCount(2);
+  await expect(workers.nth(0)).toContainText("implement");
+  await expect(workers.nth(0).getByTestId("center-task-worker-branch")).toHaveText("feature/x");
+  await expect(workers.nth(0).getByTestId("center-task-worker-commit")).toHaveText("abc1234");
+  await expect(workers.nth(0).getByTestId("center-task-worker-tests")).toHaveText("npm test: 28 pass");
+  await expect(workers.nth(0).getByTestId("center-task-worker-result")).toHaveText("型とガードを追加した");
+  await expect(workers.nth(1).getByTestId("center-task-worker-branch")).toHaveCount(0);
+  await expect(first.getByTestId("center-task-review")).toHaveAttribute("data-verdict", "issues");
+  await expect(first.getByTestId("center-task-review-verdict")).toHaveText("指摘あり");
+  const items = first.getByTestId("center-task-review-item");
+  await expect(items).toHaveCount(2);
+  await expect(items.nth(0)).toHaveAttribute("data-severity", "high");
+  await expect(items.nth(0)).toHaveAttribute("data-resolved", "true");
+  await expect(items.nth(1)).toHaveAttribute("data-resolved", "false");
+  await expect(first.getByTestId("center-task-remaining")).toContainText("命名の整理");
+  // a remote without task_result has no block
+  await expect(page.getByTestId("center-remote").nth(1).getByTestId("center-task-result")).toHaveCount(0);
+});
+
+test("an unanswered ask / approve is shown and a reply is sent as worker_reply", async ({ page }) => {
+  await page.goto("/");
+  await mock(page, { enabled: true });
+  await seedRemotes(page, withTask());
+  await page.getByTestId("open-center").click();
+
+  // the ask of w-1f.. has a later report (progress), progress / done are not asks: only the approve of w-2a.. remains
+  const asks = page.getByTestId("center-remote").nth(0).getByTestId("center-worker-ask");
+  await expect(asks).toHaveCount(1);
+  await expect(asks.nth(0)).toHaveAttribute("data-kind", "approve");
+  await expect(asks.nth(0)).toHaveAttribute("data-worker-id", "w-2a3b4c5d6e");
+  await expect(asks.nth(0).getByTestId("center-worker-ask-text")).toHaveText("push してよいか");
+
+  const send = asks.nth(0).getByTestId("center-worker-reply-send");
+  await expect(send).toBeDisabled();
+  await asks.nth(0).getByTestId("center-worker-reply-input").fill("OK、feature/x に push して");
+  await send.click();
+  await expect(asks).toHaveCount(0);
+  const sent = await page.evaluate(() => (window as unknown as { __BANTOU_MOCK__: { centerWorkerReplies: unknown[] } }).__BANTOU_MOCK__.centerWorkerReplies);
+  expect(sent).toEqual([{ remote_id: "c-0a1b2c3d4e", worker_id: "w-2a3b4c5d6e", text: "OK、feature/x に push して" }]);
+});
+
+test("a failed worker_reply keeps the ask and shows the error", async ({ page }) => {
+  await page.goto("/");
+  await mock(page, { enabled: true });
+  await seedRemotes(page, withTask());
+  await page.evaluate(() => {
+    (window as unknown as { __BANTOU_MOCK__: { centerWorkerReplyError: string } }).__BANTOU_MOCK__.centerWorkerReplyError = "unknown worker";
+  });
+  await page.getByTestId("open-center").click();
+  const ask = page.getByTestId("center-remote").nth(0).getByTestId("center-worker-ask");
+  await ask.getByTestId("center-worker-reply-input").fill("はい");
+  await ask.getByTestId("center-worker-reply-send").click();
+  await expect(ask.getByTestId("center-worker-reply-error")).toContainText("unknown worker");
+  await expect(ask).toHaveCount(1);
+});
+
 test("the remotes section says so when there is no remote", async ({ page }) => {
   await page.goto("/");
   await mock(page, { enabled: true });
