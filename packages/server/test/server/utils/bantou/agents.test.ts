@@ -200,6 +200,26 @@ test("agents: status は cap と worker を列挙し、壊れた state は error
   });
 });
 
+test("agents: center の session cap_id（大文字・- _ を含む 77 文字）で作成・status・reapOrphans が通る", async () => {
+  await withFixture(0, async (f) => {
+    const id = "c-0123456789-" + "Ab_-".repeat(16);
+    assert.equal(id.length, 77);
+    const m = mgr(f, async () => ok("x"), {
+      listProcesses: async () => [{ pid: 1, argv: "/sbin/init" }],
+      terminate: async () => {
+        throw new Error("殺してはいけない");
+      },
+    });
+    await m.invoke("cap", id, { prompt: "p" });
+    assert.deepEqual((await m.status()).caps.map((c) => [c.id, c.state]), [[id, "idle"]]);
+    const dir = await seedRunning(f, "caps", id, "sid-x");
+    assert.ok(dir.endsWith("/caps/" + id));
+    const r = await m.reapOrphans();
+    assert.deepEqual(r.reaped.map((x) => x.id), [id]);
+    assert.equal((await m.status()).caps[0].state, "failed");
+  });
+});
+
 test("agents: 不正な id は reject", async () => {
   await withFixture(0, async (f) => {
     const m = mgr(f, async () => ok("x"));

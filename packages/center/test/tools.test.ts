@@ -214,12 +214,14 @@ test("remote_send / remote_create（別名）: owner は session の認証済み
 });
 
 test("worker_reply: session 向け・外向け（desktop の center_call）とも {remote_id?, worker_id, text, server?} を remotes.workerReply へ渡す。不正な worker_id・空の text は拒否。失敗は isError", async () => {
-  const { client, session, calls, close } = await connect(undefined, { remotes: { workerReply: async (i: unknown) => { if ((i as { text: string }).text === "boom") throw new Error("版が合わない"); return { remote_id: "c-1", server: "id", worker_id: "w-1", accepted: true } as never; } } });
+  const { client, session, calls, close } = await connect(undefined, { remotes: { workerReply: async (i: unknown) => { calls.push({ workerReply: i }); if ((i as { text: string }).text === "boom") throw new Error("版が合わない"); return { remote_id: "c-1", server: "id", worker_id: "w-1", accepted: true } as never; } } });
   const c = await session("pm1");
   const r = await c.callTool({ name: "worker_reply", arguments: { worker_id: "w-1", text: "OK 進めて" } });
   assert.deepEqual(JSON.parse(text(r)), { remote_id: "c-1", server: "id", worker_id: "w-1", accepted: true });
   const o = await client.callTool({ name: "worker_reply", arguments: { remote_id: "c-1", worker_id: "w-1", text: "はい", server: "id" } });
   assert.equal(o.isError, undefined);
+  // session 向けは呼び出し元 session の owner を渡す。外向け（desktop）は渡さない
+  assert.deepEqual(calls.slice(0, 2), [{ workerReply: { owner: "pm1", worker_id: "w-1", text: "OK 進めて" } }, { workerReply: { remote_id: "c-1", worker_id: "w-1", text: "はい", server: "id" } }]);
   assert.equal((await c.callTool({ name: "worker_reply", arguments: { worker_id: "a b", text: "x" } })).isError, true);
   assert.equal((await c.callTool({ name: "worker_reply", arguments: { worker_id: "w-1", text: "" } })).isError, true);
   const e = await c.callTool({ name: "worker_reply", arguments: { worker_id: "w-1", text: "boom" } });
@@ -229,18 +231,20 @@ test("worker_reply: session 向け・外向け（desktop の center_call）と�
   await close();
 });
 
-test("remote_delete / remote_list: remote_list は session 向けなら自分の owner。remote_delete は cap の停止（owner を渡さない）。外向け remote_list は owner 引数で絞る（無ければ全件）", async () => {
+test("remote_delete / remote_list: remote_list は session 向けなら自分の owner。remote_delete は呼び出し元 session の owner を渡す（引数 owner は受けない）。include_shared で旧共有 cap も。外向け remote_list は owner 引数で絞る（無ければ全件）", async () => {
   const { client, session, calls, close } = await connect();
   const c = await session("pm1");
   await c.callTool({ name: "remote_list", arguments: {} });
   await c.callTool({ name: "remote_delete", arguments: {} });
   await c.callTool({ name: "remote_delete", arguments: { remote_id: "c-1", server: "id", force: true, owner: "evil" } });
+  await c.callTool({ name: "remote_list", arguments: { include_shared: true } });
   await client.callTool({ name: "remote_list", arguments: {} });
   await client.callTool({ name: "remote_list", arguments: { owner: "pm1" } });
   assert.deepEqual(calls, [
     { remoteList: { owner: "pm1" } },
-    { remoteDelete: {} },
-    { remoteDelete: { remote_id: "c-1", server: "id", force: true } },
+    { remoteDelete: { owner: "pm1" } },
+    { remoteDelete: { owner: "pm1", remote_id: "c-1", server: "id", force: true } },
+    { remoteList: { owner: "pm1", includeShared: true } },
     { remoteList: {} }, { remoteList: { owner: "pm1" } },
   ]);
   await c.close();

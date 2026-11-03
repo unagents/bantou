@@ -118,7 +118,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     log,
   });
   const capId = await loadCapId(stateDir, log);
-  log(`remote-cap の cap_id: ${capId}（center ごとに固定）`);
+  log(`remote-cap の cap_id 接頭: ${capId}（center ごとに固定。session の cap_id は ${capId}-<session 名>）`);
   const remotes = createRemoteManager({
     link,
     capId,

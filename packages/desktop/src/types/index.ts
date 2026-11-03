@@ -323,11 +323,13 @@ export interface CenterWorkerReport {
 }
 
 /**
- * `remote_list` element (center `RemoteView`, the part shown): one remote-cap per server (`remote_id` = cap_id, fixed per center),
+ * `remote_list` element (center `RemoteView`, the part shown): one remote-cap per session × server (`remote_id` = cap_id = `c-<center-id>-<session>`),
  * with the latest result / error and the pending instructions. No history is kept; old-format records (one cap per task) are cleaned up by center.
  */
 export interface CenterRemoteRecord {
   remote_id: string;
+  /** Session (master-cap) that owns this cap. Absent = the old shared cap (`c-<center-id>`) kept from before: no new instruction is sent, `remote_delete` removes it. */
+  session?: string;
   /** Sessions with a pending instruction on this cap (oldest first). */
   owners: string[];
   server: string;

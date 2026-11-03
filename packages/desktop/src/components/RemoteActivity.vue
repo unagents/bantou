@@ -4,7 +4,7 @@ import type { CenterActivityState, CenterRemoteRecord, CenterWorkerReport } from
 
 const props = defineProps<{ owner?: string }>();
 
-// test ids: the center dialog's list (all owners) and a session's list (one owner) can be on screen together.
+// test ids: the center dialog's list (all sessions) and a session's list (one session) can be on screen together.
 const tp = computed(() => (props.owner === undefined ? "center-" : "session-"));
 
 const POLL_MS = 3000;
@@ -20,7 +20,8 @@ async function poll() {
   polling = true;
   try {
     const all = await centerTool<CenterRemoteRecord[]>("remote_list");
-    remotes.value = props.owner === undefined ? all : all.filter((r) => r.owners.includes(props.owner!));
+    // One remote-cap per session × server: a session sees only its own caps (the shared old cap has no session and is shown in the center dialog only).
+    remotes.value = props.owner === undefined ? all : all.filter((r) => r.session === props.owner);
     fetchedAt.value = Date.now();
     error.value = null;
   } catch (e) {
@@ -93,7 +94,7 @@ async function sendReply(r: CenterRemoteRecord, w: CenterWorkerReport) {
   if (!text || replySending.value.has(key)) return;
   replySending.value.add(key);
   try {
-    await centerTool("worker_reply", { remote_id: r.remote_id, worker_id: w.worker_id, text });
+    await centerTool("worker_reply", { remote_id: r.remote_id, server: r.server, worker_id: w.worker_id, text });
     repliedKeys.value.add(key);
     delete replyError.value[key];
     delete replyText.value[key];
@@ -145,7 +146,7 @@ function elapsed(silentMs: number): string {
     </p>
     <div
       v-for="r in remotes ?? []"
-      :key="r.remote_id"
+      :key="`${r.server}:${r.remote_id}`"
       class="flex flex-col gap-1"
       :data-testid="`${tp}remote`"
       :data-remote-id="r.remote_id"
@@ -153,7 +154,7 @@ function elapsed(silentMs: number): string {
       <div class="flex items-center gap-2 text-xs">
         <span class="font-medium">{{ r.remote_id }}</span>
         <span class="text-cork-muted">{{ r.serverName ?? r.server }}</span>
-        <span class="text-cork-muted" :data-testid="`${tp}remote-owners`">{{ r.owners.join(", ") }}</span>
+        <span v-if="props.owner === undefined" class="text-cork-muted" :data-testid="`${tp}remote-session`">{{ r.session ?? "共有（旧）" }}</span>
         <span v-if="r.model" class="text-cork-muted" :data-testid="`${tp}remote-model`">{{ r.model }}</span>
         <UBadge
           v-if="r.activity?.stale"
