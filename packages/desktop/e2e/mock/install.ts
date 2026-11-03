@@ -30,9 +30,9 @@ window.__TAURI_INTERNALS__ = {
     currentWindow: { label: "main" },
     currentWebview: { windowLabel: "main", label: "main" },
   },
-  invoke(cmd: string, args: unknown) {
+  invoke(cmd: string, args: unknown, options?: { headers?: Record<string, string> }) {
     try {
-      return Promise.resolve(mock.invoke(cmd, args));
+      return Promise.resolve(mock.invoke(cmd, args, options));
     } catch (e) {
       return Promise.reject(e instanceof Error ? e.message : String(e));
     }

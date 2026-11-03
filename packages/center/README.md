@@ -33,7 +33,7 @@ bantou-center [--config <path>] [--transport stdio|http] [--port <n>] [--bind <a
 
 ### http transport
 
-- エンドポイントは `http://<bind>:<port>/mcp`（外向け。MCP Streamable HTTP。POST / GET / DELETE）と `/mcp/session`（master-cap 向け。下記「窓口の分離」）。pty 出力の配信は `/sessions/<name>/{output,input,resize}`（下記「core」）。それ以外は 404。
+- エンドポイントは `http://<bind>:<port>/mcp`（外向け。MCP Streamable HTTP。POST / GET / DELETE）と `/mcp/session`（master-cap 向け。下記「窓口の分離」）。pty 出力の配信は `/sessions/<name>/{output,input,resize,attachments}`（下記「core」「添付画像」）。それ以外は 404。
 - **認証は Bearer token**。`/mcp` へのリクエスト（POST / GET / DELETE すべて）は `Authorization: Bearer <config の token>` が必要で、欠落・形式違い・不一致は 401（`WWW-Authenticate: Bearer`）。比較は定時間。token が無い・12 文字未満だと http は起動しない。既定は loopback にだけ bind する。`--bind 0.0.0.0` 等で外に出しても、token を知らない相手は rc_start などを呼べない（ただし TLS は無いので平文。信頼できる LAN だけで使う）。
 - MCP session ごとに McpServer を作る。supervisor と server 接続は全 session で共有。
 - SIGTERM / SIGINT で http server・全 session・全 project を停止して exit 0。http では stdin を見ない（親が `/dev/null` を渡しても落ちない。親は SIGTERM で止める）。
@@ -303,3 +303,14 @@ center プロセス内のモジュール（`src/core.ts`）。session ごとの�
 - `POST /sessions/<name>/resize` `{"cols":N,"rows":N}` → 204。最後に送った側のサイズを覚え、次の wrapper 起動の初期値にする。
 
 - `GET /events`: SSE（外向け token、イベント ID・再送なし）。接続時に `event: sessions` `data: {}`、session の追加・削除・起動時復帰ごとに `event: sessions` `data: {"reason":"created"|"deleted"|"restored"|"context","name":"<name>"}`。15 秒ごとに `: ka`。受け取った側は `session_list` を取り直す。
+
+## 添付画像
+
+master-cap の claude は center のホストで動くので、画像は center のホストに置かれて初めて読める。desktop（sidecar でも別ホストの center でも同じ route）が貼り付け・ドロップ・添付ボタンの画像を送る。
+
+- `POST /sessions/<name>/attachments`: 外向け token（`Authorization: Bearer`）。本文は画像のバイト列そのもの、`Content-Type` に型。session 名は `[A-Za-z0-9_-]+`（他の `/sessions/<name>/...` と同じ）。
+- 受ける型は `image/png` `image/jpeg` `image/gif` `image/webp`。1 枚 20MB（20 × 1024 × 1024 バイト）まで。型は `Content-Type` と、先頭バイト（マジックナンバー）の両方が合っている時だけ通す。
+- 応答は 201 `{"path":"<絶対 path>","bytes":N,"type":"image/png"}`。拒否は `{"error":"<理由>"}`: 401（token）、404（未知の session・不正な session 名）、405（POST 以外）、409（config に `workspace` が無い・同じ秒の連番が尽きた）、413（20MB 超。読まずに接続を閉じる）、415（型違い・中身が画像でない）、400（本文が空）。
+- 置き場: `<workspace>/<session 名>/attachments/<yyyymmdd-HHMMSS>-<NN>.<png|jpg|gif|webp>`（時刻は center ホストのローカル時刻、`NN` は同じ秒の中の 01〜99）。dir が無ければ作る。既存のファイルは上書きしない。`workspace` は config の値（`session_create` で `path` を省いた時の親と同じ）。session を `path` 指定で作っていても、置き場は `<workspace>/<session 名>` 配下。
+- ログ（`center.log`）: 保存は `添付を保存: session=<名> bytes=<N> path=<path>`、拒否は `添付を拒否: session=<名> reason=<理由>`。本文は残さない。
+- 自動削除はしない。要らなくなったら手で消す: `find <workspace>/<session 名>/attachments -type f -delete`（その session の分を全部）、または 1 枚ずつ `rm <path>`。

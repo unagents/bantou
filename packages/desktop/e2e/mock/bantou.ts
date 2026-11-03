@@ -81,6 +81,10 @@ export class MockBantou {
   outputStops: string[] = [];
   inputs: { session: string; data: string }[] = [];
   resizes: { session: string; cols: number; rows: number }[] = [];
+  /** Attachments: every `session_attach_*` call, what the pick dialog returns, and the paths "saved" so far. */
+  attachCalls: { cmd: string; session: string; paths?: string[]; bytes?: number }[] = [];
+  pickFiles: string[] = [];
+  private attachSeq = 0;
   /** Ping timers: task id → expiry (ISO). */
   pings = new Map<string, string>();
   private listeners = new Map<string, number[]>();
@@ -160,6 +164,11 @@ export class MockBantou {
   }
 
   /** The Rust SSE client delivers output chunk `id` of `session` (`text` is encoded as UTF-8, then base64). */
+  /** Files released over the window (Tauri drag-drop event; position in physical pixels). */
+  fileDrop(paths: string[], x: number, y: number) {
+    this.emitter("tauri://drag-drop", { paths, position: { x, y } });
+  }
+
   sessionOutput(session: string, id: number, text: string) {
     const bytes = new TextEncoder().encode(text);
     let bin = "";
@@ -240,9 +249,32 @@ export class MockBantou {
     return this.listeners.get(event) ?? [];
   }
 
-  invoke(cmd: string, raw: unknown): unknown {
+  /** Mirror of `attachment.rs`: type / size refusals, then "save" and type the path into the pty (inputs). */
+  private attach(session: string, items: { name: string; ext: string | null; big?: boolean }[]) {
+    const out: { saved: string[]; errors: string[] } = { saved: [], errors: [] };
+    for (const it of items) {
+      if (it.big) out.errors.push(`${it.name}: 20MB を超えている（1 枚 20MB まで）`);
+      else if (!it.ext) out.errors.push(`${it.name}: 画像の型が違う（png / jpeg / gif / webp のみ）`);
+      else out.saved.push(`/ws/${session}/attachments/20261104-024500-${String(++this.attachSeq).padStart(2, "0")}.${it.ext}`);
+    }
+    if (out.saved.length > 0) {
+      const text = ` ${out.saved.join(" ")} `;
+      this.inputs.push({ session, data: btoa(text) });
+    }
+    return out;
+  }
+
+  private fileItems(paths: string[]) {
+    return paths.map((p) => {
+      const name = p.split("/").pop() ?? p;
+      const ext = /\.(png|jpe?g|gif|webp)$/i.exec(name)?.[1]?.toLowerCase().replace("jpeg", "jpg") ?? null;
+      return { name, ext, big: name.includes("big") };
+    });
+  }
+
+  invoke(cmd: string, raw: unknown, options?: { headers?: Record<string, string> }): unknown {
     const args = (raw ?? {}) as Record<string, unknown>;
-    this.calls.push({ cmd, args: JSON.parse(JSON.stringify(args)) });
+    this.calls.push({ cmd, args: raw instanceof Uint8Array ? { bytes: raw.length } : JSON.parse(JSON.stringify(args)) });
     switch (cmd) {
       case "get_workspace_directory":
         return this.dir;
@@ -289,6 +321,26 @@ export class MockBantou {
       case "session_input":
         this.inputs.push({ session: args.session as string, data: args.dataB64 as string });
         return null;
+      case "session_attach_bytes": {
+        const bytes = raw as Uint8Array;
+        const session = options?.headers?.["x-bantou-session"] ?? "";
+        this.attachCalls.push({ cmd, session, bytes: bytes.length });
+        const png = bytes.length >= 4 && bytes[0] === 0x89 && bytes[1] === 0x50;
+        return this.attach(session, [{ name: "クリップボードの画像", ext: png ? "png" : null }]);
+      }
+      case "session_attach_paths": {
+        const session = args.session as string;
+        const paths = args.paths as string[];
+        this.attachCalls.push({ cmd, session, paths });
+        return this.attach(session, this.fileItems(paths));
+      }
+      case "session_attach_pick": {
+        const session = args.session as string;
+        const paths = this.pickFiles;
+        this.pickFiles = [];
+        this.attachCalls.push({ cmd, session, paths });
+        return paths.length > 0 ? this.attach(session, this.fileItems(paths)) : { saved: [], errors: [] };
+      }
       case "session_resize":
         this.resizes.push({ session: args.session as string, cols: args.cols as number, rows: args.rows as number });
         return null;
