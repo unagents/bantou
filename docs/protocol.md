@@ -507,7 +507,7 @@ Models (same format as `kick_cap`'s `model`, checked before sending). `model` is
 cap already exists it is ignored and the result carries `model_ignored: true` and `note: "cap は既存なので model は無視した"`.
 `worker_model` is the default model of the workers this instruction's cap starts; it is sent on every `kick_cap` where it is
 given (including a resume), and the server remembers it as the cap's default. Defaults come from the center's `servers[]` config
-(`model` / `workerModel`), **read again at every `remote_send`** like `sessionInstructions`: a new cap gets
+(`model` / `workerModel`), **read again at every `remote_send`** like `remoteControl.model` is at every session launch: a new cap gets
 `model` = argument ?? config and `worker_model` = argument ?? config; an existing cap gets `worker_model` only when given
 (the config default is not re-sent). To choose a model per worker, say so in `prompt`: the cap passes `model` to
 `worker_start` (precedence: `worker_start` `model` > the worker's recorded model > the cap's `worker_model` > none). The
