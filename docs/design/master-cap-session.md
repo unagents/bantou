@@ -118,6 +118,23 @@ center の通知（remote の完了通知など）は owner の session 名の m
 11. pty の大きさは、最後にサイズを送ってきた desktop に合わせる。
 12. wrapper は `packages/pty-wrapper`（Rust crate）に置き、center と同じく desktop の sidecar として同梱する。center は自分の実行ファイルと同じ場所から wrapper を探す。
 
+## 追加指示（system prompt への追記、2026-11-04）
+
+desktop の設定画面で入力した「master-cap への追加指示」を、center が起動する master-cap に渡す。
+
+13. 渡し方は claude の `--append-system-prompt <text>`。center の config の `remoteControl.sessionInstructions`（文字列、省略可、空は無し）を、session を起動するたび（新規・再起動・`--continue`・resume 失敗後の素の起動）に `buildWrapperArgs` が足す。wrapper 経由の対話型 session だけが対象。
+    - 比較した案: (A) cwd に `CLAUDE.md` を書く（手で起動した claude にまで効き、ファイルの所有者も曖昧）、(B) `--append-system-prompt-file` で center の状態 dir のファイルを指す、(C) `--append-system-prompt` を argv で渡す。
+    - (C) を採用。argv は center → wrapper が `child_process.spawn` の配列（shell なし）、wrapper → claude が `portable-pty` の `CommandBuilder::args`（shell なし）で、複数行・引用符・`$` はそのまま 1 引数で届く。テストで確かめた。(B) はファイルの置き場・書き込み・掃除が増えるだけで、今の長さでは得るものが無い。
+    - 上限: 引数の長さ。Linux は 1 引数 128 KiB、Windows はコマンドライン全体で約 32K 文字。`--mcp-config` などと同じ command line に載るので、config で 16000 文字以内に制限する。超えて必要になったら (B) に替える。
+14. 追加指示の変更は動いている session に効かせない。desktop は変更で center を再起動しない（center の停止は master-cap を止めるため、再起動すると session を自動で再起動することになる）。center は session を起動するたびに config を読み直す（決定 16）ので、保存した値は保存後に起動する session（新規・再起動・`--continue`・resume 失敗後の素の起動）から効く。
+15. `rc_status` / `session_list` に `instructions`（真偽。その起動で `--append-system-prompt` を付けたか）を出す。本文は出さず、`rc_status` の `args` と起動ログでも値は `<N 文字>` に伏せる。desktop はサイドメニューの行と見出しに小さな印を出す。
+16. center は wrapper 経由の session（master-cap）を起動するたび（新規・再起動・`--continue`・resume 失敗後の素の起動）に config（`center.json`）を読み直し、その時点の `remoteControl` を使う（`createRemoteControlSupervisor` の `configPath`、`loadConfigSync`）。center は再起動しない。
+    - 比較した案: (A) 起動時に 1 度だけ読む（従来。保存しても center の再起動まで効かない）、(B) desktop が保存のたびに center を再起動する（master-cap の session が全部止まる。決定 2 と「自動では再起動しない」に反する）、(C) center が起動のたびに読み直す、(D) desktop から center へ「再読込」を知らせる経路を足す（center の HTTP には desktop から設定保存を知らせる route が無い。足さなくても (C) で要件を満たせるので足さない）。
+    - (C) を採用。起動のたびに読めば、保存から次の起動までの間にファイルが書き換わっても取りこぼさず、通知の取りこぼし・順序の問題も無い。`launch` が同期なので読み込みは同期（`readFileSync`、小さい JSON）。
+    - 読み直しに失敗した時（ファイル無し・JSON が壊れている・検証 NG）は、直前に読めた値（まだ 1 度も読めていなければ起動時の値）で起動し、理由を `center.log` に 1 行残す（`config の読み直しに失敗。直前の値で起動: project=… <理由>`。追加指示の本文は出さない）。session の起動は止めない。
+    - 読み直しで効く項目（その session の起動時点の値を使う）: `remoteControl.sessionInstructions` / `model` / `env` / `autoConsent` / `maxRestarts` / `restartDelayMs` / `continueOnRestart`。再起動の予約は、その起動で読んだ値で決める。
+    - 起動時にしか効かない項目（center の再起動が要る）: `remoteControl.claude`（起動時に解決する）、`remoteControl.stopGraceMs`（停止は起動と別の経路で、読み直しの対象外）、`projects` / `servers` / `logDir` / `workspace` / `token`、HTTP の port / bind。この一覧に項目を足さない（新しい `remoteControl` の項目は、session 起動時に使うなら読み直しの値を使う）。
+
 ## 別件（同日の観測）
 
 - server 0.3.1: `remote_create` に repo を渡すと、clone 前に `logs/center.json` が cap の dir を作るため `cap の path は git repo でない` で必ず失敗する。

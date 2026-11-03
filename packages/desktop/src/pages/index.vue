@@ -149,6 +149,14 @@ function onSessionCreated(name: string) {
               >
                 <UIcon name="i-lucide-terminal-square" class="text-cork-accent size-4 shrink-0" />
                 <span class="truncate">{{ g.name }}</span>
+                <UIcon
+                  v-if="g.instructions"
+                  name="i-lucide-scroll-text"
+                  class="text-cork-muted size-3.5 shrink-0"
+                  title="追加指示つきで起動した"
+                  data-testid="session-instructions-mark"
+                  data-scope="side"
+                />
                 <ContextUsage :usage="g.contextUsage" class="ml-auto" data-scope="side" />
                 <span class="text-cork-muted shrink-0 text-xs font-normal" :class="g.contextUsage ? '' : 'ml-auto'" data-testid="side-count">
                   {{ g.working.length }} / {{ g.queued.length }}

@@ -60,6 +60,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   };
   const supervisor = createRemoteControlSupervisor({
     config,
+    configPath,
     log,
     claude,
     wrapper: { core, tokens: sessionTokens, mcpUrl: sessionMcpUrl },

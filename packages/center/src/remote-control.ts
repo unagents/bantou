@@ -4,7 +4,7 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import type { ResolvedClaude } from "./claude-path.js";
-import type { Config, ProjectConfig } from "./config.js";
+import { loadConfigSync, type Config, type ProjectConfig } from "./config.js";
 import type { Logger } from "./log.js";
 import { reapOrphans } from "./reap.js";
 import type { Core } from "./core.js";
@@ -36,6 +36,8 @@ export interface RcStatus {
   lastError?: string;
   startedAt: string | null;
   args: string[] | null;
+  /** この起動で `--append-system-prompt`（sessionInstructions）を付けたか。本文は持たない。 */
+  instructions: boolean;
   /** 起動に使う claude 実行ファイルとその決定元。 */
   claude: ResolvedClaude;
 }
@@ -58,6 +60,13 @@ export type SpawnImpl = (
   args: string[],
   options: { cwd: string; env: NodeJS.ProcessEnv; stdio: ["pipe", "pipe", "pipe"]; detached: boolean },
 ) => ChildLike;
+
+/** `--append-system-prompt` の値を「<N 文字>」に置き換えた引数列（status / log 用）。 */
+export function redactAppendSystemPrompt(args: string[]): string[] {
+  const i = args.indexOf("--append-system-prompt");
+  if (i < 0 || i + 1 >= args.length) return [...args];
+  return [...args.slice(0, i + 1), `<${args[i + 1].length} 文字>`, ...args.slice(i + 2)];
+}
 
 /** 子へ signal を送る。既定は process group ごと（孫まで止める）。 */
 export type KillImpl = (child: ChildLike, signal: NodeJS.Signals) => void;
@@ -205,6 +214,12 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 
 export function createRemoteControlSupervisor(opts: {
   config: Config;
+  /**
+   * 指定すると、session を起動するたび（新規・再起動・--continue・resume 失敗後の素の起動）にこの config ファイルを読み直し、
+   * remoteControl の項目のうち model / sessionInstructions / env / autoConsent / maxRestarts / restartDelayMs / continueOnRestart をその時点の値にする。
+   * 読めない・不正な時は直前に読めた値（初回は config）で起動し、理由を log に残す。
+   */
+  configPath?: string;
   log: Logger;
   spawnImpl?: SpawnImpl;
   /** 子への signal 送信。省略時は、実 spawn なら process group 宛て、spawnImpl 注入時は child.kill。 */
@@ -240,6 +255,7 @@ export function createRemoteControlSupervisor(opts: {
         lastExit: null,
         startedAt: null,
         args: null,
+        instructions: false,
         claude,
       },
       child: null,
@@ -260,15 +276,30 @@ export function createRemoteControlSupervisor(opts: {
   };
   const snapshot = (e: Entry): RcStatus => ({ ...e.status, args: e.status.args ? [...e.status.args] : null });
 
-  const childEnv = (p: ProjectConfig): NodeJS.ProcessEnv => mergeChildEnv(process.env, rc.env, p.env);
+  const childEnv = (p: ProjectConfig, cur: Config["remoteControl"]): NodeJS.ProcessEnv =>
+    mergeChildEnv(process.env, cur.env, p.env);
+
+  /** 直前に読めた remoteControl。読み直しに失敗した時の起動に使う。 */
+  let lastGoodRc: Config["remoteControl"] = rc;
+  /** launch のたびに config ファイルから remoteControl を読み直す（configPath 未指定なら起動時の値）。 */
+  const currentRc = (project: string): Config["remoteControl"] => {
+    if (!opts.configPath) return rc;
+    try {
+      lastGoodRc = loadConfigSync(opts.configPath).remoteControl;
+    } catch (err) {
+      log(`config の読み直しに失敗。直前の値で起動: project=${project} ${(err as Error).message}`);
+    }
+    return lastGoodRc;
+  };
 
   /** 子プロセスを 1 本起動して監視を付ける。 */
   const launch = (e: Entry, useContinue: boolean, fallback = false): void => {
     const name = e.project.name;
+    const rc = currentRc(name);
     const wd = e.wrapper ? opts.wrapper : undefined;
     let command = claude.path;
     let args: string[];
-    let env = childEnv(e.project);
+    let env = childEnv(e.project, rc);
     if (e.wrapper) {
       if (!wd) {
         e.status.state = "error";
@@ -285,6 +316,7 @@ export function createRemoteControlSupervisor(opts: {
         mcpConfig: mcpConfigJson(mcpUrl, name),
         resume: useContinue,
         ...(rc.model ? { model: rc.model } : {}),
+        ...(rc.sessionInstructions ? { appendSystemPrompt: rc.sessionInstructions } : {}),
         ...(wd.core.size(name) ?? {}),
       });
       command = wd.path ?? resolveWrapperPath();
@@ -292,6 +324,8 @@ export function createRemoteControlSupervisor(opts: {
     } else {
       args = buildRcArgs(e.project, rc, { continue: useContinue });
     }
+    // 追加指示の本文は status にも log にも出さない（長さだけ）
+    const shownArgs = redactAppendSystemPrompt(args);
     e.stopRequested = false;
     const gen = ++e.gen;
     e.status = {
@@ -301,7 +335,8 @@ export function createRemoteControlSupervisor(opts: {
       sessionUrl: null,
       environmentUrl: null,
       startedAt: new Date().toISOString(),
-      args,
+      args: shownArgs,
+      instructions: e.wrapper && !!rc.sessionInstructions,
     };
     delete e.status.lastError;
 
@@ -323,7 +358,7 @@ export function createRemoteControlSupervisor(opts: {
     }
     e.child = child;
     e.status.pid = child.pid ?? null;
-    log(`remote-control 起動: project=${name} pid=${child.pid ?? "?"} args=${args.join(" ")}`);
+    log(`remote-control 起動: project=${name} pid=${child.pid ?? "?"} args=${shownArgs.join(" ")}`);
 
     let resolveExited!: () => void;
     e.exited = new Promise<void>((r) => (resolveExited = r));

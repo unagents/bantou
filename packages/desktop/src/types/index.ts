@@ -82,6 +82,8 @@ export interface Session {
   lastError: string | null;
   /** null: the center has none (not known yet, or an older center). */
   contextUsage: ContextUsage | null;
+  /** The session was started with the session instructions (the text itself is not sent). */
+  instructions: boolean;
 }
 
 /** The center's list as last fetched (mirror of `src-tauri/src/session.rs::SessionList`). Memory only. */
@@ -104,6 +106,8 @@ export interface CenterSettings {
   /** The one workspace directory (default `~/.bantou`). */
   workspace: string;
   claudePath?: string;
+  /** Extra instructions for master-cap, appended to its system prompt (`claude --append-system-prompt`) when the center starts a session. Empty: none. */
+  sessionInstructions: string;
   /** Bearer token the sidecar center requires on /mcp. Minted by the backend when empty. */
   token: string;
   /** Center on another host, taken from a pasted connection snippet (used instead of the sidecar). */
@@ -294,4 +298,5 @@ export interface CenterSession {
   source: "config" | "session";
   lastError?: string;
   contextUsage?: ContextUsage | null;
+  instructions?: boolean;
 }

@@ -23,6 +23,8 @@ export interface SessionGroup {
   reason: string | null;
   /** The session's context usage from the center (null: none). */
   contextUsage: ContextUsage | null;
+  /** The session was started with the center's session instructions. */
+  instructions: boolean;
   /** In-progress tasks (statuses between the first and the last). */
   working: Task[];
   /** Queued tasks (the first status, Cork's "Todo"). */
@@ -101,6 +103,7 @@ export function useBoard(dir: Ref<string | null>) {
           unreachable: !centerList.value.reachable,
           reason: centerList.value.reason,
           contextUsage: centerList.value.sessions.find((r) => r.name === name)?.contextUsage ?? null,
+          instructions: centerList.value.sessions.find((r) => r.name === name)?.instructions ?? false,
           working: [],
           queued: [],
           done: [],

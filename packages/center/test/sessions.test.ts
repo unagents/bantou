@@ -15,7 +15,7 @@ function fakeSupervisor(initial: ProjectConfig[]) {
   const calls: string[] = [];
   const mk = (p: ProjectConfig): RcStatus => ({
     project: p.name, path: p.path, state: "stopped", pid: null, sessionUrl: null, environmentUrl: null,
-    restarts: 0, lastExit: null, startedAt: null, args: null, claude: { path: "claude", source: "PATH" },
+    restarts: 0, lastExit: null, startedAt: null, args: null, instructions: false, claude: { path: "claude", source: "PATH" },
   });
   for (const p of initial) map.set(p.name, mk(p));
   const sup = {
@@ -194,4 +194,13 @@ test("list: contextUsage は取得元の値、無ければ null", async () => {
   assert.deepEqual(byName, { cfg: null, pm1: usage });
   const plain = setup();
   assert.equal((await plain.mgr.create({ name: "x" })).contextUsage, null);
+});
+
+test("list: instructions は supervisor の status の真偽（本文は出さない）", async () => {
+  const fs2 = fakeSupervisor(config.projects);
+  const store = createJsonListStore<SavedSession>(join(dir, "sessions.json"), () => {});
+  const mgr = createSessionManager({ config, supervisor: fs2.sup, store, log: () => {}, waitMs: 0 });
+  assert.equal((await mgr.create({ name: "pm1" })).instructions, false);
+  assert.ok(mgr.list().every((s) => typeof s.instructions === "boolean"));
+  assert.ok(!JSON.stringify(mgr.list()).includes("追加指示"));
 });

@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { loadConfig, parseConfig } from "../src/config.js";
+import { loadConfig, parseConfig, SESSION_INSTRUCTIONS_MAX } from "../src/config.js";
 
 const P = "/tmp/proj";
 
@@ -114,4 +114,14 @@ test("token: 指定すれば保持、空文字・未指定は undefined", () => 
   assert.equal(parseConfig({ token: "abcdefghijkl" }, "/x/c.json").token, "abcdefghijkl");
   assert.equal(parseConfig({ token: "" }, "/x/c.json").token, undefined);
   assert.equal(parseConfig({}, "/x/c.json").token, undefined);
+});
+
+test("remoteControl.sessionInstructions: 任意、複数行はそのまま、長すぎは不正", () => {
+  assert.equal(parseConfig({}, "/x/c.json").remoteControl.sessionInstructions, undefined);
+  const text = "1 行目\n  2 行目 \"quote\" $HOME `x`\n\n4 行目";
+  assert.equal(parseConfig({ remoteControl: { sessionInstructions: text } }, "/x/c.json").remoteControl.sessionInstructions, text);
+  assert.equal(parseConfig({ remoteControl: { sessionInstructions: "" } }, "/x/c.json").remoteControl.sessionInstructions, "");
+  assert.equal(parseConfig({ remoteControl: { sessionInstructions: "a".repeat(SESSION_INSTRUCTIONS_MAX) } }, "/x/c.json").remoteControl.sessionInstructions?.length, SESSION_INSTRUCTIONS_MAX);
+  assert.throws(() => parseConfig({ remoteControl: { sessionInstructions: "a".repeat(SESSION_INSTRUCTIONS_MAX + 1) } }, "/x/c.json"), /config が不正/);
+  assert.throws(() => parseConfig({ remoteControl: { sessionInstructions: 1 } }, "/x/c.json"), /config が不正/);
 });

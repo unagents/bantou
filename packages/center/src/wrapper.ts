@@ -89,6 +89,8 @@ export function buildWrapperArgs(opts: {
   resume: boolean;
   /** claude の --model にそのまま渡す。無ければ付けない。 */
   model?: string;
+  /** claude の --append-system-prompt にそのまま渡す（argv の 1 引数。shell は通らない）。空・未指定なら付けない。 */
+  appendSystemPrompt?: string;
   cols?: number;
   rows?: number;
 }): string[] {
@@ -105,6 +107,7 @@ export function buildWrapperArgs(opts: {
     opts.permissionMode,
     "--no-chrome", // Chrome 拡張があると対話型 claude が「Claude in Chrome extension detected」の確認で止まる
     ...(opts.model ? ["--model", opts.model] : []),
+    ...(opts.appendSystemPrompt ? ["--append-system-prompt", opts.appendSystemPrompt] : []),
     ...(opts.mcpConfig ? ["--mcp-config", opts.mcpConfig] : []),
     ...(opts.resume ? ["--continue"] : []),
   ];
