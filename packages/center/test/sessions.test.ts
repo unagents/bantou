@@ -183,3 +183,15 @@ test("events: create / delete / restore で通知する。失敗した create �
   await mgr.restore();
   assert.deepEqual(seen.slice(2), [{ reason: "restored", name: "pm4" }]);
 });
+
+test("list: contextUsage は取得元の値、無ければ null", async () => {
+  const fs2 = fakeSupervisor(config.projects);
+  const store = createJsonListStore<SavedSession>(join(dir, "sessions.json"), () => {});
+  const usage = { usedTokens: 84_000, windowTokens: 1_000_000, percent: 8.4, updatedAt: "2026-11-03T10:00:00.000Z" };
+  const mgr = createSessionManager({ config, supervisor: fs2.sup, store, log: () => {}, waitMs: 0, contextUsage: (n) => (n === "pm1" ? usage : null) });
+  await mgr.create({ name: "pm1" });
+  const byName = Object.fromEntries(mgr.list().map((s) => [s.name, s.contextUsage]));
+  assert.deepEqual(byName, { cfg: null, pm1: usage });
+  const plain = setup();
+  assert.equal((await plain.mgr.create({ name: "x" })).contextUsage, null);
+});

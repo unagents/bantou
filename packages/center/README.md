@@ -148,7 +148,7 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 
 - `session_create`: pty wrapper 経由の対話型 `claude --remote-control <name> --permission-mode <permissionMode> --mcp-config '<JSON>'`（再起動時は `--continue` 付き）を `path` で起動し、supervisor に動的に足す（起動の詳細は「master-cap の起動（wrapper）」）。`path` 省略時は config の `workspace` の下の `<name>`（無ければ作る）。`workspace` が無ければ `path` が必須。`permissionMode` の既定は `auto`。`name` の重複、既存 project 名との衝突、他の project / session と同じ path は拒否。接続（URL 取得）か早期終了まで最大 15 秒待って状態を返す（待ちきれなければ `starting`）。
 - `session_delete`: `session_create` で作ったものだけ。remote-control を停止（SIGTERM → `stopGraceMs` 後 SIGKILL）して監視と保存から外す。path は消さない。config 由来の project は拒否。
-- `session_list`: config の project と session の全部。`source` が `config` / `session`。
+- `session_list`: config の project と session の全部。`source` が `config` / `session`。`contextUsage`（`{ usedTokens, windowTokens, percent, updatedAt }`、まだ分からない時は `null`）が付く。取得の仕組みは「context 使用量」。
 - 保存: config と同じ dir の `sessions.json`（`name`, `path`, `permissionMode`, `createdAt`）。config の projects には書かない。center 起動時に復元して `--continue` で起動する。`--continue` で接続前に 30 秒以内に終了した場合（約 4 時間以内の記録が無い、など）は、素の起動へ fallback する（再起動回数は増やさない）。
 - 新規 path の trust: **trust プロンプトは出ず、remote-control が `Error: Workspace not trusted. Please run `claude` in <path> first ...` で即 exit 1 する**（claude 2.1.312 で実測）。親 dir が trust 済みなら配下は通る（実測: trust 済みの repo 配下の dir で `connected`）。そのため、未 trust の path では `session_create` は `state: starting` と `lastError`（`接続前に終了: Error: Workspace not trusted...`）を返し、supervisor は再起動を繰り返して上限で `error` になる。対処は、workspace（または path の親）で一度 `claude` を起動して trust を承認しておくこと。center が claude の設定ファイルを書き換えて trust を付けることはしない（今は）。
 - 同じ folder を別の `claude remote-control` が直前まで握っていると、`This folder is already served by a terminal \`claude remote-control\` on this device. Stop it first.` で約 1 分待たされて終了する（実測、直前の center を強制終了した後など）。
@@ -248,6 +248,17 @@ npm run e2e
 - 一時ディレクトリは `E2E_ROOT`（既定は OS の tmp）の下に作り、終了時に消す。
 - 確認内容: tool 一覧、`rc_start` → `connected`、stub の異常終了 → `--continue` 付き再起動、`rc_stop`、`server_list`、`cap_kick`、`server_status`、stdin EOF での自己終了。
 
+## context 使用量
+
+session（`session_create` で作った wrapper 経由の claude。master-cap を含む。config 由来の project は対象外）ごとに、claude のコンテキストの使用状況を center が把握し、`session_list` の `contextUsage` に載せる。`src/context-usage.ts`。
+
+- 取得元: claude の transcript（`<CLAUDE_CONFIG_DIR または ~/.claude>/projects/<cwd の英数字以外を - にした名前>/*.jsonl`）。端末の画面は解析しない。
+- 対象の transcript: その dir の `*.jsonl` のうち、今回の起動時刻（`startedAt`）の 2 秒前以降に更新された最新の 1 本。起動し直すと前の値は捨てる。同じ cwd で別の claude を手で動かすと取り違え得る。
+- 値: 末尾から読んだ最後の assistant message（sidechain・`<synthetic>` を除く）の usage の `input_tokens + cache_creation_input_tokens + cache_read_input_tokens + output_tokens` = `usedTokens`。transcript は末尾 64KB だけ読み、該当行が無ければ 4 倍ずつ（上限 8MB）広げる。全体は読まない。
+- 窓: `windowTokens` は config の `remoteControl.model` か transcript の model に `[1m]` があれば 1,000,000。それ以外は `null`（transcript の model は `[1m]` が落ちた素の名前で、素の名前から窓は決められない。`percent` も `null`、desktop はトークン数だけ出す）。`percent` は小数 1 桁。
+- 更新: 5 秒ごとに transcript の mtime / size を見て、変わっていなければ読まない。値が変わった時だけ `GET /events` に `reason: "context"` を流す（desktop は `session_list` を取り直す）。古い desktop は reason を見ずに取り直すだけなので混在しても動く。
+- `protocol`（`packages/protocol`）は変えない（`session_list` は center の tool で、protocol のメッセージではない）。
+
 ## 未決
 
 - B の owner を master-cap の接続に自動で載せる仕組み（上記「今は」の限界）。center が master-cap を起動する時に MCP 設定を渡せる手段が `claude remote-control` に無い。
@@ -280,4 +291,4 @@ center プロセス内のモジュール（`src/core.ts`）。session ごとの�
 - `POST /sessions/<name>/input` `{"data":"<base64>"}` → 204（実行中でなければ 409）。
 - `POST /sessions/<name>/resize` `{"cols":N,"rows":N}` → 204。最後に送った側のサイズを覚え、次の wrapper 起動の初期値にする。
 
-- `GET /events`: SSE（外向け token、イベント ID・再送なし）。接続時に `event: sessions` `data: {}`、session の追加・削除・起動時復帰ごとに `event: sessions` `data: {"reason":"created"|"deleted"|"restored","name":"<name>"}`。15 秒ごとに `: ka`。受け取った側は `session_list` を取り直す。
+- `GET /events`: SSE（外向け token、イベント ID・再送なし）。接続時に `event: sessions` `data: {}`、session の追加・削除・起動時復帰ごとに `event: sessions` `data: {"reason":"created"|"deleted"|"restored"|"context","name":"<name>"}`。15 秒ごとに `: ka`。受け取った側は `session_list` を取り直す。

@@ -10,7 +10,7 @@ import {
   SESSIONS_CHANGED_EVENT,
   THREADS_CHANGED_EVENT,
 } from "~/api";
-import type { Ping, SessionList, Task, Thread } from "~/types";
+import type { ContextUsage, Ping, SessionList, Task, Thread } from "~/types";
 
 /** How often the remaining time of the ping timers is re-evaluated. */
 const PING_TICK_MS = 5000;
@@ -21,6 +21,8 @@ export interface SessionGroup {
   unreachable: boolean;
   /** Why the center could not be asked. */
   reason: string | null;
+  /** The session's context usage from the center (null: none). */
+  contextUsage: ContextUsage | null;
   /** In-progress tasks (statuses between the first and the last). */
   working: Task[];
   /** Queued tasks (the first status, Cork's "Todo"). */
@@ -98,6 +100,7 @@ export function useBoard(dir: Ref<string | null>) {
           name,
           unreachable: !centerList.value.reachable,
           reason: centerList.value.reason,
+          contextUsage: centerList.value.sessions.find((r) => r.name === name)?.contextUsage ?? null,
           working: [],
           queued: [],
           done: [],

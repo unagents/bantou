@@ -149,6 +149,7 @@ export class MockBantou {
       sessionUrl: (e.sessionUrl as string | null) ?? null,
       source: e.source as Session["source"],
       lastError: (e.lastError as string | undefined) ?? null,
+      contextUsage: (e.contextUsage as Session["contextUsage"] | undefined) ?? null,
     };
   }
 

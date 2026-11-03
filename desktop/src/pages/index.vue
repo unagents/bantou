@@ -149,7 +149,8 @@ function onSessionCreated(name: string) {
               >
                 <UIcon name="i-lucide-terminal-square" class="text-cork-accent size-4 shrink-0" />
                 <span class="truncate">{{ g.name }}</span>
-                <span class="text-cork-muted ml-auto shrink-0 text-xs font-normal" data-testid="side-count">
+                <ContextUsage :usage="g.contextUsage" class="ml-auto" data-scope="side" />
+                <span class="text-cork-muted shrink-0 text-xs font-normal" :class="g.contextUsage ? '' : 'ml-auto'" data-testid="side-count">
                   {{ g.working.length }} / {{ g.queued.length }}
                 </span>
               </button>

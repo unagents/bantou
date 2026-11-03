@@ -15,7 +15,8 @@ const showDone = ref(false);
       <UTooltip v-if="group.unreachable" :text="group.reason ?? 'center に問い合わせられなかった'">
         <UBadge color="warning" variant="subtle" label="つながらない" data-testid="session-unreachable" />
       </UTooltip>
-      <span class="text-cork-muted ml-auto text-xs font-normal">
+      <ContextUsage :usage="group.contextUsage" class="ml-auto" data-scope="header" />
+      <span class="text-cork-muted text-xs font-normal" :class="group.contextUsage ? '' : 'ml-auto'">
         {{ group.working.length }} / {{ group.queued.length }}
       </span>
     </h2>
