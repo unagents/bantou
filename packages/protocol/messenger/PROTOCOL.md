@@ -15,6 +15,8 @@ bantou-server is the listener of this protocol. A center (or any peer) sends a c
 - `status`: `{"bantou":1,"type":"status"}`. Reply: `status_result`.
 - `hello`: `{"bantou":1,"type":"hello"}`. Asks the server for its npm version and update state. Reply: `hello_result`. Servers older than protocol 1.3.0 do not know it and do not reply.
 - `update_server`: `{"bantou":1,"type":"update_server","version":"<semver>"}`. Tells the server to update itself to npm `bantou@<version>` and restart once every running cap and worker is done (the package source is the server's own config, never this message). Reply: `update_result` (`waiting` right away; it does not wait for the runs), `error` on failure. While it waits, `kick_cap` is refused with `error` `code:"updating"`, `retryable:true`. `stop_cap`, `status`, `hello` are still served.
+- `task` (1.5.0): `{"bantou":1,"type":"task","cap_id","task_id","goal","repo"?,"branch"?,"deliverables":{"branch"?,"report_path"?,"other"?},"verify":{"tests"?,"steps"?},"constraints":[...],"workers":{"items"?:[{"id"?,"role","scope","model"?,"depends_on"?}]},"worker_model"?}`. Gives the remote cap `cap_id` a task; the server builds the cap's first instruction from the fields (the same cap_id again resumes the cap). `role` is `implement` | `review` | `docs` | `test` | `other`. No `workers.items` = the default of at least 2 workers (one implement, one review). Reply: `task_result` when the run finishes, `error` on failure. A peer older than 1.5.0 does not know it.
+- `worker_reply` (1.5.0): `{"bantou":1,"type":"worker_reply","cap_id","worker_id","text"}`. The server runs `worker_start` with the same `worker_id` and `text` as the prompt. Reply: `worker_reply_result`, `error` on failure (unknown cap, a worker of another cap).
 - The shape of `hello`, `hello_result`, `update_server` and `update_result` is fixed for good, and a center sends them to servers of any protocol version (1.3.0 and later). They are the only way to update a server whose protocol version differs from the center's.
 
 ## Replies (server to peer)
@@ -24,11 +26,15 @@ bantou-server is the listener of this protocol. A center (or any peer) sends a c
 - `status_result`: `{"bantou":1,"type":"status_result","ok":true,"caps":[...],"workers":[...]}`.
 - `hello_result`: `{"bantou":1,"type":"hello_result","ok":true,"server_version","protocol_version","update":null|{"state":"waiting"|"restarting","from","to","running":{"caps","workers","reports"}},"last_update":null|{"to","ok":false,"error","at"}}`.
 - `update_result`: `{"bantou":1,"type":"update_result","ok":true,"state":"current"|"waiting"|"restarting","from","to","running":{"caps","workers","reports"}}`.
-- `error`: `{"bantou":1,"type":"error","ok":false,"message","command"?,"cap_id"?,"worker_id"?,"code"?,"retryable"?}`. `code`: `updating` | `update_failed` | `update_conflict` | `invalid_version` | `version_mismatch`. `retryable:true` means the same command may be sent again later.
+- `task_result` (1.5.0): `{"bantou":1,"type":"task_result","cap_id","task_id","state":"done"|"failed","summary","workers":[{"worker_id","role","state","branch"?,"commit"?,"tests"?,"report_path"?,"result"}],"review":{"verdict":"ok"|"issues"|"unknown","items":[{"severity":"high"|"medium"|"low","text","resolved"}],"rounds"},"remaining":[...],"error"?}`. Taken from the cap's final answer; when no JSON can be read, `summary` is the raw answer, `workers` and `remaining` are empty and `review.verdict` is `unknown`. Also sent, to the center that sent the `task`, when a worker report resumes the cap and the cap answers with the JSON.
+- `worker_reply_result` (1.5.0): `{"bantou":1,"type":"worker_reply_result","ok":true,"cap_id","worker_id","accepted":true}`.
+- `error`: `{"bantou":1,"type":"error","ok":false,"message","command"?,"cap_id"?,"worker_id"?,"task_id"?,"code"?,"retryable"?}`. `code`: `updating` | `update_failed` | `update_conflict` | `invalid_version` | `version_mismatch`. `retryable:true` means the same command may be sent again later.
 
 ## Notices (server to peer)
 
 - `activity`: `{"bantou":1,"type":"activity","cap_id","at","agents":[...]}`. Not a reply: it is never matched with a pending command. Sent to the center that kicked `cap_id`, as a snapshot of the cap and its workers (cap first, then workers by id). Each agent has `kind`, `id`, `cap_id`, `state` (running | stalled | idle | done | failed | lost), `task`, `last_activity`, `last_output_at`, `silent_ms`, `started_at`, `finished_at`, `error`?, `model`? (string or null; absent from servers older than 1.4.0). Sent every 5 seconds while any agent is running or stalled, and at each state change. Use `silent_ms` for elapsed time, not clock differences. A peer that does not know `activity` ignores it.
+
+- `worker_report` (1.5.0): `{"bantou":1,"type":"worker_report","cap_id","task_id"?,"worker_id","kind":"progress"|"ask"|"approve"|"done","text","at"}`. Not a reply. Sent to the center that kicked `cap_id` for every report of a worker, in parallel with the resume of the cap. `task_id` is the latest `task` of the cap (absent when the cap has had none). A peer that does not know `worker_report` ignores it.
 
 ## Notes
 

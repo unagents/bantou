@@ -11,7 +11,7 @@ export const SERVER_NAME = "bantou-server";
  * agent-messenger protocol registration (messenger/protocol.json) used in `meta` of send / listPeers.
  * Not the body schema version (`bantou: 1`, PROTOCOL_VERSION). Keep in sync with messenger/protocol.json.
  */
-export const MESSENGER_PROTOCOL = { protocol: "bantou", version: "1.4.0" } as const;
+export const MESSENGER_PROTOCOL = { protocol: "bantou", version: "1.5.0" } as const;
 
 /**
  * hello / update_server (and their replies) exist from this protocol version. A server older than this
@@ -37,7 +37,15 @@ export type AgentKind = "cap" | "worker";
 /** Lifecycle of one cap / worker as kept in its state.json. */
 export type AgentState = "idle" | "running" | "failed" | "error";
 
-export type ServerCommandType = "kick_cap" | "resume_worker" | "stop_cap" | "status" | "hello" | "update_server";
+export type ServerCommandType =
+  | "kick_cap"
+  | "resume_worker"
+  | "stop_cap"
+  | "status"
+  | "hello"
+  | "update_server"
+  | "task"
+  | "worker_reply";
 
 export interface ServerCommandBase {
   /** Protocol version, always 1. */
@@ -105,13 +113,99 @@ export interface UpdateServerCommand extends ServerCommandBase {
   version: string;
 }
 
+/** Role of a worker in a task. */
+export type WorkerRole = "implement" | "review" | "docs" | "test" | "other";
+
+export const WORKER_ROLES: readonly WorkerRole[] = ["implement", "review", "docs", "test", "other"];
+
+/** Deliverables the task asks for. All fields optional. */
+export interface TaskDeliverables {
+  /** Branch the workers push to. Must not start with '-'. */
+  branch?: string;
+  /** Where the workers put their reports (a path in the clone, or free text). */
+  report_path?: string;
+  /** Other deliverables, one per entry. */
+  other?: string[];
+}
+
+/** How to check the result. All fields optional. */
+export interface TaskVerify {
+  /** Test commands to run. */
+  tests?: string[];
+  /** Check procedure, one step per entry. */
+  steps?: string[];
+}
+
+/** One planned worker. */
+export interface TaskWorkerItem {
+  /** Name other items refer to in depends_on. AGENT_ID_PATTERN. */
+  id?: string;
+  role: WorkerRole;
+  /** What this worker covers (non-empty). */
+  scope: string;
+  /** MODEL_PATTERN. Absent = worker_model of the task, else the cap's default. */
+  model?: string;
+  /** `id` of the items that must finish before this one starts. */
+  depends_on?: string[];
+}
+
+/**
+ * Worker split. No items = the default: at least 2 workers, one implement and one review.
+ * items = the center's own split; the cap follows it.
+ */
+export interface TaskWorkers {
+  items?: TaskWorkerItem[];
+}
+
+/**
+ * Give the remote cap `cap_id` a task. The server builds the cap's first instruction from the fields
+ * (prompts.ts buildTaskPrompt; text in docs/design/cap-orchestration.md). The same cap_id again resumes the cap.
+ * Reply: task_result, or error. Protocol 1.5.0.
+ */
+export interface TaskCommand extends ServerCommandBase {
+  type: "task";
+  /** AGENT_ID_PATTERN. */
+  cap_id: string;
+  /** TASK_ID_PATTERN (same characters as AGENT_ID_PATTERN). Echoed in task_result and worker_report. */
+  task_id: string;
+  /** Natural-language goal. Non-empty. */
+  goal: string;
+  /** Git URL the work is based on (cloned into the cap path on first use, fetched afterwards). */
+  repo?: string;
+  /** Base branch of the work (`git clone --branch`). */
+  branch?: string;
+  deliverables: TaskDeliverables;
+  verify: TaskVerify;
+  /** Constraints, one per entry (may be empty). */
+  constraints: string[];
+  workers: TaskWorkers;
+  /** MODEL_PATTERN. Default model of the workers (same as kick_cap `worker_model`). */
+  worker_model?: string;
+}
+
+/**
+ * Send `text` to the worker `worker_id` of the cap `cap_id`: the server runs worker_start with the same worker_id.
+ * Reply: worker_reply_result, or error. Protocol 1.5.0.
+ */
+export interface WorkerReplyCommand extends ServerCommandBase {
+  type: "worker_reply";
+  /** AGENT_ID_PATTERN. The cap that owns the worker. */
+  cap_id: string;
+  /** AGENT_ID_PATTERN. */
+  worker_id: string;
+  /** Non-empty. */
+  text: string;
+}
+
 export type ServerCommand =
   | KickCapCommand
   | ResumeWorkerCommand
   | StopCapCommand
   | StatusCommand
   | HelloCommand
-  | UpdateServerCommand;
+  | UpdateServerCommand
+  | TaskCommand
+  | WorkerReplyCommand;
 
 export type ServerReplyType =
   | "cap_result"
@@ -120,6 +214,8 @@ export type ServerReplyType =
   | "status_result"
   | "hello_result"
   | "update_result"
+  | "task_result"
+  | "worker_reply_result"
   | "error";
 
 /** Runs still alive on the server. An update waits until all of them are 0. */
@@ -181,6 +277,76 @@ export interface RunOutcome {
   error?: string;
 }
 
+/** One worker in a task_result. */
+export interface TaskResultWorker {
+  /** AGENT_ID_PATTERN. */
+  worker_id: string;
+  role: WorkerRole;
+  state: ActivityState;
+  /** Branch the worker pushed to. */
+  branch?: string;
+  /** Last commit of the worker. */
+  commit?: string;
+  /** Tests the worker ran and their outcome (free text, e.g. `npm test: 41 pass`). */
+  tests?: string;
+  report_path?: string;
+  /** Head of the worker's result (at most 500 chars). */
+  result: string;
+}
+
+export type ReviewVerdict = "ok" | "issues" | "unknown";
+
+export const REVIEW_VERDICTS: readonly ReviewVerdict[] = ["ok", "issues", "unknown"];
+
+export type ReviewSeverity = "high" | "medium" | "low";
+
+export const REVIEW_SEVERITIES: readonly ReviewSeverity[] = ["high", "medium", "low"];
+
+export interface ReviewItem {
+  severity: ReviewSeverity;
+  text: string;
+  /** true when the implementer fixed it and the reviewer confirmed. */
+  resolved: boolean;
+}
+
+/** Outcome of the review (implement <-> review rounds). verdict "unknown" = no review result could be read. */
+export interface TaskReview {
+  verdict: ReviewVerdict;
+  items: ReviewItem[];
+  /** Number of implement <-> review round trips done (0 = none). */
+  rounds: number;
+}
+
+/**
+ * Reply to `task`. The server takes it from the cap's final answer (a JSON object, see CAP_GUIDE).
+ * When it cannot read one: `summary` = the raw answer, `workers` and `remaining` empty, `review.verdict` "unknown".
+ */
+export interface TaskResultReply {
+  bantou: typeof PROTOCOL_VERSION;
+  type: "task_result";
+  cap_id: string;
+  task_id: string;
+  /** done = the run ended normally; failed = it did not (see `error`). */
+  state: "done" | "failed";
+  summary: string;
+  workers: TaskResultWorker[];
+  review: TaskReview;
+  /** What is left undone or unresolved, one per entry. */
+  remaining: string[];
+  /** Failure detail when state is failed. */
+  error?: string;
+}
+
+/** Reply to worker_reply: the worker was started (resumed) with the text. */
+export interface WorkerReplyResultReply {
+  bantou: typeof PROTOCOL_VERSION;
+  type: "worker_reply_result";
+  ok: true;
+  cap_id: string;
+  worker_id: string;
+  accepted: true;
+}
+
 export interface CapResultReply extends RunOutcome {
   bantou: typeof PROTOCOL_VERSION;
   type: "cap_result";
@@ -239,8 +405,10 @@ export interface ErrorReply {
   command?: ServerCommandType;
   /** `cap_id` of the failed `kick_cap`, when known. */
   cap_id?: string;
-  /** `worker_id` of the failed `resume_worker`, when known. */
+  /** `worker_id` of the failed `resume_worker` / `worker_reply`, when known. */
   worker_id?: string;
+  /** `task_id` of the failed `task`, when known. */
+  task_id?: string;
   /** Machine-readable cause, when there is one. */
   code?: ErrorCode;
   /** true when the same command may be sent again later. */
@@ -263,6 +431,8 @@ export type ServerReply =
   | StatusReply
   | HelloResultReply
   | UpdateResultReply
+  | TaskResultReply
+  | WorkerReplyResultReply
   | ErrorReply;
 
 /** Liveness of one cap / worker as seen from its `claude -p` stream-json output. */
@@ -304,7 +474,29 @@ export interface ActivityNotice {
   agents: AgentActivity[];
 }
 
-export type ServerNotice = ActivityNotice;
+export type WorkerReportKind = "progress" | "ask" | "approve" | "done";
+
+export const WORKER_REPORT_KINDS: readonly WorkerReportKind[] = ["progress", "ask", "approve", "done"];
+
+/**
+ * Notice from server to center: a worker called its report tool. Sent for every report, in parallel with
+ * the resume of the cap. Protocol 1.5.0.
+ */
+export interface WorkerReportNotice {
+  bantou: typeof PROTOCOL_VERSION;
+  type: "worker_report";
+  cap_id: string;
+  /** task_id of the latest `task` of the cap; absent when the cap has had no `task` (only kick_cap). */
+  task_id?: string;
+  worker_id: string;
+  kind: WorkerReportKind;
+  /** The report text as the worker sent it (1..20000 chars). */
+  text: string;
+  /** Receive time (server clock, ISO 8601). */
+  at: string;
+}
+
+export type ServerNotice = ActivityNotice | WorkerReportNotice;
 
 // -- guards -------------------------------------------------------------------
 
@@ -345,7 +537,58 @@ function isCommandType(v: unknown): v is ServerCommandType {
     v === "stop_cap" ||
     v === "status" ||
     v === "hello" ||
-    v === "update_server"
+    v === "update_server" ||
+    v === "task" ||
+    v === "worker_reply"
+  );
+}
+
+/** Absent, or an array whose entries are all strings without NUL. */
+function optPlainStrings(v: unknown): boolean {
+  return v === undefined || (Array.isArray(v) && v.every((x) => typeof x === "string" && !x.includes("\0")));
+}
+
+export function isWorkerRole(v: unknown): v is WorkerRole {
+  return typeof v === "string" && (WORKER_ROLES as readonly string[]).includes(v);
+}
+
+export function isWorkerReportKind(v: unknown): v is WorkerReportKind {
+  return typeof v === "string" && (WORKER_REPORT_KINDS as readonly string[]).includes(v);
+}
+
+function isTaskWorkerItem(v: unknown): v is TaskWorkerItem {
+  return (
+    isRecord(v) &&
+    (v.id === undefined || isValidAgentId(v.id)) &&
+    isWorkerRole(v.role) &&
+    nonEmptyString(v.scope) &&
+    optModel(v.model) &&
+    (v.depends_on === undefined || (Array.isArray(v.depends_on) && v.depends_on.every(isValidAgentId)))
+  );
+}
+
+function isTaskCommandBody(v: Record<string, unknown>): boolean {
+  const d = v.deliverables;
+  const f = v.verify;
+  const w = v.workers;
+  return (
+    isValidAgentId(v.cap_id) &&
+    isValidAgentId(v.task_id) &&
+    nonEmptyString(v.goal) &&
+    optNonEmptyString(v.repo) &&
+    optNonEmptyString(v.branch) &&
+    isRecord(d) &&
+    optNonEmptyString(d.branch) &&
+    optPlainString(d.report_path) &&
+    optPlainStrings(d.other) &&
+    isRecord(f) &&
+    optPlainStrings(f.tests) &&
+    optPlainStrings(f.steps) &&
+    Array.isArray(v.constraints) &&
+    optPlainStrings(v.constraints) &&
+    isRecord(w) &&
+    (w.items === undefined || (Array.isArray(w.items) && w.items.every(isTaskWorkerItem))) &&
+    optModel(v.worker_model)
   );
 }
 
@@ -426,9 +669,21 @@ export function isServerCommand(v: unknown): v is ServerCommand {
       return true;
     case "update_server":
       return isValidServerVersion(v.version);
+    case "task":
+      return isTaskCommandBody(v);
+    case "worker_reply":
+      return isValidAgentId(v.cap_id) && isValidAgentId(v.worker_id) && nonEmptyString(v.text);
     default:
       return false;
   }
+}
+
+export function isTaskCommand(v: unknown): v is TaskCommand {
+  return isServerCommand(v) && v.type === "task";
+}
+
+export function isWorkerReplyCommand(v: unknown): v is WorkerReplyCommand {
+  return isServerCommand(v) && v.type === "worker_reply";
 }
 
 export function isKickCapCommand(v: unknown): v is KickCapCommand {
@@ -491,6 +746,43 @@ function isAgentStatus(v: unknown): v is AgentStatus {
   );
 }
 
+function isTaskResultWorker(v: unknown): v is TaskResultWorker {
+  return (
+    isRecord(v) &&
+    isValidAgentId(v.worker_id) &&
+    isWorkerRole(v.role) &&
+    isActivityState(v.state) &&
+    optString(v.branch) &&
+    optString(v.commit) &&
+    optString(v.tests) &&
+    optString(v.report_path) &&
+    typeof v.result === "string"
+  );
+}
+
+function isReviewItem(v: unknown): v is ReviewItem {
+  return (
+    isRecord(v) &&
+    typeof v.severity === "string" &&
+    (REVIEW_SEVERITIES as readonly string[]).includes(v.severity) &&
+    typeof v.text === "string" &&
+    typeof v.resolved === "boolean"
+  );
+}
+
+function isTaskReview(v: unknown): v is TaskReview {
+  return (
+    isRecord(v) &&
+    typeof v.verdict === "string" &&
+    (REVIEW_VERDICTS as readonly string[]).includes(v.verdict) &&
+    Array.isArray(v.items) &&
+    v.items.every(isReviewItem) &&
+    typeof v.rounds === "number" &&
+    Number.isInteger(v.rounds) &&
+    v.rounds >= 0
+  );
+}
+
 export function isServerReply(v: unknown): v is ServerReply {
   if (!isRecord(v) || v.bantou !== PROTOCOL_VERSION) return false;
   switch (v.type) {
@@ -524,6 +816,21 @@ export function isServerReply(v: unknown): v is ServerReply {
         typeof v.to === "string" &&
         isUpdateRunning(v.running)
       );
+    case "task_result":
+      return (
+        isValidAgentId(v.cap_id) &&
+        isValidAgentId(v.task_id) &&
+        (v.state === "done" || v.state === "failed") &&
+        typeof v.summary === "string" &&
+        Array.isArray(v.workers) &&
+        v.workers.every(isTaskResultWorker) &&
+        isTaskReview(v.review) &&
+        Array.isArray(v.remaining) &&
+        v.remaining.every((x) => typeof x === "string") &&
+        optString(v.error)
+      );
+    case "worker_reply_result":
+      return v.ok === true && isValidAgentId(v.cap_id) && isValidAgentId(v.worker_id) && v.accepted === true;
     case "error":
       return (
         v.ok === false &&
@@ -531,6 +838,7 @@ export function isServerReply(v: unknown): v is ServerReply {
         (v.command === undefined || isCommandType(v.command)) &&
         (v.cap_id === undefined || isValidAgentId(v.cap_id)) &&
         (v.worker_id === undefined || isValidAgentId(v.worker_id)) &&
+        (v.task_id === undefined || isValidAgentId(v.task_id)) &&
         (v.code === undefined || isErrorCode(v.code)) &&
         (v.retryable === undefined || typeof v.retryable === "boolean")
       );
@@ -569,6 +877,16 @@ function isAgentActivity(v: unknown): v is AgentActivity {
 
 export function isServerNotice(v: unknown): v is ServerNotice {
   if (!isRecord(v) || v.bantou !== PROTOCOL_VERSION) return false;
+  if (v.type === "worker_report") {
+    return (
+      isValidAgentId(v.cap_id) &&
+      (v.task_id === undefined || isValidAgentId(v.task_id)) &&
+      isValidAgentId(v.worker_id) &&
+      isWorkerReportKind(v.kind) &&
+      typeof v.text === "string" &&
+      typeof v.at === "string"
+    );
+  }
   return (
     v.type === "activity" &&
     isValidAgentId(v.cap_id) &&

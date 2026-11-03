@@ -18,7 +18,7 @@ import { loadConfig } from "./config";
 import { log } from "./log";
 import { CAP_ID_HEADER, WORKER_ID_HEADER, type McpListener } from "./mcp";
 import { agentDir, runLogDir } from "./paths";
-import { CAP_GUIDE, WORKER_GUIDE } from "./prompts";
+import { CAP_GUIDE, WORKER_GUIDE, buildTaskPrompt, buildTaskResult } from "./prompts";
 import { createReportHub, setReportHandler } from "./reports";
 import { cliRunner } from "./runner";
 import {
@@ -28,7 +28,7 @@ import {
   writeReadyFile,
   type UpdateController,
 } from "./update";
-import { createWorkerHub, readOwner, setWorkerHandler, writeOwner } from "./workers";
+import { createWorkerHub, readOwner, setWorkerHandler, writeOwner, type WorkerHub } from "./workers";
 import { prepareWorkspace } from "./workspace";
 
 /** 返信に付ける messenger の meta（bantou protocol の登録と同じ値）。 */
@@ -60,6 +60,16 @@ export function maskUserinfo(text: string): string {
 export function describeCommand(cmd: ServerCommand): string {
   if (cmd.type === "stop_cap") return `cap_id=${cmd.cap_id}`;
   if (cmd.type === "update_server") return `version=${cmd.version}`;
+  if (cmd.type === "worker_reply") return `cap_id=${cmd.cap_id} worker_id=${cmd.worker_id} text=${ignoreText(cmd.text).slice(0, 80)}`;
+  if (cmd.type === "task") {
+    const parts = [`cap_id=${cmd.cap_id}`, `task_id=${cmd.task_id}`];
+    if (cmd.repo) parts.push(`repo=${maskUserinfo(cmd.repo)}`);
+    if (cmd.branch) parts.push(`branch=${cmd.branch}`);
+    if (cmd.worker_model) parts.push(`worker_model=${cmd.worker_model}`);
+    parts.push(`workers=${cmd.workers.items?.length ?? 0}`);
+    parts.push(`goal=${ignoreText(cmd.goal).slice(0, 80)}`);
+    return parts.join(" ");
+  }
   if (cmd.type !== "kick_cap") return "";
   const parts = [`cap_id=${cmd.cap_id}`];
   if (cmd.repo) parts.push(`repo=${maskUserinfo(cmd.repo)}`);
@@ -74,11 +84,32 @@ export function describeCommand(cmd: ServerCommand): string {
 }
 
 /** 指示を実行して返信内容を作る。失敗は ErrorReply にする。 */
-export async function execute(cmd: ServerCommand, manager: AgentManager): Promise<ServerReply> {
+export async function execute(
+  cmd: ServerCommand,
+  manager: AgentManager,
+  workers?: Pick<WorkerHub, "start">,
+): Promise<ServerReply> {
   try {
     if (cmd.type === "kick_cap") {
       const r = await manager.invoke("cap", cmd.cap_id, cmd);
       return { bantou: PROTOCOL_VERSION, type: "cap_result", cap_id: cmd.cap_id, ...r };
+    }
+    if (cmd.type === "task") {
+      // goal 等から定型の文面を組み立てて cap の最初の指示にする（buildTaskPrompt）。同じ cap_id なら resume
+      const r = await manager.invoke("cap", cmd.cap_id, {
+        prompt: buildTaskPrompt(cmd),
+        reason: `task ${cmd.task_id}`,
+        ...(cmd.repo ? { repo: cmd.repo } : {}),
+        ...(cmd.branch ? { branch: cmd.branch } : {}),
+        ...(cmd.worker_model ? { worker_model: cmd.worker_model } : {}),
+      });
+      return buildTaskResult(cmd.cap_id, cmd.task_id, r);
+    }
+    if (cmd.type === "worker_reply") {
+      if (!workers) throw new Error("server が起動中のため受け付けられない");
+      // その worker を同じ worker_id で worker_start（持ち主の cap でなければ「別の cap の worker」で失敗）
+      const r = await workers.start(cmd.cap_id, { worker_id: cmd.worker_id, prompt: cmd.text });
+      return { bantou: PROTOCOL_VERSION, type: "worker_reply_result", ok: true, cap_id: cmd.cap_id, worker_id: r.worker_id, accepted: true };
     }
     if (cmd.type === "stop_cap") {
       const r = await manager.stop("cap", cmd.cap_id);
@@ -97,20 +128,28 @@ export async function execute(cmd: ServerCommand, manager: AgentManager): Promis
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     log(`エラー: ${cmd.type}: ${message}`);
-    const id = cmd.type === "kick_cap" || cmd.type === "stop_cap" ? { cap_id: cmd.cap_id } : {};
+    const id =
+      cmd.type === "task"
+        ? { cap_id: cmd.cap_id, task_id: cmd.task_id }
+        : cmd.type === "worker_reply"
+          ? { cap_id: cmd.cap_id, worker_id: cmd.worker_id }
+          : cmd.type === "kick_cap" || cmd.type === "stop_cap"
+            ? { cap_id: cmd.cap_id }
+            : {};
     return { bantou: PROTOCOL_VERSION, type: "error", ok: false, message, command: cmd.type, ...id };
   }
 }
 
-/** 更新待機中に断る kick_cap の error。center は同じ指示を再送できる。 */
-export function updatingError(cmd: { cap_id: string }, update: { from: string; to: string }): ServerReply {
+/** 更新待機中に断る kick_cap / task の error。center は同じ指示を再送できる。 */
+export function updatingError(cmd: { cap_id: string; task_id?: string }, update: { from: string; to: string }): ServerReply {
   return {
     bantou: PROTOCOL_VERSION,
     type: "error",
     ok: false,
     message: `server 更新待ち（${update.from}→${update.to}）。実行中の cap/worker の終了後に再起動する。再起動後に再送`,
-    command: "kick_cap",
+    command: cmd.task_id !== undefined ? "task" : "kick_cap",
     cap_id: cmd.cap_id,
+    ...(cmd.task_id !== undefined ? { task_id: cmd.task_id } : {}),
     code: "updating",
     retryable: true,
   };
@@ -195,6 +234,7 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
     };
   };
   const manager = createAgentManager({ config, runner: cliRunner, log, observer: tracker, runExtras });
+  const workerHub = createWorkerHub({ workspace: config.workspace, manager, activity: tracker, log });
   const reaped = await manager.reapOrphans();
   log(`孤児回収: killed=${reaped.killed} failed=${reaped.failed} error=${reaped.errored}`);
 
@@ -275,18 +315,20 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
       let reply: ServerReply;
       if (cmd.type === "hello" || cmd.type === "update_server") {
         reply = await executeUpdate(cmd, update);
-      } else if (cmd.type === "kick_cap" && update.isUpdating()) {
+      } else if ((cmd.type === "kick_cap" || cmd.type === "task") && update.isUpdating()) {
         // 更新待機中は新しい指示を受け付けず、理由付きで断る（center は再起動後に再送できる）
         const p = update.progress();
-        reply = updatingError(cmd, { from: serverVersion, to: p?.to ?? "?" });
+        reply = updatingError(cmd.type === "task" ? { cap_id: cmd.cap_id, task_id: cmd.task_id } : cmd, { from: serverVersion, to: p?.to ?? "?" });
       } else {
-        if (cmd.type === "kick_cap") {
+        if (cmd.type === "kick_cap" || cmd.type === "task") {
           kicking++;
           counted = true;
           // 以降この cap の結果（report 起因の resume を含む）はこの center へ返す
           await hub.rememberCenter(cmd.cap_id, m.from_id);
+          // 以降の worker_report と report 起因の task_result はこの task_id を付ける
+          if (cmd.type === "task") await hub.rememberTask(cmd.cap_id, cmd.task_id);
         }
-        reply = await execute(cmd, manager);
+        reply = await execute(cmd, manager, workerHub);
       }
       try {
         await client.send(m.from_id, JSON.stringify(reply), "pull", REPLY_META);
@@ -338,7 +380,7 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
     tracker.reported(workerId, kind);
     return hub.report(capId, workerId, kind, text);
   });
-  setWorkerHandler(createWorkerHub({ workspace: config.workspace, manager, activity: tracker, log }));
+  setWorkerHandler(workerHub);
   // 起動時に回収した running は lost として center へ知らせる
   for (const r of reaped.reaped) {
     const capId = r.kind === "cap" ? r.id : await readOwner(config.workspace, r.id);

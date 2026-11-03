@@ -113,8 +113,8 @@ sender peer as one JSON object.
 ### Messenger protocol `bantou`
 
 The protocol definition is `packages/protocol/messenger/protocol.json` (JSON
-Schemas of `kick_cap`, `stop_cap`, `status`, `hello`, `update_server`, `cap_result`, `stop_result`, `status_result`, `hello_result`, `update_result`, `error`, `activity`)
-and `PROTOCOL.md`. It is the agent-messenger protocol version (`1.4.0`,
+Schemas of `kick_cap`, `stop_cap`, `status`, `hello`, `update_server`, `task`, `worker_reply`, `cap_result`, `stop_result`, `status_result`, `hello_result`, `update_result`, `task_result`, `worker_reply_result`, `error`, `activity`, `worker_report`)
+and `PROTOCOL.md`. It is the agent-messenger protocol version (`1.5.0`,
 `MESSENGER_PROTOCOL` in `server.ts`); the body field `bantou: 1` is a separate
 version of the JSON bodies below. Changing the definition needs a new protocol
 `version` (same name and version with other content is `PROTOCOL_CONFLICT`).
@@ -137,7 +137,7 @@ version of the JSON bodies below. Changing the definition needs a new protocol
 | key | required | meaning |
 |---|---|---|
 | `bantou` | yes | protocol version, always `1` |
-| `type` | yes | `kick_cap`, `stop_cap`, `status`, `hello` or `update_server` |
+| `type` | yes | `kick_cap`, `stop_cap`, `status`, `hello`, `update_server`, `task` or `worker_reply` |
 
 ### `kick_cap` — start or resume a cap
 
@@ -158,6 +158,46 @@ version of the JSON bodies below. Changing the definition needs a new protocol
 `model` and `worker_model` were added in protocol `1.4.0`. A server older than that ignores them (unknown fields are ignored), but a center does not send commands to a server whose protocol version differs (see below), so the server is updated first. A resumed cap (including the resume caused by a worker report) and a resumed worker keep using the same model.
 
 Reply: `cap_result` or `error`.
+
+### `task` — give a cap a task (1.5.0)
+
+Not the work-session `task` envelope above (that one is a message to a work session). This one is a command to `bantou-server`, told apart by `meta.protocol` and its fields. `kick_cap` (one free-text prompt) stays for compatibility.
+
+```json
+{"bantou":1,"type":"task","cap_id":"c-0a1b2c3d4e","task_id":"t-20261104-1","goal":"packages/protocol に task メッセージを足す","repo":"https://github.com/unagents/bantou.git","branch":"feature/protocol-task","deliverables":{"branch":"feature/protocol-task","report_path":"docs/history/20261104-0900-task/report.md","other":["PR の説明文"]},"verify":{"tests":["npm test (packages/protocol)"],"steps":["差分を読んで型とガードの対応を確認"]},"constraints":["develop / main へ push しない","version bump しない"],"workers":{"items":[{"id":"impl","role":"implement","scope":"packages/protocol と docs"},{"role":"review","scope":"impl の差分","depends_on":["impl"]}]},"worker_model":"sonnet"}
+```
+
+| key | required | meaning |
+|---|---|---|
+| `cap_id` | yes | cap id (`[A-Za-z0-9_-]+`). Same `cap_id` again = resume |
+| `task_id` | yes | task id (`[A-Za-z0-9_-]+`). Echoed in `task_result` and `worker_report` |
+| `goal` | yes | natural-language goal, non-empty |
+| `repo` / `branch` | no | the base of the work (git URL, branch). Same handling as `kick_cap`; must not start with `-` |
+| `deliverables` | yes | `{branch?, report_path?, other?: string[]}`: push-target branch, where the reports go, other deliverables. May be `{}` |
+| `verify` | yes | `{tests?: string[], steps?: string[]}`: tests to run and check steps. May be `{}` |
+| `constraints` | yes | `string[]`, one constraint per entry. May be `[]` |
+| `workers` | yes | `{items?: TaskWorkerItem[]}`. No `items` = the default: at least 2 workers, one `implement` and one `review`. May be `{}` |
+| `worker_model` | no | default `--model` of the workers (same as `kick_cap` `worker_model`, same format) |
+
+`TaskWorkerItem`: `role` (required: `implement` | `review` | `docs` | `test` | `other`), `scope` (required, what the worker covers), `id` (optional name, `[A-Za-z0-9_-]+`), `model` (optional, `--model` of this worker), `depends_on` (optional `id[]`: items that must finish first).
+
+The server builds the cap's first instruction from the fields (text: `docs/design/cap-orchestration.md`, source of truth: `prompts.ts`) and runs it like `kick_cap`. Reply: `task_result` when the run finishes, or `error` (`command: "task"`, `cap_id`, `task_id`). While the server waits to update, `task` is refused like `kick_cap` (`error` `code:"updating"`, `command:"task"`, `retryable:true`).
+
+`task` and `worker_reply` exist from protocol 1.5.0. A server older than that does not know them, and a center does not send commands to a server whose protocol version differs (see below), so the server is updated first.
+
+### `worker_reply` — answer a worker (1.5.0)
+
+```json
+{"bantou":1,"type":"worker_reply","cap_id":"c-0a1b2c3d4e","worker_id":"w-1f2e3d4c5b","text":"develop ではなく feature/protocol-task に push して"}
+```
+
+| key | required | meaning |
+|---|---|---|
+| `cap_id` | yes | the cap that owns the worker |
+| `worker_id` | yes | the worker to answer |
+| `text` | yes | non-empty. Becomes the worker's next prompt |
+
+The server runs `worker_start` for the cap with the same `worker_id` and `text` as the prompt (the worker resumes its session). Reply: `worker_reply_result` `{"bantou":1,"type":"worker_reply_result","ok":true,"cap_id","worker_id","accepted":true}` right after the start is accepted (it does not wait for the work), or `error` (`command:"worker_reply"`, `cap_id`, `worker_id`; for example an unknown cap, or a worker of another cap). The worker's next report arrives as a `worker_report` notice. Accepted while the server waits to update.
 
 ### `stop_cap` — stop a running cap
 
@@ -188,7 +228,7 @@ while agents are running.
 ```
 
 No other fields. Reply: `hello_result`
-`{"bantou":1,"type":"hello_result","ok":true,"server_version":"0.3.0","protocol_version":"1.4.0","update":null,"last_update":null}`.
+`{"bantou":1,"type":"hello_result","ok":true,"server_version":"0.3.0","protocol_version":"1.5.0","update":null,"last_update":null}`.
 `server_version` is the npm `bantou` version of the running server. `update` is
 `{"state":"waiting"|"restarting","from","to","running":{"caps","workers","reports"}}` while an update is
 in progress. `last_update` is `{"to","ok":false,"error","at"}` for the last update that failed (kept until the
@@ -333,6 +373,25 @@ all agents are in an end state, one last notice is sent and sending stops. A
 failed send is logged only. The state is kept in memory on both sides. A peer
 that does not know `activity` ignores it.
 
+### `worker_report` notices (server to center, 1.5.0)
+
+A notice, like `activity`: it is never matched with a pending command. Every time a worker calls its `report` tool, the server sends it to the center that sent the cap's `kick_cap` / `task`, in parallel with the resume of the cap (it does not wait for the resume; a failed send is logged and the cap is resumed anyway).
+
+```json
+{"bantou":1,"type":"worker_report","cap_id":"c-0a1b2c3d4e","task_id":"t-20261104-1","worker_id":"w-1f2e3d4c5b","kind":"ask","text":"push 先の branch はどれか","at":"2026-11-04T00:00:00.000Z"}
+```
+
+| key | meaning |
+|---|---|
+| `cap_id` | the cap that owns the worker |
+| `task_id` | `task_id` of the latest `task` of the cap. Absent when the cap has had only `kick_cap` |
+| `worker_id` | the reporting worker |
+| `kind` | `progress`, `ask`, `approve` or `done` |
+| `text` | the report text as the worker sent it (1..20000 chars) |
+| `at` | receive time (server clock, ISO 8601) |
+
+The center answers an `ask` / `approve` with `worker_reply`. A peer that does not know `worker_report` ignores it.
+
 ### Replies
 
 Every reply carries `bantou: 1`.
@@ -353,6 +412,26 @@ Every reply carries `bantou: 1`.
 
 Sent only after the run ends, which can take minutes. A failed run is still a
 `cap_result` with `ok: false`.
+
+`task_result` (1.5.0) — the answer to `task`:
+
+```json
+{"bantou":1,"type":"task_result","cap_id":"c-0a1b2c3d4e","task_id":"t-20261104-1","state":"done","summary":"task メッセージを追加し、review の指摘 1 件を直した","workers":[{"worker_id":"w-1f2e3d4c5b","role":"implement","state":"done","branch":"feature/protocol-task","commit":"abc1234","tests":"npm test: 28 pass","report_path":"docs/history/20261104-0900-task/report.md","result":"型とガードを追加した…"},{"worker_id":"w-2a3b4c5d6e","role":"review","state":"done","result":"指摘 1 件、解消済み"}],"review":{"verdict":"ok","items":[{"severity":"medium","text":"worker_reply の text 検証が無い","resolved":true}],"rounds":1},"remaining":[]}
+```
+
+| key | meaning |
+|---|---|
+| `cap_id` / `task_id` | ids from the command |
+| `state` | `done` = the run ended normally, `failed` = it did not |
+| `summary` | summary of the result |
+| `workers` | `{worker_id, role, state, branch?, commit?, tests?, report_path?, result}[]`. `role` as in `TaskWorkerItem`; `state` is an activity state (`running` / `stalled` / `idle` / `done` / `failed` / `lost`); `tests` = the tests run and their outcome (free text); `result` = head of the worker's result (at most 500 chars) |
+| `review` | `{verdict, items, rounds}`. `verdict` `ok` / `issues` / `unknown`; `items` = `{severity: high|medium|low, text, resolved: boolean}[]`; `rounds` = number of implement <-> review round trips (integer, 0 = none) |
+| `remaining` | what is left undone or unresolved, `string[]` |
+| `error` | failure detail when `state` is `failed` |
+
+The cap answers the `task` instruction with this JSON as its final answer; the server takes it out of the answer (a ```json block, else the last `{...}` that has a string `summary`), fills `cap_id` / `task_id` and fixes broken items to defaults. When none can be read: `summary` = the raw answer, `workers` and `remaining` empty, `review.verdict` `unknown` (a failed run: `state:"failed"` + `error`). A cap is resumed by every worker report, so an answer that is not final (such as "workers started, waiting") also becomes a `task_result` with verdict `unknown`. Completion stays what the center already uses: the cap is idle and no worker of it is running or stalled. When a worker report resumes the cap and the cap answers with the JSON, `task_result` is sent to the center again (the one that sent the `task`); any other answer after a report is a `cap_result` as before.
+
+`worker_reply_result`: see `worker_reply`.
 
 `status_result`:
 
@@ -401,7 +480,9 @@ Sent only after the run ends, which can take minutes. A failed run is still a
 | `ok` | always `false` |
 | `message` | failure reason |
 | `command` | `type` of the failed command, when known |
-| `cap_id` | `cap_id` of the failed `kick_cap`, when known |
+| `cap_id` | `cap_id` of the failed `kick_cap` / `task` / `worker_reply`, when known |
+| `task_id` | `task_id` of the failed `task`, when known (1.5.0) |
+| `worker_id` | `worker_id` of the failed `worker_reply`, when known (1.5.0) |
 
 Typical causes: git failure, agent state `running` / `error`, broken `state.json`.
 
@@ -565,7 +646,7 @@ for every request (a `name` of `bantou-server` is preferred when several match;
 0 matches or an old broker fall back to the peer name `bantou-server`; a
 `servers[].peer` setting skips discovery and uses that name). It sends the
 command with `meta: {protocol: "bantou", version}` and matches the reply by `cap_id`
-(`cap_result`), by `worker_id` (`worker_result`), and in FIFO order for
+(`cap_result`), by `cap_id` + `task_id` (`task_result`, `error` of a `task`), by `cap_id` + `worker_id` (`worker_reply_result`, `error` of a `worker_reply`), by `worker_id` (`worker_result`), and in FIFO order for
 `status_result`. An `error` reply is matched by its `cap_id` / `worker_id` when
 present, otherwise to the oldest pending request with the same `command`. If no reply arrives within the configured timeout (default 35
 minutes), the tool returns an `error` reply with message `タイムアウト (...)`.

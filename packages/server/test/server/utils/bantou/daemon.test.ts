@@ -123,3 +123,89 @@ test("executeUpdate: hello は hello_result、update_server の失敗は code �
   });
   controller.close();
 });
+
+import type { TaskCommand } from "@agent-hand/bantou-protocol";
+
+const taskCmd: TaskCommand = {
+  bantou: 1, type: "task", cap_id: "c1", task_id: "t-1", goal: "やること",
+  repo: "https://u:pw@example.com/o/r.git", branch: "main",
+  deliverables: {}, verify: {}, constraints: [], workers: {}, worker_model: "sonnet",
+};
+
+test("task: cap の最初の指示を組み立てて invoke し、task_result で返す", async () => {
+  const calls: Array<[string, string, Record<string, unknown>]> = [];
+  const manager = {
+    invoke: async (k: string, id: string, input: Record<string, unknown>) => {
+      calls.push([k, id, input]);
+      return { session_id: "s", ok: true, result_text: '{"summary":"できた","review":{"verdict":"ok","items":[],"rounds":1}}' };
+    },
+  } as unknown as AgentManager;
+  const r = await execute(taskCmd, manager);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]![0], "cap");
+  assert.equal(calls[0]![1], "c1");
+  assert.ok(String(calls[0]![2].prompt).startsWith("[task t-1]\n"));
+  assert.ok(String(calls[0]![2].prompt).includes("やること"));
+  assert.equal(calls[0]![2].repo, "https://u:pw@example.com/o/r.git");
+  assert.equal(calls[0]![2].branch, "main");
+  assert.equal(calls[0]![2].worker_model, "sonnet");
+  assert.equal(r.type, "task_result");
+  assert.equal((r as { summary: string }).summary, "できた");
+  assert.equal((r as { review: { verdict: string; rounds: number } }).review.verdict, "ok");
+  assert.equal((r as { review: { rounds: number } }).review.rounds, 1);
+});
+
+test("task: 生の返答は summary に入り verdict は unknown。失敗は error（cap_id と task_id 付き）", async () => {
+  const raw = await execute(taskCmd, { invoke: async () => ({ session_id: "s", ok: true, result_text: "起動した" }) } as unknown as AgentManager);
+  assert.deepEqual(raw, {
+    bantou: 1, type: "task_result", cap_id: "c1", task_id: "t-1", state: "done", summary: "起動した",
+    workers: [], review: { verdict: "unknown", items: [], rounds: 0 }, remaining: [],
+  });
+  const failed = await execute(taskCmd, { invoke: async () => ({ session_id: "s", ok: false, result_text: "", error: "exit 1" }) } as unknown as AgentManager);
+  assert.equal((failed as { state: string }).state, "failed");
+  assert.equal((failed as { error: string }).error, "exit 1");
+  const err = await execute(taskCmd, { invoke: async () => { throw new Error("boom"); } } as unknown as AgentManager);
+  assert.deepEqual(err, { bantou: 1, type: "error", ok: false, message: "boom", command: "task", cap_id: "c1", task_id: "t-1" });
+});
+
+test("task: ログ概要は task_id・goal 先頭・repo の userinfo を伏せる", () => {
+  const line = describeCommand({ ...taskCmd, goal: "g".repeat(200) });
+  assert.ok(line.includes("cap_id=c1 task_id=t-1"));
+  assert.ok(line.includes("repo=https://***@example.com/o/r.git"));
+  assert.ok(!line.includes("pw"));
+  assert.ok(line.includes("workers=0"));
+  assert.ok(line.includes(`goal=${"g".repeat(80)}`) && !line.includes("g".repeat(81)));
+});
+
+test("task: 更新待機中の断りは command=task、task_id 付き。kick_cap は従来どおり", () => {
+  const t = updatingError({ cap_id: "c1", task_id: "t-1" }, { from: "0.5.0", to: "0.5.1" });
+  assert.equal((t as { command?: string }).command, "task");
+  assert.equal((t as { task_id?: string }).task_id, "t-1");
+  assert.equal((t as { code?: string }).code, "updating");
+  const k = updatingError({ cap_id: "c1" }, { from: "0.5.0", to: "0.5.1" });
+  assert.equal((k as { command?: string }).command, "kick_cap");
+  assert.equal("task_id" in k, false);
+});
+
+test("worker_reply: 同じ worker_id で worker_start し、worker_reply_result を返す", async () => {
+  const calls: unknown[] = [];
+  const workers = { start: async (capId: string, input: unknown) => (calls.push([capId, input]), { worker_id: "w-1", accepted: true as const }) };
+  const cmd = { bantou: 1 as const, type: "worker_reply" as const, cap_id: "c1", worker_id: "w-1", text: "main に rebase して" };
+  const r = await execute(cmd, {} as unknown as AgentManager, workers);
+  assert.deepEqual(r, { bantou: 1, type: "worker_reply_result", ok: true, cap_id: "c1", worker_id: "w-1", accepted: true });
+  assert.deepEqual(calls, [["c1", { worker_id: "w-1", prompt: "main に rebase して" }]]);
+  assert.equal(describeCommand(cmd), "cap_id=c1 worker_id=w-1 text=main に rebase して");
+});
+
+test("worker_reply: 失敗は error（cap_id・worker_id 付き）。worker 機構が無い間も error", async () => {
+  const cmd = { bantou: 1 as const, type: "worker_reply" as const, cap_id: "c1", worker_id: "w-1", text: "x" };
+  const e1 = await execute(cmd, {} as unknown as AgentManager, { start: async () => { throw new Error("別の cap の worker: w-1"); } });
+  assert.deepEqual(e1, { bantou: 1, type: "error", ok: false, message: "別の cap の worker: w-1", command: "worker_reply", cap_id: "c1", worker_id: "w-1" });
+  const e2 = await execute(cmd, {} as unknown as AgentManager);
+  assert.equal(e2.type, "error");
+  assert.equal((e2 as { command?: string }).command, "worker_reply");
+});
+
+test("protocol 1.5.0: 返信 meta と hello の版は 1.5.0（1.4.0 の center / server とは版違いになる）", () => {
+  assert.equal(REPLY_META.version, "1.5.0");
+});

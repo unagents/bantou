@@ -7,9 +7,11 @@ import {
   type RunOutcome,
   type ServerNotice,
   type ServerReply,
+  type WorkerReportNotice,
 } from "@agent-hand/bantou-protocol";
 import type { InvokeInput } from "./agents";
 import { agentDir, runLogDir } from "./paths";
+import { extractTaskResult } from "./prompts";
 
 export const REPORT_KINDS = ["progress", "ask", "approve", "done"] as const;
 export type ReportKind = (typeof REPORT_KINDS)[number];
@@ -45,6 +47,8 @@ export interface ReportHubDeps {
 export interface ReportHub {
   /** cap を依頼した center を記録する（メモリと logs/center.json）。 */
   rememberCenter(capId: string, centerId: string): Promise<void>;
+  /** cap の最新の task_id を記録する（メモリと logs/task.json）。worker_report と report 起因の task_result に使う。 */
+  rememberTask(capId: string, taskId: string): Promise<void>;
   /** worker の report を記録し、cap の resume を queue に積む。積んだ時点で戻る。 */
   report(capId: string, workerId: string, kind: ReportKind, text: string): Promise<void>;
   /** cap を依頼した center へ activity 通知を送る。center が不明なら何もしない。失敗は投げる。 */
@@ -61,13 +65,57 @@ const oneLine = (s: string, n: number): string => s.replace(/\s+/g, " ").trim().
 
 /** center の記録先。state.json は agents.ts が丸ごと書き換えるので別ファイルにする。 */
 const centerFile = (capDir: string): string => join(runLogDir(capDir), "center.json");
+const taskFile = (capDir: string): string => join(runLogDir(capDir), "task.json");
 const reportsFile = (capDir: string): string => join(runLogDir(capDir), "reports.jsonl");
 
 export function createReportHub(deps: ReportHubDeps): ReportHub {
   const { log } = deps;
   const centers = new Map<string, string>();
+  const tasks = new Map<string, string>();
   const pending = new Set<Promise<void>>();
+  /** worker_report 通知の送信中。更新の再起動待ち（pendingCount）には数えず、drain だけが待つ。 */
+  const notices = new Set<Promise<void>>();
   let closed = false;
+
+  async function taskOf(capId: string): Promise<string | undefined> {
+    const known = tasks.get(capId);
+    if (known) return known;
+    try {
+      const d = JSON.parse(await readFile(taskFile(agentDir(deps.workspace, "cap", capId)), "utf8")) as { task_id?: unknown };
+      if (isValidAgentId(d.task_id)) {
+        tasks.set(capId, d.task_id);
+        return d.task_id;
+      }
+    } catch {
+      // 記録が無い・壊れている場合は task 無し
+    }
+    return undefined;
+  }
+
+  async function rememberTask(capId: string, taskId: string): Promise<void> {
+    tasks.set(capId, taskId);
+    const capDir = agentDir(deps.workspace, "cap", capId);
+    try {
+      await mkdir(runLogDir(capDir), { recursive: true });
+      await writeFile(taskFile(capDir), JSON.stringify({ task_id: taskId }) + "\n");
+    } catch (e) {
+      log(`task 記録失敗: cap_id=${capId} ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  async function sendReportNotice(capId: string, notice: WorkerReportNotice): Promise<void> {
+    const to = await centerOf(capId);
+    if (!to) {
+      log(`通知先 center が不明: cap_id=${capId} type=${notice.type}`);
+      return;
+    }
+    try {
+      await deps.send(to, notice);
+      log(`worker_report 通知: to=${to} cap_id=${capId} worker_id=${notice.worker_id} kind=${notice.kind}`);
+    } catch (e) {
+      log(`worker_report 通知失敗: to=${to} ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
 
   async function centerOf(capId: string): Promise<string | undefined> {
     const known = centers.get(capId);
@@ -133,17 +181,34 @@ export function createReportHub(deps: ReportHubDeps): ReportHub {
       throw new Error(`cap が存在しない: ${capId}`);
     }
     await mkdir(runLogDir(capDir), { recursive: true });
-    await appendFile(
-      reportsFile(capDir),
-      JSON.stringify({ at: new Date().toISOString(), worker_id: workerId, kind, text }) + "\n",
-    );
+    const at = new Date().toISOString();
+    await appendFile(reportsFile(capDir), JSON.stringify({ at, worker_id: workerId, kind, text }) + "\n");
     log(`report 受信: cap_id=${capId} worker_id=${workerId} kind=${kind} text=${oneLine(text, 80)}`);
+
+    // center へは cap の再開と並行して送る（worker_report 通知。失敗しても再開は止めない）
+    const taskId = await taskOf(capId);
+    const notice: WorkerReportNotice = {
+      bantou: PROTOCOL_VERSION,
+      type: "worker_report",
+      cap_id: capId,
+      ...(taskId !== undefined ? { task_id: taskId } : {}),
+      worker_id: workerId,
+      kind,
+      text,
+      at,
+    };
+    const n: Promise<void> = sendReportNotice(capId, notice).finally(() => notices.delete(n));
+    notices.add(n);
 
     const prompt = buildReportPrompt(workerId, kind, text);
     const p: Promise<void> = deps
       .invoke(capId, { prompt, reason: `report from worker ${workerId}`, keepTask: true })
       .then(
-        (r) => route(capId, { bantou: PROTOCOL_VERSION, type: "cap_result", cap_id: capId, ...r }),
+        (r) => {
+          // task 指示中の cap が task_result の JSON で答えたら task_result、そうでなければ従来どおり cap_result
+          const tr = taskId !== undefined && r.ok ? extractTaskResult(capId, taskId, r.result_text) : undefined;
+          return route(capId, tr ?? { bantou: PROTOCOL_VERSION, type: "cap_result", cap_id: capId, ...r });
+        },
         (e: unknown) => {
           const message = e instanceof Error ? e.message : String(e);
           log(`エラー: report 起因の resume: cap_id=${capId} ${message}`);
@@ -163,10 +228,11 @@ export function createReportHub(deps: ReportHubDeps): ReportHub {
 
   return {
     rememberCenter,
+    rememberTask,
     report,
     notify,
     drain: async () => {
-      await Promise.allSettled([...pending]);
+      await Promise.allSettled([...pending, ...notices]);
     },
     pendingCount: () => pending.size,
     close: () => {

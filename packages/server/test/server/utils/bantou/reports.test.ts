@@ -58,9 +58,10 @@ test("report: 記録して cap を resume し、結果を記録済み center へ
       assert.equal(calls[0]![0], "c1");
       assert.ok(calls[0]![1].prompt.startsWith("worker w1 から done: finished"));
       assert.equal(calls[0]![1].keepTask, true);
-      assert.equal(sent.length, 1);
-      assert.equal(sent[0]![0], "center-1");
-      assert.deepEqual(sent[0]![1], {
+      const replies = sent.filter(([, m]) => m.type !== "worker_report");
+      assert.equal(replies.length, 1);
+      assert.equal(replies[0]![0], "center-1");
+      assert.deepEqual(replies[0]![1], {
         bantou: 1,
         type: "cap_result",
         cap_id: "c1",
@@ -114,11 +115,12 @@ test("report: center 不明なら返信せずログだけ。失敗は error 返�
       await hub.drain();
       assert.equal(sent.length, 0);
       assert.ok(logs.some((l) => l.includes("返信先 center が不明")));
+      assert.ok(logs.some((l) => l.includes("通知先 center が不明")));
       fail = true;
       await hub.rememberCenter("c1", "center-2");
       await hub.report("c1", "w1", "ask", "q2");
       await hub.drain();
-      assert.deepEqual(sent[0]![1], {
+      assert.deepEqual(sent.filter(([, m]) => m.type !== "worker_report")[0]![1], {
         bantou: 1,
         type: "error",
         ok: false,
@@ -149,7 +151,7 @@ test("report: center はファイルから復元できる（hub 作り直し後�
     const hub = mk(sent);
     await hub.report("c1", "w1", "done", "x");
     await hub.drain();
-    assert.deepEqual(sent, ["center-3"]);
+    assert.deepEqual(sent, ["center-3", "center-3"]); // worker_report 通知と cap_result
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -229,4 +231,122 @@ test("pendingCount: report 起因の処理中は 1 以上、drain 後は 0", asy
       assert.equal(hub.pendingCount(), 0);
     },
   );
+});
+
+test("report: worker_report を center へ通知する（task_id は task 指示のあと付く）", async () => {
+  await withHub(
+    async () => ({ session_id: "s", ok: true, result_text: "cap says" }),
+    async ({ hub, sent }) => {
+      await hub.rememberCenter("c1", "center-1");
+      await hub.report("c1", "w1", "ask", "どの branch?");
+      await hub.drain();
+      const n1 = sent.find(([, m]) => m.type === "worker_report")![1] as unknown as Record<string, unknown>;
+      assert.equal("task_id" in n1, false);
+      assert.deepEqual({ ...n1, at: "x" }, { bantou: 1, type: "worker_report", cap_id: "c1", worker_id: "w1", kind: "ask", text: "どの branch?", at: "x" });
+      assert.ok(!Number.isNaN(Date.parse(String(n1.at))));
+      await hub.rememberTask("c1", "t-9");
+      await hub.report("c1", "w2", "done", "終わった");
+      await hub.drain();
+      const notices = sent.filter(([, m]) => m.type === "worker_report").map(([, m]) => m as unknown as Record<string, unknown>);
+      assert.equal(notices.length, 2);
+      assert.equal(notices[1]!.task_id, "t-9");
+      assert.equal(notices[1]!.kind, "done");
+      assert.ok(sent.filter(([to]) => to === "center-1").length === sent.length);
+    },
+  );
+});
+
+test("report: worker_report は cap の再開（invoke）を待たずに送る", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  await withHub(
+    async () => {
+      await gate;
+      return { session_id: "s", ok: true, result_text: "" };
+    },
+    async ({ hub, sent }) => {
+      await hub.rememberCenter("c1", "center-1");
+      await hub.report("c1", "w1", "progress", "途中");
+      await new Promise((r) => setTimeout(r, 20));
+      assert.equal(sent.length, 1);
+      assert.equal(sent[0]![1].type, "worker_report");
+      release();
+      await hub.drain();
+      assert.equal(sent.length, 2);
+    },
+  );
+});
+
+test("report: 通知の送信失敗は cap の再開を止めない", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "bantou-reports-test-"));
+  try {
+    const ws = join(dir, "ws");
+    await mkdir(join(ws, "caps", "c1"), { recursive: true });
+    const logs: string[] = [];
+    let invoked = 0;
+    const hub = createReportHub({
+      workspace: ws,
+      invoke: async () => (invoked++, { session_id: "s", ok: true, result_text: "" }),
+      send: async () => {
+        throw new Error("net down");
+      },
+      log: (m) => logs.push(m),
+    });
+    await hub.rememberCenter("c1", "center-1");
+    await hub.report("c1", "w1", "done", "ok");
+    await hub.drain();
+    assert.equal(invoked, 1);
+    assert.ok(logs.some((l) => l.includes("worker_report 通知失敗") && l.includes("net down")));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("report: task 指示中の cap が task_result の JSON で答えたら task_result、そうでなければ cap_result", async () => {
+  let text = '```json\n{"summary":"完了","state":"done"}\n```';
+  await withHub(
+    async () => ({ session_id: "s", ok: true, result_text: text }),
+    async ({ hub, sent }) => {
+      await hub.rememberCenter("c1", "center-1");
+      await hub.rememberTask("c1", "t-1");
+      await hub.report("c1", "w1", "done", "ok");
+      await hub.drain();
+      const r1 = sent.find(([, m]) => m.type === "task_result")![1];
+      assert.equal(r1.type, "task_result");
+      assert.equal((r1 as { task_id: string }).task_id, "t-1");
+      assert.equal((r1 as { summary: string }).summary, "完了");
+      text = "まだ worker 待ち";
+      sent.length = 0;
+      await hub.report("c1", "w1", "progress", "p");
+      await hub.drain();
+      assert.deepEqual(sent.filter(([, m]) => m.type !== "worker_report").map(([, m]) => m.type), ["cap_result"]);
+    },
+  );
+});
+
+test("report: task_id は logs/task.json から復元できる（hub 作り直し後）", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "bantou-reports-test-"));
+  try {
+    const ws = join(dir, "ws");
+    await mkdir(join(ws, "caps", "c1"), { recursive: true });
+    const sent: ServerNotice[] = [];
+    const mk = () =>
+      createReportHub({
+        workspace: ws,
+        invoke: async () => ({ session_id: "s", ok: true, result_text: "" }),
+        send: async (_to, m) => {
+          sent.push(m as ServerNotice);
+        },
+        log: () => {},
+      });
+    await mk().rememberTask("c1", "t-7");
+    const b = mk();
+    await b.rememberCenter("c1", "center-1");
+    await b.report("c1", "w1", "done", "x");
+    await b.drain();
+    const n = sent.find((m) => m.type === "worker_report");
+    assert.equal(n?.type === "worker_report" ? n.task_id : undefined, "t-7");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

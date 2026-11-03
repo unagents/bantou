@@ -1,7 +1,7 @@
 {
   "name": "bantou",
-  "version": "1.4.0",
-  "description": "bantou-server commands (kick_cap, stop_cap, status, hello, update_server), replies (cap_result, stop_result, status_result, hello_result, update_result, error) and a notice (activity). Message body is one JSON object in the text; `bantou: 1` is the body schema version.",
+  "version": "1.5.0",
+  "description": "bantou-server commands (kick_cap, stop_cap, status, hello, update_server, task, worker_reply), replies (cap_result, stop_result, status_result, hello_result, update_result, task_result, worker_reply_result, error) and notices (activity, worker_report). Message body is one JSON object in the text; `bantou: 1` is the body schema version.",
   "messages": {
     "hello": {
       "type": "object",
@@ -198,6 +198,160 @@
       },
       "additionalProperties": true
     },
+    "task": {
+      "type": "object",
+      "description": "Give the remote cap `cap_id` a task. The server builds the cap's first instruction from goal / deliverables / verify / constraints / workers. The same cap_id again resumes the cap. Reply: task_result or error. Since 1.5.0.",
+      "required": ["bantou", "type", "cap_id", "task_id", "goal", "deliverables", "verify", "constraints", "workers"],
+      "properties": {
+        "bantou": { "const": 1 },
+        "type": { "const": "task" },
+        "cap_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
+        "task_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$", "description": "Echoed in task_result and worker_report." },
+        "goal": { "type": "string", "minLength": 1, "description": "Natural-language goal." },
+        "repo": { "type": "string", "minLength": 1, "description": "Git URL the work is based on. Must not start with '-'." },
+        "branch": { "type": "string", "minLength": 1, "description": "Base branch of the work. Must not start with '-'." },
+        "deliverables": {
+          "type": "object",
+          "properties": {
+            "branch": { "type": "string", "minLength": 1, "description": "Branch the workers push to. Must not start with '-'." },
+            "report_path": { "type": "string", "description": "Where the workers put their reports." },
+            "other": { "type": "array", "items": { "type": "string" } }
+          },
+          "additionalProperties": true
+        },
+        "verify": {
+          "type": "object",
+          "properties": {
+            "tests": { "type": "array", "items": { "type": "string" }, "description": "Test commands to run." },
+            "steps": { "type": "array", "items": { "type": "string" }, "description": "Check procedure, one step per entry." }
+          },
+          "additionalProperties": true
+        },
+        "constraints": { "type": "array", "items": { "type": "string" }, "description": "Constraints, one per entry (may be empty)." },
+        "workers": {
+          "type": "object",
+          "description": "Worker split. No items = the default: at least 2 workers, one implement and one review.",
+          "properties": {
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["role", "scope"],
+                "properties": {
+                  "id": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$", "description": "Name other items refer to in depends_on." },
+                  "role": { "enum": ["implement", "review", "docs", "test", "other"] },
+                  "scope": { "type": "string", "minLength": 1 },
+                  "model": { "type": "string", "pattern": "^[A-Za-z0-9._\\[\\]][A-Za-z0-9._\\[\\]-]*$" },
+                  "depends_on": { "type": "array", "items": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" }, "description": "id of the items that must finish before this one starts." }
+                },
+                "additionalProperties": true
+              }
+            }
+          },
+          "additionalProperties": true
+        },
+        "worker_model": { "type": "string", "pattern": "^[A-Za-z0-9._\\[\\]][A-Za-z0-9._\\[\\]-]*$", "description": "Default model of the workers (same as kick_cap worker_model)." }
+      },
+      "additionalProperties": true
+    },
+    "task_result": {
+      "type": "object",
+      "description": "Reply to task, taken from the cap's final answer. When no JSON could be read: summary = the raw answer, workers / remaining empty, review.verdict unknown. Since 1.5.0.",
+      "required": ["bantou", "type", "cap_id", "task_id", "state", "summary", "workers", "review", "remaining"],
+      "properties": {
+        "bantou": { "const": 1 },
+        "type": { "const": "task_result" },
+        "cap_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
+        "task_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
+        "state": { "enum": ["done", "failed"], "description": "done = the run ended normally; failed = it did not (see error)." },
+        "summary": { "type": "string" },
+        "workers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["worker_id", "role", "state", "result"],
+            "properties": {
+              "worker_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
+              "role": { "enum": ["implement", "review", "docs", "test", "other"] },
+              "state": { "enum": ["running", "stalled", "idle", "done", "failed", "lost"] },
+              "branch": { "type": "string" },
+              "commit": { "type": "string" },
+              "tests": { "type": "string" },
+              "report_path": { "type": "string" },
+              "result": { "type": "string", "description": "Head of the worker's result (at most 500 chars)." }
+            },
+            "additionalProperties": true
+          }
+        },
+        "review": {
+          "type": "object",
+          "required": ["verdict", "items", "rounds"],
+          "properties": {
+            "verdict": { "enum": ["ok", "issues", "unknown"] },
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["severity", "text", "resolved"],
+                "properties": {
+                  "severity": { "enum": ["high", "medium", "low"] },
+                  "text": { "type": "string" },
+                  "resolved": { "type": "boolean" }
+                },
+                "additionalProperties": true
+              }
+            },
+            "rounds": { "type": "integer", "minimum": 0, "description": "Implement <-> review round trips done." }
+          },
+          "additionalProperties": true
+        },
+        "remaining": { "type": "array", "items": { "type": "string" } },
+        "error": { "type": "string", "description": "Failure detail when state is failed." }
+      },
+      "additionalProperties": true
+    },
+    "worker_reply": {
+      "type": "object",
+      "description": "Send text to the worker worker_id of the cap cap_id (the server runs worker_start with the same worker_id). Reply: worker_reply_result or error. Since 1.5.0.",
+      "required": ["bantou", "type", "cap_id", "worker_id", "text"],
+      "properties": {
+        "bantou": { "const": 1 },
+        "type": { "const": "worker_reply" },
+        "cap_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
+        "worker_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
+        "text": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": true
+    },
+    "worker_reply_result": {
+      "type": "object",
+      "required": ["bantou", "type", "ok", "cap_id", "worker_id", "accepted"],
+      "properties": {
+        "bantou": { "const": 1 },
+        "type": { "const": "worker_reply_result" },
+        "ok": { "const": true },
+        "cap_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
+        "worker_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
+        "accepted": { "const": true }
+      },
+      "additionalProperties": true
+    },
+    "worker_report": {
+      "type": "object",
+      "description": "Notice from server to center (not a reply): a worker called its report tool. Sent for every report, in parallel with the resume of the cap. Since 1.5.0.",
+      "required": ["bantou", "type", "cap_id", "worker_id", "kind", "text", "at"],
+      "properties": {
+        "bantou": { "const": 1 },
+        "type": { "const": "worker_report" },
+        "cap_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
+        "task_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$", "description": "task_id of the latest task of the cap; absent when the cap has had no task." },
+        "worker_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
+        "kind": { "enum": ["progress", "ask", "approve", "done"] },
+        "text": { "type": "string" },
+        "at": { "type": "string", "description": "Receive time (server clock, ISO 8601)." }
+      },
+      "additionalProperties": true
+    },
     "activity": {
       "type": "object",
       "description": "Notice from server to center (not a reply). Liveness summary of a cap and its workers, derived from their stream-json output. Sent every 5s while any agent runs, and on each state change.",
@@ -240,9 +394,10 @@
         "type": { "const": "error" },
         "ok": { "const": false },
         "message": { "type": "string" },
-        "command": { "enum": ["kick_cap", "resume_worker", "stop_cap", "status", "hello", "update_server"], "description": "type of the failed command, when known." },
+        "command": { "enum": ["kick_cap", "resume_worker", "stop_cap", "status", "hello", "update_server", "task", "worker_reply"], "description": "type of the failed command, when known." },
         "cap_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
         "worker_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
+        "task_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
         "code": { "enum": ["updating", "update_failed", "update_conflict", "invalid_version", "version_mismatch"], "description": "Machine-readable cause. updating = the server waits to restart for an update, resend later." },
         "retryable": { "type": "boolean", "description": "true when the same command may be sent again later." }
       },
