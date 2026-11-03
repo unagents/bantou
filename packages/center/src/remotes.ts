@@ -30,10 +30,33 @@ export interface RemoteRecord {
   /** 結果の本文（cap_result.result_text）。RESULT_MAX で切る。後の turn（report 起因の再開）の cap_result で最新に更新される。 */
   result?: string;
   error?: string;
+  /** 完了通知を owner の session へ送れた時刻。送れていなければ無い。 */
+  notifiedAt?: string;
+  /** 完了通知を送れなかった理由（送れた時は無い）。 */
+  notifyError?: string;
+  /** 最後に通知を試みた結果の識別子（state + result + error）。同じ結果で二重に送らないための照合用。 */
+  notifiedKey?: string;
 }
 
 /** remote_list が返す 1 件。通知がまだ無ければ activity は無い。 */
-export type RemoteView = RemoteRecord & { activity?: RemoteActivity };
+export type RemoteView = Omit<RemoteRecord, "notifiedKey"> & { activity?: RemoteActivity };
+
+/** 通知に載せる result の先頭の長さ。 */
+export const NOTIFY_RESULT_MAX = 500;
+/** remote_wait の既定・上限（秒）。 */
+export const WAIT_DEFAULT_SEC = 600;
+export const WAIT_MAX_SEC = 1800;
+
+export const remoteWaitSchema = {
+  remote_id: z.string().regex(AGENT_ID_PATTERN, "英数字と _ - のみ").optional().describe("待つ remote。省略時は owner の running 中のどれか（最初に終わったもの）"),
+  timeout_sec: z.number().int().min(1).max(WAIT_MAX_SEC).optional().describe(`待つ秒数。既定 ${WAIT_DEFAULT_SEC}、上限 ${WAIT_MAX_SEC}。超えたら state=running のまま返す`),
+};
+
+/** 通知の本文を作る。 */
+export function formatDoneNotice(r: { remote_id: string; state: string; result?: string; error?: string }): string {
+  const head = r.result === undefined ? "" : r.result.length > NOTIFY_RESULT_MAX ? `${r.result.slice(0, NOTIFY_RESULT_MAX)}…(省略。全文は remote_list)` : r.result;
+  return [`[bantou] remote 完了 remote_id=${r.remote_id} state=${r.state}`, `result: ${head}`, ...(r.error ? [`error: ${r.error}`] : [])].join("\n");
+}
 
 export const remoteCreateSchema = {
   prompt: z.string().min(1).refine((s) => !s.includes("\0"), { message: "NUL 文字を含められない" }).describe("remote-cap への最初の指示"),
@@ -55,6 +78,13 @@ export interface RemoteManager {
    */
   applyLateReply(reply: CapResultReply | ErrorReply): boolean;
   list(filter?: { owner?: string }): RemoteView[];
+  /** server から activity 通知を受けた時に呼ぶ。worker が全部終わって remote が完了したなら、完了通知を送る・待ちを起こす。 */
+  onActivity(capId: string): void;
+  /**
+   * remote が終わる（list の state が done / failed）まで待って返す。remote_id 省略時は owner の running 中のどれかが終わるまで。
+   * timeout なら state=running のまま返す。owner が分かっていて記録の owner と違えば拒否。
+   */
+  wait(input: { remote_id?: string; owner?: string; timeoutSec?: number }): Promise<RemoteView>;
 }
 
 const truncate = (s: string): string => (s.length > RESULT_MAX ? `${s.slice(0, RESULT_MAX)}…(省略)` : s);
@@ -67,6 +97,8 @@ export function createRemoteManager(opts: {
   activity?: ActivityStore;
   /** remote_id の採番（テスト用）。 */
   newId?: () => string;
+  /** 完了通知の送り先。owner の session へ text を送る。省けば通知しない。 */
+  notify?: (owner: string, text: string) => Promise<{ ok: true } | { ok: false; reason: string }>;
 }): RemoteManager {
   const { link, store, log } = opts;
   const newId = opts.newId ?? ((): string => `r-${randomBytes(5).toString("hex")}`);
@@ -75,11 +107,68 @@ export function createRemoteManager(opts: {
   const persist = (): Promise<void> =>
     store.save([...records.values()]).catch((e: unknown) => log(`remotes 保存失敗: ${e instanceof Error ? e.message : String(e)}`));
 
+  /** 完了通知待ちの remote_id（メモリのみ。center 再起動前に終わっていた記録を再通知しないため）。 */
+  const awaiting = new Set<string>();
+  const waiters = new Set<() => void>();
+
+  const keyOf = (r: RemoteRecord): string => JSON.stringify([r.state, r.result ?? null, r.error ?? null]);
+
+  /** list と同じ見え方。cap の turn が終わっていても、配下の worker か cap 自身が動いている間は running。 */
+  const viewOf = (r: RemoteRecord): RemoteView => {
+    const activity = opts.activity?.get(r.remote_id);
+    const busy = r.state === "done" && activity?.agents.some((a) => (a.kind === "worker" || a.kind === "cap") && (a.state === "running" || a.state === "stalled"));
+    const { notifiedKey: _k, ...rest } = r;
+    const base: RemoteView = busy ? { ...rest, state: "running" } : { ...rest };
+    if (busy) delete base.finishedAt;
+    return { ...base, ...(activity ? { activity } : {}) };
+  };
+
+  const wake = (): void => {
+    for (const w of [...waiters]) w();
+  };
+
+  /** 終わっていて通知待ちなら、owner の session へ 1 回送る。 */
+  const maybeNotify = (r: RemoteRecord): void => {
+    if (!awaiting.has(r.remote_id) || records.get(r.remote_id) !== r) return;
+    // done は配下が動いている間は終わりでない。failed は見え方が変わらない
+    if (viewOf(r).state === "running") return;
+    awaiting.delete(r.remote_id);
+    r.notifiedKey = keyOf(r);
+    if (!opts.notify) return;
+    const key = r.notifiedKey;
+    void opts.notify(r.owner, formatDoneNotice(r)).then(
+      (res) => res,
+      (e: unknown) => ({ ok: false as const, reason: e instanceof Error ? e.message : String(e) }),
+    ).then((res) => {
+      // 送っている間に結果が更新された・消えた時は、この通知の結果を記録しない
+      if (records.get(r.remote_id) !== r || r.notifiedKey !== key) return;
+      if (res.ok) {
+        r.notifiedAt = new Date().toISOString();
+        delete r.notifyError;
+        log(`remote 完了通知: ${r.remote_id} owner=${r.owner} state=${r.state}`);
+      } else {
+        delete r.notifiedAt;
+        r.notifyError = res.reason;
+        log(`remote 完了通知を送れない: ${r.remote_id} owner=${r.owner} ${res.reason}`);
+      }
+      void persist();
+      wake();
+    });
+  };
+
   const finish = (r: RemoteRecord, patch: Partial<RemoteRecord>): void => {
     // delete 済みの記録は更新しない
     if (records.get(r.remote_id) !== r) return;
     Object.assign(r, patch, { finishedAt: new Date().toISOString() });
+    // 同じ結果は二重に通知しない（通知済みの結果と同じなら待ちにしない）
+    if (keyOf(r) !== r.notifiedKey) {
+      awaiting.add(r.remote_id);
+      delete r.notifiedAt;
+      delete r.notifyError;
+    }
     void persist();
+    maybeNotify(r);
+    wake();
   };
 
   /** 記録の server を今の peer から探す（id 一致 → 名前一致）。 */
@@ -164,7 +253,9 @@ export function createRemoteManager(opts: {
         warning = `server へ stop_cap を送れなかった: ${msg}`;
       }
       records.delete(remote_id);
+      awaiting.delete(remote_id);
       opts.activity?.forget(remote_id);
+      wake();
       await persist();
       log(`remote 削除: ${remote_id} stopped=${stopped}${warning ? ` warning=${warning}` : ""}`);
       return { remote_id, deleted: true, stopped, ...(warning ? { warning } : {}) };
@@ -187,15 +278,58 @@ export function createRemoteManager(opts: {
     },
 
     list: (filter) =>
-      [...records.values()]
-        .filter((r) => filter?.owner === undefined || r.owner === filter.owner)
-        .map((r) => {
-          const activity = opts.activity?.get(r.remote_id);
-          // cap の turn は終わっていても、配下の worker が動いている間は done にしない（report で cap が再開される）
-          const busy = r.state === "done" && activity?.agents.some((a) => a.kind === "worker" && (a.state === "running" || a.state === "stalled"));
-          const base = busy ? { ...r, state: "running" as const } : { ...r };
-          if (busy) delete base.finishedAt;
-          return { ...base, ...(activity ? { activity } : {}) };
-        }),
+      [...records.values()].filter((r) => filter?.owner === undefined || r.owner === filter.owner).map(viewOf),
+
+    onActivity(capId) {
+      const r = records.get(capId);
+      if (r) maybeNotify(r);
+      wake();
+    },
+
+    async wait({ remote_id, owner, timeoutSec }) {
+      const sec = Math.min(Math.max(timeoutSec ?? WAIT_DEFAULT_SEC, 1), WAIT_MAX_SEC);
+      let targets: RemoteRecord[];
+      if (remote_id !== undefined) {
+        const rec = records.get(remote_id);
+        if (!rec) throw new Error(`未定義の remote: ${remote_id}`);
+        if (owner !== undefined && owner !== rec.owner) throw new Error(`remote ${remote_id} は別の owner のもの`);
+        targets = [rec];
+      } else {
+        if (owner === undefined) throw new Error("remote_id を省略するには owner（session）が必要");
+        targets = [...records.values()].filter((r) => r.owner === owner && viewOf(r).state === "running");
+        if (targets.length === 0) throw new Error("running の remote が無い");
+      }
+      const check = (): RemoteView | undefined => {
+        for (const t of targets) {
+          // 待っている間に delete された remote は、その時点で failed 扱いにはせず待ちから外す
+          if (records.get(t.remote_id) !== t) continue;
+          const v = viewOf(t);
+          if (v.state !== "running") return v;
+        }
+        return undefined;
+      };
+      const first = check();
+      if (first) return first;
+      return new Promise<RemoteView>((resolve, reject) => {
+        const done = (v: RemoteView | Error): void => {
+          clearTimeout(timer);
+          waiters.delete(w);
+          v instanceof Error ? reject(v) : resolve(v);
+        };
+        const w = (): void => {
+          const v = check();
+          if (v) done(v);
+          else if (targets.every((t) => records.get(t.remote_id) !== t)) done(new Error("待っていた remote が削除された"));
+        };
+        const timer = setTimeout(() => {
+          const v = check();
+          const alive = targets.find((t) => records.get(t.remote_id) === t);
+          if (v) done(v);
+          else if (alive) done(viewOf(alive));
+          else done(new Error("待っていた remote が削除された"));
+        }, sec * 1000);
+        waiters.add(w);
+      });
+    },
   };
 }

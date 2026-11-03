@@ -483,7 +483,10 @@ Remote-control record:
 `error` reply.
 
 `remote_list` returns `RemoteRecord[]` (`remote_id`, `owner`, `server`, `serverName`,
-`state`, `createdAt`, `finishedAt?`, `result?`, `error?`). A remote that has received
+`state`, `createdAt`, `finishedAt?`, `result?`, `error?`, `notifiedAt?`, `notifyError?`). `notifiedAt` = when the center sent the
+done notice (messenger `push` to the peer named like the owner session); `notifyError` = why it could not. `remote_wait`
+(`remote_id?`, `timeout_sec?` default 600, max 1800) waits until the remote has finished and returns its record,
+or returns it with `state: "running"` on timeout. A remote that has received
 `activity` notices also has `activity`:
 
 | key | meaning |
