@@ -251,6 +251,9 @@ const STATUS_ERR = "status を取れない";
 const lastAt = (r: RemoteRecord): string =>
   [r.createdAt, r.finishedAt, r.result_at, r.error_at].filter((t): t is string => typeof t === "string").sort().pop() ?? "";
 
+/** 動いている記録（running・unknown・未完了の指示あり）。復元時に status で追従する対象で、旧形式の引き継ぎでも残す側を優先する。 */
+const isActiveRec = (r: RemoteRecord): boolean => r.state === "running" || r.state === "unknown" || r.pending.length > 0;
+
 /** 通知先を server へ伝える status（cap_id 付き）の再試行の回数。pollMs ごと。 */
 const ANNOUNCE_RETRIES = 20;
 
@@ -654,7 +657,8 @@ export function createRemoteManager(opts: {
       }
       let migrated = 0;
       for (const group of groups) {
-        const keep = [...group].sort((x, y) => lastAt(y).localeCompare(lastAt(x)))[0]!;
+        // 動いている（running・unknown・未完了の指示あり）記録を最優先、同順位なら最新。動いている cap へ stop_cap を送らないため
+        const keep = [...group].sort((x, y) => Number(isActiveRec(y)) - Number(isActiveRec(x)) || lastAt(y).localeCompare(lastAt(x)))[0]!;
         if (keep.remote_id !== capId) {
           migrated++;
           log(`旧形式の記録を server の cap として引き継ぐ: cap_id=${keep.remote_id} server=${keep.serverName}`);
@@ -666,7 +670,7 @@ export function createRemoteManager(opts: {
       }
       for (const r of records) {
         // running・unknown・未完了の指示がある記録は、failed にせず復元して server の status で追従する
-        if (r.state === "running" || r.state === "unknown" || r.pending.length > 0) {
+        if (isActiveRec(r)) {
           settling.set(r, Date.now());
           schedule(r, 0);
         } else {

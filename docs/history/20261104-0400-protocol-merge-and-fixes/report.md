@@ -18,20 +18,20 @@ A 節（merge の解消方針）は cap が最終 report にまとめる。こ�
 
 - 旧: 起動時に旧形式（`remote_id` が center の cap_id と違う）の記録を一覧に残さず、`stop_cap` を送って記録を消した。
 - 新: 記録を消すのは `remote_delete` だけ。旧形式の記録は、その server の cap として新しい形に引き継ぐ（cap_id はそのまま。`history` は未完了の指示だけ残し、`history` / `legacy` / 記録単位の `owner` は捨てる）。
-  - 同じ server（peer id が同じ、または `serverName` + `serverHost` が同じ。`serverHost` を持つ前の旧形式は名前だけで同じとみなす）に複数ある時: 形式を問わず最新の 1 件（`createdAt` / `finishedAt` / `result_at` / `error_at` のうち最も新しい時刻）を残す。他は `stop_cap` を送って（届かなくても）記録を消す。作業ごとの cap の後始末で、1 回限り。
+  - 同じ server（peer id が同じ、または `serverName` + `serverHost` が同じ。`serverHost` を持つ前の旧形式は名前だけで同じとみなす）に複数ある時: 動いている（`running` / `unknown` / 未完了の指示あり）記録を最優先、同順位なら最新（`createdAt` / `finishedAt` / `result_at` / `error_at` のうち最も新しい時刻）を残す。動いている記録が複数なら最新の動いている記録を残し、他へ `stop_cap`（1 回限りの後始末）。他は `stop_cap` を送って（届かなくても）記録を消す。作業ごとの cap の後始末で、1 回限り。
   - cap_id は server ごとに記録が持つ（`remote_id`）。`send` / `status` / `worker_reply` / `delete` はその server の記録の cap_id を使い、記録の無い server だけ center の cap_id（`center-id`）で作る。`remote_id` 省略の `remote_delete` / `worker_reply` は、記録が 1 件ならそれ、複数なら `server` で絞らせる（以前は center の cap_id に決め打ち）。
 
 ### 判断が要るかもしれない点
 
 - 「最新」は、旧形式の running の記録より finished の新しい記録を残すことがある（その場合、running 側は `stop_cap` で止まる）。指示どおり最新を残している。
-- 同じ server に新形式（center の cap_id）の記録と旧形式があっても最新の 1 件を残す（旧形式の方が新しければ center の cap_id の記録は `stop_cap` で消える）。
+- 残す 1 件の選び方は、利用者の決定「最新の 1 件を残す」からの意図した調整。最新だけで選ぶと、動いている旧 cap より新しい完了済みの記録が残り、動いている cap へ `stop_cap` が飛ぶ（review が実測）ため、動いている記録を最優先にした。新形式（center の cap_id）かどうかは問わない。
 - `serverHost` の無い旧記録は、起動時の `status` が成功し、同名の peer がその 1 件だけの時に、今の peer id と host を記録に入れる（同名が複数なら入れない）。
 
 ### テスト件数
 
 - protocol: 29 pass（status の cap_id・版 1.6.0 を追加）。
 - server: 232 pass（reports に名前で覚える・同名複数・命令で更新・dir を作らない・旧形式・引けない時、daemon に `commandCapId` を追加）。typecheck OK。
-- center: 347 pass（旧記録の引き継ぎ、複数あれば最新を残す、形式を問わず最新を残す、host の無い旧記録の扱い、`remote_delete` 以外で消えない、起動時の status 送信と再試行、server ごとの cap_id、link の `statusOn` の cap_id）。typecheck OK。
+- center: 348 pass（旧記録の引き継ぎ、複数あれば最新を残す、動いている記録を最優先（旧 running + 新しい done・指示待ち・active 無しは最新・active 複数は最新の active）、host の無い旧記録の扱い、`remote_delete` 以外で消えない、起動時の status 送信と再試行、server ごとの cap_id、link の `statusOn` の cap_id）。typecheck OK。
 - 実機確認は未実施（center 再起動後に activity が届くこと）。
 
 ### 変更ファイル
@@ -40,3 +40,7 @@ A 節（merge の解消方針）は cap が最終 report にまとめる。こ�
 - server: `server/utils/bantou/daemon.ts`、`reports.ts`、`package.json`、`README.md`、`test/server/utils/bantou/{daemon,reports}.test.ts`。
 - center: `src/remotes.ts`、`src/server-link.ts`、`README.md`、`test/{remotes,server-link}.test.ts`。
 - docs: `docs/protocol.md`、`docs/architecture.md`、`docs/design/center-tools.md`、`docs/design/master-cap-session.md`。
+
+### launcher.test.ts の不安定さ（本 branch 未変更のテスト）
+
+- 「supervisor が引き継いで入れ替わっても…」が 8 回中 1 回 `isAlive(s3) === false` で落ちた。原因: launcher は lock が消えた時点で終わるが、新 supervisor・子のプロセス終了はその少し後になりうる競合。テスト側で終了を `until` で待つ形に直した（本体コードは変更なし。直した後は 16 回中 16 回 pass）。

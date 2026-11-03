@@ -1092,6 +1092,31 @@ test("restore: 同じ server に新形式の記録（center の cap_id）と旧�
   assert.deepEqual(stops.map((x) => (x.cmd as { cap_id: string }).cap_id), ["r-0a1b2c3d4e"]);
 });
 
+test("restore: 残す 1 件は動いている記録（running・unknown・指示待ち）を最優先。旧 running + 新しい done なら running を残し、stop_cap は done へ送る。active が無ければ最新、active が複数なら最新の active", async () => {
+  const stopped = async (recs: unknown[]) => {
+    await writeFile(join(dir, "remotes.json"), JSON.stringify(recs));
+    const { mgr, stops } = setup({}, undefined, undefined, undefined, { log: () => {} });
+    await mgr.restore();
+    return { kept: mgr.list().map((r) => r.remote_id), stopIds: stops.map((x) => (x.cmd as { cap_id: string }).cap_id).sort() };
+  };
+  // 旧 running + 新しい done → running を残す（done へだけ stop_cap）
+  let o = await stopped([legacyRec("r-0a1b2c3d4e", { state: "running", createdAt: "2026-11-03T00:00:00.000Z" }), legacyRec("r-9f8e7d6c5b", { finishedAt: "2026-11-03T20:00:00.000Z" })]);
+  assert.deepEqual(o, { kept: ["r-0a1b2c3d4e"], stopIds: ["r-9f8e7d6c5b"] });
+  // 指示待ち（pending あり）も active
+  o = await stopped([legacyRec("r-0a1b2c3d4e", { pending: [{ at: "2026-11-03T00:00:00.000Z", owner: "pm1", prompt: "p" }] }), legacyRec("r-9f8e7d6c5b", { finishedAt: "2026-11-03T20:00:00.000Z" })]);
+  assert.deepEqual(o, { kept: ["r-0a1b2c3d4e"], stopIds: ["r-9f8e7d6c5b"] });
+  // active が無ければ最新を残す
+  o = await stopped([legacyRec("r-0a1b2c3d4e", { finishedAt: "2026-11-03T01:00:00.000Z" }), legacyRec("r-9f8e7d6c5b", { state: "failed", finishedAt: "2026-11-03T20:00:00.000Z" })]);
+  assert.deepEqual(o, { kept: ["r-9f8e7d6c5b"], stopIds: ["r-0a1b2c3d4e"] });
+  // active が複数なら最新の active を残し、他の active と done へ stop_cap
+  o = await stopped([
+    legacyRec("r-0a1b2c3d4e", { state: "running", createdAt: "2026-11-03T01:00:00.000Z" }),
+    legacyRec("r-9f8e7d6c5b", { state: "running", createdAt: "2026-11-03T10:00:00.000Z" }),
+    legacyRec("r-5a5a5a5a5a", { finishedAt: "2026-11-03T22:00:00.000Z" }),
+  ]);
+  assert.deepEqual(o, { kept: ["r-9f8e7d6c5b"], stopIds: ["r-0a1b2c3d4e", "r-5a5a5a5a5a"] });
+});
+
 test("restore: host の無い旧記録（serverHost を持つ前）は名前で同じ server とみなし、1 件に畳む。peer id が変わっても旧 cap_id へ送り、記録は 1 件のまま。status で host が埋まる", async () => {
   const noHost = (id: string, over: Record<string, unknown> = {}) => {
     const r = legacyRec(id, over) as Record<string, unknown>;
