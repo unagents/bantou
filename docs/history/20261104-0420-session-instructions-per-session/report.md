@@ -98,3 +98,12 @@ develop（6d8b8b5）を feature/session-instructions-per-session（2988bff）へ
 
 - 一時物（静的サーバー・一時 config・スクリプト）は停止・削除済み。`bun install` による bun.lock の変更は戻して commit していない。
 - 作業 dir（`workers/w-si-merge`）に clone（`bantou`）が残る。
+
+### review 結果（w-review-m、25e1051）
+
+- 結論: 指摘なし（高・中 0）。develop 比の差分 33 ファイルはすべて session-instructions 由来、docs/protocol.md の develop 比は 1 行のみ。外向け tool 16 個が実装・tools.test・http.test で一致。`buildWrapperArgs` は `--append-system-prompt` を `--mcp-config` の前、`--settings`（statusLine のみ）を後に付け、追加 test が実 spawn の args で順序まで検証。
+- review 側のテスト: center 375 pass、server 232 pass ×3、cargo 259 pass（5 ignored）、e2e 97 pass、typecheck OK。
+- 低・参考（merge 起因でない）:
+  - `docs/design/center-tools.md` の tool 表に `session_create` の `settings?` と `session_settings_get` / `session_settings_update` の行が無かった → 表に行を足した（修正済み）。表の他の記述（`claude remote-control --name <name>` 起動など）は merge 前から古いまま。既知・未修正。
+  - `bun.lock` の packages/server が 0.5.0 のまま（`bun install` で 0.6.0 に書き換わる）。develop 6d8b8b5 の時点で既に古い。未修正。
+- 注記: この追記時点で origin/develop は dd11b65 に進んでいる（6d8b8b5 から）。再 merge はしていない。

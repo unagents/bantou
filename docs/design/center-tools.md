@@ -14,8 +14,10 @@
 
 | tool | 引数 | 返り値 | 動作 |
 |---|---|---|---|
-| `session_create` | `name`（英数 `_-`）、`path?`、`permissionMode?`（既定 `auto`） | `{name, path, state, pid, sessionUrl, startedAt, source, lastError?}` | `claude remote-control --name <name>` を path で起動し、監視対象に加える |
+| `session_create` | `name`（英数 `_-`）、`path?`、`permissionMode?`（既定 `auto`）、`settings?`（プロジェクト設定 `{ instructions?: string, … }`） | `{name, path, state, pid, sessionUrl, startedAt, source, lastError?}` | `claude remote-control --name <name>` を path で起動し、監視対象に加える |
 | `session_delete` | `name` | `{name, deleted}` | remote-control を停止し、監視と保存から外す。path は消さない |
+| `session_settings_get` | `name` | `{name, settings}` | session のプロジェクト設定を返す（未設定・config 由来は `settings: {}`） |
+| `session_settings_update` | `name`、`settings`（項目ごとにマージ。`null` で項目を削除） | `{name, settings}` | プロジェクト設定を更新して `sessions.json` に保存。次の起動から効く。config 由来の project は拒否 |
 | `session_list` | なし | 同上の配列 | config の project と session の全部（`source` で区別） |
 
 決めた点（今は）:
