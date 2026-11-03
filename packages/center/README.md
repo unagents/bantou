@@ -121,7 +121,9 @@ center は wrapper 経由の session（master-cap）を起動するたび（新�
 
 | tool | 入力 | 出力 |
 |---|---|---|
-| `session_create` | `name`, `path?`, `permissionMode?`, `instructions?`（16000 文字以内） | `SessionInfo`（下記） |
+| `session_create` | `name`, `path?`, `permissionMode?`, `settings?`（プロジェクト設定。下記） | `SessionInfo`（下記） |
+| `session_settings_get` | `name` | `{ name, settings }`（未設定・config 由来は `settings: {}`） |
+| `session_settings_update` | `name`, `settings`（項目ごとにマージ。`null` で項目を削除） | `{ name, settings }`（更新後の全体） |
 | `session_delete` | `name` | `{ name, deleted }` |
 | `session_list` | なし | `SessionInfo[]` |
 | `remote_send`（session 向けのみ） | `prompt`, `server?`, `model?`, `worker_model?` | `{ remote_id, server, serverName, state, created, model?, worker_model?, model_ignored?, note? }`（返信を待たない）。server の remote-cap（1 つ）への次の指示。owner は header の session 名。`model` は cap を最初に作る時だけ（既存の cap なら無視して `model_ignored` と note「cap は既存なので model は無視した」を返す）。`worker_model` はこの指示で cap が起動する worker の既定（resume の `kick_cap` にも載せ、server が cap の既定として記憶する）。省略時の既定は config `servers[]` |
@@ -130,7 +132,7 @@ center は wrapper 経由の session（master-cap）を起動するたび（新�
 | `remote_list` | `owner?`（外向け）。session 向けは引数なしで自分が指示を送った cap | `RemoteView[]`（server の cap 単位。`RemoteRecord` + `owners` + `activity?`、下記） |
 | `remote_wait` | `remote_id?`, `server?`, `timeout_sec?`（既定 600、上限 1800）, `owner?`（外向けのみ） | 終わった `RemoteView`。timeout なら `state: "running"` のまま。下記「完了通知」 |
 | `rc_list` | なし | `RcStatus[]` |
-| `rc_start` | `project`, `instructions?`（16000 文字以内。`session_create` で作った session のみ。空文字で解除） | `RcStatus`（起動済みなら現状を返す） |
+| `rc_start` | `project` | `RcStatus`（起動済みなら現状を返す） |
 | `rc_stop` | `project` | `RcStatus` |
 | `rc_status` | `project` | `RcStatus` |
 | `server_peers` | `refresh?` | `{ pair: { server, protocol }, peers: FollowEntry[] }`。下記「server の版合わせ」 |
@@ -163,8 +165,9 @@ center は wrapper 経由の session（master-cap）を起動するたび（新�
 - `session_create`: pty wrapper 経由の対話型 `claude --remote-control <name> --permission-mode <permissionMode> --mcp-config '<JSON>'`（再起動時は `--continue` 付き）を `path` で起動し、supervisor に動的に足す（起動の詳細は「master-cap の起動（wrapper）」）。`path` 省略時は config の `workspace` の下の `<name>`（無ければ作る）。`workspace` が無ければ `path` が必須。`permissionMode` の既定は `auto`。`name` の重複、既存 project 名との衝突、他の project / session と同じ path は拒否。接続（URL 取得）か早期終了まで最大 15 秒待って状態を返す（待ちきれなければ `starting`）。
 - `session_delete`: `session_create` で作ったものだけ。remote-control を停止（SIGTERM → `stopGraceMs` 後 SIGKILL）して監視と保存から外す。path は消さない。config 由来の project は拒否。
 - `session_list`: config の project と session の全部。`source` が `config` / `session`。`instructions`（真偽。その session を起動した時に `--append-system-prompt`（session の `instructions`）を付けたか。本文は出さない。`rc_status` の `instructions` と同じで、`rc_status` の `args` でも値は `<N 文字>` に伏せる）が付く。`contextUsage`（`{ usedTokens, windowTokens, percent, updatedAt }`、まだ分からない時は `null`）が付く。取得の仕組みは「context 使用量」。
-- 追加指示（`instructions`）: session ごとの追加指示。`session_create` の `instructions` で受け、`sessions.json` に保存し、session を起動するたび（新規・再起動・`--continue`・resume 失敗後の素の起動・center 再起動後の復元）に claude へ `--append-system-prompt <値>` を足す。argv の 1 引数で渡し、shell は通さない（複数行・引用符・`$` もそのまま届く）。省略と空文字は無し（付けない）。`rc_start` に `instructions` があれば記録を更新して起動し、無ければ記録の値で起動する（すでに動いている session は起動し直さないので、値は次の起動から効く）。config 由来の project には指定できず、効かない。center の config（`center.json`）の `remoteControl.sessionInstructions` は廃止: 残っていても無視し、起動時の読み込みで `center.log` に warning を 1 行出す。
-- 保存: config と同じ dir の `sessions.json`（`name`, `path`, `permissionMode`, `instructions`（あれば）, `createdAt`）。config の projects には書かない。center 起動時に復元して `--continue` で起動する。`--continue` で接続前に 30 秒以内に終了した場合（約 4 時間以内の記録が無い、など）は、素の起動へ fallback する（再起動回数は増やさない）。
+- プロジェクト設定（`settings`、設計は `docs/design/project-settings.md`）: session ごとの設定。`{ instructions?: string, … }`。`session_create` の `settings` で作成時に渡し、`session_settings_get` で読み、`session_settings_update` でマージ更新する（`settings` に書いた項目だけ変わる・省略した項目は変わらない・`null` で項目を削除・未知の項目は保持して返す）。`sessions.json` の各 session の `settings` に保存する。config 由来の project は更新できない（get は `{}`）。更新は次の起動から効く（動いている session は起動し直さない）。
+- `settings.instructions`（追加指示、16000 文字以内、空文字は削除と同じ）: session を起動するたび（新規・再起動・`--continue`・resume 失敗後の素の起動・center 再起動後の復元）に、値があれば claude へ `--append-system-prompt <値>` を足す。argv の 1 引数で渡し、shell は通さない（複数行・引用符・`$` もそのまま届く）。center の config（`center.json`）の `remoteControl.sessionInstructions` は廃止: 残っていても無視し、起動時の読み込みで `center.log` に warning を 1 行出す（値は出さない）。
+- 保存: config と同じ dir の `sessions.json`（`name`, `path`, `permissionMode`, `settings`（あれば）, `createdAt`）。config の projects には書かない。center 起動時に復元して `--continue` で起動する。`--continue` で接続前に 30 秒以内に終了した場合（約 4 時間以内の記録が無い、など）は、素の起動へ fallback する（再起動回数は増やさない）。
 - 新規 path の trust: **trust プロンプトは出ず、remote-control が `Error: Workspace not trusted. Please run `claude` in <path> first ...` で即 exit 1 する**（claude 2.1.312 で実測）。親 dir が trust 済みなら配下は通る（実測: trust 済みの repo 配下の dir で `connected`）。そのため、未 trust の path では `session_create` は `state: starting` と `lastError`（`接続前に終了: Error: Workspace not trusted...`）を返し、supervisor は再起動を繰り返して上限で `error` になる。対処は、workspace（または path の親）で一度 `claude` を起動して trust を承認しておくこと。center が claude の設定ファイルを書き換えて trust を付けることはしない（今は）。
 - 同じ folder を別の `claude remote-control` が直前まで握っていると、`This folder is already served by a terminal \`claude remote-control\` on this device. Stop it first.` で約 1 分待たされて終了する（実測、直前の center を強制終了した後など）。
 

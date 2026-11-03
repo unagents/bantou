@@ -501,23 +501,23 @@ test("読み直し: 保存後の起動（新規・再起動・resume 失敗後�
   await sup.shutdown();
 });
 
-test("start の instructions は記録を更新し、以降の再起動でも使う。空文字で解除。省略は記録のまま", async () => {
+test("setInstructions: 次の起動から新しい値（再起動でも）。空で解除。動いている session の args は変わらない", async () => {
   const { sup } = make({ instructions: "旧" });
   await sup.start("pm1");
   assert.equal(valueOf(launches[0].args, "--append-system-prompt"), "旧");
+  sup.setInstructions("pm1", "新");
+  assert.equal(valueOf(sup.status("pm1").args!, "--append-system-prompt"), "<1 文字>"); // 動いている分は変わらない
+  assert.equal(launches.length, 1);
+  launches[0].child.finish(1, null);
+  await until(() => launches.length === 2);
+  assert.equal(valueOf(launches[1].args, "--append-system-prompt"), "新"); // 異常終了後の再起動
+  assert.ok(launches[1].args.includes("--continue"));
   await sup.stop("pm1");
+  sup.setInstructions("pm1", "");
   await sup.start("pm1");
-  assert.equal(valueOf(launches[1].args, "--append-system-prompt"), "旧"); // 省略は記録のまま
-  await sup.stop("pm1");
-  await sup.start("pm1", { instructions: "新" });
-  assert.equal(valueOf(launches[2].args, "--append-system-prompt"), "新");
-  launches[2].child.finish(1, null);
-  await until(() => launches.length === 4);
-  assert.equal(valueOf(launches[3].args, "--append-system-prompt"), "新"); // 再起動でも
-  await sup.stop("pm1");
-  await sup.start("pm1", { instructions: "" });
-  assert.ok(!launches[4].args.includes("--append-system-prompt"));
+  assert.ok(!launches[2].args.includes("--append-system-prompt"));
   assert.equal(sup.status("pm1").instructions, false);
+  assert.throws(() => sup.setInstructions("nope", "x"), /未定義の project/);
   await sup.shutdown();
 });
 

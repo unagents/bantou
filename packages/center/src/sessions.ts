@@ -1,7 +1,8 @@
 import { mkdir } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { z } from "zod";
-import { projectSchema, PERMISSION_MODES, SESSION_INSTRUCTIONS_MAX, type Config, type ProjectConfig } from "./config.js";
+import { projectSchema, PERMISSION_MODES, type Config, type ProjectConfig } from "./config.js";
+import { mergeSettings, projectSettingsPatchSchema, readSettings, type ProjectSettings, type ProjectSettingsPatch } from "./project-settings.js";
 import type { Logger } from "./log.js";
 import type { RcStatus, RemoteControlSupervisor } from "./remote-control.js";
 import type { EventHub } from "./events.js";
@@ -15,8 +16,8 @@ export interface SavedSession {
   name: string;
   path: string;
   permissionMode: ProjectConfig["permissionMode"];
-  /** `--append-system-prompt` に渡す追加指示。再起動・--continue・center 再起動でも使う。無し・空は付けない。 */
-  instructions?: string;
+  /** プロジェクトごとの設定（instructions など。未知の項目も保持）。無ければ未設定。 */
+  settings?: ProjectSettings;
   createdAt: string;
 }
 
@@ -36,24 +37,24 @@ export interface SessionInfo {
   instructions: boolean;
 }
 
-export const instructionsSchema = z.string().max(SESSION_INSTRUCTIONS_MAX, `${SESSION_INSTRUCTIONS_MAX} 文字以内`);
-
 export const sessionCreateSchema = {
   name: z.string().regex(SESSION_NAME, "英数字と _ - のみ"),
   path: z.string().min(1).optional().describe("絶対パス。省略時は <workspace>/<name>（無ければ作る）"),
   permissionMode: z.enum(PERMISSION_MODES).optional().describe("省略時 auto"),
-  instructions: instructionsSchema.optional().describe("この session の追加指示（--append-system-prompt で渡す。再起動・--continue でも付く）。省略・空文字は無し"),
+  settings: projectSettingsPatchSchema.optional().describe("プロジェクトごとの設定（{ instructions?: string, … }）。instructions は --append-system-prompt で渡す（再起動・--continue でも付く）。省略・空文字は無し"),
 };
 
 export interface SessionManager {
   /** 保存済みの session を supervisor に載せて --continue で復帰させる（失敗時は素の起動へ fallback）。 */
   restore(): Promise<void>;
-  create(input: { name: string; path?: string; permissionMode?: ProjectConfig["permissionMode"]; instructions?: string }): Promise<SessionInfo>;
+  create(input: { name: string; path?: string; permissionMode?: ProjectConfig["permissionMode"]; settings?: ProjectSettingsPatch }): Promise<SessionInfo>;
+  /** session の settings を返す（未設定・config 由来の project は `{}`。未定義の name は例外）。 */
+  getSettings(name: string): { name: string; settings: ProjectSettings };
   /**
-   * 起動する（起動済みなら現状）。instructions を渡すと、session_create で作った session は記録も更新する（config 由来の project には渡せない）。
-   * 省略時は記録済みの値で起動する。
+   * settings を項目ごとにマージして保存し、更新後の全体を返す（null = 項目を削除、未知の項目は保持）。
+   * session_create で作った session のみ。動いている session には効かず、次の起動から効く。
    */
-  start(name: string, opts?: { instructions?: string }): Promise<SessionInfo>;
+  updateSettings(name: string, patch: ProjectSettingsPatch): Promise<{ name: string; settings: ProjectSettings }>;
   delete(name: string): Promise<{ name: string; deleted: true }>;
   list(): SessionInfo[];
 }
@@ -103,6 +104,12 @@ export function createSessionManager(opts: {
   const toProject = (s: SavedSession): ProjectConfig =>
     projectSchema.parse({ name: s.name, path: s.path, permissionMode: s.permissionMode });
 
+  /** settings から supervisor に渡す instructions（あれば）。 */
+  const instrOpt = (s: ProjectSettings | undefined): { instructions?: string } => {
+    const i = readSettings(s).instructions;
+    return typeof i === "string" ? { instructions: i } : {};
+  };
+
   const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
   return {
@@ -110,7 +117,7 @@ export function createSessionManager(opts: {
       for (const s of await store.load()) {
         try {
           if (!SESSION_NAME.test(s.name) || !isAbsolute(s.path)) throw new Error("保存内容が不正");
-          supervisor.add(toProject(s), { wrapper: true, ...(s.instructions ? { instructions: s.instructions } : {}) });
+          supervisor.add(toProject(s), { wrapper: true, ...instrOpt(s.settings) });
           saved.set(s.name, s);
           opts.events?.publish({ reason: "restored", name: s.name });
           await mkdir(s.path, { recursive: true });
@@ -138,14 +145,15 @@ export function createSessionManager(opts: {
         const clash = existing.find((s) => resolve(s.path) === path);
         if (clash) throw new Error(`path が既に使われている: ${path}（${clash.project}）`);
         await mkdir(path, { recursive: true });
+        const settings = input.settings ? mergeSettings(undefined, input.settings) : undefined;
         const rec: SavedSession = {
           name,
           path,
           permissionMode: input.permissionMode ?? "auto",
-          ...(input.instructions ? { instructions: input.instructions } : {}),
+          ...(settings && Object.keys(settings).length ? { settings } : {}),
           createdAt: new Date().toISOString(),
         };
-        supervisor.add(toProject(rec), { wrapper: true, ...(rec.instructions ? { instructions: rec.instructions } : {}) });
+        supervisor.add(toProject(rec), { wrapper: true, ...instrOpt(rec.settings) });
         saved.set(name, rec);
         try {
           await persist();
@@ -167,27 +175,33 @@ export function createSessionManager(opts: {
         return info(st);
       }),
 
-    start: (name, o = {}) =>
+    getSettings: (name) => {
+      const known = supervisor.list().some((p) => p.project === name);
+      if (!known) throw new Error(`未定義の session: ${name}`);
+      return { name, settings: readSettings(saved.get(name)?.settings) };
+    },
+
+    updateSettings: (name, patch) =>
       serial(async () => {
         const rec = saved.get(name);
-        if (o.instructions !== undefined) {
-          if (!rec) {
-            const known = supervisor.list().some((s) => s.project === name);
-            throw new Error(known ? `instructions は session_create で作った session のみ指定できる（config 由来）: ${name}` : `未定義の session: ${name}`);
-          }
-          const prev = rec.instructions;
-          if (o.instructions) rec.instructions = o.instructions;
-          else delete rec.instructions;
-          try {
-            await persist();
-          } catch (e) {
-            if (prev === undefined) delete rec.instructions;
-            else rec.instructions = prev;
-            throw new Error(`状態ファイルに保存できない: ${(e as Error).message}`);
-          }
+        if (!rec) {
+          const known = supervisor.list().some((p) => p.project === name);
+          throw new Error(known ? `session_create で作ったものではない（config 由来）: ${name}` : `未定義の session: ${name}`);
         }
-        const st = await supervisor.start(name, o.instructions !== undefined ? { instructions: o.instructions } : {});
-        return info(st);
+        const prev = rec.settings;
+        const next = mergeSettings(readSettings(prev), patch);
+        if (Object.keys(next).length) rec.settings = next;
+        else delete rec.settings;
+        try {
+          await persist();
+        } catch (e) {
+          if (prev === undefined) delete rec.settings;
+          else rec.settings = prev;
+          throw new Error(`状態ファイルに保存できない: ${(e as Error).message}`);
+        }
+        supervisor.setInstructions(name, typeof next.instructions === "string" ? next.instructions : "");
+        log(`session の設定を更新: ${name} (項目: ${Object.keys(next).join(",") || "なし"})`);
+        return { name, settings: next };
       }),
 
     delete: (name) =>

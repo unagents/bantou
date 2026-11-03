@@ -120,15 +120,16 @@ center の通知（remote の完了通知など）は owner の session 名の m
 
 ## 追加指示（system prompt への追記、2026-11-04）
 
-master-cap への追加指示を、center が起動する master-cap に渡す。追加指示は session ごとに個別で、desktop 上で session ごとに設定する（center の config ではない。改訂 2026-11-04）。
+master-cap への追加指示を、center が起動する master-cap に渡す。追加指示は session（プロジェクト）ごとに個別で、desktop の画面で設定する。保存先は center 側のプロジェクト設定（`settings`、設計は [project-settings.md](project-settings.md)）で、desktop の `settings.json` でも center の共通設定（`center.json`）でもない（改訂 2026-11-04）。
 
-13. 渡し方は claude の `--append-system-prompt <text>`。値は session ごとの `instructions`（文字列、省略可、空は無し）。起動要求（`session_create` と `rc_start`）の `instructions` で受け、center が session の実行時の記録（`sessions.json` の `instructions`）と supervisor の entry に持つ。session を起動するたび（新規・再起動・`--continue`・resume 失敗後の素の起動・center 再起動後の復元）に `buildWrapperArgs` が記録の値を足す。起動要求に `instructions` が無い `rc_start` は記録の値を使う。wrapper 経由の対話型 session だけが対象。
+13. 渡し方は claude の `--append-system-prompt <text>`。値はプロジェクト設定の `settings.instructions`（文字列、省略可、空は無し）。center が `sessions.json` の各 session の `settings` に持ち、session を起動するたび（新規・再起動・`--continue`・resume 失敗後の素の起動・center 再起動後の復元）に `buildWrapperArgs` が足す。wrapper 経由の対話型 session だけが対象。
     - 比較した案: (A) cwd に `CLAUDE.md` を書く（手で起動した claude にまで効き、ファイルの所有者も曖昧）、(B) `--append-system-prompt-file` で center の状態 dir のファイルを指す、(C) `--append-system-prompt` を argv で渡す。
     - (C) を採用。argv は center → wrapper が `child_process.spawn` の配列（shell なし）、wrapper → claude が `portable-pty` の `CommandBuilder::args`（shell なし）で、複数行・引用符・`$` はそのまま 1 引数で届く。テストで確かめた。(B) はファイルの置き場・書き込み・掃除が増えるだけで、今の長さでは得るものが無い。
     - 上限: 引数の長さ。Linux は 1 引数 128 KiB、Windows はコマンドライン全体で約 32K 文字。`--mcp-config` などと同じ command line に載るので、`instructions` は 16000 文字以内に制限する（超えると tool 呼び出しが入力検証エラー）。超えて必要になったら (B) に替える。
-    - 保存先の比較（改訂）: (A) center.json の `remoteControl.sessionInstructions`（全 session 共通になり、session ごとに変えられない。廃止）、(B) `sessions.json` の session の記録に持つ（session ごと。center の再起動・`--continue` でも同じ値）。(B) を採用。
+    - 保存先の比較（改訂）: (A) center の `center.json` の `remoteControl.sessionInstructions`（全 session 共通で、session ごとに変えられない。廃止）、(B) desktop の `settings.json`（session を起動するのは center で、別ホストの desktop から同じ値が見えない）、(C) center の session の記録（`sessions.json`）に `settings` として持ち、desktop は center の tool で読み書きする。(C) を採用。session を起動する側が値を持ち、どの desktop からも同じものが見える。
+    - 読み書きは tool `session_settings_get` / `session_settings_update`、新規は `session_create` の `settings`（形と意味は project-settings.md）。更新は項目ごとのマージで、未知の項目は保持する。
     - `center.json` に `remoteControl.sessionInstructions` が残っていても使わない。center は起動時の読み込みで `config の remoteControl.sessionInstructions は廃止。無視する…` の warning を `center.log` に出す（値は出さない）。session 起動時の読み直しでは出さない（起動のたびに同じ warning が並ぶため）。
-14. 追加指示の変更は動いている session に効かせない。`rc_start` の `instructions` は記録を更新し、次の起動（その `rc_start` が起動する場合を含む。すでに動いている session は起動し直さない）から効く。center の停止は master-cap を止めるため、変更のたびに center を再起動しない。
+14. 追加指示の変更は動いている session に効かせない。`session_settings_update` は記録を更新して次の起動に使う値を差し替えるだけで、session は起動し直さない。次の起動（異常終了後の再起動・`--continue`・手で止めてからの起動）から効く。center の停止は master-cap を止めるため、変更のたびに center を再起動しない。
 15. `rc_status` / `session_list` に `instructions`（真偽。その起動で `--append-system-prompt` を付けたか）を出す。本文は出さず、`rc_status` の `args` と起動ログでも値は `<N 文字>` に伏せる。desktop はサイドメニューの行と見出しに小さな印を出す。
 16. center は wrapper 経由の session（master-cap）を起動するたび（新規・再起動・`--continue`・resume 失敗後の素の起動）に config（`center.json`）を読み直し、その時点の `remoteControl` を使う（`createRemoteControlSupervisor` の `configPath`、`loadConfigSync`）。center は再起動しない。追加指示は config に無いので、読み直しの対象外（session の記録の値を使う）。
     - 比較した案: (A) 起動時に 1 度だけ読む（従来。保存しても center の再起動まで効かない）、(B) desktop が保存のたびに center を再起動する（master-cap の session が全部止まる。決定 2 と「自動では再起動しない」に反する）、(C) center が起動のたびに読み直す、(D) desktop から center へ「再読込」を知らせる経路を足す（center の HTTP には desktop から設定保存を知らせる route が無い。足さなくても (C) で要件を満たせるので足さない）。

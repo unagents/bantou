@@ -3,7 +3,8 @@ import { AGENT_ID_PATTERN } from "@agent-hand/bantou-protocol";
 import { z } from "zod";
 import { OWNER_HEADER, OWNER_PATTERN, OWNER_QUERY, remoteSendSchema, remoteWaitSchema, WAIT_DEFAULT_SEC, type RemoteManager } from "./remotes.js";
 import type { RemoteControlSupervisor } from "./remote-control.js";
-import { instructionsSchema, sessionCreateSchema, SESSION_NAME, type SessionManager } from "./sessions.js";
+import { projectSettingsPatchSchema } from "./project-settings.js";
+import { sessionCreateSchema, SESSION_NAME, type SessionManager } from "./sessions.js";
 import type { Follow } from "./follow.js";
 import type { ServerLink } from "./server-link.js";
 
@@ -84,6 +85,26 @@ export function registerTools(
     ({ name }) => guard(async () => json(await sessions.delete(name))),
   );
   server.registerTool(
+    "session_settings_get",
+    {
+      title: "session の設定を取得",
+      description:
+        "session のプロジェクト設定 { name, settings } を返す。settings は { instructions?: string（--append-system-prompt に渡す追加指示）, …将来の項目 }。未設定は {}。config 由来の project も {}",
+      inputSchema: { name: z.string().regex(SESSION_NAME, "英数字と _ - のみ") },
+    },
+    ({ name }) => guard(async () => json(sessions.getSettings(name))),
+  );
+  server.registerTool(
+    "session_settings_update",
+    {
+      title: "session の設定を更新",
+      description:
+        "session のプロジェクト設定を項目ごとにマージ更新し、更新後の { name, settings } を返す。settings に書いた項目だけ変わる（省略した項目はそのまま）。null はその項目を削除。instructions は 16000 文字以内で、空文字は削除と同じ。未知の項目は保持する。session_create で作った session のみ。動いている session には効かず、次の起動（再起動・--continue 含む）から効く",
+      inputSchema: { name: z.string().regex(SESSION_NAME, "英数字と _ - のみ"), settings: projectSettingsPatchSchema },
+    },
+    ({ name, settings }) => guard(async () => json(await sessions.updateSettings(name, settings))),
+  );
+  server.registerTool(
     "session_list",
     {
       title: "session 一覧",
@@ -134,12 +155,10 @@ export function registerTools(
     "rc_start",
     {
       title: "remote-control 起動",
-      description:
-        "project の claude remote-control を起動する（起動済みなら現状を返す）。instructions を渡すと追加指示（--append-system-prompt）を更新して起動する（session_create で作った session のみ。空文字で解除）。省略時は記録済みの値を使う",
-      inputSchema: { project: projectName, instructions: instructionsSchema.optional() },
+      description: "project の claude remote-control を起動する（起動済みなら現状を返す）",
+      inputSchema: { project: projectName },
     },
-    ({ project, instructions }) =>
-      guard(async () => json(instructions === undefined ? await supervisor.start(project) : await sessions.start(project, { instructions }))),
+    ({ project }) => guard(async () => json(await supervisor.start(project))),
   );
   server.registerTool(
     "rc_stop",

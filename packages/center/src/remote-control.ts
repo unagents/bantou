@@ -93,7 +93,7 @@ export interface RemoteControlSupervisor {
    * 起動する。resume: true なら `--continue` で前回の会話に復帰を試み、接続前に早期終了したら素の起動へ fallback する
    * （claude は約 4 時間以内の記録が無いと --continue で error exit する）。
    */
-  start(project: string, opts?: { resume?: boolean; instructions?: string }): Promise<RcStatus>;
+  start(project: string, opts?: { resume?: boolean }): Promise<RcStatus>;
   /**
    * 実行中に project を足す（起動はしない）。同名は拒否。remove で外せるのはこの add で足したものだけ。
    * wrapper: true なら pty wrapper 経由の対話型（`claude --remote-control`）で起動する。省略は従来の `claude remote-control`。
@@ -101,6 +101,8 @@ export interface RemoteControlSupervisor {
   add(project: ProjectConfig, opts?: { wrapper?: boolean; instructions?: string }): void;
   /** add で足した project を停止して外す。config 由来の project は外せない。 */
   remove(name: string): Promise<void>;
+  /** 追加指示（`--append-system-prompt` の値）を差し替える。次の起動から効く（動いている session は起動し直さない）。空で無し。 */
+  setInstructions(name: string, instructions: string): void;
   stop(project: string): Promise<RcStatus>;
   status(project: string): RcStatus;
   list(): RcStatus[];
@@ -581,7 +583,7 @@ export function createRemoteControlSupervisor(opts: {
 
   let closing = false;
 
-  const start = async (name: string, startOpts: { resume?: boolean; instructions?: string } = {}): Promise<RcStatus> => {
+  const start = async (name: string, startOpts: { resume?: boolean } = {}): Promise<RcStatus> => {
     const e = get(name);
     if (isActive(e) || closing) return snapshot(e);
     const stopSeq = e.stopSeq;
@@ -605,7 +607,6 @@ export function createRemoteControlSupervisor(opts: {
       return snapshot(e);
     }
     e.status.restarts = 0;
-    if (startOpts.instructions !== undefined) e.instructions = startOpts.instructions;
     launch(e, startOpts.resume === true, startOpts.resume === true);
     return snapshot(e);
   };
@@ -649,6 +650,10 @@ export function createRemoteControlSupervisor(opts: {
     dynamic.add(project.name);
   };
 
+  const setInstructions = (name: string, instructions: string): void => {
+    get(name).instructions = instructions;
+  };
+
   const remove = async (name: string): Promise<void> => {
     get(name);
     if (!dynamic.has(name)) throw new Error(`config 由来の project は外せない: ${name}`);
@@ -665,6 +670,7 @@ export function createRemoteControlSupervisor(opts: {
     start,
     add,
     remove,
+    setInstructions,
     stop,
     status: (name) => snapshot(get(name)),
     list: () => [...entries.values()].map(snapshot),

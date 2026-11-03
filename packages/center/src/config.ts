@@ -37,7 +37,7 @@ export const MIN_TOKEN_LEN = 12;
 export const DEFAULT_SERVER_TIMEOUT_MS = 2_100_000;
 
 /**
- * session の追加指示（instructions）の最大長（文字数）。session ごとに起動要求で受け、`--append-system-prompt` の 1 引数で渡す。
+ * session の追加指示（instructions）の最大長（文字数）。プロジェクト設定の `instructions`（session ごと）として持ち、`--append-system-prompt` の 1 引数で渡す。
  * Windows のコマンドライン上限（約 32K 文字）に収まる長さに制限する。
  */
 export const SESSION_INSTRUCTIONS_MAX = 16_000;

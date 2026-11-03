@@ -43,7 +43,7 @@ async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partia
     close: async () => {},
     ...link,
   };
-  const sessions = { create: async (i: unknown) => ({ called: "create", i }), start: async (n: string, o: unknown) => ({ called: "start", n, o }), delete: async (n: string) => ({ name: n, deleted: true }), list: () => [], ...mgrs.sessions } as unknown as SessionManager;
+  const sessions = { create: async (i: unknown) => ({ called: "create", i }), getSettings: (n: string) => ({ called: "get", n }), updateSettings: async (n: string, p: unknown) => ({ called: "update", n, p }), delete: async (n: string) => ({ name: n, deleted: true }), list: () => [], ...mgrs.sessions } as unknown as SessionManager;
   const remotes = {
     send: async (i: unknown) => (calls.push({ remoteSend: i }), { remote_id: "c-1", server: "id", serverName: "n", state: "running", created: false }),
     delete: async (i: unknown) => (calls.push({ remoteDelete: i }), { remote_id: "r-1", deleted: true, stopped: true }),
@@ -67,12 +67,12 @@ async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partia
 
 const text = (r: unknown): string => (r as { content: { text: string }[] }).content[0].text;
 
-test("外向けの tool は 13 個。remote_create / remote_delete / remote_send / cap_kick は無い", async () => {
+test("外向けの tool は 15 個。remote_create / remote_delete / remote_send / cap_kick は無い", async () => {
   const { client, close } = await connect();
   const names = (await client.listTools()).tools.map((t) => t.name).sort();
   assert.deepEqual(names, [
     "rc_list", "rc_start", "rc_status", "rc_stop", "remote_list", "remote_wait",
-    "server_list", "server_peers", "server_status", "session_create", "session_delete", "session_list", "worker_resume",
+    "server_list", "server_peers", "server_status", "session_create", "session_delete", "session_list", "session_settings_get", "session_settings_update", "worker_resume",
   ]);
   for (const gone of ["remote_create", "remote_send", "remote_delete", "cap_kick"]) assert.ok(!names.includes(gone), gone);
   await close();
@@ -279,22 +279,29 @@ test("remote_wait: session 向けは自分の owner で待ち、引数を渡す�
   await close();
 });
 
-test("session_create の instructions は SessionManager.create にそのまま渡る。長すぎは拒否", async () => {
+test("session_create の settings は SessionManager.create にそのまま渡る（未知項目も）。長すぎる instructions は拒否", async () => {
   const { client, close } = await connect();
-  const r = await client.callTool({ name: "session_create", arguments: { name: "pm1", instructions: "あ\nい" } });
-  assert.deepEqual(JSON.parse(text(r)), { called: "create", i: { name: "pm1", instructions: "あ\nい" } });
-  const long = await client.callTool({ name: "session_create", arguments: { name: "pm2", instructions: "a".repeat(16_001) } }).catch((e: unknown) => e);
+  const r = await client.callTool({ name: "session_create", arguments: { name: "pm1", settings: { instructions: "あ\nい", future: [1] } } });
+  assert.deepEqual(JSON.parse(text(r)), { called: "create", i: { name: "pm1", settings: { instructions: "あ\nい", future: [1] } } });
+  const long = await client.callTool({ name: "session_create", arguments: { name: "pm2", settings: { instructions: "a".repeat(16_001) } } }).catch((e: unknown) => e);
   assert.ok(long instanceof Error || (long as { isError?: boolean }).isError === true);
   await close();
 });
 
-test("rc_start: instructions があれば SessionManager.start（記録更新）、無ければ supervisor.start", async () => {
+test("session_settings_get / session_settings_update は SessionManager に委譲する。null と未知項目を通し、長すぎ・不正 name は拒否", async () => {
   const { client, close } = await connect();
-  const withI = await client.callTool({ name: "rc_start", arguments: { project: "pm1", instructions: "新" } });
-  assert.deepEqual(JSON.parse(text(withI)), { called: "start", n: "pm1", o: { instructions: "新" } });
-  const empty = await client.callTool({ name: "rc_start", arguments: { project: "pm1", instructions: "" } });
-  assert.deepEqual(JSON.parse(text(empty)), { called: "start", n: "pm1", o: { instructions: "" } });
-  const plain = await client.callTool({ name: "rc_start", arguments: { project: "pm1" } });
-  assert.equal((JSON.parse(text(plain)) as RcStatus).project, "pm1");
+  const g = await client.callTool({ name: "session_settings_get", arguments: { name: "pm1" } });
+  assert.deepEqual(JSON.parse(text(g)), { called: "get", n: "pm1" });
+  const u = await client.callTool({ name: "session_settings_update", arguments: { name: "pm1", settings: { instructions: null, skills: ["a"] } } });
+  assert.deepEqual(JSON.parse(text(u)), { called: "update", n: "pm1", p: { instructions: null, skills: ["a"] } });
+  for (const args of [
+    { name: "pm1", settings: { instructions: "a".repeat(16_001) } },
+    { name: "a b", settings: {} },
+    { name: "pm1", settings: { instructions: 1 } },
+    { name: "pm1", settings: "x" },
+  ]) {
+    const r = await client.callTool({ name: "session_settings_update", arguments: args }).catch((e: unknown) => e);
+    assert.ok(r instanceof Error || (r as { isError?: boolean }).isError === true, JSON.stringify(args).slice(0, 60));
+  }
   await close();
 });
