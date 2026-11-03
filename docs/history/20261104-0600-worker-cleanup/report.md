@@ -19,7 +19,7 @@
 
 ## テスト
 
-- server: npm test 253 件 pass / 0 fail（既存 232 + 新規 21）、typecheck エラー 0。3 回実行して同じ（初回実装時は 248 件）。
+- server: npm test 256 件 pass / 0 fail（既存 232 + 新規 24）、typecheck エラー 0。5 回実行して同じ（初回実装時は 248 件、2 回目の修正後は 253 件）。
 - 新規: 判定（done / 停止 / idle・failed は対象外 / cap running 中は対象外 / invoke 中は対象外 / 他 cap の持ち主は対象外）、keepMs 0 の無効化、再開による中断（begin で数え直し、判定後・削除前の begin は削除を見送る）、logs の保持、実 git での clone し直し（repo 省略・掃除途中の残骸・記録なしのエラー）、config、activity の forget、他 cap の worker_id では数え直さない。
 - center / desktop は未変更のためテストしていない。
 
@@ -46,6 +46,14 @@
 | 中: owner.json が無い worker が黙って永久に残る | 掃除しないまま、worker ごとに 1 回だけ「持ち主記録が無いので掃除しない: <id>」を出す。テスト追加 |
 | 低: touched が増え続ける | 掃除成功時に消す。sweep ごとに keepMs を過ぎたものも落とす（判定に効かないため）。観測できる挙動が変わらないので専用テストは無し（判定のテストが通ること） |
 | 低: logs が symlink だと印の書き込みが dir の外へ出る | cleanWorkerDir の先頭で logs が通常の directory（または無い）ことを lstat で確認し、違えば何も消さず投げる（失敗としてログ）。cleaned.json が symlink でも先を書かず、印そのものを置き換える。テスト追加（2 件） |
+
+## review 3 回目（w-review-wc）の指摘と対応
+
+| 指摘 | 対応 |
+|---|---|
+| 中: 空 dir 再開の注記が再開後も毎回付く（repo 無し worker は .git が無いのが常態で、cleaned.json が残ると以後ずっと isCleaned=true） | 空の dir で起動する時点で cleaned.json を外す（掃除途中の残骸も先に消す）。注記は掃除後の最初の再開 1 回だけ。次に掃除が走れば cleanWorkerDir が印を書き直す。テスト: repo 無し start(p1) → 掃除 → p2（注記あり）→ 自作 → p3（注記なし・作業物そのまま）→ 掃除 → p4（注記あり）→ p5（注記なし）で prompts と dir を確認 |
+| 低: 印が残った repo 無し worker に repo 付き start が来ると recloneInto が自作物を消す | 印が外れるので reclone に入らない（従来どおり「git repo でない」で失敗し、自作物は残る）。確認テスト 1 件 |
+| 低: noOwnerLogged / lastFailure が溜まる | 掃除成功時に消し、sweep で activity から外れた worker 分も落とす。外れて戻ったら出し直す。テスト 1 件 |
 
 ## (3) 一覧（読むだけ。何も消していない）
 

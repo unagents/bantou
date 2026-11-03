@@ -179,7 +179,7 @@ npx bantou --config <path>
 - 再開: 同じ `worker_id` の `worker_start`（`worker_reply` 含む）が来たら待ち時間を数え直す。掃除の途中ならその完了を待ってから進み、dir が消えた後なら clone し直して起動する（`repo` を省いても `logs/repo.json` の clone 元を使う。`repo.json` が無い worker は空の dir で起動する）。session_id は残るので `--resume` は続く。
 - 無効化: `session.workerKeepMs: 0`。
 - 制限: 対象の記録はメモリ。server を再起動する前に終わった worker は自動では消えない。掃除後の `worker_status` は state.json から返すため、done / 停止は `idle` などに見える。未 push の変更や未 commit の作業も消える（確認はしない）。`logs/repo.json` は掃除後も残る。
-- 途中で失敗した時: 印（`logs/cleaned.json`）を先に書き `.git` を先に消すので、残骸があっても再開は clone し直しで進む（残骸は clone し直しの前に消す）。`logs/repo.json` が無い掃除済みの worker（`repo` 引数なしで作り、worker が dir の中で自分で clone する運用のもの）は clone 元が無いのが正常なので、`repo` なしの `worker_start` は失敗にせず、空の dir（`logs/` と `state.json` は残る）で起動する。その時の prompt の末尾に「この dir は掃除されて空。必要なら自分で clone し直すこと」の 1 行を足す。
+- 途中で失敗した時: 印（`logs/cleaned.json`）を先に書き `.git` を先に消すので、残骸があっても再開は clone し直しで進む（残骸は clone し直しの前に消す）。`logs/repo.json` が無い掃除済みの worker（`repo` 引数なしで作り、worker が dir の中で自分で clone する運用のもの）は clone 元が無いのが正常なので、`repo` なしの `worker_start` は失敗にせず、空の dir（`logs/` と `state.json` は残る）で起動する。その時の prompt の末尾に「この dir は掃除されて空。必要なら自分で clone し直すこと」の 1 行を足す。空で起動した時点で `logs/cleaned.json` を外す（注記は掃除後の最初の再開 1 回だけ。以後 worker が自分で clone した dir は掃除済み扱いにならない。次の掃除で印を書き直す）。
 - 掃除の失敗は、同じ worker・同じ理由ならログに 1 回だけ出し、成功か再開まで出し直さない。`logs/owner.json` が無い worker は掃除せず（安全側）、`持ち主記録が無いので掃除しない: <id>` を worker ごとに 1 回だけ出す。`logs/` が通常の directory でない（symlink）worker は掃除しない（失敗としてログに出す）。
 
 ## 活動情報（activity）

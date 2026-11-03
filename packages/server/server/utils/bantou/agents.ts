@@ -249,6 +249,12 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
     }
     if (!repo) {
       await mkdir(dir, { recursive: true });
+      if (emptied) {
+        // 空の dir で起動するのはこの 1 回だけ（以後は worker が自分で clone して作業する）。
+        // 掃除が途中で止まった残骸を消し、印を外す（印が残ると再開のたびに「掃除済み」と判定される）
+        await removeNonKept(dir);
+        await unlink(cleanedFile(dir)).catch(() => {});
+      }
       return emptied;
     }
     if (repo.startsWith("-") || (branch !== undefined && branch.startsWith("-"))) {

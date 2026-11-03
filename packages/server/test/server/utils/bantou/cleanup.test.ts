@@ -421,3 +421,70 @@ test("cleanWorkerDir: 印 cleaned.json が symlink でも、先を書き換え�
     assert.match(await readFile(join(dir, "logs", "cleaned.json"), "utf8"), /cleaned_at/);
   });
 });
+
+test("再開: repo 無し worker の注記は掃除後の最初の再開 1 回だけ。掃除→再開→再々開→掃除→再開を繰り返しても同じ", async () => {
+  await withGit(async ({ ws, prompts, hub }) => {
+    const dir = join(ws, "workers", "w6");
+    const selfClone = async (n: string): Promise<void> => void (await mkdir(join(dir, n, ".git"), { recursive: true }));
+    await hub.start("c1", { worker_id: "w6", prompt: "p1" });
+    await settleRuns();
+    await selfClone("own");
+
+    await cleanWorkerDir(dir); // 1 回目の掃除
+    await hub.start("c1", { worker_id: "w6", prompt: "p2" }); // 空 dir で起動（注記あり、印を外す）
+    await settleRuns();
+    assert.deepEqual(await names(dir), ["logs", "state.json"]);
+    await assert.rejects(stat(cleanedFile(dir)), /ENOENT/);
+    await selfClone("own");
+    await hub.start("c1", { worker_id: "w6", prompt: "p3" }); // 掃除していない再々開: 注記なし、作業物はそのまま
+    await settleRuns();
+    assert.deepEqual(await names(dir), ["logs", "own", "state.json"]);
+
+    await cleanWorkerDir(dir); // 2 回目の掃除（印を改めて書く）
+    await hub.start("c1", { worker_id: "w6", prompt: "p4" });
+    await settleRuns();
+    await selfClone("own2");
+    await hub.start("c1", { worker_id: "w6", prompt: "p5" });
+    await settleRuns();
+    assert.deepEqual(await names(dir), ["logs", "own2", "state.json"]);
+
+    const note = "掃除されて空";
+    assert.deepEqual(prompts.map((p) => p.includes(note)), [false, true, false, true, false]);
+    assert.deepEqual(prompts.map((p) => p.split("\n")[0]), ["p1", "p2", "p3", "p4", "p5"]);
+  });
+});
+
+test("再開: 空 dir で再開した repo 無し worker に後から repo 付き start が来ても、worker 自作の作業物は消さない", async () => {
+  await withGit(async ({ ws, repo, hub }) => {
+    const dir = join(ws, "workers", "w7");
+    await hub.start("c1", { worker_id: "w7", prompt: "p1" });
+    await settleRuns();
+    await cleanWorkerDir(dir);
+    await hub.start("c1", { worker_id: "w7", prompt: "p2" }); // 空 dir で起動、印を外す
+    await settleRuns();
+    await mkdir(join(dir, "own", ".git"), { recursive: true });
+    await writeFile(join(dir, "own", "x.ts"), "mine");
+    await hub.start("c1", { worker_id: "w7", prompt: "p3", repo });
+    await settleRuns();
+    assert.equal(await readFile(join(dir, "own", "x.ts"), "utf8"), "mine"); // 消えていない
+    assert.equal((await readState(dir)).state, "failed"); // 従来どおり「git repo でない」で失敗
+  });
+});
+
+test("掃除の抑制記録（失敗・持ち主なし）は、activity から外れた worker 分は落とす（外れて戻ったら出し直す）", async () => {
+  await withFx(KEEP, async (f) => {
+    const dir = await populate(f.ws, "w1");
+    await rm(join(dir, "logs", "owner.json"));
+    f.acts = [cap("c1", "idle", T0 - 9000), worker("w1", "c1", "done", T0 - 9000)];
+    f.t.now = T0 + 10 * KEEP;
+    await f.cleaner.sweep();
+    await f.cleaner.sweep();
+    const msg = (): number => f.logs.filter((l) => l.includes("持ち主記録が無いので掃除しない")).length;
+    assert.equal(msg(), 1);
+    f.acts = []; // forget 相当
+    await f.cleaner.sweep();
+    f.acts = [cap("c1", "idle", T0 - 9000), worker("w1", "c1", "done", T0 - 9000)];
+    await f.cleaner.sweep();
+    assert.equal(msg(), 2);
+  });
+});

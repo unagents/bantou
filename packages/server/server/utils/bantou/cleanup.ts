@@ -101,6 +101,7 @@ export function createWorkerCleaner(deps: WorkerCleanerDeps): WorkerCleaner {
       deps.forget(w.id);
       touched.delete(w.id);
       lastFailure.delete(w.id);
+      noOwnerLogged.delete(w.id);
       log(`worker 掃除: worker_id=${w.id} cap_id=${w.cap_id} state=${w.state} 削除=${removed}件 残す=${KEEP_ENTRIES.join(",")} dir=${dir}`);
       return true;
     } catch (e) {
@@ -118,6 +119,10 @@ export function createWorkerCleaner(deps: WorkerCleanerDeps): WorkerCleaner {
     // keepMs を過ぎた touched は判定に効かない（base は finished_at 側が支配する）ので落とす
     for (const [id, t] of touched) if (now() - t >= deps.keepMs && !cleaning.has(id)) touched.delete(id);
     const all = deps.snapshot();
+    // activity から外れた（forget 済み・消えた）worker の抑制記録は落とす
+    const present = new Set(all.filter((a) => a.kind === "worker").map((a) => a.id));
+    for (const id of [...lastFailure.keys()]) if (!present.has(id)) lastFailure.delete(id);
+    for (const id of [...noOwnerLogged]) if (!present.has(id)) noOwnerLogged.delete(id);
     const caps = new Map(all.filter((a) => a.kind === "cap").map((a) => [a.id, a]));
     const picked: AgentActivity[] = [];
     const jobs = new Map<string, Promise<boolean>>();
