@@ -15,6 +15,9 @@ const showDone = ref(false);
       <UTooltip v-if="group.unreachable" :text="group.reason ?? 'center に問い合わせられなかった'">
         <UBadge color="warning" variant="subtle" label="つながらない" data-testid="session-unreachable" />
       </UTooltip>
+      <UTooltip v-if="group.instructions" text="追加指示つきで起動した">
+        <UIcon name="i-lucide-scroll-text" class="text-cork-muted size-3.5 shrink-0" data-testid="session-instructions-mark" data-scope="header" />
+      </UTooltip>
       <ContextUsage :usage="group.contextUsage" class="ml-auto" data-scope="header" />
       <span class="text-cork-muted text-xs font-normal" :class="group.contextUsage ? '' : 'ml-auto'">
         {{ group.working.length }} / {{ group.queued.length }}

@@ -386,6 +386,20 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
             @update:model-value="settings.claudePath = String($event) || undefined"
           />
         </UFormField>
+
+        <UFormField label="master-cap への追加指示（system prompt に追記）" description="center が起動する master-cap の claude に --append-system-prompt で渡す。空なら渡さない">
+          <UTextarea
+            v-model="settings.sessionInstructions"
+            :rows="5"
+            autoresize
+            :maxrows="14"
+            class="w-full"
+            data-testid="center-session-instructions"
+          />
+          <p class="text-cork-muted mt-1 text-xs" data-testid="center-session-instructions-note">
+            保存しても、動いている session には効かない（自動では再起動しない）。保存した値は center が次に起動する時から、新しく起動する session に付く
+          </p>
+        </UFormField>
         </div>
 
         <div v-else class="flex flex-col gap-2" data-testid="center-remote-section">

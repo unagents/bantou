@@ -35,6 +35,9 @@ export const MIN_TOKEN_LEN = 12;
 /** server からの返信待ちの既定（35 分。server 側 session.timeoutMs の既定 30 分 + 余裕）。 */
 export const DEFAULT_SERVER_TIMEOUT_MS = 2_100_000;
 
+/** sessionInstructions の最大長（文字数）。 */
+export const SESSION_INSTRUCTIONS_MAX = 16_000;
+
 const NAME = /^[A-Za-z0-9_-]+$/;
 
 const absPath = z.string().min(1).refine((p) => isAbsolute(p), { message: "絶対パスで指定する" });
@@ -59,6 +62,11 @@ const remoteControlSchema = z.object({
   stopGraceMs: z.number().int().min(0).default(DEFAULT_REMOTE_CONTROL.stopGraceMs),
   /** master-cap（wrapper 経由の対話型 claude）の `--model`。未指定なら付けない。 */
   model: z.string().regex(MODEL_PATTERN, "英数字と . _ [ ] - のみ（先頭は - 不可）").optional(),
+  /**
+   * master-cap の追加指示。session 起動のたびに `--append-system-prompt <値>` で渡す（新規・再起動・--continue のすべて）。
+   * 省略・空文字は無しと同じ。argv の 1 引数で渡すので、Windows のコマンドライン上限（約 32K 文字）に収まる長さに制限する。
+   */
+  sessionInstructions: z.string().max(SESSION_INSTRUCTIONS_MAX, `${SESSION_INSTRUCTIONS_MAX} 文字以内`).optional(),
   env: z.record(z.string(), z.string()).optional(),
 });
 

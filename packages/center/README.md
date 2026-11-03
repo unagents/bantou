@@ -85,6 +85,94 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 | `remoteControl.restartDelayMs` | 0 以上の整数 | `5000` | 異常終了から再起動までの待ち |
 | `remoteControl.maxRestarts` | 0 以上の整数 | `5` | 再起動回数の上限 |
 | `remoteControl.stopGraceMs` | 0 以上の整数 | `5000` | SIGTERM から SIGKILL までの猶予 |
+| `remoteControl.sessionInstructions` | 文字列（16000 文字以内） | なし | master-cap への追加指示。session を起動するたび（新規・再起動・`--continue` での再開・resume 失敗後の素の起動のすべて）に、値があれば claude に `--append-system-prompt <値>` を足す。省略と空文字は無しと同じ（付けない）。argv の 1 引数で渡し、shell は通さない（複数行・引用符・`# bantou-center
+
+素のエージェント（Claude Code など）が MCP tool 経由で cap 運用できるようにする MCP server。stdio と Streamable HTTP で動く。
+
+役割は 3 つ。
+
+- center 上の session（master-cap）の起動・削除（`session_*`、下記「session」）。
+- master-cap に持たせる remote session（remote-cap）の起動・削除（`remote_*`、下記「remote」）。
+- project ごとの `claude remote-control`（server mode、1 project 1 本）の起動・監視・切断復帰。
+- リモートホストの bantou-server への指示（kick_cap / resume_worker / status）の中継。
+
+desktop が裏で起動する予定（アプリ設定で on/off）。現時点では単体で `claude mcp add` して使う。
+
+## 起動
+
+```bash
+npx bantou-center --config ~/.config/bantou/center.json
+```
+
+`--config` の既定は `~/.config/bantou/center.json`。
+
+```
+bantou-center [--config <path>] [--transport stdio|http] [--port <n>] [--bind <addr>]
+```
+
+| フラグ | 既定 | 説明 |
+|---|---|---|
+| `--transport` | `stdio` | `stdio` / `http` |
+| `--port` | `7910` | http の待受ポート。`0` は OS 任せ（実ポートは stderr のログに出る）。stdio では無視 |
+| `--bind` | `127.0.0.1` | http の bind アドレス。stdio では無視 |
+
+不明な引数・不正な値は usage を stderr に出して exit 2。
+
+### http transport
+
+- エンドポイントは `http://<bind>:<port>/mcp`（外向け。MCP Streamable HTTP。POST / GET / DELETE）と `/mcp/session`（master-cap 向け。下記「窓口の分離」）。pty 出力の配信は `/sessions/<name>/{output,input,resize}`（下記「core」）。それ以外は 404。
+- **認証は Bearer token**。`/mcp` へのリクエスト（POST / GET / DELETE すべて）は `Authorization: Bearer <config の token>` が必要で、欠落・形式違い・不一致は 401（`WWW-Authenticate: Bearer`）。比較は定時間。token が無い・12 文字未満だと http は起動しない。既定は loopback にだけ bind する。`--bind 0.0.0.0` 等で外に出しても、token を知らない相手は rc_start などを呼べない（ただし TLS は無いので平文。信頼できる LAN だけで使う）。
+- MCP session ごとに McpServer を作る。supervisor と server 接続は全 session で共有。
+- SIGTERM / SIGINT で http server・全 session・全 project を停止して exit 0。http では stdin を見ない（親が `/dev/null` を渡しても落ちない。親は SIGTERM で止める）。
+- 親プロセスが死んだら同じ手順で停止して exit 0。2 秒ごとに `ppid` を見て、起動時の値から変わったら（orphan で 1 / launchd に付け替わったら）終了する。
+- DNS rebinding 対策（Host / Origin 検査）は `--bind` が loopback（`127.0.0.1` / `localhost` / `::1`）の時だけ効く: Host は `127.0.0.1:<port>` / `localhost:<port>` / `[::1]:<port>` だけ通し、それ以外は 403（ポート無しも 403）。Origin は付いていれば `http://<上記 Host>` だけ通す。loopback 以外の bind（`0.0.0.0` / `::` / LAN の IP）では別ホストから届く前提なので Host / Origin は絞らず、Bearer token だけで守る。
+- session は 30 分リクエストが無いと閉じる（処理中のリクエストや開いたままの SSE がある間は閉じない）。閉じた session への要求は 404 なので、クライアントは再 initialize する。
+- 同時 session は最大 32。超えた新規 initialize は 503（`Retry-After: 30`）。
+- POST ボディは 4 MiB まで。超えたら 413 を返して接続を閉じる。
+
+Claude Code への登録例:
+
+```bash
+claude mcp add bantou-center -- node /path/to/packages/center/dist/cli.js --config ~/.config/bantou/center.json
+```
+
+stdout は MCP の通信路。ログは全て stderr に出る。
+
+## config
+
+```json
+{
+  "projects": [
+    { "name": "bantou", "path": "/home/me/work/bantou", "spawn": "same-dir", "permissionMode": "auto", "capacity": 4, "autostart": true, "env": { "FOO": "bar" } }
+  ],
+  "remoteControl": { "env": { "CLAUDE_CONFIG_DIR": "/home/me/.claude-rc" }, "continueOnRestart": true, "restartDelayMs": 5000, "maxRestarts": 5, "stopGraceMs": 5000 },
+  "servers": [
+    { "name": "linux204", "timeoutMs": 2100000 },
+    { "name": "named", "peer": "my-bantou-server" }
+  ],
+  "logDir": "/home/me/.config/bantou/center-logs",
+  "workspace": "/home/me/.bantou",
+  "token": "（http transport で必須。12 文字以上のランダム文字列）"
+}
+```
+
+| キー | 型 | 既定 | 説明 |
+|---|---|---|---|
+| `projects[].name` | `[A-Za-z0-9_-]+` | 必須 | project 名。重複不可。`--name` に渡す |
+| `projects[].path` | 絶対パス | 必須 | remote-control の cwd |
+| `projects[].spawn` | `same-dir` / `worktree` / `session` | `same-dir` | `--spawn` |
+| `projects[].permissionMode` | `acceptEdits` / `auto` / `bypassPermissions` / `default` / `dontAsk` / `plan` | `auto` | `--permission-mode` |
+| `projects[].capacity` | 1 以上の整数 | 指定なし | `--capacity` |
+| `projects[].autostart` | boolean | `false` | center 起動時に remote-control も起動する |
+| `projects[].env` | `{ KEY: string }` | なし | この project の子プロセスに足す環境変数（`remoteControl.env` より優先） |
+| `remoteControl.claude` | string | 未指定 | claude 実行ファイル。未指定なら起動時に自動解決（「claude の解決」節） |
+| `remoteControl.env` | `{ KEY: string }` | なし | 全 project の子プロセスに足す環境変数 |
+| `remoteControl.continueOnRestart` | boolean | `true` | 再起動時に `--continue` を付ける（`spawn` が `worktree` / `session`、または `capacity` 指定の project は付けない。下記参照） |
+| `remoteControl.autoConsent` | boolean | `true` | 起動時の確認プロンプト（`Enable Remote Control? (y/n)`）に自動で `y` を返す |
+| `remoteControl.restartDelayMs` | 0 以上の整数 | `5000` | 異常終了から再起動までの待ち |
+| `remoteControl.maxRestarts` | 0 以上の整数 | `5` | 再起動回数の上限 |
+| `remoteControl.stopGraceMs` | 0 以上の整数 | `5000` | SIGTERM から SIGKILL までの猶予 |
+ もそのまま届く）。config 由来の project（`claude remote-control` 直起動）には効かない。center は起動時に config を 1 度読むので、変えた値は center の次の起動から効く |
 | `remoteControl.model` | 文字列（`^[A-Za-z0-9._\[\]][A-Za-z0-9._\[\]-]*$`） | なし | master-cap（`session_create` の wrapper 経由の対話型 claude）の `--model` にそのまま渡す。未指定なら付けない。config 由来の project（`claude remote-control` 直起動）には効かない |
 | `servers[].name` | `[A-Za-z0-9_-]+` | 必須 | server 名。重複不可。tool の `server` 引数で使う |
 | `servers[].peer` | string | なし | server の peer 名または id。指定すると発見せずその名前へ送る（従来の名前指定）。省略すると `list_peers`（`protocol: "bantou"`）で自動発見する |
@@ -148,7 +236,7 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 
 - `session_create`: pty wrapper 経由の対話型 `claude --remote-control <name> --permission-mode <permissionMode> --mcp-config '<JSON>'`（再起動時は `--continue` 付き）を `path` で起動し、supervisor に動的に足す（起動の詳細は「master-cap の起動（wrapper）」）。`path` 省略時は config の `workspace` の下の `<name>`（無ければ作る）。`workspace` が無ければ `path` が必須。`permissionMode` の既定は `auto`。`name` の重複、既存 project 名との衝突、他の project / session と同じ path は拒否。接続（URL 取得）か早期終了まで最大 15 秒待って状態を返す（待ちきれなければ `starting`）。
 - `session_delete`: `session_create` で作ったものだけ。remote-control を停止（SIGTERM → `stopGraceMs` 後 SIGKILL）して監視と保存から外す。path は消さない。config 由来の project は拒否。
-- `session_list`: config の project と session の全部。`source` が `config` / `session`。`contextUsage`（`{ usedTokens, windowTokens, percent, updatedAt }`、まだ分からない時は `null`）が付く。取得の仕組みは「context 使用量」。
+- `session_list`: config の project と session の全部。`source` が `config` / `session`。`instructions`（真偽。その session を起動した時に `--append-system-prompt`（`sessionInstructions`）を付けたか。本文は出さない。`rc_status` の `instructions` と同じで、`rc_status` の `args` でも値は `<N 文字>` に伏せる）が付く。`contextUsage`（`{ usedTokens, windowTokens, percent, updatedAt }`、まだ分からない時は `null`）が付く。取得の仕組みは「context 使用量」。
 - 保存: config と同じ dir の `sessions.json`（`name`, `path`, `permissionMode`, `createdAt`）。config の projects には書かない。center 起動時に復元して `--continue` で起動する。`--continue` で接続前に 30 秒以内に終了した場合（約 4 時間以内の記録が無い、など）は、素の起動へ fallback する（再起動回数は増やさない）。
 - 新規 path の trust: **trust プロンプトは出ず、remote-control が `Error: Workspace not trusted. Please run `claude` in <path> first ...` で即 exit 1 する**（claude 2.1.312 で実測）。親 dir が trust 済みなら配下は通る（実測: trust 済みの repo 配下の dir で `connected`）。そのため、未 trust の path では `session_create` は `state: starting` と `lastError`（`接続前に終了: Error: Workspace not trusted...`）を返し、supervisor は再起動を繰り返して上限で `error` になる。対処は、workspace（または path の親）で一度 `claude` を起動して trust を承認しておくこと。center が claude の設定ファイルを書き換えて trust を付けることはしない（今は）。
 - 同じ folder を別の `claude remote-control` が直前まで握っていると、`This folder is already served by a terminal \`claude remote-control\` on this device. Stop it first.` で約 1 分待たされて終了する（実測、直前の center を強制終了した後など）。

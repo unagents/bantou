@@ -36,6 +36,8 @@ export interface RcStatus {
   lastError?: string;
   startedAt: string | null;
   args: string[] | null;
+  /** この起動で `--append-system-prompt`（sessionInstructions）を付けたか。本文は持たない。 */
+  instructions: boolean;
   /** 起動に使う claude 実行ファイルとその決定元。 */
   claude: ResolvedClaude;
 }
@@ -58,6 +60,13 @@ export type SpawnImpl = (
   args: string[],
   options: { cwd: string; env: NodeJS.ProcessEnv; stdio: ["pipe", "pipe", "pipe"]; detached: boolean },
 ) => ChildLike;
+
+/** `--append-system-prompt` の値を「<N 文字>」に置き換えた引数列（status / log 用）。 */
+export function redactAppendSystemPrompt(args: string[]): string[] {
+  const i = args.indexOf("--append-system-prompt");
+  if (i < 0 || i + 1 >= args.length) return [...args];
+  return [...args.slice(0, i + 1), `<${args[i + 1].length} 文字>`, ...args.slice(i + 2)];
+}
 
 /** 子へ signal を送る。既定は process group ごと（孫まで止める）。 */
 export type KillImpl = (child: ChildLike, signal: NodeJS.Signals) => void;
@@ -240,6 +249,7 @@ export function createRemoteControlSupervisor(opts: {
         lastExit: null,
         startedAt: null,
         args: null,
+        instructions: false,
         claude,
       },
       child: null,
@@ -285,6 +295,7 @@ export function createRemoteControlSupervisor(opts: {
         mcpConfig: mcpConfigJson(mcpUrl, name),
         resume: useContinue,
         ...(rc.model ? { model: rc.model } : {}),
+        ...(rc.sessionInstructions ? { appendSystemPrompt: rc.sessionInstructions } : {}),
         ...(wd.core.size(name) ?? {}),
       });
       command = wd.path ?? resolveWrapperPath();
@@ -292,6 +303,8 @@ export function createRemoteControlSupervisor(opts: {
     } else {
       args = buildRcArgs(e.project, rc, { continue: useContinue });
     }
+    // 追加指示の本文は status にも log にも出さない（長さだけ）
+    const shownArgs = redactAppendSystemPrompt(args);
     e.stopRequested = false;
     const gen = ++e.gen;
     e.status = {
@@ -301,7 +314,8 @@ export function createRemoteControlSupervisor(opts: {
       sessionUrl: null,
       environmentUrl: null,
       startedAt: new Date().toISOString(),
-      args,
+      args: shownArgs,
+      instructions: e.wrapper && !!rc.sessionInstructions,
     };
     delete e.status.lastError;
 
@@ -323,7 +337,7 @@ export function createRemoteControlSupervisor(opts: {
     }
     e.child = child;
     e.status.pid = child.pid ?? null;
-    log(`remote-control 起動: project=${name} pid=${child.pid ?? "?"} args=${args.join(" ")}`);
+    log(`remote-control 起動: project=${name} pid=${child.pid ?? "?"} args=${shownArgs.join(" ")}`);
 
     let resolveExited!: () => void;
     e.exited = new Promise<void>((r) => (resolveExited = r));

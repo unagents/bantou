@@ -30,6 +30,8 @@ export interface SessionInfo {
   lastError?: string;
   /** claude のコンテキスト使用状況。まだ分からない（transcript が無い等）時は null。 */
   contextUsage: ContextUsage | null;
+  /** 起動時に追加指示（sessionInstructions）を付けたか。本文は出さない。 */
+  instructions: boolean;
 }
 
 export const sessionCreateSchema = {
@@ -85,6 +87,7 @@ export function createSessionManager(opts: {
     source: saved.has(s.project) ? "session" : "config",
     ...(s.lastError ? { lastError: s.lastError } : {}),
     contextUsage: opts.contextUsage?.(s.project) ?? null,
+    instructions: s.instructions,
   });
 
   const toProject = (s: SavedSession): ProjectConfig =>

@@ -53,6 +53,9 @@ pub struct Session {
     /// Context usage of the session's claude; None when the center has none (or is older than this field).
     #[serde(default)]
     pub context_usage: Option<ContextUsage>,
+    /// Whether the session was started with the center's `sessionInstructions` (`--append-system-prompt`). false when the center says no or is older than this field.
+    #[serde(default)]
+    pub instructions: bool,
 }
 
 /// What the side menu shows: the center's list as last fetched, and whether the latest read worked.
@@ -188,7 +191,18 @@ mod tests {
             source: Some("session".into()),
             last_error: None,
             context_usage: None,
+            instructions: false,
         }
+    }
+
+    #[test]
+    fn instructions_flag_is_read_and_false_when_absent() {
+        let on: Session = serde_json::from_str(r#"{"name":"a","instructions":true}"#).unwrap();
+        assert!(on.instructions);
+        let off: Session = serde_json::from_str(r#"{"name":"a","instructions":false}"#).unwrap();
+        assert!(!off.instructions);
+        let old: Session = serde_json::from_str(r#"{"name":"a"}"#).unwrap();
+        assert!(!old.instructions);
     }
 
     #[test]

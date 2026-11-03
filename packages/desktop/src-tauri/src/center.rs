@@ -57,6 +57,9 @@ const ERROR_TAIL_LINES: usize = 5;
 /// Default workspace (`~` is the home directory, resolved when the config is written).
 const DEFAULT_WORKSPACE: &str = "~/.bantou";
 
+/// Max length (chars) of `session_instructions` (mirrors `SESSION_INSTRUCTIONS_MAX` in `packages/center/src/config.ts`).
+pub const SESSION_INSTRUCTIONS_MAX: usize = 16_000;
+
 /// A center on another host, taken from a pasted connection snippet.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -80,6 +83,9 @@ pub struct CenterSettings {
     /// Absolute path of the claude executable. Unset: the center resolves it via a login shell.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub claude_path: Option<String>,
+    /// Extra instructions for master-cap: the center passes them to every session it starts as
+    /// `claude --append-system-prompt <text>` (new, restarted and `--continue`). Empty = none.
+    pub session_instructions: String,
     /// Bearer token the sidecar center requires on `/mcp`. Minted on first load when empty.
     pub token: String,
     /// Center on another host this desktop connects to (used instead of the sidecar when set).
@@ -97,6 +103,7 @@ impl Default for CenterSettings {
             bind: String::new(),
             workspace: DEFAULT_WORKSPACE.to_string(),
             claude_path: None,
+            session_instructions: String::new(),
             token: String::new(),
             remote: None,
         }
@@ -144,6 +151,12 @@ pub fn validate_settings(mut s: CenterSettings) -> Result<CenterSettings, String
             return Err("claudePath は絶対パスで指定する".to_string());
         }
     }
+    if s.session_instructions.trim().is_empty() {
+        s.session_instructions = String::new();
+    }
+    if s.session_instructions.chars().count() > SESSION_INSTRUCTIONS_MAX {
+        return Err(format!("master-cap への追加指示は {SESSION_INSTRUCTIONS_MAX} 文字以内"));
+    }
     if !s.token.is_empty() && s.token.chars().count() < MIN_TOKEN_LEN {
         return Err(format!("token は {MIN_TOKEN_LEN} 文字以上"));
     }
@@ -176,6 +189,9 @@ pub fn build_config(s: &CenterSettings, home: &Path) -> serde_json::Value {
     if let Some(v) = &s.claude_path {
         remote_control["claude"] = v.clone().into();
     }
+    if !s.session_instructions.trim().is_empty() {
+        remote_control["sessionInstructions"] = s.session_instructions.clone().into();
+    }
     let mut cfg = serde_json::json!({
         "workspace": resolve_workspace(&s.workspace, home).to_string_lossy(),
         "remoteControl": remote_control,
@@ -207,7 +223,9 @@ fn config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 /// Whether applying `new` needs a stop/start. `running_with` is the settings the live
 /// center was started with (None when not running). `remote` is not passed to the
 /// center, so it never forces a restart; neither does `bind` (the center always listens on every address). `claude_path` and `token` change what the child
-/// gets, so they do.
+/// gets, so they do. `session_instructions` does not: stopping the center stops every master-cap
+/// session (they come back with `--continue` on the next start), and changing the text must not
+/// restart sessions by itself. The saved text reaches `center.json` at the next center start.
 pub fn needs_restart(running_with: Option<&CenterSettings>, new: &CenterSettings) -> bool {
     match running_with {
         Some(old) => {
@@ -1169,5 +1187,50 @@ mod tests {
         };
         i.epoch += 1; // what stop_locked does
         assert_ne!(i.epoch, epoch);
+    }
+
+    #[test]
+    fn session_instructions_round_trip_and_default_to_empty() {
+        // an older settings.json without the key: empty
+        let old: CenterSettings = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
+        assert_eq!(old.session_instructions, "");
+        // multi-line text survives serialize -> deserialize (the settings.json round trip) unchanged
+        let text = "1 行目\n  2 行目 \"q\" $HOME\n\n末尾";
+        let s = validate_settings(CenterSettings { session_instructions: text.into(), ..Default::default() }).unwrap();
+        assert_eq!(s.session_instructions, text);
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"sessionInstructions\""));
+        let back: CenterSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, s);
+    }
+
+    #[test]
+    fn session_instructions_validation() {
+        let with = |t: &str| validate_settings(CenterSettings { session_instructions: t.into(), ..Default::default() });
+        assert_eq!(with("  \n \t").unwrap().session_instructions, "");
+        assert_eq!(with("").unwrap().session_instructions, "");
+        assert_eq!(with(&"あ".repeat(SESSION_INSTRUCTIONS_MAX)).unwrap().session_instructions.chars().count(), SESSION_INSTRUCTIONS_MAX);
+        assert!(with(&"あ".repeat(SESSION_INSTRUCTIONS_MAX + 1)).is_err());
+    }
+
+    #[test]
+    fn config_json_passes_session_instructions_under_remote_control_only_when_set() {
+        let none = build_config(&CenterSettings::default(), Path::new("/h"));
+        assert!(none["remoteControl"].get("sessionInstructions").is_none());
+        let blank = build_config(&CenterSettings { session_instructions: "  ".into(), ..Default::default() }, Path::new("/h"));
+        assert!(blank["remoteControl"].get("sessionInstructions").is_none());
+        let text = "a\nb";
+        let v = build_config(&CenterSettings { session_instructions: text.into(), ..Default::default() }, Path::new("/h"));
+        assert_eq!(v["remoteControl"]["sessionInstructions"], text);
+        // the written file keeps the newline as JSON "\n"
+        assert!(serde_json::to_string_pretty(&v).unwrap().contains("a\\nb"));
+    }
+
+    #[test]
+    fn changing_session_instructions_does_not_restart_the_center() {
+        let on = CenterSettings { enabled: true, ..Default::default() };
+        assert!(!needs_restart(Some(&on), &CenterSettings { session_instructions: "x".into(), ..on.clone() }));
+        // a start with the saved text does write it to the config
+        assert!(needs_restart(None, &CenterSettings { session_instructions: "x".into(), ..on.clone() }));
     }
 }

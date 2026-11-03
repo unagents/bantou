@@ -139,6 +139,84 @@ test("wrapper 起動: remoteControl.model が無ければ --model を付けな�
   await sup.stop("pm1");
 });
 
+const withInstructions = (sessionInstructions?: string): void => {
+  cfg = parseConfig(
+    { remoteControl: { claude: "fake-claude", restartDelayMs: 30, maxRestarts: 2, stopGraceMs: 200, ...(sessionInstructions === undefined ? {} : { sessionInstructions }) }, logDir: join(dir, "logs") },
+    join(dir, "c.json"),
+  );
+};
+const valueOf = (args: string[], flag: string): string | undefined => {
+  const i = args.indexOf(flag);
+  return i < 0 ? undefined : args[i + 1];
+};
+
+test("wrapper 起動: sessionInstructions があれば --append-system-prompt <値> を付ける。複数行・記号もそのまま 1 引数で届く", async () => {
+  const text = "1 行目\n  2 行目 \"q\" 'q' $HOME `x` ; | & 日本語\n\n末尾";
+  withInstructions(text);
+  const { sup } = make();
+  const st = await sup.start("pm1");
+  const args = launches[0].args;
+  assert.equal(args.filter((a) => a === "--append-system-prompt").length, 1);
+  assert.equal(valueOf(args, "--append-system-prompt"), text);
+  assert.ok(args.includes(text)); // 分割されず 1 要素のまま
+  assert.equal(st.instructions, true);
+  assert.equal(sup.status("pm1").instructions, true);
+  // status と log に本文は出ない（長さだけ）
+  assert.ok(!sup.status("pm1").args!.some((a) => a.includes("2 行目")));
+  assert.equal(valueOf(sup.status("pm1").args!, "--append-system-prompt"), `<${text.length} 文字>`);
+  await sup.stop("pm1");
+});
+
+test("wrapper 起動: sessionInstructions が空文字・未指定なら付けない（instructions は false）", async () => {
+  for (const v of ["", undefined]) {
+    launches.length = 0;
+    withInstructions(v);
+    const { sup } = make();
+    await sup.start("pm1");
+    assert.ok(!launches[0].args.includes("--append-system-prompt"), JSON.stringify(v));
+    assert.equal(sup.status("pm1").instructions, false);
+    await sup.shutdown();
+  }
+});
+
+test("wrapper 起動: sessionInstructions は再起動と resume（--continue）でも付く", async () => {
+  withInstructions("常に日本語で答える\n二行目");
+  const { sup } = make();
+  await sup.start("pm1", { resume: true });
+  assert.ok(launches[0].args.includes("--continue"));
+  assert.equal(valueOf(launches[0].args, "--append-system-prompt"), "常に日本語で答える\n二行目");
+  launches[0].child.out("a");
+  launches[0].child.text("https://claude.ai/code/session_aaa\n");
+  await until(() => sup.status("pm1").state === "connected");
+  launches[0].child.finish(1, null);
+  await until(() => launches.length === 2);
+  assert.ok(launches[1].args.includes("--continue"));
+  assert.equal(valueOf(launches[1].args, "--append-system-prompt"), "常に日本語で答える\n二行目");
+  assert.equal(sup.status("pm1").instructions, true);
+  await sup.shutdown();
+});
+
+test("wrapper 起動: --continue が失敗して素の起動へ fallback しても sessionInstructions は付く", async () => {
+  withInstructions("fallback でも付く");
+  const { sup } = make();
+  await sup.start("pm1", { resume: true });
+  launches[0].child.text("No conversation found to continue\n");
+  launches[0].child.finish(1, null);
+  await until(() => launches.length === 2);
+  assert.ok(!launches[1].args.includes("--continue"));
+  assert.equal(valueOf(launches[1].args, "--append-system-prompt"), "fallback でも付く");
+  await sup.shutdown();
+});
+
+test("buildWrapperArgs: appendSystemPrompt は --mcp-config の前に 1 組だけ。空・未指定は付けない", () => {
+  const base = { claudePath: "c", name: "n", permissionMode: "auto", mcpConfig: "{}", resume: false };
+  const a = buildWrapperArgs({ ...base, appendSystemPrompt: "x\ny" });
+  assert.equal(a[a.indexOf("--append-system-prompt") + 1], "x\ny");
+  assert.ok(a.indexOf("--append-system-prompt") < a.indexOf("--mcp-config"));
+  assert.ok(!buildWrapperArgs({ ...base, appendSystemPrompt: "" }).includes("--append-system-prompt"));
+  assert.ok(!buildWrapperArgs(base).includes("--append-system-prompt"));
+});
+
 test("wrapper 起動: wrapper -- claude --remote-control の引数、env の token、--mcp-config は JSON 文字列で token は ${VAR}", async () => {
   const { sup, tokens } = make();
   await sup.start("pm1");
