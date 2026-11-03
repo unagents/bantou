@@ -7,7 +7,7 @@ import {
   isActivityState, isServerNotice, parseServerNotice, ACTIVITY_STATES,
   isValidAgentId, isAgentState, SERVER_NAME, MESSENGER_PROTOCOL, AGENT_ID_PATTERN,
   isHelloCommand, isUpdateServerCommand, isValidServerVersion, isErrorCode, ERROR_CODES,
-  FOLLOW_MIN_PROTOCOL, SERVER_VERSION_PATTERN,
+  FOLLOW_MIN_PROTOCOL, SERVER_VERSION_PATTERN, MODEL_PATTERN, isValidModel,
 } from "../dist/index.js";
 
 const activityAgent = {
@@ -31,7 +31,7 @@ const hello = { bantou: 1, type: "hello" };
 const updateServer = { bantou: 1, type: "update_server", version: "0.3.1" };
 const running = { caps: 1, workers: 2, reports: 0 };
 const helloResult = {
-  bantou: 1, type: "hello_result", ok: true, server_version: "0.3.0", protocol_version: "1.3.0",
+  bantou: 1, type: "hello_result", ok: true, server_version: "0.3.0", protocol_version: "1.4.0",
   update: { state: "waiting", from: "0.3.0", to: "0.3.1", running },
   last_update: { to: "0.3.2", ok: false, error: "npx failed", at: "2026-10-31T00:00:00.000Z" },
 };
@@ -202,7 +202,33 @@ test("stop_cap / stop_result", () => {
   assert.equal(isServerReply({ ...stopResult, cap_id: "a b" }), false);
   assert.ok(isServerReply({ bantou: 1, type: "error", ok: false, message: "x", command: "stop_cap", cap_id: "c1" }));
   assert.deepEqual(manifest.messages.error.properties.command.enum, ["kick_cap", "resume_worker", "stop_cap", "status", "hello", "update_server"]);
-  assert.equal(MESSENGER_PROTOCOL.version, "1.3.0");
+  assert.equal(MESSENGER_PROTOCOL.version, "1.4.0");
+});
+
+test("model: kick_cap の model / worker_model は省略可、形式を検証、知らない版は無視できる", () => {
+  for (const m of ["sonnet", "opus", "haiku", "claude-sonnet-5-5", "opus[1m]", "a.b_c-d"]) {
+    assert.ok(isValidModel(m), m);
+    assert.ok(isKickCapCommand({ ...kickMin, model: m, worker_model: m }), m);
+  }
+  for (const m of ["", "-x", "--model", "a b", "a;b", "a\n", "a/b", 1, null]) {
+    assert.equal(isValidModel(m), false, String(m));
+    assert.equal(isServerCommand({ ...kickMin, model: m }), false, `model ${String(m)}`);
+    assert.equal(isServerCommand({ ...kickMin, worker_model: m }), false, `worker_model ${String(m)}`);
+  }
+  assert.ok(isKickCapCommand(kickMin)); // 省略
+  assert.equal(MODEL_PATTERN.source, manifest.messages.kick_cap.properties.model.pattern);
+  assert.equal(MODEL_PATTERN.source, manifest.messages.kick_cap.properties.worker_model.pattern);
+  // 古い相手: model を知らない相手の返信（agents に model 無し）も通り、知らない項目は無視される
+  assert.ok(isServerNotice({ ...activityNotice, extra: 1 }));
+  assert.ok(isServerNotice({ ...activityNotice, agents: activityNotice.agents.map((a) => ({ ...a, model: "opus" })) }));
+  assert.ok(isServerNotice({ ...activityNotice, agents: activityNotice.agents.map((a) => ({ ...a, model: null })) }));
+  assert.equal(isServerNotice({ ...activityNotice, agents: activityNotice.agents.map((a) => ({ ...a, model: 5 })) }), false);
+  const st = { kind: "cap", id: "c1", path: "/p", session_id: null, state: "idle", last_started_at: null, last_finished_at: null, retries: 0, queued: 0 };
+  const stReply = (extra) => ({ bantou: 1, type: "status_result", ok: true, caps: [{ ...st, ...extra }], workers: [] });
+  assert.ok(isServerReply(stReply({})));
+  assert.ok(isServerReply(stReply({ model: "sonnet" })));
+  assert.ok(isServerReply(stReply({ model: null })));
+  assert.equal(isServerReply(stReply({ model: 1 })), false);
 });
 
 test("activity notice guard", () => {

@@ -114,7 +114,7 @@ sender peer as one JSON object.
 
 The protocol definition is `packages/protocol/messenger/protocol.json` (JSON
 Schemas of `kick_cap`, `stop_cap`, `status`, `hello`, `update_server`, `cap_result`, `stop_result`, `status_result`, `hello_result`, `update_result`, `error`, `activity`)
-and `PROTOCOL.md`. It is the agent-messenger protocol version (`1.3.0`,
+and `PROTOCOL.md`. It is the agent-messenger protocol version (`1.4.0`,
 `MESSENGER_PROTOCOL` in `server.ts`); the body field `bantou: 1` is a separate
 version of the JSON bodies below. Changing the definition needs a new protocol
 `version` (same name and version with other content is `PROTOCOL_CONFLICT`).
@@ -152,6 +152,10 @@ version of the JSON bodies below. Changing the definition needs a new protocol
 | `repo` | no | git URL. Cloned on first use, fetched afterwards |
 | `branch` | no | branch for `git clone --branch` |
 | `reason` | no | free text, logged only, not passed to claude |
+| `model` | no | model of the cap's own `claude -p`, passed as-is to `--model` (`sonnet`, `opus`, `claude-sonnet-5-5`, `opus[1m]` ...). `^[A-Za-z0-9._\[\]][A-Za-z0-9._\[\]-]*$`; anything else is an `error`. Absent = no `--model` |
+| `worker_model` | no | default `--model` of the workers this cap starts (used when `worker_start` has no `model`). Same format. The server remembers it as the cap's default |
+
+`model` and `worker_model` were added in protocol `1.4.0`. A server older than that ignores them (unknown fields are ignored), but a center does not send commands to a server whose protocol version differs (see below), so the server is updated first. A resumed cap (including the resume caused by a worker report) and a resumed worker keep using the same model.
 
 Reply: `cap_result` or `error`.
 
@@ -184,7 +188,7 @@ while agents are running.
 ```
 
 No other fields. Reply: `hello_result`
-`{"bantou":1,"type":"hello_result","ok":true,"server_version":"0.3.0","protocol_version":"1.3.0","update":null,"last_update":null}`.
+`{"bantou":1,"type":"hello_result","ok":true,"server_version":"0.3.0","protocol_version":"1.4.0","update":null,"last_update":null}`.
 `server_version` is the npm `bantou` version of the running server. `update` is
 `{"state":"waiting"|"restarting","from","to","running":{"caps","workers","reports"}}` while an update is
 in progress. `last_update` is `{"to","ok":false,"error","at"}` for the last update that failed (kept until the
@@ -267,7 +271,7 @@ Results are JSON text; a failure sets `isError` with `{"error":"..."}`.
 
 | tool | input | result |
 |---|---|---|
-| `worker_start` | `prompt`, `worker_id?` (`[A-Za-z0-9_-]+`), `repo?`, `branch?` | `{"worker_id":"w-1f2e3d4c5b","accepted":true}` |
+| `worker_start` | `prompt`, `worker_id?` (`[A-Za-z0-9_-]+`), `repo?`, `branch?`, `model?` | `{"worker_id":"w-1f2e3d4c5b","accepted":true}` |
 | `worker_status` | `worker_id?` | `{"workers":[AgentActivity,...]}` |
 | `worker_stop` | `worker_id` | `{"worker_id":"w-...","stopped":true}` |
 
@@ -278,6 +282,7 @@ Results are JSON text; a failure sets `isError` with `{"error":"..."}`.
 - A worker belongs to the cap that first started it (`logs/owner.json`). Another
   cap gets `別の cap の worker: <id>` from all three tools.
 - `worker_status` returns `AgentActivity` (see "Activity notices") of that cap's workers.
+- `model` (same format as `kick_cap`) is the worker's `--model`. Without it the cap's `worker_model` is used, and without that no `--model`. A resumed worker keeps using the same model.
 - `worker_stop` sends SIGTERM to the worker's process group, SIGKILL after 3 s.
 
 ### Activity notices (server to center)
@@ -309,6 +314,7 @@ the cap and all its workers. Messages carry the same `meta` as replies.
 | `silent_ms` | ms since the last output (or `started_at`) at send time. Use this for elapsed time, not clock differences between hosts |
 | `started_at` / `finished_at` | ISO 8601, or `null` |
 | `error` | why the agent is `failed` / `lost` (at most 200 chars) |
+| `model` | model given with `--model`, or `null` when none was given. Absent from servers older than `1.4.0` |
 
 `state` (separate from `AgentState` of `state.json`):
 
@@ -373,6 +379,7 @@ Sent only after the run ends, which can take minutes. A failed run is still a
 | `last_error` | failure reason. Absent on success |
 | `retries` | retries used by the latest run |
 | `queued` | commands waiting in this agent's queue (the running one excluded) |
+| `model` | model given with `--model`, or `null` when none was given. Absent from servers older than `1.4.0` |
 
 `AgentState`:
 
@@ -483,7 +490,7 @@ Remote-control record:
 `error` reply.
 
 `remote_list` returns `RemoteRecord[]` (`remote_id`, `owner`, `server`, `serverName`,
-`state`, `createdAt`, `finishedAt?`, `result?`, `error?`, `notifiedAt?`, `notifyError?`). `notifiedAt` = when the center sent the
+`state`, `model?`, `worker_model?`, `createdAt`, `finishedAt?`, `result?`, `error?`, `notifiedAt?`, `notifyError?`). `notifiedAt` = when the center sent the
 done notice (messenger `push` to the peer named like the owner session); `notifyError` = why it could not. `remote_wait`
 (`remote_id?`, `timeout_sec?` default 600, max 1800) waits until the remote has finished and returns its record,
 or returns it with `state: "running"` on timeout. A remote that has received

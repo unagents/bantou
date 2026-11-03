@@ -117,6 +117,28 @@ const chunks = (core: ReturnType<typeof createCore>, name: string): string[] => 
   return out;
 };
 
+test("wrapper 起動: remoteControl.model があれば --model を付け、再起動(--continue)でも同じ", async () => {
+  cfg = parseConfig(
+    { remoteControl: { claude: "fake-claude", model: "opus", restartDelayMs: 30, maxRestarts: 2, stopGraceMs: 200 }, logDir: join(dir, "logs") },
+    join(dir, "c.json"),
+  );
+  const { sup } = make();
+  await sup.start("pm1");
+  const args = launches[0].args;
+  const i = args.indexOf("--model");
+  assert.ok(i > 0);
+  assert.equal(args[i + 1], "opus");
+  assert.ok(i < args.indexOf("--mcp-config"));
+  await sup.stop("pm1");
+});
+
+test("wrapper 起動: remoteControl.model が無ければ --model を付けない", async () => {
+  const { sup } = make();
+  await sup.start("pm1");
+  assert.ok(!launches[0].args.includes("--model"));
+  await sup.stop("pm1");
+});
+
 test("wrapper 起動: wrapper -- claude --remote-control の引数、env の token、--mcp-config は JSON 文字列で token は ${VAR}", async () => {
   const { sup, tokens } = make();
   await sup.start("pm1");
@@ -353,6 +375,12 @@ test("wrapper.ts: 引数組み立て / プロトコル行の解釈 / 窓の照�
     buildWrapperArgs({ claudePath: "c", name: "n", permissionMode: "auto", mcpConfig: null, resume: true, cols: 90, rows: 30 }),
     ["--cols", "90", "--rows", "30", "--", "c", "--remote-control", "n", "--permission-mode", "auto", "--no-chrome", "--continue"],
   );
+  // model: 指定時だけ --model を付ける（mcp-config の前）。無ければ従来どおり
+  assert.deepEqual(
+    buildWrapperArgs({ claudePath: "c", name: "n", permissionMode: "auto", mcpConfig: "{}", resume: false, model: "opus[1m]" }),
+    ["--cols", "120", "--rows", "40", "--", "c", "--remote-control", "n", "--permission-mode", "auto", "--no-chrome", "--model", "opus[1m]", "--mcp-config", "{}"],
+  );
+  assert.ok(!buildWrapperArgs({ claudePath: "c", name: "n", permissionMode: "auto", mcpConfig: null, resume: false }).includes("--model"));
   assert.equal(JSON.parse(mcpConfigJson("http://h/mcp/session", "n")).mcpServers.bantou.headers["X-Bantou-Session"], "n");
   assert.equal(JSON.parse(mcpConfigJson("http://h/mcp/session", "n")).mcpServers["bantou-messenger"].env.AGENT_MESSENGER_NAME, "n");
   assert.equal(JSON.parse(mcpConfigJson(null, "n")).mcpServers.bantou, undefined);

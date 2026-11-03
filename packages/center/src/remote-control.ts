@@ -284,6 +284,7 @@ export function createRemoteControlSupervisor(opts: {
         permissionMode: e.project.permissionMode,
         mcpConfig: mcpConfigJson(mcpUrl, name),
         resume: useContinue,
+        ...(rc.model ? { model: rc.model } : {}),
         ...(wd.core.size(name) ?? {}),
       });
       command = wd.path ?? resolveWrapperPath();

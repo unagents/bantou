@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 import { createActivityStore, type ActivityStore } from "../src/activity.js";
-import { createRemoteManager, type RemoteRecord } from "../src/remotes.js";
+import { z } from "zod";
+import { createRemoteManager, remoteCreateSchema, type RemoteRecord } from "../src/remotes.js";
 import type { ServerLink, ServerPeer } from "../src/server-link.js";
 import { createJsonListStore } from "../src/store.js";
 
@@ -55,6 +56,28 @@ test("create: 返信を待たず running で返り、kick_cap を先頭 server �
   assert.deepEqual(kicks[0].cmd, { cap_id: "r-1", prompt: "go", repo: "https://x/y.git", branch: "main", reason: "remote_create owner=pm1" });
   const saved = JSON.parse(await readFile(join(dir, "remotes.json"), "utf8")) as RemoteRecord[];
   assert.equal(saved[0].state, "running");
+});
+
+test("create: model / worker_model は記録と kick_cap に載り、省略時は載らない", async () => {
+  const { mgr, kicks } = setup();
+  const r = await mgr.create({ owner: "pm1", prompt: "go", model: "sonnet", worker_model: "haiku" });
+  assert.equal(r.model, "sonnet");
+  assert.equal(r.worker_model, "haiku");
+  assert.deepEqual(kicks[0].cmd, { cap_id: "r-1", prompt: "go", model: "sonnet", worker_model: "haiku", reason: "remote_create owner=pm1" });
+  assert.equal(mgr.list()[0].model, "sonnet");
+  const r2 = await mgr.create({ owner: "pm1", prompt: "go" });
+  assert.ok(!("model" in r2) && !("worker_model" in r2));
+  assert.ok(!("model" in kicks[1].cmd) && !("worker_model" in kicks[1].cmd));
+});
+
+test("remoteCreateSchema: model の形式を検証する", () => {
+  const s = z.object(remoteCreateSchema);
+  for (const m of ["sonnet", "opus", "haiku", "claude-sonnet-5-5", "opus[1m]", "a.b_c-d"]) assert.ok(s.safeParse({ prompt: "x", model: m, worker_model: m }).success, m);
+  for (const m of ["", "-x", "--model", "a b", "a;b", "a\n", "a/b"]) {
+    assert.ok(!s.safeParse({ prompt: "x", model: m }).success, `model ${JSON.stringify(m)}`);
+    assert.ok(!s.safeParse({ prompt: "x", worker_model: m }).success, `worker_model ${JSON.stringify(m)}`);
+  }
+  assert.ok(s.safeParse({ prompt: "x" }).success);
 });
 
 test("create: server は peer id か名前で指定でき、見つからなければ記録を作らず失敗", async () => {

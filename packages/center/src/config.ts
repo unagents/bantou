@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { MODEL_PATTERN } from "@agent-hand/bantou-protocol";
 import { z } from "zod";
 
 /** `claude --permission-mode` の選択肢。 */
@@ -56,6 +57,8 @@ const remoteControlSchema = z.object({
   restartDelayMs: z.number().int().min(0).default(DEFAULT_REMOTE_CONTROL.restartDelayMs),
   maxRestarts: z.number().int().min(0).default(DEFAULT_REMOTE_CONTROL.maxRestarts),
   stopGraceMs: z.number().int().min(0).default(DEFAULT_REMOTE_CONTROL.stopGraceMs),
+  /** master-cap（wrapper 経由の対話型 claude）の `--model`。未指定なら付けない。 */
+  model: z.string().regex(MODEL_PATTERN, "英数字と . _ [ ] - のみ（先頭は - 不可）").optional(),
   env: z.record(z.string(), z.string()).optional(),
 });
 

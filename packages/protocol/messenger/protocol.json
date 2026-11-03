@@ -1,6 +1,6 @@
 {
   "name": "bantou",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "bantou-server commands (kick_cap, stop_cap, status, hello, update_server), replies (cap_result, stop_result, status_result, hello_result, update_result, error) and a notice (activity). Message body is one JSON object in the text; `bantou: 1` is the body schema version.",
   "messages": {
     "hello": {
@@ -112,7 +112,9 @@
         "repo": { "type": "string", "minLength": 1, "description": "Git URL; cloned into the cap path on first use, fetched afterwards. Must not start with '-'." },
         "branch": { "type": "string", "minLength": 1, "description": "Branch for git clone --branch. Must not start with '-'." },
         "prompt": { "type": "string", "minLength": 1 },
-        "reason": { "type": "string", "description": "Free text, logged only." }
+        "reason": { "type": "string", "description": "Free text, logged only." },
+        "model": { "type": "string", "pattern": "^[A-Za-z0-9._\\[\\]][A-Za-z0-9._\\[\\]-]*$", "description": "Model of the cap's own claude -p, passed as-is to --model. Absent = no --model. Servers older than 1.4.0 ignore it." },
+        "worker_model": { "type": "string", "pattern": "^[A-Za-z0-9._\\[\\]][A-Za-z0-9._\\[\\]-]*$", "description": "Default model of the workers this cap starts (used when worker_start has no model). The server remembers it as the cap's default." }
       },
       "additionalProperties": true
     },
@@ -188,7 +190,8 @@
             "last_finished_at": { "type": ["string", "null"], "description": "ISO 8601." },
             "last_error": { "type": "string" },
             "retries": { "type": "number" },
-            "queued": { "type": "number", "description": "Commands waiting in this agent's queue (the running one excluded)." }
+            "queued": { "type": "number", "description": "Commands waiting in this agent's queue (the running one excluded)." },
+            "model": { "type": ["string", "null"], "description": "Model the agent was started with (--model); null / absent = none given. Servers older than 1.4.0 omit it." }
           },
           "additionalProperties": true
         }
@@ -221,7 +224,8 @@
             "silent_ms": { "type": "number", "description": "Milliseconds since the last output (or started_at) at send time." },
             "started_at": { "type": ["string", "null"] },
             "finished_at": { "type": ["string", "null"] },
-            "error": { "type": "string", "description": "Why the agent is failed / lost (at most 200 chars)." }
+            "error": { "type": "string", "description": "Why the agent is failed / lost (at most 200 chars)." },
+            "model": { "type": ["string", "null"], "description": "Model the agent runs with (--model); null / absent = none given. Servers older than 1.4.0 omit it." }
           },
           "additionalProperties": true
         }
