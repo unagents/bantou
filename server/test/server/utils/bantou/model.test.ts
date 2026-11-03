@@ -211,3 +211,13 @@ test("agents: status の caps / workers に model（記録した値、無けれ�
     assert.deepEqual(st.caps.map((c) => [c.id, (c as { model?: unknown }).model]), [["c1", "opus"], ["c2", null]]);
   });
 });
+
+test("daemon: kick_cap の model / worker_model は manager.invoke にそのまま届く（無ければ付かない）", async () => {
+  const { execute } = await import("../../../../server/utils/bantou/daemon");
+  const seen: InvokeInput[] = [];
+  const manager = { invoke: async (_k: string, _i: string, input: InvokeInput) => (seen.push(input), { session_id: "s", ok: true, result_text: "" }) };
+  await execute({ bantou: 1, type: "kick_cap", cap_id: "c1", prompt: "p", model: "opus", worker_model: "haiku" } as never, manager as never);
+  await execute({ bantou: 1, type: "kick_cap", cap_id: "c1", prompt: "p" } as never, manager as never);
+  assert.deepEqual([seen[0]!.model, seen[0]!.worker_model], ["opus", "haiku"]);
+  assert.deepEqual([seen[1]!.model, seen[1]!.worker_model], [undefined, undefined]);
+});

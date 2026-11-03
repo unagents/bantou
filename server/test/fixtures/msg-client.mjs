@@ -2,9 +2,10 @@
 // 引数: broker URL。stdin の 1 行 = server へ送る JSON。server からの受信 text は stdout に 1 行ずつ出す。
 import { createInterface } from "node:readline";
 import { createMessengerClient } from "@unagents/messenger-client";
+import { MESSENGER_PROTOCOL } from "@agent-hand/bantou-protocol";
 
 const url = process.argv[2];
-const meta = { protocol: "bantou", version: process.argv[3] ?? "1.3.0" };
+const meta = { protocol: "bantou", version: process.argv[3] ?? MESSENGER_PROTOCOL.version };
 const client = createMessengerClient({
   env: { AGENT_MESSENGER_DISCOVERY: "off" },
   name: "test-center",
