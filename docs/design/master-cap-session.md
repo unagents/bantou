@@ -22,7 +22,7 @@
 ### 1. tool の窓口を分ける
 
 - 外向け（desktop など token を持つ相手）: `session_create` / `session_delete` / `session_list`。
-- center が起動したセッション（master-cap）向け: `remote_create` / `remote_delete` / `remote_list`。
+- center が起動したセッション（master-cap）向け: `remote_send`（別名 `remote_create`） / `remote_delete` / `remote_list` / `remote_wait`（2026-11-04 以降。経路テスト当時は `remote_create` / `remote_delete` / `remote_list`）。
 - `remote_*` と `cap_kick` は外向けから外す（`cap_kick` も remote-cap を直接起動できるため）。
 
 ### 2. master-cap に道具を渡す手段
@@ -114,7 +114,7 @@ center の通知（remote の完了通知など）は owner の session 名の m
 
 8. セッション向けの窓口（`/mcp/session`）の認証は、center がセッション起動ごとに作る使い捨ての token にする。外向けの token では呼べない（外向けの token を持つ相手が session を名乗れないようにするため）。master-cap には環境変数で渡し、`--mcp-config` の header で `${VAR}` 展開させる。
 9. 外向けには読み取り専用の `remote_list` を残す（desktop の「リモート指示タスクの一覧」の表示用）。作成・削除はセッション向けだけ。
-10. 中央の列は、そのセッションの remote 記録（`remote_list` の owner 一致分）を出す。今の Cork 形式のタスク一覧は消さず、同じ列の下に残す。
+10. 中央の列は、そのセッションが指示を送った remote-cap の記録（`remote_list` の `owners` 一致分。server の cap 単位で、指示と結果の履歴つき）を出す。今の Cork 形式のタスク一覧は消さず、同じ列の下に残す。
 11. pty の大きさは、最後にサイズを送ってきた desktop に合わせる。
 12. wrapper は `packages/pty-wrapper`（Rust crate）に置き、center と同じく desktop の sidecar として同梱する。center は自分の実行ファイルと同じ場所から wrapper を探す。
 
@@ -140,3 +140,9 @@ desktop の設定画面で入力した「master-cap への追加指示」を、c
 - server 0.3.1: `remote_create` に repo を渡すと、clone 前に `logs/center.json` が cap の dir を作るため `cap の path は git repo でない` で必ず失敗する。
 - center の remote 記録は最初の `cap_result` だけが残り、worker 完了後の `cap_result`（report 起因）で更新されない。→ 修正済み（`docs/history/20261103-1210-remote-result-followup/report.md`）。
 - 0.1.23 へアプリ内更新した直後の起動で、center（sidecar）だけ broker に届かなかった。同じ binary を ssh から単独起動すると届く。アプリを再起動すると直った。原因は未確定。
+
+## 追記（2026-11-04）: remote-cap は 1 つの server につき 1 つ
+
+- center は server ごとに remote-cap を 1 つだけ持つ（cap_id は center ごとに固定の `c-<10 桁 hex>`）。session からの指示は `remote_send`（別名 `remote_create`）でその cap への「次の指示」になり、cap が無い時だけ最初の `kick_cap` で作る。
+- 記録は server の cap 単位（指示と結果の履歴つき）。完了通知は、cap が idle で worker 無しになった時に、未完了の指示を全て完了にして指示を送った session ごとに送る。
+- 経路テスト時点の `remote_create`（作業ごとに cap を作る）の記述は、この変更前のもの。詳細は `docs/design/center-tools.md` と `packages/center/README.md`、`docs/history/20261104-0200-one-cap-per-server/report.md`。

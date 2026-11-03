@@ -61,7 +61,7 @@ stdout は MCP の通信路。ログは全て stderr に出る。
   "remoteControl": { "env": { "CLAUDE_CONFIG_DIR": "/home/me/.claude-rc" }, "continueOnRestart": true, "restartDelayMs": 5000, "maxRestarts": 5, "stopGraceMs": 5000 },
   "servers": [
     { "name": "linux204", "timeoutMs": 2100000 },
-    { "name": "named", "peer": "my-bantou-server" }
+    { "name": "named", "peer": "my-bantou-server", "model": "opus", "workerModel": "sonnet" }
   ],
   "logDir": "/home/me/.config/bantou/center-logs",
   "workspace": "/home/me/.bantou",
@@ -90,6 +90,8 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 | `servers[].name` | `[A-Za-z0-9_-]+` | 必須 | server 名。重複不可。tool の `server` 引数で使う |
 | `servers[].peer` | string | なし | server の peer 名または id。指定すると発見せずその名前へ送る（従来の名前指定）。省略すると `list_peers`（`protocol: "bantou"`）で自動発見する |
 | `servers[].timeoutMs` | 正の整数 | `2100000`（35 分） | 返信待ちの打ち切り |
+| `servers[].model` | 文字列（`remoteControl.model` と同じ形式） | なし | この server の remote-cap（cap を作る最初の `kick_cap`）の `--model`。省略時は指定しない。center 起動時に読む（変更は center の再起動で反映） |
+| `servers[].workerModel` | 同上 | なし | この server の remote-cap が起動する worker の既定モデル（`kick_cap` の `worker_model`）。省略時は指定しない。同上 |
 | `logDir` | 絶対パス | config と同じ場所の `center-logs/` | remote-control の出力ログ置き場 |
 | `workspace` | 絶対パス | なし | `session_create` で `path` 省略時の置き場所 `<workspace>/<name>` の親。session は起動時に立てない |
 | `token` | 12 文字以上の文字列 | なし | http transport の `/mcp` が要求する Bearer token。http では必須（無い・12 文字未満だと起動せずエラー終了。Cork の MCP Server が 12 文字未満の token を拒否し、保存値が不正なら作り直すのに合わせた）。stdio では使わない。desktop は sidecar 起動時に `center.json` へ書く |
@@ -113,7 +115,7 @@ center は wrapper 経由の session（master-cap）を起動するたび（新�
 
 ## tools
 
-概念は `docs/concept.md`、設計の経緯は `docs/design/center-tools.md`。`session_*` が A（番頭が使う、center 上の master-cap）、`remote_*` が B（center が master-cap に持たせる、server への指示の道具）。`rc_*` `server_*` `worker_resume` は従来の tool で、そのまま残している。窓口は 2 つに分かれる（「窓口の分離」）。外向け `/mcp` の tool は下の表のうち `remote_create` / `remote_delete`（session 向け `/mcp/session` だけ）を除いたもの。`cap_kick` は外向けからも外した。
+概念は `docs/concept.md`、設計の経緯は `docs/design/center-tools.md`。`session_*` が A（番頭が使う、center 上の master-cap）、`remote_*` が B（center が master-cap に持たせる、server への指示の道具）。`rc_*` `server_*` `worker_resume` は従来の tool で、そのまま残している。窓口は 2 つに分かれる（「窓口の分離」）。外向け `/mcp` の tool は下の表のうち `remote_send` / `remote_create` / `remote_delete`（session 向け `/mcp/session` だけ）を除いたもの。`cap_kick` は外向けからも外した。
 
 出力は全て JSON 文字列を 1 つの text content に入れて返す。例外・失敗は `isError: true`（例外は `{ "error": "..." }`）。
 
@@ -122,10 +124,11 @@ center は wrapper 経由の session（master-cap）を起動するたび（新�
 | `session_create` | `name`, `path?`, `permissionMode?` | `SessionInfo`（下記） |
 | `session_delete` | `name` | `{ name, deleted }` |
 | `session_list` | なし | `SessionInfo[]` |
-| `remote_create`（session 向けのみ） | `prompt`, `server?`, `repo?`, `branch?`, `model?`, `worker_model?` | `{ remote_id, server, serverName, state, model?, worker_model? }`（返信を待たない）。owner は header の session 名 |
-| `remote_delete`（session 向けのみ） | `remote_id`, `force?` | `{ remote_id, deleted, stopped, warning? }`。自分の remote だけ |
-| `remote_list` | `owner?`（外向け）。session 向けは引数なしで自分の分 | `RemoteView[]`（`RemoteRecord` + `activity?`、下記） |
-| `remote_wait` | `remote_id?`, `timeout_sec?`（既定 600、上限 1800）, `owner?`（外向けのみ） | 終わった `RemoteView`。timeout なら `state: "running"` のまま。下記「完了通知」 |
+| `remote_send`（session 向けのみ） | `prompt`, `server?` | `{ remote_id, server, serverName, state, created, model?, worker_model? }`（返信を待たない）。server の remote-cap（1 つ）への次の指示。owner は header の session 名 |
+| `remote_create`（session 向けのみ） | 同上 | `remote_send` の互換の別名（同じ処理） |
+| `remote_delete`（session 向けのみ） | `remote_id?`, `server?`, `force?` | `{ remote_id, deleted, stopped, warning? }`。cap の停止（`stop_cap`）と記録の削除。cap は共有なので他の session の指示も止まる |
+| `remote_list` | `owner?`（外向け）。session 向けは引数なしで自分が指示を送った cap | `RemoteView[]`（server の cap 単位。`RemoteRecord` + `owners` + `activity?`、下記） |
+| `remote_wait` | `remote_id?`, `server?`, `timeout_sec?`（既定 600、上限 1800）, `owner?`（外向けのみ） | 終わった `RemoteView`。timeout なら `state: "running"` のまま。下記「完了通知」 |
 | `rc_list` | なし | `RcStatus[]` |
 | `rc_start` | `project` | `RcStatus`（起動済みなら現状を返す） |
 | `rc_stop` | `project` | `RcStatus` |
@@ -168,21 +171,28 @@ center は wrapper 経由の session（master-cap）を起動するたび（新�
 
 ### remote（B）
 
-- `remote_create`: center が `remote_id`（= server 上の cap_id、`r-<hex10>`）を採番し、発見した server に `kick_cap`（`reason: remote_create owner=<owner>`）を送る。**返信を待たず**`{ remote_id, server, serverName, state: "running" }`（指定した `model` / `worker_model` があれば付く）を返す。`model` は remote-cap 自身の `claude --model`、`worker_model` はその cap が起動する worker の既定モデルで、`kick_cap` にそのまま載る（形式 `^[A-Za-z0-9._\[\]][A-Za-z0-9._\[\]-]*$`、不正は isError、省略時は載せない＝従来どおり）。記録（`remotes.json`・`remote_list`）にも `model` / `worker_model` が残り、activity の `agents[].model` で実際に動いているモデルを見られる（`model` を知らない旧 server では出ない）。返信（`cap_result` / `error`）が来たら記録の `state` を `done` / `failed` にし、`result`（結果本文、8000 文字まで）と `error` を入れる。
-- `remote_delete`: server へ `stop_cap`（protocol `bantou` 1.1.0）を送って走行中の `claude -p` を止め、記録から外す。止められない（server が見つからない・error 返信）時、記録が `running` なら error（`force: true` なら記録だけ消し、`warning` に理由）。終わった記録は警告付きで消える。別の owner の remote は消せない。
-- `remote_list` の `state` / `result`: 最初の `cap_result` で done / failed になるが、report 起因の再開など後から届く `cap_result`（と `kick_cap` の error）でも `result` / `state` / `error` を最新に更新する。cap が done でも、activity で配下の worker が running / stalled の間は `remote_list` の `state` は running（`finishedAt` なし）で返す。
-- 完了通知: remote が終わった時（remote-cap の turn が終わり、cap・worker に running / stalled が無い状態で最後の `cap_result` / error を受けた時。failed も含む）、center は owner の名前の messenger peer へ `push` で 1 回送る（`[bantou] remote 完了 remote_id=… state=…` + `result:` 先頭 500 文字 + `error:`）。report で remote-cap が再開されて再び終わった時は、新しい結果で送る。同じ結果は二重に送らない。送れた時刻は `notifiedAt`、peer が見つからない・送れない時は理由を `notifyError` に残し center.log に出す（再送はしない）。`session_create` の session は agent-messenger の peer として登録される（下記「master-cap の起動（wrapper）」）ので届く。同名の peer が複数並んだ時（session 再起動直後）は `registered_at` が最新のものへ送る。config の `projects`（サーバー型の `rc_*`）は peer でないので、`notifyError` になる。そこは `remote_wait` で待つ。center 再起動前に終わっていた記録は通知しない。
-- `remote_wait`: `remote_id`（省略時は owner の running 中のどれか＝最初に終わったもの）が上の意味で終わるまで待って記録を返す。timeout は `state: "running"` のまま。待ち中に remote が delete されたら error。
-- `remote_list`: `owner` が分かればその owner の分だけ、分からなければ全件。`RemoteRecord` = `remote_id`, `owner`, `server`（作成時の peer id）, `serverName`, `state`, `createdAt`, `finishedAt?`, `result?`, `error?`, `notifiedAt?`, `notifyError?`。
+- **原則: remote-cap は 1 つの server につき 1 つだけ**。作業が何であれ、center はその cap に次の指示を送る（作業ごとに cap を作らない）。記録は「server の cap」単位で、`remote_id` = cap_id。
+- **cap_id**: `c-<10 桁 hex>`。center の状態 dir（config と同じ場所）の `center-id` ファイルに 10 桁 hex を持ち、無ければ最初の起動で乱数から作って保存する。center を再起動しても同じ値になる。選んだ理由: (1) center ごとに固定でなければ、再起動のたびに server に新しい cap が残る。(2) 乱数でなく hostname や config のパスから導くと、別 center と衝突したり、dir の移動・コピーで変わる／重なる。(3) 状態 dir はすでに `remotes.json` `sessions.json` の置き場で、center の状態と一緒に残る。`center-id` が書けない時は、その起動の間だけの id を使い（ログに出す）、再起動で変わる。複数の server があっても cap_id は同じで、記録は server ごとに 1 件（server は peer id、無ければ名前 + host で照合）。
+- `remote_send`（別名 `remote_create`）: session からの指示を、その server の cap への「次の指示」として同じ cap_id の `kick_cap`（`reason: remote_send owner=<owner>`）で送る。送る前に server の `status` で cap の有無を確かめ、**cap が無い時だけ**最初の `kick_cap`（cap の作成）にする（`created: true`）。status が error・タイムアウトなら cap の有無が分からないので送らず isError。**返信を待たず**`{ remote_id, server, serverName, state: "running", created }` を返す。引数は `prompt` と `server?`（peer id、一致しなければ名前、省略時は発見した先頭）だけ。`model` / `worker_model` は呼び出しごとに取らず、config の `servers[]` の `model` / `workerModel` で server ごとに決め（`servers[].peer` が peer の id か名前、または `servers[].name` が peer 名か `server` 引数に一致するもの）、cap を作る最初の `kick_cap` にだけ載せる（server は再開した cap で同じモデルを使う）。設定に無ければ載せない。記録には作った時の `model` / `worker_model` が残る。`repo` / `branch` は受けない。
+  - 同じ server への送信は center 内で直列（status の確認 → 記録 → `kick_cap` の投入）なので、同時に 2 本来ても最初の `kick_cap` は 1 本だけ。
+  - cap が実行中の間の指示: center の link は同じ cap_id の `kick_cap` を直列にする（前の返信が来てから次を送る。返信待ちは cap_id で照合するので、2 本が並走して返信を取り違えることが無い）。待たされた指示は center のメモリで待ち、server 側でも cap ごとに直列に処理される。center が再起動すると、まだ送っていない指示は失われる（`failed` として復元される）。
+  - 取り違えの余地: cap が worker の report で再開した結果（`cap_result`）は、返信待ちがあればその指示の返信として受けられ、本来の返信は後から届く。center はどちらも cap の結果として履歴に積み、完了は「返信待ちの指示が 0」かつ cap が idle・worker 無しで判断するので、指示の完了判定や通知先は変わらない。結果の本文に、どの指示への返答かは cap の返答自体に含まれる。
+- `remote_delete`: server へ `stop_cap`（protocol `bantou` 1.1.0）を送って走行中の `claude -p` を止め、記録から外す。`remote_id` 省略時は center の cap。複数の server に同じ `remote_id` がある時は `server` で指定する（無いと error）。止められない（server が見つからない・error 返信）時、記録が running なら error（`force: true` なら記録だけ消し、`warning` に理由）。終わった記録は警告付きで消える。cap は共有なので owner は見ない（どの session からでも消せる）。消した後の指示は、server に cap が無ければ最初の `kick_cap` から作り直す。
+- 履歴: 記録は `history`（古い順、最大 200 件。古い完了済みから捨てる。未完了の指示は残す）に積む。指示 = `{ type: "instruction", at, owner（送った session）, prompt（先頭 200 文字）, done_at?, notified_at?, notify_error? }`。結果 = `{ type: "result", at, ok, text（8000 文字まで）, error? }`（`cap_result`、遅れて届くものも含む）。
+- `remote_list` の `state` / `result`: cap の最新の結果。最初の `cap_result` で done / failed になり、report 起因の再開など後から届く `cap_result`（と `kick_cap` の error）でも `result` / `state` / `error` を最新に更新し、履歴に積む。返信待ちの指示がある間、または cap が done でも activity で cap か配下の worker が running / stalled の間は、`state` は running（`finishedAt` なし）で返す。
+- 完了通知: **cap が idle かつ worker 無し**（`state` が running でない = 返信待ちの指示が無く、activity で cap・worker に running / stalled が無い状態で最後の `cap_result` / error を受けた時。failed も含む）になった時点で、未完了の指示を全て完了にし（`done_at`）、**指示を送った session ごとに 1 回**、その名前の messenger peer へ `push` で送る（`[bantou] remote 完了 remote_id=… state=…` + `指示:`（その session の指示の先頭 80 文字）+ `result:` 先頭 500 文字 + `error:`）。複数 session の指示が重なっても、`cap_result` が来るたびに古い指示から順に完了にはせず、idle になった時にまとめて完了にして各 owner へ通知する（cap の返答本文に、どの指示への結果かが含まれる前提）。送れた時刻は指示の `notified_at`、peer が見つからない・送れない時は理由を `notify_error` に残し center.log に出す（再送はしない）。`session_create` の session は agent-messenger の peer として登録される（下記「master-cap の起動（wrapper）」）ので届く。同名の peer が複数並んだ時（session 再起動直後）は `registered_at` が最新のものへ送る。config の `projects`（サーバー型の `rc_*`）は peer でないので、`notify_error` になる。そこは `remote_wait` で待つ。center 再起動前の未完了の指示は、完了を見届けられないので閉じて通知しない（`notify_error: center 再起動のため通知しない`）。
+- `remote_wait`: `remote_id`（と `server`）の cap が上の意味で idle・worker 無しになるまで待って記録を返す。`remote_id` と `server` を省略した時は、owner の未完了の指示がある cap のどれか（最初に終わったもの）。どの session からでも `remote_id` で同じ cap を待てる。timeout は `state: "running"` のまま。待ち中に cap が delete されたら error。
+- `remote_list`: `owner` が分かればその owner が指示を送った cap だけ、分からなければ全件。`RemoteRecord` = `remote_id`（= cap_id）, `server`（最後に使った peer id）, `serverName`, `serverHost?`, `state`, `model?`, `worker_model?`, `createdAt`, `finishedAt?`, `result?`, `error?`, `history`。`remote_list` は加えて `owners`（指示を送った session、古い順）と `activity?` を返す。
+- 旧形式の記録（作業ごとの cap。`history` が無い `remotes.json` の記録）: 起動時に読み捨てず、`legacy: true`（`history: []`、`owners` = 旧 `owner`）として `remote_list` に残す。旧 cap は server に残っていて資源を使っているので、一覧に出して `remote_delete`（`remote_id` を指定。`stop_cap` して記録を消す）で片付けられるようにするため。新しい指示は旧形式の記録に混ぜず、cap の記録を別に作る。旧形式には完了通知を送らず、遅れた `cap_result` も反映しない（`running` だったものは `failed` で復元）。
 - `activity`（`remote_list` の各要素）: server が protocol `bantou`（1.2.0）の `activity` 通知で送ってくる remote-cap と worker の生存・進捗。通知がまだ無い remote には `activity` キーが無い。中身は `{ at, received_ms_ago, stale, agents }`。
   - `agents`: `AgentActivity[]`（cap → worker）。`kind`, `id`, `cap_id`, `state`（`running` / `stalled` / `idle` / `done` / `failed` / `lost`）, `task`（prompt の冒頭）, `last_activity`, `last_output_at`, `silent_ms`, `started_at`, `finished_at`, `error?`。仕様は `docs/protocol.md` の「Activity notices」。
   - `silent_ms`: 通知時の値に、center が受信してからの経過を足して返す。desktop はホスト間の時計ずれを避けるため、時刻の差でなくこの値で経過を出す。
   - `received_ms_ago`: 最後の通知を受けてからの ms（center の時計）。`stale`: running / stalled の agent がいるのに 30 秒を超えて通知が来ていない（server・経路が落ちた疑い）。center は lost に書き換えず `stale` を立てるだけ（lost は server 側の事実）。
-  - 保持はメモリのみ（`remotes.json` には書かない）。center 再起動後は次の通知まで空。`remote_delete` で消える。`cap_kick` で起動した cap には記録が無いので `remote_list` に出ない。
-  - 通知が来るのは、その remote の `kick_cap` を送った center（peer id は再登録で変わるため、server が記録した旧 id 宛ては届かない）。ログ: 状態の組が変わった時だけ `activity 受信: cap_id=<id> <id>=<state> ...`。
-- 保存: メモリ + config と同じ dir の `remotes.json`。center 再起動で返信を受け取れなくなった `running` は復元時に `failed`（server 側は続行している可能性）にする。center 終了時に返信待ちだったものも `failed`（`center 終了`）。
+  - 保持はメモリのみ（`remotes.json` には書かない）。center 再起動後は次の通知まで空。`remote_delete` で消える。`cap_kick` で起動した cap には記録が無いので `remote_list` に出ない。同じ cap_id が複数の server にあるので、保持は通知を送ってきた server の peer id ごと。
+  - 通知が来るのは、その cap の `kick_cap` を送った center（peer id は再登録で変わるため、server が記録した旧 id 宛ては届かない）。ログ: 状態の組が変わった時だけ `activity 受信: cap_id=<id> <id>=<state> ...`。
+- 保存: メモリ + config と同じ dir の `remotes.json`。center 再起動で返信を受け取れなくなった `running` は復元時に `failed`（server 側は続行している可能性）にし、未完了の指示は閉じる。center 終了時に返信待ちだったものも `failed`（`center 終了`）。cap_id は同 dir の `center-id`。
 - **server 選択**（概念: server は master-cap から見えなくてよい。今は発見ベース）: `config.servers` に依存しない。messenger の `listPeers("all", {protocol: "bantou"})` で見つかった peer の先頭（既定）。`server` 引数は peer id、一致しなければ name。見つからなければ候補付きで error。既存の `cap_kick` などは `servers[]` のまま（挙動は変えない）。`servers[]` があれば先頭の messenger client を共有し、無ければ内部の client を 1 本使う。broker に古い peer が残っていると先頭がそれになり得る（実測: broker.json を引き継いだ再起動で古い peer が先頭に来て、指示が届かず待ち続けた）。
-- **owner**（呼んだ master-cap の識別）: http では header `X-Bantou-Session: <session 名>`（または URL query `?session=<名>`）があればそれ、無ければ tool 引数 `owner`。優先順は header > query > 引数。`remote_create` はどれも無ければ error。`remote_delete` は owner が分かる時だけ記録の owner と照合する。`remote_list` は分からなければ絞らない。stdio には header が無いので引数のみ。
+- **owner**（呼んだ master-cap の識別）: http では header `X-Bantou-Session: <session 名>`（または URL query `?session=<名>`）があればそれ、無ければ tool 引数 `owner`。優先順は header > query > 引数。`remote_send` はどれも無ければ error。`remote_delete` は owner を見ない（cap は共有）。`remote_list` は分からなければ絞らない。stdio には header が無いので引数のみ。
   - **今は**: master-cap 側に header 付きの接続を自動で持たせる仕組みは入れていない。理由: `claude remote-control` は `--mcp-config` / `--settings` を受けず（remote-control の前の global flag は spawn した session に引き継がれない）、`~/.claude.json` の書換えはユーザー設定の変更、`.mcp.json` の配置は承認プロンプト・未 trust・token 平文の問題がある。そのため、master-cap が center に繋ぐ MCP 設定（header 付き）を用意する側（番頭など）が `X-Bantou-Session` を付けるか、master-cap が `owner` 引数を渡す。
   - owner は自己申告で、認証はしない（Bearer token は center 全体で 1 つ）。
 
@@ -191,7 +201,7 @@ center は wrapper 経由の session（master-cap）を起動するたび（新�
 - 組の版: `pair.server` = 組になる server の npm `bantou` の版、`pair.protocol` = このバイナリに bundle した protocol `bantou` の版。server の版は desktop のビルド（`packages/desktop/scripts/build-sidecar.ts`）が `bun build --compile --env=BANTOU_PAIR_*` で env `BANTOU_PAIR_SERVER_VERSION` を埋め込む（値はビルド時に固定され、実行時の env では変わらない）。埋め込みが無い時は作業ツリーの `packages/server/package.json`（`npm run dev` / tsx / dist 用）、それも無ければ不明（版合わせは無効で、protocol の版の門だけ効く）。単体バイナリ（`build:bin`）は埋め込まないので、`BANTOU_PAIR_SERVER_VERSION` を付けてビルドしない限り不明になる。
 - 確認: 起動後（`connectAll` の後）と 30 秒ごと（更新中の server がいる間は 5 秒ごと）に、発見した server へ `hello` を送る。server の版が組と違えば `update_server {version: pair.server}` を送る（新旧は比べない）。server は peer の `summary`（`<host> <workspace>`）で同一視する（peer id は再登録で変わる）。
 - 状態: `ok` / `updating`（`update.running` = 待っている cap・worker の件数）/ `unsupported`（protocol 1.3.0 未満。自動更新できず、手動で起動し直す）/ `mismatch`（server の版は組と同じなのに protocol の版が違う）/ `failed`（更新指示が断られた。同じ版は center が再起動するまで再指示しない）/ `lost`（更新中のまま 15 分戻らない）/ `unknown`（hello に答えない）。
-- 門: protocol の版が `pair.protocol` と違う server には、`hello` / `update_server` 以外（`kick_cap` / `stop_cap` / `status`）を送らず `error`（`code:"version_mismatch"`、`retryable:true`）を返す。版が分からない（名前宛てへのフォールバック）時は従来どおり送る。更新中の server への `kick_cap` は送らず `code:"updating"`（retryable）で断る。`remote_create` は断られたら記録を作らず isError で返すので、master-cap が後で再送できる。center は自動では再送しない。
+- 門: protocol の版が `pair.protocol` と違う server には、`hello` / `update_server` 以外（`kick_cap` / `stop_cap` / `status`）を送らず `error`（`code:"version_mismatch"`、`retryable:true`）を返す。版が分からない（名前宛てへのフォールバック）時は従来どおり送る。更新中の server への `kick_cap` は送らず `code:"updating"`（retryable）で断る。`remote_send` は断られたら記録を作らず isError で返すので、master-cap が後で再送できる。center は自動では再送しない。
 - 更新中に server の broker が止まる構成（server の内蔵 broker に center もつなぐ）では、再起動中は接続が切れる。送信失敗で次の使用時に接続を作り直す。
 
 ## claude の解決
@@ -283,8 +293,8 @@ session（`session_create` で作った wrapper 経由の claude。master-cap �
 
 ## 窓口の分離
 
-- 外向け `/mcp`: 認証は config の `token`（Bearer）。`session_*`、読み取り専用の `remote_list`、`remote_wait`、`rc_*`、`server_*`、`worker_resume`。`remote_create` / `remote_delete` / `cap_kick` は無い。
-- session 向け `/mcp/session`: `remote_create` / `remote_delete` / `remote_list` / `remote_wait` だけ。認証は session の起動ごとに center が作る使い捨て token（`Authorization: Bearer <token>`）と header `X-Bantou-Session: <session 名>` の組で、token はその名前に発行されたものだけ通る。不一致・外向け token・欠落は 401。owner は header の名前で、引数では受けない。MCP session id は窓口をまたいで使えない。
+- 外向け `/mcp`: 認証は config の `token`（Bearer）。`session_*`、読み取り専用の `remote_list`、`remote_wait`、`rc_*`、`server_*`、`worker_resume`。`remote_send` / `remote_create` / `remote_delete` / `cap_kick` は無い。
+- session 向け `/mcp/session`: `remote_send` / `remote_create`（別名）/ `remote_delete` / `remote_list` / `remote_wait` だけ。認証は session の起動ごとに center が作る使い捨て token（`Authorization: Bearer <token>`）と header `X-Bantou-Session: <session 名>` の組で、token はその名前に発行されたものだけ通る。不一致・外向け token・欠落は 401。owner は header の名前で、引数では受けない。MCP session id は窓口をまたいで使えない。
 - token は session の起動（再起動を含む）ごとに作り直し、停止で無効になる。master-cap には環境変数 `BANTOU_SESSION_TOKEN` で渡し、`--mcp-config` の JSON には `${BANTOU_SESSION_TOKEN}` と書く（引数に平文で残さない、ファイルも書かない）。
 
 ## master-cap の起動（wrapper）

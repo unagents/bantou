@@ -117,6 +117,8 @@ export interface ServerLink {
   selectPeer(sel?: string): Promise<ServerPeer>;
   /** 指定 peer へ kick_cap を送り、返信（cap_result / error）まで待つ。 */
   kickCapOn(peer: ServerPeer, cmd: KickCapInput): Promise<CapResultReply | ErrorReply>;
+  /** 指定 peer へ status を送り、status_result（または error）を待つ（cap の有無の確認用。FOLLOW_TIMEOUT_MS で切る）。 */
+  statusOn(peer: ServerPeer): Promise<StatusReply | ErrorReply>;
   /** 指定 peer へ stop_cap を送り、返信（stop_result / error）まで待つ。 */
   stopCapOn(peer: ServerPeer, cmd: StopCapInput): Promise<StopResultReply | ErrorReply>;
   /** 指定 peer へ hello を送り、hello_result（または error）を待つ。protocol の版の門は通らない。 */
@@ -238,12 +240,12 @@ export function createServerLink(opts: {
   /** peer id の変化を見る間隔（既定 5 秒）。 */
   peerWatchMs?: number;
   /** server からの通知（activity）。返信ではないので pending とは照合しない。 */
-  onNotice?: (n: ServerNotice) => void;
+  onNotice?: (n: ServerNotice, fromId?: string) => void;
   /**
    * 待ちの無い cap_result / kick_cap の error（report 起因の再開の結果など、最初の返信の後に server が送ってくるもの）。
    * 対応する待ちが無い返信を捨てずに渡す。
    */
-  onLateCapReply?: (r: CapResultReply | ErrorReply) => void;
+  onLateCapReply?: (r: CapResultReply | ErrorReply, fromId?: string) => void;
 }): ServerLink {
   const { config, log } = opts;
   let extraGate: Gate | undefined;
@@ -306,7 +308,7 @@ export function createServerLink(opts: {
     const notice = parseServerNotice(body);
     if (notice && fromServer(slot, m)) {
       try {
-        opts.onNotice?.(notice);
+        opts.onNotice?.(notice, m.from_id);
       } catch (e) {
         log(`通知の処理に失敗: server=${slot.cfg.name} type=${notice.type} ${e instanceof Error ? e.message : String(e)}`);
       }
@@ -350,7 +352,7 @@ export function createServerLink(opts: {
       log(`対応する待ちなし: server=${slot.cfg.name} type=${r.type}`);
       if (r.type === "cap_result" || (r.type === "error" && r.command === "kick_cap" && r.cap_id !== undefined)) {
         try {
-          opts.onLateCapReply?.(r);
+          opts.onLateCapReply?.(r, m.from_id);
         } catch (e) {
           log(`遅れた返信の処理に失敗: server=${slot.cfg.name} ${e instanceof Error ? e.message : String(e)}`);
         }
@@ -579,6 +581,8 @@ export function createServerLink(opts: {
     },
     kickCapOn: (peer, cmd) =>
       request<CapResultReply>(discoveryName, "cap_result", cmd.cap_id, cmd, { target: peerTarget(peer) }),
+    statusOn: (peer) =>
+      request<StatusReply>(discoveryName, "status_result", undefined, {}, { target: peerTarget(peer), timeoutMs: FOLLOW_TIMEOUT_MS }),
     stopCapOn: (peer, cmd) =>
       request<StopResultReply>(discoveryName, "stop_result", cmd.cap_id, cmd, { target: peerTarget(peer), timeoutMs: STOP_TIMEOUT_MS }),
     hello: (peer) =>

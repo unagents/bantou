@@ -52,8 +52,8 @@ test("three columns: side menu | remote tasks of the session + task list | termi
   await mock(page, (m) => {
     m.centerRemotes = [
       {
-        remote_id: "r-careery-1",
-        owner: "careery",
+        remote_id: "c-0123456789",
+        owners: ["careery"],
         server: "p",
         serverName: "bantou-server",
         state: "running",
@@ -62,10 +62,10 @@ test("three columns: side menu | remote tasks of the session + task list | termi
           at: "2026-10-29T00:59:55.000Z",
           received_ms_ago: 1000,
           stale: false,
-          agents: [{ kind: "cap", id: "r-careery-1", state: "running", task: "xlsx 取込の調査", silent_ms: 2000, last_activity: "Bash 実行中" }],
+          agents: [{ kind: "cap", id: "c-0123456789", state: "running", task: "xlsx 取込の調査", silent_ms: 2000, last_activity: "Bash 実行中" }],
         },
       },
-      { remote_id: "r-other-1", owner: "stroke-board", server: "p", serverName: "bantou-server", state: "done", createdAt: "2026-10-29T00:00:00.000Z" },
+      { remote_id: "c-0123456789", owners: ["stroke-board"], server: "p2", serverName: "other-server", state: "done", createdAt: "2026-10-29T00:00:00.000Z" },
     ];
   });
   await pickSession(page, "careery");
@@ -73,9 +73,9 @@ test("three columns: side menu | remote tasks of the session + task list | termi
   // middle: only the selected session's remotes, the Cork task list below them
   const middle = page.getByTestId("middle-col");
   await expect(middle.getByTestId("session-remote")).toHaveCount(1);
-  await expect(middle.getByTestId("session-remote")).toContainText("r-careery-1");
+  await expect(middle.getByTestId("session-remote")).toContainText("bantou-server");
   await expect(middle.getByTestId("session-remote-task")).toHaveText("xlsx 取込の調査");
-  await expect(middle).not.toContainText("r-other-1");
+  await expect(middle).not.toContainText("other-server");
   const remotesBox = await middle.getByTestId("session-remotes").boundingBox();
   const tasksBox = await middle.locator('section[aria-label="careery"]').boundingBox();
   expect(tasksBox!.y).toBeGreaterThan(remotesBox!.y + remotesBox!.height - 2);
@@ -83,7 +83,7 @@ test("three columns: side menu | remote tasks of the session + task list | termi
   // another session: its own remotes
   await pickSession(page, "stroke-board");
   await expect(middle.getByTestId("session-remote")).toHaveCount(1);
-  await expect(middle.getByTestId("session-remote")).toContainText("r-other-1");
+  await expect(middle.getByTestId("session-remote")).toContainText("other-server");
   await pickSession(page, "careery");
 
   // right: the terminal with the output of the session

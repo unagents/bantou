@@ -489,12 +489,33 @@ Remote-control record:
 `resume_worker` (a cap starts and continues workers with `worker_start`) and answers it with an
 `error` reply.
 
-`remote_list` returns `RemoteRecord[]` (`remote_id`, `owner`, `server`, `serverName`,
-`state`, `model?`, `worker_model?`, `createdAt`, `finishedAt?`, `result?`, `error?`, `notifiedAt?`, `notifyError?`). `notifiedAt` = when the center sent the
-done notice (messenger `push` to the peer named like the owner session); `notifyError` = why it could not. `remote_wait`
-(`remote_id?`, `timeout_sec?` default 600, max 1800) waits until the remote has finished and returns its record,
-or returns it with `state: "running"` on timeout. A remote that has received
-`activity` notices also has `activity`:
+**One remote-cap per bantou-server.** Whatever the work is, the center sends the next instruction to that
+cap; it never creates a cap per task. The center's cap id is fixed per center (`c-<10 hex>`, kept in
+`center-id` next to `center.json`, so it survives a restart). In the session window (`/mcp/session`):
+
+| tool | input | output |
+|---|---|---|
+| `remote_send` | `prompt`, `server?` | `{ remote_id, server, serverName, state: "running", created, model?, worker_model? }` |
+| `remote_create` | same | alias of `remote_send` (same handling) |
+| `remote_delete` | `remote_id?`, `server?`, `force?` | `{ remote_id, deleted, stopped, warning? }` (`stop_cap` + drop the record) |
+
+`remote_send` first asks the server for `status`. If the cap (`remote_id`) is not there it sends the first `kick_cap`
+(`created: true`, with `model` / `worker_model` from the center's `servers[]` config when set); otherwise it sends
+`kick_cap` with the same `cap_id` (a resume, no `model`). The server runs a cap's commands one at a time, so a busy cap
+makes the instruction wait. `model` and `worker_model` are not arguments. The protocol and the server are unchanged.
+
+`remote_list` returns one `RemoteView` per server cap: `RemoteRecord` (`remote_id` = cap id, `server`, `serverName`,
+`serverHost?`, `state`, `model?`, `worker_model?`, `createdAt`, `finishedAt?`, latest `result?` / `error?`, `history`,
+`legacy?`) plus `owners` (sessions that sent instructions) and `activity?`. `history` is the instructions
+(`{type:"instruction", at, owner, prompt (first 200 chars), done_at?, notified_at?, notify_error?}`) and results
+(`{type:"result", at, ok, text, error?}`, one per `cap_result`, late ones included) in order. `remote_wait`
+(`remote_id?`, `server?`, `timeout_sec?` default 600, max 1800) waits until the cap is idle and none of its workers is
+`running` / `stalled`, and returns its record, or returns it with `state: "running"` on timeout. When the cap
+becomes idle with no worker running, the center closes **all** pending instructions and sends one done notice
+(messenger `push`) to each session that sent one, not one per `cap_result`. A record of the old format (one cap per task, no `history`) is kept as `legacy: true`
+for listing and `remote_delete`; it gets no instructions and no notices.
+
+A remote that has received `activity` notices also has `activity`:
 
 | key | meaning |
 |---|---|

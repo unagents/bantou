@@ -62,7 +62,7 @@ export class MockBantou {
       { key: "mac200 /ws", id: "p2", name: "bantou-server", hostname: "mac200", server_version: "0.3.0", protocol_version: "1.3.0", state: "ok", detail: "版が一致", since: "2026-10-31T00:00:00.000Z" },
     ],
   };
-  /** `remote_list` result (center `RemoteView[]`). */
+  /** `remote_list` result (center `RemoteView[]`): one remote-cap per server (`remote_id` = cap_id, `owners`, `history`). */
   centerRemotes: unknown[] = [];
   /** `session_list` result (center `SessionInfo[]`); `session_create` appends to it. */
   centerSessions: Record<string, unknown>[] = [];

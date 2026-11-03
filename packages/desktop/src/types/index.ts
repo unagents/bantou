@@ -264,19 +264,51 @@ export interface CenterRemoteActivity {
   agents: CenterAgentActivity[];
 }
 
-/** `remote_list` element (center `RemoteView`, the part shown). */
+/** One instruction in the history of a remote-cap (center `InstructionEntry`). Pending while `done_at` is absent. */
+export interface CenterInstructionEntry {
+  type: "instruction";
+  at: string;
+  /** Session that sent the instruction. */
+  owner: string;
+  /** Head of the prompt (at most 200 characters). */
+  prompt: string;
+  done_at?: string;
+  notified_at?: string;
+  notify_error?: string;
+}
+
+/** One `cap_result` in the history of a remote-cap (center `ResultEntry`). */
+export interface CenterResultEntry {
+  type: "result";
+  at: string;
+  ok: boolean;
+  text: string;
+  error?: string;
+}
+
+export type CenterRemoteHistoryEntry = CenterInstructionEntry | CenterResultEntry;
+
+/**
+ * `remote_list` element (center `RemoteView`, the part shown): one remote-cap per server (`remote_id` = cap_id, fixed per center),
+ * with the history of instructions and results. An old-format record (one cap per task) has `legacy: true` and an empty history.
+ */
 export interface CenterRemoteRecord {
   remote_id: string;
-  owner: string;
+  /** Sessions that sent instructions to this cap (oldest first). */
+  owners: string[];
   server: string;
   serverName?: string;
   state: "running" | "done" | "failed";
-  /** Model given to the remote-cap at `remote_create` (absent = none). */
+  /** Model given when the cap was created (absent = none). */
   model?: string;
+  worker_model?: string;
   createdAt: string;
   finishedAt?: string;
+  /** Latest `cap_result` text. */
   result?: string;
   error?: string;
+  history?: CenterRemoteHistoryEntry[];
+  legacy?: boolean;
   activity?: CenterRemoteActivity;
 }
 

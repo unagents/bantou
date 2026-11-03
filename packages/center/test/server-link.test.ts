@@ -913,3 +913,45 @@ test("notifyPeer: peer がいない・列挙非対応・送信失敗・接続失
   assert.match((r3 as { reason: string }).reason, /送信失敗: send failed/);
   await c.link.close();
 });
+
+test("statusOn: 選んだ peer へ status を送り status_result を返す（cap の有無の確認用）", async () => {
+  const peer = { id: "id-a", name: "bantou-server", version: MESSENGER_PROTOCOL.version };
+  const { link, clients } = setupNoServers([peerOf("id-a", "bantou-server", MESSENGER_PROTOCOL.version)]);
+  const p = link.statusOn(peer);
+  await sleep(20);
+  assert.deepEqual(clients[0].sentTo, ["id-a"]);
+  assert.deepEqual(clients[0].sent[0], { bantou: 1, type: "status" });
+  clients[0].reply(statusResult(1), "bantou-server", { from_id: "id-a" });
+  const r = (await p) as { type: string; caps: { id: string }[] };
+  assert.equal(r.type, "status_result");
+  assert.deepEqual(r.caps.map((c) => c.id), ["c1"]);
+  await link.close();
+});
+
+test("通知・遅れた返信には送信元の peer id（from_id）が渡る", async () => {
+  const notices: { cap: string; from?: string }[] = [];
+  const late: { text?: string; from?: string }[] = [];
+  const cfg = parseConfig({ servers: [{ name: "s1", timeoutMs: 2000 }] }, "/x/c.json");
+  const clients: FakeClient[] = [];
+  const link = createServerLink({
+    config: cfg,
+    log: () => {},
+    clientFactory: () => {
+      const c = new FakeClient();
+      clients.push(c);
+      return c;
+    },
+    healthCheck: async () => true,
+    onNotice: (n, from) => notices.push({ cap: n.cap_id, ...(from ? { from } : {}) }),
+    onLateCapReply: (r, from) => late.push({ text: (r as { result_text?: string }).result_text, ...(from ? { from } : {}) }),
+  });
+  const p = link.kickCap("s1", { cap_id: "a", prompt: "x" });
+  await sleep(20);
+  clients[0].reply(notice("a"), "bantou-server", { from_id: "srv-1" });
+  clients[0].reply(capResult("a", "first"), "bantou-server", { from_id: "srv-1" });
+  await p;
+  clients[0].reply(capResult("a", "second"), "bantou-server", { from_id: "srv-1" });
+  assert.deepEqual(notices, [{ cap: "a", from: "srv-1" }]);
+  assert.deepEqual(late, [{ text: "second", from: "srv-1" }]);
+  await link.close();
+});

@@ -20,7 +20,7 @@ async function poll() {
   polling = true;
   try {
     const all = await centerTool<CenterRemoteRecord[]>("remote_list");
-    remotes.value = props.owner === undefined ? all : all.filter((r) => r.owner === props.owner);
+    remotes.value = props.owner === undefined ? all : all.filter((r) => r.owners.includes(props.owner!));
     fetchedAt.value = Date.now();
     error.value = null;
   } catch (e) {
@@ -68,6 +68,16 @@ const stateLabel: Record<CenterActivityState, string> = {
   lost: "消失",
 };
 
+/** History entries shown: the latest ones, newest last. */
+const HISTORY_SHOWN = 8;
+const recent = <T,>(h: T[]): T[] => h.slice(-HISTORY_SHOWN);
+
+/** HH:MM:SS (local) of an ISO time. */
+function clock(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleTimeString("ja-JP", { hour12: false });
+}
+
 /** `silent_ms` as of the fetch plus the time since, so host clock skew does not matter. */
 function elapsed(silentMs: number): string {
   const s = Math.max(0, Math.floor((silentMs + (now.value - fetchedAt.value)) / 1000));
@@ -94,7 +104,8 @@ function elapsed(silentMs: number): string {
       <div class="flex items-center gap-2 text-xs">
         <span class="font-medium">{{ r.remote_id }}</span>
         <span class="text-cork-muted">{{ r.serverName ?? r.server }}</span>
-        <span class="text-cork-muted">{{ r.owner }}</span>
+        <span class="text-cork-muted" :data-testid="`${tp}remote-owners`">{{ r.owners.join(", ") }}</span>
+        <UBadge v-if="r.legacy" color="neutral" variant="subtle" label="旧形式" :data-testid="`${tp}remote-legacy`" />
         <span v-if="r.model" class="text-cork-muted" :data-testid="`${tp}remote-model`">{{ r.model }}</span>
         <UBadge
           v-if="r.activity?.stale"
@@ -136,6 +147,28 @@ function elapsed(silentMs: number): string {
           <span v-if="a.error" class="text-cork-danger-text truncate pl-14">{{ a.error }}</span>
         </div>
       </template>
+      <div v-if="r.history?.length" class="flex flex-col pl-2 text-xs" :data-testid="`${tp}remote-history`">
+        <div
+          v-for="(h, i) in recent(r.history)"
+          :key="`${h.type}:${h.at}:${i}`"
+          class="flex items-center gap-2"
+          :data-testid="`${tp}remote-history-item`"
+          :data-type="h.type"
+          :data-pending="h.type === `instruction` && !h.done_at ? `true` : `false`"
+        >
+          <span class="text-cork-muted shrink-0">{{ clock(h.at) }}</span>
+          <template v-if="h.type === `instruction`">
+            <span class="w-12 shrink-0">指示</span>
+            <span class="text-cork-muted shrink-0">{{ h.owner }}</span>
+            <span class="min-w-0 flex-1 truncate">{{ h.prompt }}</span>
+            <span v-if="!h.done_at" class="text-cork-muted shrink-0">未完了</span>
+          </template>
+          <template v-else>
+            <span class="w-12 shrink-0">{{ h.ok ? `結果` : `失敗` }}</span>
+            <span class="min-w-0 flex-1 truncate">{{ h.ok ? h.text : (h.error ?? h.text) }}</span>
+          </template>
+        </div>
+      </div>
     </div>
     <p v-if="remotes && !remotes.length" class="text-cork-muted text-xs" :data-testid="`${tp}remotes-none`">
       remote なし
