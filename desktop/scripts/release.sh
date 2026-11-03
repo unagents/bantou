@@ -4,10 +4,11 @@
 #   version   : 例 0.1.30（先頭の v は付けない）。develop の今の版と違うこと
 #   --dry-run : 検査・版上げ・署名ビルド・push 可否の確認まで。push・release・cask・入れ替えはしない
 # 流れ: develop を新規 clone → e2e・cargo test → 版上げ commit → 署名ビルド → latest.json
+#       → server が npm に無い版なら server の test と npm publish
 #       → develop を push・main を早送り → gh release → cask → cask の commit を push → 後始末 → mac200 の入れ替え
 # 前提（mac200 claude-cli）: gh が GitHub に認証済み、~/.tauri/bantou-updater.key、bun・cargo・jq・/opt/homebrew/bin/brew。
+#   server の publish が要る時は npm にもログイン済み（desktop は server/package.json の版を対の版として埋め込むため、先に公開する）。
 # commit の末尾に足す行があれば ~/.config/bantou/release-trailer に置く（無ければ足さない）。
-# server/ を変えた時の npm publish は対象外（先に済ませておく）。
 set -euo pipefail
 
 usage() {
@@ -76,6 +77,15 @@ git config user.email claude.cli@local.host
 OLD="$(jq -r .version desktop/package.json)"
 [[ "$OLD" != "$VERSION" ]] || { echo "error: develop is already $VERSION" >&2; exit 1; }
 echo "develop $(git rev-parse --short HEAD), version $OLD -> $VERSION"
+SERVER_VERSION="$(jq -r .version server/package.json)"
+if [[ "$(npm view "bantou@$SERVER_VERSION" version 2>/dev/null || true)" == "$SERVER_VERSION" ]]; then
+  PUBLISH_SERVER=0
+  echo "server $SERVER_VERSION is on npm"
+else
+  PUBLISH_SERVER=1
+  echo "server $SERVER_VERSION is not on npm; it will be published"
+  npm whoami >/dev/null 2>&1 || { echo "error: server $SERVER_VERSION needs npm publish, but npm is not logged in" >&2; exit 1; }
+fi
 
 step "install and test"
 # protocol は file: 依存で、bun install の時点の中身が写される。dist を作ってから入れ直す
@@ -85,6 +95,9 @@ bun install
 git checkout -- bun.lock # bun install が書き換えることがある
 (cd desktop && bun run build:sidecar && bun run e2e)
 (cd desktop/src-tauri && cargo test)
+if [[ "$PUBLISH_SERVER" == 1 ]]; then
+  (cd server && npm install && npm test)
+fi
 
 step "bump $OLD -> $VERSION"
 OLD_RE="${OLD//./\\.}"
@@ -123,6 +136,9 @@ if [[ "$DRY_RUN" == 1 ]]; then
   git push --dry-run origin "$SHA:refs/heads/main"
   desktop/scripts/publish-cask.sh --dry-run "$VERSION" "$DMG_SHA"
   git checkout -- desktop/Casks/bantou.rb
+  if [[ "$PUBLISH_SERVER" == 1 ]]; then
+    (cd server && npm publish --dry-run)
+  fi
   ls -l "$OUT"
   cd /tmp
   rm -rf "$WORK" "$OUT"
@@ -130,8 +146,13 @@ if [[ "$DRY_RUN" == 1 ]]; then
   exit 0
 fi
 
-step "push develop and fast-forward main"
 PUSHED=1
+if [[ "$PUBLISH_SERVER" == 1 ]]; then
+  step "npm publish server $SERVER_VERSION"
+  (cd server && npm publish)
+fi
+
+step "push develop and fast-forward main"
 git push origin develop
 git push origin "$SHA:refs/heads/main"
 
@@ -152,14 +173,27 @@ step "swap the app on mac200"
 brew update
 brew upgrade --cask unagents/tap/bantou
 APP_UID="$(id -u koube)"
+INSTALLED="$(defaults read /Applications/bantou.app/Contents/Info.plist CFBundleShortVersionString)"
+[[ "$INSTALLED" == "$VERSION" ]] || { echo "error: mac200 has $INSTALLED installed, expected $VERSION" >&2; exit 1; }
 for pid in $(pgrep -u koube -f '^/Applications/bantou.app/Contents/MacOS/bantou$' || true); do
   sudo -n -u koube kill "$pid"
 done
+# アプリを止めると center・wrapper も後を追って終わる。残ったら新しいアプリと port がぶつかるので止める
 for _ in $(seq 1 30); do
   pgrep -u koube -f '/Applications/bantou.app/Contents/MacOS/' >/dev/null || break
   sleep 1
 done
+if pgrep -u koube -f '/Applications/bantou.app/Contents/MacOS/' >/dev/null; then
+  echo "error: old bantou processes are still running on mac200:" >&2
+  pgrep -u koube -fl '/Applications/bantou.app/Contents/MacOS/' >&2
+  exit 1
+fi
 sudo -n launchctl asuser "$APP_UID" sudo -n -H -u koube open /Applications/bantou.app
-INSTALLED="$(defaults read /Applications/bantou.app/Contents/Info.plist CFBundleShortVersionString)"
-[[ "$INSTALLED" == "$VERSION" ]] || { echo "error: mac200 has $INSTALLED installed, expected $VERSION" >&2; exit 1; }
-echo "released $VERSION (sha $SHA, dmg sha256 $DMG_SHA); mac200 restarted on $INSTALLED"
+NEW_PID=""
+for _ in $(seq 1 30); do
+  NEW_PID="$(pgrep -u koube -f '^/Applications/bantou.app/Contents/MacOS/bantou$' || true)"
+  [[ -n "$NEW_PID" ]] && break
+  sleep 1
+done
+[[ -n "$NEW_PID" ]] || { echo "error: bantou did not start on mac200" >&2; exit 1; }
+echo "released $VERSION (sha $SHA, dmg sha256 $DMG_SHA); mac200 runs $INSTALLED (pid $NEW_PID)"
