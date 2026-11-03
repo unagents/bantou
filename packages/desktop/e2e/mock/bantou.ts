@@ -72,6 +72,8 @@ export class MockBantou {
   centerSessionCreateError: string | null = null;
   /** Project settings the center keeps per session name (`session_settings_get` / `_update`, merged; `null` removes an item). */
   centerSettings: Record<string, Record<string, unknown>> = {};
+  /** When set, `session_settings_update` fails with this message (center isError / not reachable). */
+  centerSettingsUpdateError: string | null = null;
   /** When set, center_set_settings fails with this message (a failed save). */
   centerSetSettingsError: string | null = null;
   /** sessionUrl `session_create` returns (null: not connected yet). */
@@ -321,6 +323,7 @@ export class MockBantou {
       case "session_get_settings":
         return structuredClone(this.centerSettings[(args.name as string).trim()] ?? {});
       case "session_update_settings": {
+        if (this.centerSettingsUpdateError) throw new Error(this.centerSettingsUpdateError);
         const name = (args.name as string).trim();
         const next = { ...(this.centerSettings[name] ?? {}) };
         for (const [k, v] of Object.entries(args.settings as Record<string, unknown>)) {

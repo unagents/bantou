@@ -63,6 +63,30 @@ test.describe("session instructions", () => {
       expect(await mock(page, (m) => m.centerSettings)).toEqual({});
     });
 
+    test("the dialog reads the initial value from the center; a failed save shows the error and saves nothing", async ({ page }) => {
+      await page.goto("/");
+      await page.evaluate(() => {
+        const m = (window as unknown as { __BANTOU_MOCK__: Mock & { centerSettingsUpdateError: string | null } }).__BANTOU_MOCK__;
+        m.centerSettings.careery = { instructions: "center にある文" };
+        m.centerSettingsUpdateError = "center に接続できない: mock";
+      });
+      await page.locator('[data-testid=session-settings-open][data-name="careery"]').click();
+      const dlg = page.getByTestId("settings-dialog");
+      await expect(dlg.getByTestId("settings-instructions")).toHaveValue("center にある文");
+      await dlg.getByTestId("settings-instructions").fill("変えた文");
+      await dlg.getByTestId("settings-save").click();
+      await expect(dlg.getByTestId("settings-error")).toContainText("center に接続できない");
+      await expect(dlg).toBeVisible();
+      expect(await mock(page, (m) => m.centerSettings)).toEqual({ careery: { instructions: "center にある文" } });
+      // a retry after the center is back succeeds
+      await page.evaluate(() => {
+        (window as unknown as { __BANTOU_MOCK__: { centerSettingsUpdateError: string | null } }).__BANTOU_MOCK__.centerSettingsUpdateError = null;
+      });
+      await dlg.getByTestId("settings-save").click();
+      await expect(dlg).toBeHidden();
+      expect(await mock(page, (m) => m.centerSettings)).toEqual({ careery: { instructions: "変えた文" } });
+    });
+
     test("the gear is disabled for a project from the center config", async ({ page }) => {
       await page.goto("/");
       await page.evaluate(() => {
