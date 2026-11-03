@@ -45,10 +45,14 @@ fn normalize_settings(settings: Value) -> Result<Value, String> {
     Ok(Value::Object(map))
 }
 
-/// Body of the center's `session_create`: `settings` only when it holds something to set
+/// Body of the center's `session_create`: `path` only when it is not blank (the center then
+/// uses `<workspace>/<name>`), `settings` only when it holds something to set
 /// (a `null` item means none, so it is not sent on create).
-fn create_args(name: &str, settings: Option<Value>) -> Value {
+fn create_args(name: &str, path: Option<&str>, settings: Option<Value>) -> Value {
     let mut a = serde_json::json!({ "name": name });
+    if let Some(p) = path.map(str::trim).filter(|p| !p.is_empty()) {
+        a["path"] = Value::String(p.to_string());
+    }
     if let Some(Value::Object(m)) = settings {
         let m: serde_json::Map<String, Value> = m.into_iter().filter(|(_, v)| !v.is_null()).collect();
         if !m.is_empty() {
@@ -117,6 +121,9 @@ pub struct Session {
     pub session_url: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
+    /// The folder the session runs in (center's `path`; on the center's host). None when the center sends none.
+    #[serde(default)]
+    pub path: Option<String>,
     /// Center's `lastError` of the session.
     #[serde(default)]
     pub last_error: Option<String>,
@@ -232,18 +239,46 @@ pub async fn refresh_sessions(app: tauri::AppHandle, cache: tauri::State<'_, Ses
     Ok(read_list(&app, &cache).await)
 }
 
-/// Create a new session on the center (`session_create`). The center lists it, so the list is
-/// read again.
+/// What the add dialog needs about the folder field: the center's `workspace` (its default parent
+/// folder; None when unknown / not set / an older center without `center_info`) and whether this PC's
+/// folder dialog makes sense (only for the own sidecar center, on macOS / Windows).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PathHints {
+    pub workspace: Option<String>,
+    pub can_pick: bool,
+}
+
+/// `workspace` of the center's `center_info` answer (None when absent / null / blank).
+fn workspace_of(answer: &Value) -> Option<String> {
+    answer.get("workspace").and_then(Value::as_str).map(str::trim).filter(|w| !w.is_empty()).map(String::from)
+}
+
+/// The folder dialog picks a folder on this PC, so it only helps when the center runs here (sidecar).
+fn can_pick_folder(source: Option<center_mcp::TargetSource>, os_has_dialog: bool) -> bool {
+    os_has_dialog && source == Some(center_mcp::TargetSource::Sidecar)
+}
+
+#[tauri::command]
+pub async fn session_path_hints(app: tauri::AppHandle) -> CmdResult<PathHints> {
+    let source = center_mcp::current_source(&app).ok();
+    let workspace = center_json(&app, "center_info", None).await.ok().as_ref().and_then(workspace_of);
+    Ok(PathHints { workspace, can_pick: can_pick_folder(source, cfg!(any(target_os = "macos", target_os = "windows"))) })
+}
+
+/// Create a new session on the center (`session_create`). `path` is the folder on the center's
+/// host (blank: not sent, the center decides). The center lists it, so the list is read again.
 #[tauri::command]
 pub async fn create_session(
     app: tauri::AppHandle,
     cache: tauri::State<'_, SessionCache>,
     name: String,
+    path: Option<String>,
     settings: Option<Value>,
 ) -> CmdResult<Session> {
     let name = name.trim().to_string();
     let settings = settings.map(normalize_settings).transpose().map_err(CommandError::Other)?;
-    let v = center_json(&app, "session_create", Some(create_args(&name, settings)))
+    let v = center_json(&app, "session_create", Some(create_args(&name, path.as_deref(), settings)))
         .await
         .map_err(CommandError::Other)?;
     let s: Session =
@@ -262,6 +297,7 @@ mod tests {
             state: Some(state.into()),
             session_url: Some(format!("https://claude.ai/code/{name}")),
             source: Some("session".into()),
+            path: Some(format!("/ws/{name}")),
             last_error: None,
             context_usage: None,
             instructions: false,
@@ -286,14 +322,41 @@ mod tests {
     #[test]
     fn create_body_carries_settings_only_when_something_is_set() {
         use serde_json::json;
-        assert_eq!(create_args("a", None), json!({ "name": "a" }));
-        assert_eq!(create_args("a", Some(json!({}))), json!({ "name": "a" }));
-        assert_eq!(create_args("a", Some(json!({ "instructions": null }))), json!({ "name": "a" }));
-        let v = create_args("a", Some(json!({ "instructions": "x\ny" })));
+        assert_eq!(create_args("a", None, None), json!({ "name": "a" }));
+        assert_eq!(create_args("a", None, Some(json!({}))), json!({ "name": "a" }));
+        assert_eq!(create_args("a", None, Some(json!({ "instructions": null }))), json!({ "name": "a" }));
+        let v = create_args("a", None, Some(json!({ "instructions": "x\ny" })));
         assert_eq!(v["name"], "a");
         assert_eq!(v["settings"]["instructions"], "x\ny");
         assert!(v.get("instructions").is_none());
         assert!(serde_json::to_string(&v).unwrap().contains("x\\ny"));
+    }
+
+    #[test]
+    fn create_body_carries_path_only_when_not_blank() {
+        use serde_json::json;
+        assert_eq!(create_args("a", Some("/w/a"), None), json!({ "name": "a", "path": "/w/a" }));
+        assert_eq!(create_args("a", Some("  /w/a \n"), None), json!({ "name": "a", "path": "/w/a" }));
+        assert_eq!(create_args("a", Some(""), None), json!({ "name": "a" }));
+        assert_eq!(create_args("a", Some("   "), None), json!({ "name": "a" }));
+        assert_eq!(create_args("a", None, None), json!({ "name": "a" }));
+        let v = create_args("a", Some("/w/a"), Some(json!({ "instructions": "x" })));
+        assert_eq!(v["path"], "/w/a");
+        assert_eq!(v["settings"]["instructions"], "x");
+    }
+
+    #[test]
+    fn workspace_is_read_from_center_info_and_folder_dialog_only_for_the_own_center() {
+        use crate::center_mcp::TargetSource::{Remote, Sidecar};
+        use serde_json::json;
+        assert_eq!(workspace_of(&json!({ "workspace": "/ws" })).as_deref(), Some("/ws"));
+        assert_eq!(workspace_of(&json!({ "workspace": null })), None);
+        assert_eq!(workspace_of(&json!({ "workspace": " " })), None);
+        assert_eq!(workspace_of(&json!({})), None);
+        assert!(can_pick_folder(Some(Sidecar), true));
+        assert!(!can_pick_folder(Some(Remote), true));
+        assert!(!can_pick_folder(None, true));
+        assert!(!can_pick_folder(Some(Sidecar), false));
     }
 
     #[test]
@@ -417,6 +480,7 @@ mod tests {
         .unwrap();
         assert_eq!(e.session_url.as_deref(), Some("https://u"));
         assert_eq!(e.last_error.as_deref(), Some("x"));
+        assert_eq!(e.path.as_deref(), Some("/p"));
         let bare: Session = serde_json::from_str(r#"{"name":"a"}"#).unwrap();
         assert_eq!(bare.state, None);
     }

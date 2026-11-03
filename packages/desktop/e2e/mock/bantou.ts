@@ -74,6 +74,12 @@ export class MockBantou {
   sessionCache: SessionList = { sessions: [], reachable: true, reason: null, rev: 0 };
   /** When set, `session_create` fails with this message (center error). */
   centerSessionCreateError: string | null = null;
+  /** The center's `workspace` (`center_info`; `session_path_hints`). null: not set / an older center. */
+  centerWorkspace: string | null = "/mock/ws";
+  /** `session_path_hints.canPick`: this PC's folder dialog applies (own center on macOS / Windows). */
+  centerCanPick = false;
+  /** What the folder dialog (`pick_directory`) returns (null: cancelled). */
+  pickedDirectory: string | null = null;
   /** Project settings the center keeps per session name (`session_settings_get` / `_update`, merged; `null` removes an item). */
   centerSettings: Record<string, Record<string, unknown>> = {};
   /** When set, `session_settings_update` fails with this message (center isError / not reachable). */
@@ -160,6 +166,7 @@ export class MockBantou {
       state: e.state as Session["state"],
       sessionUrl: (e.sessionUrl as string | null) ?? null,
       source: e.source as Session["source"],
+      path: (e.path as string | undefined) ?? null,
       lastError: (e.lastError as string | undefined) ?? null,
       contextUsage: (e.contextUsage as Session["contextUsage"] | undefined) ?? null,
       instructions: (e.instructions as boolean | undefined) ?? false,
@@ -243,12 +250,17 @@ export class MockBantou {
   }
 
   /** `session_create` on the center: validates, appends to its list and returns the new entry. */
-  private createCenterSession(name: string): Record<string, unknown> {
+  private createCenterSession(name: string, path?: string | null): Record<string, unknown> {
     this.fetchCenterList();
     if (this.centerSessionCreateError) throw new Error(this.centerSessionCreateError);
     if (!/^[A-Za-z0-9_-]+$/.test(name)) throw new Error("name は英数字と _ - のみ");
     if (this.centerSessions.some((s) => s.name === name)) throw new Error(`name が既に使われている: ${name}`);
+    if (path && !path.startsWith("/")) throw new Error("path は絶対パスで指定する");
+    const clash = path ? this.centerSessions.find((s) => s.path === path) : undefined;
+    if (clash) throw new Error(`path が既に使われている: ${path}（${clash.name as string}）`);
     const e = this.centerEntry(name, this.centerSessionUrl ? "connected" : "starting", this.centerSessionUrl);
+    if (path) e.path = path;
+    else if (this.centerWorkspace) e.path = `${this.centerWorkspace}/${name}`;
     this.centerSessions.push(e);
     return e;
   }
@@ -290,7 +302,9 @@ export class MockBantou {
         this.dir = args.path as string;
         return null;
       case "pick_directory":
-        return null;
+        return this.pickedDirectory;
+      case "session_path_hints":
+        return { workspace: this.centerWorkspace, canPick: this.centerCanPick };
       case "list_workspace_history":
         return this.dir ? [this.dir] : [];
       case "list_tasks":
@@ -317,7 +331,7 @@ export class MockBantou {
         return structuredClone(this.readList());
       case "create_session": {
         const name = (args.name as string).trim();
-        const s = this.toSession(this.createCenterSession(name));
+        const s = this.toSession(this.createCenterSession(name, args.path as string | null | undefined));
         const settings = (args.settings as Record<string, unknown> | null | undefined) ?? {};
         const kept = Object.fromEntries(Object.entries(settings).filter(([, v]) => v !== null && v !== ""));
         if (Object.keys(kept).length) this.centerSettings[name] = kept;

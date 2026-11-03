@@ -26,6 +26,16 @@ master-cap への追加指示（`--append-system-prompt`）を session ごとに
 |---|---|---|
 | `instructions` | string（16000 文字以内、空文字 = 無し） | master-cap への追加指示。起動のたびに claude へ `--append-system-prompt <値>`（新規・再起動・`--continue`・復元のすべて）。wrapper 経由の session だけが対象 |
 
+## session のフォルダ（path）
+
+settings の項目ではなく、session の記録の `path`（master-cap の claude の cwd）。作成時にだけ決まり、変更しない（desktop の歯車では読み取り専用）。2026-11-04 決定。
+
+- 作成: desktop の追加ダイアログの「フォルダ」欄（既定は空）。空なら `session_create` に `path` を渡さず、center が `<workspace>/<name>` に決める。入力は絶対パス。center は無ければ作り、相対パス・別 session と同じ path・作れない場合は error を返す（desktop はそのままダイアログに出す）。
+- プレースホルダ: center の `workspace`。desktop が取る手段として center に tool `center_info`（引数なし → `{ workspace: string | null }`）を足した。旧 center（tool が無い）や取れない時は汎用文。
+- フォルダ選択ダイアログ: 自分の sidecar center で macOS / Windows の時だけ。別ホストの center ではフォルダは center のホスト上のパスなので、手入力のみ。
+- 表示: 歯車のダイアログは `session_list` の `path` を読み取り専用で出す（`session_settings_get` は変えない）。
+- 比較した案（workspace の取り方）: (A) `session_list` の返り値を `{sessions, workspace}` に変える（既存の読み手を壊す）、(B) `session_settings_get` に載せる（追加ダイアログの時点では session が無い）、(C) 新 tool `center_info`。(C) を採用。
+
 ## 項目を足す手順（将来用。今は実装しない）
 
 skills・出力スタイルなど新しい項目を足す時は、次を同じ場所に足す。
