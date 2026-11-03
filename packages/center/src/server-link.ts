@@ -231,6 +231,11 @@ export function createServerLink(opts: {
   peerWatchMs?: number;
   /** server からの通知（activity）。返信ではないので pending とは照合しない。 */
   onNotice?: (n: ServerNotice) => void;
+  /**
+   * 待ちの無い cap_result / kick_cap の error（report 起因の再開の結果など、最初の返信の後に server が送ってくるもの）。
+   * 対応する待ちが無い返信を捨てずに渡す。
+   */
+  onLateCapReply?: (r: CapResultReply | ErrorReply) => void;
 }): ServerLink {
   const { config, log } = opts;
   let extraGate: Gate | undefined;
@@ -335,6 +340,13 @@ export function createServerLink(opts: {
     }
     if (!target) {
       log(`対応する待ちなし: server=${slot.cfg.name} type=${r.type}`);
+      if (r.type === "cap_result" || (r.type === "error" && r.command === "kick_cap" && r.cap_id !== undefined)) {
+        try {
+          opts.onLateCapReply?.(r);
+        } catch (e) {
+          log(`遅れた返信の処理に失敗: server=${slot.cfg.name} ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
       return;
     }
     settle(slot, target, r);

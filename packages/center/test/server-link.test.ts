@@ -833,3 +833,33 @@ test("kick_cap の updating error（cap_id 付き）は cap_id で照合され�
   assert.equal(r.retryable, true);
   await link.close();
 });
+
+test("待ちの無い cap_result / kick_cap の error は onLateCapReply に渡る。それ以外は渡らない", async () => {
+  const late: unknown[] = [];
+  const cfg = parseConfig({ servers: [{ name: "s1", timeoutMs: 2000 }] }, "/x/c.json");
+  const clients: FakeClient[] = [];
+  const link = createServerLink({
+    config: cfg,
+    log: () => {},
+    clientFactory: () => {
+      const c = new FakeClient();
+      clients.push(c);
+      return c;
+    },
+    healthCheck: async () => true,
+    onLateCapReply: (r) => late.push(r),
+  });
+  const p = link.kickCap("s1", { cap_id: "a", prompt: "x" });
+  await sleep(20);
+  clients[0].reply(capResult("a", "first"));
+  await p;
+  // 最初の返信で待ちは消えた。後続の cap_result は渡る
+  clients[0].reply(capResult("a", "second"));
+  clients[0].reply({ bantou: 1, type: "error", ok: false, message: "resume 失敗", command: "kick_cap", cap_id: "a" });
+  // 渡らない: worker_result、cap_id の無い error、別の送信元
+  clients[0].reply(workerResult("w1"));
+  clients[0].reply({ bantou: 1, type: "error", ok: false, message: "x", command: "kick_cap" });
+  clients[0].reply(capResult("a", "other"), "someone-else");
+  assert.deepEqual(late.map((r) => (r as { type: string }).type + ":" + ((r as { result_text?: string }).result_text ?? (r as { message?: string }).message)), ["cap_result:second", "error:resume 失敗"]);
+  await link.close();
+});

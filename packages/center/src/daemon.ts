@@ -1,4 +1,5 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import type { CapResultReply, ErrorReply } from "@agent-hand/bantou-protocol";
 import type { CliArgs } from "./args.js";
 import { resolveClaude } from "./claude-path.js";
 import { createActivityStore } from "./activity.js";
@@ -65,9 +66,12 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   const activity = createActivityStore();
   // 通知は 5 秒ごとに来るので、状態の組が変わった時だけログに出す
   const lastStates = new Map<string, string>();
+  // remotes は link の後に作るので、遅れて届く返信はここ経由で渡す
+  let applyLateReply: (r: CapResultReply | ErrorReply) => void = () => {};
   const link = createServerLink({
     config,
     log,
+    onLateCapReply: (r) => applyLateReply(r),
     onNotice: (n) => {
       activity.apply(n);
       const states = n.agents.map((a) => `${a.id}=${a.state}`).join(" ");
@@ -93,6 +97,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     log,
   });
   const remotes = createRemoteManager({ link, store: createJsonListStore(join(stateDir, "remotes.json"), log), log, activity });
+  applyLateReply = (r) => void remotes.applyLateReply(r);
 
   let closing = false;
   let http: HttpHandle | null = null;

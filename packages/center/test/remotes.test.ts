@@ -218,3 +218,79 @@ test("create: 門が通せば従来どおり記録を作って kick_cap を送�
   assert.equal(r.state, "running");
   assert.equal(kicks.length, 1);
 });
+
+const lateOk = (id: string, text: string) => ({ bantou: 1, type: "cap_result", cap_id: id, session_id: "s", ok: true, result_text: text }) as const;
+const workerAct = (capId: string, state: "running" | "stalled" | "done") => ({
+  bantou: 1 as const, type: "activity" as const, cap_id: capId, at: "2026-11-03T00:00:00.000Z",
+  agents: [
+    { kind: "cap" as const, id: capId, cap_id: capId, state: "idle" as const, task: "t", last_activity: null, last_output_at: null, silent_ms: 0, started_at: null, finished_at: null },
+    { kind: "worker" as const, id: "w-1", cap_id: capId, state, task: "t", last_activity: null, last_output_at: null, silent_ms: 0, started_at: null, finished_at: null },
+  ],
+});
+
+test("applyLateReply: 最初の返信の後の cap_result で result が最新になり、失敗なら failed・次の成功で done に戻る", async () => {
+  const { mgr, kicks } = setup();
+  await mgr.create({ owner: "o", prompt: "p" });
+  kicks[0].resolve(lateOk("r-1", "作業継続中。worker を起動した。report 待ち"));
+  await tick();
+  assert.equal(mgr.list()[0]!.result, "作業継続中。worker を起動した。report 待ち");
+  assert.equal(mgr.applyLateReply(lateOk("r-1", "worker 完了。PR 作成済み")), true);
+  let r = mgr.list()[0]!;
+  assert.deepEqual({ state: r.state, result: r.result }, { state: "done", result: "worker 完了。PR 作成済み" });
+  mgr.applyLateReply({ ...lateOk("r-1", "途中まで"), ok: false, error: "timeout" });
+  r = mgr.list()[0]!;
+  assert.deepEqual({ state: r.state, result: r.result, error: r.error }, { state: "failed", result: "途中まで", error: "timeout" });
+  mgr.applyLateReply(lateOk("r-1", "復旧"));
+  r = mgr.list()[0]!;
+  assert.deepEqual({ state: r.state, result: r.result, error: r.error }, { state: "done", result: "復旧", error: undefined });
+  await tick();
+  const saved = JSON.parse(await readFile(join(dir, "remotes.json"), "utf8")) as RemoteRecord[];
+  assert.equal(saved[0]!.result, "復旧");
+  assert.equal("error" in saved[0]!, false);
+});
+
+test("applyLateReply: 再開の失敗（kick_cap の error）は failed + error。結果本文は残す", async () => {
+  const { mgr, kicks } = setup();
+  await mgr.create({ owner: "o", prompt: "p" });
+  kicks[0].resolve(lateOk("r-1", "first"));
+  await tick();
+  mgr.applyLateReply({ bantou: 1, type: "error", ok: false, message: "resume 失敗", command: "kick_cap", cap_id: "r-1" });
+  const r = mgr.list()[0]!;
+  assert.deepEqual({ state: r.state, result: r.result, error: r.error }, { state: "failed", result: "first", error: "resume 失敗" });
+});
+
+test("applyLateReply: 記録なし・最初の返信待ち（running）・delete 済みは無視", async () => {
+  const { mgr } = setup();
+  assert.equal(mgr.applyLateReply(lateOk("r-x", "?")), false);
+  await mgr.create({ owner: "o", prompt: "p" });
+  assert.equal(mgr.applyLateReply(lateOk("r-1", "早すぎ")), false);
+  assert.equal(mgr.list()[0]!.state, "running");
+  assert.equal(mgr.list()[0]!.result, undefined);
+});
+
+test("list: cap が done でも配下の worker が running / stalled の間は running。全員終われば done", async () => {
+  const activity = createActivityStore();
+  const { mgr, kicks } = setup({}, activity);
+  await mgr.create({ owner: "o", prompt: "p" });
+  kicks[0].resolve(lateOk("r-1", "report 待ち"));
+  await tick();
+  activity.apply(workerAct("r-1", "running"));
+  let r = mgr.list()[0]!;
+  assert.deepEqual({ state: r.state, result: r.result, finished: r.finishedAt }, { state: "running", result: "report 待ち", finished: undefined });
+  activity.apply(workerAct("r-1", "stalled"));
+  assert.equal(mgr.list()[0]!.state, "running");
+  activity.apply(workerAct("r-1", "done"));
+  r = mgr.list()[0]!;
+  assert.equal(r.state, "done");
+  assert.ok(r.finishedAt);
+});
+
+test("list: failed は worker が動いていても failed のまま", async () => {
+  const activity = createActivityStore();
+  const { mgr, kicks } = setup({}, activity);
+  await mgr.create({ owner: "o", prompt: "p" });
+  kicks[0].resolve({ bantou: 1, type: "error", ok: false, message: "boom", command: "kick_cap", cap_id: "r-1" });
+  await tick();
+  activity.apply(workerAct("r-1", "running"));
+  assert.equal(mgr.list()[0]!.state, "failed");
+});
