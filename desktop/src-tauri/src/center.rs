@@ -152,6 +152,7 @@ pub fn validate_settings(mut s: CenterSettings) -> Result<CenterSettings, String
         if !(r.url.starts_with("http://") || r.url.starts_with("https://")) {
             return Err("remote の url は http(s):// で始める".to_string());
         }
+        r.url = crate::center_mcp::normalize_remote(&r.url);
         r.token = r.token.take().map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
     }
     Ok(s)
@@ -654,14 +655,27 @@ pub(crate) fn load_settings(app: &tauri::AppHandle) -> CmdResult<CenterSettings>
         .get(CENTER_KEY)
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default();
-    let (s, minted) = ensure_token(stored);
+    let (mut s, minted) = ensure_token(stored);
+    // A saved remote url from an older version (`//mcp`, `/mcp/`) is repaired and written back.
+    let repaired = repair_remote_url(&mut s);
     // A saved IP is kept as is, even when this machine no longer has it (the settings dialog
     // reports that and the user chooses; see `center_ip_status`).
-    if minted {
+    if minted || repaired {
         store.set(CENTER_KEY, serde_json::to_value(&s).map_err(CommandError::other)?);
         store.save().map_err(CommandError::other)?;
     }
     Ok(s)
+}
+
+/// Normalizes the saved remote url in place; whether it changed.
+fn repair_remote_url(s: &mut CenterSettings) -> bool {
+    let Some(r) = &mut s.remote else { return false };
+    let fixed = crate::center_mcp::normalize_remote(&r.url);
+    if fixed == r.url {
+        return false;
+    }
+    r.url = fixed;
+    true
 }
 
 /// One-line reason logged when autostart does nothing. `path` is the resolved settings store.
@@ -790,6 +804,29 @@ mod tests {
         // a blank token means "none"; the url is trimmed
         let s = validate_settings(remote(" http://h:1/mcp ", Some("  "))).unwrap();
         assert_eq!(s.remote, Some(CenterRemote { url: "http://h:1/mcp".into(), token: None }));
+    }
+
+    #[test]
+    fn saving_a_remote_stores_the_canonical_url() {
+        let save = |u: &str| {
+            let s = CenterSettings { remote: Some(CenterRemote { url: u.into(), token: None }), ..Default::default() };
+            validate_settings(s).unwrap().remote.unwrap().url
+        };
+        for u in ["http://h:7910", "http://h:7910/", "http://h:7910//mcp", "http://h:7910/mcp/", " http://h:7910//mcp/ "] {
+            assert_eq!(save(u), "http://h:7910/mcp", "{u}");
+        }
+    }
+
+    #[test]
+    fn a_broken_stored_remote_url_is_repaired_on_load() {
+        let mut s: CenterSettings =
+            serde_json::from_str(r#"{"remote":{"url":"http://h:7910//mcp","token":"abcdefghijkl"}}"#).unwrap();
+        assert!(repair_remote_url(&mut s));
+        assert_eq!(s.remote.as_ref().unwrap().url, "http://h:7910/mcp");
+        assert_eq!(s.remote.as_ref().unwrap().token.as_deref(), Some("abcdefghijkl"));
+        // already canonical, or no remote: nothing to write back
+        assert!(!repair_remote_url(&mut s));
+        assert!(!repair_remote_url(&mut CenterSettings::default()));
     }
 
     #[test]

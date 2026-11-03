@@ -531,6 +531,16 @@ mod tests {
         assert_eq!(p.url, "http://b:1/mcp");
         // no headers: no token
         assert_eq!(parse_connect(r#"{"mcpServers":{"x":{"url":"http://h:1/mcp"}}}"#).unwrap().token, None);
+        // slashes: every trailing / duplicated spelling ends up as .../mcp
+        for u in ["http://h:7910/", "http://h:7910//mcp", "http://h:7910/mcp/", "http://h:7910//"] {
+            let json = format!(r#"{{"mcpServers":{{"x":{{"url":"{u}"}}}}}}"#);
+            assert_eq!(parse_connect(&json).unwrap().url, "http://h:7910/mcp", "{u}");
+            let cmd = format!("claude mcp add --transport http c {u} --header \"Authorization: Bearer tokentoken123\"");
+            assert_eq!(parse_connect(&cmd).unwrap().url, "http://h:7910/mcp", "{u}");
+        }
+        // re-reading what the dialog shows for a saved url gives the same url (no growth)
+        let once = parse_connect(r#"{"url":"http://h:7910//mcp/"}"#).unwrap().url;
+        assert_eq!(parse_connect(&format!(r#"{{"url":"{once}"}}"#)).unwrap().url, once);
         // path-less url gets /mcp
         assert_eq!(parse_connect(r#"{"url":"http://mac200:7910"}"#).unwrap().url, "http://mac200:7910/mcp");
     }
