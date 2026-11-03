@@ -124,7 +124,7 @@ export function parseConfig(data: unknown, configPath: string, warn?: (msg: stri
   const rcRaw = (data as { remoteControl?: unknown } | null | undefined)?.remoteControl;
   if (typeof rcRaw === "object" && rcRaw !== null && "sessionInstructions" in rcRaw) {
     warn?.(
-      "config の remoteControl.sessionInstructions は廃止。無視する（追加指示は session ごとに起動要求の instructions で渡す）",
+      "config の remoteControl.sessionInstructions は廃止。無視する（追加指示は session ごとのプロジェクト設定 settings.instructions で渡す: session_create の settings / session_settings_update）",
     );
   }
   const r = configSchema.safeParse(data ?? {});

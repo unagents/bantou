@@ -37,9 +37,9 @@ branch: `feature/session-instructions-per-session`（base: develop）。
 - `packages/center/test/project-settings.test.ts`（新規）、`config` / `remote-control-wrapper` / `sessions` / `tools` / `http` の各 test
 - `docs/design/master-cap-session.md`、`docs/design/project-settings.md`（新規）、`packages/center/README.md`
 
-### 未対応（要判断）
+### 参照切れの修正（修正済み）
 
-- `docs/protocol.md` の「read again at every `remote_send` like `sessionInstructions`」が参照切れ（担当範囲外のため未修正）。
+- `docs/protocol.md` の「read again at every `remote_send` like `sessionInstructions`」と `packages/center/src/remotes.ts` のコメントの `sessionInstructions` への言及は、`remoteControl.model` に直した（c3a29e9・adae3c5）。
 
 ## desktop（w-si-desktop）
 

@@ -123,6 +123,9 @@ test("remoteControl.sessionInstructions: 廃止。値は無視して warning を
   assert.equal(warns.length, 1);
   assert.match(warns[0], /sessionInstructions/);
   assert.match(warns[0], /無視/);
+  assert.match(warns[0], /settings\.instructions/);
+  assert.match(warns[0], /session_create の settings \/ session_settings_update/);
+  assert.ok(!/起動要求/.test(warns[0]));
   assert.ok(!warns[0].includes("\"x\""));
   // 長すぎ・型違いでも検証エラーにはならない（無視）
   assert.doesNotThrow(() => parseConfig({ remoteControl: { sessionInstructions: 1 } }, "/x/c.json"));
