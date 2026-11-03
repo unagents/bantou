@@ -104,12 +104,11 @@ export async function execute(
       return { bantou: PROTOCOL_VERSION, type: "cap_result", cap_id: cmd.cap_id, ...r };
     }
     if (cmd.type === "task") {
-      // goal 等から定型の文面を組み立てて cap の最初の指示にする（buildTaskPrompt）。同じ cap_id なら resume
+      // goal 等から定型の文面を組み立てて cap の最初の指示にする（buildTaskPrompt）。同じ cap_id なら resume。
+      // repo / branch は cap には渡さない（cap は git を触らない。clone するのは worker）。文面に載せて cap から worker へ伝える
       const r = await manager.invoke("cap", cmd.cap_id, {
         prompt: buildTaskPrompt(cmd),
         reason: `task ${cmd.task_id}`,
-        ...(cmd.repo ? { repo: cmd.repo } : {}),
-        ...(cmd.branch ? { branch: cmd.branch } : {}),
         ...(cmd.worker_model ? { worker_model: cmd.worker_model } : {}),
       });
       return buildTaskResult(cmd.cap_id, cmd.task_id, r);
