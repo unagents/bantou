@@ -878,6 +878,20 @@ test("notifyPeer: 名前が一致する peer（自分以外）へ push で送る
   await link.close();
 });
 
+test("notifyPeer: 同名 peer が複数（再起動直後の古い登録）なら最後に登録したものへ送る", async () => {
+  const { link, clients, logs } = setupDiscovery({}, [
+    peerOf("srv", "bantou-server"),
+    { id: "new-1", name: "pm1", registered_at: "2026-11-03T05:00:30.000Z" },
+    { id: "old-1", name: "pm1", registered_at: "2026-11-03T05:00:00.000Z" },
+    { id: "none-1", name: "pm1" },
+  ]);
+  const r = await link.notifyPeer("pm1", "hello");
+  assert.deepEqual(r, { ok: true, to: "new-1" });
+  assert.deepEqual(clients[0].sentRaw, [{ to: "new-1", text: "hello", delivery: "push" }]);
+  assert.ok(logs.some((l) => l.includes("通知先の peer が複数")));
+  await link.close();
+});
+
 test("notifyPeer: peer がいない・列挙非対応・送信失敗・接続失敗は ok:false で理由を返す（投げない）", async () => {
   const a = setupDiscovery({}, [peerOf("srv", "bantou-server")]);
   const r1 = await a.link.notifyPeer("pm1", "x");

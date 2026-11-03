@@ -46,17 +46,35 @@ export const encodeInput = (data: Buffer): string => `${JSON.stringify({ t: "inp
 export const encodeResize = (cols: number, rows: number): string => `${JSON.stringify({ t: "resize", cols, rows })}\n`;
 export const encodeStop = (): string => `${JSON.stringify({ t: "stop" })}\n`;
 
-/** --mcp-config に渡す JSON 文字列。token は ${BANTOU_SESSION_TOKEN} のまま（claude が環境変数から展開する）。 */
-export function mcpConfigJson(url: string, session: string): string {
-  return JSON.stringify({
-    mcpServers: {
-      bantou: {
-        type: "http",
-        url,
-        headers: { Authorization: "Bearer ${BANTOU_SESSION_TOKEN}", "X-Bantou-Session": session },
-      },
+/** session に足す agent-messenger の MCP（plugin `messenger` の .mcp.json と同じ npx 起動）の版。 */
+export const MESSENGER_VERSION = "0.12.0";
+
+/** --mcp-config 内の agent-messenger の entry 名（user scope の `agent-messenger` と衝突させない別名）。 */
+export const MESSENGER_SERVER_KEY = "bantou-messenger";
+
+/**
+ * --mcp-config に渡す JSON 文字列。
+ * - messenger: session 名を peer 名（AGENT_MESSENGER_NAME）にした agent-messenger の stdio MCP。常に付ける。
+ *   broker は client が自分で解決する（env → config → UDP 発見）ので指名しない。
+ * - bantou: token は ${BANTOU_SESSION_TOKEN} のまま（claude が環境変数から展開する）。url が無い時は付けない。
+ */
+export function mcpConfigJson(url: string | null, session: string): string {
+  const mcpServers: Record<string, unknown> = {
+    [MESSENGER_SERVER_KEY]: {
+      type: "stdio",
+      command: "npx",
+      args: ["-y", `@unagents/messenger@${MESSENGER_VERSION}`, "mcp"],
+      env: { AGENT_MESSENGER_NAME: session, AGENT_MESSENGER_CLIENT_SPEC: MESSENGER_VERSION },
     },
-  });
+  };
+  if (url) {
+    mcpServers.bantou = {
+      type: "http",
+      url,
+      headers: { Authorization: "Bearer ${BANTOU_SESSION_TOKEN}", "X-Bantou-Session": session },
+    };
+  }
+  return JSON.stringify({ mcpServers });
 }
 
 export const DEFAULT_COLS = 120;
