@@ -12,7 +12,7 @@
         "bantou-center": "dist/cli.js",
       },
       "dependencies": {
-        "@agent-hand/bantou-protocol": "file:../protocol",
+        "@agent-hand/bantou-protocol": "^0.2.0",
         "@modelcontextprotocol/sdk": "1.32.2",
         "@unagents/messenger-client": "0.10.0",
         "zod": "^4.0.0",
@@ -1730,8 +1730,6 @@
     "zod": ["zod@4.6.7", "", {}, "sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg=="],
 
     "zod-to-json-schema": ["zod-to-json-schema@3.25.2", "", { "peerDependencies": { "zod": "^3.25.28 || ^4" } }, "sha512-O/PgfnpT1xKSDeQYSCfRI5Gy3hPf91mKVDuYLUHZJMiDFptvP41MSnWofm8dnCm0256ZNfZIM7DSzuSMAFnjHA=="],
-
-    "@agent-hand/bantou-center/@agent-hand/bantou-protocol": ["@agent-hand/bantou-protocol@file:packages/protocol", { "devDependencies": { "typescript": "^5.9.0" } }],
 
     "@babel/code-frame/js-tokens": ["js-tokens@4.0.0", "", {}, "sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ=="],
 
