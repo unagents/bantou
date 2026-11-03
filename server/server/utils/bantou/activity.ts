@@ -1,3 +1,4 @@
+import type { WithModel } from "./model";
 import type { ActivityNotice, ActivityState, AgentActivity, AgentKind } from "@agent-hand/bantou-protocol";
 import { PROTOCOL_VERSION } from "@agent-hand/bantou-protocol";
 import type { InvokeInput, RunObserver } from "./agents";
@@ -82,7 +83,7 @@ export interface ActivityTracker extends RunObserver {
   reported(workerId: string, kind: ReportKind): void;
   /** 起動時の孤児回収で見つけた running を lost で登録する。 */
   seedLost(kind: AgentKind, id: string, capId: string, error: string): void;
-  snapshot(capId?: string): AgentActivity[];
+  snapshot(capId?: string): Array<WithModel<AgentActivity>>;
   close(): void;
 }
 
@@ -101,6 +102,7 @@ interface Entry {
   capId: string;
   state: ActivityState;
   task: string;
+  model: string | null;
   lastActivity: string | null;
   lastOutputAt: number | null;
   startedAt: number | null;
@@ -123,14 +125,15 @@ export function createActivityTracker(deps: ActivityTrackerDeps): ActivityTracke
   const keyOf = (kind: AgentKind, id: string): string => `${kind}:${id}`;
   const iso = (t: number | null): string | null => (t === null ? null : new Date(t).toISOString());
 
-  const toActivity = (e: Entry): AgentActivity => {
+  const toActivity = (e: Entry): WithModel<AgentActivity> => {
     const base = e.lastOutputAt ?? e.startedAt;
-    const a: AgentActivity = {
+    const a: WithModel<AgentActivity> = {
       kind: e.kind,
       id: e.id,
       cap_id: e.capId,
       state: e.state,
       task: e.task,
+      model: e.model,
       last_activity: e.lastActivity,
       last_output_at: iso(e.lastOutputAt),
       silent_ms: base === null ? 0 : Math.max(0, now() - base),
@@ -141,7 +144,7 @@ export function createActivityTracker(deps: ActivityTrackerDeps): ActivityTracke
     return a;
   };
 
-  const snapshot = (capId?: string): AgentActivity[] =>
+  const snapshot = (capId?: string): Array<WithModel<AgentActivity>> =>
     [...entries.values()]
       .filter((e) => capId === undefined || e.capId === capId)
       .sort((a, b) => {
@@ -211,6 +214,7 @@ export function createActivityTracker(deps: ActivityTrackerDeps): ActivityTracke
         capId,
         state: "running",
         task: "",
+        model: null,
         lastActivity: null,
         lastOutputAt: null,
         startedAt: null,
@@ -218,6 +222,7 @@ export function createActivityTracker(deps: ActivityTrackerDeps): ActivityTracke
         reportedDone: false,
       };
       if (capId !== "") e.capId = capId;
+      e.model = input.resolvedModel ?? null;
       if (!input.keepTask || prev === undefined) e.task = oneLine(input.prompt, TASK_MAX);
       e.state = "running";
       e.lastActivity = null;
@@ -267,6 +272,7 @@ export function createActivityTracker(deps: ActivityTrackerDeps): ActivityTracke
         capId,
         state: "lost",
         task: "",
+        model: null,
         lastActivity: null,
         lastOutputAt: null,
         startedAt: null,

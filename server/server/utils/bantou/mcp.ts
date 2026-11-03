@@ -66,12 +66,14 @@ function registerWorkerTools(server: McpServer, capId: string): void {
     {
       description:
         "Start a worker (headless claude -p run by the server) with a prompt, or give an existing worker (same worker_id) its next instruction. " +
+        "Optional model (e.g. sonnet, opus, haiku, or a full model id) is passed to claude --model; without it the worker keeps its earlier model, else uses your default worker model, else claude's own default. " +
         "Returns {worker_id, accepted} immediately without waiting for the work; the worker reports back with its own report tool, which resumes you.",
       inputSchema: {
         prompt: z.string().min(1).refine(noNul, { message: "NUL 文字を含められない" }),
         worker_id: z.string().regex(/^[A-Za-z0-9_-]+$/).optional(),
         repo: z.string().min(1).refine((s) => !s.startsWith("-") && noNul(s), { message: "- で始められない / NUL 不可" }).optional(),
         branch: z.string().min(1).refine((s) => !s.startsWith("-") && noNul(s), { message: "- で始められない / NUL 不可" }).optional(),
+        model: z.string().regex(/^[A-Za-z0-9._[\]][A-Za-z0-9._[\]-]*$/).optional(),
       },
     },
     async (args) => {
