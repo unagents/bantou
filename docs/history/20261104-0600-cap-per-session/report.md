@@ -60,6 +60,10 @@
 - 高: 8c2b634 の center-tools.md が壊れていた（置換文字列の `$` + バッククォートが String.replace の特殊パターンになり、51 行目が途中で切れてファイル先頭から 51 行目手前までが貼り込まれ、「前提 / A / B」節が重複）。51〜101 行を 1 行に直し、見出しの重複が無いことを確認（`grep -c ドラフトを実装に落とした版` = 1）。他の docs（master-cap-session / README / report / architecture / protocol）に同じ崩れが無いことを diff と見出しで確認した（master-cap-session の「## 追記（2026-11-04）」の 2 回は cfea74d から既存）。以後 docs は `$` を含まない文字列か関数形式の replace で編集した。
 - 低: session 名の 64 文字上限を `session_create`（sessionCreateSchema と create）と config の `projects[].name` にも足した。保存済み session の復元は緩いまま（既存の 65 文字以上は残り、remote_send だけ error）。`projectSchema` は復元でも使うので緩いまま、config の projects 配列にだけ上限を課した。テスト 3 件追加（sessions 2、config 1）。desktop の追加ダイアログ（AddSessionDialog）は長さを見ない（center の error が出る）。変更していない。
 
+### 最終 review（fa34b46）
+
+- 低（docs）: center-tools.md と README の「境界」が、外向け /mcp の remote_delete も owner を自己申告できると書いていた。外向けに remote_delete は無い（session 側のみ）ので、owner を自己申告できるのは remote_list / remote_wait / worker_reply だけに直した。
+
 ## 残存物・未解決
 
 - worker の `AgentStatus` に cap_id が無いため、center 再起動直後で activity が無い間の status 追従は server 全体の worker を見る（完了判定が遅れる側にだけ倒れる）。恒久対応は protocol の status に worker の cap_id を足す（server 変更）。未着手。
