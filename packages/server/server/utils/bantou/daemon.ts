@@ -14,6 +14,7 @@ import {
 } from "@agent-hand/bantou-protocol";
 import { createActivityTracker } from "./activity";
 import { createAgentManager, type AgentManager, type RunExtras } from "./agents";
+import { createWorkerCleaner } from "./cleanup";
 import { loadConfig } from "./config";
 import { log } from "./log";
 import { CAP_ID_HEADER, WORKER_ID_HEADER, type McpListener } from "./mcp";
@@ -242,7 +243,15 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
     };
   };
   const manager = createAgentManager({ config, runner: cliRunner, log, observer: tracker, runExtras });
-  const workerHub = createWorkerHub({ workspace: config.workspace, manager, activity: tracker, log });
+  const cleaner = createWorkerCleaner({
+    workspace: config.workspace,
+    keepMs: config.session.workerKeepMs,
+    snapshot: () => tracker.snapshot(),
+    isActive: (id) => manager.isActive("worker", id),
+    forget: (id) => tracker.forget("worker", id),
+    log,
+  });
+  const workerHub = createWorkerHub({ workspace: config.workspace, manager, activity: tracker, log, cleaner });
   const reaped = await manager.reapOrphans();
   log(`孤児回収: killed=${reaped.killed} failed=${reaped.failed} error=${reaped.errored}`);
 
@@ -418,6 +427,7 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
         Promise.allSettled([...inflight, hub.drain()]),
         new Promise((r) => setTimeout(r, 2500)),
       ]);
+      await cleaner.close();
       tracker.close();
       update.close();
       await removeReadyFile(config.workspace).catch(() => {});

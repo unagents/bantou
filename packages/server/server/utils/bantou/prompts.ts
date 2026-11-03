@@ -43,6 +43,7 @@ export const CAP_GUIDE = [
   "指示には必ず次を含める。",
   "- 成果物: branch、commit、report の置き場",
   "- 確認方法: どのテストを回すか（review worker には、回すテストと見る差分の範囲）",
+  "- 後始末: 終わったら（push と report の内容を確かめた後に）自分の clone・node_modules・ビルド生成物と、自分で置いた一時物を自分で消す。logs/ と state.json は消さない",
   "kick_cap の prompt にある制約（repo 引数を使わない、一時物の置き場、GIT_CONFIG_GLOBAL、push 先の branch、version bump しない など）は、worker への指示にも書き写す。worker は cap の prompt を見ない。",
   "",
   "[model]",

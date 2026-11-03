@@ -301,3 +301,22 @@ test("tracker: snapshot は cap_id で絞り、cap → worker の id 昇順", ()
     tr.close();
   }
 });
+
+test("tracker: forget は snapshot から外し、cap へ通知する（agents[] に出なくなる）", async () => {
+  const { tr, sent } = fx();
+  try {
+    tr.started("cap", "c1", { prompt: "p" }, 1);
+    tr.started("worker", "w1", { prompt: "p", capId: "c1" }, 2);
+    tr.finished("worker", "w1", { ok: true, lost: false });
+    await settle();
+    sent.length = 0;
+    tr.forget("worker", "w1");
+    tr.forget("worker", "none"); // 無いものは何もしない
+    await settle();
+    assert.deepEqual(tr.snapshot("c1").map((a) => a.id), ["c1"]);
+    assert.equal(sent.length, 1);
+    assert.deepEqual(sent[0]!.agents.map((a) => a.id), ["c1"]);
+  } finally {
+    tr.close();
+  }
+});

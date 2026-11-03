@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { isValidAgentId, type AgentActivity } from "@agent-hand/bantou-protocol";
 import type { AgentManager } from "./agents";
 import type { ActivityTracker } from "./activity";
+import type { WorkerCleaner } from "./cleanup";
 import { agentDir, runLogDir } from "./paths";
 import { readState } from "./state";
 import { assertModel, readModelRecord, type WithModel } from "./model";
@@ -29,6 +30,8 @@ export interface WorkerHubDeps {
   manager: Pick<AgentManager, "invoke" | "stop">;
   activity: Pick<ActivityTracker, "snapshot">;
   log: (msg: string) => void;
+  /** 終わった worker の掃除。start の入口で待ち時間を数え直し、掃除中なら完了を待つ。 */
+  cleaner?: Pick<WorkerCleaner, "begin">;
   /** worker_id の採番（テスト用）。 */
   newId?: () => string;
 }
@@ -94,6 +97,8 @@ export function createWorkerHub(deps: WorkerHubDeps): WorkerHub {
     if (input.model !== undefined) assertModel(input.model, "model");
     const owner = await readOwner(workspace, workerId);
     if (owner !== undefined && owner !== capId) throw new Error(`別の cap の worker: ${workerId}`);
+    // 掃除中ならその完了を待つ（dir が消えた後は clone し直しで起動する）。持ち主の確認の後（他の cap が掃除を妨げられない）
+    await deps.cleaner?.begin(workerId);
     const dir = agentDir(workspace, "worker", workerId);
     // repo 付きの初回は clone 先が存在してはいけないので、持ち主の記録は clone の後（runExtras）に任せる
     if (!(input.repo && !(await exists(dir)))) await writeOwner(workspace, workerId, capId);
