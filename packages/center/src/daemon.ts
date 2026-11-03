@@ -13,6 +13,7 @@ import { createFollow } from "./follow.js";
 import { resolvePair } from "./pair.js";
 import { createRemoteManager } from "./remotes.js";
 import { createRemoteControlSupervisor } from "./remote-control.js";
+import { createContextUsageTracker } from "./context-usage.js";
 import { createSessionManager } from "./sessions.js";
 import { createJsonListStore } from "./store.js";
 import { createCenterServer, createSessionMcpServer } from "./server.js";
@@ -91,9 +92,20 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   // session / remote の保存先は config と同じ dir（config の projects には書かない）
   const stateDir = dirname(resolve(configPath));
   const events = createEventHub();
+  const contextUsage = createContextUsageTracker({
+    targets: () =>
+      sessions
+        .list()
+        .filter((s) => s.source === "session")
+        .map((s) => ({ name: s.name, path: s.path, startedAt: s.startedAt, running: s.state === "starting" || s.state === "connected" })),
+    onChange: (name) => events.publish({ reason: "context", name }),
+    ...(config.remoteControl.model ? { model: config.remoteControl.model } : {}),
+    log,
+  });
   const sessions = createSessionManager({
     config,
     events,
+    contextUsage: (name) => contextUsage.get(name),
     supervisor,
     store: createJsonListStore(join(stateDir, "sessions.json"), log),
     log,
@@ -123,6 +135,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     try {
       // 子の停止を最優先にする（http.close が長引いても子に signal が届くように）
       follow.stop();
+      contextUsage.stop();
       const results = await Promise.allSettled([supervisor.shutdown(), http?.close(), link.close()]);
       for (const r of results) {
         if (r.status === "rejected") throw r.reason;
@@ -182,6 +195,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   // transport を先に繋いでから、接続と autostart をバックグラウンドで進める
   void link.connectAll().finally(() => follow.start());
   void remotes.restore().catch((e: unknown) => log(`remote 記録の復元失敗: ${e instanceof Error ? e.message : String(e)}`));
+  contextUsage.start();
   void sessions.restore().catch((e: unknown) => log(`session の復帰失敗: ${e instanceof Error ? e.message : String(e)}`));
   for (const p of config.projects) {
     if (!p.autostart) continue;

@@ -64,6 +64,15 @@ export interface AgentEvent {
   message: string | null;
 }
 
+/** Context usage of a session's claude (center `contextUsage`; mirror of `src-tauri/src/session.rs::ContextUsage`). */
+export interface ContextUsage {
+  usedTokens: number;
+  /** null: the center cannot tell the model's window (then `percent` is null too). */
+  windowTokens: number | null;
+  percent: number | null;
+  updatedAt: string | null;
+}
+
 /** A session of the center's `session_list` (mirror of `src-tauri/src/session.rs::Session`). */
 export interface Session {
   name: string;
@@ -71,6 +80,8 @@ export interface Session {
   sessionUrl: string | null;
   source: CenterSession["source"] | null;
   lastError: string | null;
+  /** null: the center has none (not known yet, or an older center). */
+  contextUsage: ContextUsage | null;
 }
 
 /** The center's list as last fetched (mirror of `src-tauri/src/session.rs::SessionList`). Memory only. */
@@ -282,4 +293,5 @@ export interface CenterSession {
   sessionUrl: string | null;
   source: "config" | "session";
   lastError?: string;
+  contextUsage?: ContextUsage | null;
 }

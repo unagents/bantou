@@ -21,6 +21,20 @@ use tauri::Emitter;
 
 pub const SESSIONS_CHANGED_EVENT: &str = "bantou://sessions-changed";
 
+/// The center's context usage of a session's claude (`contextUsage` of `session_list`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextUsage {
+    pub used_tokens: u64,
+    /// None when the center cannot tell the model's window.
+    #[serde(default)]
+    pub window_tokens: Option<u64>,
+    #[serde(default)]
+    pub percent: Option<f64>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+}
+
 /// A session as the center lists it (`session_list` / `session_create` result; fields bantou uses).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,6 +50,9 @@ pub struct Session {
     /// Center's `lastError` of the session.
     #[serde(default)]
     pub last_error: Option<String>,
+    /// Context usage of the session's claude; None when the center has none (or is older than this field).
+    #[serde(default)]
+    pub context_usage: Option<ContextUsage>,
 }
 
 /// What the side menu shows: the center's list as last fetched, and whether the latest read worked.
@@ -170,7 +187,25 @@ mod tests {
             session_url: Some(format!("https://claude.ai/code/{name}")),
             source: Some("session".into()),
             last_error: None,
+            context_usage: None,
         }
+    }
+
+    #[test]
+    fn context_usage_is_read_when_the_center_sends_it_and_none_otherwise() {
+        let with: Session = serde_json::from_str(
+            r#"{"name":"a","state":"connected","contextUsage":{"usedTokens":84000,"windowTokens":200000,"percent":42,"updatedAt":"t"}}"#,
+        )
+        .unwrap();
+        let u = with.context_usage.unwrap();
+        assert_eq!((u.used_tokens, u.window_tokens, u.percent), (84000, Some(200000), Some(42.0)));
+        let unknown: Session =
+            serde_json::from_str(r#"{"name":"a","contextUsage":{"usedTokens":5,"windowTokens":null,"percent":null}}"#).unwrap();
+        assert_eq!(unknown.context_usage.unwrap().window_tokens, None);
+        let old: Session = serde_json::from_str(r#"{"name":"a"}"#).unwrap();
+        assert_eq!(old.context_usage, None);
+        let null: Session = serde_json::from_str(r#"{"name":"a","contextUsage":null}"#).unwrap();
+        assert_eq!(null.context_usage, None);
     }
 
     #[test]

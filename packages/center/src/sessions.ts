@@ -6,6 +6,7 @@ import type { Logger } from "./log.js";
 import type { RcStatus, RemoteControlSupervisor } from "./remote-control.js";
 import type { EventHub } from "./events.js";
 import type { JsonListStore } from "./store.js";
+import type { ContextUsage } from "./context-usage.js";
 
 export const SESSION_NAME = /^[A-Za-z0-9_-]+$/;
 
@@ -27,6 +28,8 @@ export interface SessionInfo {
   /** config = config の projects、session = session_create で作ったもの。 */
   source: "config" | "session";
   lastError?: string;
+  /** claude のコンテキスト使用状況。まだ分からない（transcript が無い等）時は null。 */
+  contextUsage: ContextUsage | null;
 }
 
 export const sessionCreateSchema = {
@@ -56,6 +59,8 @@ export function createSessionManager(opts: {
   waitMs?: number;
   /** session の増減を通知する先（GET /events）。省略時は通知しない。 */
   events?: EventHub;
+  /** session ごとのコンテキスト使用状況の取得元。省略時は常に null。 */
+  contextUsage?: (name: string) => ContextUsage | null;
 }): SessionManager {
   const { config, supervisor, store, log } = opts;
   const waitMs = opts.waitMs ?? 15_000;
@@ -79,6 +84,7 @@ export function createSessionManager(opts: {
     startedAt: s.startedAt,
     source: saved.has(s.project) ? "session" : "config",
     ...(s.lastError ? { lastError: s.lastError } : {}),
+    contextUsage: opts.contextUsage?.(s.project) ?? null,
   });
 
   const toProject = (s: SavedSession): ProjectConfig =>

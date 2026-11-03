@@ -1,6 +1,7 @@
 /** center のセッション増減の通知（GET /events の SSE に流す）。 */
 export interface SessionsEvent {
-  reason: "created" | "deleted" | "restored";
+  /** context = コンテキスト使用状況が変わった（受け手は session_list を取り直す）。 */
+  reason: "created" | "deleted" | "restored" | "context";
   name: string;
 }
 
