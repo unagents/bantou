@@ -30,10 +30,10 @@
 
 ## テスト
 
-- center: `bun run test` 396 件 pass（変更前 375 件）、`bun run typecheck` OK
+- center: `bun run test` 397 件 pass（develop 取り込み後）（変更前 375 件）、`bun run typecheck` OK
   - 新規 `cap-per-session.test.ts` 17 件: 組ごとの cap_id が衝突しない・64 文字上限、cap_id の変換と衝突しなさ、拒否、session ごとの send、他 session から見えない・触れない（list / wait / delete / workerReply）、通知先、旧共有 cap の引き継ぎ・delete・他 session の cap は消せない、status 追従で他 session の worker を数えない、remote_id 省略の error
-- server: `npm test` 233 件 pass、typecheck OK（実装の変更なし。`agents.test.ts` に「77 文字・大文字・- _ の cap_id で作成・status・reapOrphans」1 件追加）
-- desktop e2e: `terminal.spec.ts` + `center.spec.ts` 23 件 pass（`bun run generate` の静的ビルド + 簡易静的サーバー + ms-playwright chromium）。session を切り替えると remotes 欄が変わる（careery: 2 行（server ごと）、stroke-board: 1 行、cap 無しの session: 「remote なし」、旧共有 cap は出ない）
+- server: `npm test` 257 件 pass（develop 取り込み後）、typecheck OK（実装の変更なし。`agents.test.ts` に「77 文字・大文字・- _ の cap_id で作成・status・reapOrphans」1 件追加）
+- desktop e2e: `terminal.spec.ts` + `center.spec.ts` + `session-path.spec.ts` 29 件 pass（develop 取り込み後に再実行。取り込み前は 23 件）（`bun run generate` の静的ビルド + 簡易静的サーバー + ms-playwright chromium）。session を切り替えると remotes 欄が変わる（careery: 2 行（server ごと）、stroke-board: 1 行、cap 無しの session: 「remote なし」、旧共有 cap は出ない）
 - cargo test: 259 件 pass（`bun run build:sidecar` 後）
 
 ## review の指摘と対応
