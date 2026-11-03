@@ -109,10 +109,29 @@ test("http: 2xx 以外の応答は method・path・status・理由で log に残
     assert.equal((await fetch(`${base}/mcp`, { method: "POST", headers: MCP_HEADERS, body: JSON.stringify(INIT) })).status, 200);
     const http = lines.filter((l) => l.startsWith("HTTP "));
     assert.deepEqual(http, [
-      "HTTP GET /other -> 404: not found",
-      "HTTP GET /mcp -> 401: unauthorized",
-      "HTTP GET /mcp -> 404: session が存在しない",
+      "HTTP GET /other -> 404: not found (from 127.0.0.1)",
+      "HTTP GET /mcp -> 401: unauthorized (from 127.0.0.1)",
+      "HTTP GET /mcp -> 404: session が存在しない (from 127.0.0.1)",
     ]);
+  } finally {
+    await h.close();
+  }
+});
+
+test("http: 重複スラッシュ・末尾スラッシュの path も /mcp・/mcp/session・/events・/sessions/.. として通る", async () => {
+  const lines: string[] = [];
+  const { h, base } = await boot({ log: (m) => lines.push(m) });
+  try {
+    for (const p of ["/mcp", "//mcp", "/mcp/", "///mcp//", "//mcp?x=1"]) {
+      const r = await fetch(`${base}${p}`, { method: "POST", headers: MCP_HEADERS, body: JSON.stringify(INIT) });
+      assert.equal(r.status, 200, p);
+    }
+    assert.equal((await fetch(`${base}//mcp`)).status, 401, "認証は // でも必要");
+    assert.equal((await fetch(`${base}//mcp/session/`, { method: "POST" })).status, 401, "/mcp/session 側も // で照合される");
+    assert.equal((await fetch(`${base}//sessions//nope/output/`, { headers: AUTH })).status, 404);
+    assert.equal((await fetch(`${base}/mcpx`)).status, 404, "別の path は通さない");
+    assert.equal((await fetch(`${base}//`)).status, 404);
+    assert.ok(lines.some((l) => l === "HTTP GET //mcp -> 401: unauthorized (from 127.0.0.1)"), "log には受けた path のまま残る");
   } finally {
     await h.close();
   }

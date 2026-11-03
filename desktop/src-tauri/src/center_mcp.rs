@@ -47,15 +47,36 @@ pub struct Target {
     pub source: TargetSource,
 }
 
-/// A URL as given; an empty path (`http://host:7910`) gets `/mcp` appended.
+/// A connection URL in its one canonical form: repeated slashes in the path collapse to one, a
+/// trailing `/` is dropped, and an empty path (`http://host:7910`, `http://host:7910/`) becomes `/mcp`.
+/// Every way a URL enters (paste, save, load, send) goes through this. Unparsable input is returned as is.
 pub(crate) fn normalize_remote(u: &str) -> String {
-    match reqwest::Url::parse(u) {
-        Ok(mut url) if url.path() == "/" || url.path().is_empty() => {
-            url.set_path(MCP_PATH);
-            url.to_string()
+    let Ok(mut url) = reqwest::Url::parse(u.trim()) else {
+        return u.to_string();
+    };
+    let mut path = String::new();
+    for seg in url.path().split('/').filter(|s| !s.is_empty()) {
+        path.push('/');
+        path.push_str(seg);
+    }
+    if path.is_empty() {
+        path = MCP_PATH.to_string();
+    }
+    url.set_path(&path);
+    url.to_string()
+}
+
+/// `url` for an error message shown to the user: no credentials, no query (a token must not leak).
+fn redact_url(url: &str) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(mut u) => {
+            let _ = u.set_username("");
+            let _ = u.set_password(None);
+            u.set_query(None);
+            u.set_fragment(None);
+            u.to_string()
         }
-        Ok(url) => url.to_string(),
-        Err(_) => u.to_string(),
+        Err(_) => url.split(['?', '#']).next().unwrap_or("").to_string(),
     }
 }
 
@@ -257,7 +278,7 @@ impl CenterClient {
             return Err(McpError::failed(unauthorized(url, token)));
         }
         if !(200..300).contains(&r.status) {
-            return Err(McpError::failed(format!("initialize が HTTP {} で失敗: {}", r.status, snippet(&r.body))));
+            return Err(McpError::failed(format!("initialize が HTTP {} で失敗 ({}): {}", r.status, redact_url(url), snippet(&r.body))));
         }
         let result = pick_response(&parse_messages(&r.content_type, &r.body), id)?;
         let session = Session {
@@ -276,7 +297,7 @@ impl CenterClient {
         })?;
         if !(200..300).contains(&n.status) {
             log::warn!("center MCP notifications/initialized: HTTP {}: {}", n.status, clip_body(&n.body));
-            return Err(McpError::failed(format!("initialized 通知が HTTP {} で失敗: {}", n.status, snippet(&n.body))));
+            return Err(McpError::failed(format!("initialized 通知が HTTP {} で失敗 ({}): {}", n.status, redact_url(url), snippet(&n.body))));
         }
         Ok(session)
     }
@@ -342,7 +363,7 @@ impl CenterClient {
             return Err(McpError::SessionGone);
         }
         if !(200..300).contains(&r.status) {
-            return Err(McpError::failed(format!("{method} が HTTP {} で失敗: {}", r.status, snippet(&r.body))));
+            return Err(McpError::failed(format!("{method} が HTTP {} で失敗 ({}): {}", r.status, redact_url(url), snippet(&r.body))));
         }
         pick_response(&parse_messages(&r.content_type, &r.body), id)
     }
@@ -846,6 +867,65 @@ mod tests {
         // the right token still works afterwards
         client.probe(&mock.url, Some("tok-abcdefghij")).await.unwrap();
         assert_eq!(client.last_error(), None);
+    }
+
+    #[test]
+    fn normalize_remote_gives_one_form_for_every_spelling() {
+        for (given, want) in [
+            ("http://h:7910", "http://h:7910/mcp"),
+            ("http://h:7910/", "http://h:7910/mcp"),
+            ("http://h:7910//", "http://h:7910/mcp"),
+            ("http://h:7910/mcp", "http://h:7910/mcp"),
+            ("http://h:7910/mcp/", "http://h:7910/mcp"),
+            ("http://h:7910//mcp", "http://h:7910/mcp"),
+            ("http://h:7910///mcp//", "http://h:7910/mcp"),
+            ("  http://h:7910//mcp  ", "http://h:7910/mcp"),
+            ("http://h:7910/custom//x/", "http://h:7910/custom/x"),
+            ("https://h//mcp", "https://h/mcp"),
+            ("http://[fd7a::5]:7910//mcp/", "http://[fd7a::5]:7910/mcp"),
+            ("http://h:7910//mcp?x=1", "http://h:7910/mcp?x=1"),
+        ] {
+            assert_eq!(normalize_remote(given), want, "{given}");
+            // idempotent
+            assert_eq!(normalize_remote(want), want, "{want}");
+        }
+        // not a url: untouched
+        assert_eq!(normalize_remote("nope//"), "nope//");
+    }
+
+    #[test]
+    fn select_target_normalizes_a_stored_remote() {
+        for stored in ["http://h:7910/", "http://h:7910//mcp", "http://h:7910/mcp/"] {
+            let t = select_target(&settings(false, Some(stored))).unwrap();
+            assert_eq!(t.url, "http://h:7910/mcp", "{stored}");
+        }
+    }
+
+    #[test]
+    fn redact_url_drops_credentials_and_query() {
+        assert_eq!(redact_url("http://u:p@h:1/mcp?token=secret#f"), "http://h:1/mcp");
+        assert_eq!(redact_url("http://h:1//mcp"), "http://h:1//mcp");
+        assert_eq!(redact_url("not a url?token=secret"), "not a url");
+    }
+
+    #[tokio::test]
+    async fn http_error_message_names_the_url_without_secrets() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(mut conn) = conn else { break };
+                let _ = read_request(&mut conn);
+                respond(&mut conn, 404, &[("content-type", "application/json".into())], r#"{"error":"not found"}"#);
+            }
+        });
+        let url = format!("http://user:pw@{addr}//mcp?token=secret-q");
+        let client = CenterClient::default();
+        let e = client.call_tool(&url, Some("bearer-secret-zzz"), "rc_list", None).await.unwrap_err();
+        assert!(e.contains("HTTP 404") && e.contains(&format!("http://{addr}//mcp")) && e.contains("not found"), "{e}");
+        for secret in ["secret-q", "pw@", "bearer-secret-zzz"] {
+            assert!(!e.contains(secret), "{secret} in {e}");
+        }
     }
 
     #[tokio::test]

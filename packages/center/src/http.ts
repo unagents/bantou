@@ -18,6 +18,12 @@ const OWNER_HEADER = "x-bantou-session";
 const SESSION_NAME = /^[A-Za-z0-9_-]+$/;
 /** core の SSE に流す keep-alive コメントの間隔。 */
 export const SSE_KEEPALIVE_MS = 15_000;
+/** 重複スラッシュを 1 つにし、末尾の / を除く（`//mcp`・`/mcp/` を `/mcp` として扱う）。 */
+export function normalizePath(p: string): string {
+  const q = p.replace(/\/{2,}/g, "/");
+  return q.length > 1 && q.endsWith("/") ? q.slice(0, -1) : q;
+}
+
 const CORE_PATH = /^\/sessions\/([A-Za-z0-9_-]+)\/(output|input|resize)$/;
 /** POST ボディの上限。 */
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
@@ -281,7 +287,8 @@ export async function startHttpServer(opts: {
   };
 
   const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-    const [path, query = ""] = (req.url ?? "").split("?", 2);
+    const [rawPath, query = ""] = (req.url ?? "").split("?", 2);
+    const path = normalizePath(rawPath);
     const coreMatch = opts.core ? CORE_PATH.exec(path) : null;
     let window: "external" | "session";
     let owner: string | undefined;
@@ -429,7 +436,7 @@ export async function startHttpServer(opts: {
     };
     res.once("finish", () => {
       if (res.statusCode >= 200 && res.statusCode < 300) return;
-      log(`HTTP ${req.method ?? "?"} ${(req.url ?? "").split("?", 1)[0]} -> ${res.statusCode}: ${httpReason(reason, res.statusMessage)}`);
+      log(`HTTP ${req.method ?? "?"} ${(req.url ?? "").split("?", 1)[0]} -> ${res.statusCode}: ${httpReason(reason, res.statusMessage)} (from ${req.socket.remoteAddress ?? "?"})`);
     });
   };
 
