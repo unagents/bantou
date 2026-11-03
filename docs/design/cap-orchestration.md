@@ -29,6 +29,7 @@ review の指摘は、実装 worker に同じ worker_id で worker_start して�
 指示には必ず次を含める。
 - 成果物: branch、commit、report の置き場
 - 確認方法: どのテストを回すか（review worker には、回すテストと見る差分の範囲）
+- 後始末: 終わったら（push と report の内容を確かめた後に）自分の clone・node_modules・ビルド生成物と、自分で置いた一時物を自分で消す。logs/ と state.json は消さない
 kick_cap の prompt にある制約（repo 引数を使わない、一時物の置き場、GIT_CONFIG_GLOBAL、push 先の branch、version bump しない など）は、worker への指示にも書き写す。worker は cap の prompt を見ない。
 
 [model]
@@ -93,6 +94,14 @@ worker_model: （worker_model）（worker_start で model を省く時の既定�
 cap は `task` 指示の最終返答を task_result の JSON 1 つで返す（形式は上の「決まり本文」の `[最終返答]`）。server は返答から次の順で JSON を探す: ```json コードブロック（複数なら最後）、無ければ本文中の最後の `{...}`。`summary`（文字列）を持つ JSON だけを採る。取れた JSON は `cap_id` / `task_id` を server が補い、形が崩れた項目は既定値で補う（worker の role は `other`、state は `idle`、review の severity は `medium`、verdict は `unknown`、rounds は 0）。取り出せない時は `summary` に生の返答、`workers` / `remaining` は空、`review.verdict` は `unknown`（実行の失敗は `state: "failed"` と `error`）。
 
 cap は worker の report のたびに再開するので、最終ではない返答（「worker を起動した、report 待ち」など）は取り出せず、verdict が `unknown` の `task_result` になる。center は完了を verdict ではなく従来どおり「cap が idle かつ配下の worker に running / stalled が無い」で判断する。report 起因の再開で cap が task_result の JSON で答えた時は `task_result`、そうでなければ従来の `cap_result` を center へ送る。
+
+## 終わった worker の掃除
+
+- worker の dir（`<workspace>/workers/<id>`）には clone・node_modules・ビルド生成物が溜まる。cap は指示（`[worker への指示]` の後始末）で worker 自身に消させ、それでも残るものは server が消す。
+- server の掃除（config `session.workerKeepMs`、既定 30 分、0 は掃除しない）: worker が done（report kind=done を送って終了）か、worker_stop で止められ、かつその cap が idle（turn が終わっている）のまま `workerKeepMs` 経ったら、dir のうち `logs/` と `state.json` 以外を消す。cap の turn が続いている間・その worker に再開の指示が来ている間は消さない。同じ worker_id の `worker_start`（`worker_reply` 含む）が来たら待ち時間を数え直す。
+- 消したら server.log に `worker 掃除: worker_id=...` を出し、その worker を activity の `agents[]` から外す（protocol は変えない）。`worker_status` は state.json から引くので掃除後も返る。
+- 掃除後の同じ worker_id の `worker_start` は、dir に clone し直して起動する（`repo` を省いても、最初の clone の repo / branch を `logs/repo.json` から使う）。session_id は state.json に残るので `--resume` は同じ。
+- 消すのは server が動いている間に done / stop を観測した worker だけ（記録はメモリ。server の再起動前に終わった worker は対象外）。
 
 ## 根拠・補足
 

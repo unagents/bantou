@@ -30,6 +30,7 @@ test("config: 全項目指定はそのまま返る", async () => {
       disallowedTools: ["Edit"],
       extraArgs: ["--model", "x"],
       capBashSandbox: true,
+      workerKeepMs: 60000,
       env: { CLAUDE_CONFIG_DIR: "/c" },
     },
     update: { spec: "file:/x/bantou-{version}.tgz" },
@@ -111,4 +112,13 @@ test("config: update.spec は既定 bantou@{version}、{version} 必須、- 始�
     await assert.rejects(load({ workspace: "/w", update: { spec } }), /update\.spec/, String(spec));
   }
   await assert.rejects(load({ workspace: "/w", update: "x" }), /update はオブジェクト/);
+});
+
+test("config: workerKeepMs は既定 30 分、0 は掃除しない、負・小数・文字列は拒否", async () => {
+  assert.equal((await load({ workspace: "/w" })).session.workerKeepMs, 1_800_000);
+  assert.equal((await load({ workspace: "/w", session: { workerKeepMs: 0 } })).session.workerKeepMs, 0);
+  assert.equal((await load({ workspace: "/w", session: { workerKeepMs: 5000 } })).session.workerKeepMs, 5000);
+  for (const bad of [-1, 1.5, "10"]) {
+    await assert.rejects(load({ workspace: "/w", session: { workerKeepMs: bad } }), /workerKeepMs/);
+  }
 });

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { isValidAgentId, type AgentActivity } from "@agent-hand/bantou-protocol";
 import type { AgentManager } from "./agents";
 import type { ActivityTracker } from "./activity";
+import type { WorkerCleaner } from "./cleanup";
 import { agentDir, runLogDir } from "./paths";
 import { readState } from "./state";
 import { assertModel, readModelRecord, type WithModel } from "./model";
@@ -29,6 +30,8 @@ export interface WorkerHubDeps {
   manager: Pick<AgentManager, "invoke" | "stop">;
   activity: Pick<ActivityTracker, "snapshot">;
   log: (msg: string) => void;
+  /** 終わった worker の掃除。start の入口で待ち時間を数え直し、掃除中なら完了を待つ。 */
+  cleaner?: Pick<WorkerCleaner, "begin">;
   /** worker_id の採番（テスト用）。 */
   newId?: () => string;
 }
@@ -92,6 +95,8 @@ export function createWorkerHub(deps: WorkerHubDeps): WorkerHub {
       throw new Error("prompt は空でない文字列（NUL 不可）");
     }
     if (input.model !== undefined) assertModel(input.model, "model");
+    // 掃除中ならその完了を待つ（dir が消えた後は clone し直しで起動する）
+    await deps.cleaner?.begin(workerId);
     const owner = await readOwner(workspace, workerId);
     if (owner !== undefined && owner !== capId) throw new Error(`別の cap の worker: ${workerId}`);
     const dir = agentDir(workspace, "worker", workerId);

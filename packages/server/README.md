@@ -80,6 +80,7 @@ npx bantou --config <path>
 | `session.disallowedTools` | 任意 | `[]` | 空でなければ `--disallowedTools` に渡す。文字列の配列 |
 | `session.extraArgs` | 任意 | `[]` | `--` の前にそのまま付ける追加引数。文字列の配列。`--settings` の後ろに並ぶため、同じ指定が重なれば extraArgs が後勝ち |
 | `session.capBashSandbox` | 任意 | `false` | cap の `claude -p` の Bash sandbox。`false` は `--settings {"sandbox":{"enabled":false}}` を付けて切る（新規・resume とも）。`true` は付けず claude の設定のまま（sandbox が有効だと worker が cap の終了で消える）。真偽値 |
+| `session.workerKeepMs` | 任意 | `1800000`（30 分） | 終わった worker の dir を掃除するまでの待ち時間。0 以上の整数。0 は掃除しない（下記「終わった worker の掃除」） |
 | `session.env` | 任意 | `{}` | spawn する claude に追加で渡す環境変数。文字列値のオブジェクト。bantou-server 自身の環境変数に上書きで合成する |
 | `update.spec` | 任意 | `"bantou@{version}"` | 自己更新の取得元。`{version}` を更新先の版に置き換えて npx の `--package` に渡す。`{version}` 必須、`-` で始められない。テストでは `file:/path/bantou-{version}.tgz` で npm 未公開の tarball を指せる。本番は指定しない |
 
@@ -103,13 +104,16 @@ npx bantou --config <path>
     logs/system-prompt.md            cap の `--append-system-prompt-file`（実行ごとに上書き）
   workers/<worker-id>/               worker の path。構成は cap と同じ
     logs/owner.json                  この worker の持ち主 cap（`{"cap_id":"..."}`）
+    logs/repo.json                   clone 元（`{"repo":"...","branch":"..."}`。認証情報を含みうるので 0600）。掃除後の再開で clone し直すのに使う
+    logs/cleaned.json                掃除した時刻（`{"cleaned_at":"..."}`）。clone し直したら消える
 ```
 
 - 起動時に `<workspace>/caps` と `<workspace>/workers` が無ければ作る。
 - `cap_id` / `worker_id` は `[A-Za-z0-9_-]+`。
 - `repo` を指定した指示では、path を git repo として扱う。path が無ければ clone、`.git` があれば fetch、`.git` が無い既存 path はエラー。clone 後は `.git/info/exclude` に `state.json` と `logs/` を追記する。
 - 既存の `.git` がある場合は `fetch` だけ行う。`repo` / `branch` の違いは検知しない。
-- `repo` 無しなら path を作るだけ。
+- `repo` 無しなら path を作るだけ（掃除済みの worker は `logs/repo.json` の clone 元で clone し直す）。
+- 掃除済み（`logs/cleaned.json` があり `.git` が無い）の worker に `repo` 付きの指示が来たら、tmp に clone して中身を移し、clone し直す。`logs/` と `state.json`（session_id）はそのまま。
 
 ## 内蔵 broker と peer
 
@@ -164,6 +168,17 @@ npx bantou --config <path>
 - `worker_stop`: process group に SIGTERM、3 秒で SIGKILL（`stop_cap` と同じ）。
 - worker の timeout・retry・sandbox 設定は cap と同じ `config.session`。
 - cap への案内（`CAP_GUIDE`）は claude の `--system-prompt-snapshot`（既定 on）により session の初回に固定される。変更前に作った cap session は resume しても新しい案内を受けない（新しい cap から効く）。
+
+## 終わった worker の掃除
+
+- 目的: 終わった worker の dir（clone・node_modules・ビルド生成物）が溜まり続けるのを防ぐ。
+- 対象: server が動いている間に、worker が `done`（`report` の `kind=done` を送って正常終了）になった、または `worker_stop` で止められたもの。`idle`（done 報告なしで終了）と、停止以外の `failed` は調査用に残す。
+- 時機: その cap が running / stalled でなくなり（turn が終わり）、worker の終了からも `session.workerKeepMs`（既定 30 分）経った時。cap の turn が続いている間や、worker に再開の指示（invoke 中）がある間は消さない。確認は 60 秒ごと。
+- 消すもの: `workers/<id>/` 直下の `logs/` と `state.json` 以外すべて（`logs/` の中は消さない）。消したら `logs/cleaned.json` を書く。持ち主 cap（`logs/owner.json`）が activity と合わない worker は消さない。
+- 通知: server.log に `worker 掃除: worker_id=<id> cap_id=<id> state=<state> 削除=<n>件 ...` を出し、その worker を activity の `agents[]` から外して center へ送る。`worker_status` は state.json から返すので掃除後も引ける。
+- 再開: 同じ `worker_id` の `worker_start`（`worker_reply` 含む）が来たら待ち時間を数え直す。掃除の途中ならその完了を待ってから進み、dir が消えた後なら clone し直して起動する（`repo` を省いても `logs/repo.json` の clone 元を使う）。session_id は残るので `--resume` は続く。
+- 無効化: `session.workerKeepMs: 0`。
+- 制限: 対象の記録はメモリ。server を再起動する前に終わった worker は自動では消えない。
 
 ## 活動情報（activity）
 
@@ -284,7 +299,7 @@ npx bantou --config <path>
 2026-10-28T05:00:00.000Z bantou: 指示受信: type=kick_cap from=... cap_id=cap-a prompt=Review the open issues.
 ```
 
-起動 / 孤児回収 / broker 起動 / mcp 起動 / peer 登録 / worker_start / worker_stop / report 受信 / activity 通知 / 指示受信 / claude 起動 / claude 終了 / 再試行 / 返信 / エラー / 終了処理 が出る。
+起動 / 孤児回収 / worker 掃除 / broker 起動 / mcp 起動 / peer 登録 / worker_start / worker_stop / report 受信 / activity 通知 / 指示受信 / claude 起動 / claude 終了 / 再試行 / 返信 / エラー / 終了処理 が出る。
 
 - `指示受信` は prompt の先頭 80 文字だけを出す。repo URL の userinfo は伏せる。
 - claude の生出力は `logs/<session_id>.jsonl` に追記する。1 回の実行ごとに `# <ISO> mode=<mode> session=<id>` の見出し行が付く。

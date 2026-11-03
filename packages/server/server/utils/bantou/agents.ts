@@ -1,6 +1,6 @@
 import { execFile, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFile, mkdir, readdir, stat } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import {
@@ -12,7 +12,7 @@ import {
 import type { Config } from "./config";
 import { assertModel, readModelRecord, writeModelRecord, type WithModel } from "./model";
 import { killGroup, type ClaudeRunOptions, type ClaudeRunResult, type RunMode } from "./claude";
-import { agentDir, runLogDir } from "./paths";
+import { agentDir, cleanedFile, runLogDir } from "./paths";
 import { listLiveProcesses, matchesSession, type LiveProcess } from "./processes";
 import type { AgentRunner } from "./runner";
 import { readState, writeState, type AgentStateFile } from "./state";
@@ -84,6 +84,8 @@ export interface AgentManager {
   reapOrphans(): Promise<ReapSummary>;
   /** invoke 中（待ち + 実行）の件数を kind 別に返す。server 更新の「全部終わった」判定に使う。 */
   activeCount(): { caps: number; workers: number };
+  /** その agent に invoke 中（待ち + 実行）の指示があるか。 */
+  isActive(kind: AgentKind, id: string): boolean;
   shutdown(): Promise<void>;
 }
 
@@ -184,8 +186,62 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
     }
   }
 
+  async function cloneRepo(target: string, repo: string, branch: string | undefined): Promise<void> {
+    await git(["clone", ...(branch ? [`--branch=${branch}`] : []), "--", repo, target], "clone");
+    const info = join(target, ".git", "info");
+    await mkdir(info, { recursive: true });
+    await appendFile(join(info, "exclude"), "state.json\nlogs/\n");
+  }
+
+  /** 掃除済み（logs/cleaned.json があり .git が無い）の worker の dir か。 */
+  async function isCleaned(dir: string): Promise<boolean> {
+    return (await exists(cleanedFile(dir))) && !(await exists(join(dir, ".git")));
+  }
+
+  /** clone の記録（掃除後の再開で、repo 指定が無くても clone し直せるように）。 */
+  const repoRecordFile = (dir: string): string => join(runLogDir(dir), "repo.json");
+
+  async function writeRepoRecord(dir: string, repo: string, branch: string | undefined): Promise<void> {
+    await mkdir(runLogDir(dir), { recursive: true });
+    // repo に認証情報が含まれうるので本人だけが読める
+    await writeFile(repoRecordFile(dir), JSON.stringify({ repo, ...(branch ? { branch } : {}) }) + "\n", { mode: 0o600 });
+  }
+
+  async function readRepoRecord(dir: string): Promise<{ repo: string; branch?: string } | undefined> {
+    try {
+      const d = JSON.parse(await readFile(repoRecordFile(dir), "utf8")) as { repo?: unknown; branch?: unknown };
+      if (typeof d.repo !== "string" || d.repo === "") return undefined;
+      return { repo: d.repo, ...(typeof d.branch === "string" && d.branch !== "" ? { branch: d.branch } : {}) };
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** logs/ と state.json だけが残った dir に clone し直す（tmp に clone して中身を移す）。 */
+  async function recloneInto(dir: string, repo: string, branch: string | undefined): Promise<void> {
+    const tmp = `${dir}.clone-${randomUUID()}`;
+    try {
+      await cloneRepo(tmp, repo, branch);
+      for (const name of await readdir(tmp)) {
+        if (name === "logs" || name === "state.json") {
+          await rm(join(tmp, name), { recursive: true, force: true });
+          continue;
+        }
+        await rename(join(tmp, name), join(dir, name));
+      }
+      await unlink(cleanedFile(dir)).catch(() => {});
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  }
+
   async function prepareDir(kind: AgentKind, dir: string, input: InvokeInput): Promise<void> {
-    const { repo, branch } = input;
+    let { repo, branch } = input;
+    // 掃除済みの worker は、repo の指定が無くても前回の clone 元で clone し直す
+    if (!repo && kind === "worker" && (await isCleaned(dir))) {
+      const rec = await readRepoRecord(dir);
+      if (rec) ({ repo, branch } = rec);
+    }
     if (!repo) {
       await mkdir(dir, { recursive: true });
       return;
@@ -197,10 +253,12 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
       await git(["-C", dir, "fetch"], "fetch");
     } else if (!(await exists(dir))) {
       await mkdir(join(dir, ".."), { recursive: true });
-      await git(["clone", ...(branch ? [`--branch=${branch}`] : []), "--", repo, dir], "clone");
-      const info = join(dir, ".git", "info");
-      await mkdir(info, { recursive: true });
-      await appendFile(join(info, "exclude"), "state.json\nlogs/\n");
+      await cloneRepo(dir, repo, branch);
+      await writeRepoRecord(dir, repo, branch).catch((e: unknown) => log(`repo 記録失敗: kind=${kind} dir=${dir} ${errMsg(e)}`));
+    } else if (kind === "worker" && (await isCleaned(dir))) {
+      log(`掃除済みの worker を clone し直す: dir=${dir}`);
+      await recloneInto(dir, repo, branch);
+      await writeRepoRecord(dir, repo, branch).catch((e: unknown) => log(`repo 記録失敗: kind=${kind} dir=${dir} ${errMsg(e)}`));
     } else {
       throw new Error(`${kind} の path は git repo でない: ${dir}`);
     }
@@ -573,5 +631,9 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
     return { caps, workers };
   }
 
-  return { invoke, stop, status, reapOrphans, activeCount, shutdown };
+  function isActive(kind: AgentKind, id: string): boolean {
+    return inflight.has(`${kind}:${id}`);
+  }
+
+  return { invoke, stop, status, reapOrphans, activeCount, isActive, shutdown };
 }

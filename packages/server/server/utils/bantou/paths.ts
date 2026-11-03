@@ -18,3 +18,8 @@ export function stateFile(dir: string): string {
 export function runLogDir(dir: string): string {
   return join(dir, "logs");
 }
+
+/** 掃除済みの印（logs/ の中）。再開時の clone し直しの判定に使う。 */
+export function cleanedFile(dir: string): string {
+  return join(runLogDir(dir), "cleaned.json");
+}

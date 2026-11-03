@@ -38,6 +38,7 @@ export const DEFAULT_SESSION = {
   disallowedTools: [] as string[],
   extraArgs: [] as string[],
   capBashSandbox: false,
+  workerKeepMs: 1_800_000,
   env: {} as Record<string, string>,
 };
 
@@ -58,6 +59,8 @@ export interface SessionConfig {
   extraArgs: string[];
   /** true なら cap の Bash sandbox を claude の設定のまま（有効なら worker が cap と共に死ぬ）。false（既定）は `--settings {"sandbox":{"enabled":false}}` を付けて切る。 */
   capBashSandbox: boolean;
+  /** 終わった worker の dir を掃除するまでの待ち時間（ms）。0 は掃除しない。 */
+  workerKeepMs: number;
   /** spawn する claude に追加で渡す環境変数。自身の環境変数に上書きで合成する。 */
   env: Record<string, string>;
 }
@@ -167,6 +170,10 @@ function parseSession(v: unknown, path: string): SessionConfig {
   if (typeof capBashSandbox !== "boolean") {
     throw new Error(`config の session.capBashSandbox は真偽値: ${path}`);
   }
+  const workerKeepMs = v.workerKeepMs ?? DEFAULT_SESSION.workerKeepMs;
+  if (typeof workerKeepMs !== "number" || !Number.isInteger(workerKeepMs) || workerKeepMs < 0) {
+    throw new Error(`config の session.workerKeepMs は 0 以上の整数（0 は掃除しない）: ${path}`);
+  }
   return {
     claude,
     permissionMode,
@@ -176,6 +183,7 @@ function parseSession(v: unknown, path: string): SessionConfig {
     disallowedTools: parseStringList(v.disallowedTools, "disallowedTools", path),
     extraArgs: parseStringList(v.extraArgs, "extraArgs", path),
     capBashSandbox,
+    workerKeepMs,
     env: parseEnv(v.env, path),
   };
 }
