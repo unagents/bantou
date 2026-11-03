@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 import { AGENT_ID_PATTERN } from "@agent-hand/bantou-protocol";
-import { sessionCapId } from "../src/center-id.js";
+import { MAX_SESSION_NAME, sessionCapId } from "../src/center-id.js";
 import { createActivityStore } from "../src/activity.js";
 import { createRemoteManager, type RemoteRecord } from "../src/remotes.js";
 import type { ServerLink, ServerPeer } from "../src/server-link.js";
@@ -49,6 +49,28 @@ const result = (cap: string, taskId: string) => ({
 });
 
 // -- cap_id の変換 --
+
+test("sessionCapId: 異なる (center-id, session) の組は必ず別の cap_id（center-id は固定長 10 桁 hex）。旧共有 cap とも一致しない", () => {
+  const centers = ["c-0123456789", "c-0123456788", "c-abcdef0123"];
+  const names = ["a", "b", "a-b", "b-a", "ab", "9", "9-a", "A", "a_b", "a-", "-a", "0123456789", "0123456789-a"];
+  const seen = new Map<string, string>();
+  for (const c of centers) {
+    seen.set(c, "shared:" + c); // 旧共有 cap
+    for (const n of names) {
+      const id = sessionCapId(c, n);
+      assert.equal(seen.has(id), false, id + " が " + seen.get(id) + " と衝突");
+      seen.set(id, c + "/" + n);
+    }
+  }
+});
+
+test("sessionCapId: session 名が MAX_SESSION_NAME 文字を超えたら error（短縮しない）。上限ちょうどは通り 255 byte に収まる", () => {
+  const max = "A".repeat(MAX_SESSION_NAME);
+  const id = sessionCapId(CENTER, max);
+  assert.ok(id.length <= 255 && id.length === CENTER.length + 1 + MAX_SESSION_NAME);
+  assert.match(id, AGENT_ID_PATTERN);
+  assert.throws(() => sessionCapId(CENTER, "A".repeat(MAX_SESSION_NAME + 1)), /文字まで/);
+});
 
 test("sessionCapId: c-<center-id>-<session 名>。session 名は cap_id と同じ文字種なので恒等。AGENT_ID_PATTERN を満たす", () => {
   assert.equal(sessionCapId(CENTER, "main"), "c-0123456789-main");

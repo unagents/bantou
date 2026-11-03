@@ -34,13 +34,18 @@ export async function loadCapId(stateDir: string, log: (m: string) => void): Pro
   return `${CAP_ID_PREFIX}${id}`;
 }
 
+/** session 名の最大文字数（cap_id のディレクトリ名を 255 byte に収める）。 */
+export const MAX_SESSION_NAME = 64;
+
 /**
  * session の cap_id。`<center の cap_id>-<session 名>`（例 `c-0a1b2c3d4e-main`）。cap は session × server に 1 つ。
  * session 名は cap_id と同じ文字種（`[A-Za-z0-9_-]`、sessions.ts の SESSION_NAME）なので、変換は恒等（エスケープ不要）。
  * center の cap_id は固定長（`c-` + 10 桁 hex）で `-` の位置が決まるので、session 名が違えば cap_id も必ず違い、
- * 旧共有 cap（`c-<center-id>`）とも一致しない。文字種に合わない名前は投げる（黙って別の名前に寄せない）。
+ * 旧共有 cap（`c-<center-id>`）とも一致しない。文字種に合わない名前、`MAX_SESSION_NAME`（64）文字を超える名前は投げる（黙って別の名前に寄せない・短縮しない）。
+ * 上限の理由: cap_id は `<workspace>/caps/<cap_id>` のディレクトリ名になる（Linux は 255 byte まで）。server の検証（AGENT_ID_PATTERN）に長さ上限は無いので center 側で絞る。cap_id は最大 13 + 64 = 77 文字。
  */
 export function sessionCapId(centerCapId: string, session: string): string {
   if (!/^[A-Za-z0-9_-]+$/.test(session)) throw new Error("session 名は英数字と _ - のみ");
+  if (session.length > MAX_SESSION_NAME) throw new Error(`session 名は ${MAX_SESSION_NAME} 文字まで`);
   return `${centerCapId}-${session}`;
 }

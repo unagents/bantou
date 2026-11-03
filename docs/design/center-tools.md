@@ -48,7 +48,57 @@
 - （確定: 2026-11-04。同日に次項で改訂）**remote-cap は 1 つの server につき 1 つだけ**。作業が何であれ、center はその cap に次の指示を送る。作業ごとに cap を作るのは資源（cap の path・プロセス・state）と設計（同じ server の cap が際限なく増え、片付けも要る）の両面で無意味なので止めた。protocol の `kick_cap` は同じ cap_id なら resume で、server は cap ごとに直列実行し worker の report で cap を再開するので、server 側の取り決めは変えていない。
 - （確定: 2026-11-04、利用者の決定）**cap は session × server に 1 つ**（session = master-cap と remote-cap を 1 対 1）。理由: 1 server に cap 1 つを全 session で共有すると、他の session が作った cap とその指示・結果が見え、指示も混ざる。「作業ごとに cap を作らない」は維持する（session の cap に次の指示を送る）。
   - cap_id = `<center の cap_id>-<session 名>` = `c-<10 桁 hex>-<session 名>`（例 `c-0a1b2c3d4e-main`）。`remote_id` = cap_id。
-  - 文字種と変換: session 名は `[A-Za-z0-9_-]+`（`SESSION_NAME` / `OWNER_PATTERN`。cap_id の `AGENT_ID_PATTERN` と同じ）なので、**変換は恒等でエスケープは要らない**。この文字種に合わない名前は `remote_send` が error にする（黙って別の名前に寄せない）。衝突しない根拠: 接頭辞 `c-<10 桁 hex>` は固定長で 1 center につき 1 つなので、cap_id は session 名で一意に決まる（別の session 名なら別の cap_id）。旧共有 cap の `c-<10 桁 hex>` は session 名の接尾辞が無いので、どの session の cap_id とも一致しない。将来 session 名の文字種を広げる時は、許可外の文字を `_` + 2 桁 hex（UTF-8 のバイトごと）に、`_` 自体も `_5F` に変えれば衝突しない（今は使わない。`_` を含む今の名前を変えないため）。
+  - 文字種と変換: session 名は `[A-Za-z0-9_-]+`（`SESSION_NAME` / `OWNER_PATTERN`。cap_id の `AGENT_ID_PATTERN` と同じ）なので、**変換は恒等でエスケープは要らない**。この文字種に合わない名前、**64 文字を超える名前**は `remote_send` が error にする（黙って別の名前に寄せない・短縮もしない）。衝突しない根拠: center-id は `loadCapId` が `^[0-9a-f]{10}# center の tool 仕様（実装済み、2026-10-29）
+
+ドラフトを実装に落とした版。前提は `docs/concept.md`。各項目に「概念」（ユーザー確定の原則）か「今は」（いずれ変わり得る実装）を付ける。
+
+## 前提（概念）
+
+- ユーザーは番頭（bantou）と話し、番頭が全部を切り盛りする。PM（master-cap）を用意するのも番頭。
+- master-cap は「考えて指示を出す」だけの中継役。実体（起動手段・場所・path）は本質ではない。
+- center は master-cap に必要な道具を持たせてよい。agent-messenger の通信部分は center が持ち、master-cap ごとに messenger の MCP を抱えさせない。
+- どの server で作業するか、worker を何本使うかは、ユーザーからはできるだけ見えなくする（master-cap に見えるのは構わない）。
+- center の tool は 2 種類: (A) 番頭が使う、center 上の session（master-cap）の起動・削除。(B) center が master-cap に持たせる、server の remote-cap（session × server ごとに 1 つ）への指示・停止の道具。
+
+## A. center 上の session（番頭が使う）
+
+| tool | 引数 | 返り値 | 動作 |
+|---|---|---|---|
+| `session_create` | `name`（英数 `_-`）、`path?`、`permissionMode?`（既定 `auto`）、`settings?`（プロジェクト設定 `{ instructions?: string, … }`） | `{name, path, state, pid, sessionUrl, startedAt, source, lastError?}` | `claude remote-control --name <name>` を path で起動し、監視対象に加える |
+| `session_delete` | `name` | `{name, deleted}` | remote-control を停止し、監視と保存から外す。path は消さない |
+| `session_settings_get` | `name` | `{name, settings}` | session のプロジェクト設定を返す（未設定・config 由来は `settings: {}`） |
+| `session_settings_update` | `name`、`settings`（項目ごとにマージ。`null` で項目を削除） | `{name, settings}` | プロジェクト設定を更新して `sessions.json` に保存。次の起動から効く。config 由来の project は拒否 |
+| `session_list` | なし | 同上の配列 | config の project と session の全部（`source` で区別） |
+
+決めた点（今は）:
+
+- 実体は supervisor（`remote-control.ts`）の entry。構築時固定だった entry を `add` / `remove` で動的に足し引きできるようにした。`remove` できるのは `add` したものだけ（config 由来は不可）。
+- 保存は center 自前の状態ファイル（config と同じ dir の `sessions.json`）。config の projects には書かない。center 起動時に復元し、`--continue` で起動する。`--continue` が接続前（30 秒以内）に終了したら、素の起動へ fallback する（claude は約 4 時間以内の記録が無いと `--continue` で error exit する。実測: `No recent session found in this directory or its worktrees`）。
+- `path` 省略時は config の project `workspace`（desktop が渡す 1 件）の path の下に `<name>` を作る。`workspace` が無ければ `path` 必須。
+- 拒否: name 重複、既存 project 名（`workspace` 含む）との衝突、他の project / session と同じ path、相対 path。
+- 新規 path の trust（実測、claude 2.1.312）: プロンプトは出ず `Error: Workspace not trusted. Please run \`claude\` in <path> first ...` で即 exit 1。親 dir が trust 済みなら配下は通る。未 trust の path では `session_create` は `lastError` 付きの `starting` を返し、再起動を繰り返して上限で `error`。center が claude の設定に trust を書く案は、ユーザー設定の書換えになるので入れていない（今は。人が一度 `claude` を起動して承認する）。
+- 同じ folder を直前まで別の remote-control が握っていると、`This folder is already served by a terminal ...` で約 1 分待たされて終了する（実測）。
+- `session_delete` は path を消さない（ドラフトの案どおり）。
+
+## B. remote session（center が master-cap に持たせる道具）
+
+| tool | 引数 | 返り値 | 動作 |
+|---|---|---|---|
+| `remote_send` | `goal`、`deliverables?`、`verify?`、`constraints?`、`workers?`、`worker_model?`、`repo?`、`branch?`、`server?` | `{remote_id, server, serverName, state, created, task_id, worker_model?}` | この session の remote-cap（cap_id = `c-<center-id>-<session 名>`。server ごとに 1 つ）に `task` を送る。`goal` だけなら他は既定（`deliverables:{}` `verify:{}` `constraints:[]` `workers:{}`。items 無し = implement + review の最低 2 体）。`task_id` は center が採番。返信（`task_result`）は待たない。cap が無い時は server が作る。他の session の cap には届かない |
+| `remote_create` | 同上 | 同上 | `remote_send` の互換の別名（同じ処理） |
+| `worker_reply` | `remote_id?`、`worker_id`、`text`、`server?` | `{remote_id, server, worker_id, accepted:true}` | server の worker へ返答を送る（`worker_report` の ask / approve への回答）。`remote_id` 省略時は呼び出し元 session の cap（server が複数あれば `server` で絞る）。他の session の cap には送れない（旧共有 cap は `remote_id` で明示）。desktop は外向け `/mcp` の同名 tool を `center_call` で呼ぶ |
+| `remote_delete` | `remote_id?`、`server?`、`force?` | `{remote_id, deleted, stopped, warning?}` | server に `stop_cap` を送って実行を止め、記録を外す。対象は呼び出し元 session の cap と、`remote_id` で明示した旧共有 cap だけ（他の session の cap は見えない・触れない） |
+| `remote_list` | `owner?`（外向け）、`include_shared?`（session 向け） | `RemoteView[]` | session × server の cap 単位。`session` を持つ。最新の `result` / `error` と時刻、最新の `task_result`、直近の `worker_reports`（最大 20 件、到着順）、未完了の指示 `pending`、`owners`（pending を持つ session）、`activity?` を含む（履歴は無い）。owner が分かればその session の未完了の指示がある cap、分からなければ全件（session 無しの旧共有 cap も含む）。session 向けは自分の cap だけで、`include_shared: true` で旧共有 cap も含める |
+| `remote_wait` | `remote_id?`、`server?`、`timeout_sec?`、`owner?` | `RemoteView` | cap が idle で配下の worker に running / stalled が無くなるまで待つ。timeout は `state: running`。完了通知を受けられない session 用 |
+
+決めた点:
+
+- （概念）master-cap から server が見えること自体は構わないが、選ばなくても動く。`server` 省略で自動選択。
+- （今は）server 選択は発見ベース: messenger の `listPeers("all", {protocol: "bantou"})` の先頭。`server` 引数は peer id、一致しなければ name。`config.servers` には依存しない（desktop は 2eceed7 以降 `servers` を書かない）。`config.servers` があれば先頭の client を共有し、無ければ内部 client 1 本（接続を増やさない）。既存 tool の挙動は変えていない。
+- （確定: 2026-11-04。同日に次項で改訂）**remote-cap は 1 つの server につき 1 つだけ**。作業が何であれ、center はその cap に次の指示を送る。作業ごとに cap を作るのは資源（cap の path・プロセス・state）と設計（同じ server の cap が際限なく増え、片付けも要る）の両面で無意味なので止めた。protocol の `kick_cap` は同じ cap_id なら resume で、server は cap ごとに直列実行し worker の report で cap を再開するので、server 側の取り決めは変えていない。
+- （確定: 2026-11-04、利用者の決定）**cap は session × server に 1 つ**（session = master-cap と remote-cap を 1 対 1）。理由: 1 server に cap 1 つを全 session で共有すると、他の session が作った cap とその指示・結果が見え、指示も混ざる。「作業ごとに cap を作らない」は維持する（session の cap に次の指示を送る）。
+  - cap_id = `<center の cap_id>-<session 名>` = `c-<10 桁 hex>-<session 名>`（例 `c-0a1b2c3d4e-main`）。`remote_id` = cap_id。
+  - 文字種と変換: session 名は `[A-Za-z0-9_-]+`（`SESSION_NAME` / `OWNER_PATTERN`。cap_id の `AGENT_ID_PATTERN` と同じ）なので、**変換は恒等でエスケープは要らない**。 で検証する**固定長 10 桁 hex（`-` を含まない）**で、接頭辞 `c-<10 桁 hex>-` は常に 13 文字。session 名に `-` が入っても、先頭 13 文字が center を、残りが session 名を一意に決める（`(center-id, session)` の組と cap_id は 1 対 1。別 center の `c-ab-c` のような id は作れない）。旧共有 cap の `c-<10 桁 hex>`（12 文字）は接尾辞が無いので、どの session の cap_id（14 文字以上）とも一致しない。長さ上限の根拠: cap_id は server の `<workspace>/caps/<cap_id>` のディレクトリ名で、Linux の上限は 255 byte。server の検証（`AGENT_ID_PATTERN`）に長さ上限は無いので center 側で絞る。cap_id は最大 13 + 64 = 77 文字。大文字・`-`・`_` を含む 77 文字の id で作成・status・孤児回収が通ることは server のテストで確かめた。大文字小文字を区別しない FS の server（macOS など）では `Main` と `main` が同じ dir になる（Linux の server では別。現状の server は Linux 前提で、center は server の FS を知らない）。旧共有 cap の `c-<10 桁 hex>` は session 名の接尾辞が無いので、どの session の cap_id とも一致しない。将来 session 名の文字種を広げる時は、許可外の文字を `_` + 2 桁 hex（UTF-8 のバイトごと）に、`_` 自体も `_5F` に変えれば衝突しない（今は使わない。`_` を含む今の名前を変えないため）。
   - 記録は session × server に 1 件。記録（`remotes.json`）は cap_id をキーに `session` を持つ。server は記録の peer id（無ければ名前 + host）で照合する。同じ session が別の server に cap を持つ時、cap_id は同じで server が違う記録になる。
   - `remote_send`: 呼び出し元 session（`X-Bantou-Session`）の cap へ送る。記録が無ければ作る（cap は server が最初の `task` で作る）。`remote_list` / `remote_wait` / `remote_delete` / `worker_reply` は呼び出し元 session の cap だけが対象で、他 session の cap は `remote_id` を指定しても見えない（「未定義の remote」）。`remote_id` 省略時は自分の cap（server が複数あれば `server` で絞る）。外向け `/mcp`（desktop の `center_call`）は owner を持たないので全件。
   - 通知は cap の session にだけ送る（完了通知・`worker_report` の push）。`worker_report` は未完了の指示が無くても cap の session へ送る（cap に owner が 1 人に決まったため）。

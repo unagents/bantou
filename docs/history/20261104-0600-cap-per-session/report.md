@@ -15,22 +15,24 @@
 ## cap_id の変換規則
 
 - session 名は `[A-Za-z0-9_-]+`（`SESSION_NAME` / `OWNER_PATTERN`）で、cap_id の `AGENT_ID_PATTERN` と同じ文字種。**変換は恒等でエスケープ無し**（`sessionCapId`、center-id.ts）。
-- 文字種外の名前は error（別の名前に寄せない）。
-- 衝突しない根拠: `c-<10 桁 hex>` は固定長で 1 center に 1 つ。cap_id は session 名で一意。旧共有 cap `c-<10 桁 hex>` は接尾辞が無く、どの session の cap_id とも違う。
+- 文字種外の名前、64 文字を超える名前（`MAX_SESSION_NAME`）は error（別の名前に寄せない・短縮しない）。上限の理由: cap_id は server の `caps/<cap_id>` の dir 名（Linux 255 byte）。server の検証に長さ上限は無いので center で絞る。cap_id は最大 77 文字。
+- 衝突しない根拠: center-id は `loadCapId` が 10 桁 hex に検証する固定長（`-` を含まない）。接頭辞 `c-<hex>-` は常に 13 文字なので、session 名に `-` があっても `(center-id, session)` と cap_id は 1 対 1（`c-ab` の session `c` と center-id `ab-c` の共有 cap のような衝突は、center-id が固定長 hex なので起きない）。cap_id は session 名で一意。旧共有 cap `c-<10 桁 hex>` は接尾辞が無く、どの session の cap_id とも違う。
+- 大文字小文字を区別しない FS の server では `Main` と `main` が同じ dir になりうる（Linux の server は別。未対応・server の FS は center から分からない）。
 - 将来 session 名の文字種を広げる時: 許可外の文字を `_` + 2 桁 hex（UTF-8 のバイトごと）、`_` 自体を `_5F` に変える（今は使わない。`_` を含む今の名前を変えないため）。
 
 ## 変更ファイル
 
 - center: `src/center-id.ts`（`sessionCapId`）、`src/remotes.ts`、`src/tools.ts`
-- center テスト: `test/remotes.test.ts`（共有 cap 前提の 23 件を session ごとの cap に書き換え）、`test/tools.test.ts`、`test/cap-per-session.test.ts`（新規 15 件）
+- center テスト: `test/remotes.test.ts`（共有 cap 前提の 23 件を session ごとの cap に書き換え）、`test/tools.test.ts`、`test/cap-per-session.test.ts`（新規 17 件）
 - desktop: `src/components/RemoteActivity.vue`、`src/types/index.ts`、`e2e/center.spec.ts`、`e2e/terminal.spec.ts`
+- server テスト: `packages/server/test/server/utils/bantou/agents.test.ts`（1 件追加）
 - docs: `docs/design/center-tools.md`、`docs/architecture.md`、`docs/protocol.md`、`packages/center/README.md`、`docs/design/master-cap-session.md`、この report
 
 ## テスト
 
-- center: `bun run test` 390 件 pass（変更前 375 件）、`bun run typecheck` OK
-  - 新規 `cap-per-session.test.ts` 15 件: cap_id の変換と衝突しなさ、拒否、session ごとの send、他 session から見えない・触れない（list / wait / delete / workerReply）、通知先、旧共有 cap の引き継ぎ・delete・他 session の cap は消せない、status 追従で他 session の worker を数えない、remote_id 省略の error
-- server: `npm test` 232 件 pass、typecheck OK（変更なし）
+- center: `bun run test` 392 件 pass（変更前 375 件）、`bun run typecheck` OK
+  - 新規 `cap-per-session.test.ts` 17 件: 組ごとの cap_id が衝突しない・64 文字上限、cap_id の変換と衝突しなさ、拒否、session ごとの send、他 session から見えない・触れない（list / wait / delete / workerReply）、通知先、旧共有 cap の引き継ぎ・delete・他 session の cap は消せない、status 追従で他 session の worker を数えない、remote_id 省略の error
+- server: `npm test` 233 件 pass、typecheck OK（実装の変更なし。`agents.test.ts` に「77 文字・大文字・- _ の cap_id で作成・status・reapOrphans」1 件追加）
 - desktop e2e: `terminal.spec.ts` + `center.spec.ts` 23 件 pass（`bun run generate` の静的ビルド + 簡易静的サーバー + ms-playwright chromium）。session を切り替えると remotes 欄が変わる（careery: 2 行（server ごと）、stroke-board: 1 行、cap 無しの session: 「remote なし」、旧共有 cap は出ない）
 - cargo test: 259 件 pass（`bun run build:sidecar` 後）
 
