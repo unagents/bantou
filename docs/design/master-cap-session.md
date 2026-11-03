@@ -135,6 +135,14 @@ desktop の設定画面で入力した「master-cap への追加指示」を、c
     - 読み直しで効く項目（その session の起動時点の値を使う）: `remoteControl.sessionInstructions` / `model` / `env` / `autoConsent` / `maxRestarts` / `restartDelayMs` / `continueOnRestart`。再起動の予約は、その起動で読んだ値で決める。
     - 起動時にしか効かない項目（center の再起動が要る）: `remoteControl.claude`（起動時に解決する）、`remoteControl.stopGraceMs`（停止は起動と別の経路で、読み直しの対象外）、`projects` / `servers` / `logDir` / `workspace` / `token`、HTTP の port / bind。この一覧に項目を足さない（新しい `remoteControl` の項目は、session 起動時に使うなら読み直しの値を使う）。
 
+17. 追記（2026-11-04）: context の窓は claude の statusLine の JSON（`context_window.context_window_size`）を正本にする。center は master-cap を起動する時に `--settings '{"statusLine":{"type":"command","command":"<center の status-line サブコマンド>"}}'` を足し、サブコマンドが stdin の JSON を `POST /sessions/<name>/status-line` へ送る。**利用者の statusLine 設定より center のものが master-cap で優先される**（利用者の statusLine は master-cap では出ない）。
+    - 理由: transcript の model 名は `[1m]` が落ちた素の名前で窓が決められず、desktop の ctx 表示が % にならなかった（`[1m]` 無しの session で 25 万 token 使えていた）。
+    - 比較した案: (A) transcript の model 名から窓を推測する（`[1m]` 無しで 1M の session があり、決められない）、(B) `/context` の出力を画面から読む（画面解析は採らない方針）、(C) statusLine の JSON を使う、で (C)。(C) の渡し方は、(C1) `/bin/sh` + `curl`（token が curl の argv に出て `ps` に見える。Windows に無い）、(C2) 一時ファイルを書く（掃除が増える）、(C3) center 自身のサブコマンド。(C3) を採用。token は claude の env `BANTOU_SESSION_TOKEN`（`--mcp-config` と同じ使い捨て）を子が読み、argv に載せない。
+    - `--settings` は `statusLine` のキーだけを渡す（他の設定は上書きしない。実機で hooks・output style が残ることを確認）。
+    - 値: `usedTokens` = `total_input_tokens`（output を含まない。claude の `used_percentage` と同じ式）、`percent` は出し直した小数 1 桁。statusLine の値が来るまで、および `used_percentage` が `null` の間は transcript 方式を予備にする（窓だけ statusLine で補う）。詳細は `packages/center/README.md` の「statusLine 方式」。
+    - 利用者から見える副作用: statusLine を設定していなかった利用者でも、master-cap の端末では footer の hint（`esc to interrupt` など）が消える（custom statusLine を設定した時の claude の仕様。docs 記載）。Windows での実行は未検証。
+    - desktop の表示は変えない（1M は「1M」）。
+
 ## 別件（同日の観測）
 
 - server 0.3.1: `remote_create` に repo を渡すと、clone 前に `logs/center.json` が cap の dir を作るため `cap の path は git repo でない` で必ず失敗する。

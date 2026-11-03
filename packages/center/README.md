@@ -33,7 +33,7 @@ bantou-center [--config <path>] [--transport stdio|http] [--port <n>] [--bind <a
 
 ### http transport
 
-- エンドポイントは `http://<bind>:<port>/mcp`（外向け。MCP Streamable HTTP。POST / GET / DELETE）と `/mcp/session`（master-cap 向け。下記「窓口の分離」）。pty 出力の配信は `/sessions/<name>/{output,input,resize,attachments}`（下記「core」「添付画像」）。それ以外は 404。
+- エンドポイントは `http://<bind>:<port>/mcp`（外向け。MCP Streamable HTTP。POST / GET / DELETE）と `/mcp/session`（master-cap 向け。下記「窓口の分離」）。pty 出力の配信は `/sessions/<name>/{output,input,resize,attachments}`（下記「core」「添付画像」）。statusLine の受信は `POST /sessions/<name>/status-line`（session token。下記「context 使用量」）。それ以外は 404。
 - **認証は Bearer token**。`/mcp` へのリクエスト（POST / GET / DELETE すべて）は `Authorization: Bearer <config の token>` が必要で、欠落・形式違い・不一致は 401（`WWW-Authenticate: Bearer`）。比較は定時間。token が無い・12 文字未満だと http は起動しない。既定は loopback にだけ bind する。`--bind 0.0.0.0` 等で外に出しても、token を知らない相手は rc_start などを呼べない（ただし TLS は無いので平文。信頼できる LAN だけで使う）。
 - MCP session ごとに McpServer を作る。supervisor と server 接続は全 session で共有。
 - SIGTERM / SIGINT で http server・全 session・全 project を停止して exit 0。http では stdin を見ない（親が `/dev/null` を渡しても落ちない。親は SIGTERM で止める）。
@@ -163,7 +163,7 @@ center は wrapper 経由の session（master-cap）を起動するたび（新�
 
 - `session_create`: pty wrapper 経由の対話型 `claude --remote-control <name> --permission-mode <permissionMode> --mcp-config '<JSON>'`（再起動時は `--continue` 付き）を `path` で起動し、supervisor に動的に足す（起動の詳細は「master-cap の起動（wrapper）」）。`path` 省略時は config の `workspace` の下の `<name>`（無ければ作る）。`workspace` が無ければ `path` が必須。`permissionMode` の既定は `auto`。`name` の重複、既存 project 名との衝突、他の project / session と同じ path は拒否。接続（URL 取得）か早期終了まで最大 15 秒待って状態を返す（待ちきれなければ `starting`）。
 - `session_delete`: `session_create` で作ったものだけ。remote-control を停止（SIGTERM → `stopGraceMs` 後 SIGKILL）して監視と保存から外す。path は消さない。config 由来の project は拒否。
-- `session_list`: config の project と session の全部。`source` が `config` / `session`。`instructions`（真偽。その session を起動した時に `--append-system-prompt`（`sessionInstructions`）を付けたか。本文は出さない。`rc_status` の `instructions` と同じで、`rc_status` の `args` でも値は `<N 文字>` に伏せる）が付く。`contextUsage`（`{ usedTokens, windowTokens, percent, updatedAt }`、まだ分からない時は `null`）が付く。取得の仕組みは「context 使用量」。
+- `session_list`: config の project と session の全部。`source` が `config` / `session`。`instructions`（真偽。その session を起動した時に `--append-system-prompt`（`sessionInstructions`）を付けたか。本文は出さない。`rc_status` の `instructions` と同じで、`rc_status` の `args` でも値は `<N 文字>` に伏せる）が付く。`contextUsage`（`{ usedTokens, windowTokens, percent, updatedAt, model? }`。`model` は statusLine 由来の時だけ。まだ分からない時は `null`）が付く。取得の仕組みは「context 使用量」。
 - 保存: config と同じ dir の `sessions.json`（`name`, `path`, `permissionMode`, `createdAt`）。config の projects には書かない。center 起動時に復元して `--continue` で起動する。`--continue` で接続前に 30 秒以内に終了した場合（約 4 時間以内の記録が無い、など）は、素の起動へ fallback する（再起動回数は増やさない）。
 - 新規 path の trust: **trust プロンプトは出ず、remote-control が `Error: Workspace not trusted. Please run `claude` in <path> first ...` で即 exit 1 する**（claude 2.1.312 で実測）。親 dir が trust 済みなら配下は通る（実測: trust 済みの repo 配下の dir で `connected`）。そのため、未 trust の path では `session_create` は `state: starting` と `lastError`（`接続前に終了: Error: Workspace not trusted...`）を返し、supervisor は再起動を繰り返して上限で `error` になる。対処は、workspace（または path の親）で一度 `claude` を起動して trust を承認しておくこと。center が claude の設定ファイルを書き換えて trust を付けることはしない（今は）。
 - 同じ folder を別の `claude remote-control` が直前まで握っていると、`This folder is already served by a terminal \`claude remote-control\` on this device. Stop it first.` で約 1 分待たされて終了する（実測、直前の center を強制終了した後など）。
@@ -274,12 +274,25 @@ npm run e2e
 
 session（`session_create` で作った wrapper 経由の claude。master-cap を含む。config 由来の project は対象外）ごとに、claude のコンテキストの使用状況を center が把握し、`session_list` の `contextUsage` に載せる。`src/context-usage.ts`。
 
-- 取得元: claude の transcript（`<CLAUDE_CONFIG_DIR または ~/.claude>/projects/<cwd の英数字以外を - にした名前>/*.jsonl`）。端末の画面は解析しない。
+- 取得元は 2 つ。**statusLine（正本）**: center が master-cap に渡す statusLine が、claude の stdin JSON（`context_window`）を center に POST する（下記「statusLine 方式」）。**transcript（予備）**: statusLine の値が来るまで、または statusLine から使用量が取れない間に使う。以降の「対象の transcript」「値」「窓」「更新」は予備（transcript 方式）の説明。
+- transcript の場所: claude の transcript（`<CLAUDE_CONFIG_DIR または ~/.claude>/projects/<cwd の英数字以外を - にした名前>/*.jsonl`）。端末の画面は解析しない。
 - 対象の transcript: その dir の `*.jsonl` のうち、今回の起動時刻（`startedAt`）の 2 秒前以降に更新された最新の 1 本。起動し直すと前の値は捨てる。同じ cwd で別の claude を手で動かすと取り違え得る。
 - 値: 末尾から読んだ最後の assistant message（sidechain・`<synthetic>` を除く）の usage の `input_tokens + cache_creation_input_tokens + cache_read_input_tokens + output_tokens` = `usedTokens`。transcript は末尾 64KB だけ読み、該当行が無ければ 4 倍ずつ（上限 8MB）広げる。全体は読まない。
-- 窓: `windowTokens` は config の `remoteControl.model` か transcript の model に `[1m]` があれば 1,000,000。それ以外は `null`（transcript の model は `[1m]` が落ちた素の名前で、素の名前から窓は決められない。`percent` も `null`、desktop はトークン数だけ出す）。`percent` は小数 1 桁。
+- 窓（transcript 方式）: `windowTokens` は config の `remoteControl.model` か transcript の model に `[1m]` があれば 1,000,000。それ以外は `null`（transcript の model は `[1m]` が落ちた素の名前で、素の名前から窓は決められない。`percent` も `null`、desktop はトークン数だけ出す）。`percent` は小数 1 桁。
 - 更新: 5 秒ごとに transcript の mtime / size を見て、変わっていなければ読まない。値が変わった時だけ `GET /events` に `reason: "context"` を流す（desktop は `session_list` を取り直す）。古い desktop は reason を見ずに取り直すだけなので混在しても動く。
 - `protocol`（`packages/protocol`）は変えない（`session_list` は center の tool で、protocol のメッセージではない）。
+
+### statusLine 方式
+
+- 背景: transcript の model 名は `[1m]` が落ちた素の名前で、窓（200k か 1M か）を決められなかった（`[1m]` 無しの session で 25 万 token 使えていた）。claude が statusLine コマンドの stdin に渡す JSON の `context_window.context_window_size` が窓の正本。
+- center は wrapper 経由の session を起動する時、`--settings '{"statusLine":{"type":"command","command":"<center の status-line サブコマンド>"}}'` を足す。`--settings` は他の設定と併合され、`statusLine` のキーだけを渡すので他の設定（hooks・output style・permissions など）は上書きしない。**利用者の statusLine 設定（`settings.json` の `statusLine`）より center のものが優先される**ので、master-cap では利用者の statusLine は表示されない（2.1.317 で実測。user の settings.json に statusLine があっても center のコマンドが呼ばれた）。窓口が無い（stdio）時は付けない。config 由来の project（`claude remote-control` 直起動）には付けない。
+- コマンドは center 自身のサブコマンド `bantou-center status-line --url <center>/sessions/<name>/status-line`。bun / node / curl に依存せず、compiled の center 1 本で動く（`/bin/sh` + `curl` は Windows に無いので採らなかった。Windows での実行・quote は未検証）。stdin の JSON を POST し、stdout には何も出さない（statusLine の表示を空にする）。失敗は stderr に 1 行出すだけで終了コードは常に 0。タイムアウト 2 秒。
+- token は argv にも設定にも載せない。claude の env の `BANTOU_SESSION_TOKEN`（起動ごとの使い捨て、`--mcp-config` と同じもの）を、statusLine の子（サブコマンド）が自分で読む（statusLine の子は claude の env を継ぐ。実測）。`curl -H "Authorization: Bearer $T"` だと curl の argv に token が出て `ps` に見えるため採らない。
+- `POST /sessions/<name>/status-line`: 認証は**その session の token**（`Authorization: Bearer <session token>`。外向け token・他の session の token は 401）。本文は JSON object。204。壊れた JSON・object 以外は 400（center.log に `statusLine の JSON が不正: session=<name>`）。POST 以外は 405。
+- 値: `windowTokens` = `context_window_size`、`usedTokens` = `total_input_tokens`（claude 自身の式。`input + cache_creation + cache_read`、**output を含まない**。transcript 方式は最後の応答の output 分だけ多い）、`percent` = `usedTokens / windowTokens` を小数 1 桁（`used_percentage` は整数に丸められて来るため出し直す）、`model` = `model.id`。
+- `used_percentage` が `null` の間（初回の API 応答前・`/compact` 直後）は使用量を持たない。その間は transcript の値を使い、窓だけ statusLine の `context_window_size` で補う。statusLine の値が取れたらそれが transcript に優先する。起動し直したら statusLine の値は捨てる。
+- master-cap の端末では、statusLine を設定していなかった利用者でも、footer の `esc to interrupt` や `? for shortcuts` などの hint が消える（custom statusLine を設定した時の claude の仕様。docs 記載、実機では footer の hint 消失までは見ていない）。
+- 更新: POST のたびに反映し、値（使用量・窓・percent・model）が変わった時だけ `GET /events` に `reason: "context"` を流す。claude は 300ms の debounce で呼ぶ。
 
 ## 未決
 
@@ -303,6 +316,7 @@ session（`session_create` で作った wrapper 経由の claude。master-cap �
 - `session_create` の session は `bantou-pty-wrapper --cols N --rows N -- claude --remote-control <name> --permission-mode <m> --mcp-config '<JSON>' [--continue]` で起動する。wrapper は `dirname(process.execPath)/bantou-pty-wrapper`、env `BANTOU_PTY_WRAPPER` で上書き。config の `projects`（`rc_*`）は従来の `claude remote-control` のまま。supervisor は 1 つで、entry ごとに起動方式を選ぶ（再起動・`--continue`・素の起動への fallback・ログ・有効化確認への自動応答は共通）。
 - `--mcp-config` の JSON には `bantou`（http、`/mcp/session`。窓口が無い時は付けない）と `bantou-messenger`（stdio、agent-messenger）が入る。`bantou-messenger` は `npx -y @unagents/messenger@0.12.0 mcp` を env `AGENT_MESSENGER_NAME=<session 名>` で起動し、session 名を messenger の peer 名にする。受信は Claude Code の inbox socket 経由で会話に現れる（pty への書き込みではない）。broker は client が env → config → UDP 発見で解決する（center は指名しない）。再起動・`--continue` でも同じ名前で登録し直す。center の子プロセスの PATH に `npx` が要る。
 - wrapper との間は 1 行 1 JSON（wrapper の stdout: `started` / `output`（base64）/ `text`（制御文字を除いた文字列）/ `exit`、stdin: `input` / `resize` / `stop`）。session URL と接続状態は `text` の直近 16 KiB の窓に対して照合する（行単位ではない）。有効化確認への自動応答は `input`（`y\r`）。
+- `--settings` で center の statusLine を渡す（引数の順は `--mcp-config` の後、`--continue` の前）。利用者の statusLine 設定より center のものが優先される（「context 使用量」の「statusLine 方式」）。
 - 停止は wrapper へ `stop` を送って待ち、`stopGraceMs` 内に終わらなければ SIGKILL。
 
 ## core（出力の配信）
