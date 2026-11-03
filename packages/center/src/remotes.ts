@@ -459,10 +459,16 @@ export function createRemoteManager(opts: {
     wake();
   };
 
-  /** server の status から、cap（id）か worker が動いているか。worker は cap との対応が status に無いので server 全体で見る。 */
-  const statusBusy = (st: StatusReply, id: string): boolean => {
-    const cap = st.caps.find((c) => c.id === id);
-    return (cap !== undefined && (cap.state === "running" || (cap.queued ?? 0) > 0)) || st.workers.some((w) => w.state === "running");
+  /**
+   * server の status から、cap（r の cap_id）か worker が動いているか。worker は cap との対応が status に無い。
+   * 他 session の cap の worker を数えないよう、この cap の activity があればそこに載る worker だけを見る（載っていなければ worker 無し）。
+   * activity がまだ無い（center 再起動直後など）間は対応が分からないので server 全体で見る（完了判定が遅れることはあっても、早まらない）。
+   */
+  const statusBusy = (st: StatusReply, r: RemoteRecord): boolean => {
+    const cap = st.caps.find((c) => c.id === r.remote_id);
+    const mine = activityOf(r)?.agents.filter((a) => a.kind === "worker").map((a) => a.id);
+    const workers = mine === undefined ? st.workers : st.workers.filter((w) => mine.includes(w.id));
+    return (cap !== undefined && (cap.state === "running" || (cap.queued ?? 0) > 0)) || workers.some((w) => w.state === "running");
   };
 
   /**
@@ -492,7 +498,7 @@ export function createRemoteManager(opts: {
       return;
     }
     if (!has(r) || (inflight.get(r) ?? 0) > 0) return;
-    if (statusBusy(st, r.remote_id)) {
+    if (statusBusy(st, r)) {
       settling.delete(r);
       statusIdleAt.delete(r);
       if (r.state !== "running") log(`remote 追従: ${r.remote_id} cap / worker が動いている（status）`);
@@ -604,7 +610,14 @@ export function createRemoteManager(opts: {
       cands = cands.filter((r) => sameServer(r, peer));
       if (cands.length === 0) throw new Error(`その server に remote ${remote_id ?? ""} は無い: ${server}`);
     }
-    if (cands.length > 1) throw new Error(`remote ${remote_id ?? "（remote_id 省略）"} は複数の server にある（server で指定: ${cands.map((r) => `${r.serverName}(${r.server})`).join(", ")}）`);
+    if (cands.length > 1) {
+      const distinctIds = new Set(cands.map((r) => r.remote_id)).size > 1;
+      throw new Error(
+        distinctIds
+          ? `remote_id 省略では 1 件に決まらない（remote_id で指定: ${cands.map((r) => r.remote_id).join(", ")}）`
+          : `remote ${remote_id ?? "（remote_id 省略）"} は複数の server にある（server で指定: ${cands.map((r) => `${r.serverName}(${r.server})`).join(", ")}）`,
+      );
+    }
     return cands[0];
   };
 

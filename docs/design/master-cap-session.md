@@ -154,7 +154,7 @@ master-cap への追加指示を、center が起動する master-cap に渡す�
 
 ## 追記（2026-11-04）: remote-cap は 1 つの server につき 1 つ
 
-- center は server ごとに remote-cap を 1 つだけ持つ（cap_id は center ごとに固定の `c-<10 桁 hex>`。2026-11-04 以降は記録が持つ cap_id が優先で、旧形式から引き継いだ server は元の cap_id のまま。下の「追記（2026-11-04 夜）」）。session からの指示は `remote_send`（別名 `remote_create`）でその cap への「次の指示」になり、cap が無い時だけ最初の `kick_cap` で作る。
+- （2026-11-04 のうちに session ごとへ改訂。下の追記）center は server ごとに remote-cap を 1 つだけ持つ（cap_id は center ごとに固定の `c-<10 桁 hex>`。2026-11-04 以降は記録が持つ cap_id が優先で、旧形式から引き継いだ server は元の cap_id のまま。下の「追記（2026-11-04 夜）」）。session からの指示は `remote_send`（別名 `remote_create`）でその cap への「次の指示」になり、cap が無い時だけ最初の `kick_cap` で作る。
 - 記録は server の cap 単位（履歴は持たない。最新の結果と未完了の指示だけ）。完了通知は、cap が idle で worker 無しになった時に、未完了の指示を全て完了にして指示を送った session ごとに送る。
 - 経路テスト時点の `remote_create`（作業ごとに cap を作る）の記述は、この変更前のもの。詳細は `docs/design/center-tools.md` と `packages/center/README.md`、`docs/history/20261104-0200-one-cap-per-server/report.md`。
 

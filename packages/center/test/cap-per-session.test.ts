@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 import { AGENT_ID_PATTERN } from "@agent-hand/bantou-protocol";
 import { sessionCapId } from "../src/center-id.js";
+import { createActivityStore } from "../src/activity.js";
 import { createRemoteManager, type RemoteRecord } from "../src/remotes.js";
 import type { ServerLink, ServerPeer } from "../src/server-link.js";
 import { createJsonListStore } from "../src/store.js";
@@ -21,7 +22,7 @@ const CENTER = "c-0123456789";
 const peerA: ServerPeer = { id: "id-a", name: "bantou-server", hostname: "host-a", version: "1.1.0" };
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 10));
 
-function setup() {
+function setup(opts: { statusWorkers?: unknown[]; activity?: ReturnType<typeof createActivityStore> } = {}) {
   const kicks: { cmd: Record<string, unknown>; resolve: (r: unknown) => void }[] = [];
   const stops: unknown[] = [];
   const replies: unknown[] = [];
@@ -29,14 +30,14 @@ function setup() {
   const link = {
     peers: async () => [peerA],
     selectPeer: async () => peerA,
-    statusOn: async () => ({ bantou: 1, type: "status_result", ok: true, caps: kicks.map((k) => ({ kind: "cap", id: k.cmd.cap_id })), workers: [] }),
+    statusOn: async () => ({ bantou: 1, type: "status_result", ok: true, caps: kicks.map((k) => ({ kind: "cap", id: k.cmd.cap_id, state: "idle" })), workers: opts.statusWorkers ?? [] }),
     taskOn: (_p: ServerPeer, cmd: Record<string, unknown>) => new Promise((resolve) => kicks.push({ cmd, resolve })),
     stopCapOn: async (_p: ServerPeer, cmd: { cap_id: string }) => (stops.push(cmd), { bantou: 1, type: "stop_result", ok: true, cap_id: cmd.cap_id, stopped: true }),
     workerReplyOn: async (_p: ServerPeer, cmd: { cap_id: string; worker_id: string }) => (replies.push(cmd), { bantou: 1, type: "worker_reply_result", ok: true, cap_id: cmd.cap_id, worker_id: cmd.worker_id, accepted: true }),
   } as unknown as ServerLink;
   const store = createJsonListStore<RemoteRecord>(join(dir, "remotes.json"), () => {});
   const mgr = createRemoteManager({
-    link, store, log: () => {}, capId: CENTER, graceMs: 60, pollMs: 40,
+    link, store, log: () => {}, capId: CENTER, graceMs: 60, pollMs: 40, ...(opts.activity ? { activity: opts.activity } : {}),
     notify: async (owner, text) => (sent.push({ owner, text }), { ok: true }),
   });
   return { mgr, kicks, stops, replies, sent };
@@ -194,4 +195,23 @@ test("旧共有 cap に未完了の指示があれば、その owner へ完了�
   await new Promise((r) => setTimeout(r, 200));
   assert.ok(sent.every((s) => s.owner === "alpha"));
   assert.deepEqual(mgr.list().find((r) => r.remote_id === CENTER)!.session, undefined);
+});
+
+test("status での追従: 他 session の cap の worker が running でも、自分の cap は done になる（activity に載る worker だけを見る）", async () => {
+  const activity = createActivityStore();
+  const { mgr, kicks, sent } = setup({ statusWorkers: [{ kind: "worker", id: "w-other", state: "running" }], activity });
+  await mgr.send({ owner: "alpha", goal: "a" });
+  // alpha の cap の activity: cap は idle、worker 無し（w-other は beta の worker）
+  activity.apply({ bantou: 1, type: "activity", cap_id: "c-0123456789-alpha", at: "2026-11-04T00:00:00.000Z", agents: [{ kind: "cap", id: "c-0123456789-alpha", cap_id: "c-0123456789-alpha", state: "idle", task: "t", last_activity: null, last_output_at: null, silent_ms: 0, started_at: null, finished_at: null }] } as never, "id-a");
+  kicks[0].resolve(result("c-0123456789-alpha", String(kicks[0].cmd.task_id)));
+  await new Promise((r) => setTimeout(r, 250));
+  assert.equal(mgr.list({ owner: "alpha" })[0].state, "done");
+  assert.deepEqual(sent.map((s) => s.owner), ["alpha"]);
+});
+
+test("remote_id 省略で 1 件に決まらない時（同じ server に別 session の cap が複数）は、remote_id での指定を促す", async () => {
+  const { mgr } = setup();
+  await mgr.send({ owner: "alpha", goal: "a" });
+  await mgr.send({ owner: "beta", goal: "b" });
+  await assert.rejects(mgr.delete({}), /remote_id 省略では 1 件に決まらない.*c-0123456789-alpha.*c-0123456789-beta/);
 });
