@@ -177,9 +177,9 @@ export interface TaskCommand extends ServerCommandBase {
   task_id: string;
   /** Natural-language goal. Non-empty. */
   goal: string;
-  /** Git URL the work is based on (cloned into the cap path on first use, fetched afterwards). */
+  /** Git URL the work is based on. Relayed to the cap in the prompt; the cap path is never cloned (workers clone). */
   repo?: string;
-  /** Base branch of the work (`git clone --branch`). */
+  /** Base branch of the work. Relayed like `repo`. */
   branch?: string;
   deliverables: TaskDeliverables;
   verify: TaskVerify;

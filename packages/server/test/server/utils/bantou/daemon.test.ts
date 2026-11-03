@@ -146,8 +146,11 @@ test("task: cap の最初の指示を組み立てて invoke し、task_result �
   assert.equal(calls[0]![1], "c1");
   assert.ok(String(calls[0]![2].prompt).startsWith("[task t-1]\n"));
   assert.ok(String(calls[0]![2].prompt).includes("やること"));
-  assert.equal(calls[0]![2].repo, "https://u:pw@example.com/o/r.git");
-  assert.equal(calls[0]![2].branch, "main");
+  // repo / branch は cap の dir に clone されない（cap は git を触らない）。文面にだけ載る
+  assert.equal(calls[0]![2].repo, undefined);
+  assert.equal(calls[0]![2].branch, undefined);
+  assert.ok(String(calls[0]![2].prompt).includes("repo: https://u:pw@example.com/o/r.git"));
+  assert.ok(String(calls[0]![2].prompt).includes("branch: main"));
   assert.equal(calls[0]![2].worker_model, "sonnet");
   assert.equal(r.type, "task_result");
   assert.equal((r as { summary: string }).summary, "できた");
