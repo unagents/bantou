@@ -64,6 +64,10 @@ export class MockBantou {
   };
   /** `remote_list` result (center `RemoteView[]`): one remote-cap per server (`remote_id` = cap_id, `owners`, `history`). */
   centerRemotes: unknown[] = [];
+  /** `worker_reply` calls received (arguments as sent). */
+  centerWorkerReplies: unknown[] = [];
+  /** When set, `worker_reply` fails with this message. */
+  centerWorkerReplyError: string | null = null;
   /** `session_list` result (center `SessionInfo[]`); `session_create` appends to it. */
   centerSessions: Record<string, unknown>[] = [];
   /** The list as last fetched (memory on the Rust side, `SessionCache`). */
@@ -396,6 +400,10 @@ export class MockBantou {
             return text(this.centerRc);
           case "remote_list":
             return text(this.centerRemotes);
+          case "worker_reply":
+            if (this.centerWorkerReplyError) throw new Error(this.centerWorkerReplyError);
+            this.centerWorkerReplies.push(args.arguments);
+            return text({ ok: true, accepted: true });
           case "session_list":
             return text(this.fetchCenterList());
           case "session_create":
