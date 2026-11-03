@@ -114,7 +114,7 @@ center の通知（remote の完了通知など）は owner の session 名の m
 
 8. セッション向けの窓口（`/mcp/session`）の認証は、center がセッション起動ごとに作る使い捨ての token にする。外向けの token では呼べない（外向けの token を持つ相手が session を名乗れないようにするため）。master-cap には環境変数で渡し、`--mcp-config` の header で `${VAR}` 展開させる。
 9. 外向けには読み取り専用の `remote_list` を残す（desktop の「リモート指示タスクの一覧」の表示用）。作成・削除はセッション向けだけ。
-10. 中央の列は、そのセッションが指示を送った remote-cap の記録（`remote_list` の `owners` 一致分。server の cap 単位で、指示と結果の履歴つき）を出す。今の Cork 形式のタスク一覧は消さず、同じ列の下に残す。
+10. 中央の列は、そのセッションが指示を送った remote-cap の記録（`remote_list` の `owners` 一致分。server の cap 単位。履歴は無く、最新の結果と未完了の指示だけ）を出す。今の Cork 形式のタスク一覧は消さず、同じ列の下に残す。
 11. pty の大きさは、最後にサイズを送ってきた desktop に合わせる。
 12. wrapper は `packages/pty-wrapper`（Rust crate）に置き、center と同じく desktop の sidecar として同梱する。center は自分の実行ファイルと同じ場所から wrapper を探す。
 
@@ -144,5 +144,5 @@ desktop の設定画面で入力した「master-cap への追加指示」を、c
 ## 追記（2026-11-04）: remote-cap は 1 つの server につき 1 つ
 
 - center は server ごとに remote-cap を 1 つだけ持つ（cap_id は center ごとに固定の `c-<10 桁 hex>`）。session からの指示は `remote_send`（別名 `remote_create`）でその cap への「次の指示」になり、cap が無い時だけ最初の `kick_cap` で作る。
-- 記録は server の cap 単位（指示と結果の履歴つき）。完了通知は、cap が idle で worker 無しになった時に、未完了の指示を全て完了にして指示を送った session ごとに送る。
+- 記録は server の cap 単位（履歴は持たない。最新の結果と未完了の指示だけ）。完了通知は、cap が idle で worker 無しになった時に、未完了の指示を全て完了にして指示を送った session ごとに送る。
 - 経路テスト時点の `remote_create`（作業ごとに cap を作る）の記述は、この変更前のもの。詳細は `docs/design/center-tools.md` と `packages/center/README.md`、`docs/history/20261104-0200-one-cap-per-server/report.md`。

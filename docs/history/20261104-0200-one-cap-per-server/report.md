@@ -125,3 +125,48 @@
 - 静的サーバー（node）は停止、port 1420 解放を確認。一時 config・スクリプト・symlink は作業 dir の `scratch/` ごと `find -delete` で削除。一時 config は commit していない。
 - 残る: 作業 dir 内の clone（`bantou/`）、その `node_modules`、desktop の `.output` `.nuxt`、`src-tauri/target`、`src-tauri/binaries`（いずれも git 管理外）。
 - ps に残る chrome は他の puppeteer のもの（今回のものではない）。
+
+## 追記 2: 履歴と旧記録を持たない
+
+### 利用者の決定
+
+- 「server の起動履歴のようなもの」は不要。desktop の remotes 欄に、終わった remote の記録（`r-xxxx … 活動情報なし done`）が作業の数だけ積み上がるのが不要という意味。
+- 1 server = 1 cap にした後も、旧 cap を legacy として一覧に残す・cap ごとに指示と結果の履歴（history）を積む、はこの「履歴」に当たるので外す。上の「旧記録（作業ごとの cap）の扱い」と、仕様の `history` の記述はこの追記で置き換わる。
+
+### 仕様
+
+- legacy は一覧に出さない。center の起動時、`remote_id` が center の cap_id と違う記録（旧形式。作業ごとの cap）を見つけたら、その server に `stop_cap` を送り（届かなくても記録は消す）、記録を消す。結果は center.log（`旧形式の remote を掃除` / `旧形式の remote の stop_cap が届かない（記録は消した）`）。desktop の「旧形式」バッジも無い。
+- history（最大 200 件）は持たない。記録に残すのは次だけ。
+  - server ごとの cap の `state`
+  - 未完了の指示 `pending`（`{at, owner（通知先の session）, prompt の先頭 200 文字}`。完了したら消す）
+  - 最新の `result` / `error` と時刻（`result_at` / `error_at`）
+  - `activity`
+- `remote_list` は上の形（+ `owners` = `pending` を持つ session）を返す。`legacy` / `history` は無い。通知の成否（`notified_at` / `notify_error`）も記録に残さず、center.log に出す。
+- 履歴を持っていた版（この branch の前の commit）の `remotes.json` は、cap の記録の未完了の指示だけ `pending` に引き継ぎ、`history` は捨てる。
+- desktop の remotes 欄は server ごとに 1 行: cap の state・最新の result の先頭（80 文字）・配下の worker の一覧と状態。cap が idle（`state: done`）で worker が無く未完了の指示も無い時は「待機中」を 1 行で出す。done の記録は並ばない。
+
+### 変更ファイル
+
+- center: `src/remotes.ts`、`src/tools.ts`（tool の description のみ）。テスト: `test/remotes.test.ts`。
+- desktop: `src/components/RemoteActivity.vue`、`src/types/index.ts`、`e2e/center.spec.ts`、`e2e/mock/bantou.ts`（コメントのみ）。
+- docs: `docs/protocol.md`、`docs/architecture.md`、`docs/design/center-tools.md`、`docs/design/master-cap-session.md`（履歴つきの記述 2 箇所）、`packages/center/README.md`、この report。
+- protocol・server は変更なし。version bump なし。
+
+### テスト
+
+- center: `bun run test` 316 件 pass / 0 fail（前回 313 → 316）、`bun run typecheck` エラーなし。
+  - 書き換え・追加: 返信で最新の result / error と時刻だけを持つ・指示の prompt 先頭 200 文字と `pending`・完了で `pending` が消える・30 回繰り返しても記録 1 件・通知が送れなくても指示は消える・`remote_list` の形（キーの完全一致）・旧形式の起動時の掃除（stop_cap を送って記録を消す、3 件）・stop_cap が届かなくても消えて center.log に残る・履歴を持っていた版の記録の移行。
+  - `test/tools.test.ts` / `test/http.test.ts` は remotes をスタブで差しているので、今回の仕様では修正不要（そのまま通る）。
+- desktop: e2e 81 件 pass、`cargo test`（`src-tauri`）251 passed / 0 failed / 5 ignored、`bun run build:sidecar` 成功。e2e の手順は前回と同じ（`bun run generate` の静的ビルドを node の簡易静的サーバーで配信、ms-playwright の chromium-1243 を clone の外の一時 config で指定）。
+- desktop `nuxt typecheck` は前回と同じ理由で未確認。
+
+### 注意・利用者の判断が要る点
+
+- `owners` と session 側の `remote_list` / desktop の session 欄の絞り込みは、`pending` を持つ session で決まる。完了後は session の欄からその cap が消える（中央ダイアログ = 全件では出る）。「完了後も自分が使った cap を session 欄に出す」は履歴（誰が使ったか）を持つことになるので入れていない。
+- 旧形式の stop_cap が届かなかった場合、server に旧 cap が残る（記録は消すので center からは見えない。center.log で分かる）。
+- 実機の server・messenger での動作は未確認。
+
+### 後始末と残存物
+
+- 静的サーバー（node）は停止、port 1420 は解放を確認。一時 config・スクリプト・ログは作業 dir の `scratch/` と `edit*.mjs` を `find -delete` で削除。一時 config は commit していない。
+- 残る: 作業 dir 内の clone（`bantou/`）、その `node_modules`、desktop の `.output` `.nuxt`、`src-tauri/target`、`src-tauri/binaries`（いずれも git 管理外）。

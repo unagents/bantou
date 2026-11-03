@@ -264,29 +264,14 @@ export interface CenterRemoteActivity {
   agents: CenterAgentActivity[];
 }
 
-/** One instruction in the history of a remote-cap (center `InstructionEntry`). Pending while `done_at` is absent. */
-export interface CenterInstructionEntry {
-  type: "instruction";
+/** A pending (not yet completed) instruction of a remote-cap (center `PendingInstruction`). Removed once completed; no history is kept. */
+export interface CenterPendingInstruction {
   at: string;
-  /** Session that sent the instruction. */
+  /** Session that sent the instruction (the one notified on completion). */
   owner: string;
   /** Head of the prompt (at most 200 characters). */
   prompt: string;
-  done_at?: string;
-  notified_at?: string;
-  notify_error?: string;
 }
-
-/** One `cap_result` in the history of a remote-cap (center `ResultEntry`). */
-export interface CenterResultEntry {
-  type: "result";
-  at: string;
-  ok: boolean;
-  text: string;
-  error?: string;
-}
-
-export type CenterRemoteHistoryEntry = CenterInstructionEntry | CenterResultEntry;
 
 /** One worker in `task_result` (protocol `TaskResultWorker`). */
 export interface CenterTaskResultWorker {
@@ -331,11 +316,11 @@ export interface CenterWorkerReport {
 
 /**
  * `remote_list` element (center `RemoteView`, the part shown): one remote-cap per server (`remote_id` = cap_id, fixed per center),
- * with the history of instructions and results. An old-format record (one cap per task) has `legacy: true` and an empty history.
+ * with the latest result / error and the pending instructions. No history is kept; old-format records (one cap per task) are cleaned up by center.
  */
 export interface CenterRemoteRecord {
   remote_id: string;
-  /** Sessions that sent instructions to this cap (oldest first). */
+  /** Sessions with a pending instruction on this cap (oldest first). */
   owners: string[];
   server: string;
   serverName?: string;
@@ -347,9 +332,10 @@ export interface CenterRemoteRecord {
   finishedAt?: string;
   /** Latest `cap_result` text. */
   result?: string;
+  result_at?: string;
   error?: string;
-  history?: CenterRemoteHistoryEntry[];
-  legacy?: boolean;
+  error_at?: string;
+  pending?: CenterPendingInstruction[];
   activity?: CenterRemoteActivity;
   /** Latest `task_result` of the cap (absent until a `task` finished). */
   task_result?: CenterTaskResult;

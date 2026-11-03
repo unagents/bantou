@@ -254,7 +254,7 @@ pub struct Terminals {
 }
 
 impl Terminals {
-    fn client(&self) -> reqwest::Client {
+    pub(crate) fn client(&self) -> reqwest::Client {
         self.client.lock().unwrap().get_or_insert_with(http).clone()
     }
 
@@ -337,7 +337,7 @@ pub fn session_output_stop(terminals: tauri::State<'_, Terminals>, session: Stri
     terminals.replace(&session, None);
 }
 
-async fn post(app: &tauri::AppHandle, session: &str, tail: &str, body: Value) -> CmdResult<()> {
+pub(crate) async fn post(app: &tauri::AppHandle, session: &str, tail: &str, body: Value) -> CmdResult<()> {
     let t = select_target(&load_settings(app)?).ok_or_else(|| CommandError::other("接続先が無い"))?;
     let url = session_url(&t.url, session, tail).map_err(CommandError::Other)?;
     let client = app.state::<Terminals>().client();

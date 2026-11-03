@@ -1,3 +1,4 @@
+mod attachment;
 mod agent;
 mod broker;
 mod center;
@@ -126,6 +127,9 @@ pub fn run() {
             terminal::session_output_stop,
             terminal::session_input,
             terminal::session_resize,
+            attachment::session_attach_bytes,
+            attachment::session_attach_paths,
+            attachment::session_attach_pick,
         ])
         .on_window_event(|window, event| {
             // `Destroyed` (not `CloseRequested`) is the right hook:

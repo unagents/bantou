@@ -105,7 +105,7 @@ export function registerTools(
     {
       title: "remote 一覧",
       description:
-        "center が保持する remote（server の cap 単位。remote_id = cap_id, server, state, owners, 時刻, 最新の結果, 指示と結果の履歴 history）の一覧。owner が分かれば（header / query / 引数）その owner が指示を送った cap だけ、分からなければ全件。" +
+        "center が保持する remote（server の cap 単位。remote_id = cap_id, server, state, owners, 時刻, 最新の結果, 未完了の指示 pending）の一覧。owner が分かれば（header / query / 引数）その owner が指示を送った cap だけ、分からなければ全件。" +
         "最新の task_result（task_result 本体）と直近の worker_reports（WorkerReportNotice の配列、最大 20 件、到着順）も含む。server から通知を受けた remote には activity が付く: agents（cap → worker。state は running / stalled / idle / done / failed / lost、task、last_activity、last_output_at、silent_ms = 最後の出力からの経過 ms）、received_ms_ago（最後の通知から）、stale（running の agent がいるのに通知が途絶えた）",
       inputSchema: { owner: ownerArg },
     },
@@ -131,7 +131,7 @@ export function registerTools(
     "remote_wait",
     {
       title: "remote 完了待ち",
-      description: "server の cap が終わる（state が done / failed = cap が idle で、配下の worker が running / stalled でない）まで待って、その cap の記録（state, result, error, history など）を返す。remote_id 省略時は owner の未完了の指示がある cap のどれかが終わるまで。timeout_sec（既定 "+WAIT_DEFAULT_SEC+"、上限 1800）を超えたら state=running のまま返す。完了通知を受けられない session でもこれで待てる",
+      description: "server の cap が終わる（state が done / failed = cap が idle で、配下の worker が running / stalled でない）まで待って、その cap の記録（state, result, error, pending など）を返す。remote_id 省略時は owner の未完了の指示がある cap のどれかが終わるまで。timeout_sec（既定 "+WAIT_DEFAULT_SEC+"、上限 1800）を超えたら state=running のまま返す。完了通知を受けられない session でもこれで待てる",
       inputSchema: { ...remoteWaitSchema, owner: ownerArg },
     },
     ({ remote_id, server, timeout_sec, owner }, extra) =>
@@ -300,7 +300,7 @@ export function registerSessionTools(server: McpServer, deps: { remotes: RemoteM
     "remote_list",
     {
       title: "remote 一覧",
-      description: "この session が指示を送った remote-cap（remote_id, server, state, 時刻, 最新の結果, 最新の task_result, 直近の worker_reports（最大 20 件、到着順）, 指示と結果の履歴 history、通知を受けたものは activity 付き）の一覧",
+      description: "この session が指示を送った remote-cap（remote_id, server, state, 時刻, 最新の結果, 最新の task_result, 直近の worker_reports（最大 20 件、到着順）, 未完了の指示 pending、通知を受けたものは activity 付き）の一覧",
     },
     () => guard(() => json(remotes.list({ owner }))),
   );
@@ -308,7 +308,7 @@ export function registerSessionTools(server: McpServer, deps: { remotes: RemoteM
     "remote_wait",
     {
       title: "remote 完了待ち",
-      description: "server の cap が終わる（state が done / failed = cap が idle で、配下の worker が running / stalled でない）まで待って、その cap の記録（state, result, error, history など）を返す。remote_id 省略時は owner の未完了の指示がある cap のどれかが終わるまで。timeout_sec（既定 "+WAIT_DEFAULT_SEC+"、上限 1800）を超えたら state=running のまま返す。完了通知を受けられない session でもこれで待てる",
+      description: "server の cap が終わる（state が done / failed = cap が idle で、配下の worker が running / stalled でない）まで待って、その cap の記録（state, result, error, pending など）を返す。remote_id 省略時は owner の未完了の指示がある cap のどれかが終わるまで。timeout_sec（既定 "+WAIT_DEFAULT_SEC+"、上限 1800）を超えたら state=running のまま返す。完了通知を受けられない session でもこれで待てる",
       inputSchema: remoteWaitSchema,
     },
     ({ remote_id, server: srv, timeout_sec }) =>

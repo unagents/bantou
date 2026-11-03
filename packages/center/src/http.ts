@@ -9,6 +9,7 @@ import type { Core } from "./core.js";
 import type { EventHub } from "./events.js";
 import type { SessionTokens } from "./session-auth.js";
 import type { Logger } from "./log.js";
+import { ATTACHMENT_TYPES, AttachmentError, MAX_ATTACHMENT_BYTES, matchesMagic, mediaType, readBytes, saveAttachment } from "./attachments.js";
 
 export const MCP_PATH = "/mcp";
 /** session（master-cap）向けの MCP 窓口。認証は session ごとの使い捨て token + header X-Bantou-Session。 */
@@ -24,7 +25,7 @@ export function normalizePath(p: string): string {
   return q.length > 1 && q.endsWith("/") ? q.slice(0, -1) : q;
 }
 
-const CORE_PATH = /^\/sessions\/([A-Za-z0-9_-]+)\/(output|input|resize)$/;
+const CORE_PATH = /^\/sessions\/([A-Za-z0-9_-]+)\/(output|input|resize|attachments)$/;
 /** POST ボディの上限。 */
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
 /** リクエストが無いまま放置された session を閉じるまでの時間（30 分）。 */
@@ -155,6 +156,8 @@ export async function startHttpServer(opts: {
   sessionAuth?: SessionTokens;
   /** pty 出力の core。渡すと /sessions/<name>/{output,input,resize} を外向け token で提供する。 */
   core?: Core;
+  /** 添付画像の置き場所の親（<workspace>/<session 名>/attachments/）。省略時、添付は 409 で断る。 */
+  workspace?: string;
   /** セッション増減の通知。渡すと GET /events（外向け token）を提供する。 */
   events?: EventHub;
   /** SSE の keep-alive 間隔（テスト用）。 */
@@ -200,18 +203,65 @@ export async function startHttpServer(opts: {
     await s.server.close().catch(() => {});
   };
 
+  /** 画像の添付（認証済み・session 確認済み）。本文はログに残さない。 */
+  const handleAttachment = async (req: IncomingMessage, res: ServerResponse, name: string): Promise<void> => {
+    const refuse = (status: number, reason: string, headers: Record<string, string> = {}): void => {
+      log(`添付を拒否: session=${name} reason=${reason}`);
+      sendJson(res, status, { error: reason }, headers);
+    };
+    if (req.method !== "POST") {
+      sendJson(res, 405, { error: "method not allowed" }, { allow: "POST" });
+      return;
+    }
+    if (!opts.workspace) {
+      refuse(409, "center に workspace が無い（config の workspace を設定する）");
+      return;
+    }
+    const raw = req.headers["content-type"];
+    const type = mediaType(Array.isArray(raw) ? raw[0] : raw);
+    if (!ATTACHMENT_TYPES[type]) {
+      refuse(415, `未対応の型: ${type || "(なし)"}（png / jpeg / gif / webp のみ）`, { connection: "close" });
+      return;
+    }
+    try {
+      const body = await readBytes(req, MAX_ATTACHMENT_BYTES);
+      if (body.length === 0) {
+        refuse(400, "本文が空");
+        return;
+      }
+      if (!matchesMagic(type, body)) {
+        refuse(415, `中身が ${type} の画像でない`);
+        return;
+      }
+      const saved = await saveAttachment({ workspace: opts.workspace, session: name, type, body });
+      log(`添付を保存: session=${name} bytes=${saved.bytes} path=${saved.path}`);
+      sendJson(res, 201, saved);
+    } catch (e) {
+      if (e instanceof AttachmentError) {
+        refuse(e.status, e.message, e.status === 413 ? { connection: "close" } : {});
+      } else {
+        log(`添付の保存失敗: session=${name} ${e instanceof Error ? e.message : String(e)}`);
+        sendJson(res, 500, { error: "保存に失敗した" });
+      }
+    }
+  };
+
   /** core の SSE / 入力 / サイズ変更（認証済み）。 */
   const handleCore = async (
     req: IncomingMessage,
     res: ServerResponse,
     name: string,
-    kind: "output" | "input" | "resize",
+    kind: "output" | "input" | "resize" | "attachments",
     query: string,
   ): Promise<void> => {
     const core = opts.core!;
     const method = req.method ?? "";
     if (!core.has(name)) {
       sendJson(res, 404, { error: "未定義の session" });
+      return;
+    }
+    if (kind === "attachments") {
+      await handleAttachment(req, res, name);
       return;
     }
     if (kind === "output") {
@@ -346,7 +396,7 @@ export async function startHttpServer(opts: {
         sendJson(res, 403, { error: "forbidden host" });
         return;
       }
-      await handleCore(req, res, coreMatch[1], coreMatch[2] as "output" | "input" | "resize", query);
+      await handleCore(req, res, coreMatch[1], coreMatch[2] as "output" | "input" | "resize" | "attachments", query);
       return;
     } else {
       sendJson(res, 404, { error: "not found" });
