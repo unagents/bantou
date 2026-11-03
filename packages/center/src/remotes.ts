@@ -172,7 +172,7 @@ export function createRemoteManager(opts: {
   capId: string;
   /** config の servers[]。server ごとの model / workerModel を引く（無ければ指定しない）。configPath があれば送信のたびに読み直し、読めない時はこの値。 */
   servers?: ServerConfig[];
-  /** 指定すると、send のたびにこの config ファイルを読み直して servers[] を取る（sessionInstructions と同じ）。 */
+  /** 指定すると、send のたびにこの config ファイルを読み直して servers[] を取る（remoteControl.model が session 起動のたびに読み直されるのと同じ）。 */
   configPath?: string;
   /** cap_result の後、次の activity を待つ猶予（ms）。既定 SETTLE_GRACE_MS。 */
   graceMs?: number;
