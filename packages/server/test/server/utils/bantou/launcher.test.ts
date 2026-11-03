@@ -109,8 +109,9 @@ test("launcher: supervisor が引き継いで入れ替わっても残り、系�
       await until("新 supervisor の子が ready", () => exists(join(ws, "server.ready")));
       process.emit("SIGTERM"); // launcher が lock.pid（新 supervisor）へ中継する
       assert.equal(await p, 0);
-      assert.equal(isAlive(s3), false);
-      assert.equal((await starts(ws)).every((s) => !isAlive(s.pid)), true);
+      // launcher は lock が消えた時点で終わる。supervisor・子のプロセス終了はその少し後になりうるので待つ
+      await until("新 supervisor の終了", () => !isAlive(s3));
+      await until("子の終了", async () => (await starts(ws)).every((s) => !isAlive(s.pid)));
     } finally {
       await killAll(ws);
     }

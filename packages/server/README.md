@@ -35,7 +35,7 @@ npx bantou --config <path>
 - `npx bantou` で起動した bin は **launcher**（`bin/launcher.mjs`、凍結。node 組み込みのみ）。起動時に 1 回だけ同 package の `--supervise`（supervisor）を env `BANTOU_LAUNCHER_PID` 付きで起動し、以後は見張るだけ。SIGTERM / SIGINT は supervisor と、`server.lock` の `pid`（`launcher` が自分の時）へ 1 回ずつ中継する。supervisor の系列（更新で入れ替わる）が消えたら `<workspace>/server.exit`（`{launcher, code}`）の code で終わる（無ければ直下の supervisor の code、それも無ければ 1）。
 - supervisor（`--supervise`、Nitro は読まない）は常駐本体（`--serve`）を子に 1 本だけ持つ。SIGTERM / SIGINT は子の process group へ中継する。supervisor の PID は更新で**変わる**（新版の supervisor に引き継ぐ。下記）。launcher の PID は変わらない。子だけ入れ替える従来の更新（引き継ぎ非対応の版へ）では supervisor の PID は変わらない。
 - 二重起動の防止: `<workspace>/server.lock`（`{pid, version, started_at, launcher?, child?, next?}`）を supervisor が排他作成する。`pid` は supervisor 自身。生きている pid（または引き継ぎ中の `next.pid`）があれば `既に起動中 pid=...` / `引き継ぎ中 pid=...` で exit 1（launcher も exit 1）、死んだ pid なら取り直す。`--serve` は env `BANTOU_SUPERVISOR_PID` が lock の `pid`（引き継ぎの試行中は `next.pid`）と合わなければ exit 1（手起動を防ぐ）。最後の砦は broker / mcp の port bind 衝突。
-- 更新（protocol `bantou` の `update_server`、`docs/protocol.md`）: server は `npx -y --package=<spec> -- bantou --version` で取得を確かめ（失敗は `update_failed` で、動き続ける）、受理したら実行中の cap・worker・report が全部終わるのを待つ（待機中の `kick_cap` は `updating`（retryable）で断る）。終わったら `<workspace>/update.json`（`{"state":"restart","to","spec"}`）を書いて通常の終了処理で exit 0。
+- 更新（protocol `bantou` の `update_server`、`docs/protocol.md`）: server は `npx -y --package=<spec> -- bantou --version` で取得を確かめ（失敗は `update_failed` で、動き続ける）、受理したら実行中の cap・worker・report が全部終わるのを待つ（待機中の `kick_cap` / `task` は `updating`（retryable）で断る）。終わったら `<workspace>/update.json`（`{"state":"restart","to","spec"}`）を書いて通常の終了処理で exit 0。
 - 引き継ぎ（supervisor も新版になる）: 子が終わると旧 supervisor（S2）は `npx -y --package=<spec> -- bantou --handoff-protocol` が `1` を出すか確かめる（0.3.0 など未対応の版は exit 2 → 従来どおり子だけ入れ替える）。対応版なら lock に `next:{token}` を付け、`npx -y --package=<spec> -- bantou --supervise --config ...` を別 group で起動する。新 supervisor（S3）は env `BANTOU_HANDOFF_TOKEN` が lock の token と合う時だけ試行モードに入り、`next.pid / version` を書き、自分の子を起動して ready を待つ（子が ready になるまで lock の持ち主は S2 のまま）。ready で `next.ready=true` を書くと、S2 が lock を `{pid:S3, ...}` に rename で書き換え、`update.json` の restart を消して exit 0 する（S3 の npx は残る）。S2 が昇格前に死んで ready 済みなら S3 が自分で昇格する。
 - 巻き戻し: S3 が ready 前に終了する、または 120 秒（+ 取得の猶予 60 秒）以内に ready にならないと、S2 が S3 の group と `next.child` / `next.pid` を止めて消えるまで待ち、lock を自分に戻し、`update.json` に `{"state":"failed","to","error","at"}` を書き、直前に ready だった版（最初は自分の `.output`）の子を同じ config で起動し直す。起動した server は `hello_result.last_update` で返す。引き継ぎ中に停止要求（SIGTERM）が来たら S2 が S3 の系列を片付け、巻き戻し扱いにせず停止する。子だけ入れ替える更新（引き継ぎ非対応の版）も、更新後の子が ready にならなければ従来どおり直前の版へ巻き戻す。
 - 取得元は config `update.spec`。`--version` を持たない版は更新先にできない（取得確認で失敗する）。
@@ -96,7 +96,7 @@ npx bantou --config <path>
   caps/<cap-id>/                     cap の path（claude の cwd）
     state.json                       状態
     logs/<session_id>.jsonl          claude の生出力（stream-json）
-    logs/center.json                 この cap を依頼した center（messenger の peer id）
+    logs/center.json                 この cap の通知先 center（peer 名と最後の peer id。送る時に名前から今の peer id へ引く）
     logs/reports.jsonl               worker から受けた report の記録（1 行 1 件）
     logs/model.json                  指定されたモデル（`{"model":"...","worker_model":"..."}`、指定が無ければ作らない）
     logs/mcp.json                    cap の `--mcp-config`（実行ごとに上書き）
@@ -134,7 +134,7 @@ npx bantou --config <path>
 - 送信元は header `x-bantou-cap-id` / `x-bantou-worker-id` で判定する（token は使わない。認証は全体で後回し）。
 - tool は記録して queue に積んだ時点で `accepted` を返す。worker はそこでターンを終える。不正な id・存在しない cap・終了中は `isError` で返す。
 - 受けた report は `logs/reports.jsonl` に追記し、該当 cap の queue に積んで `--resume` で起動する。prompt は `worker <id> から <kind>: <text>` と、worker へ返す時の MCP 情報（URL・header 名）。実行中の cap には、終わってから渡す。
-- cap の結果（stdout の result）は、`kick_cap` の送信元 center へ `cap_result` で返す。report 起因の resume の結果も同じ。center は cap ごとに `logs/center.json` へ保存する（再起動後も復元）。resume が失敗した時は `error`（`command: "kick_cap"`、`cap_id`）を返す。
+- cap の結果（stdout の result）は、`kick_cap` の送信元 center へ `cap_result` で返す。report 起因の resume の結果も同じ。center は peer の**名前**（`bantou-center`）で覚え（cap ごとに `logs/center.json` へ保存、再起動後も復元）、送る時に messenger の今の peer id へ引く（center の再起動で peer id が変わっても届く。protocol 1.6.0）。`task` / `kick_cap` / `worker_reply` / `stop_cap` / cap_id 付きの `status` を受けるたびに通知先を更新する（cap を作るのは `kick_cap` / `task` だけ）。resume が失敗した時は `error`（`command: "kick_cap"`、`cap_id`）を返す。
 - worker の MCP 設定は server が付ける。worker 起動のたびに `<path>/logs/mcp.json` を書き、`--mcp-config <file>` で渡す（resume でも毎回）。cap が渡す必要は無い:
 
 ```json

@@ -14,6 +14,10 @@ import {
   type ServerNotice,
   type ResumeWorkerCommand,
   type ServerCommandType,
+  type TaskCommand,
+  type TaskResultReply,
+  type WorkerReplyCommand,
+  type WorkerReplyResultReply,
   type StatusReply,
   type StopCapCommand,
   type StopResultReply,
@@ -76,6 +80,8 @@ export interface ServerInfo {
 export type KickCapInput = Omit<KickCapCommand, "bantou" | "type">;
 export type ResumeWorkerInput = Omit<ResumeWorkerCommand, "bantou" | "type">;
 export type StopCapInput = Omit<StopCapCommand, "bantou" | "type">;
+export type TaskInput = Omit<TaskCommand, "bantou" | "type">;
+export type WorkerReplyInput = Omit<WorkerReplyCommand, "bantou" | "type">;
 
 /** config.servers に依存せず、messenger の発見（protocol bantou）で選んだ server の peer。 */
 export interface ServerPeer {
@@ -117,8 +123,15 @@ export interface ServerLink {
   selectPeer(sel?: string): Promise<ServerPeer>;
   /** 指定 peer へ kick_cap を送り、返信（cap_result / error）まで待つ。 */
   kickCapOn(peer: ServerPeer, cmd: KickCapInput): Promise<CapResultReply | ErrorReply>;
-  /** 指定 peer へ status を送り、status_result（または error）を待つ（cap の有無の確認用。FOLLOW_TIMEOUT_MS で切る）。 */
-  statusOn(peer: ServerPeer): Promise<StatusReply | ErrorReply>;
+  /** 指定 peer へ task を送り、返信（task_result / error）まで待つ。同じ task_id の task_result が後から重ねて届く分は onLateReply へ渡る。 */
+  taskOn(peer: ServerPeer, cmd: TaskInput): Promise<TaskResultReply | ErrorReply>;
+  /** 指定 peer へ worker_reply を送り、返信（worker_reply_result / error）を待つ（FOLLOW_TIMEOUT_MS で切る）。 */
+  workerReplyOn(peer: ServerPeer, cmd: WorkerReplyInput): Promise<WorkerReplyResultReply | ErrorReply>;
+  /**
+   * 指定 peer へ status を送り、status_result（または error）を待つ（cap の有無の確認用。FOLLOW_TIMEOUT_MS で切る）。
+   * cap_id を付けると、server はこの center をその cap の通知先にする（protocol 1.6.0。center の再起動後に通知先を取り戻すのに使う）。
+   */
+  statusOn(peer: ServerPeer, opts?: { cap_id?: string }): Promise<StatusReply | ErrorReply>;
   /** 指定 peer へ stop_cap を送り、返信（stop_result / error）まで待つ。 */
   stopCapOn(peer: ServerPeer, cmd: StopCapInput): Promise<StopResultReply | ErrorReply>;
   /** 指定 peer へ hello を送り、hello_result（または error）を待つ。protocol の版の門は通らない。 */
@@ -137,13 +150,15 @@ export interface ServerLink {
   close(): Promise<void>;
 }
 
-type ReplyKind = "cap_result" | "worker_result" | "stop_result" | "status_result" | "hello_result" | "update_result";
+type ReplyKind = "cap_result" | "task_result" | "worker_reply_result" | "worker_result" | "stop_result" | "status_result" | "hello_result" | "update_result";
 
 interface Pending {
   kind: ReplyKind;
   command: ServerCommandType;
-  /** cap_id / worker_id。status は無し。 */
+  /** cap_id / worker_id（worker_reply は cap_id:worker_id）。status は無し。 */
   key?: string;
+  /** task の task_id（task_result の照合に使う）。 */
+  taskId?: string;
   resolve: (r: unknown) => void;
   timer: NodeJS.Timeout;
 }
@@ -178,6 +193,8 @@ export interface Target {
 
 const KIND_COMMAND: Record<ReplyKind, ServerCommandType> = {
   cap_result: "kick_cap",
+  task_result: "task",
+  worker_reply_result: "worker_reply",
   worker_result: "resume_worker",
   stop_result: "stop_cap",
   status_result: "status",
@@ -242,10 +259,10 @@ export function createServerLink(opts: {
   /** server からの通知（activity）。返信ではないので pending とは照合しない。 */
   onNotice?: (n: ServerNotice, fromId?: string) => void;
   /**
-   * 待ちの無い cap_result / kick_cap の error（report 起因の再開の結果など、最初の返信の後に server が送ってくるもの）。
+   * 待ちの無い cap_result / task_result / kick_cap・task の error（report 起因の再開の結果など、最初の返信の後に server が送ってくるもの）。
    * 対応する待ちが無い返信を捨てずに渡す。
    */
-  onLateCapReply?: (r: CapResultReply | ErrorReply, fromId?: string) => void;
+  onLateCapReply?: (r: CapResultReply | TaskResultReply | ErrorReply, fromId?: string) => void;
 }): ServerLink {
   const { config, log } = opts;
   let extraGate: Gate | undefined;
@@ -322,6 +339,10 @@ export function createServerLink(opts: {
     let target: Pending | undefined;
     if (r.type === "cap_result") {
       target = slot.pending.find((p) => p.kind === "cap_result" && p.key === r.cap_id);
+    } else if (r.type === "task_result") {
+      target = slot.pending.find((p) => p.kind === "task_result" && p.key === r.cap_id && p.taskId === r.task_id);
+    } else if (r.type === "worker_reply_result") {
+      target = slot.pending.find((p) => p.kind === "worker_reply_result" && p.key === `${r.cap_id}:${r.worker_id}`);
     } else if (r.type === "worker_result") {
       target = slot.pending.find((p) => p.kind === "worker_result" && p.key === r.worker_id);
     } else if (r.type === "stop_result") {
@@ -336,6 +357,11 @@ export function createServerLink(opts: {
     } else if (r.command === "stop_cap" && r.cap_id !== undefined) {
       // stop_cap の error は、同じ cap_id の kick_cap の待ちと取り違えない
       target = slot.pending.find((p) => p.kind === "stop_result" && p.key === r.cap_id);
+    } else if (r.command === "task") {
+      // task の error は task_id（無ければ cap_id）で照合する
+      target = slot.pending.find((p) => p.kind === "task_result" && (r.cap_id === undefined || p.key === r.cap_id) && (r.task_id === undefined || p.taskId === r.task_id));
+    } else if (r.command === "worker_reply") {
+      target = slot.pending.find((p) => p.kind === "worker_reply_result" && (r.cap_id === undefined || r.worker_id === undefined || p.key === `${r.cap_id}:${r.worker_id}`));
     } else if (r.cap_id !== undefined || r.worker_id !== undefined) {
       // id 付きの error は id で照合する（同じ command の別 id と取り違えない）
       target = slot.pending.find((p) =>
@@ -350,7 +376,7 @@ export function createServerLink(opts: {
     }
     if (!target) {
       log(`対応する待ちなし: server=${slot.cfg.name} type=${r.type}`);
-      if (r.type === "cap_result" || (r.type === "error" && r.command === "kick_cap" && r.cap_id !== undefined)) {
+      if (r.type === "cap_result" || r.type === "task_result" || (r.type === "error" && (r.command === "kick_cap" || r.command === "task") && r.cap_id !== undefined)) {
         try {
           opts.onLateCapReply?.(r, m.from_id);
         } catch (e) {
@@ -450,7 +476,7 @@ export function createServerLink(opts: {
     kind: ReplyKind,
     key: string | undefined,
     payload: object,
-    opts: { target?: Target; timeoutMs?: number } = {},
+    opts: { target?: Target; timeoutMs?: number; taskId?: string } = {},
   ): Promise<R | ErrorReply> => {
     let slot: Slot;
     try {
@@ -482,6 +508,7 @@ export function createServerLink(opts: {
           kind,
           command,
           key,
+          ...(opts.taskId !== undefined ? { taskId: opts.taskId } : {}),
           resolve: resolve as (r: unknown) => void,
           timer: setTimeout(() => {
             log(`タイムアウト: server=${server} type=${command}${key ? ` id=${key}` : ""}`);
@@ -581,8 +608,12 @@ export function createServerLink(opts: {
     },
     kickCapOn: (peer, cmd) =>
       request<CapResultReply>(discoveryName, "cap_result", cmd.cap_id, cmd, { target: peerTarget(peer) }),
-    statusOn: (peer) =>
-      request<StatusReply>(discoveryName, "status_result", undefined, {}, { target: peerTarget(peer), timeoutMs: FOLLOW_TIMEOUT_MS }),
+    taskOn: (peer, cmd) =>
+      request<TaskResultReply>(discoveryName, "task_result", cmd.cap_id, cmd, { target: peerTarget(peer), taskId: cmd.task_id }),
+    workerReplyOn: (peer, cmd) =>
+      request<WorkerReplyResultReply>(discoveryName, "worker_reply_result", `${cmd.cap_id}:${cmd.worker_id}`, cmd, { target: peerTarget(peer), timeoutMs: FOLLOW_TIMEOUT_MS }),
+    statusOn: (peer, opts) =>
+      request<StatusReply>(discoveryName, "status_result", undefined, opts?.cap_id !== undefined ? { cap_id: opts.cap_id } : {}, { target: peerTarget(peer), timeoutMs: FOLLOW_TIMEOUT_MS }),
     stopCapOn: (peer, cmd) =>
       request<StopResultReply>(discoveryName, "stop_result", cmd.cap_id, cmd, { target: peerTarget(peer), timeoutMs: STOP_TIMEOUT_MS }),
     hello: (peer) =>

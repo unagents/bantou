@@ -1,9 +1,19 @@
+import { randomBytes } from "node:crypto";
 import { z } from "zod";
-import { AGENT_ID_PATTERN, MODEL_PATTERN, type CapResultReply, type ErrorReply, type StatusReply } from "@agent-hand/bantou-protocol";
+import {
+  AGENT_ID_PATTERN,
+  MODEL_PATTERN,
+  type CapResultReply,
+  type ErrorReply,
+  type StatusReply,
+  type TaskCommand,
+  type TaskResultReply,
+  type WorkerReportNotice,
+} from "@agent-hand/bantou-protocol";
 import type { ActivityStore, RemoteActivity } from "./activity.js";
 import { loadConfigSync, type ServerConfig } from "./config.js";
 import type { Logger } from "./log.js";
-import type { ServerLink, ServerPeer } from "./server-link.js";
+import type { ServerLink, ServerPeer, TaskInput } from "./server-link.js";
 import type { JsonListStore } from "./store.js";
 
 /** remote の呼び出し元（master-cap の session 名）を運ぶ HTTP header。 */
@@ -18,6 +28,12 @@ const RESULT_MAX = 8000;
 export const PROMPT_HEAD_MAX = 200;
 /** 通知に載せる指示の先頭の長さ。 */
 const NOTIFY_PROMPT_MAX = 80;
+/** 記録・返却する worker_report の最大件数（到着順で、古いものから捨てる）。 */
+export const WORKER_REPORTS_MAX = 20;
+/** progress の push を同じ worker から間引く間隔（ms）。ask / approve / done は間引かない。 */
+export const PROGRESS_THROTTLE_MS = 60_000;
+/** push に載せる worker_report の本文の長さ。 */
+export const NOTIFY_REPORT_MAX = 2000;
 
 /** unknown = server に届かない・status も取れず、cap の状態が分からない（次に status が取れた時に running / done に戻る）。 */
 export type RemoteState = "running" | "done" | "failed" | "unknown";
@@ -33,13 +49,16 @@ export interface PendingInstruction {
   at: string;
   /** 指示を送った session 名（完了の通知先）。 */
   owner: string;
-  /** prompt の先頭（PROMPT_HEAD_MAX 文字）。 */
+  /** goal の先頭（PROMPT_HEAD_MAX 文字）。 */
   prompt: string;
+  /** この指示で送った task の task_id。 */
+  task_id?: string;
 }
 
 /**
- * center が保持する「server の cap」の記録。server ごとに 1 件、remote_id = cap_id（center ごとに固定）。
- * メモリ + 状態ファイル。
+ * center が保持する「server の cap」の記録。server ごとに 1 件、remote_id = cap_id。
+ * cap_id は server ごとに記録が持つ（新しい server は center ごとに固定の cap_id、旧形式から引き継いだ server は元の cap_id）。
+ * メモリ + 状態ファイル。記録を消すのは remote_delete だけ（再起動では消えない）。
  */
 export interface RemoteRecord {
   remote_id: string;
@@ -54,9 +73,13 @@ export interface RemoteRecord {
   worker_model?: string;
   createdAt: string;
   finishedAt?: string;
-  /** 最新の cap_result の本文。 */
+  /** 最新の task_result（または cap_result）の本文（task_result は summary）。 */
   result?: string;
-  /** 最新の cap_result を受けた時刻。 */
+  /** 最新の task_result 本体。 */
+  task_result?: TaskResultReply;
+  /** 直近の worker_report（最大 WORKER_REPORTS_MAX 件、到着順）。 */
+  worker_reports?: WorkerReportNotice[];
+  /** 最新の task_result（または cap_result）を受けた時刻。 */
   result_at?: string;
   /** 最新の失敗。成功の結果で消える。 */
   error?: string;
@@ -67,7 +90,7 @@ export interface RemoteRecord {
 }
 
 /** remote_list が返す 1 件。通知がまだ無ければ activity は無い。 */
-export type RemoteView = RemoteRecord & { owners: string[]; activity?: RemoteActivity };
+export type RemoteView = Omit<RemoteRecord, "worker_reports"> & { owners: string[]; worker_reports: WorkerReportNotice[]; activity?: RemoteActivity };
 
 /** 通知に載せる result の先頭の長さ。 */
 export const NOTIFY_RESULT_MAX = 500;
@@ -94,16 +117,67 @@ export function formatDoneNotice(r: { remote_id: string; state: string; result?:
   ].join("\n");
 }
 
+/** worker_report の push 本文を作る。 */
+export function formatWorkerReportNotice(remoteId: string, n: WorkerReportNotice): string {
+  const head = n.text.length > NOTIFY_REPORT_MAX ? `${n.text.slice(0, NOTIFY_REPORT_MAX)}…(省略。全文は remote_list の worker_reports)` : n.text;
+  return [
+    `[bantou] worker_report remote_id=${remoteId} worker=${n.worker_id} kind=${n.kind}${n.task_id ? ` task_id=${n.task_id}` : ""}`,
+    head,
+    ...(n.kind === "ask" || n.kind === "approve" ? [`返答: worker_reply(worker_id="${n.worker_id}", text)`] : []),
+  ].join("\n");
+}
+
+/** center が採番する task_id（TASK_ID_PATTERN と同じ文字種）。 */
+const newTaskId = (): string => `t-${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`;
+
 const modelArg = (what: string) =>
   z.string().regex(MODEL_PATTERN, "英数字と . _ [ ] - のみ（先頭は - 不可）").optional().describe(what);
+const noNul = (v: string): boolean => !v.includes("\0");
+const noNulMsg = { message: "NUL 文字を含められない" };
+const notDash = (v: string): boolean => !v.startsWith("-");
+const plain = z.string().refine(noNul, noNulMsg);
+const plainList = z.array(plain);
+const agentIdArg = z.string().regex(AGENT_ID_PATTERN, "英数字と _ - のみ");
+const branchArg = z.string().min(1).refine(notDash, { message: "- で始められない" }).refine(noNul, noNulMsg);
 
-/** remote_send（別名 remote_create）の入力。model / worker_model の既定は config の servers[]（送信のたびに読み直す）。 */
+/** remote_send（別名 remote_create）の入力。worker_model の既定は config の servers[]（送信のたびに読み直す）。 */
 export const remoteSendSchema = {
-  prompt: z.string().min(1).refine((s) => !s.includes("\0"), { message: "NUL 文字を含められない" }).describe("server の remote-cap への次の指示。worker ごとにモデルを変えたい時は、prompt の中で cap に worker_start の model を指定させる"),
+  goal: z.string().min(1).refine(noNul, noNulMsg).describe("server の remote-cap に渡す task の目的（自然言語）。他の項目を省けば goal だけで動く（分担は既定の implement + review の最低 2 体）"),
+  repo: z.string().min(1).refine(noNul, noNulMsg).optional().describe("作業の元になる git URL"),
+  branch: branchArg.optional().describe("作業の基点 branch"),
+  deliverables: z
+    .object({ branch: branchArg.optional(), report_path: plain.optional(), other: plainList.optional() })
+    .optional()
+    .describe("成果物。branch（worker が push する branch）/ report_path / other。省略時 {}"),
+  verify: z.object({ tests: plainList.optional(), steps: plainList.optional() }).optional().describe("確認方法。tests（実行するテスト）/ steps（手順）。省略時 {}"),
+  constraints: plainList.optional().describe("制約（1 件 1 要素）。省略時 []"),
+  workers: z
+    .object({
+      items: z
+        .array(
+          z.object({
+            id: agentIdArg.optional(),
+            role: z.enum(["implement", "review", "docs", "test", "other"]),
+            scope: z.string().min(1).refine(noNul, noNulMsg),
+            model: z.string().regex(MODEL_PATTERN, "英数字と . _ [ ] - のみ（先頭は - 不可）").optional(),
+            depends_on: z.array(agentIdArg).optional(),
+          }),
+        )
+        .optional(),
+    })
+    .optional()
+    .describe("worker の分担。items 無し = 既定（implement + review の最低 2 体）。省略時 {}"),
   server: serverArg,
-  model: modelArg("cap のモデル（--model）。cap を最初に作る時だけ使う。cap が既にあれば無視する（返り値に model_ignored）。省略時は config servers[].model"),
-  worker_model: modelArg("この指示で cap が起動する worker の既定モデル（worker_start に model が無い時に使う）。cap が既にあっても送り、server が cap の既定として記憶する。省略時、新規の cap は config servers[].workerModel、既存の cap は送らない（server の記憶のまま）"),
+  worker_model: modelArg("worker の既定モデル（task に載せる。items[].model が優先）。省略時、新規の cap は config servers[].workerModel、既存の cap は送らない（server の記憶のまま）"),
 };
+/** worker_reply の入力（desktop の center_call と /mcp/session で共通）。remote_id 省略時は記録が 1 件ならその cap。 */
+export const workerReplySchema = {
+  remote_id: z.string().regex(AGENT_ID_PATTERN, "英数字と _ - のみ").optional().describe("返答先の remote（cap）。省略時は記録が 1 件ならその cap（複数なら server で絞る）"),
+  worker_id: z.string().regex(AGENT_ID_PATTERN, "英数字と _ - のみ").describe("返答する worker（worker_report の worker_id）"),
+  text: z.string().min(1).refine(noNul, noNulMsg).describe("worker への返答（ask への回答、approve の承認・却下など）"),
+  server: serverArg.describe("remote_id が複数の server にある時の絞り込み"),
+};
+
 /** 互換: remote_create の入力は remote_send と同じ。 */
 export const remoteCreateSchema = remoteSendSchema;
 
@@ -112,36 +186,54 @@ export interface RemoteSendResult {
   server: string;
   serverName: string;
   state: RemoteState;
-  /** この指示で cap を作った（server に cap が無く、最初の kick_cap を送った）。 */
+  /** この指示で cap を作った（server に cap が無かった。最初の task で server が作る）。 */
   created: boolean;
-  model?: string;
+  /** この指示の task_id（center が採番。task_result・worker_report と照合する）。 */
+  task_id: string;
   worker_model?: string;
-  /** cap が既存で、指定された model を使わなかった。 */
-  model_ignored?: true;
-  note?: string;
+}
+
+export interface RemoteSendInput {
+  owner: string;
+  goal: string;
+  server?: string;
+  repo?: string;
+  branch?: string;
+  deliverables?: TaskCommand["deliverables"];
+  verify?: TaskCommand["verify"];
+  constraints?: string[];
+  workers?: TaskCommand["workers"];
+  worker_model?: string;
 }
 
 export interface RemoteManager {
   /**
    * 保存済みの記録を読み込む。running と未完了の指示はそのまま復元し、server の status で cap と worker の状態を取り直して追従する
    * （取れなければ unknown。再起動後に届く cap_result は applyLateReply が反映する。messenger の peer 名が再起動前と同じ前提）。
-   * 旧形式（作業ごとの cap。remote_id が center の cap_id でない）の記録は一覧に残さず、server へ stop_cap を送って（届かなくても）記録を消す。結果は center.log。
+   * あわせて、全ての記録の server へ status（cap_id 付き）を送り、server の通知先（activity / task_result / worker_report の送り先）を取り戻す
+   * （server が居なければ再試行する。状態の追従で status を送る記録はそれが兼ねる）。
+   * 旧形式（作業ごとの cap。remote_id が center の cap_id と違う・history 形式など）の記録は、その server の cap として新しい形に引き継ぐ（cap_id はそのまま）。
+   * 同じ server に複数あれば、動いている記録（isActiveRec）を最優先、同順位なら最新の 1 件を残し、他は stop_cap を送って（届かなくても）記録を消す（作業ごとの cap の後始末。1 回限り。結果は center.log）。
    */
   restore(): Promise<void>;
   /**
    * server の cap（remote_id = cap_id、center ごとに固定）へ次の指示を送る。
-   * server の status で cap の有無を確かめ、無い時だけ最初の kick_cap（model / worker_model は config の servers[]）。
-   * 返信は待たず、running で返る。cap が実行中なら server 側で直列に待たされる。
+   * server の status で cap の有無を確かめ（新規の cap の worker_model の既定は config の servers[]）、task を送る。task_id は center が採番。
+   * 返信（task_result）は待たず、running で返る。cap が実行中なら server 側で直列に待たされる。
    */
-  send(input: { owner: string; prompt: string; server?: string; model?: string; worker_model?: string }): Promise<RemoteSendResult>;
-  /** stop_cap を送って記録を外す。remote_id 省略時は center の cap。server で複数から絞る。 */
+  send(input: RemoteSendInput): Promise<RemoteSendResult>;
+  /** worker_reply を server へ送る（remote_id 省略時は記録が 1 件ならその cap）。版が合わない server へは送らず投げる。 */
+  workerReply(input: { remote_id?: string; server?: string; worker_id: string; text: string }): Promise<{ remote_id: string; server: string; worker_id: string; accepted: true }>;
+  /** server から worker_report を受けた時に呼ぶ。記録に積み、未完了の指示の owner へ push する（progress は同じ worker から 60 秒に 1 回）。 */
+  onWorkerReport(report: WorkerReportNotice, fromId?: string): void;
+  /** stop_cap を送って記録を外す。remote_id 省略時は記録が 1 件ならその cap。server で複数から絞る。 */
   delete(input: { remote_id?: string; server?: string; force?: boolean }): Promise<{ remote_id: string; deleted: true; stopped: boolean; warning?: string }>;
   /**
-   * 最初の返信の後に server が送ってきた cap_result / error（kick_cap。report 起因の再開など）を記録に反映する。
+   * 最初の返信の後に server が送ってきた task_result / cap_result / error（task・kick_cap。report 起因の再開など）を記録に反映する。
    * 記録が無い（delete 済み・cap_kick の cap・旧形式）・まだ最初の返信待ちの時は何もしない。反映したら true。
    * fromId = 送ってきた server の peer id（同じ cap_id が複数 server にある時の取り違え防止）。
    */
-  applyLateReply(reply: CapResultReply | ErrorReply, fromId?: string): boolean;
+  applyLateReply(reply: CapResultReply | TaskResultReply | ErrorReply, fromId?: string): boolean;
   list(filter?: { owner?: string }): RemoteView[];
   /** server から activity 通知を受けた時に呼ぶ。cap が idle で worker も無くなったなら、未完了の指示を完了にして通知する・待ちを起こす。 */
   onActivity(capId: string, fromId?: string): void;
@@ -154,6 +246,16 @@ export interface RemoteManager {
 
 /** unknown にした時の error の接頭辞（回復時に消す印）。 */
 const STATUS_ERR = "status を取れない";
+
+/** 記録の最も新しい時刻（ISO 8601）。旧形式の引き継ぎで、動いている記録が同順位の時に最新を選ぶ判定に使う。 */
+const lastAt = (r: RemoteRecord): string =>
+  [r.createdAt, r.finishedAt, r.result_at, r.error_at].filter((t): t is string => typeof t === "string").sort().pop() ?? "";
+
+/** 動いている記録（running・unknown・未完了の指示あり）。復元時に status で追従する対象で、旧形式の引き継ぎでも残す側を優先する。 */
+const isActiveRec = (r: RemoteRecord): boolean => r.state === "running" || r.state === "unknown" || r.pending.length > 0;
+
+/** 通知先を server へ伝える status（cap_id 付き）の再試行の回数。pollMs ごと。 */
+const ANNOUNCE_RETRIES = 20;
 
 const truncate = (s: string): string => (s.length > RESULT_MAX ? `${s.slice(0, RESULT_MAX)}…(省略)` : s);
 
@@ -196,6 +298,10 @@ export function createRemoteManager(opts: {
   const probes = new Map<RemoteRecord, ReturnType<typeof setTimeout>>();
   /** 返信待ちの kick_cap の数（メモリのみ）。center の link は同じ cap_id の指示を直列にするので、2 本目以降は 1 本目の返信後に送られる。 */
   const inflight = new Map<RemoteRecord, number>();
+  /** 返信待ちの task の task_id（メモリのみ）。同じ task_id の task_result は待ちに照合されるので触らず、別の task_id なら記録に反映する。 */
+  const inflightTasks = new Map<RemoteRecord, Set<string>>();
+  /** progress の最後の push の時刻（remote_id|server|worker_id → ms。メモリのみ）。 */
+  const lastProgressPush = new Map<string, number>();
   const waiters = new Set<() => void>();
   /** server（peer id）ごとの送信の直列化（status の確認 → 記録 → kick_cap の投入）。 */
   const locks = new Map<string, Promise<unknown>>();
@@ -204,6 +310,29 @@ export function createRemoteManager(opts: {
     store.save(records).catch((e: unknown) => log(`remotes 保存失敗: ${e instanceof Error ? e.message : String(e)}`));
 
   const has = (r: RemoteRecord): boolean => records.includes(r);
+
+  /**
+   * server に status（cap_id 付き）を送り、この center を cap の通知先として取り戻す（center の再起動で server が持つ通知先が古くなるため）。
+   * server がまだ見えない・届かない時は pollMs ごとに ANNOUNCE_RETRIES 回まで再試行する。記録が消えたら止める。
+   */
+  const announce = async (r: RemoteRecord, attempt = 0): Promise<void> => {
+    if (!has(r)) return;
+    try {
+      const peer = await findPeer(r);
+      const reply = await link.statusOn(peer, { cap_id: r.remote_id });
+      if (reply.type === "error") throw new Error(reply.message);
+      await adoptPeer(r, peer);
+      log(`通知先を server へ伝えた（status cap_id）: ${r.remote_id} server=${r.serverName}`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (attempt >= ANNOUNCE_RETRIES) {
+        log(`通知先を server へ伝えられない（諦める。次の指示で伝わる）: ${r.remote_id} server=${r.serverName} ${msg}`);
+        return;
+      }
+      const t = setTimeout(() => void announce(r, attempt + 1), pollMs);
+      t.unref?.();
+    }
+  };
 
   const activityOf = (r: RemoteRecord): RemoteActivity | undefined =>
     opts.activity?.get(r.remote_id, r.server) ?? opts.activity?.get(r.remote_id, "");
@@ -246,7 +375,7 @@ export function createRemoteManager(opts: {
 
   const viewOf = (r: RemoteRecord): RemoteView => {
     const state = stateOf(r);
-    const base: RemoteView = { ...r, pending: r.pending.map((p) => ({ ...p })), owners: ownersOf(r), state };
+    const base: RemoteView = { ...r, pending: r.pending.map((p) => ({ ...p })), owners: ownersOf(r), worker_reports: (r.worker_reports ?? []).map((w) => ({ ...w })), state };
     if (state === "running") delete base.finishedAt;
     const activity = activityOf(r);
     return { ...base, ...(activity ? { activity } : {}) };
@@ -293,11 +422,12 @@ export function createRemoteManager(opts: {
    * transport = server に届かない・返信が来ない（state は failed でなく unknown）。
    * cap_result は即座に完了にしない: 未完了の指示があれば settling にして、次の activity か猶予（graceMs）の後の status で判定する。
    */
-  const applyResult = (r: RemoteRecord, res: { ok: boolean; text: string; error?: string }, kind: "cap_result" | "error" | "transport"): void => {
+  const applyResult = (r: RemoteRecord, res: { ok: boolean; text: string; error?: string }, kind: "cap_result" | "error" | "transport", taskResult?: TaskResultReply): void => {
     if (!has(r)) return;
     const now = new Date().toISOString();
     r.state = kind === "transport" ? "unknown" : res.ok ? "done" : "failed";
     r.finishedAt = now;
+    if (taskResult) r.task_result = taskResult;
     if (kind === "cap_result" && r.pending.length > 0) {
       settling.set(r, Date.now());
       schedule(r, graceMs);
@@ -322,9 +452,9 @@ export function createRemoteManager(opts: {
     wake();
   };
 
-  /** server の status から、cap か worker が動いているか。worker は cap との対応が status に無いので server 全体で見る。 */
-  const statusBusy = (st: StatusReply): boolean => {
-    const cap = st.caps.find((c) => c.id === capId);
+  /** server の status から、cap（id）か worker が動いているか。worker は cap との対応が status に無いので server 全体で見る。 */
+  const statusBusy = (st: StatusReply, id: string): boolean => {
+    const cap = st.caps.find((c) => c.id === id);
     return (cap !== undefined && (cap.state === "running" || (cap.queued ?? 0) > 0)) || st.workers.some((w) => w.state === "running");
   };
 
@@ -338,9 +468,11 @@ export function createRemoteManager(opts: {
     const startedAt = Date.now();
     let st: StatusReply;
     try {
-      const reply = await link.statusOn(await findPeer(r));
+      const peer = await findPeer(r);
+      const reply = await link.statusOn(peer, { cap_id: r.remote_id });
       if (reply.type === "error") throw new Error(reply.message);
       st = reply;
+      await adoptPeer(r, peer);
     } catch (e) {
       if (!has(r) || (inflight.get(r) ?? 0) > 0) return;
       const msg = e instanceof Error ? e.message : String(e);
@@ -353,7 +485,7 @@ export function createRemoteManager(opts: {
       return;
     }
     if (!has(r) || (inflight.get(r) ?? 0) > 0) return;
-    if (statusBusy(st)) {
+    if (statusBusy(st, r.remote_id)) {
       settling.delete(r);
       statusIdleAt.delete(r);
       if (r.state !== "running") log(`remote 追従: ${r.remote_id} cap / worker が動いている（status）`);
@@ -389,18 +521,39 @@ export function createRemoteManager(opts: {
     wake();
   };
 
-  const resultOf = (reply: CapResultReply | ErrorReply): { ok: boolean; text: string; error?: string } =>
-    reply.type === "cap_result"
-      ? { ok: reply.ok, text: reply.result_text, ...(reply.ok ? {} : { error: reply.error ?? "失敗" }) }
-      : { ok: false, text: "", error: reply.message };
+  const resultOf = (reply: CapResultReply | TaskResultReply | ErrorReply): { ok: boolean; text: string; error?: string } =>
+    reply.type === "task_result"
+      ? { ok: reply.state === "done", text: reply.summary, ...(reply.state === "done" ? {} : { error: reply.error ?? "失敗" }) }
+      : reply.type === "cap_result"
+        ? { ok: reply.ok, text: reply.result_text, ...(reply.ok ? {} : { error: reply.error ?? "失敗" }) }
+        : { ok: false, text: "", error: reply.message };
 
-  /** server の peer から記録を探す（id 一致 → 名前 + host 一致）。旧形式は除く。 */
-  const findRecord = (peer: ServerPeer): RemoteRecord | undefined => {
-    const own = records.filter((r) => r.remote_id === capId);
-    return (
-      own.find((r) => r.server === peer.id) ??
-      own.find((r) => r.serverName === peer.name && r.serverHost === peer.hostname)
-    );
+  /**
+   * 記録がこの peer の server か。peer id 一致、または名前 + host 一致。host の無い記録（serverHost を持つ前の旧形式）は名前だけで一致する
+   * （同名の server が複数あっても host が埋まるまでは区別できない）。
+   */
+  const sameServer = (r: RemoteRecord, peer: ServerPeer): boolean =>
+    r.server === peer.id || (r.serverName === peer.name && (r.serverHost === undefined || r.serverHost === peer.hostname));
+
+  /** server の peer から記録を探す（id 一致 → 名前 + host 一致）。server ごとに 1 件。 */
+  const findRecord = (peer: ServerPeer): RemoteRecord | undefined =>
+    records.find((r) => r.server === peer.id) ?? records.find((r) => sameServer(r, peer));
+
+  /**
+   * host の無い記録（旧形式）の server が status で確かめられたら、今の peer id と host を記録に入れる（以後は名前 + host で区別できる）。
+   * 同名の peer が複数いて、どれがこの記録の server か決められない時は何もしない。
+   */
+  const adoptPeer = async (r: RemoteRecord, peer: ServerPeer): Promise<void> => {
+    if (r.serverHost !== undefined || !peer.hostname) return;
+    try {
+      const same = (await link.peers()).filter((p) => p.name === r.serverName);
+      if (same.length !== 1 || same[0].id !== peer.id) return;
+    } catch {
+      return;
+    }
+    r.server = peer.id;
+    r.serverHost = peer.hostname;
+    void persist();
   };
 
   /** 通知・遅れた返信の送信元から記録を決める。同じ cap_id が 1 件だけなら、peer id が変わっていてもそれ。 */
@@ -430,17 +583,16 @@ export function createRemoteManager(opts: {
     return hit;
   };
 
-  /** remote_id（省略時は center の cap）と server から記録を 1 件決める。複数あれば server で絞らせる。 */
+  /** remote_id（省略時は全ての記録）と server から記録を 1 件決める。複数あれば server で絞らせる。 */
   const pick = async (remote_id: string | undefined, server: string | undefined): Promise<RemoteRecord> => {
-    const id = remote_id ?? capId;
-    let cands = records.filter((r) => r.remote_id === id);
-    if (cands.length === 0) throw new Error(`未定義の remote: ${id}`);
+    let cands = remote_id === undefined ? [...records] : records.filter((r) => r.remote_id === remote_id);
+    if (cands.length === 0) throw new Error(`未定義の remote: ${remote_id ?? "（remote_id 省略。remote が無い）"}`);
     if (server !== undefined) {
       const peer = await link.selectPeer(server);
-      cands = cands.filter((r) => r.server === peer.id || (r.serverName === peer.name && r.serverHost === peer.hostname));
-      if (cands.length === 0) throw new Error(`その server に remote ${id} は無い: ${server}`);
+      cands = cands.filter((r) => sameServer(r, peer));
+      if (cands.length === 0) throw new Error(`その server に remote ${remote_id ?? ""} は無い: ${server}`);
     }
-    if (cands.length > 1) throw new Error(`remote ${id} は複数の server にある（server で指定: ${cands.map((r) => `${r.serverName}(${r.server})`).join(", ")}）`);
+    if (cands.length > 1) throw new Error(`remote ${remote_id ?? "（remote_id 省略）"} は複数の server にある（server で指定: ${cands.map((r) => `${r.serverName}(${r.server})`).join(", ")}）`);
     return cands[0];
   };
 
@@ -476,17 +628,12 @@ export function createRemoteManager(opts: {
 
   return {
     async restore() {
-      const legacy: RemoteRecord[] = [];
+      const loaded: RemoteRecord[] = [];
       for (const r of await store.load()) {
         if (typeof r?.remote_id !== "string" || !AGENT_ID_PATTERN.test(r.remote_id)) continue;
-        // 旧形式（作業ごとの cap。remote_id が center の cap_id でない）は一覧に残さず、後で stop_cap を送って記録を消す
-        if (r.remote_id !== capId) {
-          legacy.push(r);
-          continue;
-        }
-        const old = r as RemoteRecord & { history?: unknown };
+        // 旧形式の欄（history・legacy・record 単位の owner）は、未完了の指示だけ引き継いで捨てる
+        const old = r as RemoteRecord & { history?: unknown; legacy?: unknown; owner?: unknown };
         if (!Array.isArray(r.pending)) {
-          // 履歴を持っていた版の記録: 未完了の指示だけ引き継ぎ、履歴は捨てる
           r.pending = Array.isArray(old.history)
             ? (old.history as { type?: string; at: string; owner: string; prompt: string; done_at?: string }[])
                 .filter((e) => e.type === "instruction" && e.done_at === undefined)
@@ -494,19 +641,64 @@ export function createRemoteManager(opts: {
             : [];
         }
         delete old.history;
+        delete old.legacy;
+        delete old.owner;
         if (r.state !== "running" && r.state !== "done" && r.state !== "failed" && r.state !== "unknown") r.state = "unknown";
-        records.push(r);
-        // running・unknown・未完了の指示がある記録は、failed にせず復元して server の status で追従する
-        if (r.state === "running" || r.state === "unknown" || r.pending.length > 0) {
-          settling.set(r, Date.now());
-          schedule(r, 0);
+        loaded.push(r);
+      }
+      // server ごとに 1 件にする。同じ server に複数ある（作業ごとの cap の名残）時は、動いている記録を最優先、同順位なら最新の 1 件を残し、他は stop_cap を送って消す（1 回限りの後始末）。
+      // 同じ server = peer id が同じ、または名前 + host が同じ。host の無い旧記録は、今の peer で同名の server が 1 つだけと確かめられた時だけ、その host の server とみなす。
+      // 確かめられない（peer が引けない・同名の peer が複数）host 無しの記録は、どの記録とも一緒にせず、stop_cap も送らずにそのまま残す（次の status 成功時に host が埋まる）
+      let livePeers: ServerPeer[] = [];
+      try {
+        livePeers = await link.peers();
+      } catch {
+        // peer が引けない
+      }
+      const hostOf = (r: RemoteRecord): string | undefined => {
+        if (r.serverHost !== undefined) return r.serverHost;
+        const same = livePeers.filter((p) => p.name === r.serverName);
+        return same.length === 1 ? same[0].hostname : undefined;
+      };
+      const surplus: RemoteRecord[] = [];
+      const groups: RemoteRecord[][] = [];
+      for (const r of loaded) {
+        const h = hostOf(r);
+        const g =
+          h === undefined && r.serverHost === undefined
+            ? undefined
+            : groups.find((m) => m.some((x) => x.server === r.server || (x.serverName === r.serverName && hostOf(x) !== undefined && hostOf(x) === h)));
+        if (g) g.push(r);
+        else groups.push([r]);
+      }
+      let migrated = 0;
+      for (const group of groups) {
+        // 動いている（running・unknown・未完了の指示あり）記録を最優先、同順位なら最新。動いている cap へ stop_cap を送らないため
+        const keep = [...group].sort((x, y) => Number(isActiveRec(y)) - Number(isActiveRec(x)) || lastAt(y).localeCompare(lastAt(x)))[0]!;
+        if (keep.remote_id !== capId) {
+          migrated++;
+          log(`旧形式の記録を server の cap として引き継ぐ: cap_id=${keep.remote_id} server=${keep.serverName}`);
+        }
+        for (const r of group) {
+          if (r === keep) records.push(r);
+          else surplus.push(r);
         }
       }
-      if (records.length > 0 || legacy.length > 0) await persist();
-      log(`remote 記録を読込: ${records.length} 件${legacy.length > 0 ? `（旧形式 ${legacy.length} 件は stop_cap を送って記録を消す）` : ""}`);
-      // 旧形式: server に stop_cap を送る（届かなくても記録は消す。結果は center.log）
+      for (const r of records) {
+        // running・unknown・未完了の指示がある記録は、failed にせず復元して server の status で追従する
+        if (isActiveRec(r)) {
+          settling.set(r, Date.now());
+          schedule(r, 0);
+        } else {
+          // 追従の status を送らない記録も、server へ通知先（この center）を伝える（status は cap_id 付き）
+          void announce(r);
+        }
+      }
+      if (records.length > 0 || surplus.length > 0) await persist();
+      log(`remote 記録を読込: ${records.length} 件${migrated > 0 ? `（旧形式から引き継ぎ ${migrated} 件）` : ""}${surplus.length > 0 ? `（同じ server の余分な旧形式 ${surplus.length} 件は stop_cap を送って記録を消す）` : ""}`);
+      // 余分な旧形式: server に stop_cap を送る（届かなくても記録は消す。結果は center.log）
       await Promise.all(
-        legacy.map(async (r) => {
+        surplus.map(async (r) => {
           try {
             const peer = await findPeer(r);
             const reply = await link.stopCapOn(peer, { cap_id: r.remote_id });
@@ -520,69 +712,76 @@ export function createRemoteManager(opts: {
     },
 
     async send(input) {
-      for (const [k, v] of [["model", input.model], ["worker_model", input.worker_model]] as const) {
-        if (v !== undefined && !MODEL_PATTERN.test(v)) throw new Error(`${k} が不正: 英数字と . _ [ ] - のみ（先頭は - 不可）`);
-      }
+      if (input.worker_model !== undefined && !MODEL_PATTERN.test(input.worker_model)) throw new Error("worker_model が不正: 英数字と . _ [ ] - のみ（先頭は - 不可）");
+      if (input.goal.length === 0 || input.goal.includes("\0")) throw new Error("goal が不正（空・NUL 文字は不可）");
       if (!OWNER_PATTERN.test(input.owner)) throw new Error("owner は英数字と _ - のみ");
       const peer = await link.selectPeer(input.server);
       // protocol の版が合わない・更新待ちの server へは、記録を作らず isError で返す（session が後で再送できる）
-      const blocked = link.gate?.(peer, "kick_cap");
+      const blocked = link.gate?.(peer, "task");
       if (blocked) throw new Error(blocked.message);
       return serial(peer.id, async () => {
-        const st = await link.statusOn(peer);
-        if (st.type === "error") throw new Error(`server の cap を確かめられない: ${st.message}`);
-        const exists = st.caps.some((c) => c.id === capId);
-        // 新規の cap: 指定 > config。既存の cap: model は無視、worker_model は指定された時だけ送る（server が cap の既定として記憶する）
-        const cfgModels = exists ? {} : serverModels(peer, input.server);
-        const model = exists ? undefined : (input.model ?? cfgModels.model);
-        const workerModel = input.worker_model ?? cfgModels.worker_model;
-        const models = { ...(model ? { model } : {}), ...(workerModel ? { worker_model: workerModel } : {}) };
-        const now = new Date().toISOString();
+        // この server の cap_id は記録のもの（旧形式から引き継いだ cap はその cap_id）。無ければ center の cap_id
         let rec = findRecord(peer);
+        const cid = rec?.remote_id ?? capId;
+        const st = await link.statusOn(peer, { cap_id: cid });
+        if (st.type === "error") throw new Error(`server の cap を確かめられない: ${st.message}`);
+        const exists = st.caps.some((c) => c.id === cid);
+        // 新規の cap: 指定 > config。既存の cap: worker_model は指定された時だけ送る（server が cap の既定として記憶する）
+        const cfgModels = exists ? {} : serverModels(peer, input.server);
+        const workerModel = input.worker_model ?? cfgModels.worker_model;
+        const taskId = newTaskId();
+        const now = new Date().toISOString();
         if (!rec) {
-          rec = { remote_id: capId, server: peer.id, serverName: peer.name, ...(peer.hostname ? { serverHost: peer.hostname } : {}), state: "running", createdAt: now, pending: [] };
+          rec = { remote_id: cid, server: peer.id, serverName: peer.name, ...(peer.hostname ? { serverHost: peer.hostname } : {}), state: "running", createdAt: now, pending: [] };
           records.push(rec);
         }
         rec.server = peer.id;
         rec.serverName = peer.name;
         if (peer.hostname) rec.serverHost = peer.hostname;
-        // cap を作る時だけ model を渡す。記録も作った時の値にする
-        if (!exists) {
-          if (models.model) rec.model = models.model;
-          else delete rec.model;
-          if (!models.worker_model) delete rec.worker_model;
-        }
-        if (models.worker_model) rec.worker_model = models.worker_model;
+        // cap を作る時は、記録も作った時の値にする
+        if (!exists && !workerModel) delete rec.worker_model;
+        if (workerModel) rec.worker_model = workerModel;
         const target = rec;
-        target.pending.push({ at: now, owner: input.owner, prompt: input.prompt.slice(0, PROMPT_HEAD_MAX) });
+        target.pending.push({ at: now, owner: input.owner, prompt: input.goal.slice(0, PROMPT_HEAD_MAX), task_id: taskId });
         target.state = "running";
         delete target.finishedAt;
         settling.delete(target);
         statusIdleAt.delete(target);
         unschedule(target);
         inflight.set(target, (inflight.get(target) ?? 0) + 1);
+        inflightTasks.set(target, (inflightTasks.get(target) ?? new Set<string>()).add(taskId));
         await persist();
-        log(`remote 指示: ${capId} owner=${input.owner} server=${peer.name}(${peer.id}) ${exists ? "既存の cap へ" : "cap を作成（最初の kick_cap）"}`);
-        const settle = (res: { ok: boolean; text: string; error?: string }, kind: "cap_result" | "error" | "transport"): void => {
+        log(`remote 指示: ${cid} task_id=${taskId} owner=${input.owner} server=${peer.name}(${peer.id}) ${exists ? "既存の cap へ" : "cap を作成（最初の task）"}`);
+        const settle = (res: { ok: boolean; text: string; error?: string }, kind: "cap_result" | "error" | "transport", taskResult?: TaskResultReply): void => {
           inflight.set(target, Math.max(0, (inflight.get(target) ?? 1) - 1));
-          applyResult(target, res, kind);
-          log(`remote 結果: ${capId} state=${stateOf(target)}`);
+          inflightTasks.get(target)?.delete(taskId);
+          applyResult(target, res, kind, taskResult);
+          log(`remote 結果: ${cid} task_id=${taskId} state=${stateOf(target)}`);
         };
-        void link
-          .kickCapOn(peer, { cap_id: capId, prompt: input.prompt, ...models, reason: `remote_send owner=${input.owner}` })
-          .then(
-            (reply) => settle(resultOf(reply), reply.type === "cap_result" ? "cap_result" : "error"),
-            (e: unknown) => settle({ ok: false, text: "", error: e instanceof Error ? e.message : String(e) }, "transport"),
-          );
+        const cmd: TaskInput = {
+          cap_id: cid,
+          task_id: taskId,
+          goal: input.goal,
+          ...(input.repo ? { repo: input.repo } : {}),
+          ...(input.branch ? { branch: input.branch } : {}),
+          deliverables: input.deliverables ?? {},
+          verify: input.verify ?? {},
+          constraints: input.constraints ?? [],
+          workers: input.workers ?? {},
+          ...(workerModel ? { worker_model: workerModel } : {}),
+        };
+        void link.taskOn(peer, cmd).then(
+          (reply) => settle(resultOf(reply), reply.type === "task_result" ? "cap_result" : "error", reply.type === "task_result" ? reply : undefined),
+          (e: unknown) => settle({ ok: false, text: "", error: e instanceof Error ? e.message : String(e) }, "transport"),
+        );
         return {
-          remote_id: capId,
+          remote_id: cid,
           server: peer.id,
           serverName: peer.name,
           state: "running" as const,
           created: !exists,
-          ...(target.model ? { model: target.model } : {}),
+          task_id: taskId,
           ...(target.worker_model ? { worker_model: target.worker_model } : {}),
-          ...(exists && input.model ? { model_ignored: true as const, note: "cap は既存なので model は無視した" } : {}),
         };
       });
     },
@@ -605,6 +804,7 @@ export function createRemoteManager(opts: {
       const i = records.indexOf(rec);
       if (i >= 0) records.splice(i, 1);
       inflight.delete(rec);
+      inflightTasks.delete(rec);
       settling.delete(rec);
       statusIdleAt.delete(rec);
       unschedule(rec);
@@ -615,12 +815,64 @@ export function createRemoteManager(opts: {
       return { remote_id: rec.remote_id, deleted: true, stopped, ...(warning ? { warning } : {}) };
     },
 
+    async workerReply({ remote_id, server, worker_id, text }) {
+      if (!AGENT_ID_PATTERN.test(worker_id)) throw new Error("worker_id は英数字と _ - のみ");
+      if (text.length === 0 || text.includes("\0")) throw new Error("text が不正（空・NUL 文字は不可）");
+      const rec = await pick(remote_id, server);
+      const peer = await findPeer(rec);
+      const blocked = link.gate?.(peer, "worker_reply");
+      if (blocked) throw new Error(blocked.message);
+      const reply = await link.workerReplyOn(peer, { cap_id: rec.remote_id, worker_id, text });
+      if (reply.type === "error") throw new Error(reply.message);
+      log(`remote worker_reply: ${rec.remote_id} worker=${worker_id} server=${rec.serverName}`);
+      return { remote_id: rec.remote_id, server: peer.id, worker_id: reply.worker_id, accepted: true as const };
+    },
+
+    onWorkerReport(report, fromId) {
+      const r = resolveRecord(report.cap_id, fromId);
+      if (!r) {
+        log(`worker_report を捨てる（記録が無い）: cap_id=${report.cap_id} worker=${report.worker_id} kind=${report.kind}`);
+        return;
+      }
+      (r.worker_reports ??= []).push(report);
+      if (r.worker_reports.length > WORKER_REPORTS_MAX) r.worker_reports.splice(0, r.worker_reports.length - WORKER_REPORTS_MAX);
+      void persist();
+      wake();
+      // progress は同じ worker から PROGRESS_THROTTLE_MS に 1 回まで。ask / approve / done は毎回
+      if (report.kind === "progress") {
+        const key = `${r.remote_id}|${r.server}|${report.worker_id}`;
+        const last = lastProgressPush.get(key);
+        const now = Date.now();
+        if (last !== undefined && now - last < PROGRESS_THROTTLE_MS) return;
+        lastProgressPush.set(key, now);
+      }
+      // 完了通知と同じ規則: 未完了の指示の owner へ送る。無ければ送らない
+      const owners = [...new Set(r.pending.map((p) => p.owner))];
+      if (owners.length === 0 || !opts.notify) {
+        log(`worker_report を通知しない（${owners.length === 0 ? "未完了の指示が無く owner 不明" : "通知の送り先が無い"}）: ${r.remote_id} worker=${report.worker_id} kind=${report.kind}`);
+        return;
+      }
+      const text = formatWorkerReportNotice(r.remote_id, report);
+      for (const owner of owners) {
+        void opts.notify(owner, text).then(
+          (res) => res,
+          (e: unknown) => ({ ok: false as const, reason: e instanceof Error ? e.message : String(e) }),
+        ).then((res) => {
+          if (res.ok) log(`worker_report 通知: ${r.remote_id} owner=${owner} worker=${report.worker_id} kind=${report.kind}`);
+          else log(`worker_report を通知できない: ${r.remote_id} owner=${owner} ${res.reason}`);
+        });
+      }
+    },
+
     applyLateReply(reply, fromId) {
       const id = reply.cap_id;
       const rec = id === undefined ? undefined : resolveRecord(id, fromId);
-      // 返信待ちがある間（inflight）はここへ来る返信も待ちに照合されるはずなので、取り違えを避けて触らない
-      if (!rec || (inflight.get(rec) ?? 0) > 0) return false;
-      applyResult(rec, resultOf(reply), reply.type === "cap_result" ? "cap_result" : "error");
+      if (!rec) return false;
+      // 返信待ちがある間（inflight）はここへ来る返信も待ちに照合されるはずなので、取り違えを避けて触らない。
+      // ただし task_id が付いていて、待ちの task_id のどれとも違う（過去の task の遅れた task_result・error）なら反映する
+      const taskId = reply.type === "task_result" || reply.type === "error" ? reply.task_id : undefined;
+      if ((inflight.get(rec) ?? 0) > 0 && (taskId === undefined || inflightTasks.get(rec)?.has(taskId))) return false;
+      applyResult(rec, resultOf(reply), reply.type === "error" ? "error" : "cap_result", reply.type === "task_result" ? reply : undefined);
       log(`remote 結果を更新: ${rec.remote_id} state=${stateOf(rec)}`);
       return true;
     },

@@ -249,7 +249,7 @@ test("組の server 版が不明なら版合わせはせず、protocol の版だ
   assert.equal(only(fl).state, "mismatch");
 });
 
-test("gate: updating の server への kick_cap だけ、再送可の error で断る", async () => {
+test("gate: updating の server への kick_cap / task だけ、再送可の error で断る", async () => {
   const f = fake();
   const fl = mk(f);
   assert.equal(fl.gate({ id: "id-1" }, "kick_cap"), undefined, "まだ何も分かっていない間は通す");
@@ -258,9 +258,11 @@ test("gate: updating の server への kick_cap だけ、再送可の error で�
   assert.equal(g?.code, "updating");
   assert.equal(g?.retryable, true);
   assert.equal(g?.command, "kick_cap");
+  assert.equal(fl.gate({ id: "id-1" }, "task")?.code, "updating");
+  assert.equal(fl.gate({ id: "id-1" }, "task")?.command, "task");
   assert.match(g?.message ?? "", /0\.3\.0→0\.3\.1/);
   assert.match(g?.message ?? "", /再送/);
-  for (const c of ["stop_cap", "status", "hello", "update_server"] as const) assert.equal(fl.gate({ id: "id-1" }, c), undefined, c);
+  for (const c of ["stop_cap", "status", "hello", "update_server", "worker_reply"] as const) assert.equal(fl.gate({ id: "id-1" }, c), undefined, c);
   assert.equal(fl.gate({ id: "other" }, "kick_cap"), undefined);
 });
 

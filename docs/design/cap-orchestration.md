@@ -6,7 +6,7 @@
 
 ## 決まり本文
 
-```
+````
 あなたは bantou の remote-cap。作業を束ねるオーケストレーターで、自分では実装しない。
 作業は必ず worker にさせる。cap がするのは、分割・指示・結果の確認・次の指示・まとめだけ。
 「密結合だから worker は 1 体」と丸投げしない。
@@ -37,7 +37,62 @@ worker の model は、cap への指示の worker_model か prompt の指定に�
 
 [最終返答]
 各 worker の結果、review の結論、残った問題を書く。
+指示が [task <task_id>] で始まる時（task 指示）は、最終返答を task_result の JSON 1 つで返す。JSON は ```json のコードブロックに入れ、ブロックの前後に説明を書いてよい。形式:
+{"state":"done または failed","summary":"結果の要約","workers":[{"worker_id":"...","role":"implement|review|docs|test|other","state":"done|failed|idle|running|stalled|lost","branch":"...","commit":"...","tests":"回したテストと結果","report_path":"...","result":"worker の結果の先頭"}],"review":{"verdict":"ok|issues|unknown","items":[{"severity":"high|medium|low","text":"指摘","resolved":true}],"rounds":0},"remaining":["残った問題"]}
+branch / commit / tests / report_path は分かるものだけ書く。review の結果が無い時は verdict を unknown にする。
+
+[report が来ない worker]
+worker が report を送らずに idle になった時（worker_status が idle で、その worker の report が届いていない）は、同じ worker_id で worker_start して report を送るよう指示し、再開させる。
+````
+
+## task 指示の文面
+
+protocol 1.5.0 の `task`（center → server）を受けた server が、`goal` / `deliverables` / `verify` / `constraints` / `workers` から cap の最初の指示を組み立てる。正本は `prompts.ts` の `buildTaskPrompt`。文面は次のとおり（括弧内は `task` の値で置き換わる。項目が無い節は省くか「指定なし」「なし」と書く）。
+
+- 先頭行は `[task <task_id>]` で固定。`CAP_GUIDE` はこの行で task 指示と見分ける
+- `[作業の base]` は `repo` / `branch` のどちらかがある時だけ出す。server は `kick_cap` と同じく `repo` / `branch` を cap の path への clone に使う
+- `[分担]` は `workers.items` が無ければ「最低 2 体: 実装 worker と review worker。分割は cap が決める。」。あれば `items` を 1 行ずつ（`<id または #番号>: role= scope= model= depends_on=`）。実装か review が無い時は cap が足す一文を付ける
+- `[worker の model]` は `worker_model` がある時だけ出す。server は `worker_model` を cap の既定としても記録する（`kick_cap` と同じ）
+
 ```
+[task t-1]
+
+[目的]
+（goal の自然文）
+
+[作業の base]
+repo: （repo）
+branch: （base branch）
+
+[成果物]
+- push 先 branch: （push 先 branch）
+- report の置き場: （report の置き場）
+- （その他の成果物）
+
+[確認方法]
+- 回すテスト: （回すテスト）
+- 手順: （手順）
+
+[制約]
+- （制約）
+
+[分担]
+次の分担に従って worker を起動する。依存（depends_on）がある worker は、その完了を確認してから起動する。
+- impl: role=implement scope=（担当範囲） model=（model）
+- #2: role=review scope=（担当範囲） depends_on=impl
+
+[worker の model]
+worker_model: （worker_model）（worker_start で model を省く時の既定。分担の model が優先）
+
+[最終返答]
+最終返答は task_result の JSON 1 つで返す（形式は system prompt の [最終返答]）。task_id は返さなくてよい。
+```
+
+## task_result（最終返答）
+
+cap は `task` 指示の最終返答を task_result の JSON 1 つで返す（形式は上の「決まり本文」の `[最終返答]`）。server は返答から次の順で JSON を探す: ```json コードブロック（複数なら最後）、無ければ本文中の最後の `{...}`。`summary`（文字列）を持つ JSON だけを採る。取れた JSON は `cap_id` / `task_id` を server が補い、形が崩れた項目は既定値で補う（worker の role は `other`、state は `idle`、review の severity は `medium`、verdict は `unknown`、rounds は 0）。取り出せない時は `summary` に生の返答、`workers` / `remaining` は空、`review.verdict` は `unknown`（実行の失敗は `state: "failed"` と `error`）。
+
+cap は worker の report のたびに再開するので、最終ではない返答（「worker を起動した、report 待ち」など）は取り出せず、verdict が `unknown` の `task_result` になる。center は完了を verdict ではなく従来どおり「cap が idle かつ配下の worker に running / stalled が無い」で判断する。report 起因の再開で cap が task_result の JSON で答えた時は `task_result`、そうでなければ従来の `cap_result` を center へ送る。
 
 ## 根拠・補足
 
@@ -45,4 +100,6 @@ worker の model は、cap への指示の worker_model か prompt の指定に�
 - 往復の上限は 3 回（固定。`CAP_GUIDE` 内の数値）。
 - 既存の決まりは cap の prompt（`kick_cap`）側にあり、server は中身を知らない。cap が worker の指示に引き継ぐ形にした。
 - 以前の「軽い作業は Agent tool で済ませてよい」の行は、「自分では実装しない」と衝突するため本文から外した。
-- 変えないもの: `kick_cap` の prompt、`packages/protocol`、tool の入出力。`worker_start` の description は説明を足す。
+- 変えないもの: `kick_cap` の prompt、tool の入出力。`worker_start` の description は説明を足す。
+- `task` の追加（protocol 1.5.0）で `CAP_GUIDE` に「task 指示の最終返答は task_result の JSON」「report を送らずに idle になった worker を再開させる」を足した。`kick_cap` の prompt は従来どおり cap にそのまま渡る。
+- 「report を送らずに idle」は cap が `worker_status` を見て気づく決まり。cap は report でしか再開しないので、worker が report を送らずに止まった時に server が cap を起こす仕組みは無い（未対応）。

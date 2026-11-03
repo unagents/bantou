@@ -113,8 +113,8 @@ sender peer as one JSON object.
 ### Messenger protocol `bantou`
 
 The protocol definition is `packages/protocol/messenger/protocol.json` (JSON
-Schemas of `kick_cap`, `stop_cap`, `status`, `hello`, `update_server`, `cap_result`, `stop_result`, `status_result`, `hello_result`, `update_result`, `error`, `activity`)
-and `PROTOCOL.md`. It is the agent-messenger protocol version (`1.4.0`,
+Schemas of `kick_cap`, `stop_cap`, `status`, `hello`, `update_server`, `task`, `worker_reply`, `cap_result`, `stop_result`, `status_result`, `hello_result`, `update_result`, `task_result`, `worker_reply_result`, `error`, `activity`, `worker_report`)
+and `PROTOCOL.md`. It is the agent-messenger protocol version (`1.6.0`,
 `MESSENGER_PROTOCOL` in `server.ts`); the body field `bantou: 1` is a separate
 version of the JSON bodies below. Changing the definition needs a new protocol
 `version` (same name and version with other content is `PROTOCOL_CONFLICT`).
@@ -137,7 +137,7 @@ version of the JSON bodies below. Changing the definition needs a new protocol
 | key | required | meaning |
 |---|---|---|
 | `bantou` | yes | protocol version, always `1` |
-| `type` | yes | `kick_cap`, `stop_cap`, `status`, `hello` or `update_server` |
+| `type` | yes | `kick_cap`, `stop_cap`, `status`, `hello`, `update_server`, `task` or `worker_reply` |
 
 ### `kick_cap` — start or resume a cap
 
@@ -159,6 +159,46 @@ version of the JSON bodies below. Changing the definition needs a new protocol
 
 Reply: `cap_result` or `error`.
 
+### `task` — give a cap a task (1.5.0)
+
+Not the work-session `task` envelope above (that one is a message to a work session). This one is a command to `bantou-server`, told apart by `meta.protocol` and its fields. `kick_cap` (one free-text prompt) stays for compatibility.
+
+```json
+{"bantou":1,"type":"task","cap_id":"c-0a1b2c3d4e","task_id":"t-20261104-1","goal":"packages/protocol に task メッセージを足す","repo":"https://github.com/unagents/bantou.git","branch":"feature/protocol-task","deliverables":{"branch":"feature/protocol-task","report_path":"docs/history/20261104-0900-task/report.md","other":["PR の説明文"]},"verify":{"tests":["npm test (packages/protocol)"],"steps":["差分を読んで型とガードの対応を確認"]},"constraints":["develop / main へ push しない","version bump しない"],"workers":{"items":[{"id":"impl","role":"implement","scope":"packages/protocol と docs"},{"role":"review","scope":"impl の差分","depends_on":["impl"]}]},"worker_model":"sonnet"}
+```
+
+| key | required | meaning |
+|---|---|---|
+| `cap_id` | yes | cap id (`[A-Za-z0-9_-]+`). Same `cap_id` again = resume |
+| `task_id` | yes | task id (`[A-Za-z0-9_-]+`). Echoed in `task_result` and `worker_report` |
+| `goal` | yes | natural-language goal, non-empty |
+| `repo` / `branch` | no | the base of the work (git URL, branch). Same handling as `kick_cap`; must not start with `-` |
+| `deliverables` | yes | `{branch?, report_path?, other?: string[]}`: push-target branch, where the reports go, other deliverables. May be `{}` |
+| `verify` | yes | `{tests?: string[], steps?: string[]}`: tests to run and check steps. May be `{}` |
+| `constraints` | yes | `string[]`, one constraint per entry. May be `[]` |
+| `workers` | yes | `{items?: TaskWorkerItem[]}`. No `items` = the default: at least 2 workers, one `implement` and one `review`. May be `{}` |
+| `worker_model` | no | default `--model` of the workers (same as `kick_cap` `worker_model`, same format) |
+
+`TaskWorkerItem`: `role` (required: `implement` | `review` | `docs` | `test` | `other`), `scope` (required, what the worker covers), `id` (optional name, `[A-Za-z0-9_-]+`), `model` (optional, `--model` of this worker), `depends_on` (optional `id[]`: items that must finish first).
+
+The server builds the cap's first instruction from the fields (text: `docs/design/cap-orchestration.md`, source of truth: `prompts.ts`) and runs it like `kick_cap`. Reply: `task_result` when the run finishes, or `error` (`command: "task"`, `cap_id`, `task_id`). While the server waits to update, `task` is refused like `kick_cap` (`error` `code:"updating"`, `command:"task"`, `retryable:true`).
+
+`task` and `worker_reply` exist from protocol 1.5.0. A server older than that does not know them, and a center does not send commands to a server whose protocol version differs (see below), so the server is updated first.
+
+### `worker_reply` — answer a worker (1.5.0)
+
+```json
+{"bantou":1,"type":"worker_reply","cap_id":"c-0a1b2c3d4e","worker_id":"w-1f2e3d4c5b","text":"develop ではなく feature/protocol-task に push して"}
+```
+
+| key | required | meaning |
+|---|---|---|
+| `cap_id` | yes | the cap that owns the worker |
+| `worker_id` | yes | the worker to answer |
+| `text` | yes | non-empty. Becomes the worker's next prompt |
+
+The server runs `worker_start` for the cap with the same `worker_id` and `text` as the prompt (the worker resumes its session). Reply: `worker_reply_result` `{"bantou":1,"type":"worker_reply_result","ok":true,"cap_id","worker_id","accepted":true}` right after the start is accepted (it does not wait for the work), or `error` (`command:"worker_reply"`, `cap_id`, `worker_id`; for example an unknown cap, or a worker of another cap). The worker's next report arrives as a `worker_report` notice. Accepted while the server waits to update.
+
 ### `stop_cap` — stop a running cap
 
 ```json
@@ -176,10 +216,12 @@ process group (see server README).
 
 ```json
 {"bantou":1,"type":"status"}
+{"bantou":1,"type":"status","cap_id":"c-0a1b2c3d4e"}
 ```
 
-No other fields. Reply: `status_result` or `error`. Answered immediately, even
-while agents are running.
+`cap_id` is optional (1.6.0, `AGENT_ID_PATTERN`). Reply: `status_result` or `error`, the same with or without it. Answered immediately, even
+while agents are running. With `cap_id` the server also takes the sender as the center to notify for that cap (see "Who is notified" below);
+a center sends it after a restart to take its caps' notices back. A server older than 1.6.0 ignores `cap_id`.
 
 ### `hello` — ask the server's version
 
@@ -188,7 +230,7 @@ while agents are running.
 ```
 
 No other fields. Reply: `hello_result`
-`{"bantou":1,"type":"hello_result","ok":true,"server_version":"0.3.0","protocol_version":"1.4.0","update":null,"last_update":null}`.
+`{"bantou":1,"type":"hello_result","ok":true,"server_version":"0.3.0","protocol_version":"1.6.0","update":null,"last_update":null}`.
 `server_version` is the npm `bantou` version of the running server. `update` is
 `{"state":"waiting"|"restarting","from","to","running":{"caps","workers","reports"}}` while an update is
 in progress. `last_update` is `{"to","ok":false,"error","at"}` for the last update that failed (kept until the
@@ -211,7 +253,7 @@ an `error` with `code:"update_failed"` (the server keeps serving normally).
 While `waiting`, the server restarts itself only after every running cap and worker (and worker reports being
 handled) are done. Meanwhile:
 
-- `kick_cap` is refused with `error` `{"code":"updating","retryable":true,"command":"kick_cap","cap_id":...}`
+- `kick_cap` and `task` are refused with `error` `{"code":"updating","retryable":true,"command":"kick_cap" or "task","cap_id":...}` (`task` also carries `task_id`)
   and a reason (`server 更新待ち（<from>→<to>）...再起動後に再送`). The center may send it again after the restart.
 - `stop_cap`, `status` and `hello` are still served. Worker `report` and `worker_start` over MCP are
   still accepted (they belong to the caps that are running).
@@ -285,10 +327,16 @@ Results are JSON text; a failure sets `isError` with `{"error":"..."}`.
 - `model` (same format as `kick_cap`) is the worker's `--model`. Without it the cap's `worker_model` is used, and without that no `--model`. A resumed worker keeps using the same model.
 - `worker_stop` sends SIGTERM to the worker's process group, SIGKILL after 3 s.
 
+### Who is notified (1.6.0)
+
+The server keeps one **center** per cap: the peer **name** of the sender (`bantou-center`, from `from_name`) and the peer id it last used. `activity`, `worker_report`, and the `cap_result` / `task_result` / `error` that follow a worker report (the resume of the cap) go to it. The name is resolved to the current peer id **at send time** (`listPeers`), because a center that restarts gets a new peer id: if the remembered id is still registered under that name it is used (so with several peers of the same name, the one that sent the last command wins); otherwise the peer of that name that registered last is used (and remembered). With no peer of that name, or when the lookup fails, the remembered id is tried as it is. A record from before 1.6.0 holds a peer id only and is used as it is until the next command.
+
+The center is updated by every command that carries a `cap_id`: `kick_cap`, `task`, `worker_reply`, `stop_cap` and `status` with `cap_id`. A center that restarted therefore sends `status` with `cap_id` for each cap it remembers, and gets its notices back without sending a new instruction. `status` / `stop_cap` / `worker_reply` update the memory of the server, and the cap's record file only when the cap exists (they never create a cap).
+
 ### Activity notices (server to center)
 
 `activity` is a notice, not a reply: it is never matched with a pending command.
-The server sends it to the peer that sent the cap's `kick_cap`, as a snapshot of
+The server sends it to the center of the cap (see "Who is notified"), as a snapshot of
 the cap and all its workers. Messages carry the same `meta` as replies.
 
 ```json
@@ -333,6 +381,25 @@ all agents are in an end state, one last notice is sent and sending stops. A
 failed send is logged only. The state is kept in memory on both sides. A peer
 that does not know `activity` ignores it.
 
+### `worker_report` notices (server to center, 1.5.0)
+
+A notice, like `activity`: it is never matched with a pending command. Every time a worker calls its `report` tool, the server sends it to the center of the cap (see "Who is notified"), in parallel with the resume of the cap (it does not wait for the resume; a failed send is logged and the cap is resumed anyway).
+
+```json
+{"bantou":1,"type":"worker_report","cap_id":"c-0a1b2c3d4e","task_id":"t-20261104-1","worker_id":"w-1f2e3d4c5b","kind":"ask","text":"push 先の branch はどれか","at":"2026-11-04T00:00:00.000Z"}
+```
+
+| key | meaning |
+|---|---|
+| `cap_id` | the cap that owns the worker |
+| `task_id` | `task_id` of the latest `task` of the cap. Absent when the cap has had only `kick_cap` |
+| `worker_id` | the reporting worker |
+| `kind` | `progress`, `ask`, `approve` or `done` |
+| `text` | the report text as the worker sent it (1..20000 chars) |
+| `at` | receive time (server clock, ISO 8601) |
+
+The center answers an `ask` / `approve` with `worker_reply`. A peer that does not know `worker_report` ignores it.
+
 ### Replies
 
 Every reply carries `bantou: 1`.
@@ -353,6 +420,26 @@ Every reply carries `bantou: 1`.
 
 Sent only after the run ends, which can take minutes. A failed run is still a
 `cap_result` with `ok: false`.
+
+`task_result` (1.5.0) — the answer to `task`:
+
+```json
+{"bantou":1,"type":"task_result","cap_id":"c-0a1b2c3d4e","task_id":"t-20261104-1","state":"done","summary":"task メッセージを追加し、review の指摘 1 件を直した","workers":[{"worker_id":"w-1f2e3d4c5b","role":"implement","state":"done","branch":"feature/protocol-task","commit":"abc1234","tests":"npm test: 28 pass","report_path":"docs/history/20261104-0900-task/report.md","result":"型とガードを追加した…"},{"worker_id":"w-2a3b4c5d6e","role":"review","state":"done","result":"指摘 1 件、解消済み"}],"review":{"verdict":"ok","items":[{"severity":"medium","text":"worker_reply の text 検証が無い","resolved":true}],"rounds":1},"remaining":[]}
+```
+
+| key | meaning |
+|---|---|
+| `cap_id` / `task_id` | ids from the command |
+| `state` | `done` = the run ended normally, `failed` = it did not |
+| `summary` | summary of the result |
+| `workers` | `{worker_id, role, state, branch?, commit?, tests?, report_path?, result}[]`. `role` as in `TaskWorkerItem`; `state` is an activity state (`running` / `stalled` / `idle` / `done` / `failed` / `lost`); `tests` = the tests run and their outcome (free text); `result` = head of the worker's result (at most 500 chars) |
+| `review` | `{verdict, items, rounds}`. `verdict` `ok` / `issues` / `unknown`; `items` = `{severity: high|medium|low, text, resolved: boolean}[]`; `rounds` = number of implement <-> review round trips (integer, 0 = none) |
+| `remaining` | what is left undone or unresolved, `string[]` |
+| `error` | failure detail when `state` is `failed` |
+
+The cap answers the `task` instruction with this JSON as its final answer; the server takes it out of the answer (a ```json block, else the last `{...}` that has a string `summary`), fills `cap_id` / `task_id` and fixes broken items to defaults. When none can be read: `summary` = the raw answer, `workers` and `remaining` empty, `review.verdict` `unknown` (a failed run: `state:"failed"` + `error`). A cap is resumed by every worker report, so an answer that is not final (such as "workers started, waiting") also becomes a `task_result` with verdict `unknown`. Completion stays what the center already uses: the cap is idle and no worker of it is running or stalled. When a worker report resumes the cap and the cap answers with the JSON, `task_result` is sent to the center again (the one that sent the `task`); any other answer after a report is a `cap_result` as before.
+
+`worker_reply_result`: see `worker_reply`.
 
 `status_result`:
 
@@ -401,7 +488,9 @@ Sent only after the run ends, which can take minutes. A failed run is still a
 | `ok` | always `false` |
 | `message` | failure reason |
 | `command` | `type` of the failed command, when known |
-| `cap_id` | `cap_id` of the failed `kick_cap`, when known |
+| `cap_id` | `cap_id` of the failed `kick_cap` / `task` / `worker_reply`, when known |
+| `task_id` | `task_id` of the failed `task`, when known (1.5.0) |
+| `worker_id` | `worker_id` of the failed `worker_reply`, when known (1.5.0) |
 
 Typical causes: git failure, agent state `running` / `error`, broken `state.json`.
 
@@ -424,7 +513,7 @@ Typical causes: git failure, agent state `running` / `error`, broken `state.json
 | `<workspace>/caps/<cap_id>/` | cap path = cwd of claude |
 | `<workspace>/workers/<worker_id>/` | worker path, same layout as a cap |
 | `<path>/state.json` | agent state (shape below) |
-| `<cap path>/logs/center.json` | center that sent the cap's `kick_cap` (`{"center_id":"..."}`) |
+| `<cap path>/logs/center.json` | center of the cap (`{"center_id":"<last peer id>","center_name":"<peer name>"}`; `center_name` is absent in a record from before 1.6.0) |
 | `<worker path>/logs/owner.json` | cap that owns the worker (`{"cap_id":"..."}`) |
 | `<path>/logs/mcp.json` / `logs/system-prompt.md` | `--mcp-config` / `--append-system-prompt-file` of the latest run, rewritten every run |
 | `<path>/logs/<session_id>.jsonl` | raw claude output (stream-json), appended per run with a `# <ISO> mode=<mode> session=<id>` header line |
@@ -491,38 +580,36 @@ Remote-control record:
 
 **One remote-cap per bantou-server.** Whatever the work is, the center sends the next instruction to that
 cap; it never creates a cap per task. The center's cap id is fixed per center (`c-<10 hex>`, kept in
-`center-id` next to `center.json`, so it survives a restart). In the session window (`/mcp/session`):
+`center-id` next to `center.json`, so it survives a restart; a cap taken over from the old format keeps its own cap id, so the cap id is decided **per server** from its record, and the center's id is only used for a server that has no record). In the session window (`/mcp/session`):
 
 | tool | input | output |
 |---|---|---|
-| `remote_send` | `prompt`, `server?`, `model?`, `worker_model?` | `{ remote_id, server, serverName, state: "running", created, model?, worker_model?, model_ignored?, note? }` |
+| `remote_send` | `goal`, `repo?`, `branch?`, `deliverables?`, `verify?`, `constraints?`, `workers?`, `server?`, `worker_model?` | `{ remote_id, server, serverName, state: "running", created, task_id, worker_model? }` |
 | `remote_create` | same | alias of `remote_send` (same handling) |
+| `worker_reply` | `remote_id?`, `worker_id`, `text`, `server?` | `{ remote_id, server, worker_id, accepted: true }` (sends `worker_reply`; also on `/mcp` for the desktop) |
 | `remote_delete` | `remote_id?`, `server?`, `force?` | `{ remote_id, deleted, stopped, warning? }` (`stop_cap` + drop the record) |
 
-`remote_send` first asks the server for `status`. If the cap (`remote_id`) is not there it sends the first `kick_cap`
-(`created: true`); otherwise it sends `kick_cap` with the same `cap_id` (a resume). The server runs a cap's commands
-one at a time, so a busy cap makes the instruction wait.
+`remote_send` first asks the server for `status` (`created: true` = the cap was not there; the server creates it on the first `task`),
+then sends `task` with the same `cap_id` (a resume when the cap exists). `task_id` is assigned by the center and returned. Only `goal`
+is required; `deliverables` / `verify` / `constraints` / `workers` default to `{}` / `{}` / `[]` / `{}` (no `workers.items` = at least
+two workers, implement + review). The server runs a cap's commands one at a time, so a busy cap makes the instruction wait.
+A server whose protocol version differs, or one waiting to update, is not sent `task`: `remote_send` returns an error and keeps no record.
 
-Models (same format as `kick_cap`'s `model`, checked before sending). `model` is used only when the cap is created; if the
-cap already exists it is ignored and the result carries `model_ignored: true` and `note: "cap は既存なので model は無視した"`.
-`worker_model` is the default model of the workers this instruction's cap starts; it is sent on every `kick_cap` where it is
-given (including a resume), and the server remembers it as the cap's default. Defaults come from the center's `servers[]` config
-(`model` / `workerModel`), **read again at every `remote_send`** like `sessionInstructions`: a new cap gets
-`model` = argument ?? config and `worker_model` = argument ?? config; an existing cap gets `worker_model` only when given
-(the config default is not re-sent). To choose a model per worker, say so in `prompt`: the cap passes `model` to
-`worker_start` (precedence: `worker_start` `model` > the worker's recorded model > the cap's `worker_model` > none). The
-protocol and the server are unchanged (the server already updates `worker_model` on a resume).
+Models. `remote_send` no longer takes `model` (the `task` message has no field for the cap's own model); `servers[].model` stays for `cap_kick`.
+`worker_model` is the default model of the workers (`items[].model` wins). It is sent with `task` when given. For a new cap it
+defaults to the center's `servers[].workerModel`, **read again at every `remote_send`** like `sessionInstructions`; for an existing cap the
+config default is not re-sent. Precedence for a worker: `worker_start` `model` > the worker's recorded model > the cap's `worker_model` > none.
 
 `remote_list` returns one `RemoteView` per server cap: `RemoteRecord` (`remote_id` = cap id, `server`, `serverName`,
-`serverHost?`, `state`, `model?`, `worker_model?`, `createdAt`, `finishedAt?`, latest `result?` / `result_at?` / `error?` / `error_at?`, `pending`) plus `owners` (sessions with a pending instruction) and `activity?`. `pending` is the
-unfinished instructions (`{at, owner, prompt (first 200 chars)}`); an instruction is removed when it completes. **No history is kept**
-(no list of past instructions or results, no per-instruction notice status): only the latest result / error and its time. `remote_wait`
+`serverHost?`, `state`, `model?`, `worker_model?`, `createdAt`, `finishedAt?`, latest `result?` / `result_at?` / `error?` / `error_at?`, latest `task_result?`, `pending`) plus `owners` (sessions with a pending instruction), `worker_reports` (the latest 20 `worker_report` notices in arrival order; `[]` when none) and `activity?`. `pending` is the
+unfinished instructions (`{at, owner, prompt (first 200 chars), task_id?}`); an instruction is removed when it completes. **No history is kept**
+(no list of past instructions or results, no per-instruction notice status): only the latest result / error and its time, the latest `task_result` and the latest `worker_reports`. `remote_wait`
 (`remote_id?`, `server?`, `timeout_sec?` default 600, max 1800) waits until the cap is idle and none of its workers is
 `running` / `stalled`, and returns its record, or returns it with the current `state` (`running` / `unknown`) on timeout.
 When the cap becomes idle with no worker running, the center closes **all** pending instructions and sends one done notice
 (messenger `push`) to each session that sent one, not one per `cap_result`.
 
-Completion is decided only when all of these hold: no `kick_cap` reply is pending, and the latest `activity` shows the cap
+Completion is decided only when all of these hold: no `task` / `kick_cap` reply is pending, and the latest `activity` shows the cap
 `idle` and no worker `running` / `stalled`. A `cap_result` does **not** complete a remote by itself, because the
 `activity` that follows it may still show a running worker (seen in practice: the first `cap_result` arrived 10 s after an
 activity with cap=running / worker=running, and an activity with cap=idle / worker=running came 21 ms later). After a
@@ -531,7 +618,7 @@ intervals); if no `activity` comes by then it fetches the server's `status` and 
 worker `running`; the status has no cap-to-worker link, so workers are checked server-wide). While the cap or a worker is running
 the center follows it by `status` every 15 s.
 
-`state` is `running` / `done` / `failed` / `unknown`. `unknown` = the center cannot tell: the `kick_cap` never reached the
+`state` is `running` / `done` / `failed` / `unknown`. `unknown` = the center cannot tell: the `task` / `kick_cap` never reached the
 server (the send itself failed or timed out), or `status` cannot be fetched. It is not `failed` (that is a `cap_result` with
 `ok: false` or an `error` reply from the server). The center retries `status` every 15 s and the state returns to `running` /
 `done` when it succeeds (or when an `activity` arrives); nothing is notified while `unknown`.
@@ -541,9 +628,8 @@ server (the send itself failed or timed out), or `status` cannot be fetched. It 
 follows it as above (`unknown` if `status` fails). A `cap_result` that arrives after the restart updates the latest
 `result`, and completes the remote (with the notice) the same way. This relies on the messenger peer name of the center and the
 sessions being the same after the restart (notices go to the session's peer name; a late reply comes back to `bantou-center`). If it
-changed, the notice is not delivered (logged in `center.log`), and use `remote_wait` / `remote_list`. Records of the old format (one cap per task, `remote_id` is not the center's cap id) are not
-listed: at startup the center sends `stop_cap` for each to its server (it may not arrive) and deletes the record, logging the result in `center.log`.
-A record from the version that kept `history` is migrated: only its pending instructions are kept.
+changed, the notice is not delivered (logged in `center.log`), and use `remote_wait` / `remote_list`. A record is deleted only by `remote_delete`, never by a restart. At startup the center also sends `status` with `cap_id` for every record to its server, so the server notifies this center again (it retries while the server is not visible yet; a record that follows `status` anyway sends it as part of that).
+Records of the old format (one cap per task: `remote_id` is not the center's cap id, `history` form, ...) are **taken over** as the cap of their server in the new form (the cap id is kept; `history`, `legacy` and a record-level `owner` are dropped, only the pending instructions are kept). When one server has several, the active record (`running` / `unknown` / with pending instructions) comes first, and among equals the newest one (the latest of `createdAt` / `finishedAt` / `result_at` / `error_at`) is kept (several active records: only the newest active one is kept). This is an intended adjustment of "keep the newest": newest-only would keep a newer finished record and send `stop_cap` to the still running cap. The same server = the same peer id, or the same name and host (a record without a host counts as the server of the one live peer with that name, only when there is exactly one; a record that cannot be confirmed — no peer lookup, or several peers with the same name — is neither grouped nor sent `stop_cap`, and stays as it is until a later `status` fills in its host). The others get `stop_cap` (it may not arrive) and their records are deleted, logging the result in `center.log` (one-time cleanup of the per-task caps).
 
 A remote that has received `activity` notices also has `activity`:
 
@@ -565,7 +651,7 @@ for every request (a `name` of `bantou-server` is preferred when several match;
 0 matches or an old broker fall back to the peer name `bantou-server`; a
 `servers[].peer` setting skips discovery and uses that name). It sends the
 command with `meta: {protocol: "bantou", version}` and matches the reply by `cap_id`
-(`cap_result`), by `worker_id` (`worker_result`), and in FIFO order for
+(`cap_result`), by `cap_id` + `task_id` (`task_result`, `error` of a `task`), by `cap_id` + `worker_id` (`worker_reply_result`, `error` of a `worker_reply`), by `worker_id` (`worker_result`), and in FIFO order for
 `status_result`. An `error` reply is matched by its `cap_id` / `worker_id` when
 present, otherwise to the oldest pending request with the same `command`. If no reply arrives within the configured timeout (default 35
 minutes), the tool returns an `error` reply with message `タイムアウト (...)`.
