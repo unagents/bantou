@@ -58,6 +58,8 @@ watch(modalOpen, (v) => {
 // --- session side menu (the connected center's session_list; selection lives in memory only) ----
 
 const selectedName = ref<string | null>(null);
+/** A project from the center config (not made by `session_create`) has no settings: the center cannot update it. */
+const fromConfig = (name: string) => centerList.value.sessions.find((r) => r.name === name)?.source === "config";
 /** Session whose project settings dialog is open. */
 const settingsFor = ref<string | null>(null);
 const settingsDialogOpen = computed({
@@ -177,6 +179,8 @@ function onSessionCreated(name: string) {
                 size="xs"
                 icon="i-lucide-settings"
                 :aria-label="`${g.name} の設定`"
+                :disabled="fromConfig(g.name)"
+                :title="fromConfig(g.name) ? 'center の config 由来の project は設定を持てない' : undefined"
                 data-testid="session-settings-open"
                 :data-name="g.name"
                 @click="settingsFor = g.name"

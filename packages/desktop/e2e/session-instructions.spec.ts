@@ -63,6 +63,17 @@ test.describe("session instructions", () => {
       expect(await mock(page, (m) => m.centerSettings)).toEqual({});
     });
 
+    test("the gear is disabled for a project from the center config", async ({ page }) => {
+      await page.goto("/");
+      await page.evaluate(() => {
+        const s = (window as unknown as { __BANTOU_MOCK__: Mock }).__BANTOU_MOCK__.centerSessions.find((x) => x.name === "careery");
+        if (s) s.source = "config";
+      });
+      await page.locator("header h1").click();
+      await expect(page.locator('[data-testid=session-settings-open][data-name="careery"]')).toBeDisabled();
+      await expect(page.locator('[data-testid=session-settings-open][data-name="stroke-board"]')).toBeEnabled();
+    });
+
     test("the gear does not select the row; an over-long text cannot be saved", async ({ page }) => {
       await page.goto("/");
       await pickSession(page, "careery");
