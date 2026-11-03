@@ -225,7 +225,8 @@ fn config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 /// center, so it never forces a restart; neither does `bind` (the center always listens on every address). `claude_path` and `token` change what the child
 /// gets, so they do. `session_instructions` does not: stopping the center stops every master-cap
 /// session (they come back with `--continue` on the next start), and changing the text must not
-/// restart sessions by itself. The saved text reaches `center.json` at the next center start.
+/// restart sessions by itself. `apply` rewrites `center.json` for a running center instead, and the
+/// center re-reads it each time it starts a session.
 pub fn needs_restart(running_with: Option<&CenterSettings>, new: &CenterSettings) -> bool {
     match running_with {
         Some(old) => {
@@ -543,6 +544,12 @@ impl Center {
         self.stop_locked().await;
     }
 
+    fn refresh_config(&self, app: &tauri::AppHandle, s: &CenterSettings) -> Result<(), String> {
+        let path = config_path(app)?;
+        let home = app.path().home_dir().map_err(|e| format!("HOME を解決できない: {e}"))?;
+        write_config(s, &path, &home)
+    }
+
     fn start_locked(&self, app: &tauri::AppHandle, s: &CenterSettings) -> Result<(), String> {
         let path = config_path(app)?;
         let home = app.path().home_dir().map_err(|e| format!("HOME を解決できない: {e}"))?;
@@ -631,6 +638,13 @@ impl Center {
             if g.child.is_some() { g.started_with.clone() } else { None }
         };
         if !needs_restart(running_with.as_ref(), s) {
+            // No restart, but the center re-reads center.json whenever it starts a session:
+            // keep the file in step with the saved settings (e.g. session_instructions).
+            if running_with.is_some() {
+                if let Err(e) = self.refresh_config(app, s) {
+                    self.set_error(format!("center.json の更新に失敗: {e}"));
+                }
+            }
             return;
         }
         self.stop_locked().await;
@@ -978,6 +992,21 @@ mod tests {
         std::fs::write(home.join(".bantou/keep"), "x").unwrap();
         write_config(&s, &cfg, &home).unwrap();
         assert!(home.join(".bantou/keep").is_file());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn rewriting_the_config_carries_a_changed_session_instructions() {
+        // apply() rewrites center.json (no restart) so the per-session re-read in the center sees the new text
+        let home = tmp_dir("rewrite");
+        let cfg = home.join(".local/share/bantou/center.json");
+        let old = CenterSettings { enabled: true, session_instructions: "old".into(), ..Default::default() };
+        write_config(&old, &cfg, &home).unwrap();
+        let new = CenterSettings { session_instructions: "new\nline".into(), ..old.clone() };
+        assert!(!needs_restart(Some(&old), &new));
+        write_config(&new, &cfg, &home).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(v["remoteControl"]["sessionInstructions"], "new\nline");
         let _ = std::fs::remove_dir_all(&home);
     }
 

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
@@ -95,13 +95,14 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-function make(opts: { mcpUrl?: string | null } = {}) {
+function make(opts: { mcpUrl?: string | null; configPath?: string; logs?: string[] } = {}) {
   const core = createCore();
   const tokens = createSessionTokens();
   const url = opts.mcpUrl === undefined ? "http://127.0.0.1:4567/mcp/session" : opts.mcpUrl;
   const sup = createRemoteControlSupervisor({
     config: cfg,
-    log: () => {},
+    ...(opts.configPath ? { configPath: opts.configPath } : {}),
+    log: (m) => void opts.logs?.push(m),
     spawnImpl,
     wrapper: { core, tokens, path: "/fake/bantou-pty-wrapper", mcpUrl: () => url },
   });
@@ -475,4 +476,93 @@ test("wrapper.ts: 引数組み立て / プロトコル行の解釈 / 窓の照�
   assert.equal(windowConnected("/remote-control is active"), true);
   assert.equal(resolveWrapperPath({ BANTOU_PTY_WRAPPER: "/x/w" }, "/opt/node"), "/x/w");
   assert.equal(resolveWrapperPath({}, "/opt/bin/center"), join("/opt/bin", process.platform === "win32" ? "bantou-pty-wrapper.exe" : "bantou-pty-wrapper"));
+});
+
+/** center.json の remoteControl だけを書き換える（再読込のテスト用）。 */
+const writeRc = (path: string, rc: Record<string, unknown>): Promise<void> =>
+  writeFile(path, JSON.stringify({ remoteControl: { claude: "fake-claude", restartDelayMs: 30, maxRestarts: 2, stopGraceMs: 200, ...rc }, logDir: join(dir, "logs") }));
+
+test("読み直し: 保存後の起動（新規・再起動・resume 失敗後の素の起動）で新しい sessionInstructions と model が使われる。動いている session は変わらない", async () => {
+  const path = join(dir, "reload.json");
+  await writeRc(path, { sessionInstructions: "旧", model: "opus" });
+  cfg = parseConfig(JSON.parse(await readFile(path, "utf8")), path);
+  const logs: string[] = [];
+  const { sup } = make({ configPath: path, logs });
+  await sup.start("pm1");
+  assert.equal(valueOf(launches[0].args, "--append-system-prompt"), "旧");
+  // 保存（center は再起動しない）。動いている session の args は変わらない
+  await writeRc(path, { sessionInstructions: "新\n二行目", model: "sonnet" });
+  assert.equal(valueOf(sup.status("pm1").args!, "--append-system-prompt"), "<1 文字>");
+  // 異常終了後の再起動で新しい値
+  launches[0].child.out("a");
+  launches[0].child.text("https://claude.ai/code/session_aaa\n");
+  await until(() => sup.status("pm1").state === "connected");
+  launches[0].child.finish(1, null);
+  await until(() => launches.length === 2);
+  assert.equal(valueOf(launches[1].args, "--append-system-prompt"), "新\n二行目");
+  assert.equal(valueOf(launches[1].args, "--model"), "sonnet");
+  // resume 失敗後の素の起動でもさらに新しい値
+  await writeRc(path, { sessionInstructions: "さらに新" });
+  launches[1].child.text("No conversation found to continue\n");
+  launches[1].child.finish(1, null);
+  await until(() => launches.length === 3);
+  assert.equal(valueOf(launches[2].args, "--append-system-prompt"), "さらに新");
+  assert.ok(!launches[2].args.includes("--model"));
+  assert.ok(!logs.some((l) => l.includes("読み直しに失敗")));
+  await sup.shutdown();
+});
+
+test("読み直し: 空に変えると次の起動から付かない（instructions も false）", async () => {
+  const path = join(dir, "reload.json");
+  await writeRc(path, { sessionInstructions: "あり" });
+  cfg = parseConfig(JSON.parse(await readFile(path, "utf8")), path);
+  const { sup } = make({ configPath: path });
+  await sup.start("pm1");
+  assert.equal(sup.status("pm1").instructions, true);
+  await sup.stop("pm1");
+  await writeRc(path, { sessionInstructions: "" });
+  await sup.start("pm1");
+  assert.ok(!launches[1].args.includes("--append-system-prompt"));
+  assert.equal(sup.status("pm1").instructions, false);
+  await sup.shutdown();
+});
+
+test("読み直し: ファイルが壊れている・無い・検証 NG の時は直前に読めた値で起動し、理由を log に残す", async () => {
+  const path = join(dir, "reload.json");
+  await writeRc(path, { sessionInstructions: "初期" });
+  cfg = parseConfig(JSON.parse(await readFile(path, "utf8")), path);
+  const logs: string[] = [];
+  const { sup } = make({ configPath: path, logs });
+  // 1 回目: 新しい値が読めて、それが「直前の値」になる
+  await writeRc(path, { sessionInstructions: "読めた値" });
+  await sup.start("pm1");
+  assert.equal(valueOf(launches[0].args, "--append-system-prompt"), "読めた値");
+  await sup.stop("pm1");
+  // 壊れた JSON
+  await writeFile(path, "{ broken");
+  await sup.start("pm1");
+  assert.equal(valueOf(launches[1].args, "--append-system-prompt"), "読めた値");
+  assert.ok(logs.some((l) => l.includes("読み直しに失敗") && l.includes("JSON として不正")), logs.join("\n"));
+  await sup.stop("pm1");
+  // 検証 NG（上限超過）
+  await writeRc(path, { sessionInstructions: "x".repeat(16_001) });
+  await sup.start("pm1");
+  assert.equal(valueOf(launches[2].args, "--append-system-prompt"), "読めた値");
+  assert.ok(logs.some((l) => l.includes("読み直しに失敗") && l.includes("config が不正")));
+  await sup.stop("pm1");
+  // ファイル無し
+  await rm(path);
+  await sup.start("pm1");
+  assert.equal(valueOf(launches[3].args, "--append-system-prompt"), "読めた値");
+  assert.ok(logs.some((l) => l.includes("読み直しに失敗") && l.includes("config を読めない")));
+  assert.ok(!logs.some((l) => l.includes("読めた値")), "本文は log に出ない");
+  await sup.shutdown();
+});
+
+test("読み直し: configPath 無しなら起動時の値のまま（従来動作）", async () => {
+  withInstructions("固定");
+  const { sup } = make();
+  await sup.start("pm1");
+  assert.equal(valueOf(launches[0].args, "--append-system-prompt"), "固定");
+  await sup.shutdown();
 });

@@ -18,8 +18,8 @@ test.describe("session instructions", () => {
     const field = page.getByTestId("center-session-instructions");
     await expect(page.getByText("master-cap への追加指示（system prompt に追記）")).toBeVisible();
     await expect(field).toHaveValue("");
-    await expect(page.getByTestId("center-session-instructions-note")).toContainText("動いている session には効かない");
-    await expect(page.getByTestId("center-session-instructions-note")).toContainText("自動では再起動しない");
+    await expect(page.getByTestId("center-session-instructions-note")).toContainText("保存後に起動する session から効く。動いている session には効かない");
+    await expect(page.getByTestId("center-session-instructions-note")).not.toContainText("再起動");
 
     const save = page.getByTestId("settings-save");
     await field.fill(MULTI);

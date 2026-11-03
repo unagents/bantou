@@ -49,3 +49,37 @@ branch: `feature/session-system-prompt`（base: develop `888d06a`）。commit: `
 - worker 作業 dir の `tmp-e2e/`（静的サーバーのスクリプト、一時 playwright config）は静的サーバー停止後に `find … -delete`。clone 内の一時 config `playwright.tmp.config.ts` も削除済み（commit していない）。port 1420 は解放確認済み。
 - clone `bantou/` は worker 作業 dir に残す。生成物（`node_modules`、`.nuxt`、`.output`、`src-tauri/binaries`、`src-tauri/target`）は `.gitignore` 対象。
 - push は `feature/session-system-prompt` のみ。develop・main へは push・merge していない。version bump なし。
+
+## 追記: 設定の読み直し
+
+不具合: center は config を起動時に 1 度しか読まず、desktop で `sessionInstructions` を保存しても center の再起動まで次の session 起動に効かなかった（上の「判断が要った点」）。center の再起動は全 session の停止になるので採らない。
+
+### 直し方
+
+- center（`remote-control.ts`、`config.ts`、`daemon.ts`）: session を起動するたび（新規・再起動・`--continue`・resume 失敗後の素の起動。すべて `launch` を通る）に `center.json` を `loadConfigSync` で読み直し、その時点の `remoteControl` を使う。読み直しに失敗（ファイル無し・JSON 破損・検証 NG）したら、直前に読めた値（未取得なら起動時の値）で起動し、`config の読み直しに失敗。直前の値で起動: project=… <理由>` を `center.log` に残す。本文は log に出ない。
+- desktop（`center.rs`）: 実装中に判明した点。desktop は `center.json` を center の起動時にしか書いておらず、再起動しない保存（`sessionInstructions` のみの変更など）ではファイルが古いままだった。center の読み直しだけでは効かないので、再起動しない保存でも center が動いていれば `center.json` を書き直す（`apply` の `refresh_config`）。center へ知らせる経路（HTTP route 等）は無く、足していない。
+- desktop の注意文を「保存後に起動する session から効く。動いている session には効かない」に変更（`SettingsDialog.vue`、README、e2e）。
+- 根拠（比較）: (A) 起動時 1 度のまま、(B) 保存のたび center 再起動（session が全部止まる）、(C) 起動のたび読み直し、(D) 保存時に center へ通知（route が無い）。(C) は取りこぼしが無く、要件を満たす。
+
+### 効く項目と効かない項目
+
+- 読み直しで効く（その session の起動時点の値）: `remoteControl.sessionInstructions` / `model` / `env` / `autoConsent` / `maxRestarts` / `restartDelayMs` / `continueOnRestart`。
+- 起動時にしか効かない: `remoteControl.claude`、`remoteControl.stopGraceMs`、`projects`、`servers`、`logDir`、`workspace`、`token`、port / bind。
+- docs: `docs/design/master-cap-session.md` 決定 14 の改訂と決定 16、`packages/center/README.md`（表と「config の読み直し」節）、`packages/desktop/README.md`。
+
+### 前回 commit の破損の修復
+
+`c554923` で `docs/design/master-cap-session.md` と `packages/center/README.md` が壊れていた（JS の `String.replace` で置換文字列の `` $` `` が展開され、ファイル先頭からの本文が文中に複製された。両ファイルとも約 130 / 90 行の混入）。`888d06a` との差分が意図した追記だけになるよう、混入部分を除いて `` `$` `` を元に戻した。他のファイルの差分は規模が妥当で、同様の破損は無かった。
+
+### テスト
+
+- center: `bun run test` 280 件 通過 / 失敗 0（276 + 新規 4: 保存後の起動〔再起動・resume 失敗後の素の起動〕で新しい値と model が使われ動いている session は変わらない、空に変えると付かない、壊れた JSON・検証 NG・ファイル無しで直前の値と log、configPath 無しは従来どおり）。`bun run typecheck` エラーなし。
+- `src-tauri` `cargo test`: 251 件 通過 / 失敗 0 / ignored 5（250 + 新規 1: 再起動しない保存で書き直した `center.json` に新しい値が入る）。`bun run build:sidecar` 成功。
+- desktop e2e（`bun run generate` の静的ビルド + 簡易静的サーバー、ms-playwright chromium-1243、一時 config）: 80 件 通過 / 失敗 0（注意文の検証を新文言に変更）。
+- 未実施: 実機の center + master-cap で、保存後に起動した session に新しい指示が効くこと。desktop の `nuxt typecheck` は前回同様 `vue-tsc` の問題で未確認。
+
+### 残存物
+
+- 一時の静的サーバー（port 1420）は停止、`tmp-e2e/` と clone 内の `playwright.tmp.config.ts` は `find -delete` で削除済み（commit していない）。プロセス・port 1420 の残りなし。
+- clone `bantou/` は worker 作業 dir に残す（生成物は `.gitignore` 対象）。
+- push は `feature/session-system-prompt` のみ。develop・main へは push・merge していない。version bump なし。

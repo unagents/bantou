@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { MODEL_PATTERN } from "@agent-hand/bantou-protocol";
@@ -139,6 +140,26 @@ export async function loadConfig(path: string): Promise<Config> {
   let raw: string;
   try {
     raw = await readFile(path, "utf8");
+  } catch (e) {
+    throw new Error(`config を読めない: ${path} (${(e as Error).message})`);
+  }
+  let data: unknown;
+  try {
+    data = JSON.parse(raw);
+  } catch (e) {
+    throw new Error(`config が JSON として不正: ${path} (${(e as Error).message})`);
+  }
+  return parseConfig(data, path);
+}
+
+/**
+ * loadConfig の同期版。session 起動のたびの読み直し（remote-control.ts）で使う（launch が同期のため）。
+ * 失敗理由は loadConfig と同じ文言の Error で投げる。
+ */
+export function loadConfigSync(path: string): Config {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
   } catch (e) {
     throw new Error(`config を読めない: ${path} (${(e as Error).message})`);
   }

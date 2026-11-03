@@ -397,7 +397,7 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
             data-testid="center-session-instructions"
           />
           <p class="text-cork-muted mt-1 text-xs" data-testid="center-session-instructions-note">
-            保存しても、動いている session には効かない（自動では再起動しない）。保存した値は center が次に起動する時から、新しく起動する session に付く
+            保存後に起動する session から効く。動いている session には効かない
           </p>
         </UFormField>
         </div>
