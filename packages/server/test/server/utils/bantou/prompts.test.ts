@@ -90,6 +90,12 @@ test("task 指示: items に実装か review が無ければ cap が足す旨を
   assert.ok(p.includes("足りない方の worker を cap が追加する"));
 });
 
+test("CAP_GUIDE: worker への指示に、終わったら clone と生成物を自分で消す後始末を含める", () => {
+  assert.ok(CAP_GUIDE.includes("後始末: 終わったら"));
+  assert.ok(CAP_GUIDE.includes("自分の clone・node_modules・ビルド生成物"));
+  assert.ok(CAP_GUIDE.includes("logs/ と state.json は消さない"));
+});
+
 test("CAP_GUIDE: task_result の JSON で返す・report 無しで idle の worker を再開させる", () => {
   for (const k of ["task_result の JSON 1 つで返す", "```json", '"verdict"', "report を送らずに idle", "同じ worker_id で worker_start して report を送るよう指示"]) {
     assert.ok(CAP_GUIDE.includes(k), k);

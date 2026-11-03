@@ -16,6 +16,7 @@ export {
 export {
   CENTER_SESSIONS_CHANGED_EVENT,
   createSession,
+  sessionPathHints,
   getSessionSettings,
   listSessions,
   OS_NETWORK_EVENT,

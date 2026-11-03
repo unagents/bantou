@@ -28,7 +28,7 @@ export function createCenterServer(deps: {
   follow?: Follow;
 }): McpServer {
   const server = new McpServer({ name: "bantou-center", version: packageVersion() });
-  registerTools(server, { supervisor: deps.supervisor, link: deps.link, sessions: deps.sessions, remotes: deps.remotes, follow: deps.follow });
+  registerTools(server, { supervisor: deps.supervisor, link: deps.link, sessions: deps.sessions, remotes: deps.remotes, follow: deps.follow, workspace: deps.config.workspace });
   return server;
 }
 

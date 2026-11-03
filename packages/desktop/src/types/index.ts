@@ -80,10 +80,20 @@ export interface Session {
   sessionUrl: string | null;
   source: CenterSession["source"] | null;
   lastError: string | null;
+  /** The folder the session runs in (on the center's host). null: the center sent none. */
+  path: string | null;
   /** null: the center has none (not known yet, or an older center). */
   contextUsage: ContextUsage | null;
   /** The session was started with the session instructions (the text itself is not sent). */
   instructions: boolean;
+}
+
+/** What the add dialog needs for the folder field (mirror of `session.rs::PathHints`). */
+export interface SessionPathHints {
+  /** The center's default parent folder (`<workspace>/<name>` is the default path). null: unknown / not set / an older center. */
+  workspace: string | null;
+  /** This PC's folder dialog applies (own sidecar center, macOS / Windows). */
+  canPick: boolean;
 }
 
 /**

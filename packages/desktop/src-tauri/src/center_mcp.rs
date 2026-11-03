@@ -477,6 +477,11 @@ pub async fn center_call(
         .map_err(CommandError::Other)
 }
 
+/// Which center the desktop talks to now (own sidecar / pasted remote). Err: no target.
+pub(crate) fn current_source(app: &tauri::AppHandle) -> CmdResult<TargetSource> {
+    select_target(&load_settings(app)?).map(|t| t.source).ok_or_else(|| CommandError::other(NO_TARGET))
+}
+
 /// Where the desktop is connecting to and whether the center answers right now.
 #[tauri::command]
 pub async fn center_connection(app: tauri::AppHandle) -> CmdResult<CenterConnection> {

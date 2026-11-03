@@ -3,7 +3,7 @@ import { getSessionSettings, updateSessionSettings } from "~/api";
 import { draftError, draftOf, emptyDraft, toUpdate, type SettingsDraft } from "~/composables/sessionInstructions";
 
 const open = defineModel<boolean>("open", { required: true });
-const props = defineProps<{ name: string }>();
+const props = defineProps<{ name: string; path?: string | null }>();
 
 const draft = ref<SettingsDraft>(emptyDraft());
 const saved = ref<SettingsDraft>(emptyDraft());
@@ -50,6 +50,9 @@ async function save() {
   <UModal v-model:open="open" :title="`${name} の設定`" description="このプロジェクト（session）の設定。center に保存される" :ui="{ content: 'max-w-2xl' }">
     <template #body>
       <div class="flex flex-col gap-3" data-testid="settings-dialog">
+        <UFormField label="フォルダ" help="作成時に決まる（変更できない）。center のホスト上のパス">
+          <UInput :model-value="path ?? '（center が返していない）'" class="w-full" readonly data-testid="settings-path" />
+        </UFormField>
         <ProjectSettingsFields v-model="draft" id-prefix="settings" />
         <p v-if="problem" class="text-cork-danger-text text-xs" data-testid="settings-problem">{{ problem }}</p>
         <UButton

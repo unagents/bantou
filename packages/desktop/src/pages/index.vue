@@ -167,10 +167,7 @@ function onSessionCreated(name: string) {
                   data-testid="session-instructions-mark"
                   data-scope="side"
                 />
-                <ContextUsage :usage="g.contextUsage" class="ml-auto" data-scope="side" />
-                <span class="text-cork-muted shrink-0 text-xs font-normal" :class="g.contextUsage ? '' : 'ml-auto'" data-testid="side-count">
-                  {{ g.working.length }} / {{ g.queued.length }}
-                </span>
+                <ContextUsage :usage="g.contextUsage" percent-only class="ml-auto" data-scope="side" />
               </button>
               <UButton
                 class="rounded-none"
@@ -242,7 +239,12 @@ function onSessionCreated(name: string) {
       :existing="centerList.sessions.map((s) => s.name)"
       @done="onSessionCreated"
     />
-    <ProjectSettingsDialog v-if="settingsFor !== null" v-model:open="settingsDialogOpen" :name="settingsFor" />
+    <ProjectSettingsDialog
+      v-if="settingsFor !== null"
+      v-model:open="settingsDialogOpen"
+      :name="settingsFor"
+      :path="centerList.sessions.find((s) => s.name === settingsFor)?.path ?? null"
+    />
     <SettingsDialog v-if="settingsOpen" v-model:open="settingsOpen" />
     <CenterDialog v-if="centerOpen" v-model:open="centerOpen" />
   </div>

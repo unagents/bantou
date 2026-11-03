@@ -81,6 +81,8 @@ export function summarizeLine(line: string): { activity: string | null } | null 
 export interface ActivityTracker extends RunObserver {
   /** worker の report（kind=done で done 判定に使う）。 */
   reported(workerId: string, kind: ReportKind): void;
+  /** 掃除した worker を snapshot（activity の agents[]）から外す。 */
+  forget(kind: AgentKind, id: string): void;
   /** 起動時の孤児回収で見つけた running を lost で登録する。 */
   seedLost(kind: AgentKind, id: string, capId: string, error: string): void;
   snapshot(capId?: string): Array<WithModel<AgentActivity>>;
@@ -281,6 +283,13 @@ export function createActivityTracker(deps: ActivityTrackerDeps): ActivityTracke
         reportedDone: false,
       });
       markDirty(capId);
+    },
+
+    forget(kind, id) {
+      const e = get(kind, id);
+      if (!e) return;
+      entries.delete(keyOf(kind, id));
+      if (e.capId !== "") markDirty(e.capId);
     },
 
     snapshot,
