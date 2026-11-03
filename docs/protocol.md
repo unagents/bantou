@@ -578,16 +578,26 @@ Remote-control record:
 `resume_worker` (a cap starts and continues workers with `worker_start`) and answers it with an
 `error` reply.
 
-**One remote-cap per bantou-server.** Whatever the work is, the center sends the next instruction to that
-cap; it never creates a cap per task. The center's cap id is fixed per center (`c-<10 hex>`, kept in
-`center-id` next to `center.json`, so it survives a restart; a cap taken over from the old format keeps its own cap id, so the cap id is decided **per server** from its record, and the center's id is only used for a server that has no record). In the session window (`/mcp/session`):
+**One remote-cap per session and bantou-server.** A session (master-cap) and its remote-cap are one to one. Whatever the work is, the center sends the next
+instruction to that session's cap; it never creates a cap per task, and a session never sees or touches another session's cap. The cap id is
+`c-<10 hex>-<session name>` (e.g. `c-0a1b2c3d4e-main`): the `c-<10 hex>` part is fixed per center (kept in `center-id` next to `center.json`, so it survives a restart) and the
+session name is used as it is. A session name already matches `[A-Za-z0-9_-]+` (the same characters as a cap id), so the conversion is the identity and there is nothing to escape;
+a name outside it is refused with an error, never rewritten. Two sessions never share a cap id (the prefix has a fixed length, so the name is recovered uniquely). No server change is needed: a cap id is only checked against
+`[A-Za-z0-9_-]+` (cap path `<workspace>/caps/<cap_id>`), so there are just more caps. The caller is the session of the `X-Bantou-Session` header. In the session window (`/mcp/session`):
 
 | tool | input | output |
 |---|---|---|
 | `remote_send` | `goal`, `repo?`, `branch?`, `deliverables?`, `verify?`, `constraints?`, `workers?`, `server?`, `worker_model?` | `{ remote_id, server, serverName, state: "running", created, task_id, worker_model? }` |
 | `remote_create` | same | alias of `remote_send` (same handling) |
-| `worker_reply` | `remote_id?`, `worker_id`, `text`, `server?` | `{ remote_id, server, worker_id, accepted: true }` (sends `worker_reply`; also on `/mcp` for the desktop) |
-| `remote_delete` | `remote_id?`, `server?`, `force?` | `{ remote_id, deleted, stopped, warning? }` (`stop_cap` + drop the record) |
+| `worker_reply` | `remote_id?`, `worker_id`, `text`, `server?` | `{ remote_id, server, worker_id, accepted: true }` (sends `worker_reply`; also on `/mcp` for the desktop). Only the caller's cap (no `remote_id` = the caller's cap) |
+| `remote_delete` | `remote_id?`, `server?`, `force?` | `{ remote_id, deleted, stopped, warning? }` (`stop_cap` + drop the record). Only the caller's cap, or the old shared cap named by `remote_id` |
+| `remote_list` | `include_shared?` | `RemoteView[]` of the caller's caps; `include_shared: true` adds the old shared cap (no session) |
+| `remote_wait` | `remote_id?`, `server?`, `timeout_sec?` | the finished `RemoteView`. Only the caller's caps (or the old shared cap named by `remote_id`) |
+
+**Old shared cap.** Before this change one cap per server (`c-<10 hex>`) was shared by all sessions. At startup the center keeps such a record (and any old-format record) as a record **without `session`**.
+No new instruction is ever sent to it (`remote_send` always uses the session's cap id). `remote_list` in the session window hides it unless `include_shared: true` (the `/mcp` `remote_list` returns every record).
+`remote_delete`, `remote_wait` and `worker_reply` can target it only when `remote_id` names it (e.g. `remote_delete({"remote_id":"c-0a1b2c3d4e"})`; `server` narrows when it exists on several servers); omitting `remote_id` never selects it, and another session's cap is never selectable.
+Notices (done notice, `worker_report` push) go only to the session of the cap; for the old shared cap, to the owners of its pending instructions.
 
 `remote_send` first asks the server for `status` (`created: true` = the cap was not there; the server creates it on the first `task`),
 then sends `task` with the same `cap_id` (a resume when the cap exists). `task_id` is assigned by the center and returned. Only `goal`
@@ -600,14 +610,14 @@ Models. `remote_send` no longer takes `model` (the `task` message has no field f
 defaults to the center's `servers[].workerModel`, **read again at every `remote_send`** like `remoteControl.model` is at every session launch; for an existing cap the
 config default is not re-sent. Precedence for a worker: `worker_start` `model` > the worker's recorded model > the cap's `worker_model` > none.
 
-`remote_list` returns one `RemoteView` per server cap: `RemoteRecord` (`remote_id` = cap id, `server`, `serverName`,
+`remote_list` returns one `RemoteView` per session × server cap: `RemoteRecord` (`remote_id` = cap id, `session?` = the owning session, absent for the old shared cap, `server`, `serverName`,
 `serverHost?`, `state`, `model?`, `worker_model?`, `createdAt`, `finishedAt?`, latest `result?` / `result_at?` / `error?` / `error_at?`, latest `task_result?`, `pending`) plus `owners` (sessions with a pending instruction), `worker_reports` (the latest 20 `worker_report` notices in arrival order; `[]` when none) and `activity?`. `pending` is the
 unfinished instructions (`{at, owner, prompt (first 200 chars), task_id?}`); an instruction is removed when it completes. **No history is kept**
 (no list of past instructions or results, no per-instruction notice status): only the latest result / error and its time, the latest `task_result` and the latest `worker_reports`. `remote_wait`
 (`remote_id?`, `server?`, `timeout_sec?` default 600, max 1800) waits until the cap is idle and none of its workers is
 `running` / `stalled`, and returns its record, or returns it with the current `state` (`running` / `unknown`) on timeout.
 When the cap becomes idle with no worker running, the center closes **all** pending instructions and sends one done notice
-(messenger `push`) to each session that sent one, not one per `cap_result`.
+(messenger `push`) to the cap's session, not one per `cap_result`.
 
 Completion is decided only when all of these hold: no `task` / `kick_cap` reply is pending, and the latest `activity` shows the cap
 `idle` and no worker `running` / `stalled`. A `cap_result` does **not** complete a remote by itself, because the
@@ -629,7 +639,7 @@ follows it as above (`unknown` if `status` fails). A `cap_result` that arrives a
 `result`, and completes the remote (with the notice) the same way. This relies on the messenger peer name of the center and the
 sessions being the same after the restart (notices go to the session's peer name; a late reply comes back to `bantou-center`). If it
 changed, the notice is not delivered (logged in `center.log`), and use `remote_wait` / `remote_list`. A record is deleted only by `remote_delete`, never by a restart. At startup the center also sends `status` with `cap_id` for every record to its server, so the server notifies this center again (it retries while the server is not visible yet; a record that follows `status` anyway sends it as part of that).
-Records of the old format (one cap per task: `remote_id` is not the center's cap id, `history` form, ...) are **taken over** as the cap of their server in the new form (the cap id is kept; `history`, `legacy` and a record-level `owner` are dropped, only the pending instructions are kept). When one server has several, the active record (`running` / `unknown` / with pending instructions) comes first, and among equals the newest one (the latest of `createdAt` / `finishedAt` / `result_at` / `error_at`) is kept (several active records: only the newest active one is kept). This is an intended adjustment of "keep the newest": newest-only would keep a newer finished record and send `stop_cap` to the still running cap. The same server = the same peer id, or the same name and host (a record without a host counts as the server of the one live peer with that name, only when there is exactly one; a record that cannot be confirmed — no peer lookup, or several peers with the same name — is neither grouped nor sent `stop_cap`, and stays as it is until a later `status` fills in its host). The others get `stop_cap` (it may not arrive) and their records are deleted, logging the result in `center.log` (one-time cleanup of the per-task caps).
+Records of the old format (the shared cap, or one cap per task: `remote_id` is not the center's cap id, `history` form, ...) are **taken over** as old shared caps without `session` (see above; the cap id is kept; `history`, `legacy` and a record-level `owner` are dropped, only the pending instructions are kept). When one server has several, the active record (`running` / `unknown` / with pending instructions) comes first, and among equals the newest one (the latest of `createdAt` / `finishedAt` / `result_at` / `error_at`) is kept (several active records: only the newest active one is kept). This is an intended adjustment of "keep the newest": newest-only would keep a newer finished record and send `stop_cap` to the still running cap. The same server = the same peer id, or the same name and host (a record without a host counts as the server of the one live peer with that name, only when there is exactly one; a record that cannot be confirmed — no peer lookup, or several peers with the same name — is neither grouped nor sent `stop_cap`, and stays as it is until a later `status` fills in its host). The others get `stop_cap` (it may not arrive) and their records are deleted, logging the result in `center.log` (one-time cleanup of the per-task caps).
 
 A remote that has received `activity` notices also has `activity`:
 

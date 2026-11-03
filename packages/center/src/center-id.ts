@@ -33,3 +33,14 @@ export async function loadCapId(stateDir: string, log: (m: string) => void): Pro
   }
   return `${CAP_ID_PREFIX}${id}`;
 }
+
+/**
+ * session の cap_id。`<center の cap_id>-<session 名>`（例 `c-0a1b2c3d4e-main`）。cap は session × server に 1 つ。
+ * session 名は cap_id と同じ文字種（`[A-Za-z0-9_-]`、sessions.ts の SESSION_NAME）なので、変換は恒等（エスケープ不要）。
+ * center の cap_id は固定長（`c-` + 10 桁 hex）で `-` の位置が決まるので、session 名が違えば cap_id も必ず違い、
+ * 旧共有 cap（`c-<center-id>`）とも一致しない。文字種に合わない名前は投げる（黙って別の名前に寄せない）。
+ */
+export function sessionCapId(centerCapId: string, session: string): string {
+  if (!/^[A-Za-z0-9_-]+$/.test(session)) throw new Error("session 名は英数字と _ - のみ");
+  return `${centerCapId}-${session}`;
+}

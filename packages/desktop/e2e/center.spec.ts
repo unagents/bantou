@@ -79,7 +79,7 @@ test("without a target the dialog says there is nothing to connect to", async ({
 const agent = (kind: "cap" | "worker", id: string, state: string, extra: Record<string, unknown> = {}) => ({
   kind,
   id,
-  cap_id: "c-0a1b2c3d4e",
+  cap_id: "c-0a1b2c3d4e-careery",
   state,
   task: `task of ${id}`,
   last_activity: null,
@@ -93,8 +93,9 @@ const agent = (kind: "cap" | "worker", id: string, state: string, extra: Record<
 /** `remote_list` shaped as docs of stream-liveness design chapter 4. */
 const remotes = (workerState: string) => [
   {
-    remote_id: "c-0a1b2c3d4e",
-    owners: ["bantou-pm", "careery"],
+    remote_id: "c-0a1b2c3d4e-careery",
+    session: "careery",
+    owners: ["careery"],
     server: "p-7c1d",
     serverName: "bantou-server",
     state: "running",
@@ -108,7 +109,7 @@ const remotes = (workerState: string) => [
       received_ms_ago: 1200,
       stale: false,
       agents: [
-        agent("cap", "c-0a1b2c3d4e", "idle", { silent_ms: 116200, last_activity: "text: worker を 3 本起動した", model: "opus" }),
+        agent("cap", "c-0a1b2c3d4e-careery", "idle", { silent_ms: 116200, last_activity: "text: worker を 3 本起動した", model: "opus" }),
         agent("worker", "w-1f2e3d4c5b", workerState, { last_activity: "Bash 実行中 60s", model: "claude-sonnet-5-5" }),
         agent("worker", "w-2a3b4c5d6e", "stalled", { silent_ms: 366200 }),
         agent("worker", "w-3c4d5e6f7a", "lost", { silent_ms: 36200, error: "signal SIGKILL で終了" }),
@@ -116,7 +117,8 @@ const remotes = (workerState: string) => [
     },
   },
   {
-    remote_id: "c-9f8e7d6c5b",
+    remote_id: "c-0a1b2c3d4e-bantou-pm",
+    session: "bantou-pm",
     owners: ["bantou-pm"],
     server: "p-7c1d",
     serverName: "bantou-server",
@@ -126,11 +128,12 @@ const remotes = (workerState: string) => [
       at: "2026-10-29T00:59:55.000Z",
       received_ms_ago: 45000,
       stale: true,
-      agents: [agent("cap", "c-9f8e7d6c5b", "running", { silent_ms: 46000, last_activity: "thinking" })],
+      agents: [agent("cap", "c-0a1b2c3d4e-bantou-pm", "running", { silent_ms: 46000, last_activity: "thinking" })],
     },
   },
   // an idle cap with no worker and no pending instruction (one row, no record of finished work)
-  { remote_id: "c-3c4d5e6f7a", owners: [], server: "p-8e2f", serverName: "other-server", state: "done", createdAt: "2026-10-28T22:00:00.000Z", result: "PR を確認した。\n指摘は 3 件", result_at: "2026-10-28T23:00:00.000Z", pending: [] },
+  // the old shared cap kept from before (no session)
+  { remote_id: "c-0a1b2c3d4e", owners: [], server: "p-8e2f", serverName: "other-server", state: "done", createdAt: "2026-10-28T22:00:00.000Z", result: "PR を確認した。\n指摘は 3 件", result_at: "2026-10-28T23:00:00.000Z", pending: [] },
 ];
 
 const seedRemotes = (page: Page, list: unknown[]) =>
@@ -182,7 +185,10 @@ test("one row per server: cap state, head of the latest result and workers. No h
   const rows = page.getByTestId("center-remote");
   await expect(rows).toHaveCount(3);
   const first = rows.nth(0);
-  await expect(first.getByTestId("center-remote-owners")).toHaveText("bantou-pm, careery");
+  // the center dialog lists every session's cap with its session name; the old shared cap has no session
+  await expect(first.getByTestId("center-remote-session")).toHaveText("careery");
+  await expect(rows.nth(1).getByTestId("center-remote-session")).toHaveText("bantou-pm");
+  await expect(rows.nth(2).getByTestId("center-remote-session")).toHaveText("共有（旧）");
   await expect(first.getByTestId("center-remote-result")).toHaveText("整理した");
   await expect(first.getByTestId("center-remote-agent").nth(0).getByTestId("center-remote-agent-state")).toHaveText("待機");
   const idle = rows.nth(2);
@@ -212,7 +218,7 @@ const withTask = () => {
     {
       ...first,
       task_result: {
-        cap_id: "c-0a1b2c3d4e",
+        cap_id: "c-0a1b2c3d4e-careery",
         task_id: "t-1",
         state: "done",
         summary: "task メッセージを追加した",
@@ -232,10 +238,10 @@ const withTask = () => {
         error: "tests 一部失敗",
       },
       worker_reports: [
-        { cap_id: "c-0a1b2c3d4e", task_id: "t-1", worker_id: "w-1f2e3d4c5b", kind: "ask", text: "古い質問", at: "2026-10-29T01:00:00.000Z" },
-        { cap_id: "c-0a1b2c3d4e", task_id: "t-1", worker_id: "w-1f2e3d4c5b", kind: "progress", text: "続行した", at: "2026-10-29T01:00:30.000Z" },
-        { cap_id: "c-0a1b2c3d4e", task_id: "t-1", worker_id: "w-2a3b4c5d6e", kind: "approve", text: "push してよいか", at: "2026-10-29T01:01:00.000Z" },
-        { cap_id: "c-0a1b2c3d4e", task_id: "t-1", worker_id: "w-3c4d5e6f7a", kind: "done", text: "完了", at: "2026-10-29T01:02:00.000Z" },
+        { cap_id: "c-0a1b2c3d4e-careery", task_id: "t-1", worker_id: "w-1f2e3d4c5b", kind: "ask", text: "古い質問", at: "2026-10-29T01:00:00.000Z" },
+        { cap_id: "c-0a1b2c3d4e-careery", task_id: "t-1", worker_id: "w-1f2e3d4c5b", kind: "progress", text: "続行した", at: "2026-10-29T01:00:30.000Z" },
+        { cap_id: "c-0a1b2c3d4e-careery", task_id: "t-1", worker_id: "w-2a3b4c5d6e", kind: "approve", text: "push してよいか", at: "2026-10-29T01:01:00.000Z" },
+        { cap_id: "c-0a1b2c3d4e-careery", task_id: "t-1", worker_id: "w-3c4d5e6f7a", kind: "done", text: "完了", at: "2026-10-29T01:02:00.000Z" },
       ],
     },
     ...rest,
@@ -290,7 +296,7 @@ test("an unanswered ask / approve is shown and a reply is sent as worker_reply",
   await send.click();
   await expect(asks).toHaveCount(0);
   const sent = await page.evaluate(() => (window as unknown as { __BANTOU_MOCK__: { centerWorkerReplies: unknown[] } }).__BANTOU_MOCK__.centerWorkerReplies);
-  expect(sent).toEqual([{ remote_id: "c-0a1b2c3d4e", worker_id: "w-2a3b4c5d6e", text: "OK、feature/x に push して" }]);
+  expect(sent).toEqual([{ remote_id: "c-0a1b2c3d4e-careery", server: "p-7c1d", worker_id: "w-2a3b4c5d6e", text: "OK、feature/x に push して" }]);
 });
 
 test("a failed worker_reply keeps the ask and shows the error", async ({ page }) => {

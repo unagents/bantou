@@ -38,7 +38,9 @@
 - stroke（Gitea `grrowapp/stroke`）: `server/utils/stroke/claude.ts`（`runClaude`、単独 import 可）、`invoke.ts` / `ai.ts`（retry と状態遷移）、`running.ts`（多重起動防止）、`reap*.ts` / `live-processes.ts`（孤児回収）
 - claudep（`stroke-plugin/.origin/tools/claudep`）: Agent SDK `query()` のループ、JSONL ログ、exit 判定
 
-## center の remote-cap（確定: 2026-11-04）
+## center の remote-cap（確定: 2026-11-04。同日に session ごとへ改訂）
+
+- **（2026-11-04 改訂、利用者の決定）remote-cap は session × server に 1 つ**。session（master-cap）と remote-cap は 1 対 1。1 server に cap 1 つを全 session で共有すると、他の session が作った cap とその指示・結果が見え、指示も混ざるため。cap_id = `c-<center-id>-<session 名>`（session 名は cap_id と同じ `[A-Za-z0-9_-]` で、変換は恒等。衝突しない理由と文字種外の扱いは `docs/design/center-tools.md`）。`remote_send` は呼び出し元 session の cap へ送り（無ければ作る）、`remote_list` / `remote_wait` / `remote_delete` / `worker_reply` と通知は呼び出し元 session の cap だけが対象。desktop の remotes 欄は選択中の session の cap（server ごとに 1 行）だけを出す。center 起動時、既存の共有 cap（`c-<center-id>`）は session 無しの記録として残し、新しい指示は送らず、`remote_delete` に `remote_id` を明示して消す。以下の「1 つの server につき 1 つ」「center ごとに固定の cap_id」は、この改訂で「session × server」「session ごとの cap_id」に読み替える（server 側の取り決めは変わらない）
 
 - **remote-cap は 1 つの server につき 1 つだけ**。作業が何であれ、center はその cap に次の指示を送る。作業ごとに cap を作ると、cap の path・プロセス・state が際限なく増える（資源）うえ、同じ server に cap が溜まって片付けも要る（設計）ので止めた。server 側の取り決め（protocol）は変えていない: `task` / `kick_cap` は同じ cap_id なら resume で、server は cap ごとに直列実行し、worker の report で cap を再開する
 - cap_id は、記録の無い server では center ごとに固定の `c-<10 桁 hex>`（center の状態 dir の `center-id` に保存。center を再起動しても同じ）。記録のある server は記録の cap_id（旧形式から引き継いだ cap はその cap_id のまま。cap_id は server ごとに記録が持つ）。session からの依頼（MCP `remote_send`、別名 `remote_create`）は、server の `status` で cap の有無を確かめ、`task`（`goal` と、省略可の `deliverables` / `verify` / `constraints` / `workers` / `repo` / `branch`。`task_id` は center が採番。新規の cap の `worker_model` の既定は center の設定 `servers[]`（送信のたびに読み直す））を同じ cap_id へ送る（cap は無ければ server が作る）。protocol の版が合わない server（旧 server 1.4.0 など）へは送らず isError
