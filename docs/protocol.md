@@ -514,10 +514,9 @@ given (including a resume), and the server remembers it as the cap's default. De
 protocol and the server are unchanged (the server already updates `worker_model` on a resume).
 
 `remote_list` returns one `RemoteView` per server cap: `RemoteRecord` (`remote_id` = cap id, `server`, `serverName`,
-`serverHost?`, `state`, `model?`, `worker_model?`, `createdAt`, `finishedAt?`, latest `result?` / `error?`, `history`,
-`legacy?`) plus `owners` (sessions that sent instructions) and `activity?`. `history` is the instructions
-(`{type:"instruction", at, owner, prompt (first 200 chars), done_at?, notified_at?, notify_error?}`) and results
-(`{type:"result", at, ok, text, error?}`, one per `cap_result`, late ones included) in order. `remote_wait`
+`serverHost?`, `state`, `model?`, `worker_model?`, `createdAt`, `finishedAt?`, latest `result?` / `result_at?` / `error?` / `error_at?`, `pending`) plus `owners` (sessions with a pending instruction) and `activity?`. `pending` is the
+unfinished instructions (`{at, owner, prompt (first 200 chars)}`); an instruction is removed when it completes. **No history is kept**
+(no list of past instructions or results, no per-instruction notice status): only the latest result / error and its time. `remote_wait`
 (`remote_id?`, `server?`, `timeout_sec?` default 600, max 1800) waits until the cap is idle and none of its workers is
 `running` / `stalled`, and returns its record, or returns it with the current `state` (`running` / `unknown`) on timeout.
 When the cap becomes idle with no worker running, the center closes **all** pending instructions and sends one done notice
@@ -539,11 +538,12 @@ server (the send itself failed or timed out), or `status` cannot be fetched. It 
 
 **Center restart** (the desktop release replaces the app, so the center restarts). Unfinished records are **not** closed as
 `failed`: a record is restored as it was (`running`, pending instructions kept), then the center fetches the server's `status` and
-follows it as above (`unknown` if `status` fails). A `cap_result` that arrives after the restart is added to `history` and the latest
+follows it as above (`unknown` if `status` fails). A `cap_result` that arrives after the restart updates the latest
 `result`, and completes the remote (with the notice) the same way. This relies on the messenger peer name of the center and the
 sessions being the same after the restart (notices go to the session's peer name; a late reply comes back to `bantou-center`). If it
-changed, the notice is not delivered (`notify_error`), and use `remote_wait` / `remote_list`. A record of the old format (one cap per task, no `history`) is kept as `legacy: true`
-for listing and `remote_delete`; it gets no instructions and no notices.
+changed, the notice is not delivered (logged in `center.log`), and use `remote_wait` / `remote_list`. Records of the old format (one cap per task, `remote_id` is not the center's cap id) are not
+listed: at startup the center sends `stop_cap` for each to its server (it may not arrive) and deletes the record, logging the result in `center.log`.
+A record from the version that kept `history` is migrated: only its pending instructions are kept.
 
 A remote that has received `activity` notices also has `activity`:
 

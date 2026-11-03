@@ -14,10 +14,8 @@ export const OWNER_QUERY = "session";
 export const OWNER_PATTERN = /^[A-Za-z0-9_-]+$/;
 /** 保存・返却する結果テキストの上限。 */
 const RESULT_MAX = 8000;
-/** 履歴に残す prompt の先頭の長さ。 */
+/** 未完了の指示に残す prompt の先頭の長さ。 */
 export const PROMPT_HEAD_MAX = 200;
-/** 履歴の最大件数（古い完了済みから捨てる。未完了の指示は捨てない）。 */
-export const HISTORY_MAX = 200;
 /** 通知に載せる指示の先頭の長さ。 */
 const NOTIFY_PROMPT_MAX = 80;
 
@@ -29,33 +27,15 @@ export const SETTLE_GRACE_MS = 15_000;
 /** status で追従する間隔（ms）。unknown の再試行・再起動後や cap 再開中の追従。 */
 export const PROBE_POLL_MS = 15_000;
 
-/** 履歴: session から送った指示。done_at が無い間は未完了。 */
-export interface InstructionEntry {
-  type: "instruction";
+/** 未完了の指示（完了したら消す）。通知先 = owner の session。 */
+export interface PendingInstruction {
+  /** 指示を送った時刻。 */
   at: string;
-  /** 指示を送った session 名。 */
+  /** 指示を送った session 名（完了の通知先）。 */
   owner: string;
   /** prompt の先頭（PROMPT_HEAD_MAX 文字）。 */
   prompt: string;
-  /** 完了にした時刻（cap が idle で worker が無くなった時点）。 */
-  done_at?: string;
-  /** 完了通知を owner の session へ送れた時刻。 */
-  notified_at?: string;
-  /** 完了通知を送れなかった理由（または送らなかった理由）。 */
-  notify_error?: string;
 }
-
-/** 履歴: server から届いた cap_result（または失敗の error 返信）。 */
-export interface ResultEntry {
-  type: "result";
-  at: string;
-  ok: boolean;
-  /** 結果の本文。RESULT_MAX で切る。 */
-  text: string;
-  error?: string;
-}
-
-export type HistoryEntry = InstructionEntry | ResultEntry;
 
 /**
  * center が保持する「server の cap」の記録。server ごとに 1 件、remote_id = cap_id（center ごとに固定）。
@@ -76,18 +56,18 @@ export interface RemoteRecord {
   finishedAt?: string;
   /** 最新の cap_result の本文。 */
   result?: string;
+  /** 最新の cap_result を受けた時刻。 */
+  result_at?: string;
   /** 最新の失敗。成功の結果で消える。 */
   error?: string;
-  /** 指示と結果の履歴（古い順）。 */
-  history: HistoryEntry[];
-  /** 旧形式（作業ごとの cap）の記録。一覧に出すだけで、指示は送らない・通知しない。delete で止めて消せる。 */
-  legacy?: true;
-  /** 旧形式の owner。 */
-  owner?: string;
+  /** 最新の失敗の時刻。 */
+  error_at?: string;
+  /** 未完了の指示（古い順）。完了したら消す。履歴は持たない。 */
+  pending: PendingInstruction[];
 }
 
 /** remote_list が返す 1 件。通知がまだ無ければ activity は無い。 */
-export type RemoteView = Omit<RemoteRecord, "owner"> & { owners: string[]; activity?: RemoteActivity };
+export type RemoteView = RemoteRecord & { owners: string[]; activity?: RemoteActivity };
 
 /** 通知に載せる result の先頭の長さ。 */
 export const NOTIFY_RESULT_MAX = 500;
@@ -145,7 +125,7 @@ export interface RemoteManager {
   /**
    * 保存済みの記録を読み込む。running と未完了の指示はそのまま復元し、server の status で cap と worker の状態を取り直して追従する
    * （取れなければ unknown。再起動後に届く cap_result は applyLateReply が反映する。messenger の peer 名が再起動前と同じ前提）。
-   * 旧形式（作業ごとの cap）の記録は legacy として残す。
+   * 旧形式（作業ごとの cap。remote_id が center の cap_id でない）の記録は一覧に残さず、server へ stop_cap を送って（届かなくても）記録を消す。結果は center.log。
    */
   restore(): Promise<void>;
   /**
@@ -177,12 +157,10 @@ const STATUS_ERR = "status を取れない";
 
 const truncate = (s: string): string => (s.length > RESULT_MAX ? `${s.slice(0, RESULT_MAX)}…(省略)` : s);
 
-const isPending = (e: HistoryEntry): e is InstructionEntry => e.type === "instruction" && e.done_at === undefined;
-
+/** 未完了の指示を送った session（重複なし）。 */
 const ownersOf = (r: RemoteRecord): string[] => {
   const seen: string[] = [];
-  for (const e of r.history) if (e.type === "instruction" && !seen.includes(e.owner)) seen.push(e.owner);
-  if (r.owner && !seen.includes(r.owner)) seen.push(r.owner);
+  for (const p of r.pending) if (!seen.includes(p.owner)) seen.push(p.owner);
   return seen;
 };
 
@@ -267,9 +245,8 @@ export function createRemoteManager(opts: {
   };
 
   const viewOf = (r: RemoteRecord): RemoteView => {
-    const { owner: _o, ...rest } = r;
     const state = stateOf(r);
-    const base: RemoteView = { ...rest, history: r.history.map((e) => ({ ...e })), owners: ownersOf(r), state };
+    const base: RemoteView = { ...r, pending: r.pending.map((p) => ({ ...p })), owners: ownersOf(r), state };
     if (state === "running") delete base.finishedAt;
     const activity = activityOf(r);
     return { ...base, ...(activity ? { activity } : {}) };
@@ -285,63 +262,43 @@ export function createRemoteManager(opts: {
    */
   const completeIfIdle = (r: RemoteRecord): void => {
     const s = stateOf(r);
-    if (!has(r) || r.legacy || s === "running" || s === "unknown") return;
-    const pending = r.history.filter(isPending);
+    if (!has(r) || s === "running" || s === "unknown") return;
+    const pending = r.pending;
     if (pending.length === 0) return;
-    const now = new Date().toISOString();
-    for (const p of pending) p.done_at = now;
+    r.pending = [];
     void persist();
-    const byOwner = new Map<string, InstructionEntry[]>();
+    const byOwner = new Map<string, PendingInstruction[]>();
     for (const p of pending) byOwner.set(p.owner, [...(byOwner.get(p.owner) ?? []), p]);
-    const text = (instr: InstructionEntry[]): string =>
-      formatDoneNotice({ remote_id: r.remote_id, state: stateOf(r), ...(r.result !== undefined ? { result: r.result } : {}), ...(r.error ? { error: r.error } : {}), instructions: instr.map((i) => i.prompt) });
+    const text = (instr: PendingInstruction[]): string =>
+      formatDoneNotice({ remote_id: r.remote_id, state: s, ...(r.result !== undefined ? { result: r.result } : {}), ...(r.error ? { error: r.error } : {}), instructions: instr.map((i) => i.prompt) });
     for (const [owner, instr] of byOwner) {
       if (!opts.notify) {
-        for (const i of instr) i.notify_error = "通知の送り先が無い";
+        log(`remote 完了通知を送れない: ${r.remote_id} owner=${owner} 通知の送り先が無い`);
         continue;
       }
       void opts.notify(owner, text(instr)).then(
         (res) => res,
         (e: unknown) => ({ ok: false as const, reason: e instanceof Error ? e.message : String(e) }),
       ).then((res) => {
-        for (const i of instr) {
-          if (res.ok) {
-            i.notified_at = new Date().toISOString();
-            delete i.notify_error;
-          } else {
-            delete i.notified_at;
-            i.notify_error = res.reason;
-          }
-        }
-        if (res.ok) log(`remote 完了通知: ${r.remote_id} owner=${owner} state=${stateOf(r)} 指示=${instr.length}`);
+        if (res.ok) log(`remote 完了通知: ${r.remote_id} owner=${owner} state=${s} 指示=${instr.length}`);
         else log(`remote 完了通知を送れない: ${r.remote_id} owner=${owner} ${res.reason}`);
-        if (has(r)) void persist();
         wake();
       });
     }
     wake();
   };
 
-  const trim = (r: RemoteRecord): void => {
-    let i = 0;
-    while (r.history.length > HISTORY_MAX && i < r.history.length) {
-      if (r.history[i].type === "instruction" && isPending(r.history[i] as InstructionEntry)) i++;
-      else r.history.splice(i, 1);
-    }
-  };
-
   /**
-   * 結果を履歴と最新の状態に反映する。kind: cap_result = cap の turn が終わった（成功・失敗とも）/ error = server の error 返信 /
+   * 結果を最新の状態に反映する（履歴は持たない）。kind: cap_result = cap の turn が終わった（成功・失敗とも）/ error = server の error 返信 /
    * transport = server に届かない・返信が来ない（state は failed でなく unknown）。
    * cap_result は即座に完了にしない: 未完了の指示があれば settling にして、次の activity か猶予（graceMs）の後の status で判定する。
    */
   const applyResult = (r: RemoteRecord, res: { ok: boolean; text: string; error?: string }, kind: "cap_result" | "error" | "transport"): void => {
     if (!has(r)) return;
     const now = new Date().toISOString();
-    r.history.push({ type: "result", at: now, ok: res.ok, text: truncate(res.text), ...(res.error ? { error: res.error } : {}) });
     r.state = kind === "transport" ? "unknown" : res.ok ? "done" : "failed";
     r.finishedAt = now;
-    if (kind === "cap_result" && r.history.some(isPending)) {
+    if (kind === "cap_result" && r.pending.length > 0) {
       settling.set(r, Date.now());
       schedule(r, graceMs);
     } else if (kind === "transport") {
@@ -349,12 +306,17 @@ export function createRemoteManager(opts: {
     }
     if (res.ok) {
       r.result = truncate(res.text);
+      r.result_at = now;
       delete r.error;
+      delete r.error_at;
     } else {
       r.error = res.error ?? "失敗";
-      if (res.text) r.result = truncate(res.text);
+      r.error_at = now;
+      if (res.text) {
+        r.result = truncate(res.text);
+        r.result_at = now;
+      }
     }
-    trim(r);
     void persist();
     completeIfIdle(r);
     wake();
@@ -372,7 +334,7 @@ export function createRemoteManager(opts: {
    * 過ぎたら running / unknown を done にして完了判定。返信待ちの kick_cap がある間は返信が進めるので何もしない。
    */
   const probe = async (r: RemoteRecord): Promise<void> => {
-    if (!has(r) || r.legacy || (inflight.get(r) ?? 0) > 0) return;
+    if (!has(r) || (inflight.get(r) ?? 0) > 0) return;
     const startedAt = Date.now();
     let st: StatusReply;
     try {
@@ -434,7 +396,7 @@ export function createRemoteManager(opts: {
 
   /** server の peer から記録を探す（id 一致 → 名前 + host 一致）。旧形式は除く。 */
   const findRecord = (peer: ServerPeer): RemoteRecord | undefined => {
-    const own = records.filter((r) => !r.legacy && r.remote_id === capId);
+    const own = records.filter((r) => r.remote_id === capId);
     return (
       own.find((r) => r.server === peer.id) ??
       own.find((r) => r.serverName === peer.name && r.serverHost === peer.hostname)
@@ -443,7 +405,7 @@ export function createRemoteManager(opts: {
 
   /** 通知・遅れた返信の送信元から記録を決める。同じ cap_id が 1 件だけなら、peer id が変わっていてもそれ。 */
   const resolveRecord = (id: string, fromId?: string): RemoteRecord | undefined => {
-    const cands = records.filter((r) => !r.legacy && r.remote_id === id);
+    const cands = records.filter((r) => r.remote_id === id);
     if (cands.length === 0) return undefined;
     if (fromId !== undefined) {
       const hit = cands.find((r) => r.server === fromId);
@@ -514,29 +476,47 @@ export function createRemoteManager(opts: {
 
   return {
     async restore() {
+      const legacy: RemoteRecord[] = [];
       for (const r of await store.load()) {
         if (typeof r?.remote_id !== "string" || !AGENT_ID_PATTERN.test(r.remote_id)) continue;
-        if (!Array.isArray(r.history)) {
-          // 旧形式（作業ごとの cap）。読み捨てず、legacy として一覧に残す
-          r.history = [];
-          r.legacy = true;
+        // 旧形式（作業ごとの cap。remote_id が center の cap_id でない）は一覧に残さず、後で stop_cap を送って記録を消す
+        if (r.remote_id !== capId) {
+          legacy.push(r);
+          continue;
         }
+        const old = r as RemoteRecord & { history?: unknown };
+        if (!Array.isArray(r.pending)) {
+          // 履歴を持っていた版の記録: 未完了の指示だけ引き継ぎ、履歴は捨てる
+          r.pending = Array.isArray(old.history)
+            ? (old.history as { type?: string; at: string; owner: string; prompt: string; done_at?: string }[])
+                .filter((e) => e.type === "instruction" && e.done_at === undefined)
+                .map((e) => ({ at: e.at, owner: e.owner, prompt: e.prompt }))
+            : [];
+        }
+        delete old.history;
         if (r.state !== "running" && r.state !== "done" && r.state !== "failed" && r.state !== "unknown") r.state = "unknown";
-        if (r.legacy && r.state === "running") {
-          // 旧形式は追従しない。返信を受け取れないので従来どおり failed
-          r.state = "failed";
-          r.finishedAt = new Date().toISOString();
-          r.error = "center 再起動で返信を受け取れなかった（server 側は実行を続けている可能性がある）";
-        }
         records.push(r);
         // running・unknown・未完了の指示がある記録は、failed にせず復元して server の status で追従する
-        if (!r.legacy && (r.state === "running" || r.state === "unknown" || r.history.some(isPending))) {
+        if (r.state === "running" || r.state === "unknown" || r.pending.length > 0) {
           settling.set(r, Date.now());
           schedule(r, 0);
         }
       }
-      if (records.length > 0) await persist();
-      log(`remote 記録を読込: ${records.length} 件${records.some((r) => r.legacy) ? `（旧形式 ${records.filter((r) => r.legacy).length} 件）` : ""}`);
+      if (records.length > 0 || legacy.length > 0) await persist();
+      log(`remote 記録を読込: ${records.length} 件${legacy.length > 0 ? `（旧形式 ${legacy.length} 件は stop_cap を送って記録を消す）` : ""}`);
+      // 旧形式: server に stop_cap を送る（届かなくても記録は消す。結果は center.log）
+      await Promise.all(
+        legacy.map(async (r) => {
+          try {
+            const peer = await findPeer(r);
+            const reply = await link.stopCapOn(peer, { cap_id: r.remote_id });
+            if (reply.type === "stop_result") log(`旧形式の remote を掃除: ${r.remote_id} server=${r.serverName} stopped=${reply.stopped}`);
+            else throw new Error(reply.type === "error" ? reply.message : "不明な返信");
+          } catch (e) {
+            log(`旧形式の remote の stop_cap が届かない（記録は消した）: ${r.remote_id} server=${r.serverName} ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }),
+      );
     },
 
     async send(input) {
@@ -560,7 +540,7 @@ export function createRemoteManager(opts: {
         const now = new Date().toISOString();
         let rec = findRecord(peer);
         if (!rec) {
-          rec = { remote_id: capId, server: peer.id, serverName: peer.name, ...(peer.hostname ? { serverHost: peer.hostname } : {}), state: "running", createdAt: now, history: [] };
+          rec = { remote_id: capId, server: peer.id, serverName: peer.name, ...(peer.hostname ? { serverHost: peer.hostname } : {}), state: "running", createdAt: now, pending: [] };
           records.push(rec);
         }
         rec.server = peer.id;
@@ -574,13 +554,12 @@ export function createRemoteManager(opts: {
         }
         if (models.worker_model) rec.worker_model = models.worker_model;
         const target = rec;
-        target.history.push({ type: "instruction", at: now, owner: input.owner, prompt: input.prompt.slice(0, PROMPT_HEAD_MAX) });
+        target.pending.push({ at: now, owner: input.owner, prompt: input.prompt.slice(0, PROMPT_HEAD_MAX) });
         target.state = "running";
         delete target.finishedAt;
         settling.delete(target);
         statusIdleAt.delete(target);
         unschedule(target);
-        trim(target);
         inflight.set(target, (inflight.get(target) ?? 0) + 1);
         await persist();
         log(`remote 指示: ${capId} owner=${input.owner} server=${peer.name}(${peer.id}) ${exists ? "既存の cap へ" : "cap を作成（最初の kick_cap）"}`);
@@ -680,7 +659,7 @@ export function createRemoteManager(opts: {
         targets = [await pick(remote_id, server)];
       } else {
         if (owner === undefined) throw new Error("remote_id を省略するには owner（session）が必要");
-        targets = records.filter((r) => !r.legacy && r.history.some((e) => isPending(e) && e.owner === owner));
+        targets = records.filter((r) => r.pending.some((p) => p.owner === owner));
         if (targets.length === 0) throw new Error("running の remote が無い（未完了の指示が無い）");
       }
       const check = (): RemoteView | undefined => {

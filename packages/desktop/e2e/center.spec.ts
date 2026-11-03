@@ -97,14 +97,12 @@ const remotes = (workerState: string) => [
     owners: ["bantou-pm", "careery"],
     server: "p-7c1d",
     serverName: "bantou-server",
-    state: "done",
+    state: "running",
     model: "opus",
     createdAt: "2026-10-29T00:57:00.000Z",
-    history: [
-      { type: "instruction", at: "2026-10-29T00:57:00.000Z", owner: "bantou-pm", prompt: "issue を整理して", done_at: "2026-10-29T00:58:00.000Z" },
-      { type: "result", at: "2026-10-29T00:58:00.000Z", ok: true, text: "整理した" },
-      { type: "instruction", at: "2026-10-29T00:59:00.000Z", owner: "careery", prompt: "次は PR を見て" },
-    ],
+    result: "整理した",
+    result_at: "2026-10-29T00:58:00.000Z",
+    pending: [{ at: "2026-10-29T00:59:00.000Z", owner: "careery", prompt: "次は PR を見て" }],
     activity: {
       at: "2026-10-29T01:00:05.000Z",
       received_ms_ago: 1200,
@@ -131,7 +129,8 @@ const remotes = (workerState: string) => [
       agents: [agent("cap", "c-9f8e7d6c5b", "running", { silent_ms: 46000, last_activity: "thinking" })],
     },
   },
-  { remote_id: "r-5a5a5a5a5a", owners: ["other-pm"], server: "p-7c1d", serverName: "bantou-server", state: "failed", createdAt: "2026-10-28T22:00:00.000Z", legacy: true, history: [] },
+  // an idle cap with no worker and no pending instruction (one row, no record of finished work)
+  { remote_id: "c-3c4d5e6f7a", owners: [], server: "p-8e2f", serverName: "other-server", state: "done", createdAt: "2026-10-28T22:00:00.000Z", result: "PR を確認した。\n指摘は 3 件", result_at: "2026-10-28T23:00:00.000Z", pending: [] },
 ];
 
 const seedRemotes = (page: Page, list: unknown[]) =>
@@ -169,35 +168,30 @@ test("the remotes section shows each cap and worker with state, task and time si
   await expect(first.getByTestId("center-remote-stale")).toHaveCount(0);
   await expect(page.getByTestId("center-remote").nth(1).getByTestId("center-remote-stale")).toHaveText("更新途絶");
   const third = page.getByTestId("center-remote").nth(2);
-  await expect(third).toContainText("活動情報なし");
-  await expect(third).toContainText("failed");
+  await expect(third.getByTestId("center-remote-waiting")).toHaveText("待機中");
   await expect(third.getByTestId("center-remote-agent")).toHaveCount(0);
-  await expect(third.getByTestId("center-remote-legacy")).toHaveText("旧形式");
-  await expect(third.getByTestId("center-remote-history")).toHaveCount(0);
+  await expect(first.getByTestId("center-remote-waiting")).toHaveCount(0);
 });
 
-test("a cap shows the sessions that sent instructions and the history of instructions and results", async ({ page }) => {
+test("one row per server: cap state, head of the latest result and workers. No history, no old-format badge, no list of finished records", async ({ page }) => {
   await page.goto("/");
   await mock(page, { enabled: true });
   await seedRemotes(page, remotes("running"));
   await page.getByTestId("open-center").click();
 
-  const first = page.getByTestId("center-remote").nth(0);
+  const rows = page.getByTestId("center-remote");
+  await expect(rows).toHaveCount(3);
+  const first = rows.nth(0);
   await expect(first.getByTestId("center-remote-owners")).toHaveText("bantou-pm, careery");
-  await expect(first.getByTestId("center-remote-legacy")).toHaveCount(0);
-  const items = first.getByTestId("center-remote-history-item");
-  await expect(items).toHaveCount(3);
-  await expect(items.nth(0)).toHaveAttribute("data-type", "instruction");
-  await expect(items.nth(0)).toHaveAttribute("data-pending", "false");
-  await expect(items.nth(0)).toContainText("bantou-pm");
-  await expect(items.nth(0)).toContainText("issue を整理して");
-  await expect(items.nth(1)).toHaveAttribute("data-type", "result");
-  await expect(items.nth(1)).toContainText("整理した");
-  await expect(items.nth(2)).toHaveAttribute("data-pending", "true");
-  await expect(items.nth(2)).toContainText("careery");
-  await expect(items.nth(2)).toContainText("未完了");
-  // a remote without history has no history block
-  await expect(page.getByTestId("center-remote").nth(1).getByTestId("center-remote-history")).toHaveCount(0);
+  await expect(first.getByTestId("center-remote-result")).toHaveText("整理した");
+  await expect(first.getByTestId("center-remote-agent").nth(0).getByTestId("center-remote-agent-state")).toHaveText("待機");
+  const idle = rows.nth(2);
+  await expect(idle).toContainText("other-server");
+  await expect(idle.getByTestId("center-remote-result")).toHaveText("PR を確認した。 指摘は 3 件");
+  await expect(page.getByTestId("center-remote-history")).toHaveCount(0);
+  await expect(page.getByTestId("center-remote-history-item")).toHaveCount(0);
+  await expect(page.getByTestId("center-remote-legacy")).toHaveCount(0);
+  await expect(page.getByText("活動情報なし")).toHaveCount(0);
 });
 
 test("the remotes section refreshes by itself without pressing update", async ({ page }) => {

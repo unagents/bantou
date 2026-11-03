@@ -68,14 +68,18 @@ const stateLabel: Record<CenterActivityState, string> = {
   lost: "消失",
 };
 
-/** History entries shown: the latest ones, newest last. */
-const HISTORY_SHOWN = 8;
-const recent = <T,>(h: T[]): T[] => h.slice(-HISTORY_SHOWN);
+/** Head of the latest result shown on the row. */
+const RESULT_HEAD_MAX = 80;
+function resultHead(r: CenterRemoteRecord): string {
+  const t = (r.result ?? "").replace(/\s+/g, " ").trim();
+  return t.length > RESULT_HEAD_MAX ? `${t.slice(0, RESULT_HEAD_MAX)}…` : t;
+}
 
-/** HH:MM:SS (local) of an ISO time. */
-function clock(iso: string): string {
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? iso : d.toLocaleTimeString("ja-JP", { hour12: false });
+/** The cap is idle, has no worker and no pending instruction: one line "待機中". */
+function waiting(r: CenterRemoteRecord): boolean {
+  if (r.state !== "done" || (r.pending?.length ?? 0) > 0) return false;
+  const agents = r.activity?.agents ?? [];
+  return !agents.some((a) => a.kind === "worker") && !agents.some((a) => a.kind === "cap" && a.state !== "idle" && a.state !== "done");
 }
 
 /** `silent_ms` as of the fetch plus the time since, so host clock skew does not matter. */
@@ -105,7 +109,6 @@ function elapsed(silentMs: number): string {
         <span class="font-medium">{{ r.remote_id }}</span>
         <span class="text-cork-muted">{{ r.serverName ?? r.server }}</span>
         <span class="text-cork-muted" :data-testid="`${tp}remote-owners`">{{ r.owners.join(", ") }}</span>
-        <UBadge v-if="r.legacy" color="neutral" variant="subtle" label="旧形式" :data-testid="`${tp}remote-legacy`" />
         <span v-if="r.model" class="text-cork-muted" :data-testid="`${tp}remote-model`">{{ r.model }}</span>
         <UBadge
           v-if="r.activity?.stale"
@@ -114,12 +117,14 @@ function elapsed(silentMs: number): string {
           label="更新途絶"
           :data-testid="`${tp}remote-stale`"
         />
-        <template v-if="!r.activity">
+        <span v-if="waiting(r)" class="text-cork-muted" :data-testid="`${tp}remote-waiting`">待機中</span>
+        <template v-else-if="!r.activity">
           <span class="text-cork-muted">活動情報なし</span>
           <span class="text-cork-muted">{{ r.state }}</span>
         </template>
+        <span v-if="resultHead(r)" class="text-cork-muted min-w-0 flex-1 truncate" :data-testid="`${tp}remote-result`">{{ resultHead(r) }}</span>
       </div>
-      <template v-if="r.activity">
+      <template v-if="r.activity && !waiting(r)">
         <div
           v-for="a in r.activity.agents"
           :key="`${a.kind}:${a.id}`"
@@ -147,28 +152,6 @@ function elapsed(silentMs: number): string {
           <span v-if="a.error" class="text-cork-danger-text truncate pl-14">{{ a.error }}</span>
         </div>
       </template>
-      <div v-if="r.history?.length" class="flex flex-col pl-2 text-xs" :data-testid="`${tp}remote-history`">
-        <div
-          v-for="(h, i) in recent(r.history)"
-          :key="`${h.type}:${h.at}:${i}`"
-          class="flex items-center gap-2"
-          :data-testid="`${tp}remote-history-item`"
-          :data-type="h.type"
-          :data-pending="h.type === `instruction` && !h.done_at ? `true` : `false`"
-        >
-          <span class="text-cork-muted shrink-0">{{ clock(h.at) }}</span>
-          <template v-if="h.type === `instruction`">
-            <span class="w-12 shrink-0">指示</span>
-            <span class="text-cork-muted shrink-0">{{ h.owner }}</span>
-            <span class="min-w-0 flex-1 truncate">{{ h.prompt }}</span>
-            <span v-if="!h.done_at" class="text-cork-muted shrink-0">未完了</span>
-          </template>
-          <template v-else>
-            <span class="w-12 shrink-0">{{ h.ok ? `結果` : `失敗` }}</span>
-            <span class="min-w-0 flex-1 truncate">{{ h.ok ? h.text : (h.error ?? h.text) }}</span>
-          </template>
-        </div>
-      </div>
     </div>
     <p v-if="remotes && !remotes.length" class="text-cork-muted text-xs" :data-testid="`${tp}remotes-none`">
       remote なし
