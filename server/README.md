@@ -98,6 +98,7 @@ npx bantou --config <path>
     logs/<session_id>.jsonl          claude の生出力（stream-json）
     logs/center.json                 この cap を依頼した center（messenger の peer id）
     logs/reports.jsonl               worker から受けた report の記録（1 行 1 件）
+    logs/model.json                  指定されたモデル（`{"model":"...","worker_model":"..."}`、指定が無ければ作らない）
     logs/mcp.json                    cap の `--mcp-config`（実行ごとに上書き）
     logs/system-prompt.md            cap の `--append-system-prompt-file`（実行ごとに上書き）
   workers/<worker-id>/               worker の path。構成は cap と同じ
@@ -151,11 +152,12 @@ npx bantou --config <path>
 
 | tool | 入力 | 返り値 |
 |---|---|---|
-| `worker_start` | `prompt`、`worker_id?`、`repo?`、`branch?` | `{"worker_id":"w-1f2e3d4c5b","accepted":true}` |
+| `worker_start` | `prompt`、`worker_id?`、`repo?`、`branch?`、`model?` | `{"worker_id":"w-1f2e3d4c5b","accepted":true}` |
 | `worker_status` | `worker_id?` | `{"workers":[AgentActivity,...]}` |
 | `worker_stop` | `worker_id` | `{"worker_id":"w-...","stopped":true}` |
 
 - `worker_start`: `worker_id` を省くと `w-<hex10>` を採番して新規、既存の id なら同じ session を `--resume`（続きの指示）。完了を待たずに返る。実行中なら queue で直列。失敗は activity と `state.json` に出る。path は `<workspace>/workers/<worker_id>/`（`repo` 指定時は clone / fetch）。cap の存在を確かめる（無ければ `cap が存在しない`）。
+- `worker_start` の `model`: worker の `claude --model` にそのまま渡す（`sonnet` / `opus` / `haiku` / `claude-sonnet-5-5` などフル ID も可。`[A-Za-z0-9._[]-]` のみ、先頭 `-` 不可。不正は error）。優先順位は 指定 > その worker の前回のモデル > cap の `worker_model`（`kick_cap`） > 付けない。続きの指示（同じ `worker_id`）でも同じモデルを使い続ける。
 - 持ち主は `workers/<worker_id>/logs/owner.json` に記録する。別の cap の worker は `worker_start` / `worker_status` / `worker_stop` とも `別の cap の worker: <id>` で拒否する。
 - `worker_status`: 呼んだ cap の worker だけ。server 再起動後など活動情報が無い worker は `state.json` から補う（idle → idle、failed / error → failed、running → running。起動直後で `state.json` が無いものは running / `starting`）。
 - `worker_stop`: process group に SIGTERM、3 秒で SIGKILL（`stop_cap` と同じ）。
@@ -165,7 +167,7 @@ npx bantou --config <path>
 ## 活動情報（activity）
 
 - cap と worker の `claude -p` の stdout（stream-json）を 1 行ずつ読み、要約を保持する。保持はメモリのみ（`state.json` には書かない）。全文は流さない。
-- 要約: `state`、`task`（最後の `kick_cap` / `worker_start` の prompt の冒頭 200 文字。cap の report 起因の resume では上書きしない）、`last_activity`（tool 名と引数の要点、assistant テキストの冒頭、`Bash 実行中 60s` 等。120 文字）、`last_output_at`、`silent_ms`（最後の出力 = 無ければ起動時刻からの経過）、`started_at`、`finished_at`、`error`。
+- 要約: `state`、`task`（最後の `kick_cap` / `worker_start` の prompt の冒頭 200 文字。cap の report 起因の resume では上書きしない）、`last_activity`（tool 名と引数の要点、assistant テキストの冒頭、`Bash 実行中 60s` 等。120 文字）、`last_output_at`、`silent_ms`（最後の出力 = 無ければ起動時刻からの経過）、`started_at`、`finished_at`、`error`、`model`（指定されたもの。無ければ `null`。`status` の `caps[]` / `workers[]` も同じ）。
 - 状態: `running`（実行中）、`stalled`（実行中で 300 秒出力が無い。表示のみで kill しない。新しい出力で running に戻る）、`idle`（正常終了。cap は常にこれ）、`done`（worker が正常終了し、その実行中に `report` の `kind=done` を受けた）、`failed`（非 0 終了、応答が読めない、timeout、停止、server 終了、準備失敗）、`lost`（server 自身の kill でない signal で終了 = 外から kill された・落ちた。起動時の孤児回収が拾った running も lost）。`state.json` の `AgentState` とは別物。
 - lost と判定したら、その process group にも SIGKILL を送る。限界: claude の Bash tool が起動した子は別 group にいるため止まらない（204 実測）。
 - center への通知: protocol `bantou` の `activity`（cap を `kick_cap` した center 宛て）。cap ごとに 1 通で、cap 本人とその worker 全部のスナップショット。running / stalled が 1 つでもあれば 5 秒ごと、状態遷移（起動・stalled・終了・孤児回収）では即時（同じ同期区間はまとめる）。全員が終端になったらその 1 通を送って止める。送信失敗はログだけで再送しない。ログ: `activity 通知: to=<peer> cap_id=<id> <id>=<state> ...`。
@@ -192,6 +194,9 @@ npx bantou --config <path>
 - `repo` / `branch`: path の git 取得に使う。`-` で始まる値は拒否。
 - `prompt`: claude に渡す指示。
 - `reason`: 起動理由。ログ用で、claude には渡さない。
+- `model`（任意）: cap 自身の `claude --model`。`sonnet` / `opus` / `haiku` / `claude-sonnet-5-5` などフル ID をそのまま渡す。形式は `[A-Za-z0-9._[]-]`（先頭 `-` 不可）で、不正なら `error`。省略時は前回の指定を使い続け、一度も無ければ `--model` を付けない。`session.extraArgs` に `--model` があっても、指定があれば `model` が後勝ち。
+- `worker_model`（任意）: この cap が `worker_start` で起動する worker の既定モデル。cap の `logs/model.json` に覚え、`worker_start` に `model` が無い時に使う。形式は `model` と同じ。
+- `model` / `worker_model` を知らない古い center は送らない（その場合は従来どおり）。知らない古い server は無視する。
 
 `stop_cap`（protocol `bantou` 1.1.0 で追加）:
 

@@ -20,6 +20,8 @@ export interface ClaudeRunOptions {
   capBashSandbox?: boolean;
   /** `--` の前にそのまま付ける。 */
   extraArgs: string[];
+  /** `--model <値>`。extraArgs の後ろに置き、同じ指定が extraArgs にあればこちらを後勝ちにする。省けば付けない。 */
+  model?: string;
   timeoutMs: number;
   /** 生出力（stream-json 全行）の追記先。省けば書かない。 */
   logFile?: string;
@@ -72,6 +74,7 @@ export function buildClaudeArgs(o: ClaudeRunOptions): string[] {
     ...(o.mcpConfigFile ? ["--mcp-config", o.mcpConfigFile] : []),
     ...(o.appendSystemPromptFile ? ["--append-system-prompt-file", o.appendSystemPromptFile] : []),
     ...o.extraArgs,
+    ...(o.model ? ["--model", o.model] : []),
     o.mode === "new" ? "--session-id" : "--resume",
     o.sessionId,
     "--",

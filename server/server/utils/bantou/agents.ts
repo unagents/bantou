@@ -10,6 +10,7 @@ import {
   type RunOutcome,
 } from "@agent-hand/bantou-protocol";
 import type { Config } from "./config";
+import { assertModel, readModelRecord, writeModelRecord, type WithModel } from "./model";
 import { killGroup, type ClaudeRunOptions, type ClaudeRunResult, type RunMode } from "./claude";
 import { agentDir, runLogDir } from "./paths";
 import { listLiveProcesses, matchesSession, type LiveProcess } from "./processes";
@@ -27,6 +28,14 @@ export interface InvokeInput {
   capId?: string;
   /** true なら activity の task を上書きしない（cap の report 起因の resume）。 */
   keepTask?: boolean;
+  /** このエージェントの claude --model。省略時は前回記録した値、それも無ければ付けない。 */
+  model?: string;
+  /** cap が起動する worker の既定モデル（cap の記録に残す）。 */
+  worker_model?: string;
+  /** model も記録も無い時だけ使う既定（worker_start が cap の worker_model を渡す）。 */
+  defaultModel?: string;
+  /** 実際に使うモデル（manager が解決して observer に渡す）。 */
+  resolvedModel?: string;
 }
 
 export interface ReapSummary {
@@ -223,6 +232,18 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
     }
     const st = await readState(dir);
     if (st.state === "running") throw new Error(`${id} は実行中`);
+    // 指定があれば記録し、無ければ前回の記録を使う（resume / report 起因の再開でも同じモデルを使い続ける）
+    const rec0 = await readModelRecord(dir);
+    const patch = {
+      ...(input.model !== undefined ? { model: input.model } : rec0.model === undefined && input.defaultModel !== undefined ? { model: input.defaultModel } : {}),
+      ...(input.worker_model !== undefined ? { worker_model: input.worker_model } : {}),
+    };
+    const rec = { ...rec0, ...patch };
+    if (Object.keys(patch).length > 0) {
+      await writeModelRecord(dir, patch).catch((e: unknown) => log(`model 記録失敗: kind=${kind} id=${id} ${errMsg(e)}`));
+    }
+    const model = rec.model;
+    input = { ...input, ...(model !== undefined ? { resolvedModel: model } : {}) };
     if (st.state === "error") {
       throw new Error(`${id} は state=error のため起動しない（state.json を確認）`);
     }
@@ -264,6 +285,7 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
           disallowedTools: config.session.disallowedTools,
           capBashSandbox: config.session.capBashSandbox,
           extraArgs: config.session.extraArgs,
+          ...(model !== undefined ? { model } : {}),
           timeoutMs: config.session.timeoutMs,
           env: { ...process.env, ...config.session.env },
           logFile: join(runLogDir(dir), `${sessionId}.jsonl`),
@@ -384,6 +406,13 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
     if (!isValidAgentId(id)) {
       return Promise.reject(new Error(kind === "cap" ? `cap_id が不正: ${id}` : `worker_id が不正: ${id}`));
     }
+    try {
+      if (input.model !== undefined) assertModel(input.model, "model");
+      if (input.worker_model !== undefined) assertModel(input.worker_model, "worker_model");
+      if (input.defaultModel !== undefined) assertModel(input.defaultModel, "model");
+    } catch (e) {
+      return Promise.reject(e);
+    }
     const key = `${kind}:${id}`;
     inflight.set(key, (inflight.get(key) ?? 0) + 1);
     waiting.set(key, (waiting.get(key) ?? 0) + 1);
@@ -419,12 +448,12 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
       .sort();
   }
 
-  async function statusOf(kind: AgentKind, id: string): Promise<AgentStatus> {
+  async function statusOf(kind: AgentKind, id: string): Promise<WithModel<AgentStatus>> {
     const dir = agentDir(config.workspace, kind, id);
     const queued = waiting.get(`${kind}:${id}`) ?? 0;
     try {
       const s = await readState(dir);
-      const out: AgentStatus = {
+      const out: WithModel<AgentStatus> = {
         kind,
         id,
         path: dir,
@@ -434,6 +463,7 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
         last_finished_at: s.last_finished_at,
         retries: s.retries,
         queued,
+        model: (await readModelRecord(dir)).model ?? null,
       };
       if (s.last_error !== undefined) out.last_error = s.last_error;
       return out;

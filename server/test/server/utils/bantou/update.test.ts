@@ -1,3 +1,4 @@
+import { MESSENGER_PROTOCOL } from "@agent-hand/bantou-protocol";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -110,7 +111,7 @@ test("hello: 版と protocol 版、更新なしは null", async () => {
     const r = c.hello();
     assert.equal(r.type, "hello_result");
     assert.equal(r.server_version, "0.3.0");
-    assert.equal(r.protocol_version, "1.3.0");
+    assert.equal(r.protocol_version, MESSENGER_PROTOCOL.version);
     assert.equal(r.update, null);
     assert.equal(r.last_update, null);
     assert.equal(c.isUpdating(), false);

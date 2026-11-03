@@ -7,17 +7,20 @@ import type { AgentManager } from "./agents";
 import type { ActivityTracker } from "./activity";
 import { agentDir, runLogDir } from "./paths";
 import { readState } from "./state";
+import { assertModel, readModelRecord, type WithModel } from "./model";
 
 export interface WorkerStartInput {
   worker_id?: string;
   prompt: string;
   repo?: string;
   branch?: string;
+  /** この worker の claude --model。省略時は前回の記録、それも無ければ cap の worker_model、それも無ければ付けない。 */
+  model?: string;
 }
 
 export interface WorkerHub {
   start(capId: string, input: WorkerStartInput): Promise<{ worker_id: string; accepted: true }>;
-  status(capId: string, workerId?: string): Promise<{ workers: AgentActivity[] }>;
+  status(capId: string, workerId?: string): Promise<{ workers: Array<WithModel<AgentActivity>> }>;
   stop(capId: string, workerId: string): Promise<{ worker_id: string; stopped: boolean }>;
 }
 
@@ -88,11 +91,14 @@ export function createWorkerHub(deps: WorkerHubDeps): WorkerHub {
     if (typeof input.prompt !== "string" || input.prompt === "" || input.prompt.includes("\0")) {
       throw new Error("prompt は空でない文字列（NUL 不可）");
     }
+    if (input.model !== undefined) assertModel(input.model, "model");
     const owner = await readOwner(workspace, workerId);
     if (owner !== undefined && owner !== capId) throw new Error(`別の cap の worker: ${workerId}`);
     const dir = agentDir(workspace, "worker", workerId);
     // repo 付きの初回は clone 先が存在してはいけないので、持ち主の記録は clone の後（runExtras）に任せる
     if (!(input.repo && !(await exists(dir)))) await writeOwner(workspace, workerId, capId);
+    // 指定が無ければ cap の worker_model（manager が worker の前回記録を優先して使う）
+    const capModel = input.model === undefined ? (await readModelRecord(agentDir(workspace, "cap", capId))).worker_model : undefined;
     log(`worker_start: cap_id=${capId} worker_id=${workerId} prompt=${oneLine(input.prompt, 80)}`);
     // 完了は待たない。失敗は activity と state.json に出る
     deps.manager
@@ -100,6 +106,8 @@ export function createWorkerHub(deps: WorkerHubDeps): WorkerHub {
         prompt: input.prompt,
         ...(input.repo ? { repo: input.repo } : {}),
         ...(input.branch ? { branch: input.branch } : {}),
+        ...(input.model !== undefined ? { model: input.model } : {}),
+        ...(capModel !== undefined ? { defaultModel: capModel } : {}),
         reason: `worker_start from cap ${capId}`,
         capId,
       })
@@ -111,19 +119,20 @@ export function createWorkerHub(deps: WorkerHubDeps): WorkerHub {
   }
 
   /** tracker に無い worker（server 再起動前のもの等）を state.json から補う。 */
-  async function fromState(capId: string, workerId: string): Promise<AgentActivity | undefined> {
+  async function fromState(capId: string, workerId: string): Promise<WithModel<AgentActivity> | undefined> {
     const dir = agentDir(workspace, "worker", workerId);
     const st = await readState(dir).catch(() => null);
     if (st === null) return undefined;
     const fresh = st.session_id === null && st.state === "idle";
     const state = fresh || st.state === "running" ? "running" : st.state === "idle" ? "idle" : "failed";
     const base = st.last_finished_at ?? st.last_started_at;
-    const a: AgentActivity = {
+    const a: WithModel<AgentActivity> = {
       kind: "worker",
       id: workerId,
       cap_id: capId,
       state,
       task: "",
+      model: (await readModelRecord(dir)).model ?? null,
       last_activity: fresh ? "starting" : null,
       last_output_at: null,
       silent_ms: base ? Math.max(0, Date.now() - Date.parse(base)) : 0,
@@ -134,7 +143,7 @@ export function createWorkerHub(deps: WorkerHubDeps): WorkerHub {
     return a;
   }
 
-  async function status(capId: string, workerId?: string): Promise<{ workers: AgentActivity[] }> {
+  async function status(capId: string, workerId?: string): Promise<{ workers: Array<WithModel<AgentActivity>> }> {
     await requireCap(capId);
     if (workerId !== undefined) {
       if (!isValidAgentId(workerId)) throw new Error(`worker_id が不正: ${workerId}`);
@@ -153,7 +162,7 @@ export function createWorkerHub(deps: WorkerHubDeps): WorkerHub {
       }
       for (const d of entries) if (d.isDirectory() && isValidAgentId(d.name)) ids.push(d.name);
     }
-    const extra: AgentActivity[] = [];
+    const extra: Array<WithModel<AgentActivity>> = [];
     for (const id of ids.sort()) {
       if (seen.has(id)) continue;
       if ((await readOwner(workspace, id)) !== capId) continue;

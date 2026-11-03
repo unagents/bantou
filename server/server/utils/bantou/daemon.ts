@@ -64,6 +64,10 @@ export function describeCommand(cmd: ServerCommand): string {
   const parts = [`cap_id=${cmd.cap_id}`];
   if (cmd.repo) parts.push(`repo=${maskUserinfo(cmd.repo)}`);
   if (cmd.branch) parts.push(`branch=${cmd.branch}`);
+  // model / worker_model は protocol の版によって型に無い。無ければ付かないだけ
+  const { model, worker_model: workerModel } = cmd as { model?: unknown; worker_model?: unknown };
+  if (typeof model === "string" && model) parts.push(`model=${model}`);
+  if (typeof workerModel === "string" && workerModel) parts.push(`worker_model=${workerModel}`);
   if (cmd.reason) parts.push(`reason=${ignoreText(cmd.reason)}`);
   parts.push(`prompt=${ignoreText(cmd.prompt).slice(0, 80)}`);
   return parts.join(" ");
