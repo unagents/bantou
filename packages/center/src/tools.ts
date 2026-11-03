@@ -121,7 +121,7 @@ export function registerTools(
     {
       title: "worker へ返答",
       description:
-        "server の worker に返答を送る（worker_report の ask / approve への回答など。desktop の center_call から使う）。server が同じ worker_id で worker を起動し直して text を渡す。remote_id 省略時は center の cap。{remote_id, server, worker_id, accepted:true} を返す。protocol の版が合わない server へは送らず error",
+        "server の worker に返答を送る（worker_report の ask / approve への回答など。desktop の center_call から使う）。server が同じ worker_id で worker を起動し直して text を渡す。remote_id 省略時は記録が 1 件ならその cap（複数あれば server で絞る）。{remote_id, server, worker_id, accepted:true} を返す。protocol の版が合わない server へは送らず error",
       inputSchema: workerReplySchema,
     },
     workerReplyHandler(remotes),
@@ -271,7 +271,7 @@ export function registerSessionTools(server: McpServer, deps: { remotes: RemoteM
     {
       title: "worker へ返答",
       description:
-        "server の worker に返答を送る（worker_report の ask / approve への回答など）。server が同じ worker_id で worker を起動し直して text を渡す。remote_id 省略時は center の cap。{remote_id, server, worker_id, accepted:true} を返す。protocol の版が合わない server へは送らず error",
+        "server の worker に返答を送る（worker_report の ask / approve への回答など）。server が同じ worker_id で worker を起動し直して text を渡す。remote_id 省略時は記録が 1 件ならその cap（複数あれば server で絞る）。{remote_id, server, worker_id, accepted:true} を返す。protocol の版が合わない server へは送らず error",
       inputSchema: workerReplySchema,
     },
     workerReplyHandler(remotes),
@@ -290,7 +290,7 @@ export function registerSessionTools(server: McpServer, deps: { remotes: RemoteM
     {
       title: "remote 削除",
       description:
-        "server の remote-cap の実行を止め（server へ stop_cap）、center の記録から外す。止められない時は error（force: true で記録だけ消す）。cap は共有なので、他の session の指示も止まる。remote_id 省略時は center の cap。複数の server に同じ remote_id がある時は server で指定する",
+        "server の remote-cap の実行を止め（server へ stop_cap）、center の記録から外す。止められない時は error（force: true で記録だけ消す）。cap は共有なので、他の session の指示も止まる。remote_id 省略時は記録が 1 件ならその cap（複数あれば server で絞る）。複数の server に同じ remote_id がある時は server で指定する",
       inputSchema: { remote_id: agentId.optional(), server: z.string().min(1).optional(), force: z.boolean().optional() },
     },
     ({ remote_id, server: srv, force }) =>

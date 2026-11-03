@@ -1074,16 +1074,64 @@ test("restore: 同じ server に旧形式が複数あれば最新の 1 件を残
   assert.deepEqual((JSON.parse(await readFile(join(dir, "remotes.json"), "utf8")) as RemoteRecord[]).map((r) => r.remote_id).sort(), ["r-9f8e7d6c5b", "r-b-only"]);
 });
 
-test("restore: 新形式の記録（center の cap_id）がある server では、それを残して旧形式を stop_cap で消す。stop_cap が届かなくても記録は消える", async () => {
-  const old = legacyRec("r-0a1b2c3d4e", { createdAt: "2026-11-05T00:00:00.000Z" }); // 新形式より新しくても残さない
-  const own: RemoteRecord = { remote_id: CAP, server: "id-a", serverName: "bantou-server", serverHost: "host-a", state: "done", createdAt: "2026-11-04T00:00:00.000Z", result: "keep", pending: [] };
-  await writeFile(join(dir, "remotes.json"), JSON.stringify([old, own]));
+test("restore: 同じ server に新形式の記録（center の cap_id）と旧形式があっても、形式を問わず最新の 1 件を残す。stop_cap が届かなくても記録は消える", async () => {
+  const own: RemoteRecord = { remote_id: CAP, server: "id-a", serverName: "bantou-server", serverHost: "host-a", state: "done", createdAt: "2026-11-04T00:00:00.000Z", result: "own", pending: [] };
+  const newer = legacyRec("r-0a1b2c3d4e", { createdAt: "2026-11-05T00:00:00.000Z", result: "newer legacy" });
+  await writeFile(join(dir, "remotes.json"), JSON.stringify([own, newer]));
   const logs: string[] = [];
   const { mgr } = setup({ stopCapOn: async () => { throw new Error("link down"); } }, undefined, undefined, undefined, { log: (m: string) => logs.push(m) });
   await mgr.restore();
-  assert.deepEqual(mgr.list().map((r) => [r.remote_id, r.result]), [[CAP, "keep"]]);
-  assert.ok(logs.some((l) => /stop_cap が届かない.*r-0a1b2c3d4e.*link down/.test(l)));
-  assert.deepEqual((JSON.parse(await readFile(join(dir, "remotes.json"), "utf8")) as RemoteRecord[]).map((x) => x.remote_id), [CAP]);
+  assert.deepEqual(mgr.list().map((r) => [r.remote_id, r.result]), [["r-0a1b2c3d4e", "newer legacy"]]);
+  assert.ok(logs.some((l) => new RegExp(`stop_cap が届かない.*${CAP}.*link down`).test(l)));
+  assert.deepEqual((JSON.parse(await readFile(join(dir, "remotes.json"), "utf8")) as RemoteRecord[]).map((x) => x.remote_id), ["r-0a1b2c3d4e"]);
+  // 新形式の方が新しければ、新形式が残る（center の cap_id のまま）
+  await writeFile(join(dir, "remotes.json"), JSON.stringify([{ ...own, createdAt: "2026-11-06T00:00:00.000Z" }, legacyRec("r-0a1b2c3d4e")]));
+  const { mgr: m2, stops } = setup({}, undefined, undefined, undefined, { log: () => {} });
+  await m2.restore();
+  assert.deepEqual(m2.list().map((r) => r.remote_id), [CAP]);
+  assert.deepEqual(stops.map((x) => (x.cmd as { cap_id: string }).cap_id), ["r-0a1b2c3d4e"]);
+});
+
+test("restore: host の無い旧記録（serverHost を持つ前）は名前で同じ server とみなし、1 件に畳む。peer id が変わっても旧 cap_id へ送り、記録は 1 件のまま。status で host が埋まる", async () => {
+  const noHost = (id: string, over: Record<string, unknown> = {}) => {
+    const r = legacyRec(id, over) as Record<string, unknown>;
+    delete r.serverHost;
+    return r;
+  };
+  const own: RemoteRecord = { remote_id: CAP, server: "id-a", serverName: "bantou-server", serverHost: "host-a", state: "done", createdAt: "2026-11-03T12:00:00.000Z", pending: [] };
+  await writeFile(join(dir, "remotes.json"), JSON.stringify([noHost("r-0a1b2c3d4e", { createdAt: "2026-11-03T00:00:00.000Z" }), noHost("r-9f8e7d6c5b", { createdAt: "2026-11-03T20:00:00.000Z" }), own]));
+  const { mgr, stops, kicks, caps, setPeers } = setup({}, undefined, undefined, undefined, { log: () => {} });
+  const peerA2: ServerPeer = { id: "id-a2", name: "bantou-server", hostname: "host-a", version: "1.1.0" }; // server の再起動で peer id が変わった
+  setPeers([peerA2, peerB]);
+  caps.set("id-a2", ["r-9f8e7d6c5b"]);
+  await mgr.restore();
+  assert.deepEqual(mgr.list().map((r) => r.remote_id), ["r-9f8e7d6c5b"]);
+  assert.deepEqual(stops.map((x) => (x.cmd as { cap_id: string }).cap_id).sort(), [CAP, "r-0a1b2c3d4e"].sort());
+  caps.set("id-a2", ["r-9f8e7d6c5b"]); // テストの stopCapOn は server の cap を全部消すので、残した cap を戻す
+  const r = await mgr.send({ owner: "o", goal: "go" });
+  assert.equal(r.remote_id, "r-9f8e7d6c5b");
+  assert.equal(r.created, false);
+  assert.equal(kicks[0].cmd.cap_id, "r-9f8e7d6c5b");
+  assert.equal(mgr.list().length, 1);
+  assert.equal(mgr.list()[0].server, "id-a2");
+  assert.equal(mgr.list()[0].serverHost, "host-a");
+});
+
+test("restore: host の無い旧記録は、起動時の status が成功したら今の peer id と host を記録に入れる（同名の server が複数いて決められない時は入れない）", async () => {
+  const rec = { remote_id: "r-0a1b2c3d4e", server: "old-id", serverName: "bantou-server", state: "done", createdAt: "2026-11-03T00:00:00.000Z", pending: [] };
+  await writeFile(join(dir, "remotes.json"), JSON.stringify([rec]));
+  const one = setup({}, undefined, undefined, undefined, { log: () => {} });
+  one.setPeers([peerA, peerB]);
+  await one.mgr.restore();
+  await sleep(30);
+  assert.deepEqual([one.mgr.list()[0].server, one.mgr.list()[0].serverHost], ["id-a", "host-a"]);
+  assert.equal((JSON.parse(await readFile(join(dir, "remotes.json"), "utf8")) as RemoteRecord[])[0].serverHost, "host-a");
+  await writeFile(join(dir, "remotes.json"), JSON.stringify([rec]));
+  const two = setup({}, undefined, undefined, undefined, { log: () => {} });
+  two.setPeers([peerA, { ...peerA, id: "id-a-other", hostname: "host-z" }]);
+  await two.mgr.restore();
+  await sleep(30);
+  assert.equal(two.mgr.list()[0].serverHost, undefined);
 });
 
 test("restore: 旧形式の running と未完了の指示（history 形式）は引き継いで status で追従する。cap_id ごとに指示する", async () => {
@@ -1323,7 +1371,7 @@ test("worker_report: 記録に到着順で積み（最大 20 件）、remote_lis
   assert.equal(wr.length, 20);
   assert.deepEqual([wr[0].text, wr[19].text], ["q5", "q24"]);
   assert.deepEqual(mgr.list({ owner: "pm1" })[0].worker_reports.length, 20);
-  await tick();
+  await sleep(80); // 保存（非同期）を待つ
   const saved = JSON.parse(await readFile(join(dir, "remotes.json"), "utf8")) as RemoteRecord[];
   assert.equal(saved[0].worker_reports?.length, 20);
 });

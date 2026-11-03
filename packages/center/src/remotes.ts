@@ -170,9 +170,9 @@ export const remoteSendSchema = {
   server: serverArg,
   worker_model: modelArg("worker の既定モデル（task に載せる。items[].model が優先）。省略時、新規の cap は config servers[].workerModel、既存の cap は送らない（server の記憶のまま）"),
 };
-/** worker_reply の入力（desktop の center_call と /mcp/session で共通）。remote_id 省略時は center の cap。 */
+/** worker_reply の入力（desktop の center_call と /mcp/session で共通）。remote_id 省略時は記録が 1 件ならその cap。 */
 export const workerReplySchema = {
-  remote_id: z.string().regex(AGENT_ID_PATTERN, "英数字と _ - のみ").optional().describe("返答先の remote（cap）。省略時は center の cap"),
+  remote_id: z.string().regex(AGENT_ID_PATTERN, "英数字と _ - のみ").optional().describe("返答先の remote（cap）。省略時は記録が 1 件ならその cap（複数なら server で絞る）"),
   worker_id: z.string().regex(AGENT_ID_PATTERN, "英数字と _ - のみ").describe("返答する worker（worker_report の worker_id）"),
   text: z.string().min(1).refine(noNul, noNulMsg).describe("worker への返答（ask への回答、approve の承認・却下など）"),
   server: serverArg.describe("remote_id が複数の server にある時の絞り込み"),
@@ -222,11 +222,11 @@ export interface RemoteManager {
    * 返信（task_result）は待たず、running で返る。cap が実行中なら server 側で直列に待たされる。
    */
   send(input: RemoteSendInput): Promise<RemoteSendResult>;
-  /** worker_reply を server へ送る（remote_id 省略時は center の cap）。版が合わない server へは送らず投げる。 */
+  /** worker_reply を server へ送る（remote_id 省略時は記録が 1 件ならその cap）。版が合わない server へは送らず投げる。 */
   workerReply(input: { remote_id?: string; server?: string; worker_id: string; text: string }): Promise<{ remote_id: string; server: string; worker_id: string; accepted: true }>;
   /** server から worker_report を受けた時に呼ぶ。記録に積み、未完了の指示の owner へ push する（progress は同じ worker から 60 秒に 1 回）。 */
   onWorkerReport(report: WorkerReportNotice, fromId?: string): void;
-  /** stop_cap を送って記録を外す。remote_id 省略時は center の cap。server で複数から絞る。 */
+  /** stop_cap を送って記録を外す。remote_id 省略時は記録が 1 件ならその cap。server で複数から絞る。 */
   delete(input: { remote_id?: string; server?: string; force?: boolean }): Promise<{ remote_id: string; deleted: true; stopped: boolean; warning?: string }>;
   /**
    * 最初の返信の後に server が送ってきた task_result / cap_result / error（task・kick_cap。report 起因の再開など）を記録に反映する。
@@ -315,8 +315,10 @@ export function createRemoteManager(opts: {
   const announce = async (r: RemoteRecord, attempt = 0): Promise<void> => {
     if (!has(r)) return;
     try {
-      const reply = await link.statusOn(await findPeer(r), { cap_id: r.remote_id });
+      const peer = await findPeer(r);
+      const reply = await link.statusOn(peer, { cap_id: r.remote_id });
       if (reply.type === "error") throw new Error(reply.message);
+      await adoptPeer(r, peer);
       log(`通知先を server へ伝えた（status cap_id）: ${r.remote_id} server=${r.serverName}`);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -463,9 +465,11 @@ export function createRemoteManager(opts: {
     const startedAt = Date.now();
     let st: StatusReply;
     try {
-      const reply = await link.statusOn(await findPeer(r), { cap_id: r.remote_id });
+      const peer = await findPeer(r);
+      const reply = await link.statusOn(peer, { cap_id: r.remote_id });
       if (reply.type === "error") throw new Error(reply.message);
       st = reply;
+      await adoptPeer(r, peer);
     } catch (e) {
       if (!has(r) || (inflight.get(r) ?? 0) > 0) return;
       const msg = e instanceof Error ? e.message : String(e);
@@ -521,9 +525,33 @@ export function createRemoteManager(opts: {
         ? { ok: reply.ok, text: reply.result_text, ...(reply.ok ? {} : { error: reply.error ?? "失敗" }) }
         : { ok: false, text: "", error: reply.message };
 
+  /**
+   * 記録がこの peer の server か。peer id 一致、または名前 + host 一致。host の無い記録（serverHost を持つ前の旧形式）は名前だけで一致する
+   * （同名の server が複数あっても host が埋まるまでは区別できない）。
+   */
+  const sameServer = (r: RemoteRecord, peer: ServerPeer): boolean =>
+    r.server === peer.id || (r.serverName === peer.name && (r.serverHost === undefined || r.serverHost === peer.hostname));
+
   /** server の peer から記録を探す（id 一致 → 名前 + host 一致）。server ごとに 1 件。 */
   const findRecord = (peer: ServerPeer): RemoteRecord | undefined =>
-    records.find((r) => r.server === peer.id) ?? records.find((r) => r.serverName === peer.name && r.serverHost === peer.hostname);
+    records.find((r) => r.server === peer.id) ?? records.find((r) => sameServer(r, peer));
+
+  /**
+   * host の無い記録（旧形式）の server が status で確かめられたら、今の peer id と host を記録に入れる（以後は名前 + host で区別できる）。
+   * 同名の peer が複数いて、どれがこの記録の server か決められない時は何もしない。
+   */
+  const adoptPeer = async (r: RemoteRecord, peer: ServerPeer): Promise<void> => {
+    if (r.serverHost !== undefined || !peer.hostname) return;
+    try {
+      const same = (await link.peers()).filter((p) => p.name === r.serverName);
+      if (same.length !== 1 || same[0].id !== peer.id) return;
+    } catch {
+      return;
+    }
+    r.server = peer.id;
+    r.serverHost = peer.hostname;
+    void persist();
+  };
 
   /** 通知・遅れた返信の送信元から記録を決める。同じ cap_id が 1 件だけなら、peer id が変わっていてもそれ。 */
   const resolveRecord = (id: string, fromId?: string): RemoteRecord | undefined => {
@@ -558,7 +586,7 @@ export function createRemoteManager(opts: {
     if (cands.length === 0) throw new Error(`未定義の remote: ${remote_id ?? "（remote_id 省略。remote が無い）"}`);
     if (server !== undefined) {
       const peer = await link.selectPeer(server);
-      cands = cands.filter((r) => r.server === peer.id || (r.serverName === peer.name && r.serverHost === peer.hostname));
+      cands = cands.filter((r) => sameServer(r, peer));
       if (cands.length === 0) throw new Error(`その server に remote ${remote_id ?? ""} は無い: ${server}`);
     }
     if (cands.length > 1) throw new Error(`remote ${remote_id ?? "（remote_id 省略）"} は複数の server にある（server で指定: ${cands.map((r) => `${r.serverName}(${r.server})`).join(", ")}）`);
@@ -615,17 +643,18 @@ export function createRemoteManager(opts: {
         if (r.state !== "running" && r.state !== "done" && r.state !== "failed" && r.state !== "unknown") r.state = "unknown";
         loaded.push(r);
       }
-      // server ごとに 1 件にする。同じ server に複数ある（作業ごとの cap の名残）時は、center の cap_id の記録があればそれ、
-      // 無ければ最新の 1 件を残し、他は stop_cap を送って消す（1 回限りの後始末）
+      // server ごとに 1 件にする。同じ server に複数ある（作業ごとの cap の名残）時は最新の 1 件を残し、他は stop_cap を送って消す（1 回限りの後始末）。
+      // 同じ server = peer id が同じ、または名前が同じで host が同じ（host の無い旧形式の記録は名前だけで同じとみなす）
       const surplus: RemoteRecord[] = [];
-      const byServer = new Map<string, RemoteRecord[]>();
+      const groups: RemoteRecord[][] = [];
       for (const r of loaded) {
-        const key = `${r.serverName ?? ""}\0${r.serverHost ?? ""}`;
-        byServer.set(key, [...(byServer.get(key) ?? []), r]);
+        const g = groups.find((m) => m.some((x) => x.server === r.server || (x.serverName === r.serverName && (x.serverHost === undefined || r.serverHost === undefined || x.serverHost === r.serverHost))));
+        if (g) g.push(r);
+        else groups.push([r]);
       }
       let migrated = 0;
-      for (const group of byServer.values()) {
-        const keep = group.find((r) => r.remote_id === capId) ?? [...group].sort((x, y) => lastAt(y).localeCompare(lastAt(x)))[0]!;
+      for (const group of groups) {
+        const keep = [...group].sort((x, y) => lastAt(y).localeCompare(lastAt(x)))[0]!;
         if (keep.remote_id !== capId) {
           migrated++;
           log(`旧形式の記録を server の cap として引き継ぐ: cap_id=${keep.remote_id} server=${keep.serverName}`);
