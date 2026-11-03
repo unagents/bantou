@@ -94,7 +94,7 @@ e2e の実行方法（204 は Chrome が無く nuxt dev が sandbox で動かな
 
 ## 残存物
 
-- 一時物は作業 dir 内: `tmp/`（capture 用 tee.sh・stdin.jsonl・env.txt、compiled の center、mock / 静的サーバーの js と log、pw.config.mts）→ 最後に `find -delete` で削除。
+- 一時物は作業 dir 内の `tmp/`（capture 用 tee.sh・stdin.jsonl・env.txt、compiled の center、mock / 静的サーバーの js と log、pw.config.mts）。`find -delete` で削除済み。
 - clone 内の ignore 済みの生成物: `packages/desktop/.output/`、`packages/desktop/node_modules/.cache/bantou-e2e/`（mock bundle・test-results）、`src-tauri/binaries/bantou-pty-wrapper-*`、`src-tauri/target/`、`packages/pty-wrapper/target/`、各 `node_modules`、`packages/protocol/dist`。
-- clone の外: capture 用に起動した claude が作った transcript dir `$CLAUDE_CONFIG_DIR/projects/-home-vagrant-work-bantou-server-ws-workers-w-ctx-tmp-proj/` （確認済み）。作業 dir の `tmp/proj` を trust したので、設定 dir の `.claude.json` に project の記録がある可能性がある（未確認、中身は読んでいない）。削除は cap に委ねる。
+- clone の外: capture 用に別の設定 dir は作っていない（`CLAUDE_CONFIG_DIR` は利用者の `~/.claude-agent`）。capture で claude が作った transcript dir `~/.claude-agent/projects/-home-vagrant-work-bantou-server-ws-workers-w-ctx-tmp-proj/` は `find -delete` で削除済み。`~/.claude-agent/.claude.json` と `~/.claude.json` に `w-ctx/tmp/proj` の project 記録が残っている（利用者の実ファイルのため変更せず、読むだけで確認）。
 - プロセス: tmux session `ctxcap`、静的サーバー、モックサーバーは停止済み（ポート 14999 / 47911 解放確認）。
