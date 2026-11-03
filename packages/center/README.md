@@ -91,6 +91,7 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 | `servers[].timeoutMs` | 正の整数 | `2100000`（35 分） | 返信待ちの打ち切り |
 | `logDir` | 絶対パス | config と同じ場所の `center-logs/` | remote-control の出力ログ置き場 |
 | `workspace` | 絶対パス | なし | `session_create` で `path` 省略時の置き場所 `<workspace>/<name>` の親。session は起動時に立てない |
+| `sessionInstructions` | 文字列 | なし | 全 session（master-cap）の dir に `CLAUDE.md` として書く指示。空文字・空白だけは未指定と同じ（書かない）。詳細は「master-cap への指示（CLAUDE.md）」 |
 | `token` | 12 文字以上の文字列 | なし | http transport の `/mcp` が要求する Bearer token。http では必須（無い・12 文字未満だと起動せずエラー終了。Cork の MCP Server が 12 文字未満の token を拒否し、保存値が不正なら作り直すのに合わせた）。stdio では使わない。desktop は sidecar 起動時に `center.json` へ書く |
 
 ### server の発見（protocol 方式）
@@ -150,6 +151,7 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 - `session_delete`: `session_create` で作ったものだけ。remote-control を停止（SIGTERM → `stopGraceMs` 後 SIGKILL）して監視と保存から外す。path は消さない。config 由来の project は拒否。
 - `session_list`: config の project と session の全部。`source` が `config` / `session`。`contextUsage`（`{ usedTokens, windowTokens, percent, updatedAt }`、まだ分からない時は `null`）が付く。取得の仕組みは「context 使用量」。
 - 保存: config と同じ dir の `sessions.json`（`name`, `path`, `permissionMode`, `createdAt`）。config の projects には書かない。center 起動時に復元して `--continue` で起動する。`--continue` で接続前に 30 秒以内に終了した場合（約 4 時間以内の記録が無い、など）は、素の起動へ fallback する（再起動回数は増やさない）。
+- master-cap への指示（CLAUDE.md）: config の `sessionInstructions` があれば、session の dir（`session_create` の `path`、省略時は `<workspace>/<name>`）の `CLAUDE.md` に、先頭 1 行の印 `<!-- bantou: center の設定から生成。手で直しても次の保存で上書きされる -->` を付けて書く。書くのは (a) `session_create` の起動前、(b) 起動時の session 復帰（`--continue`）の前、(c) config ファイルが書き換わった時（1 秒ごとの更新時刻の確認。desktop が設定を保存すると config を書き出す）の 3 つで、(c) は今ある全 session の dir を書き直す。(c) で反映するのは `sessionInstructions` だけで、他の項目は center の再起動で反映する。指示が空になったら、印のあるファイルだけを消す（手で置かれた印の無い `CLAUDE.md` は消さない）。書けない dir があってもログに出すだけで、起動は止めない。Claude Code は `CLAUDE.md` を起動時に読むので、動いている session には次の起動まで効かない（session の自動再起動はしない）。
 - 新規 path の trust: **trust プロンプトは出ず、remote-control が `Error: Workspace not trusted. Please run `claude` in <path> first ...` で即 exit 1 する**（claude 2.1.312 で実測）。親 dir が trust 済みなら配下は通る（実測: trust 済みの repo 配下の dir で `connected`）。そのため、未 trust の path では `session_create` は `state: starting` と `lastError`（`接続前に終了: Error: Workspace not trusted...`）を返し、supervisor は再起動を繰り返して上限で `error` になる。対処は、workspace（または path の親）で一度 `claude` を起動して trust を承認しておくこと。center が claude の設定ファイルを書き換えて trust を付けることはしない（今は）。
 - 同じ folder を別の `claude remote-control` が直前まで握っていると、`This folder is already served by a terminal \`claude remote-control\` on this device. Stop it first.` で約 1 分待たされて終了する（実測、直前の center を強制終了した後など）。
 

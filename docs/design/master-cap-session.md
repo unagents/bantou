@@ -102,6 +102,18 @@ center の通知（remote の完了通知など）は owner の session 名の m
 
 公式ドキュメント（環境変数一覧、remote-control、MCP）に、サーバー型が作るセッションへファイル無しで MCP を渡す手段、MCP 設定を受け取る環境変数、`-p` で remote-control を有効にする手段の記述は無い。`remoteControlAtStartup` は対話型の起動時に効き、true はユーザー設定か管理者設定でのみ有効。
 
+### 6.2 master-cap への指示ファイル CLAUDE.md（2026-11-04）
+
+master-cap の振る舞いを決める指示を、desktop の設定画面から入れて center が session の dir に `CLAUDE.md` として置く。
+
+- 設定: center.json の `sessionInstructions`（文字列、省略可。空文字・空白だけは「無し」）。desktop の `settings.json` の center キー `sessionInstructions` から書き出す。設定画面の「master-cap の CLAUDE.md」が入力欄。
+- 書く先: session の cwd（`<workspace>/<session 名>/`。`path` を指定した session はその path）の `CLAUDE.md`。先頭 1 行に印 `<!-- bantou: center の設定から生成。手で直しても次の保存で上書きされる -->` を付ける。
+- 書く時: session の起動前（`session_create`）、復帰（`--continue`）の前、設定の保存時（今ある全 session の dir）。内容が空なら消す。
+- 保存の伝え方: desktop は保存時に center.json を書き直す。center は config ファイルの更新時刻を 1 秒ごとに見て、変わったら `sessionInstructions` だけ読み直して全 session に書く（他の項目は従来どおり再起動で反映）。
+  - 比べた案: (A) 変更で center を再起動 — 再起動で全 master-cap が止まり、自動再起動をしない方針に反する。(B) center に再読込の HTTP エンドポイントを足す — desktop 側に port・token で呼ぶ経路が増える。(C) SIGHUP — center は SIGHUP を終了に使っており、Windows に無い。(D) 更新時刻の監視 — 経路が config ファイルだけで済む。採用。
+- 空にした時に消すのは、印のあるファイルだけ。手で置かれた `CLAUDE.md`（印なし）は消さない。非空の内容は、印の有無にかかわらず上書きする（仕様どおり）。
+- Claude Code は `CLAUDE.md` を session 起動時に読む。動いている session には次の起動まで効かない。設定画面に注意文を出し、自動再起動はしない。
+
 ## 決定（技術判断）
 
 1. desktop ↔ core は SSE + POST。出力は SSE（イベント ID = チャンク ID、つなぎ直しは `Last-Event-ID`）、入力は POST。center と同じポート・同じ token。desktop の Rust 側が受け、画面へは Tauri の event で渡す（webview は center に直接触れない、`docs/architecture.md`）。

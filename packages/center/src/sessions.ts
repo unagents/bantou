@@ -7,6 +7,7 @@ import type { RcStatus, RemoteControlSupervisor } from "./remote-control.js";
 import type { EventHub } from "./events.js";
 import type { JsonListStore } from "./store.js";
 import type { ContextUsage } from "./context-usage.js";
+import { syncInstructionsFile } from "./instructions.js";
 
 export const SESSION_NAME = /^[A-Za-z0-9_-]+$/;
 
@@ -44,6 +45,8 @@ export interface SessionManager {
   create(input: { name: string; path?: string; permissionMode?: ProjectConfig["permissionMode"] }): Promise<SessionInfo>;
   delete(name: string): Promise<{ name: string; deleted: true }>;
   list(): SessionInfo[];
+  /** 指示（CLAUDE.md の内容）を差し替え、今ある全 session の dir に書き直す（空なら消す）。動いている session には次の起動まで効かない。 */
+  setInstructions(text: string | undefined): Promise<void>;
 }
 
 /**
@@ -65,6 +68,15 @@ export function createSessionManager(opts: {
   const { config, supervisor, store, log } = opts;
   const waitMs = opts.waitMs ?? 15_000;
   const saved = new Map<string, SavedSession>();
+  let instructions = opts.config.sessionInstructions;
+  /** 1 つの dir に書く。失敗しても session の起動は止めない。 */
+  const writeInstructions = async (name: string, dir: string): Promise<void> => {
+    try {
+      await syncInstructionsFile(dir, instructions);
+    } catch (e) {
+      log(`CLAUDE.md を書けない: ${name} (${dir}) ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
   /** 同時の create / delete を直列にする（重複判定と保存を競合させない）。 */
   let chain: Promise<unknown> = Promise.resolve();
   const serial = <T>(fn: () => Promise<T>): Promise<T> => {
@@ -101,6 +113,7 @@ export function createSessionManager(opts: {
           saved.set(s.name, s);
           opts.events?.publish({ reason: "restored", name: s.name });
           await mkdir(s.path, { recursive: true });
+          await writeInstructions(s.name, s.path);
           await supervisor.start(s.name, { resume: true });
           log(`session 復帰: ${s.name} (${s.path})`);
         } catch (e) {
@@ -125,6 +138,7 @@ export function createSessionManager(opts: {
         const clash = existing.find((s) => resolve(s.path) === path);
         if (clash) throw new Error(`path が既に使われている: ${path}（${clash.project}）`);
         await mkdir(path, { recursive: true });
+        await writeInstructions(name, path);
         const rec: SavedSession = {
           name,
           path,
@@ -168,5 +182,12 @@ export function createSessionManager(opts: {
       }),
 
     list: () => supervisor.list().map(info),
+
+    setInstructions: (text) =>
+      serial(async () => {
+        instructions = text;
+        for (const s of saved.values()) await writeInstructions(s.name, s.path);
+        log(`session の CLAUDE.md を更新: ${saved.size} 件`);
+      }),
   };
 }

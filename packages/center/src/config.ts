@@ -79,6 +79,8 @@ export const configSchema = z
     workspace: absPath.optional(),
     /** http transport の `/mcp` が要求する Bearer token。stdio では使わない。無い・短い時は http が起動しない。 */
     token: z.string().optional(),
+    /** 全 session（master-cap）の dir に CLAUDE.md として書く指示。空文字・未指定は「無し」。 */
+    sessionInstructions: z.string().optional(),
   })
   .superRefine((cfg, ctx) => {
     for (const key of ["projects", "servers"] as const) {
@@ -106,6 +108,8 @@ export interface Config {
   workspace?: string;
   /** http transport の Bearer token（未設定なら undefined）。 */
   token?: string;
+  /** session の dir に書く CLAUDE.md の内容（無ければ undefined。空文字は無しに寄せる）。 */
+  sessionInstructions?: string;
 }
 
 /** zod の検証結果から Config を作る（logDir の既定は config と同じ場所の center-logs）。 */
@@ -117,12 +121,13 @@ export function parseConfig(data: unknown, configPath: string): Config {
       .join("; ");
     throw new Error(`config が不正: ${issues}`);
   }
-  const { logDir, token, workspace, ...rest } = r.data;
+  const { logDir, token, workspace, sessionInstructions, ...rest } = r.data;
   return {
     ...rest,
     logDir: logDir ?? join(dirname(resolve(configPath)), "center-logs"),
     ...(workspace ? { workspace } : {}),
     ...(token ? { token } : {}),
+    ...(sessionInstructions?.trim() ? { sessionInstructions } : {}),
   };
 }
 

@@ -34,7 +34,7 @@ export class MockBantou {
   supplement: string;
   update: Seed["update"];
   /** bind "" = no IP saved: center_get_settings shows the default (first external IPv4). */
-  center: CenterSettings = { enabled: false, port: 7910, bind: "", workspace: "~/.bantou", token: "mock-token-000000000000000000000001" };
+  center: CenterSettings = { enabled: false, port: 7910, bind: "", workspace: "~/.bantou", sessionInstructions: "", token: "mock-token-000000000000000000000001" };
   /** Number of tokens minted by center_regenerate_token (the next one is mock-token-<n>). */
   private tokenSeq = 1;
   /** This machine's addresses now (center_local_ips / center_ip_status); a spec can drop one to make a saved IP vanish. */

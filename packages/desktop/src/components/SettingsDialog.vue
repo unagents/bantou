@@ -386,6 +386,24 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
             @update:model-value="settings.claudePath = String($event) || undefined"
           />
         </UFormField>
+
+        <UFormField
+          label="master-cap の CLAUDE.md"
+          description="center が起動する全 master-cap の作業ディレクトリに CLAUDE.md として書く。空なら書かない（center が書いたものは消す）"
+        >
+          <UTextarea
+            v-model="settings.sessionInstructions"
+            :rows="6"
+            autoresize
+            class="w-full font-mono"
+            data-testid="center-session-instructions"
+          />
+          <template #hint>
+            <span class="text-cork-muted text-xs" data-testid="center-session-instructions-note">
+              動いている master-cap には次の起動まで効かない（自動では再起動しない）
+            </span>
+          </template>
+        </UFormField>
         </div>
 
         <div v-else class="flex flex-col gap-2" data-testid="center-remote-section">

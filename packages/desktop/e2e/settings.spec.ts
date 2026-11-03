@@ -382,3 +382,31 @@ test("a center that could not listen shows the same IP banner", async ({ page })
   await expect(page.getByTestId("center-ip-banner-bind-failed")).toBeVisible();
   await expect(page.getByTestId("center-ip-banner-missing")).toHaveCount(0);
 });
+
+test("master-cap の CLAUDE.md: 保存済みの内容が入力欄に出て、注意文があり、編集して保存できる", async ({ page }) => {
+  await page.goto("/");
+  await page.evaluate(() => {
+    const m = (window as unknown as { __BANTOU_MOCK__: { center: Record<string, unknown> } }).__BANTOU_MOCK__;
+    m.center.enabled = true;
+    m.center.sessionInstructions = "# 方針\n日本語で答える";
+  });
+  await page.getByTestId("open-settings").click();
+  const field = page.getByTestId("center-session-instructions");
+  await expect(field).toBeVisible();
+  await expect(field).toHaveValue("# 方針\n日本語で答える");
+  await expect(page.getByTestId("center-session-instructions-note")).toContainText("次の起動まで効かない");
+
+  await field.fill("行1\n行2");
+  await page.getByTestId("settings-save").click();
+  await expect(page.getByText("設定を保存した", { exact: true })).toBeVisible();
+  const saved = await page.evaluate(() => (window as unknown as { __BANTOU_MOCK__: { center: { sessionInstructions: string } } }).__BANTOU_MOCK__.center.sessionInstructions);
+  expect(saved).toBe("行1\n行2");
+
+  // 空にして保存すると「無し」になる
+  await page.getByTestId("open-settings").click();
+  await page.getByTestId("center-session-instructions").fill("");
+  await page.getByTestId("settings-save").click();
+  await expect(page.getByTestId("settings-dialog")).toBeHidden();
+  const cleared = await page.evaluate(() => (window as unknown as { __BANTOU_MOCK__: { center: { sessionInstructions: string } } }).__BANTOU_MOCK__.center.sessionInstructions);
+  expect(cleared).toBe("");
+});

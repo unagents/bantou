@@ -80,6 +80,10 @@ pub struct CenterSettings {
     /// Absolute path of the claude executable. Unset: the center resolves it via a login shell.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub claude_path: Option<String>,
+    /// Text the center writes as `CLAUDE.md` into every master-cap session dir (`sessionInstructions` of center.json).
+    /// Empty: none (the center removes the file it wrote). A running center picks a change up
+    /// from the config file without a restart; a running session reads it at its next start.
+    pub session_instructions: String,
     /// Bearer token the sidecar center requires on `/mcp`. Minted on first load when empty.
     pub token: String,
     /// Center on another host this desktop connects to (used instead of the sidecar when set).
@@ -97,6 +101,7 @@ impl Default for CenterSettings {
             bind: String::new(),
             workspace: DEFAULT_WORKSPACE.to_string(),
             claude_path: None,
+            session_instructions: String::new(),
             token: String::new(),
             remote: None,
         }
@@ -144,6 +149,10 @@ pub fn validate_settings(mut s: CenterSettings) -> Result<CenterSettings, String
             return Err("claudePath は絶対パスで指定する".to_string());
         }
     }
+    // Blank counts as none (the text itself is kept as typed).
+    if s.session_instructions.trim().is_empty() {
+        s.session_instructions.clear();
+    }
     if !s.token.is_empty() && s.token.chars().count() < MIN_TOKEN_LEN {
         return Err(format!("token は {MIN_TOKEN_LEN} 文字以上"));
     }
@@ -182,6 +191,9 @@ pub fn build_config(s: &CenterSettings, home: &Path) -> serde_json::Value {
     });
     if !s.token.is_empty() {
         cfg["token"] = s.token.clone().into();
+    }
+    if !s.session_instructions.is_empty() {
+        cfg["sessionInstructions"] = s.session_instructions.clone().into();
     }
     cfg
 }
@@ -613,6 +625,16 @@ impl Center {
             if g.child.is_some() { g.started_with.clone() } else { None }
         };
         if !needs_restart(running_with.as_ref(), s) {
+            // Not restarted, but the center watches its config file for `sessionInstructions`.
+            if running_with.is_some() {
+                let written = config_path(app).and_then(|path| {
+                    let home = app.path().home_dir().map_err(|e| format!("HOME を解決できない: {e}"))?;
+                    write_config(s, &path, &home)
+                });
+                if let Err(e) = written {
+                    self.set_error(format!("center の設定を書けない: {e}"));
+                }
+            }
             return;
         }
         self.stop_locked().await;
@@ -980,6 +1002,28 @@ mod tests {
         let s: CenterSettings = serde_json::from_str(r#"{"projects":[],"servers":[]}"#).unwrap();
         assert_eq!(s.workspace, "~/.bantou");
         assert!(validate_settings(s).is_ok());
+    }
+
+    #[test]
+    fn session_instructions_roundtrip_and_config() {
+        // old settings without the key read as none
+        let s: CenterSettings = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
+        assert_eq!(s.session_instructions, "");
+        // camelCase key, kept as typed (multi-line)
+        let s: CenterSettings = serde_json::from_str(r#"{"sessionInstructions":"a\nb\n"}"#).unwrap();
+        assert_eq!(s.session_instructions, "a\nb\n");
+        let v = validate_settings(s).unwrap();
+        let back: CenterSettings = serde_json::from_value(serde_json::to_value(&v).unwrap()).unwrap();
+        assert_eq!(back.session_instructions, "a\nb\n");
+        assert_eq!(serde_json::to_value(&v).unwrap()["sessionInstructions"], "a\nb\n");
+        // center.json carries it only when set; blank is none
+        assert_eq!(build_config(&v, Path::new("/home/u"))["sessionInstructions"], "a\nb\n");
+        let blank = validate_settings(CenterSettings { session_instructions: " \n ".into(), ..Default::default() }).unwrap();
+        assert_eq!(blank.session_instructions, "");
+        assert!(build_config(&blank, Path::new("/home/u")).get("sessionInstructions").is_none());
+        // no restart for the instructions alone
+        let on = CenterSettings { enabled: true, ..Default::default() };
+        assert!(!needs_restart(Some(&on), &CenterSettings { session_instructions: "x".into(), ..on.clone() }));
     }
 
     #[test]

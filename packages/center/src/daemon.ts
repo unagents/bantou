@@ -20,6 +20,7 @@ import { createCenterServer, createSessionMcpServer } from "./server.js";
 import { createCore } from "./core.js";
 import { createEventHub } from "./events.js";
 import { createSessionTokens } from "./session-auth.js";
+import { watchSessionInstructions } from "./config-watch.js";
 import { createServerLink } from "./server-link.js";
 
 /** 強制終了の猶予に足す余裕（stop は SIGTERM 待ち stopGraceMs の後、SIGKILL 待ちで最大 5 秒）。 */
@@ -122,6 +123,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
 
   let closing = false;
   let http: HttpHandle | null = null;
+  let stopConfigWatch: (() => void) | null = null;
   const shutdown = async (reason: string): Promise<void> => {
     if (closing) return;
     closing = true;
@@ -136,6 +138,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
       // 子の停止を最優先にする（http.close が長引いても子に signal が届くように）
       follow.stop();
       contextUsage.stop();
+      stopConfigWatch?.();
       const results = await Promise.allSettled([supervisor.shutdown(), http?.close(), link.close()]);
       for (const r of results) {
         if (r.status === "rejected") throw r.reason;
@@ -196,6 +199,13 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   void link.connectAll().finally(() => follow.start());
   void remotes.restore().catch((e: unknown) => log(`remote 記録の復元失敗: ${e instanceof Error ? e.message : String(e)}`));
   contextUsage.start();
+  // desktop が設定を保存すると config ファイルが書き換わる。指示（CLAUDE.md）だけは再起動なしで反映する
+  stopConfigWatch = watchSessionInstructions({
+    path: configPath,
+    initial: config.sessionInstructions,
+    onChange: (text) => sessions.setInstructions(text),
+    log,
+  });
   void sessions.restore().catch((e: unknown) => log(`session の復帰失敗: ${e instanceof Error ? e.message : String(e)}`));
   for (const p of config.projects) {
     if (!p.autostart) continue;
