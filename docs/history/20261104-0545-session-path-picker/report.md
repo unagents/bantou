@@ -30,7 +30,20 @@
 
 ## review の指摘と対応
 
-（後で追記）
+review（w-review-sp、1fd9780 時点）: 高・中の指摘 0。壊れ・仕様ずれ・docs 孤児なし。引数形（path は trim 後に非空の時だけ送る。center は isAbsolute→resolve→衝突検査→mkdir -p）、center_info の形と fallback（unknown tool は握りつぶして汎用文）、can_pick（macOS/Windows かつ sidecar のみ。Remote・target 無しは false）、歯車の path 表示（path 無しの古い center は「（center が返していない）」）が一致。
+
+review 側テスト（1fd9780）: center 376 pass・typecheck 0、cargo 261 pass（5 ignored）、desktop e2e 103 pass、nuxt typecheck（vue-tsc）exit 0（vue-router/volar の警告は bun ストアの hoist 環境要因）。
+
+低・参考:
+
+- (1) e2e mock の絶対判定が startsWith("/") のみで Windows パスは未検証（実 center は node の isAbsolute）。未対応。
+- (2) e2e は session_path_hints 全体を mock で置換するので、center_info の fallback と current_source の配線は IPC 越しには未検証（unit のみ）。未対応。
+- (3) プレースホルダは名前が不正文字でも "/ws/a b" と出す。**対応済み**: AddSessionDialog.vue の folderPlaceholder で、名前が NAME_PATTERN に合わない間は <名前> と出す（1 行）。e2e は既存テストに assertion を追加。
+- (4) hints は mount 時 1 回だけ取得。未対応。
+- (5) center の衝突検査は大文字小文字を同一視しない。未対応（center 側）。
+- (6) ~ は相対扱いでエラー（desktop に案内なし）。未対応。
+
+(3) 修正後の desktop e2e: 103 pass（既存テストへの assertion 追加のため件数は同じ）。cargo は Rust 無変更のため再実行せず（261 pass のまま）。
 
 ## 残存物
 

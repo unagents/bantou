@@ -29,7 +29,7 @@ const nameError = computed(() => {
 const folderPlaceholder = computed(() => {
   if (!workspace.value) return "空ならセンターが決める（<workspace>/<名前>）";
   const sep = workspace.value.includes("\\") ? "\\" : "/";
-  return `${workspace.value.replace(/[\\/]+$/, "")}${sep}${trimmed.value || "<名前>"}`;
+  return `${workspace.value.replace(/[\\/]+$/, "")}${sep}${NAME_PATTERN.test(trimmed.value) ? trimmed.value : "<名前>"}`;
 });
 
 onMounted(async () => {

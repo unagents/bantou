@@ -34,6 +34,10 @@ test.describe("session folder (path)", () => {
     await expect(folder).toHaveAttribute("placeholder", "/mock/ws/<名前>");
     await dlg.getByTestId("add-name").fill("pm-x");
     await expect(folder).toHaveAttribute("placeholder", "/mock/ws/pm-x");
+    // an invalid name is not echoed into the default path
+    await dlg.getByTestId("add-name").fill("a b");
+    await expect(folder).toHaveAttribute("placeholder", "/mock/ws/<名前>");
+    await dlg.getByTestId("add-name").fill("pm-x");
     // a center that has no workspace (or an older one): a generic hint instead
     await mock(page, (m) => {
       m.centerWorkspace = null;
