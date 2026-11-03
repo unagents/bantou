@@ -35,6 +35,7 @@
 | `remote_create` | `prompt`、`server?`、`repo?`、`branch?`、`owner?` | `{remote_id, server, serverName, state}` | server に remote-cap を作らせ最初の指示で起動する。返信は待たない |
 | `remote_delete` | `remote_id`、`owner?`、`force?` | `{remote_id, deleted, stopped, warning?}` | server に `stop_cap` を送って実行を止め、記録を外す |
 | `remote_list` | `owner?` | `RemoteRecord[]` | owner が分かればその分、分からなければ全件 |
+| `remote_wait` | `remote_id?`、`timeout_sec?`、`owner?` | `RemoteRecord` | 終わる（cap の turn 終了 + worker に running / stalled なし）まで待つ。timeout は `state: running`。完了通知を受けられない session 用 |
 
 決めた点:
 

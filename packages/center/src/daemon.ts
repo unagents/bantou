@@ -68,12 +68,14 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   const lastStates = new Map<string, string>();
   // remotes は link の後に作るので、遅れて届く返信はここ経由で渡す
   let applyLateReply: (r: CapResultReply | ErrorReply) => void = () => {};
+  let onActivity: (capId: string) => void = () => {};
   const link = createServerLink({
     config,
     log,
     onLateCapReply: (r) => applyLateReply(r),
     onNotice: (n) => {
       activity.apply(n);
+      onActivity(n.cap_id);
       const states = n.agents.map((a) => `${a.id}=${a.state}`).join(" ");
       if (lastStates.get(n.cap_id) !== states) {
         lastStates.set(n.cap_id, states);
@@ -96,8 +98,15 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     store: createJsonListStore(join(stateDir, "sessions.json"), log),
     log,
   });
-  const remotes = createRemoteManager({ link, store: createJsonListStore(join(stateDir, "remotes.json"), log), log, activity });
+  const remotes = createRemoteManager({
+    link,
+    store: createJsonListStore(join(stateDir, "remotes.json"), log),
+    log,
+    activity,
+    notify: (owner, text) => link.notifyPeer(owner, text),
+  });
   applyLateReply = (r) => void remotes.applyLateReply(r);
+  onActivity = (capId) => remotes.onActivity(capId);
 
   let closing = false;
   let http: HttpHandle | null = null;

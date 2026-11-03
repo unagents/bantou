@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { AGENT_ID_PATTERN } from "@agent-hand/bantou-protocol";
 import { z } from "zod";
-import { OWNER_HEADER, OWNER_PATTERN, OWNER_QUERY, remoteCreateSchema, type RemoteManager } from "./remotes.js";
+import { OWNER_HEADER, OWNER_PATTERN, OWNER_QUERY, remoteCreateSchema, remoteWaitSchema, WAIT_DEFAULT_SEC, type RemoteManager } from "./remotes.js";
 import type { RemoteControlSupervisor } from "./remote-control.js";
 import { sessionCreateSchema, SESSION_NAME, type SessionManager } from "./sessions.js";
 import type { Follow } from "./follow.js";
@@ -106,6 +106,20 @@ export function registerTools(
       guard(() => {
         const who = resolveOwner(extra as OwnerRequestInfo, owner);
         return json(remotes.list(who ? { owner: who } : {}));
+      }),
+  );
+
+  server.registerTool(
+    "remote_wait",
+    {
+      title: "remote 完了待ち",
+      description: "remote が終わる（state が done / failed。配下の worker が running / stalled の間は終わりでない）まで待って、その remote の記録（state, result, error, notifiedAt など）を返す。remote_id 省略時は owner の running 中のどれかが終わるまで。timeout_sec（既定 "+WAIT_DEFAULT_SEC+"、上限 1800）を超えたら state=running のまま返す。完了通知を受けられない session でもこれで待てる",
+      inputSchema: { ...remoteWaitSchema, owner: ownerArg },
+    },
+    ({ remote_id, timeout_sec, owner }, extra) =>
+      guard(async () => {
+        const who = resolveOwner(extra as OwnerRequestInfo, owner);
+        return json(await remotes.wait({ ...(remote_id ? { remote_id } : {}), ...(who ? { owner: who } : {}), ...(timeout_sec !== undefined ? { timeoutSec: timeout_sec } : {}) }));
       }),
   );
 
@@ -240,5 +254,15 @@ export function registerSessionTools(server: McpServer, deps: { remotes: RemoteM
       description: "この session が作った remote（remote_id, server, state, 時刻, 結果、通知を受けたものは activity 付き）の一覧",
     },
     () => guard(() => json(remotes.list({ owner }))),
+  );
+  server.registerTool(
+    "remote_wait",
+    {
+      title: "remote 完了待ち",
+      description: "remote が終わる（state が done / failed。配下の worker が running / stalled の間は終わりでない）まで待って、その remote の記録（state, result, error, notifiedAt など）を返す。remote_id 省略時は owner の running 中のどれかが終わるまで。timeout_sec（既定 "+WAIT_DEFAULT_SEC+"、上限 1800）を超えたら state=running のまま返す。完了通知を受けられない session でもこれで待てる",
+      inputSchema: remoteWaitSchema,
+    },
+    ({ remote_id, timeout_sec }) =>
+      guard(async () => json(await remotes.wait({ owner, ...(remote_id ? { remote_id } : {}), ...(timeout_sec !== undefined ? { timeoutSec: timeout_sec } : {}) }))),
   );
 }

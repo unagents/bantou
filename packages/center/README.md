@@ -113,6 +113,7 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 | `remote_create`（session 向けのみ） | `prompt`, `server?`, `repo?`, `branch?` | `{ remote_id, server, serverName, state }`（返信を待たない）。owner は header の session 名 |
 | `remote_delete`（session 向けのみ） | `remote_id`, `force?` | `{ remote_id, deleted, stopped, warning? }`。自分の remote だけ |
 | `remote_list` | `owner?`（外向け）。session 向けは引数なしで自分の分 | `RemoteView[]`（`RemoteRecord` + `activity?`、下記） |
+| `remote_wait` | `remote_id?`, `timeout_sec?`（既定 600、上限 1800）, `owner?`（外向けのみ） | 終わった `RemoteView`。timeout なら `state: "running"` のまま。下記「完了通知」 |
 | `rc_list` | なし | `RcStatus[]` |
 | `rc_start` | `project` | `RcStatus`（起動済みなら現状を返す） |
 | `rc_stop` | `project` | `RcStatus` |
@@ -158,7 +159,9 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 - `remote_create`: center が `remote_id`（= server 上の cap_id、`r-<hex10>`）を採番し、発見した server に `kick_cap`（`reason: remote_create owner=<owner>`）を送る。**返信を待たず**`{ remote_id, server, serverName, state: "running" }` を返す。返信（`cap_result` / `error`）が来たら記録の `state` を `done` / `failed` にし、`result`（結果本文、8000 文字まで）と `error` を入れる。
 - `remote_delete`: server へ `stop_cap`（protocol `bantou` 1.1.0）を送って走行中の `claude -p` を止め、記録から外す。止められない（server が見つからない・error 返信）時、記録が `running` なら error（`force: true` なら記録だけ消し、`warning` に理由）。終わった記録は警告付きで消える。別の owner の remote は消せない。
 - `remote_list` の `state` / `result`: 最初の `cap_result` で done / failed になるが、report 起因の再開など後から届く `cap_result`（と `kick_cap` の error）でも `result` / `state` / `error` を最新に更新する。cap が done でも、activity で配下の worker が running / stalled の間は `remote_list` の `state` は running（`finishedAt` なし）で返す。
-- `remote_list`: `owner` が分かればその owner の分だけ、分からなければ全件。`RemoteRecord` = `remote_id`, `owner`, `server`（作成時の peer id）, `serverName`, `state`, `createdAt`, `finishedAt?`, `result?`, `error?`。
+- 完了通知: remote が終わった時（remote-cap の turn が終わり、cap・worker に running / stalled が無い状態で最後の `cap_result` / error を受けた時。failed も含む）、center は owner の名前の messenger peer へ `push` で 1 回送る（`[bantou] remote 完了 remote_id=… state=…` + `result:` 先頭 500 文字 + `error:`）。report で remote-cap が再開されて再び終わった時は、新しい結果で送る。同じ結果は二重に送らない。送れた時刻は `notifiedAt`、peer が見つからない・送れない時は理由を `notifyError` に残し center.log に出す（再送はしない）。**master-cap の session は messenger の peer ではない**（pty 越しの claude で、agent-messenger に接続していない）ので、その環境では peer が見つからず `notifyError` になる。そこは `remote_wait` で待つ。center 再起動前に終わっていた記録は通知しない。
+- `remote_wait`: `remote_id`（省略時は owner の running 中のどれか＝最初に終わったもの）が上の意味で終わるまで待って記録を返す。timeout は `state: "running"` のまま。待ち中に remote が delete されたら error。
+- `remote_list`: `owner` が分かればその owner の分だけ、分からなければ全件。`RemoteRecord` = `remote_id`, `owner`, `server`（作成時の peer id）, `serverName`, `state`, `createdAt`, `finishedAt?`, `result?`, `error?`, `notifiedAt?`, `notifyError?`。
 - `activity`（`remote_list` の各要素）: server が protocol `bantou`（1.2.0）の `activity` 通知で送ってくる remote-cap と worker の生存・進捗。通知がまだ無い remote には `activity` キーが無い。中身は `{ at, received_ms_ago, stale, agents }`。
   - `agents`: `AgentActivity[]`（cap → worker）。`kind`, `id`, `cap_id`, `state`（`running` / `stalled` / `idle` / `done` / `failed` / `lost`）, `task`（prompt の冒頭）, `last_activity`, `last_output_at`, `silent_ms`, `started_at`, `finished_at`, `error?`。仕様は `docs/protocol.md` の「Activity notices」。
   - `silent_ms`: 通知時の値に、center が受信してからの経過を足して返す。desktop はホスト間の時計ずれを避けるため、時刻の差でなくこの値で経過を出す。
@@ -257,8 +260,8 @@ npm run e2e
 
 ## 窓口の分離
 
-- 外向け `/mcp`: 認証は config の `token`（Bearer）。`session_*`、読み取り専用の `remote_list`、`rc_*`、`server_*`、`worker_resume`。`remote_create` / `remote_delete` / `cap_kick` は無い。
-- session 向け `/mcp/session`: `remote_create` / `remote_delete` / `remote_list` だけ。認証は session の起動ごとに center が作る使い捨て token（`Authorization: Bearer <token>`）と header `X-Bantou-Session: <session 名>` の組で、token はその名前に発行されたものだけ通る。不一致・外向け token・欠落は 401。owner は header の名前で、引数では受けない。MCP session id は窓口をまたいで使えない。
+- 外向け `/mcp`: 認証は config の `token`（Bearer）。`session_*`、読み取り専用の `remote_list`、`remote_wait`、`rc_*`、`server_*`、`worker_resume`。`remote_create` / `remote_delete` / `cap_kick` は無い。
+- session 向け `/mcp/session`: `remote_create` / `remote_delete` / `remote_list` / `remote_wait` だけ。認証は session の起動ごとに center が作る使い捨て token（`Authorization: Bearer <token>`）と header `X-Bantou-Session: <session 名>` の組で、token はその名前に発行されたものだけ通る。不一致・外向け token・欠落は 401。owner は header の名前で、引数では受けない。MCP session id は窓口をまたいで使えない。
 - token は session の起動（再起動を含む）ごとに作り直し、停止で無効になる。master-cap には環境変数 `BANTOU_SESSION_TOKEN` で渡し、`--mcp-config` の JSON には `${BANTOU_SESSION_TOKEN}` と書く（引数に平文で残さない、ファイルも書かない）。
 
 ## master-cap の起動（wrapper）

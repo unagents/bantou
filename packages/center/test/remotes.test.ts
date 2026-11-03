@@ -19,7 +19,7 @@ afterEach(async () => {
 const peerA: ServerPeer = { id: "id-a", name: "bantou-server", version: "1.1.0" };
 const peerB: ServerPeer = { id: "id-b", name: "other" };
 
-function setup(over: Partial<ServerLink> = {}, activity?: ActivityStore) {
+function setup(over: Partial<ServerLink> = {}, activity?: ActivityStore, notify?: NonNullable<Parameters<typeof createRemoteManager>[0]["notify"]>) {
   const kicks: { peer: ServerPeer; cmd: Record<string, unknown>; resolve: (r: unknown) => void }[] = [];
   const stops: { peer: ServerPeer; cmd: unknown }[] = [];
   let peers = [peerA, peerB];
@@ -41,7 +41,7 @@ function setup(over: Partial<ServerLink> = {}, activity?: ActivityStore) {
   } as unknown as ServerLink;
   const store = createJsonListStore<RemoteRecord>(join(dir, "remotes.json"), () => {});
   let n = 0;
-  const mgr = createRemoteManager({ link, store, log: () => {}, newId: () => `r-${++n}`, ...(activity ? { activity } : {}) });
+  const mgr = createRemoteManager({ link, store, log: () => {}, newId: () => `r-${++n}`, ...(activity ? { activity } : {}), ...(notify ? { notify } : {}) });
   return { mgr, kicks, stops, store, setPeers: (p: ServerPeer[]) => (peers = p) };
 }
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 10));
@@ -293,4 +293,224 @@ test("list: failed は worker が動いていても failed のまま", async () 
   await tick();
   activity.apply(workerAct("r-1", "running"));
   assert.equal(mgr.list()[0]!.state, "failed");
+});
+
+// -- 完了通知 / remote_wait --
+
+function notifier(result: { ok: true } | { ok: false; reason: string } = { ok: true }) {
+  const sent: { owner: string; text: string }[] = [];
+  return { sent, notify: async (owner: string, text: string) => (sent.push({ owner, text }), result) };
+}
+
+test("通知: 最後の cap_result で owner へ 1 回。remote_id・state・result の先頭を含み、notifiedAt が付く", async () => {
+  const n = notifier();
+  const { mgr, kicks } = setup({}, undefined, n.notify);
+  await mgr.create({ owner: "pm1", prompt: "p" });
+  assert.equal(n.sent.length, 0);
+  kicks[0].resolve(lateOk("r-1", "x".repeat(900)));
+  await tick();
+  assert.equal(n.sent.length, 1);
+  assert.equal(n.sent[0].owner, "pm1");
+  assert.match(n.sent[0].text, /remote_id=r-1 state=done/);
+  assert.ok(n.sent[0].text.includes("x".repeat(500)) && !n.sent[0].text.includes("x".repeat(501)));
+  const r = mgr.list()[0];
+  assert.ok(r.notifiedAt);
+  assert.equal(r.notifyError, undefined);
+  assert.equal("notifiedKey" in r, false);
+});
+
+test("通知: failed（error 返信）も error 付きで送る", async () => {
+  const n = notifier();
+  const { mgr, kicks } = setup({}, undefined, n.notify);
+  await mgr.create({ owner: "pm1", prompt: "p" });
+  kicks[0].resolve({ bantou: 1, type: "error", ok: false, message: "boom", command: "kick_cap", cap_id: "r-1" });
+  await tick();
+  assert.equal(n.sent.length, 1);
+  assert.match(n.sent[0].text, /state=failed/);
+  assert.match(n.sent[0].text, /error: boom/);
+});
+
+test("通知: worker が running / stalled の間は送らず、全部終わった activity 通知で 1 回だけ送る", async () => {
+  const n = notifier();
+  const activity = createActivityStore();
+  const { mgr, kicks } = setup({}, activity, n.notify);
+  await mgr.create({ owner: "pm1", prompt: "p" });
+  activity.apply(workerAct("r-1", "running"));
+  kicks[0].resolve(lateOk("r-1", "worker 起動した"));
+  await tick();
+  assert.equal(n.sent.length, 0);
+  assert.equal(mgr.list()[0].state, "running");
+  activity.apply(workerAct("r-1", "stalled"));
+  mgr.onActivity("r-1");
+  await tick();
+  assert.equal(n.sent.length, 0);
+  activity.apply(workerAct("r-1", "done"));
+  mgr.onActivity("r-1");
+  mgr.onActivity("r-1");
+  await tick();
+  assert.equal(n.sent.length, 1);
+  assert.match(n.sent[0].text, /worker 起動した/);
+});
+
+test("通知: 二重に送らない（同じ結果の再受信・activity 通知の繰り返し）。再開後の新しい結果では送り直す", async () => {
+  const n = notifier();
+  const activity = createActivityStore();
+  const { mgr, kicks } = setup({}, activity, n.notify);
+  await mgr.create({ owner: "pm1", prompt: "p" });
+  kicks[0].resolve(lateOk("r-1", "first"));
+  await tick();
+  mgr.onActivity("r-1");
+  mgr.applyLateReply(lateOk("r-1", "first"));
+  await tick();
+  assert.equal(n.sent.length, 1);
+  // report で cap が再開されて再び終わる
+  mgr.applyLateReply(lateOk("r-1", "second"));
+  await tick();
+  assert.equal(n.sent.length, 2);
+  assert.match(n.sent[1].text, /second/);
+  assert.equal(mgr.list()[0].notifiedAt !== undefined, true);
+  // 再開の失敗も新しい結果として送る
+  mgr.applyLateReply({ bantou: 1, type: "error", ok: false, message: "resume 失敗", command: "kick_cap", cap_id: "r-1" });
+  await tick();
+  assert.equal(n.sent.length, 3);
+  assert.match(n.sent[2].text, /state=failed/);
+});
+
+test("通知: cap 自身が再開して running の間は送らない", async () => {
+  const n = notifier();
+  const activity = createActivityStore();
+  const { mgr, kicks } = setup({}, activity, n.notify);
+  await mgr.create({ owner: "pm1", prompt: "p" });
+  kicks[0].resolve(lateOk("r-1", "first"));
+  await tick();
+  assert.equal(n.sent.length, 1);
+  const capRunning = workerAct("r-1", "done");
+  capRunning.agents[0].state = "running" as never;
+  activity.apply(capRunning);
+  mgr.applyLateReply(lateOk("r-1", "second"));
+  await tick();
+  assert.equal(n.sent.length, 1);
+  assert.equal(mgr.list()[0].state, "running");
+  activity.apply(workerAct("r-1", "done"));
+  mgr.onActivity("r-1");
+  await tick();
+  assert.equal(n.sent.length, 2);
+});
+
+test("通知: 送れない時は notifyError を記録し、notifiedAt は付かない。再送もしない", async () => {
+  const logs: string[] = [];
+  const link = { selectPeer: async () => peerA } as unknown as ServerLink;
+  // 通知が throw しても記録される
+  const mgr2 = createRemoteManager({
+    link: { ...link, kickCapOn: () => Promise.resolve(lateOk("r-2", "ok")) } as unknown as ServerLink,
+    store: createJsonListStore<RemoteRecord>(join(dir, "remotes2.json"), () => {}),
+    log: (m) => logs.push(m),
+    newId: () => "r-2",
+    notify: async () => {
+      throw new Error("broker down");
+    },
+  });
+  await mgr2.create({ owner: "pm1", prompt: "p" });
+  await tick();
+  const r = mgr2.list()[0];
+  assert.equal(r.notifiedAt, undefined);
+  assert.equal(r.notifyError, "broker down");
+  assert.ok(logs.some((l) => l.includes("完了通知を送れない") && l.includes("broker down")));
+  mgr2.onActivity("r-2");
+  await tick();
+  assert.equal(mgr2.list()[0].notifyError, "broker down");
+});
+
+test("通知: 失敗の理由が records に残り、送れた時は notifyError が消える", async () => {
+  let ok = false;
+  const { mgr, kicks } = setup({}, undefined, async () => (ok ? { ok: true } : { ok: false, reason: "peer なし" }));
+  await mgr.create({ owner: "pm1", prompt: "p" });
+  kicks[0].resolve(lateOk("r-1", "a"));
+  await tick();
+  assert.equal(mgr.list()[0].notifyError, "peer なし");
+  ok = true;
+  mgr.applyLateReply(lateOk("r-1", "b"));
+  await tick();
+  const r = mgr.list()[0];
+  assert.ok(r.notifiedAt);
+  assert.equal(r.notifyError, undefined);
+});
+
+test("通知: center 再起動前に終わっていた記録は、activity 通知が来ても通知しない。通知済みの記録は永続される", async () => {
+  const n = notifier();
+  const a = setup({}, undefined, n.notify);
+  await a.mgr.create({ owner: "pm1", prompt: "p" });
+  a.kicks[0].resolve(lateOk("r-1", "done!"));
+  await tick();
+  assert.equal(n.sent.length, 1);
+  const saved = JSON.parse(await readFile(join(dir, "remotes.json"), "utf8")) as RemoteRecord[];
+  assert.ok(saved[0].notifiedAt);
+  const n2 = notifier();
+  const link = { selectPeer: async () => peerA, kickCapOn: () => new Promise(() => {}) } as unknown as ServerLink;
+  const mgr2 = createRemoteManager({ link, store: createJsonListStore<RemoteRecord>(join(dir, "remotes.json"), () => {}), log: () => {}, notify: n2.notify });
+  await mgr2.restore();
+  mgr2.onActivity("r-1");
+  mgr2.applyLateReply(lateOk("r-1", "done!")); // 同じ結果
+  await tick();
+  assert.equal(n2.sent.length, 0);
+  assert.equal(mgr2.list()[0].notifiedAt, saved[0].notifiedAt);
+});
+
+test("remote_wait: 終わるまで待って結果を返す。すでに終わっていれば即返す", async () => {
+  const { mgr, kicks } = setup();
+  await mgr.create({ owner: "pm1", prompt: "p" });
+  const p = mgr.wait({ remote_id: "r-1", owner: "pm1", timeoutSec: 30 });
+  await tick();
+  kicks[0].resolve(lateOk("r-1", "finished"));
+  const v = await p;
+  assert.equal(v.state, "done");
+  assert.equal(v.result, "finished");
+  assert.equal((await mgr.wait({ remote_id: "r-1" })).state, "done");
+});
+
+test("remote_wait: worker が動いている間は待ち、全部終わった activity 通知で返る", async () => {
+  const activity = createActivityStore();
+  const { mgr, kicks } = setup({}, activity);
+  await mgr.create({ owner: "pm1", prompt: "p" });
+  activity.apply(workerAct("r-1", "running"));
+  kicks[0].resolve(lateOk("r-1", "起動した"));
+  await tick();
+  let settled = false;
+  const p = mgr.wait({ remote_id: "r-1", timeoutSec: 30 }).then((v) => ((settled = true), v));
+  await tick();
+  assert.equal(settled, false);
+  activity.apply(workerAct("r-1", "done"));
+  mgr.onActivity("r-1");
+  assert.equal((await p).state, "done");
+});
+
+test("remote_wait: remote_id 省略は owner の running 中のどれか。running が無ければ error。別 owner は拒否", async () => {
+  const { mgr, kicks } = setup();
+  await assert.rejects(mgr.wait({ owner: "pm1" }), /running の remote が無い/);
+  await assert.rejects(mgr.wait({}), /owner/);
+  await mgr.create({ owner: "pm1", prompt: "p" });
+  await mgr.create({ owner: "pm1", prompt: "p" });
+  await mgr.create({ owner: "other", prompt: "p" });
+  await assert.rejects(mgr.wait({ remote_id: "r-3", owner: "pm1" }), /別の owner/);
+  await assert.rejects(mgr.wait({ remote_id: "zz" }), /未定義/);
+  const p = mgr.wait({ owner: "pm1", timeoutSec: 30 });
+  await tick();
+  kicks[1].resolve(lateOk("r-2", "second first"));
+  const v = await p;
+  assert.equal(v.remote_id, "r-2");
+  assert.equal(v.state, "done");
+});
+
+test("remote_wait: timeout なら state=running のまま返す。待ち中の delete は error", async () => {
+  const { mgr } = setup();
+  await mgr.create({ owner: "pm1", prompt: "p" });
+  const t0 = Date.now();
+  const v = await mgr.wait({ remote_id: "r-1", timeoutSec: 1 });
+  assert.equal(v.state, "running");
+  assert.ok(Date.now() - t0 >= 900);
+  const p = mgr.wait({ remote_id: "r-1", timeoutSec: 30 });
+  const rejected = assert.rejects(p, /削除された/);
+  await tick();
+  await mgr.delete({ remote_id: "r-1", force: true });
+  await rejected;
 });

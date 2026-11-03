@@ -67,21 +67,21 @@ async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partia
 
 const text = (r: unknown): string => (r as { content: { text: string }[] }).content[0].text;
 
-test("外向けの tool は 12 個。remote_create / remote_delete / cap_kick は無い", async () => {
+test("外向けの tool は 13 個。remote_create / remote_delete / cap_kick は無い", async () => {
   const { client, close } = await connect();
   const names = (await client.listTools()).tools.map((t) => t.name).sort();
   assert.deepEqual(names, [
-    "rc_list", "rc_start", "rc_status", "rc_stop", "remote_list",
+    "rc_list", "rc_start", "rc_status", "rc_stop", "remote_list", "remote_wait",
     "server_list", "server_peers", "server_status", "session_create", "session_delete", "session_list", "worker_resume",
   ]);
   for (const gone of ["remote_create", "remote_delete", "cap_kick"]) assert.ok(!names.includes(gone), gone);
   await close();
 });
 
-test("session 向けの tool は remote_create / remote_delete / remote_list の 3 つだけ", async () => {
+test("session 向けの tool は remote_create / remote_delete / remote_list / remote_wait の 4 つだけ", async () => {
   const { session, close } = await connect();
   const c = await session("pm1");
-  assert.deepEqual((await c.listTools()).tools.map((t) => t.name).sort(), ["remote_create", "remote_delete", "remote_list"]);
+  assert.deepEqual((await c.listTools()).tools.map((t) => t.name).sort(), ["remote_create", "remote_delete", "remote_list", "remote_wait"]);
   await c.close();
   await close();
 });
@@ -249,5 +249,23 @@ test("server_peers: follow が無ければ isError", async () => {
   const { client, close } = await connect();
   const r = await client.callTool({ name: "server_peers", arguments: {} });
   assert.equal(r.isError, true);
+  await close();
+});
+
+test("remote_wait: session 向けは自分の owner で待ち、引数を渡す。外向けは owner を header / 引数から解決する", async () => {
+  const { client, calls, session, close } = await connect({}, { remotes: { wait: async (i: unknown) => (calls.push({ remoteWait: i }), { remote_id: "r-1", state: "running" }) } as never });
+  const c = await session("pm1");
+  const r = await c.callTool({ name: "remote_wait", arguments: { remote_id: "r-1", timeout_sec: 5 } });
+  assert.equal(JSON.parse(text(r)).state, "running");
+  await c.callTool({ name: "remote_wait", arguments: {} });
+  await client.callTool({ name: "remote_wait", arguments: { owner: "pm2" } });
+  assert.deepEqual(calls, [
+    { remoteWait: { owner: "pm1", remote_id: "r-1", timeoutSec: 5 } },
+    { remoteWait: { owner: "pm1" } },
+    { remoteWait: { owner: "pm2" } },
+  ]);
+  const bad = await c.callTool({ name: "remote_wait", arguments: { timeout_sec: 1801 } });
+  assert.equal(bad.isError, true);
+  await c.close();
   await close();
 });

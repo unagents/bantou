@@ -18,6 +18,8 @@ class FakeClient implements LinkClient {
   sent: Record<string, unknown>[] = [];
   sentTo: string[] = [];
   sentMeta: Array<LinkMeta | undefined> = [];
+  /** JSON でない text（session への通知など）と delivery の記録。 */
+  sentRaw: Array<{ to: string; text: string; delivery?: string }> = [];
   /** listPeers の返す peer。undefined なら 0.9 broker 相当（BROKER_UNSUPPORTED）。 */
   peers: LinkPeer[] | undefined = undefined;
   listCalls: Array<{ scope?: string; filter?: { protocol?: string; version?: string } }> = [];
@@ -34,8 +36,10 @@ class FakeClient implements LinkClient {
   async close(): Promise<void> {
     this.closed = true;
   }
-  async send(to: string, text: string, _delivery?: "pull" | "push", meta?: LinkMeta): Promise<unknown> {
+  async send(to: string, text: string, delivery?: "pull" | "push", meta?: LinkMeta): Promise<unknown> {
     if (this.failSend) throw new Error("send failed");
+    this.sentRaw.push({ to, text, ...(delivery ? { delivery } : {}) });
+    if (!meta) return {};
     this.sentTo.push(to);
     this.sentMeta.push(meta);
     this.sent.push(JSON.parse(text) as Record<string, unknown>);
@@ -862,4 +866,36 @@ test("待ちの無い cap_result / kick_cap の error は onLateCapReply に渡�
   clients[0].reply(capResult("a", "other"), "someone-else");
   assert.deepEqual(late.map((r) => (r as { type: string }).type + ":" + ((r as { result_text?: string }).result_text ?? (r as { message?: string }).message)), ["cap_result:second", "error:resume 失敗"]);
   await link.close();
+});
+
+test("notifyPeer: 名前が一致する peer（自分以外）へ push で送る", async () => {
+  const { link, clients } = setupDiscovery({}, [peerOf("srv", "bantou-server"), { id: "peer-1", name: "pm1" }, { id: "sess-1", name: "pm1" }]);
+  const r = await link.notifyPeer("pm1", "hello");
+  assert.deepEqual(r, { ok: true, to: "sess-1" });
+  assert.deepEqual(clients[0].sentRaw, [{ to: "sess-1", text: "hello", delivery: "push" }]);
+  // 絞り込み無し（session は bantou protocol を持たない）
+  assert.deepEqual(clients[0].listCalls, [{ scope: "all", filter: undefined }]);
+  await link.close();
+});
+
+test("notifyPeer: peer がいない・列挙非対応・送信失敗・接続失敗は ok:false で理由を返す（投げない）", async () => {
+  const a = setupDiscovery({}, [peerOf("srv", "bantou-server")]);
+  const r1 = await a.link.notifyPeer("pm1", "x");
+  assert.equal(r1.ok, false);
+  assert.match((r1 as { reason: string }).reason, /peer pm1 がいない/);
+  await a.link.close();
+
+  const b = setupDiscovery({}, undefined);
+  const r2 = await b.link.notifyPeer("pm1", "x");
+  assert.equal(r2.ok, false);
+  assert.match((r2 as { reason: string }).reason, /送信失敗|BROKER_UNSUPPORTED/);
+  await b.link.close();
+
+  const c = setupDiscovery({}, [{ id: "sess-1", name: "pm1" }]);
+  await c.link.notifyPeer("zz", "warm");
+  c.clients[0].failSend = true;
+  const r3 = await c.link.notifyPeer("pm1", "x");
+  assert.equal(r3.ok, false);
+  assert.match((r3 as { reason: string }).reason, /送信失敗: send failed/);
+  await c.link.close();
 });

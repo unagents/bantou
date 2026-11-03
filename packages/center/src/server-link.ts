@@ -120,6 +120,11 @@ export interface ServerLink {
   hello(peer: ServerPeer): Promise<HelloResultReply | ErrorReply>;
   /** 指定 peer へ update_server を送り、update_result（または error）を待つ。protocol の版の門は通らない。 */
   updateServer(peer: ServerPeer, version: string): Promise<UpdateResultReply | ErrorReply>;
+  /**
+   * name の名前を持つ messenger peer（owner の session）へ text を push で送る。
+   * peer が見つからない・送れない時は ok:false と理由を返す（投げない）。bantou protocol の指示ではないので版の門は通らない。
+   */
+  notifyPeer(name: string, text: string): Promise<{ ok: true; to: string } | { ok: false; reason: string }>;
   /** 送る前の門（protocol の版と更新待ち）。断るなら error 返信、通すなら undefined。 */
   gate(peer: ServerPeer, command: ServerCommandType): ErrorReply | undefined;
   /** 追加の門（更新待ちの判定）を差し込む。protocol の版の門はこの前に常に効く。 */
@@ -577,6 +582,25 @@ export function createServerLink(opts: {
       request<HelloResultReply>(discoveryName, "hello_result", peer.id, {}, { target: peerTarget(peer), timeoutMs: FOLLOW_TIMEOUT_MS }),
     updateServer: (peer, version) =>
       request<UpdateResultReply>(discoveryName, "update_result", peer.id, { version }, { target: peerTarget(peer), timeoutMs: FOLLOW_TIMEOUT_MS }),
+    async notifyPeer(name, text) {
+      let client: LinkClient;
+      try {
+        client = await ensure(slotOf(discoveryName));
+      } catch (e) {
+        return { ok: false, reason: `messenger に接続できない: ${(e as Error).message}` };
+      }
+      if (!client.listPeers) return { ok: false, reason: "broker が peer の列挙に対応していない" };
+      try {
+        const own = client.peer?.id ?? null;
+        const hits = (await client.listPeers("all")).filter((p) => p.name === name && p.id !== own);
+        if (hits.length === 0) return { ok: false, reason: `messenger に peer ${name} がいない（session が agent-messenger につながっていない）` };
+        if (hits.length > 1) log(`通知先の peer が複数: name=${name} ${hits.map((p) => p.id).join(",")} -> ${hits[0].id}`);
+        await client.send(hits[0].id, text, "push");
+        return { ok: true, to: hits[0].id };
+      } catch (e) {
+        return { ok: false, reason: `送信失敗: ${e instanceof Error ? e.message : String(e)}` };
+      }
+    },
     gate: (peer, command) => gateOf(peer, command),
     setGate: (g) => {
       extraGate = g;
