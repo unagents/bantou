@@ -6,7 +6,7 @@ import { AGENT_ID_PATTERN } from "@agent-hand/bantou-protocol";
 /** center の安定 id を保存するファイル名（config と同じ dir）。 */
 export const CENTER_ID_FILE = "center-id";
 
-/** remote-cap の cap_id 接頭辞。cap_id = `c-<center の安定 id>`。 */
+/** remote-cap の cap_id 接頭辞。center の cap_id = `c-<center の安定 id>`（旧共有 cap の cap_id）。session の cap_id はこれに `-<session 名>` を足す（sessionCapId）。 */
 export const CAP_ID_PREFIX = "c-";
 
 /**

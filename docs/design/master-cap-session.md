@@ -163,6 +163,8 @@ master-cap への追加指示を、center が起動する master-cap に渡す�
 - remote-cap は center の指示で作られ、その記録は center が保存して再起動で復元する。以後の指示はその記録の cap に送る。記録を消すのは `remote_delete` だけ。
 - 旧形式（作業ごとの cap）の記録は、起動時に掃除（`stop_cap` で消す）するのをやめ、その server の cap として引き継ぐ（cap_id はそのまま）。同じ server に複数あれば動いている（`running` / `unknown` / 未完了の指示あり）記録を最優先し、同順位なら最新（`createdAt` / `finishedAt` / `result_at` / `error_at` のうち最も新しい時刻）を残す。理由: 最新だけで選ぶと、動いている旧 cap より新しい完了済みの記録が残り、動いている cap へ `stop_cap` が飛ぶため（利用者の決定「最新の 1 件を残す」からの意図した調整）。動いている記録が複数なら最新の動いている記録を残し、他（動いている記録を含む）へ `stop_cap` を送る。他は `stop_cap` で消す（1 回限り）。cap_id は server ごとに記録から決める。
 - server は center を peer の名前（`bantou-center`）で覚え、送る時に今の peer id へ引く（protocol 1.6.0）。center を再起動しても activity / 結果 / worker_report が届く。center は起動時に各 cap の `status`（cap_id 付き）を server へ送って通知先を取り戻す。
+- 「他 session から見えない」を保証するのは `/mcp/session`（session ごとの使い捨て token + `X-Bantou-Session`）だけ。外向け `/mcp`（center token、desktop 用）は owner を自己申告でき、省略で全件。desktop は全件を取って client 側で絞る。
+- session を消しても cap は残る。同名の session を作り直すと同じ cap_id で引き継ぐ。不要なら `remote_delete`。大文字小文字を区別しない FS の server では `Main` と `main` の cap が同じ dir になりうる（既知の制約）。
 - 詳細は `docs/design/center-tools.md`、`packages/center/README.md`、`docs/protocol.md`。
 
 ## 追記（2026-11-04）: session と remote-cap を 1 対 1 にする

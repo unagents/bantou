@@ -23,14 +23,14 @@
 ## 変更ファイル
 
 - center: `src/center-id.ts`（`sessionCapId`）、`src/remotes.ts`、`src/tools.ts`
-- center テスト: `test/remotes.test.ts`（共有 cap 前提の 23 件を session ごとの cap に書き換え）、`test/tools.test.ts`、`test/cap-per-session.test.ts`（新規 17 件）
+- center テスト: `test/remotes.test.ts`（共有 cap 前提の 23 件を session ごとの cap に書き換え）、`test/tools.test.ts`、`test/cap-per-session.test.ts`（新規 17 件）、`test/cap-per-session-http.test.ts`（新規 1 件）
 - desktop: `src/components/RemoteActivity.vue`、`src/types/index.ts`、`e2e/center.spec.ts`、`e2e/terminal.spec.ts`
 - server テスト: `packages/server/test/server/utils/bantou/agents.test.ts`（1 件追加）
 - docs: `docs/design/center-tools.md`、`docs/architecture.md`、`docs/protocol.md`、`packages/center/README.md`、`docs/design/master-cap-session.md`、この report
 
 ## テスト
 
-- center: `bun run test` 392 件 pass（変更前 375 件）、`bun run typecheck` OK
+- center: `bun run test` 393 件 pass（変更前 375 件）、`bun run typecheck` OK
   - 新規 `cap-per-session.test.ts` 17 件: 組ごとの cap_id が衝突しない・64 文字上限、cap_id の変換と衝突しなさ、拒否、session ごとの send、他 session から見えない・触れない（list / wait / delete / workerReply）、通知先、旧共有 cap の引き継ぎ・delete・他 session の cap は消せない、status 追従で他 session の worker を数えない、remote_id 省略の error
 - server: `npm test` 233 件 pass、typecheck OK（実装の変更なし。`agents.test.ts` に「77 文字・大文字・- _ の cap_id で作成・status・reapOrphans」1 件追加）
 - desktop e2e: `terminal.spec.ts` + `center.spec.ts` 23 件 pass（`bun run generate` の静的ビルド + 簡易静的サーバー + ms-playwright chromium）。session を切り替えると remotes 欄が変わる（careery: 2 行（server ごと）、stroke-board: 1 行、cap 無しの session: 「remote なし」、旧共有 cap は出ない）
@@ -44,6 +44,16 @@
 2. README・architecture・master-cap-session の一部が旧仕様のまま → 対応: 該当文を session ごとの記述に直した。
 3. 外向け呼び出しで別 session の cap が複数ある時の error 文が「server で指定」になる → 対応: remote_id での指定を促す文にした。テスト追加。
 4. `remote_wait` の remote_id 省略では旧共有 cap の未完了の指示を待てない → 対応しない（設計どおり。旧共有 cap は `remote_id` を明示する。完了通知は届く）。
+
+### review 2 回目（w-review-a、cfea74d 時点）
+
+- 1（長さ上限）: 8c2b634 で対応済みを確認（session 名 64 文字まで）。
+- 4（大文字小文字）: docs の「衝突しない」に「server の FS が大文字小文字を区別しない場合を除く」を明記し、center-tools.md / README / master-cap-session.md に既知の制約として書いた。
+- 5（境界）: 「見えない・触れない」を保証するのは /mcp/session だけ。外向け /mcp は owner を自己申告でき省略で全件、desktop は全件を取って client 側で絞る。center-tools.md / README / master-cap-session.md に明記。
+- 6（古い記述）: center-id.ts の CAP_ID_PREFIX コメントと daemon.ts の起動ログ文言を接頭の実態に合わせた（コメントとログのみ）。
+- 7（統合テスト）: `cap-per-session-http.test.ts` 1 件。実 RemoteManager を /mcp/session に繋ぎ、2 session の token で list に別 session の cap が出ない・remote_delete / worker_reply / remote_wait が別 session の remote_id で error・自分の cap には届く・偽装（他 session 名 + 自分の token）が 401 を確かめる。
+- 3（session_delete 後の cap）: コードは変えず docs に現状を明記（session を消しても cap は残る。同名の session を作り直すと引き継ぐ。不要なら session を消す前に remote_delete）。**利用者の判断待ち**: session 削除時に cap を片付けるか・確認するか。
+- 2（desktop に旧共有 cap を消す導線が無い）: コードは変えず。現状は master-cap の remote_delete({remote_id}) でのみ消せる（remote_delete は /mcp/session だけの tool）。remote_list は include_shared: true が要る。**利用者の判断待ち**: desktop に消す導線を足すか。
 
 ## 残存物・未解決
 
