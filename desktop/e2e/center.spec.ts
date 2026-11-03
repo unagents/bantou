@@ -98,14 +98,15 @@ const remotes = (workerState: string) => [
     server: "p-7c1d",
     serverName: "bantou-server",
     state: "done",
+    model: "opus",
     createdAt: "2026-10-29T00:57:00.000Z",
     activity: {
       at: "2026-10-29T01:00:05.000Z",
       received_ms_ago: 1200,
       stale: false,
       agents: [
-        agent("cap", "r-0a1b2c3d4e", "idle", { silent_ms: 116200, last_activity: "text: worker を 3 本起動した" }),
-        agent("worker", "w-1f2e3d4c5b", workerState, { last_activity: "Bash 実行中 60s" }),
+        agent("cap", "r-0a1b2c3d4e", "idle", { silent_ms: 116200, last_activity: "text: worker を 3 本起動した", model: "opus" }),
+        agent("worker", "w-1f2e3d4c5b", workerState, { last_activity: "Bash 実行中 60s", model: "claude-sonnet-5-5" }),
         agent("worker", "w-2a3b4c5d6e", "stalled", { silent_ms: 366200 }),
         agent("worker", "w-3c4d5e6f7a", "lost", { silent_ms: 36200, error: "signal SIGKILL で終了" }),
       ],
@@ -156,6 +157,10 @@ test("the remotes section shows each cap and worker with state, task and time si
   await expect(agents.nth(3).getByTestId("center-remote-agent-state")).toHaveText("消失");
   await expect(agents.nth(3)).toContainText("signal SIGKILL で終了");
 
+  await expect(first.getByTestId("center-remote-model")).toHaveText("opus");
+  await expect(agents.nth(0).getByTestId("center-remote-agent-model")).toHaveText("opus");
+  await expect(agents.nth(1).getByTestId("center-remote-agent-model")).toHaveText("claude-sonnet-5-5");
+  await expect(agents.nth(2).getByTestId("center-remote-agent-model")).toHaveCount(0);
   await expect(first.getByTestId("center-remote-stale")).toHaveCount(0);
   await expect(page.getByTestId("center-remote").nth(1).getByTestId("center-remote-stale")).toHaveText("更新途絶");
   const third = page.getByTestId("center-remote").nth(2);

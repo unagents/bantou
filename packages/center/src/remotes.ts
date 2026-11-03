@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { z } from "zod";
-import { AGENT_ID_PATTERN } from "@agent-hand/bantou-protocol";
+import { AGENT_ID_PATTERN, MODEL_PATTERN } from "@agent-hand/bantou-protocol";
 import type { ActivityStore, RemoteActivity } from "./activity.js";
 import type { Logger } from "./log.js";
 import type { ServerLink, ServerPeer } from "./server-link.js";
@@ -25,6 +25,10 @@ export interface RemoteRecord {
   server: string;
   serverName: string;
   state: RemoteState;
+  /** 指定された remote-cap のモデル（`claude --model`）。省略時は無い。 */
+  model?: string;
+  /** 指定された worker の既定モデル。省略時は無い。 */
+  worker_model?: string;
   createdAt: string;
   finishedAt?: string;
   /** 結果の本文（cap_result.result_text）。RESULT_MAX で切る。 */
@@ -35,18 +39,22 @@ export interface RemoteRecord {
 /** remote_list が返す 1 件。通知がまだ無ければ activity は無い。 */
 export type RemoteView = RemoteRecord & { activity?: RemoteActivity };
 
+const modelSchema = z.string().regex(MODEL_PATTERN, { message: "model は英数字と . _ [ ] - のみ（先頭は - 不可）" });
+
 export const remoteCreateSchema = {
   prompt: z.string().min(1).refine((s) => !s.includes("\0"), { message: "NUL 文字を含められない" }).describe("remote-cap への最初の指示"),
   server: z.string().min(1).optional().describe("server の peer id（一致しなければ名前）。省略時は protocol bantou で発見した先頭"),
   repo: z.string().min(1).refine((s) => !s.startsWith("-") && !s.includes("\0"), { message: "- で始められない / NUL 不可" }).optional(),
   branch: z.string().min(1).refine((s) => !s.startsWith("-") && !s.includes("\0"), { message: "- で始められない / NUL 不可" }).optional(),
+  model: modelSchema.optional().describe("remote-cap 自身のモデル（claude --model にそのまま渡す。例: sonnet / opus / haiku / claude-sonnet-5-5）。省略時は指定しない"),
+  worker_model: modelSchema.optional().describe("この remote-cap が起動する worker の既定モデル（worker_start に model が無い時に使う）。省略時は指定しない"),
 };
 
 export interface RemoteManager {
   /** 保存済みの記録を読み込む。返信を待っていた running は center 再起動で返信を失うので failed にする。 */
   restore(): Promise<void>;
   /** remote-cap を作って kick_cap を送る。返信は待たず、running で返る。返信が来たら done / failed に更新。 */
-  create(input: { owner: string; prompt: string; server?: string; repo?: string; branch?: string }): Promise<RemoteRecord>;
+  create(input: { owner: string; prompt: string; server?: string; repo?: string; branch?: string; model?: string; worker_model?: string }): Promise<RemoteRecord>;
   /** stop_cap を送って記録を外す。owner が分かっていて記録の owner と違えば拒否。 */
   delete(input: { remote_id: string; owner?: string; force?: boolean }): Promise<{ remote_id: string; deleted: true; stopped: boolean; warning?: string }>;
   list(filter?: { owner?: string }): RemoteView[];
@@ -113,6 +121,8 @@ export function createRemoteManager(opts: {
         server: peer.id,
         serverName: peer.name,
         state: "running",
+        ...(input.model ? { model: input.model } : {}),
+        ...(input.worker_model ? { worker_model: input.worker_model } : {}),
         createdAt: new Date().toISOString(),
       };
       records.set(remote_id, rec);
@@ -124,6 +134,8 @@ export function createRemoteManager(opts: {
           prompt: input.prompt,
           ...(input.repo ? { repo: input.repo } : {}),
           ...(input.branch ? { branch: input.branch } : {}),
+          ...(input.model ? { model: input.model } : {}),
+          ...(input.worker_model ? { worker_model: input.worker_model } : {}),
           reason: `remote_create owner=${input.owner}`,
         })
         .then(

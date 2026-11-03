@@ -236,6 +236,8 @@ export interface CenterAgentActivity {
   started_at: string | null;
   finished_at: string | null;
   error?: string;
+  /** Model the agent runs with (`--model`). null / absent = none given (or a server that does not report it). */
+  model?: string | null;
 }
 
 /** `remote_list[].activity` (center `RemoteActivity`). Omitted until the first notice arrives. */
@@ -254,6 +256,8 @@ export interface CenterRemoteRecord {
   server: string;
   serverName?: string;
   state: "running" | "done" | "failed";
+  /** Model given to the remote-cap at `remote_create` (absent = none). */
+  model?: string;
   createdAt: string;
   finishedAt?: string;
   result?: string;

@@ -10,7 +10,7 @@ bantou-server is the listener of this protocol. A center (or any peer) sends a c
 
 ## Commands (peer to server)
 
-- `kick_cap`: `{"bantou":1,"type":"kick_cap","cap_id":"<id>","prompt":"...","repo"?,"branch"?,"reason"?}`. Starts the remote cap `cap_id` headlessly, or resumes it when it already has a session. `cap_id` matches `^[A-Za-z0-9_-]+$`. `repo` and `branch` must not start with `-`. Reply: `cap_result` when the run finishes (it can take minutes), `error` on failure.
+- `kick_cap`: `{"bantou":1,"type":"kick_cap","cap_id":"<id>","prompt":"...","repo"?,"branch"?,"reason"?,"model"?,"worker_model"?}`. Starts the remote cap `cap_id` headlessly, or resumes it when it already has a session. `cap_id` matches `^[A-Za-z0-9_-]+$`. `repo` and `branch` must not start with `-`. `model` (claude `--model` for the cap itself) and `worker_model` (default `--model` of the workers this cap starts, remembered by the server as the cap's default) match `^[A-Za-z0-9._\[\]][A-Za-z0-9._\[\]-]*$`; both optional, absent = no `--model`. Servers older than 1.4.0 ignore them. Reply: `cap_result` when the run finishes (it can take minutes), `error` on failure.
 - `stop_cap`: `{"bantou":1,"type":"stop_cap","cap_id":"<id>"}`. Stops the running `claude -p` of the remote cap `cap_id` (its whole process group). Reply: `stop_result` (`stopped` is false when the cap was not running), `error` on failure. The interrupted `kick_cap` still gets its own `cap_result` with `ok:false`.
 - `status`: `{"bantou":1,"type":"status"}`. Reply: `status_result`.
 - `hello`: `{"bantou":1,"type":"hello"}`. Asks the server for its npm version and update state. Reply: `hello_result`. Servers older than protocol 1.3.0 do not know it and do not reply.
@@ -28,7 +28,7 @@ bantou-server is the listener of this protocol. A center (or any peer) sends a c
 
 ## Notices (server to peer)
 
-- `activity`: `{"bantou":1,"type":"activity","cap_id","at","agents":[...]}`. Not a reply: it is never matched with a pending command. Sent to the center that kicked `cap_id`, as a snapshot of the cap and its workers (cap first, then workers by id). Each agent has `kind`, `id`, `cap_id`, `state` (running | stalled | idle | done | failed | lost), `task`, `last_activity`, `last_output_at`, `silent_ms`, `started_at`, `finished_at`, `error`?. Sent every 5 seconds while any agent is running or stalled, and at each state change. Use `silent_ms` for elapsed time, not clock differences. A peer that does not know `activity` ignores it.
+- `activity`: `{"bantou":1,"type":"activity","cap_id","at","agents":[...]}`. Not a reply: it is never matched with a pending command. Sent to the center that kicked `cap_id`, as a snapshot of the cap and its workers (cap first, then workers by id). Each agent has `kind`, `id`, `cap_id`, `state` (running | stalled | idle | done | failed | lost), `task`, `last_activity`, `last_output_at`, `silent_ms`, `started_at`, `finished_at`, `error`?, `model`? (string or null; absent from servers older than 1.4.0). Sent every 5 seconds while any agent is running or stalled, and at each state change. Use `silent_ms` for elapsed time, not clock differences. A peer that does not know `activity` ignores it.
 
 ## Notes
 

@@ -69,6 +69,8 @@ export function buildWrapperArgs(opts: {
   permissionMode: string;
   mcpConfig: string | null;
   resume: boolean;
+  /** claude の --model にそのまま渡す。無ければ付けない。 */
+  model?: string;
   cols?: number;
   rows?: number;
 }): string[] {
@@ -84,6 +86,7 @@ export function buildWrapperArgs(opts: {
     "--permission-mode",
     opts.permissionMode,
     "--no-chrome", // Chrome 拡張があると対話型 claude が「Claude in Chrome extension detected」の確認で止まる
+    ...(opts.model ? ["--model", opts.model] : []),
     ...(opts.mcpConfig ? ["--mcp-config", opts.mcpConfig] : []),
     ...(opts.resume ? ["--continue"] : []),
   ];

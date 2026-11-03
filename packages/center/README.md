@@ -85,6 +85,7 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 | `remoteControl.restartDelayMs` | 0 以上の整数 | `5000` | 異常終了から再起動までの待ち |
 | `remoteControl.maxRestarts` | 0 以上の整数 | `5` | 再起動回数の上限 |
 | `remoteControl.stopGraceMs` | 0 以上の整数 | `5000` | SIGTERM から SIGKILL までの猶予 |
+| `remoteControl.model` | 文字列（`^[A-Za-z0-9._\[\]][A-Za-z0-9._\[\]-]*$`） | なし | master-cap（`session_create` の wrapper 経由の対話型 claude）の `--model` にそのまま渡す。未指定なら付けない。config 由来の project（`claude remote-control` 直起動）には効かない |
 | `servers[].name` | `[A-Za-z0-9_-]+` | 必須 | server 名。重複不可。tool の `server` 引数で使う |
 | `servers[].peer` | string | なし | server の peer 名または id。指定すると発見せずその名前へ送る（従来の名前指定）。省略すると `list_peers`（`protocol: "bantou"`）で自動発見する |
 | `servers[].timeoutMs` | 正の整数 | `2100000`（35 分） | 返信待ちの打ち切り |
@@ -110,7 +111,7 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 | `session_create` | `name`, `path?`, `permissionMode?` | `SessionInfo`（下記） |
 | `session_delete` | `name` | `{ name, deleted }` |
 | `session_list` | なし | `SessionInfo[]` |
-| `remote_create`（session 向けのみ） | `prompt`, `server?`, `repo?`, `branch?` | `{ remote_id, server, serverName, state }`（返信を待たない）。owner は header の session 名 |
+| `remote_create`（session 向けのみ） | `prompt`, `server?`, `repo?`, `branch?`, `model?`, `worker_model?` | `{ remote_id, server, serverName, state, model?, worker_model? }`（返信を待たない）。owner は header の session 名 |
 | `remote_delete`（session 向けのみ） | `remote_id`, `force?` | `{ remote_id, deleted, stopped, warning? }`。自分の remote だけ |
 | `remote_list` | `owner?`（外向け）。session 向けは引数なしで自分の分 | `RemoteView[]`（`RemoteRecord` + `activity?`、下記） |
 | `rc_list` | なし | `RcStatus[]` |
@@ -155,7 +156,7 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 
 ### remote（B）
 
-- `remote_create`: center が `remote_id`（= server 上の cap_id、`r-<hex10>`）を採番し、発見した server に `kick_cap`（`reason: remote_create owner=<owner>`）を送る。**返信を待たず**`{ remote_id, server, serverName, state: "running" }` を返す。返信（`cap_result` / `error`）が来たら記録の `state` を `done` / `failed` にし、`result`（結果本文、8000 文字まで）と `error` を入れる。
+- `remote_create`: center が `remote_id`（= server 上の cap_id、`r-<hex10>`）を採番し、発見した server に `kick_cap`（`reason: remote_create owner=<owner>`）を送る。**返信を待たず**`{ remote_id, server, serverName, state: "running" }`（指定した `model` / `worker_model` があれば付く）を返す。`model` は remote-cap 自身の `claude --model`、`worker_model` はその cap が起動する worker の既定モデルで、`kick_cap` にそのまま載る（形式 `^[A-Za-z0-9._\[\]][A-Za-z0-9._\[\]-]*$`、不正は isError、省略時は載せない＝従来どおり）。記録（`remotes.json`・`remote_list`）にも `model` / `worker_model` が残り、activity の `agents[].model` で実際に動いているモデルを見られる（`model` を知らない旧 server では出ない）。返信（`cap_result` / `error`）が来たら記録の `state` を `done` / `failed` にし、`result`（結果本文、8000 文字まで）と `error` を入れる。
 - `remote_delete`: server へ `stop_cap`（protocol `bantou` 1.1.0）を送って走行中の `claude -p` を止め、記録から外す。止められない（server が見つからない・error 返信）時、記録が `running` なら error（`force: true` なら記録だけ消し、`warning` に理由）。終わった記録は警告付きで消える。別の owner の remote は消せない。
 - `remote_list`: `owner` が分かればその owner の分だけ、分からなければ全件。`RemoteRecord` = `remote_id`, `owner`, `server`（作成時の peer id）, `serverName`, `state`, `createdAt`, `finishedAt?`, `result?`, `error?`。
 - `activity`（`remote_list` の各要素）: server が protocol `bantou`（1.2.0）の `activity` 通知で送ってくる remote-cap と worker の生存・進捗。通知がまだ無い remote には `activity` キーが無い。中身は `{ at, received_ms_ago, stale, agents }`。

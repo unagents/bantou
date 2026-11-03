@@ -95,6 +95,7 @@ function elapsed(silentMs: number): string {
         <span class="font-medium">{{ r.remote_id }}</span>
         <span class="text-cork-muted">{{ r.serverName ?? r.server }}</span>
         <span class="text-cork-muted">{{ r.owner }}</span>
+        <span v-if="r.model" class="text-cork-muted" :data-testid="`${tp}remote-model`">{{ r.model }}</span>
         <UBadge
           v-if="r.activity?.stale"
           color="warning"
@@ -119,6 +120,7 @@ function elapsed(silentMs: number): string {
           <div class="flex items-center gap-2">
             <span class="w-12">{{ a.kind }}</span>
             <span class="w-32 truncate">{{ a.id }}</span>
+            <span v-if="a.model" class="text-cork-muted shrink-0" :data-testid="`${tp}remote-agent-model`">{{ a.model }}</span>
             <UBadge
               :color="stateColor[a.state]"
               variant="subtle"

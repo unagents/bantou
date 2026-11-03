@@ -93,6 +93,13 @@ test("remoteControl.claude 未指定は undefined（既定値を入れない）"
   assert.equal(parseConfig({}, "/x/c.json").remoteControl.claude, undefined);
 });
 
+test("remoteControl.model: 任意、形式を検証、省略時は入れない", () => {
+  assert.equal(parseConfig({}, "/x/c.json").remoteControl.model, undefined);
+  assert.ok(!("model" in parseConfig({}, "/x/c.json").remoteControl));
+  assert.equal(parseConfig({ remoteControl: { model: "opus[1m]" } }, "/x/c.json").remoteControl.model, "opus[1m]");
+  for (const m of ["", "-x", "a b", "a;b"]) assert.throws(() => parseConfig({ remoteControl: { model: m } }, "/x/c.json"), /config が不正/, m);
+});
+
 test("server の peer は任意（省略すると protocol 発見）", () => {
   const c = parseConfig(
     { servers: [{ name: "a" }, { name: "b", peer: "my-server" }] },

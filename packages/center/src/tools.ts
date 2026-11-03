@@ -219,7 +219,14 @@ export function registerSessionTools(server: McpServer, deps: { remotes: RemoteM
     (args) =>
       guard(async () => {
         const r = await remotes.create({ owner, ...args });
-        return json({ remote_id: r.remote_id, server: r.server, serverName: r.serverName, state: r.state });
+        return json({
+          remote_id: r.remote_id,
+          server: r.server,
+          serverName: r.serverName,
+          state: r.state,
+          ...(r.model ? { model: r.model } : {}),
+          ...(r.worker_model ? { worker_model: r.worker_model } : {}),
+        });
       }),
   );
   server.registerTool(

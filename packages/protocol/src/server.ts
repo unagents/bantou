@@ -11,7 +11,7 @@ export const SERVER_NAME = "bantou-server";
  * agent-messenger protocol registration (messenger/protocol.json) used in `meta` of send / listPeers.
  * Not the body schema version (`bantou: 1`, PROTOCOL_VERSION). Keep in sync with messenger/protocol.json.
  */
-export const MESSENGER_PROTOCOL = { protocol: "bantou", version: "1.3.0" } as const;
+export const MESSENGER_PROTOCOL = { protocol: "bantou", version: "1.4.0" } as const;
 
 /**
  * hello / update_server (and their replies) exist from this protocol version. A server older than this
@@ -25,6 +25,12 @@ export const SERVER_VERSION_PATTERN = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
 
 /** Allowed cap / worker ids (also directory names under <workspace>/caps and <workspace>/workers). */
 export const AGENT_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+/**
+ * Claude model name passed as-is to `claude --model` ("sonnet", "opus", "claude-sonnet-5-5", "opus[1m]" ...).
+ * Optional everywhere; absent = no `--model` (the claude default). Never starts with '-' (it ends up in an argument).
+ */
+export const MODEL_PATTERN = /^[A-Za-z0-9._\[\]][A-Za-z0-9._\[\]-]*$/;
 
 export type AgentKind = "cap" | "worker";
 
@@ -52,6 +58,10 @@ export interface KickCapCommand extends ServerCommandBase {
   prompt: string;
   /** Free text, logged only. */
   reason?: string;
+  /** MODEL_PATTERN. Model of the cap's own `claude -p` (`--model`). Absent = no `--model`. Servers older than 1.4.0 ignore it. */
+  model?: string;
+  /** MODEL_PATTERN. Default model of the workers this cap starts (used when `worker_start` has no `model`). The server remembers it as the cap's default. */
+  worker_model?: string;
 }
 
 /** Resume (or start) the worker `worker_id` with `prompt`. */
@@ -208,6 +218,8 @@ export interface AgentStatus {
   retries: number;
   /** Commands waiting in this agent's queue (the running one excluded). */
   queued: number;
+  /** Model the agent was started with (`--model`); null / absent = none given. Servers older than 1.4.0 omit it. */
+  model?: string | null;
 }
 
 export interface StatusReply {
@@ -277,6 +289,8 @@ export interface AgentActivity {
   finished_at: string | null;
   /** Why the agent is failed / lost (at most 200 chars). */
   error?: string;
+  /** Model the agent runs with (`--model`); null / absent = none given. Servers older than 1.4.0 omit it. */
+  model?: string | null;
 }
 
 /** Notice from server to center (not a reply: it is never matched with a pending command). */
@@ -362,6 +376,16 @@ function isUpdateFailure(v: unknown): v is UpdateFailure {
   return isRecord(v) && typeof v.to === "string" && v.ok === false && typeof v.error === "string" && typeof v.at === "string";
 }
 
+/** A string matching MODEL_PATTERN. */
+export function isValidModel(v: unknown): v is string {
+  return typeof v === "string" && MODEL_PATTERN.test(v);
+}
+
+/** Absent, or a valid model. */
+function optModel(v: unknown): boolean {
+  return v === undefined || isValidModel(v);
+}
+
 /** A string matching AGENT_ID_PATTERN. */
 export function isValidAgentId(v: unknown): v is string {
   return typeof v === "string" && AGENT_ID_PATTERN.test(v);
@@ -384,7 +408,9 @@ export function isServerCommand(v: unknown): v is ServerCommand {
         nonEmptyString(v.prompt) &&
         optNonEmptyString(v.repo) &&
         optNonEmptyString(v.branch) &&
-        optPlainString(v.reason)
+        optPlainString(v.reason) &&
+        optModel(v.model) &&
+        optModel(v.worker_model)
       );
     case "resume_worker":
       return (
@@ -460,7 +486,8 @@ function isAgentStatus(v: unknown): v is AgentStatus {
     strOrNull(v.last_finished_at) &&
     optString(v.last_error) &&
     typeof v.retries === "number" &&
-    typeof v.queued === "number"
+    typeof v.queued === "number" &&
+    (v.model === undefined || strOrNull(v.model))
   );
 }
 
@@ -535,7 +562,8 @@ function isAgentActivity(v: unknown): v is AgentActivity {
     typeof v.silent_ms === "number" &&
     strOrNull(v.started_at) &&
     strOrNull(v.finished_at) &&
-    optString(v.error)
+    optString(v.error) &&
+    (v.model === undefined || strOrNull(v.model))
   );
 }
 
