@@ -86,6 +86,8 @@ export function buildWrapperArgs(opts: {
   name: string;
   permissionMode: string;
   mcpConfig: string | null;
+  /** claude の --settings にそのまま渡す JSON 文字列（statusLine のみ）。無ければ付けない。 */
+  settings?: string | null;
   resume: boolean;
   /** claude の --model にそのまま渡す。無ければ付けない。 */
   model?: string;
@@ -109,6 +111,7 @@ export function buildWrapperArgs(opts: {
     ...(opts.model ? ["--model", opts.model] : []),
     ...(opts.appendSystemPrompt ? ["--append-system-prompt", opts.appendSystemPrompt] : []),
     ...(opts.mcpConfig ? ["--mcp-config", opts.mcpConfig] : []),
+    ...(opts.settings ? ["--settings", opts.settings] : []),
     ...(opts.resume ? ["--continue"] : []),
   ];
 }

@@ -3,6 +3,12 @@ import { parseArgs, USAGE, type CliArgs } from "./args.js";
 import { runDaemon } from "./daemon.js";
 import { fatalLine } from "./log.js";
 
+if (process.argv[2] === "status-line") {
+  // claude の statusLine から呼ばれるサブコマンド（stdin の JSON を center に POST する）。daemon は読み込まない
+  const { runStatusLine } = await import("./status-line.js");
+  process.exit(await runStatusLine(process.argv.slice(3)));
+}
+
 let args: CliArgs;
 try {
   args = parseArgs(process.argv.slice(2));

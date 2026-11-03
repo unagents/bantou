@@ -25,6 +25,7 @@ export function normalizePath(p: string): string {
   return q.length > 1 && q.endsWith("/") ? q.slice(0, -1) : q;
 }
 
+const STATUS_LINE_PATH = /^\/sessions\/([A-Za-z0-9_-]+)\/status-line$/;
 const CORE_PATH = /^\/sessions\/([A-Za-z0-9_-]+)\/(output|input|resize|attachments)$/;
 /** POST ボディの上限。 */
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
@@ -158,6 +159,8 @@ export async function startHttpServer(opts: {
   core?: Core;
   /** 添付画像の置き場所の親（<workspace>/<session 名>/attachments/）。省略時、添付は 409 で断る。 */
   workspace?: string;
+  /** session の claude の statusLine が渡した JSON（POST /sessions/<name>/status-line、session token 認証）。渡すと提供する。sessionAuth と一緒に渡す。 */
+  onStatusLine?: (name: string, payload: unknown) => void;
   /** セッション増減の通知。渡すと GET /events（外向け token）を提供する。 */
   events?: EventHub;
   /** SSE の keep-alive 間隔（テスト用）。 */
@@ -244,6 +247,39 @@ export async function startHttpServer(opts: {
         sendJson(res, 500, { error: "保存に失敗した" });
       }
     }
+  };
+
+  /** statusLine の JSON の受信（session token 認証。外向け token は通さない）。 */
+  const handleStatusLine = async (req: IncomingMessage, res: ServerResponse, name: string): Promise<void> => {
+    const auth = req.headers.authorization;
+    if (!auth?.startsWith("Bearer ") || !opts.sessionAuth!.verify(name, auth.slice("Bearer ".length))) {
+      sendJson(res, 401, { error: "unauthorized" }, { "www-authenticate": "Bearer" });
+      return;
+    }
+    if (req.method !== "POST") {
+      sendJson(res, 405, { error: "method not allowed" }, { allow: "POST" });
+      return;
+    }
+    let body: unknown;
+    try {
+      body = await readJson(req);
+    } catch (e) {
+      if (e instanceof HttpError) {
+        sendJson(res, e.status, { error: e.message }, { connection: "close" });
+      } else {
+        log(`statusLine の JSON が不正: session=${name}`);
+        sendJson(res, 400, { error: (e as Error).message });
+      }
+      return;
+    }
+    if (typeof body !== "object" || body === null || Array.isArray(body)) {
+      log(`statusLine の JSON が object でない: session=${name}`);
+      sendJson(res, 400, { error: "JSON object が必要" });
+      return;
+    }
+    opts.onStatusLine!(name, body);
+    res.writeHead(204);
+    res.end();
   };
 
   /** core の SSE / 入力 / サイズ変更（認証済み）。 */
@@ -340,6 +376,7 @@ export async function startHttpServer(opts: {
     const [rawPath, query = ""] = (req.url ?? "").split("?", 2);
     const path = normalizePath(rawPath);
     const coreMatch = opts.core ? CORE_PATH.exec(path) : null;
+    const statusLineMatch = opts.onStatusLine && opts.sessionAuth ? STATUS_LINE_PATH.exec(path) : null;
     let window: "external" | "session";
     let owner: string | undefined;
     if (path === MCP_PATH) {
@@ -386,6 +423,9 @@ export async function startHttpServer(opts: {
         unsub();
         clearInterval(ka);
       });
+      return;
+    } else if (statusLineMatch) {
+      await handleStatusLine(req, res, statusLineMatch[1]);
       return;
     } else if (coreMatch) {
       if (!bearerMatches(req.headers.authorization, token)) {

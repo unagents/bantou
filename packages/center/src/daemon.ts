@@ -180,6 +180,10 @@ export async function runDaemon(args: CliArgs): Promise<void> {
       createServer: makeServer,
       createSessionServer: (owner) => createSessionMcpServer({ remotes, owner }),
       sessionAuth: sessionTokens,
+      onStatusLine: (name, payload) => {
+        const s = sessions.list().find((x) => x.name === name);
+        if (s && (s.state === "starting" || s.state === "connected")) contextUsage.applyStatusLine(name, payload, s.startedAt);
+      },
       core,
       events,
       ...(config.workspace ? { workspace: config.workspace } : {}),

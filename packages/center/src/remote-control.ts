@@ -21,6 +21,7 @@ import {
   TEXT_WINDOW,
   windowConnected,
 } from "./wrapper.js";
+import { statusLineCommand, statusLineSettingsJson, statusLineUrl } from "./status-line.js";
 
 export type RcState = "stopped" | "starting" | "connected" | "error";
 
@@ -193,6 +194,8 @@ export interface WrapperDeps {
   path?: string;
   /** session 向け MCP 窓口の URL。http で待ち受けていない（stdio）時は null で、その時は --mcp-config を付けない。 */
   mcpUrl: () => string | null;
+  /** statusLine のサブコマンドが center 自身を再実行する argv。省略時は実行中の center 自身（テスト用の差し替え）。 */
+  statusLineSelf?: string[];
 }
 
 /**
@@ -314,6 +317,8 @@ export function createRemoteControlSupervisor(opts: {
         name,
         permissionMode: e.project.permissionMode,
         mcpConfig: mcpConfigJson(mcpUrl, name),
+        // statusLine は center のものを渡す（利用者の statusLine 設定より優先される）。窓口が無い（stdio）時は付けない
+        settings: mcpUrl ? statusLineSettingsJson(statusLineCommand(statusLineUrl(mcpUrl, name), wd.statusLineSelf)) : null,
         resume: useContinue,
         ...(rc.model ? { model: rc.model } : {}),
         ...(rc.sessionInstructions ? { appendSystemPrompt: rc.sessionInstructions } : {}),
