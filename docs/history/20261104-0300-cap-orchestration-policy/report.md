@@ -36,6 +36,13 @@ branch: `feature/cap-orchestration-policy`（base: develop）。
 5. 確認済み（指摘なし）: `packages/protocol` 無変更、`kick_cap` の prompt 無変更（変更は `worker_start` の description と `CAP_GUIDE` のみ）、server version 0.4.1 と bun.lock が一致、README / architecture / design / worker_start の記載内容は仕様と一致。
 6. 結論: 要修正 1 件（中）。
 
+対応:
+
+- 指摘 [中]（architecture.md:27）: 修正。該当文を削除。他の docs / README / prompts に同種の記述は無い（grep。残りは `docs/design/cap-orchestration.md` の削除経緯の 1 行のみで、矛盾しない）。
+- 指摘 [低]（正本と `CAP_GUIDE` の一致テスト）: 見送り。今回スコープ外。
+- 指摘 [低]（読み取り調査の 1 行）: 見送り。任意のため。
+- 再実行: server `npm test` 203 件、pass 203、fail 0、typecheck エラーなし。
+
 ## 残存物
 
 - 作業 dir: `/home/vagrant/work/bantou-server-ws/workers/w-2a16c37efa`（clone `bantou/`）
