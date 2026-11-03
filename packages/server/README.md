@@ -178,7 +178,8 @@ npx bantou --config <path>
 - 通知: server.log に `worker 掃除: worker_id=<id> cap_id=<id> state=<state> 削除=<n>件 ...` を出し、その worker を activity の `agents[]` から外して center へ送る。`worker_status` は state.json から返すので掃除後も引ける。
 - 再開: 同じ `worker_id` の `worker_start`（`worker_reply` 含む）が来たら待ち時間を数え直す。掃除の途中ならその完了を待ってから進み、dir が消えた後なら clone し直して起動する（`repo` を省いても `logs/repo.json` の clone 元を使う）。session_id は残るので `--resume` は続く。
 - 無効化: `session.workerKeepMs: 0`。
-- 制限: 対象の記録はメモリ。server を再起動する前に終わった worker は自動では消えない。
+- 制限: 対象の記録はメモリ。server を再起動する前に終わった worker は自動では消えない。掃除後の `worker_status` は state.json から返すため、done / 停止は `idle` などに見える。未 push の変更や未 commit の作業も消える（確認はしない）。`logs/repo.json` は掃除後も残る。
+- 途中で失敗した時: 印（`logs/cleaned.json`）を先に書き `.git` を先に消すので、残骸があっても再開は clone し直しで進む（残骸は clone し直しの前に消す）。clone 元の記録が無い掃除済みの worker は、`repo` を指定しない `worker_start` を失敗にする。
 
 ## 活動情報（activity）
 

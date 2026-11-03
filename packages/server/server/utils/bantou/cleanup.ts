@@ -1,12 +1,10 @@
-import { lstat, mkdir, readdir, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isValidAgentId, type AgentActivity } from "@agent-hand/bantou-protocol";
 import { STOP_MSG } from "./agents";
-import { agentDir, cleanedFile, runLogDir } from "./paths";
+import { KEEP_ENTRIES, agentDir, cleanedFile, removeNonKept, runLogDir } from "./paths";
 import { readOwner } from "./workers";
 
-/** 掃除しても残すもの（dir 直下）。 */
-export const KEEP_ENTRIES: readonly string[] = ["logs", "state.json"];
 /** 掃除の確認間隔の既定。 */
 export const CLEANUP_INTERVAL_MS = 60_000;
 
@@ -45,15 +43,10 @@ export async function cleanWorkerDir(dir: string): Promise<number> {
     throw e;
   }
   if (!st.isDirectory()) throw new Error(`dir が通常の directory でない: ${dir}`);
-  let removed = 0;
-  for (const name of await readdir(dir)) {
-    if (KEEP_ENTRIES.includes(name)) continue;
-    await rm(join(dir, name), { recursive: true, force: true });
-    removed++;
-  }
+  // 印を先に書き、.git を先に消す。途中で失敗しても「印あり・.git 無し」になり、再開で clone し直せる
   await mkdir(runLogDir(dir), { recursive: true });
   await writeFile(cleanedFile(dir), JSON.stringify({ cleaned_at: new Date().toISOString() }) + "\n");
-  return removed;
+  return await removeNonKept(dir);
 }
 
 const isLive = (s: AgentActivity["state"]): boolean => s === "running" || s === "stalled";

@@ -293,3 +293,51 @@ test("再開: 掃除していない（.git が残る）worker は従来どおり
     assert.equal((await readState(join(ws, "workers", "w3"))).state, "failed");
   });
 });
+
+test("再開: 掃除が途中で止まった dir（印あり・.git 無し・残骸あり）でも clone し直せる。記録が無ければ明示エラー", async () => {
+  await withGit(async ({ ws, repo, hub }) => {
+    await hub.start("c1", { worker_id: "w4", prompt: "p", repo });
+    await settleRuns();
+    const dir = join(ws, "workers", "w4");
+    await cleanWorkerDir(dir);
+    await mkdir(join(dir, "node_modules"), { recursive: true }); // 残骸
+    await writeFile(join(dir, "a.txt"), "stale"); // 同名の残骸
+    await hub.start("c1", { worker_id: "w4", prompt: "again" });
+    await settleRuns();
+    assert.equal(await readFile(join(dir, "a.txt"), "utf8"), "A\n");
+    assert.equal((await names(dir)).includes("node_modules"), false);
+
+    // clone 元の記録が無い掃除済み dir は、repo 無しの再開を失敗にする（空の dir で走らせない）
+    await cleanWorkerDir(dir);
+    await rm(join(dir, "logs", "repo.json"));
+    await hub.start("c1", { worker_id: "w4", prompt: "norepo" });
+    await settleRuns();
+    const st = await readState(dir);
+    assert.equal(st.state, "failed");
+    assert.match(st.last_error ?? "", /repo を指定/);
+  });
+});
+
+test("worker_start: 別の cap の worker_id では掃除の待ち時間を数え直さない（begin を呼ばない）", async () => {
+  const base = await mkdtemp(join(tmpdir(), "bantou-cleanup-owner-"));
+  try {
+    const ws = join(base, "ws");
+    await mkdir(join(ws, "caps", "c1"), { recursive: true });
+    await mkdir(join(ws, "caps", "c2"), { recursive: true });
+    await writeOwner(ws, "w9", "c1");
+    const begun: string[] = [];
+    const hub = createWorkerHub({
+      workspace: ws,
+      manager: { invoke: async () => ({ session_id: "s", ok: true, result_text: "" }), stop: async () => ({ stopped: true }) },
+      activity: { snapshot: () => [] },
+      log: () => {},
+      cleaner: { begin: async (id) => void begun.push(id) },
+    });
+    await assert.rejects(hub.start("c2", { worker_id: "w9", prompt: "p" }), /別の cap の worker/);
+    assert.deepEqual(begun, []);
+    await hub.start("c1", { worker_id: "w9", prompt: "p" });
+    assert.deepEqual(begun, ["w9"]);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});

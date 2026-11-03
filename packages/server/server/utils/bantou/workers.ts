@@ -95,10 +95,10 @@ export function createWorkerHub(deps: WorkerHubDeps): WorkerHub {
       throw new Error("prompt は空でない文字列（NUL 不可）");
     }
     if (input.model !== undefined) assertModel(input.model, "model");
-    // 掃除中ならその完了を待つ（dir が消えた後は clone し直しで起動する）
-    await deps.cleaner?.begin(workerId);
     const owner = await readOwner(workspace, workerId);
     if (owner !== undefined && owner !== capId) throw new Error(`別の cap の worker: ${workerId}`);
+    // 掃除中ならその完了を待つ（dir が消えた後は clone し直しで起動する）。持ち主の確認の後（他の cap が掃除を妨げられない）
+    await deps.cleaner?.begin(workerId);
     const dir = agentDir(workspace, "worker", workerId);
     // repo 付きの初回は clone 先が存在してはいけないので、持ち主の記録は clone の後（runExtras）に任せる
     if (!(input.repo && !(await exists(dir)))) await writeOwner(workspace, workerId, capId);

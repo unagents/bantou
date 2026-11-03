@@ -12,7 +12,7 @@ import {
 import type { Config } from "./config";
 import { assertModel, readModelRecord, writeModelRecord, type WithModel } from "./model";
 import { killGroup, type ClaudeRunOptions, type ClaudeRunResult, type RunMode } from "./claude";
-import { agentDir, cleanedFile, runLogDir } from "./paths";
+import { agentDir, cleanedFile, removeNonKept, runLogDir } from "./paths";
 import { listLiveProcesses, matchesSession, type LiveProcess } from "./processes";
 import type { AgentRunner } from "./runner";
 import { readState, writeState, type AgentStateFile } from "./state";
@@ -222,13 +222,11 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
     const tmp = `${dir}.clone-${randomUUID()}`;
     try {
       await cloneRepo(tmp, repo, branch);
-      for (const name of await readdir(tmp)) {
-        if (name === "logs" || name === "state.json") {
-          await rm(join(tmp, name), { recursive: true, force: true });
-          continue;
-        }
-        await rename(join(tmp, name), join(dir, name));
-      }
+      // 前回の掃除が途中で終わっていた場合の残りを先に消す
+      await removeNonKept(dir);
+      // .git は最後に移す（途中で失敗しても .git が無ければ次も clone し直しになる）
+      const names = (await readdir(tmp)).filter((n) => n !== "logs" && n !== "state.json").sort((a, b) => (a === ".git" ? 1 : b === ".git" ? -1 : 0));
+      for (const name of names) await rename(join(tmp, name), join(dir, name));
       await unlink(cleanedFile(dir)).catch(() => {});
     } finally {
       await rm(tmp, { recursive: true, force: true });
@@ -240,7 +238,8 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
     // 掃除済みの worker は、repo の指定が無くても前回の clone 元で clone し直す
     if (!repo && kind === "worker" && (await isCleaned(dir))) {
       const rec = await readRepoRecord(dir);
-      if (rec) ({ repo, branch } = rec);
+      if (!rec) throw new Error(`worker は掃除済みで clone 元の記録（logs/repo.json）が無い。repo を指定して worker_start する: ${dir}`);
+      ({ repo, branch } = rec);
     }
     if (!repo) {
       await mkdir(dir, { recursive: true });
