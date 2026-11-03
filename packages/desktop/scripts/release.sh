@@ -107,7 +107,7 @@ awk -v v="$VERSION" '/^ *"packages\/desktop": \{/ { d = 1 } d && /"version":/ { 
 mv bun.lock.new bun.lock
 sed -i '' "s/^version = \"$OLD_RE\"\$/version = \"$VERSION\"/" packages/desktop/src-tauri/Cargo.toml
 # Cargo.lock には同じ版の別 crate があり得る（例: schannel 0.1.30）。name = "bantou" の直後の版だけ書き換える
-awk -v v="$VERSION" '/^name = "bantou"$/ { b = 1; print; next } b && /^version = / { $0 = "version = \"" v "\""; b = 0 } { print }' packages/desktop/src-tauri/Cargo.lock >desktop/src-tauri/Cargo.lock.new
+awk -v v="$VERSION" '/^name = "bantou"$/ { b = 1; print; next } b && /^version = / { $0 = "version = \"" v "\""; b = 0 } { print }' packages/desktop/src-tauri/Cargo.lock >packages/desktop/src-tauri/Cargo.lock.new
 mv packages/desktop/src-tauri/Cargo.lock.new packages/desktop/src-tauri/Cargo.lock
 for f in bun.lock packages/desktop/package.json packages/desktop/src-tauri/Cargo.toml packages/desktop/src-tauri/Cargo.lock; do
   n="$(git diff -U0 "$f" | grep -c '^+[^+]' || true)"
