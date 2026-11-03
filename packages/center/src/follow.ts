@@ -52,7 +52,7 @@ export interface Follow {
   /** 1 周する（発見 → hello → 必要なら update_server）。同時に 2 周は走らない。 */
   check(): Promise<void>;
   snapshot(): FollowSnapshot;
-  /** link の門に差し込む。更新待ちの server への kick_cap を送る前に断る。 */
+  /** link の門に差し込む。更新待ちの server への kick_cap / task を送る前に断る。 */
   gate(peer: { id: string }, command: ServerCommandType): ErrorReply | undefined;
 }
 
@@ -74,7 +74,7 @@ export function compareVersions(a: string, b: string): number {
   return 0;
 }
 
-/** 更新待ちの server に kick_cap を送る前に center が断る error（server 側の断りと同じ形）。 */
+/** 更新待ちの server に kick_cap / task を送る前に center が断る error（server 側の断りと同じ形）。 */
 export function updatingError(
   entry: { server_version?: string; update?: { to: string } },
   pair: Pair,
@@ -302,7 +302,7 @@ export function createFollow(opts: {
       };
     },
     gate(peer, command) {
-      if (command !== "kick_cap") return undefined;
+      if (command !== "kick_cap" && command !== "task") return undefined;
       const key = byId.get(peer.id);
       const rec = key ? recs.get(key) : undefined;
       if (rec?.entry.state !== "updating") return undefined;

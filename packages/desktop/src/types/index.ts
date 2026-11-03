@@ -281,6 +281,47 @@ export interface CenterPendingInstruction {
   prompt: string;
 }
 
+/** One worker in `task_result` (protocol `TaskResultWorker`). */
+export interface CenterTaskResultWorker {
+  worker_id: string;
+  role: string;
+  state: CenterActivityState;
+  branch?: string;
+  commit?: string;
+  tests?: string;
+  report_path?: string;
+  /** Head of the worker's result (at most 500 chars). */
+  result: string;
+}
+
+export interface CenterReviewItem {
+  severity: "high" | "medium" | "low";
+  text: string;
+  resolved: boolean;
+}
+
+/** `remote_list[].task_result` (protocol `TaskResultReply`, the part shown). */
+export interface CenterTaskResult {
+  cap_id: string;
+  task_id: string;
+  state: "done" | "failed";
+  summary: string;
+  workers: CenterTaskResultWorker[];
+  review: { verdict: "ok" | "issues" | "unknown"; items: CenterReviewItem[]; rounds: number };
+  remaining: string[];
+  error?: string;
+}
+
+/** `remote_list[].worker_reports` element (protocol `WorkerReportNotice`): latest 20, in arrival order. */
+export interface CenterWorkerReport {
+  cap_id: string;
+  task_id?: string;
+  worker_id: string;
+  kind: "progress" | "ask" | "approve" | "done";
+  text: string;
+  at: string;
+}
+
 /**
  * `remote_list` element (center `RemoteView`, the part shown): one remote-cap per server (`remote_id` = cap_id, fixed per center),
  * with the latest result / error and the pending instructions. No history is kept; old-format records (one cap per task) are cleaned up by center.
@@ -304,6 +345,10 @@ export interface CenterRemoteRecord {
   error_at?: string;
   pending?: CenterPendingInstruction[];
   activity?: CenterRemoteActivity;
+  /** Latest `task_result` of the cap (absent until a `task` finished). */
+  task_result?: CenterTaskResult;
+  /** Latest worker reports (at most 20, arrival order). */
+  worker_reports?: CenterWorkerReport[];
 }
 
 /** State machine of the in-app updater (`useUpdater`). Mirrors Cork's `UpdaterState`. */

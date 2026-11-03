@@ -24,11 +24,11 @@ const AUTH_WITH = (name: string): Record<string, string> => ({ ...AUTH, "x-banto
 
 const TOOLS = [
   "rc_list", "rc_start", "rc_status", "rc_stop", "remote_list", "remote_wait",
-  "server_list", "server_peers", "server_status", "session_create", "session_delete", "session_list", "session_settings_get", "session_settings_update", "worker_resume",
+  "server_list", "server_peers", "server_status", "session_create", "session_delete", "session_list", "session_settings_get", "session_settings_update", "worker_reply", "worker_resume",
 ];
 
 async function boot(
-  extra: { sessionIdleTtlMs?: number; sweepIntervalMs?: number; maxSessions?: number; bind?: string; token?: string; keepAliveMs?: number; workspace?: string; log?: (msg: string) => void } = {},
+  extra: { sessionIdleTtlMs?: number; sweepIntervalMs?: number; maxSessions?: number; bind?: string; token?: string; keepAliveMs?: number; workspace?: string; log?: (msg: string) => void; onStatusLine?: (name: string, payload: unknown) => void } = {},
 ) {
   const config = parseConfig({}, "/tmp/c.json");
   const supervisor = {
@@ -372,14 +372,14 @@ const sessionClient = async (base: string, token: string, name: string) => {
   return c;
 };
 
-test("/mcp/session: 窓口は remote_send / remote_create / remote_delete / remote_list / remote_wait だけ。owner は header の session 名", async () => {
+test("/mcp/session: 窓口は remote_send / remote_create / remote_delete / remote_list / remote_wait / worker_reply だけ。owner は header の session 名", async () => {
   const { h, tokens, created, base } = await boot();
   const t = tokens.issue("pm1");
   const c = await sessionClient(base, t, "pm1");
   try {
-    assert.deepEqual((await c.listTools()).tools.map((x) => x.name).sort(), ["remote_create", "remote_delete", "remote_list", "remote_send", "remote_wait"]);
-    await c.callTool({ name: "remote_create", arguments: { prompt: "p", owner: "evil" } });
-    assert.deepEqual(created, [{ owner: "pm1", prompt: "p" }]);
+    assert.deepEqual((await c.listTools()).tools.map((x) => x.name).sort(), ["remote_create", "remote_delete", "remote_list", "remote_send", "remote_wait", "worker_reply"]);
+    await c.callTool({ name: "remote_create", arguments: { goal: "p", owner: "evil" } });
+    assert.deepEqual(created, [{ owner: "pm1", goal: "p" }]);
     const l = await c.callTool({ name: "remote_list", arguments: {} });
     assert.equal((JSON.parse((l.content as { text: string }[])[0].text) as { owner: string }[])[0].owner, "pm1");
   } finally {
@@ -707,5 +707,60 @@ test("添付: 認証なし・違う token は 401 で何も書かない。worksp
     assert.equal(r.status, 409);
   } finally {
     await b.h.close();
+  }
+});
+
+test("POST /sessions/<name>/status-line: session token で JSON を受け取り 204。A の token で B・外向け token・token 無し・不正 token は 401、onStatusLine に渡らない", async () => {
+  const got: { name: string; payload: unknown }[] = [];
+  const { h, base, tokens } = await boot({ onStatusLine: (name, payload) => got.push({ name, payload }) });
+  try {
+    const ta = tokens.issue("a");
+    tokens.issue("b");
+    const url = (n: string): string => `${base}/sessions/${n}/status-line`;
+    const post = (n: string, headers: Record<string, string>, body: string) =>
+      fetch(url(n), { method: "POST", headers: { "content-type": "application/json", ...headers }, body });
+    const body = JSON.stringify({ context_window: { context_window_size: 1000000, used_percentage: 6 } });
+    const ok = await post("a", { authorization: `Bearer ${ta}` }, body);
+    assert.equal(ok.status, 204);
+    assert.deepEqual(got, [{ name: "a", payload: JSON.parse(body) }]);
+    for (const headers of [{ authorization: `Bearer ${ta}` }, AUTH, {}, { authorization: "Bearer nope" }]) {
+      const r = await post("b", headers, body);
+      assert.equal(r.status, 401);
+    }
+    assert.equal((await post("zzz", { authorization: `Bearer ${ta}` }, body)).status, 401, "token の無い session 名");
+    assert.equal(got.length, 1, "401 は反映しない");
+    assert.equal((await fetch(url("a"), { method: "GET", headers: { authorization: `Bearer ${ta}` } })).status, 405);
+  } finally {
+    await h.close();
+  }
+});
+
+test("POST /sessions/<name>/status-line: 壊れた JSON は 400 でログに残し反映しない。object 以外も 400", async () => {
+  const got: unknown[] = [];
+  const lines: string[] = [];
+  const { h, base, tokens } = await boot({ onStatusLine: (_n, p) => got.push(p), log: (m) => lines.push(m) });
+  try {
+    const t = tokens.issue("a");
+    const post = (body: string) =>
+      fetch(`${base}/sessions/a/status-line`, { method: "POST", headers: { authorization: `Bearer ${t}`, "content-type": "application/json" }, body });
+    assert.equal((await post('{"context_window":')).status, 400);
+    assert.ok(lines.some((l) => l.includes("statusLine の JSON が不正") && l.includes("session=a")), lines.join("\n"));
+    assert.ok(lines.some((l) => l.includes("HTTP POST /sessions/a/status-line -> 400")));
+    assert.equal((await post("[1]")).status, 400);
+    assert.equal((await post('"x"')).status, 400);
+    assert.deepEqual(got, []);
+  } finally {
+    await h.close();
+  }
+});
+
+test("status-line の route は onStatusLine が無い center では 404", async () => {
+  const { h, base, tokens } = await boot();
+  try {
+    const t = tokens.issue("a");
+    const r = await fetch(`${base}/sessions/a/status-line`, { method: "POST", headers: { authorization: `Bearer ${t}` }, body: "{}" });
+    assert.equal(r.status, 404);
+  } finally {
+    await h.close();
   }
 });

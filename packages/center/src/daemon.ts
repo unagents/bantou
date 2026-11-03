@@ -1,5 +1,5 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import type { CapResultReply, ErrorReply } from "@agent-hand/bantou-protocol";
+import type { CapResultReply, ErrorReply, TaskResultReply, WorkerReportNotice } from "@agent-hand/bantou-protocol";
 import type { CliArgs } from "./args.js";
 import { resolveClaude } from "./claude-path.js";
 import { createActivityStore } from "./activity.js";
@@ -70,13 +70,18 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   // 通知は 5 秒ごとに来るので、状態の組が変わった時だけログに出す
   const lastStates = new Map<string, string>();
   // remotes は link の後に作るので、遅れて届く返信はここ経由で渡す
-  let applyLateReply: (r: CapResultReply | ErrorReply, fromId?: string) => void = () => {};
+  let applyLateReply: (r: CapResultReply | TaskResultReply | ErrorReply, fromId?: string) => void = () => {};
   let onActivity: (capId: string, fromId?: string) => void = () => {};
+  let onWorkerReport: (n: WorkerReportNotice, fromId?: string) => void = () => {};
   const link = createServerLink({
     config,
     log,
     onLateCapReply: (r, fromId) => applyLateReply(r, fromId),
     onNotice: (n, fromId) => {
+      if (n.type === "worker_report") {
+        onWorkerReport(n, fromId);
+        return;
+      }
       activity.apply(n, fromId ?? "");
       onActivity(n.cap_id, fromId);
       const states = n.agents.map((a) => `${a.id}=${a.state}`).join(" ");
@@ -126,6 +131,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   });
   applyLateReply = (r, fromId) => void remotes.applyLateReply(r, fromId);
   onActivity = (id, fromId) => remotes.onActivity(id, fromId);
+  onWorkerReport = (n, fromId) => remotes.onWorkerReport(n, fromId);
 
   let closing = false;
   let http: HttpHandle | null = null;
@@ -180,6 +186,10 @@ export async function runDaemon(args: CliArgs): Promise<void> {
       createServer: makeServer,
       createSessionServer: (owner) => createSessionMcpServer({ remotes, owner }),
       sessionAuth: sessionTokens,
+      onStatusLine: (name, payload) => {
+        const s = sessions.list().find((x) => x.name === name);
+        if (s && (s.state === "starting" || s.state === "connected")) contextUsage.applyStatusLine(name, payload, s.startedAt);
+      },
       core,
       events,
       ...(config.workspace ? { workspace: config.workspace } : {}),

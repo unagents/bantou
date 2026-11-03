@@ -138,6 +138,14 @@ master-cap への追加指示を、center が起動する master-cap に渡す�
     - 読み直しで効く項目（その session の起動時点の値を使う）: `remoteControl.model` / `env` / `autoConsent` / `maxRestarts` / `restartDelayMs` / `continueOnRestart`。再起動の予約は、その起動で読んだ値で決める。
     - 起動時にしか効かない項目（center の再起動が要る）: `remoteControl.claude`（起動時に解決する）、`remoteControl.stopGraceMs`（停止は起動と別の経路で、読み直しの対象外）、`projects` / `servers` / `logDir` / `workspace` / `token`、HTTP の port / bind。この一覧に項目を足さない（新しい `remoteControl` の項目は、session 起動時に使うなら読み直しの値を使う）。
 
+17. 追記（2026-11-04）: context の窓は claude の statusLine の JSON（`context_window.context_window_size`）を正本にする。center は master-cap を起動する時に `--settings '{"statusLine":{"type":"command","command":"<center の status-line サブコマンド>"}}'` を足し、サブコマンドが stdin の JSON を `POST /sessions/<name>/status-line` へ送る。**利用者の statusLine 設定より center のものが master-cap で優先される**（利用者の statusLine は master-cap では出ない）。
+    - 理由: transcript の model 名は `[1m]` が落ちた素の名前で窓が決められず、desktop の ctx 表示が % にならなかった（`[1m]` 無しの session で 25 万 token 使えていた）。
+    - 比較した案: (A) transcript の model 名から窓を推測する（`[1m]` 無しで 1M の session があり、決められない）、(B) `/context` の出力を画面から読む（画面解析は採らない方針）、(C) statusLine の JSON を使う、で (C)。(C) の渡し方は、(C1) `/bin/sh` + `curl`（token が curl の argv に出て `ps` に見える。Windows に無い）、(C2) 一時ファイルを書く（掃除が増える）、(C3) center 自身のサブコマンド。(C3) を採用。token は claude の env `BANTOU_SESSION_TOKEN`（`--mcp-config` と同じ使い捨て）を子が読み、argv に載せない。
+    - `--settings` は `statusLine` のキーだけを渡す（他の設定は上書きしない。実機で hooks・output style が残ることを確認）。
+    - 値: `usedTokens` = `total_input_tokens`（output を含まない。claude の `used_percentage` と同じ式）、`percent` は出し直した小数 1 桁。statusLine の値が来るまで、および `used_percentage` が `null` の間は transcript 方式を予備にする（窓だけ statusLine で補う）。詳細は `packages/center/README.md` の「statusLine 方式」。
+    - 利用者から見える副作用: statusLine を設定していなかった利用者でも、master-cap の端末では footer の hint（`esc to interrupt` など）が消える（custom statusLine を設定した時の claude の仕様。docs 記載）。Windows での実行は未検証。
+    - desktop の表示は変えない（1M は「1M」）。
+
 ## 別件（同日の観測）
 
 - server 0.3.1: `remote_create` に repo を渡すと、clone 前に `logs/center.json` が cap の dir を作るため `cap の path は git repo でない` で必ず失敗する。
@@ -146,6 +154,13 @@ master-cap への追加指示を、center が起動する master-cap に渡す�
 
 ## 追記（2026-11-04）: remote-cap は 1 つの server につき 1 つ
 
-- center は server ごとに remote-cap を 1 つだけ持つ（cap_id は center ごとに固定の `c-<10 桁 hex>`）。session からの指示は `remote_send`（別名 `remote_create`）でその cap への「次の指示」になり、cap が無い時だけ最初の `kick_cap` で作る。
+- center は server ごとに remote-cap を 1 つだけ持つ（cap_id は center ごとに固定の `c-<10 桁 hex>`。2026-11-04 以降は記録が持つ cap_id が優先で、旧形式から引き継いだ server は元の cap_id のまま。下の「追記（2026-11-04 夜）」）。session からの指示は `remote_send`（別名 `remote_create`）でその cap への「次の指示」になり、cap が無い時だけ最初の `kick_cap` で作る。
 - 記録は server の cap 単位（履歴は持たない。最新の結果と未完了の指示だけ）。完了通知は、cap が idle で worker 無しになった時に、未完了の指示を全て完了にして指示を送った session ごとに送る。
 - 経路テスト時点の `remote_create`（作業ごとに cap を作る）の記述は、この変更前のもの。詳細は `docs/design/center-tools.md` と `packages/center/README.md`、`docs/history/20261104-0200-one-cap-per-server/report.md`。
+
+## 追記（2026-11-04 夜）: center の記録は center が持ち、消すのは remote_delete だけ
+
+- remote-cap は center の指示で作られ、その記録は center が保存して再起動で復元する。以後の指示はその記録の cap に送る。記録を消すのは `remote_delete` だけ。
+- 旧形式（作業ごとの cap）の記録は、起動時に掃除（`stop_cap` で消す）するのをやめ、その server の cap として引き継ぐ（cap_id はそのまま）。同じ server に複数あれば動いている（`running` / `unknown` / 未完了の指示あり）記録を最優先し、同順位なら最新（`createdAt` / `finishedAt` / `result_at` / `error_at` のうち最も新しい時刻）を残す。理由: 最新だけで選ぶと、動いている旧 cap より新しい完了済みの記録が残り、動いている cap へ `stop_cap` が飛ぶため（利用者の決定「最新の 1 件を残す」からの意図した調整）。動いている記録が複数なら最新の動いている記録を残し、他（動いている記録を含む）へ `stop_cap` を送る。他は `stop_cap` で消す（1 回限り）。cap_id は server ごとに記録から決める。
+- server は center を peer の名前（`bantou-center`）で覚え、送る時に今の peer id へ引く（protocol 1.6.0）。center を再起動しても activity / 結果 / worker_report が届く。center は起動時に各 cap の `status`（cap_id 付き）を server へ送って通知先を取り戻す。
+- 詳細は `docs/design/center-tools.md`、`packages/center/README.md`、`docs/protocol.md`。

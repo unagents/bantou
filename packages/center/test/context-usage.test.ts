@@ -117,3 +117,66 @@ test("tracker: transcript が無い時は null、窓が不明な時は percent n
   await tr.poll();
   assert.deepEqual(tr.get("n"), { usedTokens: 5, windowTokens: null, percent: null, updatedAt: "2026-11-03T10:00:00.000Z" });
 });
+
+// ---- statusLine 方式 ----
+import { parseStatusLine } from "../src/context-usage.js";
+
+const sl = (cw: Record<string, unknown>, model = "claude-opus-5-5"): unknown => ({ model: { id: model, display_name: "Opus" }, context_window: cw });
+const SL_USED = { total_input_tokens: 58789, total_output_tokens: 178, context_window_size: 1_000_000, used_percentage: 6, remaining_percentage: 94 };
+
+test("parseStatusLine: 窓は context_window_size、使用量は total_input_tokens（output を含まない）、percent は小数 1 桁で出し直す", () => {
+  assert.deepEqual(parseStatusLine(sl(SL_USED)), { windowTokens: 1_000_000, usedTokens: 58789, percent: 5.9, model: "claude-opus-5-5" });
+  // 窓が無ければ used_percentage をそのまま
+  assert.deepEqual(parseStatusLine(sl({ total_input_tokens: 10, used_percentage: 3 })), { windowTokens: null, usedTokens: 10, percent: 3, model: "claude-opus-5-5" });
+  // used_percentage が null（API 応答前・/compact 直後）は使用量なし、窓だけ
+  assert.deepEqual(parseStatusLine(sl({ total_input_tokens: 0, context_window_size: 1_000_000, used_percentage: null, current_usage: null })), {
+    windowTokens: 1_000_000,
+    usedTokens: null,
+    percent: null,
+    model: "claude-opus-5-5",
+  });
+  for (const bad of [null, "x", 1, {}, { context_window: null }, { context_window: {} }, { context_window: { context_window_size: 0, used_percentage: null } }]) {
+    assert.equal(parseStatusLine(bad), null);
+  }
+});
+
+test("tracker.applyStatusLine: 値が変わった時だけ onChange。statusLine が transcript に優先し、無い間は transcript", async () => {
+  const cwd = "/work/sl1";
+  const pdir = join(dir, "projects", projectDirName(cwd));
+  await mkdir(pdir, { recursive: true });
+  await writeFile(join(pdir, "s.jsonl"), asst({ input_tokens: 250_000 }) + "\n");
+  const t: UsageTarget = { name: "sl1", path: cwd, startedAt: new Date(Date.now() - 1000).toISOString(), running: true };
+  const changes: string[] = [];
+  const tr = createContextUsageTracker({ targets: () => [t], onChange: (n) => changes.push(n), configDir: dir });
+  await tr.poll();
+  // statusLine が無い間は transcript（窓は不明）
+  assert.equal(tr.get("sl1")?.windowTokens, null);
+  assert.equal(tr.get("sl1")?.usedTokens, 250_000);
+  changes.length = 0;
+  // used_percentage が null の間: 窓だけ補い、tokens は transcript のまま
+  assert.equal(tr.applyStatusLine("sl1", sl({ total_input_tokens: 0, context_window_size: 1_000_000, used_percentage: null }), t.startedAt), true);
+  assert.deepEqual(
+    { u: tr.get("sl1")?.usedTokens, w: tr.get("sl1")?.windowTokens, p: tr.get("sl1")?.percent },
+    { u: 250_000, w: 1_000_000, p: 25 },
+  );
+  assert.deepEqual(changes, ["sl1"]);
+  // 値が入ったら statusLine が正本（model も付く）
+  tr.applyStatusLine("sl1", sl(SL_USED), t.startedAt);
+  const u = tr.get("sl1")!;
+  assert.deepEqual({ ...u, updatedAt: "-" }, { usedTokens: 58789, windowTokens: 1_000_000, percent: 5.9, updatedAt: "-", model: "claude-opus-5-5" });
+  assert.equal(changes.length, 2);
+  // 同じ値は通知しない
+  tr.applyStatusLine("sl1", sl(SL_USED), t.startedAt);
+  assert.equal(changes.length, 2);
+  // 読めない JSON は反映せず false
+  assert.equal(tr.applyStatusLine("sl1", { nope: 1 }, t.startedAt), false);
+  assert.equal(tr.get("sl1")?.usedTokens, 58789);
+  // poll しても statusLine のまま
+  await tr.poll();
+  assert.equal(tr.get("sl1")?.usedTokens, 58789);
+  // 起動し直したら statusLine の値は捨て、transcript に戻る
+  t.startedAt = new Date(Date.now() - 500).toISOString();
+  await tr.poll();
+  assert.equal(tr.get("sl1")?.model, undefined);
+  assert.equal(tr.get("sl1")?.usedTokens, 250_000);
+});

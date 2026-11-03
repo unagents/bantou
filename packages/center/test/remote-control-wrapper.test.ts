@@ -104,7 +104,7 @@ function make(opts: { mcpUrl?: string | null; configPath?: string; logs?: string
     ...(opts.configPath ? { configPath: opts.configPath } : {}),
     log: (m) => void opts.logs?.push(m),
     spawnImpl,
-    wrapper: { core, tokens, path: "/fake/bantou-pty-wrapper", mcpUrl: () => url },
+    wrapper: { core, tokens, path: "/fake/bantou-pty-wrapper", mcpUrl: () => url, statusLineSelf: ["/fake/bantou-center"] },
   });
   sup.add(project, { wrapper: true, ...(opts.instructions !== undefined ? { instructions: opts.instructions } : {}) });
   return { sup, core, tokens };
@@ -208,6 +208,19 @@ test("buildWrapperArgs: appendSystemPrompt は --mcp-config の前に 1 組だ�
   assert.ok(!buildWrapperArgs(base).includes("--append-system-prompt"));
 });
 
+test("wrapper 起動: instructions と statusLine の --settings が両方付く（--append-system-prompt は 1 回、--settings は statusLine のみ）", async () => {
+  const { sup } = make({ instructions: "追加指示" });
+  await sup.start("pm1");
+  const args = launches[0].args;
+  assert.equal(valueOf(args, "--append-system-prompt"), "追加指示");
+  assert.equal(args.filter((a) => a === "--settings").length, 1);
+  const settings = JSON.parse(valueOf(args, "--settings")!) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(settings), ["statusLine"]);
+  assert.ok(args.indexOf("--append-system-prompt") < args.indexOf("--mcp-config"));
+  assert.ok(args.indexOf("--mcp-config") < args.indexOf("--settings"));
+  await sup.stop("pm1");
+});
+
 test("wrapper 起動: wrapper -- claude --remote-control の引数、env の token、--mcp-config は JSON 文字列で token は ${VAR}", async () => {
   const { sup, tokens } = make();
   await sup.start("pm1");
@@ -218,7 +231,13 @@ test("wrapper 起動: wrapper -- claude --remote-control の引数、env の tok
   assert.deepEqual(l.args.slice(0, 6), ["--cols", "120", "--rows", "40", "--", "fake-claude"]);
   assert.deepEqual(l.args.slice(6, 11), ["--remote-control", "pm1", "--permission-mode", "plan", "--no-chrome"]);
   assert.equal(l.args[11], "--mcp-config");
-  assert.equal(l.args.length, 13); // 初回は --continue 無し
+  assert.equal(l.args[13], "--settings");
+  assert.equal(l.args.length, 15); // 初回は --continue 無し
+  // statusLine は center のサブコマンド。--settings は statusLine のキーだけ。token は argv に載せない
+  const settings = JSON.parse(l.args[14]) as Record<string, { type: string; command: string }>;
+  assert.deepEqual(Object.keys(settings), ["statusLine"]);
+  assert.equal(settings.statusLine.type, "command");
+  assert.equal(settings.statusLine.command, "'/fake/bantou-center' 'status-line' '--url' 'http://127.0.0.1:4567/sessions/pm1/status-line'");
   const json = JSON.parse(l.args[12]) as { mcpServers: { bantou: Record<string, unknown>; "bantou-messenger": Record<string, unknown> } };
   // session 名が messenger の peer 名になる（名前は MCP の env だけ。claude 子プロセスの env には入れない）
   assert.deepEqual(json.mcpServers["bantou-messenger"], {
@@ -248,6 +267,7 @@ test("http 窓口が無い（mcpUrl が null）時も --mcp-config を付け、m
   assert.ok(i >= 0);
   const json = JSON.parse(launches[0].args[i + 1]) as { mcpServers: Record<string, { env?: Record<string, string> }> };
   assert.deepEqual(Object.keys(json.mcpServers), ["bantou-messenger"]);
+  assert.ok(!launches[0].args.includes("--settings"), "窓口が無い時は statusLine も付けない");
   assert.equal(json.mcpServers["bantou-messenger"].env?.AGENT_MESSENGER_NAME, "pm1");
   await sup.shutdown();
 });
@@ -450,6 +470,12 @@ test("wrapper.ts: 引数組み立て / プロトコル行の解釈 / 窓の照�
     ["--cols", "120", "--rows", "40", "--", "c", "--remote-control", "n", "--permission-mode", "auto", "--no-chrome", "--model", "opus[1m]", "--mcp-config", "{}"],
   );
   assert.ok(!buildWrapperArgs({ claudePath: "c", name: "n", permissionMode: "auto", mcpConfig: null, resume: false }).includes("--model"));
+  // settings: 指定時だけ --settings（mcp-config の後、--continue の前）
+  assert.deepEqual(
+    buildWrapperArgs({ claudePath: "c", name: "n", permissionMode: "auto", mcpConfig: "{}", settings: '{"statusLine":{}}', resume: true }),
+    ["--cols", "120", "--rows", "40", "--", "c", "--remote-control", "n", "--permission-mode", "auto", "--no-chrome", "--mcp-config", "{}", "--settings", '{"statusLine":{}}', "--continue"],
+  );
+  assert.ok(!buildWrapperArgs({ claudePath: "c", name: "n", permissionMode: "auto", mcpConfig: null, settings: null, resume: false }).includes("--settings"));
   assert.equal(JSON.parse(mcpConfigJson("http://h/mcp/session", "n")).mcpServers.bantou.headers["X-Bantou-Session"], "n");
   assert.equal(JSON.parse(mcpConfigJson("http://h/mcp/session", "n")).mcpServers["bantou-messenger"].env.AGENT_MESSENGER_NAME, "n");
   assert.equal(JSON.parse(mcpConfigJson(null, "n")).mcpServers.bantou, undefined);

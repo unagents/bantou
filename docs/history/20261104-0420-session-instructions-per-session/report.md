@@ -67,3 +67,34 @@ branch: `feature/session-instructions-per-session`（base: develop）。
 ### 未検証
 
 - 実 center との結合（mock の center 応答のみ）。
+
+## 追記: develop との merge
+
+develop（6d8b8b5）を feature/session-instructions-per-session（2988bff）へ merge した。衝突は 4 ファイル（src/ は衝突なし）。
+
+### 解消方針（ファイルごと）
+
+- `docs/protocol.md`: remote_send の Models 段落は develop（task + worker_model）を正とした。「like `sessionInstructions`」は廃止済みのため「like `remoteControl.model` is at every session launch」に直した。
+- `packages/center/README.md`: `session_list` / 保存の節は session-instructions 側（`settings.instructions`、`sessions.json` の各 session の `settings`、`remoteControl.sessionInstructions` の廃止と warning）を残し、`contextUsage` に develop の `model?`（statusLine 由来の時だけ）を足した。tool 表は両方（`session_settings_*`、`worker_reply`、`task` 形式の `remote_send`）が載る。
+- `packages/center/test/http.test.ts`: 外向け tool 一覧は `session_settings_get` / `session_settings_update` と `worker_reply` の両方。
+- `packages/center/test/tools.test.ts`: 同じ一覧、件数を「16 個」に更新（develop の 14 + `session_settings_*` 2）。`connect` のモックは `getSettings` / `updateSettings` と `workerReply` の両方を持つ。
+
+### 確認
+
+- master-cap 起動引数: `wrapper.ts` の `buildWrapperArgs` が `--append-system-prompt`（`--mcp-config` の前）と `--settings`（statusLine のみ、`--mcp-config` の後）を両方付ける。両方が同時に付く test を `remote-control-wrapper.test.ts` に追加した。
+- `remotes.ts` の restore 説明と README の「動いている記録を最優先」の記述は develop と矛盾しない（変更なし）。
+
+### テスト
+
+- center: test 375 passed / 0 failed、typecheck OK
+- server: npm test 232 passed / 0 failed、typecheck OK
+- desktop: build:sidecar OK、cargo test 259 passed / 0 failed（5 ignored）、e2e 97 passed / 0 failed（generate の静的ビルド + 簡易静的サーバー + ms-playwright chromium-1243 の一時 config、retries 0）
+
+### review
+
+- 未実施。cap が後で追記を頼む。
+
+### 残存物
+
+- 一時物（静的サーバー・一時 config・スクリプト）は停止・削除済み。`bun install` による bun.lock の変更は戻して commit していない。
+- 作業 dir（`workers/w-si-merge`）に clone（`bantou`）が残る。
