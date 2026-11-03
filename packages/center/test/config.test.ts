@@ -150,3 +150,8 @@ test("loadConfig: center.json に sessionInstructions があれば warn に渡�
     await rm(d, { recursive: true, force: true });
   }
 });
+
+test("projects[].name は 64 文字まで（cap_id の dir 名に収める）", () => {
+  assert.equal(parseConfig({ projects: [{ name: "a".repeat(64), path: P }] }, "/etc/bantou/center.json").projects.length, 1);
+  assert.throws(() => parseConfig({ projects: [{ name: "a".repeat(65), path: P }] }, "/etc/bantou/center.json"), /64 文字まで/);
+});

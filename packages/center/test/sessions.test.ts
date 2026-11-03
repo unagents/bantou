@@ -282,3 +282,17 @@ test("updateSettings: config 由来・未定義は拒否。保存に失敗した
   await assert.rejects(mgr.updateSettings("cfg", { instructions: "x" }), /config 由来/);
   await assert.rejects(mgr.updateSettings("nope", { instructions: "x" }), /未定義の session/);
 });
+
+test("create: name は 64 文字まで（cap_id の dir 名に収める）。65 文字は拒否、64 文字は通る", async () => {
+  const { mgr } = setup();
+  await assert.rejects(mgr.create({ name: "a".repeat(65) }), /64 文字まで/);
+  assert.equal((await mgr.create({ name: "b".repeat(64) })).name, "b".repeat(64));
+});
+
+test("restore: 保存済みの 65 文字以上の名前は残る（作成時だけ絞る。remote_send だけ error）", async () => {
+  const { mgr, store } = setup();
+  const long = "c".repeat(70);
+  await store.save([{ name: long, path: join(dir, "ws", "long"), permissionMode: "auto", createdAt: "t" }]);
+  await mgr.restore();
+  assert.ok(mgr.list().some((s) => s.name === long));
+});

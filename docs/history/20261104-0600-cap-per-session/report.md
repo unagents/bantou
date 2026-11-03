@@ -30,7 +30,7 @@
 
 ## テスト
 
-- center: `bun run test` 393 件 pass（変更前 375 件）、`bun run typecheck` OK
+- center: `bun run test` 396 件 pass（変更前 375 件）、`bun run typecheck` OK
   - 新規 `cap-per-session.test.ts` 17 件: 組ごとの cap_id が衝突しない・64 文字上限、cap_id の変換と衝突しなさ、拒否、session ごとの send、他 session から見えない・触れない（list / wait / delete / workerReply）、通知先、旧共有 cap の引き継ぎ・delete・他 session の cap は消せない、status 追従で他 session の worker を数えない、remote_id 省略の error
 - server: `npm test` 233 件 pass、typecheck OK（実装の変更なし。`agents.test.ts` に「77 文字・大文字・- _ の cap_id で作成・status・reapOrphans」1 件追加）
 - desktop e2e: `terminal.spec.ts` + `center.spec.ts` 23 件 pass（`bun run generate` の静的ビルド + 簡易静的サーバー + ms-playwright chromium）。session を切り替えると remotes 欄が変わる（careery: 2 行（server ごと）、stroke-board: 1 行、cap 無しの session: 「remote なし」、旧共有 cap は出ない）
@@ -54,6 +54,11 @@
 - 7（統合テスト）: `cap-per-session-http.test.ts` 1 件。実 RemoteManager を /mcp/session に繋ぎ、2 session の token で list に別 session の cap が出ない・remote_delete / worker_reply / remote_wait が別 session の remote_id で error・自分の cap には届く・偽装（他 session 名 + 自分の token）が 401 を確かめる。
 - 3（session_delete 後の cap）: コードは変えず docs に現状を明記（session を消しても cap は残る。同名の session を作り直すと引き継ぐ。不要なら session を消す前に remote_delete）。**利用者の判断待ち**: session 削除時に cap を片付けるか・確認するか。
 - 2（desktop に旧共有 cap を消す導線が無い）: コードは変えず。現状は master-cap の remote_delete({remote_id}) でのみ消せる（remote_delete は /mcp/session だけの tool）。remote_list は include_shared: true が要る。**利用者の判断待ち**: desktop に消す導線を足すか。
+
+### review 3 回目（追加の指摘）
+
+- 高: 8c2b634 の center-tools.md が壊れていた（置換文字列の `$` + バッククォートが String.replace の特殊パターンになり、51 行目が途中で切れてファイル先頭から 51 行目手前までが貼り込まれ、「前提 / A / B」節が重複）。51〜101 行を 1 行に直し、見出しの重複が無いことを確認（`grep -c ドラフトを実装に落とした版` = 1）。他の docs（master-cap-session / README / report / architecture / protocol）に同じ崩れが無いことを diff と見出しで確認した（master-cap-session の「## 追記（2026-11-04）」の 2 回は cfea74d から既存）。以後 docs は `$` を含まない文字列か関数形式の replace で編集した。
+- 低: session 名の 64 文字上限を `session_create`（sessionCreateSchema と create）と config の `projects[].name` にも足した。保存済み session の復元は緩いまま（既存の 65 文字以上は残り、remote_send だけ error）。`projectSchema` は復元でも使うので緩いまま、config の projects 配列にだけ上限を課した。テスト 3 件追加（sessions 2、config 1）。desktop の追加ダイアログ（AddSessionDialog）は長さを見ない（center の error が出る）。変更していない。
 
 ## 残存物・未解決
 

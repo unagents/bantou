@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { MODEL_PATTERN } from "@agent-hand/bantou-protocol";
+import { MAX_SESSION_NAME } from "./center-id.js";
 import { z } from "zod";
 
 /** `claude --permission-mode` の選択肢。 */
@@ -82,7 +83,8 @@ const serverSchema = z.object({
 
 export const configSchema = z
   .object({
-    projects: z.array(projectSchema).default([]),
+    // config の project 名は cap_id に使うので作成時と同じ上限を課す（projectSchema 自体は絞らない: 保存済み session の復元で再利用するため）
+    projects: z.array(projectSchema.extend({ name: projectSchema.shape.name.max(MAX_SESSION_NAME, `${MAX_SESSION_NAME} 文字まで（cap_id の dir 名に収める）`) })).default([]),
     remoteControl: remoteControlSchema.default(() => remoteControlSchema.parse({})),
     servers: z.array(serverSchema).default([]),
     logDir: absPath.optional(),

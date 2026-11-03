@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { z } from "zod";
+import { MAX_SESSION_NAME } from "./center-id.js";
 import { projectSchema, PERMISSION_MODES, type Config, type ProjectConfig } from "./config.js";
 import { mergeSettings, projectSettingsPatchSchema, readSettings, type ProjectSettings, type ProjectSettingsPatch } from "./project-settings.js";
 import type { Logger } from "./log.js";
@@ -38,7 +39,7 @@ export interface SessionInfo {
 }
 
 export const sessionCreateSchema = {
-  name: z.string().regex(SESSION_NAME, "英数字と _ - のみ"),
+  name: z.string().regex(SESSION_NAME, "英数字と _ - のみ").max(MAX_SESSION_NAME, `${MAX_SESSION_NAME} 文字まで`),
   path: z.string().min(1).optional().describe("絶対パス。省略時は <workspace>/<name>（無ければ作る）"),
   permissionMode: z.enum(PERMISSION_MODES).optional().describe("省略時 auto"),
   settings: projectSettingsPatchSchema.optional().describe("プロジェクトごとの設定（{ instructions?: string, … }）。instructions は --append-system-prompt で渡す（再起動・--continue でも付く）。省略・空文字は無し"),
@@ -133,6 +134,8 @@ export function createSessionManager(opts: {
       serial(async () => {
         const { name } = input;
         if (!SESSION_NAME.test(name)) throw new Error("name は英数字と _ - のみ");
+        // 作成時だけ絞る（保存済み・config の既存の長い名前は読み込める。remote_send だけ error）
+        if (name.length > MAX_SESSION_NAME) throw new Error(`name は ${MAX_SESSION_NAME} 文字まで（remote-cap の cap_id に使うため）`);
         const existing = supervisor.list();
         if (existing.some((s) => s.project === name)) throw new Error(`name が既に使われている: ${name}`);
         let path = input.path;
