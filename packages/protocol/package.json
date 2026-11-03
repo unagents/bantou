@@ -1,6 +1,6 @@
 {
   "name": "@agent-hand/bantou-protocol",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Shared TypeScript types for the bantou work session message protocol (spec: docs/protocol.md)",
   "type": "module",
   "main": "dist/index.js",

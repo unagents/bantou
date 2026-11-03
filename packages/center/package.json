@@ -1,6 +1,6 @@
 {
   "name": "@agent-hand/bantou-center",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "bantou center: MCP server that supervises claude remote-control per project and relays commands to bantou-server",
   "license": "MIT",
   "private": true,
