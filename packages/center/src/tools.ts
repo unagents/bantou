@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { AGENT_ID_PATTERN } from "@agent-hand/bantou-protocol";
 import { z } from "zod";
-import { OWNER_HEADER, OWNER_PATTERN, OWNER_QUERY, remoteSendSchema, remoteWaitSchema, WAIT_DEFAULT_SEC, type RemoteManager } from "./remotes.js";
+import { OWNER_HEADER, OWNER_PATTERN, OWNER_QUERY, remoteSendSchema, remoteWaitSchema, workerReplySchema, WAIT_DEFAULT_SEC, type RemoteManager, type RemoteSendInput } from "./remotes.js";
 import type { RemoteControlSupervisor } from "./remote-control.js";
 import { sessionCreateSchema, SESSION_NAME, type SessionManager } from "./sessions.js";
 import type { Follow } from "./follow.js";
@@ -22,6 +22,13 @@ async function guard(fn: () => Promise<ToolResult> | ToolResult): Promise<ToolRe
     return json({ error: e instanceof Error ? e.message : String(e) }, true);
   }
 }
+
+/** worker_reply の handler（/mcp と /mcp/session で共通。owner は見ない）。 */
+const workerReplyHandler =
+  (remotes: RemoteManager) =>
+  (args: { remote_id?: string; server?: string; worker_id: string; text: string }): Promise<ToolResult> =>
+    guard(async () =>
+      json(await remotes.workerReply({ worker_id: args.worker_id, text: args.text, ...(args.remote_id ? { remote_id: args.remote_id } : {}), ...(args.server ? { server: args.server } : {}) })));
 
 /** server の返信が失敗（error 返信または ok:false）か。 */
 const isFailure = (r: { type: string; ok?: boolean }): boolean => r.type === "error" || r.ok === false;
@@ -99,7 +106,7 @@ export function registerTools(
       title: "remote 一覧",
       description:
         "center が保持する remote（server の cap 単位。remote_id = cap_id, server, state, owners, 時刻, 最新の結果, 指示と結果の履歴 history）の一覧。owner が分かれば（header / query / 引数）その owner が指示を送った cap だけ、分からなければ全件。" +
-        "server から通知を受けた remote には activity が付く: agents（cap → worker。state は running / stalled / idle / done / failed / lost、task、last_activity、last_output_at、silent_ms = 最後の出力からの経過 ms）、received_ms_ago（最後の通知から）、stale（running の agent がいるのに通知が途絶えた）",
+        "最新の task_result（task_result 本体）と直近の worker_reports（WorkerReportNotice の配列、最大 20 件、到着順）も含む。server から通知を受けた remote には activity が付く: agents（cap → worker。state は running / stalled / idle / done / failed / lost、task、last_activity、last_output_at、silent_ms = 最後の出力からの経過 ms）、received_ms_ago（最後の通知から）、stale（running の agent がいるのに通知が途絶えた）",
       inputSchema: { owner: ownerArg },
     },
     ({ owner }, extra) =>
@@ -107,6 +114,17 @@ export function registerTools(
         const who = resolveOwner(extra as OwnerRequestInfo, owner);
         return json(remotes.list(who ? { owner: who } : {}));
       }),
+  );
+
+  server.registerTool(
+    "worker_reply",
+    {
+      title: "worker へ返答",
+      description:
+        "server の worker に返答を送る（worker_report の ask / approve への回答など。desktop の center_call から使う）。server が同じ worker_id で worker を起動し直して text を渡す。remote_id 省略時は center の cap。{remote_id, server, worker_id, accepted:true} を返す。protocol の版が合わない server へは送らず error",
+      inputSchema: workerReplySchema,
+    },
+    workerReplyHandler(remotes),
   );
 
   server.registerTool(
@@ -222,18 +240,41 @@ export function registerTools(
 export function registerSessionTools(server: McpServer, deps: { remotes: RemoteManager; owner: string }): void {
   const { remotes, owner } = deps;
 
-  const sendHandler = (args: { prompt: string; server?: string; model?: string; worker_model?: string }): Promise<ToolResult> =>
+  const sendHandler = (args: Omit<RemoteSendInput, "owner">): Promise<ToolResult> =>
     guard(async () =>
-      json(await remotes.send({ owner, prompt: args.prompt, ...(args.server ? { server: args.server } : {}), ...(args.model ? { model: args.model } : {}), ...(args.worker_model ? { worker_model: args.worker_model } : {}) })));
+      json(
+        await remotes.send({
+          owner,
+          goal: args.goal,
+          ...(args.server ? { server: args.server } : {}),
+          ...(args.repo ? { repo: args.repo } : {}),
+          ...(args.branch ? { branch: args.branch } : {}),
+          ...(args.deliverables ? { deliverables: args.deliverables } : {}),
+          ...(args.verify ? { verify: args.verify } : {}),
+          ...(args.constraints ? { constraints: args.constraints } : {}),
+          ...(args.workers ? { workers: args.workers } : {}),
+          ...(args.worker_model ? { worker_model: args.worker_model } : {}),
+        }),
+      ));
   server.registerTool(
     "remote_send",
     {
       title: "remote-cap へ指示",
       description:
-        "server の remote-cap に次の指示を送る（cap は server ごとに 1 つ。無ければ作る）。どの session からでも同じ cap に行く。cap が実行中なら server 側で順番に待たされる。完了を待たず {remote_id, state:\"running\", created} を返す。完了は通知（push）か remote_wait / remote_list で確認する。server は protocol bantou で発見した先頭、server 引数で peer id か名前を指定できる。model（cap を最初に作る時だけ有効。既存の cap なら無視して返り値に model_ignored）と worker_model（この指示で cap が起動する worker の既定。server が cap の既定として記憶する）の既定は center の設定 servers[]。worker ごとにモデルを変えたい時は、prompt の中で cap に worker_start の model を指定させる。state は running / done / failed / unknown（server に届かない・status も取れず不明。取れたら戻る）",
+        "server の remote-cap に task を送る（cap は server ごとに 1 つ。無ければ server が作る）。goal（必須）だけでも動く（deliverables / verify / constraints / workers は省略時 {} / {} / [] / {}。workers.items 無し = implement + review の最低 2 体）。task_id は center が採番して返す。どの session からでも同じ cap に行く。cap が実行中なら server 側で順番に待たされる。完了を待たず {remote_id, state:\"running\", created, task_id} を返す。完了は通知（push）か remote_wait / remote_list（task_result）で確認する。worker の report（progress / ask / approve / done）は push で届く（progress は同じ worker から 60 秒に 1 回まで）。ask / approve への返答は worker_reply。server は protocol bantou で発見した先頭、server 引数で peer id か名前を指定できる。worker_model の既定は center の設定 servers[]（新規の cap のみ）。state は running / done / failed / unknown（server に届かない・status も取れず不明。取れたら戻る）。protocol の版が合わない server へは送らず error",
       inputSchema: remoteSendSchema,
     },
     sendHandler,
+  );
+  server.registerTool(
+    "worker_reply",
+    {
+      title: "worker へ返答",
+      description:
+        "server の worker に返答を送る（worker_report の ask / approve への回答など）。server が同じ worker_id で worker を起動し直して text を渡す。remote_id 省略時は center の cap。{remote_id, server, worker_id, accepted:true} を返す。protocol の版が合わない server へは送らず error",
+      inputSchema: workerReplySchema,
+    },
+    workerReplyHandler(remotes),
   );
   server.registerTool(
     "remote_create",
@@ -259,7 +300,7 @@ export function registerSessionTools(server: McpServer, deps: { remotes: RemoteM
     "remote_list",
     {
       title: "remote 一覧",
-      description: "この session が指示を送った remote-cap（remote_id, server, state, 時刻, 最新の結果, 指示と結果の履歴 history、通知を受けたものは activity 付き）の一覧",
+      description: "この session が指示を送った remote-cap（remote_id, server, state, 時刻, 最新の結果, 最新の task_result, 直近の worker_reports（最大 20 件、到着順）, 指示と結果の履歴 history、通知を受けたものは activity 付き）の一覧",
     },
     () => guard(() => json(remotes.list({ owner }))),
   );

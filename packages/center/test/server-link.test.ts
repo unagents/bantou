@@ -955,3 +955,93 @@ test("通知・遅れた返信には送信元の peer id（from_id）が渡る",
   assert.deepEqual(late, [{ text: "second", from: "srv-1" }]);
   await link.close();
 });
+
+// -- task / worker_reply（protocol 1.5.0） --
+
+const taskCmd = (taskId: string, capId = "r-1") => ({
+  cap_id: capId, task_id: taskId, goal: "g", deliverables: {}, verify: {}, constraints: [], workers: {},
+});
+const taskResult = (taskId: string, capId = "r-1", summary = "done") => ({
+  bantou: 1, type: "task_result", cap_id: capId, task_id: taskId, state: "done", summary,
+  workers: [], review: { verdict: "ok", items: [], rounds: 1 }, remaining: [],
+});
+
+test("taskOn: task を選んだ peer 宛てに送り、cap_id と task_id が一致する task_result で解決する。別 task_id の task_result は待ちを解決せず onLateCapReply へ渡る", async () => {
+  const late: unknown[] = [];
+  const cfg = parseConfig({}, "/x/c.json");
+  const clients: FakeClient[] = [];
+  const link = createServerLink({ config: cfg, log: () => {}, clientFactory: () => { const c = new FakeClient(); c.peers = [peerOf("id-a", "bantou-server", MESSENGER_PROTOCOL.version)]; clients.push(c); return c; }, onLateCapReply: (r) => late.push(r) });
+  const peer = { id: "id-a", name: "bantou-server", version: MESSENGER_PROTOCOL.version };
+  const p = link.taskOn(peer, taskCmd("t-2"));
+  await sleep(20);
+  assert.deepEqual(clients[0].sentTo, ["id-a"]);
+  assert.deepEqual(clients[0].sent[0], { bantou: 1, type: "task", ...taskCmd("t-2") });
+  clients[0].reply(taskResult("t-1", "r-1", "old"), "bantou-server", { from_id: "id-a" });
+  assert.equal(late.length, 1);
+  clients[0].reply(taskResult("t-2", "r-1", "new"), "bantou-server", { from_id: "id-a" });
+  assert.equal(((await p) as { summary: string }).summary, "new");
+  // 最初の返信の後に同じ task_id の task_result が重ねて届いても、渡る（待ちは無い）
+  clients[0].reply(taskResult("t-2", "r-1", "again"), "bantou-server", { from_id: "id-a" });
+  assert.deepEqual(late.map((r) => (r as { summary: string }).summary), ["old", "again"]);
+  await link.close();
+});
+
+test("taskOn: task の error（task_id 付き）は task の待ちを解決する。待ちが無ければ onLateCapReply へ渡る", async () => {
+  const late: unknown[] = [];
+  const cfg = parseConfig({}, "/x/c.json");
+  const clients: FakeClient[] = [];
+  const link = createServerLink({ config: cfg, log: () => {}, clientFactory: () => { const c = new FakeClient(); c.peers = [peerOf("id-a", "bantou-server", MESSENGER_PROTOCOL.version)]; clients.push(c); return c; }, onLateCapReply: (r) => late.push(r) });
+  const peer = { id: "id-a", name: "bantou-server", version: MESSENGER_PROTOCOL.version };
+  const p = link.taskOn(peer, taskCmd("t-1"));
+  await sleep(20);
+  clients[0].reply({ bantou: 1, type: "error", ok: false, message: "updating", command: "task", cap_id: "r-1", task_id: "t-1", code: "updating", retryable: true }, "bantou-server", { from_id: "id-a" });
+  assert.equal(((await p) as { code?: string }).code, "updating");
+  clients[0].reply({ bantou: 1, type: "error", ok: false, message: "resume 失敗", command: "task", cap_id: "r-1", task_id: "t-1" }, "bantou-server", { from_id: "id-a" });
+  assert.equal(late.length, 1);
+  await link.close();
+});
+
+test("workerReplyOn: cap_id と worker_id が一致する worker_reply_result で解決する。error（command=worker_reply）は worker_reply の待ちへ", async () => {
+  const cfg = parseConfig({}, "/x/c.json");
+  const clients: FakeClient[] = [];
+  const link = createServerLink({ config: cfg, log: () => {}, clientFactory: () => { const c = new FakeClient(); c.peers = [peerOf("id-a", "bantou-server", MESSENGER_PROTOCOL.version)]; clients.push(c); return c; } });
+  const peer = { id: "id-a", name: "bantou-server", version: MESSENGER_PROTOCOL.version };
+  const p = link.workerReplyOn(peer, { cap_id: "r-1", worker_id: "w-1", text: "OK" });
+  await sleep(20);
+  assert.deepEqual(clients[0].sent[0], { bantou: 1, type: "worker_reply", cap_id: "r-1", worker_id: "w-1", text: "OK" });
+  clients[0].reply({ bantou: 1, type: "worker_reply_result", ok: true, cap_id: "r-1", worker_id: "w-2", accepted: true }, "bantou-server", { from_id: "id-a" });
+  clients[0].reply({ bantou: 1, type: "worker_reply_result", ok: true, cap_id: "r-1", worker_id: "w-1", accepted: true }, "bantou-server", { from_id: "id-a" });
+  assert.deepEqual(await p, { bantou: 1, type: "worker_reply_result", ok: true, cap_id: "r-1", worker_id: "w-1", accepted: true });
+  const q = link.workerReplyOn(peer, { cap_id: "r-1", worker_id: "w-1", text: "NG" });
+  await sleep(20);
+  clients[0].reply({ bantou: 1, type: "error", ok: false, message: "worker が無い", command: "worker_reply", cap_id: "r-1", worker_id: "w-1" }, "bantou-server", { from_id: "id-a" });
+  assert.equal(((await q) as { type: string }).type, "error");
+  await link.close();
+});
+
+test("門: 版が違う server へは task / worker_reply を送らず version_mismatch を返す（1.4.0 の旧 server）", async () => {
+  const peer = { id: "id-a", name: "s", version: "1.4.0" };
+  const { link, clients } = setupNoServers([peerOf("id-a", "s", "1.4.0")]);
+  const t = (await link.taskOn(peer, taskCmd("t-1"))) as { code?: string; command?: string };
+  assert.deepEqual([t.code, t.command], ["version_mismatch", "task"]);
+  const w = (await link.workerReplyOn(peer, { cap_id: "r-1", worker_id: "w-1", text: "x" })) as { code?: string; command?: string };
+  assert.deepEqual([w.code, w.command], ["version_mismatch", "worker_reply"]);
+  assert.deepEqual(clients[0]?.sent ?? [], []);
+  assert.equal(link.gate(peer, "task")?.code, "version_mismatch");
+  assert.equal(link.gate(peer, "worker_reply")?.code, "version_mismatch");
+  await link.close();
+});
+
+test("通知: worker_report は onNotice に渡り、task の待ちを消さない", async () => {
+  const got: ServerNotice[] = [];
+  const { link, clients, logs } = setup(2000, undefined, (n) => got.push(n));
+  const p = link.kickCap("s1", { cap_id: "c1", prompt: "go" });
+  await sleep(20);
+  clients[0].reply({ bantou: 1, type: "worker_report", cap_id: "c1", task_id: "t-1", worker_id: "w-1", kind: "ask", text: "どっち？", at: "2026-11-04T00:00:00.000Z" });
+  await sleep(20);
+  assert.deepEqual(got.map((n) => [n.type, (n as { kind?: string }).kind]), [["worker_report", "ask"]]);
+  assert.ok(!logs.some((m) => m.startsWith("対応する待ちなし") || m.startsWith("無視:")));
+  clients[0].reply(capResult("c1", "done"));
+  assert.equal(((await p) as { result_text: string }).result_text, "done");
+  await link.close();
+});

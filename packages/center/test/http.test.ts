@@ -21,7 +21,7 @@ const AUTH_WITH = (name: string): Record<string, string> => ({ ...AUTH, "x-banto
 
 const TOOLS = [
   "rc_list", "rc_start", "rc_status", "rc_stop", "remote_list", "remote_wait",
-  "server_list", "server_peers", "server_status", "session_create", "session_delete", "session_list", "worker_resume",
+  "server_list", "server_peers", "server_status", "session_create", "session_delete", "session_list", "worker_reply", "worker_resume",
 ];
 
 async function boot(
@@ -369,14 +369,14 @@ const sessionClient = async (base: string, token: string, name: string) => {
   return c;
 };
 
-test("/mcp/session: 窓口は remote_send / remote_create / remote_delete / remote_list / remote_wait だけ。owner は header の session 名", async () => {
+test("/mcp/session: 窓口は remote_send / remote_create / remote_delete / remote_list / remote_wait / worker_reply だけ。owner は header の session 名", async () => {
   const { h, tokens, created, base } = await boot();
   const t = tokens.issue("pm1");
   const c = await sessionClient(base, t, "pm1");
   try {
-    assert.deepEqual((await c.listTools()).tools.map((x) => x.name).sort(), ["remote_create", "remote_delete", "remote_list", "remote_send", "remote_wait"]);
-    await c.callTool({ name: "remote_create", arguments: { prompt: "p", owner: "evil" } });
-    assert.deepEqual(created, [{ owner: "pm1", prompt: "p" }]);
+    assert.deepEqual((await c.listTools()).tools.map((x) => x.name).sort(), ["remote_create", "remote_delete", "remote_list", "remote_send", "remote_wait", "worker_reply"]);
+    await c.callTool({ name: "remote_create", arguments: { goal: "p", owner: "evil" } });
+    assert.deepEqual(created, [{ owner: "pm1", goal: "p" }]);
     const l = await c.callTool({ name: "remote_list", arguments: {} });
     assert.equal((JSON.parse((l.content as { text: string }[])[0].text) as { owner: string }[])[0].owner, "pm1");
   } finally {

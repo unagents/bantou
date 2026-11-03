@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, test } from "node:test";
+import { afterEach, beforeEach, mock, test } from "node:test";
 import { createActivityStore, type ActivityStore } from "../src/activity.js";
 import { z } from "zod";
 import { parseConfig } from "../src/config.js";
@@ -46,10 +46,10 @@ function setup(over: Partial<ServerLink> = {}, activity?: ActivityStore, notify?
       caps: (caps.get(peer.id) ?? []).map((id) => ({ kind: "cap", id })),
       workers: [],
     }),
-    kickCapOn: (peer: ServerPeer, cmd: Record<string, unknown>) =>
+    taskOn: (peer: ServerPeer, cmd: Record<string, unknown>) =>
       new Promise((resolve) => {
         kicks.push({ peer, cmd, resolve });
-        // server は kick_cap で cap を作る（次の status には載る）
+        // server は task で cap を作る（次の status には載る）
         caps.set(peer.id, [...new Set([...(caps.get(peer.id) ?? []), cmd.cap_id as string])]);
       }),
     stopCapOn: async (peer: ServerPeer, cmd: unknown) => {
@@ -69,7 +69,10 @@ const GRACE = 60;
 const POLL = 40;
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 10));
-const ok = (text: string) => ({ bantou: 1, type: "cap_result", cap_id: CAP, session_id: "s", ok: true, result_text: text });
+const ok = (text: string, taskId = "t-late") => ({
+  bantou: 1, type: "task_result", cap_id: CAP, task_id: taskId, state: "done", summary: text,
+  workers: [], review: { verdict: "unknown", items: [], rounds: 0 }, remaining: [],
+});
 const lateOk = (text: string) => ok(text) as never;
 
 function notifier(fail?: string) {
@@ -91,94 +94,104 @@ const act = (state: string, workerState?: string, id = CAP) => ({
 
 // -- 指示は同じ cap_id の kick_cap。最初だけ cap を作る --
 
-test("send: cap が無い時だけ最初の kick_cap（created）。status で cap の有無を確かめ、model は config の servers[] から", async () => {
+test("send: task を送る（goal のみなら deliverables {} / verify {} / constraints [] / workers {}）。status で cap の有無を確かめ、worker_model は新規の cap だけ config の servers[] から。task_id は center が採番", async () => {
   const servers = parseConfig({ servers: [{ name: "s1", peer: "bantou-server", model: "opus", workerModel: "haiku" }] }, "/x/c.json").servers;
   const { mgr, kicks } = setup({}, undefined, undefined, servers);
-  const r = await mgr.send({ owner: "pm1", prompt: "go" });
-  assert.deepEqual(r, { remote_id: CAP, server: "id-a", serverName: "bantou-server", state: "running", created: true, model: "opus", worker_model: "haiku" });
+  const r = await mgr.send({ owner: "pm1", goal: "go" });
+  assert.match(r.task_id, /^[A-Za-z0-9_-]+$/);
+  assert.deepEqual(r, { remote_id: CAP, server: "id-a", serverName: "bantou-server", state: "running", created: true, task_id: r.task_id, worker_model: "haiku" });
   assert.equal(kicks.length, 1);
   assert.equal(kicks[0].peer.id, "id-a");
-  assert.deepEqual(kicks[0].cmd, { cap_id: CAP, prompt: "go", model: "opus", worker_model: "haiku", reason: "remote_send owner=pm1" });
+  assert.deepEqual(kicks[0].cmd, { cap_id: CAP, task_id: r.task_id, goal: "go", deliverables: {}, verify: {}, constraints: [], workers: {}, worker_model: "haiku" });
   const saved = JSON.parse(await readFile(join(dir, "remotes.json"), "utf8")) as RemoteRecord[];
   assert.equal(saved.length, 1);
   assert.equal(saved[0].state, "running");
+  assert.equal((saved[0].history[0] as { task_id?: string }).task_id, r.task_id);
 });
 
-test("send: 設定に model が無ければ最初の kick_cap にも付けない", async () => {
+test("send: goal 以外の引数（repo / branch / deliverables / verify / constraints / workers / worker_model）を task にそのまま載せる", async () => {
   const { mgr, kicks } = setup();
-  const r = await mgr.send({ owner: "pm1", prompt: "go" });
-  assert.ok(!("model" in r) && !("worker_model" in r));
-  assert.deepEqual(kicks[0].cmd, { cap_id: CAP, prompt: "go", reason: "remote_send owner=pm1" });
+  const workers = { items: [{ id: "impl", role: "implement" as const, scope: "実装" }, { role: "review" as const, scope: "確認", depends_on: ["impl"], model: "opus" }] };
+  const r = await mgr.send({ owner: "pm1", goal: "g", repo: "https://example.com/r.git", branch: "main", deliverables: { branch: "feature/x", report_path: "docs/r.md", other: ["a"] }, verify: { tests: ["npm test"], steps: ["見る"] }, constraints: ["c1"], workers, worker_model: "sonnet" });
+  assert.deepEqual(kicks[0].cmd, { cap_id: CAP, task_id: r.task_id, goal: "g", repo: "https://example.com/r.git", branch: "main", deliverables: { branch: "feature/x", report_path: "docs/r.md", other: ["a"] }, verify: { tests: ["npm test"], steps: ["見る"] }, constraints: ["c1"], workers, worker_model: "sonnet" });
 });
 
-test("send: 2 回目の指示は同じ cap_id の kick_cap（resume）。cap があるので model は付けず、記録は 1 件のまま", async () => {
-  const servers = parseConfig({ servers: [{ name: "s1", peer: "bantou-server", model: "opus" }] }, "/x/c.json").servers;
+test("send: 設定に workerModel が無ければ worker_model は付けない", async () => {
+  const { mgr, kicks } = setup();
+  const r = await mgr.send({ owner: "pm1", goal: "go" });
+  assert.ok(!("worker_model" in r));
+  assert.ok(!("worker_model" in kicks[0].cmd));
+});
+
+test("send: 2 回目の指示は同じ cap_id の task（task_id は別）。既存の cap なので config の worker_model は付けず、記録は 1 件のまま", async () => {
+  const servers = parseConfig({ servers: [{ name: "s1", peer: "bantou-server", workerModel: "haiku" }] }, "/x/c.json").servers;
   const { mgr, kicks } = setup({}, undefined, undefined, servers);
-  const first = await mgr.send({ owner: "pm1", prompt: "one" });
-  kicks[0].resolve(ok("r1"));
+  const first = await mgr.send({ owner: "pm1", goal: "one" });
+  kicks[0].resolve(ok("r1", first.task_id));
   await tick();
-  const second = await mgr.send({ owner: "pm1", prompt: "two" });
+  const second = await mgr.send({ owner: "pm1", goal: "two" });
   assert.equal(first.created, true);
   assert.equal(second.created, false);
+  assert.notEqual(second.task_id, first.task_id);
   assert.equal(kicks.length, 2);
-  assert.equal(kicks[1].cmd.cap_id, CAP);
-  assert.deepEqual(kicks[1].cmd, { cap_id: CAP, prompt: "two", reason: "remote_send owner=pm1" });
+  assert.deepEqual(kicks[1].cmd, { cap_id: CAP, task_id: second.task_id, goal: "two", deliverables: {}, verify: {}, constraints: [], workers: {} });
   assert.equal(mgr.list().length, 1);
   assert.equal(second.remote_id, first.remote_id);
 });
 
-test("send: 前の指示の返信を待たずに続けて送っても、同じ cap_id で 2 本とも kick_cap になる（記録は 1 件）", async () => {
+test("send: 前の指示の返信を待たずに続けて送っても、同じ cap_id で 2 本とも task になる（記録は 1 件）", async () => {
   const { mgr, kicks } = setup();
-  await mgr.send({ owner: "pm1", prompt: "one" });
-  const second = await mgr.send({ owner: "pm2", prompt: "two" });
+  await mgr.send({ owner: "pm1", goal: "one" });
+  const second = await mgr.send({ owner: "pm2", goal: "two" });
   assert.equal(second.created, false);
-  assert.deepEqual(kicks.map((k) => [k.cmd.cap_id, k.cmd.prompt]), [[CAP, "one"], [CAP, "two"]]);
+  assert.deepEqual(kicks.map((k) => [k.cmd.cap_id, k.cmd.goal]), [[CAP, "one"], [CAP, "two"]]);
   assert.equal(mgr.list().length, 1);
   assert.equal(mgr.list()[0].state, "running");
 });
 
 test("send: 同時に 2 本送っても最初の kick_cap は 1 本だけ（server ごとに直列）", async () => {
   const { mgr, kicks } = setup();
-  const [a, b] = await Promise.all([mgr.send({ owner: "pm1", prompt: "a" }), mgr.send({ owner: "pm2", prompt: "b" })]);
+  const [a, b] = await Promise.all([mgr.send({ owner: "pm1", goal: "a" }), mgr.send({ owner: "pm2", goal: "b" })]);
   assert.deepEqual([a.created, b.created].sort(), [false, true]);
   assert.equal(kicks.length, 2);
   assert.equal(mgr.list().length, 1);
 });
 
-test("send: server に cap があるのに center の記録が無い時は、記録を作って model なしの resume として送る", async () => {
-  const servers = parseConfig({ servers: [{ name: "s1", peer: "bantou-server", model: "opus" }] }, "/x/c.json").servers;
+test("send: server に cap があるのに center の記録が無い時は、記録を作って worker_model なしで送る", async () => {
+  const servers = parseConfig({ servers: [{ name: "s1", peer: "bantou-server", workerModel: "haiku" }] }, "/x/c.json").servers;
   const { mgr, kicks, caps } = setup({}, undefined, undefined, servers);
   caps.set("id-a", [CAP]);
-  const r = await mgr.send({ owner: "pm1", prompt: "go" });
+  const r = await mgr.send({ owner: "pm1", goal: "go" });
   assert.equal(r.created, false);
-  assert.ok(!("model" in kicks[0].cmd));
+  assert.ok(!("worker_model" in kicks[0].cmd));
   assert.equal(mgr.list().length, 1);
 });
 
-test("send: server に cap が無くなっていれば、記録があっても最初の kick_cap に戻る", async () => {
-  const servers = parseConfig({ servers: [{ name: "s1", peer: "bantou-server", model: "opus" }] }, "/x/c.json").servers;
+test("send: server に cap が無くなっていれば、記録があっても新規の cap として config の worker_model を付けて送る", async () => {
+  const servers = parseConfig({ servers: [{ name: "s1", peer: "bantou-server", workerModel: "haiku" }] }, "/x/c.json").servers;
   const { mgr, kicks, caps } = setup({}, undefined, undefined, servers);
-  await mgr.send({ owner: "pm1", prompt: "one" });
+  await mgr.send({ owner: "pm1", goal: "one" });
   kicks[0].resolve(ok("r1"));
   await tick();
   caps.clear();
-  const r = await mgr.send({ owner: "pm1", prompt: "two" });
+  const r = await mgr.send({ owner: "pm1", goal: "two" });
   assert.equal(r.created, true);
-  assert.equal(kicks[1].cmd.model, "opus");
+  assert.equal(kicks[1].cmd.worker_model, "haiku");
+  assert.equal(mgr.list().length, 1);
 });
 
 test("send: status が error なら cap の有無が分からないので送らず、記録も作らない", async () => {
   const { mgr, kicks } = setup({ statusOn: async () => ({ bantou: 1, type: "error", ok: false, message: "タイムアウト", command: "status" }) as never });
-  await assert.rejects(mgr.send({ owner: "o", prompt: "p" }), /cap を確かめられない: タイムアウト/);
+  await assert.rejects(mgr.send({ owner: "o", goal: "p" }), /cap を確かめられない: タイムアウト/);
   assert.equal(kicks.length, 0);
   assert.equal(mgr.list().length, 0);
 });
 
 test("send: server は peer id か名前で指定でき、server ごとに記録（cap）が 1 件。見つからなければ記録を作らず失敗", async () => {
   const { mgr, kicks } = setup();
-  assert.equal((await mgr.send({ owner: "o", prompt: "p", server: "id-b" })).serverName, "other");
-  assert.equal((await mgr.send({ owner: "o", prompt: "p", server: "bantou-server" })).server, "id-a");
-  await assert.rejects(mgr.send({ owner: "o", prompt: "p", server: "zzz" }), /見つからない/);
+  assert.equal((await mgr.send({ owner: "o", goal: "p", server: "id-b" })).serverName, "other");
+  assert.equal((await mgr.send({ owner: "o", goal: "p", server: "bantou-server" })).server, "id-a");
+  await assert.rejects(mgr.send({ owner: "o", goal: "p", server: "zzz" }), /見つからない/);
   assert.equal(mgr.list().length, 2);
   assert.equal(kicks.length, 2);
   assert.equal(kicks[0].cmd.cap_id, kicks[1].cmd.cap_id);
@@ -186,34 +199,39 @@ test("send: server は peer id か名前で指定でき、server ごとに記録
 
 test("send: owner 形式が不正なら拒否", async () => {
   const { mgr } = setup();
-  await assert.rejects(mgr.send({ owner: "a b", prompt: "p" }), /owner/);
+  await assert.rejects(mgr.send({ owner: "a b", goal: "p" }), /owner/);
 });
 
 test("send: 門が断る（protocol の版違い・更新待ち）時は投げ、記録も kick_cap も作らない", async () => {
   const { mgr, kicks } = setup({ gate: () => ({ bantou: 1, type: "error", ok: false, message: "更新待ち", code: "updating", retryable: true }) } as never);
-  await assert.rejects(mgr.send({ owner: "o", prompt: "p" }), /更新待ち/);
+  await assert.rejects(mgr.send({ owner: "o", goal: "p" }), /更新待ち/);
   assert.equal(mgr.list().length, 0);
   assert.equal(kicks.length, 0);
 });
 
-test("schema: remote_send / remote_create は prompt・server・model・worker_model（repo は受けない）。model は protocol と同じ形式で検証", () => {
+test("schema: remote_send / remote_create は goal 必須。deliverables / verify / constraints / workers / repo / branch / server / worker_model を受け、model は受けない。worker_model は protocol と同じ形式で検証", () => {
   assert.equal(remoteCreateSchema, remoteSendSchema);
   const s = z.object(remoteSendSchema);
-  assert.deepEqual(s.parse({ prompt: "x", server: "s", model: "opus", repo: "r", worker_model: "haiku" }), { prompt: "x", server: "s", model: "opus", worker_model: "haiku" });
-  assert.deepEqual(s.parse({ prompt: "x", model: "claude-opus-4-8[1m]" }), { prompt: "x", model: "claude-opus-4-8[1m]" });
-  for (const bad of ["a b", "-x", "a;b", ""]) {
-    assert.ok(!s.safeParse({ prompt: "x", model: bad }).success, `model=${bad}`);
-    assert.ok(!s.safeParse({ prompt: "x", worker_model: bad }).success, `worker_model=${bad}`);
-  }
-  assert.ok(!s.safeParse({ prompt: "" }).success);
-  assert.ok(!s.safeParse({ prompt: "a\0b" }).success);
+  assert.deepEqual(s.parse({ goal: "x", server: "s", model: "opus", repo: "r", branch: "b", worker_model: "haiku" }), { goal: "x", server: "s", repo: "r", branch: "b", worker_model: "haiku" });
+  const full = { goal: "x", deliverables: { branch: "f", report_path: "p", other: ["o"] }, verify: { tests: ["t"], steps: ["s"] }, constraints: ["c"], workers: { items: [{ id: "a-1", role: "docs", scope: "s", model: "opus", depends_on: ["b"] }] } };
+  assert.deepEqual(s.parse(full), full);
+  assert.deepEqual(s.parse({ goal: "x", worker_model: "claude-opus-4-8[1m]" }), { goal: "x", worker_model: "claude-opus-4-8[1m]" });
+  for (const bad of ["a b", "-x", "a;b", ""]) assert.ok(!s.safeParse({ goal: "x", worker_model: bad }).success, `worker_model=${bad}`);
+  assert.ok(!s.safeParse({ prompt: "x" }).success);
+  assert.ok(!s.safeParse({ goal: "" }).success);
+  assert.ok(!s.safeParse({ goal: "a\0b" }).success);
+  assert.ok(!s.safeParse({ goal: "x", branch: "-x" }).success);
+  assert.ok(!s.safeParse({ goal: "x", deliverables: { branch: "-x" } }).success);
+  assert.ok(!s.safeParse({ goal: "x", workers: { items: [{ role: "boss", scope: "s" }] } }).success);
+  assert.ok(!s.safeParse({ goal: "x", workers: { items: [{ role: "test", scope: "" }] } }).success);
+  assert.ok(!s.safeParse({ goal: "x", constraints: ["a\0b"] }).success);
 });
 
 // -- 返信・履歴 --
 
 test("返信で state が done / failed に更新され、結果が履歴（指示と結果）に積まれる", async () => {
   const { mgr, kicks } = setup();
-  await mgr.send({ owner: "pm1", prompt: "one" });
+  await mgr.send({ owner: "pm1", goal: "one" });
   kicks[0].resolve(ok("OK!"));
   await tick();
   mgr.onActivity(CAP);
@@ -222,8 +240,8 @@ test("返信で state が done / failed に更新され、結果が履歴（指�
   assert.equal(r.state, "done");
   assert.equal(r.result, "OK!");
   assert.ok(r.finishedAt);
-  await mgr.send({ owner: "pm2", prompt: "two" });
-  kicks[1].resolve({ bantou: 1, type: "error", ok: false, message: "boom", command: "kick_cap", cap_id: CAP });
+  await mgr.send({ owner: "pm2", goal: "two" });
+  kicks[1].resolve({ bantou: 1, type: "error", ok: false, message: "boom", command: "task", cap_id: CAP });
   await tick();
   mgr.onActivity(CAP);
   await tick();
@@ -238,19 +256,19 @@ test("返信で state が done / failed に更新され、結果が履歴（指�
   assert.deepEqual([(r.history[3] as { ok: boolean }).ok, (r.history[3] as { error?: string }).error], [false, "boom"]);
 });
 
-test("履歴の prompt は先頭 200 文字だけ。kick_cap には全文", async () => {
+test("履歴の prompt は goal の先頭 200 文字だけ。task には全文", async () => {
   const { mgr, kicks } = setup();
   const long = "x".repeat(500);
-  await mgr.send({ owner: "o", prompt: long });
+  await mgr.send({ owner: "o", goal: long });
   assert.equal((mgr.list()[0].history[0] as { prompt: string }).prompt.length, 200);
-  assert.equal(kicks[0].cmd.prompt, long);
+  assert.equal(kicks[0].cmd.goal, long);
 });
 
 test("送信自体の失敗（server に届かない reject）は failed でなく unknown。status が取れたら戻り、完了を通知する", async () => {
   const n = notifier();
   let down = false;
-  const { mgr } = setup({ kickCapOn: async () => { throw new Error("link down"); }, statusOn: async () => { if (down) throw new Error("no peer"); return { bantou: 1, type: "status_result", ok: true, caps: [{ kind: "cap", id: CAP, state: "idle" }], workers: [] } as never; } }, undefined, n.notify);
-  await mgr.send({ owner: "o", prompt: "p" });
+  const { mgr } = setup({ taskOn: async () => { throw new Error("link down"); }, statusOn: async () => { if (down) throw new Error("no peer"); return { bantou: 1, type: "status_result", ok: true, caps: [{ kind: "cap", id: CAP, state: "idle" }], workers: [] } as never; } }, undefined, n.notify);
+  await mgr.send({ owner: "o", goal: "p" });
   down = true; // 送信後は status も取れない
   await tick();
   assert.deepEqual([mgr.list()[0].state, mgr.list()[0].error], ["unknown", "link down"]);
@@ -266,16 +284,16 @@ test("送信自体の失敗（server に届かない reject）は failed でな�
 
 test("送信の error 返信（server が断った）は failed のまま", async () => {
   const { mgr, kicks } = setup();
-  await mgr.send({ owner: "o", prompt: "p" });
-  kicks[0].resolve({ bantou: 1, type: "error", ok: false, message: "updating", command: "kick_cap", cap_id: CAP });
+  await mgr.send({ owner: "o", goal: "p" });
+  kicks[0].resolve({ bantou: 1, type: "error", ok: false, message: "updating", command: "task", cap_id: CAP });
   await tick();
   assert.equal(mgr.list()[0].state, "failed");
 });
 
 test("list: owner はその owner が指示を送った cap だけ。返り値の変更は内部に影響しない", async () => {
   const { mgr } = setup();
-  await mgr.send({ owner: "a", prompt: "p" });
-  await mgr.send({ owner: "b", prompt: "p", server: "id-b" });
+  await mgr.send({ owner: "a", goal: "p" });
+  await mgr.send({ owner: "b", goal: "p", server: "id-b" });
   assert.deepEqual(mgr.list({ owner: "a" }).map((r) => r.server), ["id-a"]);
   assert.deepEqual(mgr.list({ owner: "b" }).map((r) => r.server), ["id-b"]);
   assert.equal(mgr.list().length, 2);
@@ -288,7 +306,7 @@ test("list: owner はその owner が指示を送った cap だけ。返り値�
 test("履歴は 200 件を超えたら古い完了済みから捨てる（未完了の指示は残す）", async () => {
   const { mgr, kicks } = setup();
   for (let i = 0; i < 110; i++) {
-    await mgr.send({ owner: "o", prompt: `p${i}` });
+    await mgr.send({ owner: "o", goal: `p${i}` });
     kicks[i].resolve(ok(`r${i}`));
     await tick();
   }
@@ -302,7 +320,7 @@ test("履歴は 200 件を超えたら古い完了済みから捨てる（未完
 test("通知: 指示を送った session へ、cap が idle で worker 無しになった時に 1 回。指示の先頭・state・result を含む", async () => {
   const n = notifier();
   const { mgr, kicks } = setup({}, undefined, n.notify);
-  await mgr.send({ owner: "pm1", prompt: "調べて" });
+  await mgr.send({ owner: "pm1", goal: "調べて" });
   assert.equal(n.sent.length, 0);
   kicks[0].resolve(ok("調査結果"));
   await tick();
@@ -325,8 +343,8 @@ test("通知: 指示を送った session へ、cap が idle で worker 無しに
 test("通知: failed（error 返信）も error 付きで送る", async () => {
   const n = notifier();
   const { mgr, kicks } = setup({}, undefined, n.notify);
-  await mgr.send({ owner: "pm1", prompt: "p" });
-  kicks[0].resolve({ bantou: 1, type: "error", ok: false, message: "updating", command: "kick_cap", cap_id: CAP });
+  await mgr.send({ owner: "pm1", goal: "p" });
+  kicks[0].resolve({ bantou: 1, type: "error", ok: false, message: "updating", command: "task", cap_id: CAP });
   await tick();
   assert.match(n.sent[0].text, /state=failed/);
   assert.match(n.sent[0].text, /error: updating/);
@@ -335,9 +353,9 @@ test("通知: failed（error 返信）も error 付きで送る", async () => {
 test("通知: 複数 session の指示が重なっても、cap が idle になるまで送らず、idle になった時に未完了を全て完了にして各 owner へ 1 回ずつ", async () => {
   const n = notifier();
   const { mgr, kicks } = setup({}, undefined, n.notify);
-  await mgr.send({ owner: "pm1", prompt: "A" });
-  await mgr.send({ owner: "pm2", prompt: "B" });
-  await mgr.send({ owner: "pm1", prompt: "C" });
+  await mgr.send({ owner: "pm1", goal: "A" });
+  await mgr.send({ owner: "pm2", goal: "B" });
+  await mgr.send({ owner: "pm1", goal: "C" });
   // 1 本目の返信: 後ろに返信待ちの指示がある間は完了にしない
   kicks[0].resolve(ok("r-A"));
   await tick();
@@ -367,13 +385,13 @@ test("通知: 複数 session の指示が重なっても、cap が idle にな�
 test("通知: 通知先は指示を送った session だけ（別 session の指示は別の通知）。完了後の新しい指示は新しい通知", async () => {
   const n = notifier();
   const { mgr, kicks } = setup({}, undefined, n.notify);
-  await mgr.send({ owner: "pm1", prompt: "A" });
+  await mgr.send({ owner: "pm1", goal: "A" });
   kicks[0].resolve(ok("rA"));
   await tick();
   mgr.onActivity(CAP);
   await tick();
   assert.deepEqual(n.sent.map((s) => s.owner), ["pm1"]);
-  await mgr.send({ owner: "pm2", prompt: "B" });
+  await mgr.send({ owner: "pm2", goal: "B" });
   kicks[1].resolve(ok("rB"));
   await tick();
   mgr.onActivity(CAP);
@@ -387,7 +405,7 @@ test("通知: worker が running / stalled の間は送らず、全部終わっ�
   const n = notifier();
   const activity = createActivityStore();
   const { mgr, kicks } = setup({}, activity, n.notify);
-  await mgr.send({ owner: "pm1", prompt: "p" });
+  await mgr.send({ owner: "pm1", goal: "p" });
   activity.apply(act("idle", "running"), "id-a");
   kicks[0].resolve(ok("first"));
   await tick();
@@ -409,7 +427,7 @@ test("通知: cap 自身が再開して running の間は送らない", async ()
   const n = notifier();
   const activity = createActivityStore();
   const { mgr, kicks } = setup({}, activity, n.notify);
-  await mgr.send({ owner: "pm1", prompt: "p" });
+  await mgr.send({ owner: "pm1", goal: "p" });
   activity.apply(act("running"), "id-a");
   kicks[0].resolve(ok("first"));
   await tick();
@@ -424,7 +442,7 @@ test("通知: cap 自身が再開して running の間は送らない", async ()
 test("通知: 送れない時は指示に notify_error を残し、再送しない。送れた時は notify_error が消える", async () => {
   const n = notifier("peer がいない");
   const { mgr, kicks } = setup({}, undefined, n.notify);
-  await mgr.send({ owner: "pm1", prompt: "p" });
+  await mgr.send({ owner: "pm1", goal: "p" });
   kicks[0].resolve(ok("r"));
   await tick();
   mgr.onActivity(CAP);
@@ -439,14 +457,14 @@ test("通知: 送れない時は指示に notify_error を残し、再送しな�
 
 test("通知: notify が throw しても記録に残り、落ちない。notify 無しなら理由を残す", async () => {
   const { mgr, kicks } = setup({}, undefined, (async () => { throw new Error("push 失敗"); }) as Notify);
-  await mgr.send({ owner: "pm1", prompt: "p" });
+  await mgr.send({ owner: "pm1", goal: "p" });
   kicks[0].resolve(ok("r"));
   await tick();
   mgr.onActivity(CAP);
   await tick();
   assert.equal((mgr.list()[0].history[0] as { notify_error?: string }).notify_error, "push 失敗");
   const b = setup();
-  await b.mgr.send({ owner: "pm1", prompt: "p" });
+  await b.mgr.send({ owner: "pm1", goal: "p" });
   b.kicks[0].resolve(ok("r"));
   await tick();
   b.mgr.onActivity(CAP);
@@ -458,14 +476,14 @@ test("通知: notify が throw しても記録に残り、落ちない。notify 
 
 test("applyLateReply: 最初の返信の後の cap_result で result が最新になり、履歴に積まれる。失敗なら failed、次の成功で done に戻る", async () => {
   const { mgr, kicks } = setup();
-  await mgr.send({ owner: "o", prompt: "p" });
+  await mgr.send({ owner: "o", goal: "p" });
   kicks[0].resolve(ok("first"));
   await tick();
   mgr.onActivity(CAP);
   await tick();
   assert.equal(mgr.applyLateReply(lateOk("second")), true);
   assert.equal(mgr.list()[0].result, "second");
-  assert.equal(mgr.applyLateReply({ bantou: 1, type: "cap_result", cap_id: CAP, session_id: "s", ok: false, result_text: "partial", error: "kill" } as never), true);
+  assert.equal(mgr.applyLateReply({ ...ok("partial"), state: "failed", error: "kill" } as never), true);
   let r = mgr.list()[0];
   assert.deepEqual([r.state, r.error, r.result], ["failed", "kill", "partial"]);
   mgr.applyLateReply(lateOk("third"));
@@ -476,12 +494,12 @@ test("applyLateReply: 最初の返信の後の cap_result で result が最新�
 
 test("applyLateReply: kick_cap の error は failed + error。結果本文は残す", async () => {
   const { mgr, kicks } = setup();
-  await mgr.send({ owner: "o", prompt: "p" });
+  await mgr.send({ owner: "o", goal: "p" });
   kicks[0].resolve(ok("keep"));
   await tick();
   mgr.onActivity(CAP);
   await tick();
-  mgr.applyLateReply({ bantou: 1, type: "error", ok: false, message: "resume 失敗", command: "kick_cap", cap_id: CAP });
+  mgr.applyLateReply({ bantou: 1, type: "error", ok: false, message: "resume 失敗", command: "task", cap_id: CAP });
   const r = mgr.list()[0];
   assert.deepEqual([r.state, r.error, r.result], ["failed", "resume 失敗", "keep"]);
 });
@@ -489,8 +507,9 @@ test("applyLateReply: kick_cap の error は failed + error。結果本文は残
 test("applyLateReply: 記録なし・返信待ちの指示がある間・delete 済み・cap_id 違いは無視", async () => {
   const { mgr, kicks } = setup();
   assert.equal(mgr.applyLateReply(lateOk("x")), false);
-  await mgr.send({ owner: "o", prompt: "p" });
-  assert.equal(mgr.applyLateReply(lateOk("x")), false);
+  await mgr.send({ owner: "o", goal: "p" });
+  // 返信待ちの task と同じ task_id の task_result は待ちに照合されるので触らない
+  assert.equal(mgr.applyLateReply(ok("x", kicks[0].cmd.task_id as string) as never), false);
   kicks[0].resolve(ok("first"));
   await tick();
   assert.equal(mgr.applyLateReply({ ...ok("x"), cap_id: "other" } as never), false);
@@ -502,8 +521,8 @@ test("applyLateReply: 記録なし・返信待ちの指示がある間・delete 
 test("applyLateReply / onActivity: 同じ cap_id が複数 server にある時は送信元の peer id で記録を決める", async () => {
   const n = notifier();
   const { mgr, kicks } = setup({}, undefined, n.notify);
-  await mgr.send({ owner: "o", prompt: "a" });
-  await mgr.send({ owner: "o", prompt: "b", server: "id-b" });
+  await mgr.send({ owner: "o", goal: "a" });
+  await mgr.send({ owner: "o", goal: "b", server: "id-b" });
   kicks[0].resolve(ok("A"));
   kicks[1].resolve(ok("B"));
   await tick();
@@ -520,7 +539,7 @@ test("applyLateReply / onActivity: 同じ cap_id が複数 server にある時�
 test("list: cap が done でも配下の worker が running / stalled の間は running。全員終われば done。failed は変えない", async () => {
   const activity = createActivityStore();
   const { mgr, kicks } = setup({}, activity);
-  await mgr.send({ owner: "o", prompt: "p" });
+  await mgr.send({ owner: "o", goal: "p" });
   kicks[0].resolve(ok("done"));
   await tick();
   mgr.onActivity(CAP);
@@ -532,7 +551,7 @@ test("list: cap が done でも配下の worker が running / stalled の間は 
   assert.equal(mgr.list()[0].state, "running");
   activity.apply(act("idle", "done"), "id-a");
   assert.equal(mgr.list()[0].state, "done");
-  mgr.applyLateReply({ bantou: 1, type: "error", ok: false, message: "x", command: "kick_cap", cap_id: CAP });
+  mgr.applyLateReply({ bantou: 1, type: "error", ok: false, message: "x", command: "task", cap_id: CAP });
   activity.apply(act("idle", "running"), "id-a");
   assert.equal(mgr.list()[0].state, "failed");
 });
@@ -541,7 +560,7 @@ test("list: activity 通知のある cap には activity が付き、delete で�
   let now = 1_000_000;
   const activity = createActivityStore({ now: () => now });
   const { mgr } = setup({}, activity);
-  await mgr.send({ owner: "a", prompt: "p" });
+  await mgr.send({ owner: "a", goal: "p" });
   activity.apply(act("running"), "id-a");
   now += 2000;
   const r = mgr.list()[0];
@@ -550,7 +569,7 @@ test("list: activity 通知のある cap には activity が付き、delete で�
   await mgr.delete({ force: true });
   assert.equal(activity.get(CAP, "id-a"), undefined);
   const b = setup();
-  await b.mgr.send({ owner: "a", prompt: "p" });
+  await b.mgr.send({ owner: "a", goal: "p" });
   assert.equal("activity" in b.mgr.list()[0], false);
 });
 
@@ -569,7 +588,7 @@ test("activity: scope（server の peer id）ごとに別々に持つ", () => {
 
 test("remote_wait: cap が idle で worker 無しになるまで待って結果を返す。すでに終わっていれば即返す", async () => {
   const { mgr, kicks } = setup();
-  await mgr.send({ owner: "pm1", prompt: "p" });
+  await mgr.send({ owner: "pm1", goal: "p" });
   const w = mgr.wait({ remote_id: CAP, timeoutSec: 5 });
   await tick();
   kicks[0].resolve(ok("fin"));
@@ -583,7 +602,7 @@ test("remote_wait: cap が idle で worker 無しになるまで待って結果�
 test("remote_wait: worker が動いている間は待ち、全部終わった activity 通知で返る", async () => {
   const activity = createActivityStore();
   const { mgr, kicks } = setup({}, activity);
-  await mgr.send({ owner: "pm1", prompt: "p" });
+  await mgr.send({ owner: "pm1", goal: "p" });
   activity.apply(act("idle", "running"), "id-a");
   kicks[0].resolve(ok("fin"));
   let state: string | undefined;
@@ -599,7 +618,7 @@ test("remote_wait: worker が動いている間は待ち、全部終わった ac
 test("remote_wait: remote_id 省略は owner の未完了の指示がある cap。無ければ error。未定義の remote_id・owner 無しは error", async () => {
   const { mgr, kicks } = setup();
   await assert.rejects(mgr.wait({ owner: "pm1" }), /running の remote が無い/);
-  await mgr.send({ owner: "pm1", prompt: "p" });
+  await mgr.send({ owner: "pm1", goal: "p" });
   await assert.rejects(mgr.wait({ owner: "pm2" }), /running の remote が無い/);
   await assert.rejects(mgr.wait({}), /owner/);
   await assert.rejects(mgr.wait({ remote_id: "zzz" }), /未定義/);
@@ -614,8 +633,8 @@ test("remote_wait: remote_id 省略は owner の未完了の指示がある cap�
 
 test("remote_wait: 複数 server に同じ remote_id がある時は server で絞る", async () => {
   const { mgr, kicks } = setup();
-  await mgr.send({ owner: "o", prompt: "a" });
-  await mgr.send({ owner: "o", prompt: "b", server: "id-b" });
+  await mgr.send({ owner: "o", goal: "a" });
+  await mgr.send({ owner: "o", goal: "b", server: "id-b" });
   kicks[1].resolve(ok("B"));
   await tick();
   await assert.rejects(mgr.wait({ remote_id: CAP, timeoutSec: 1 }), /複数の server/);
@@ -626,7 +645,7 @@ test("remote_wait: 複数 server に同じ remote_id がある時は server で�
 
 test("remote_wait: timeout なら state=running のまま返す。待ち中の delete は error", async () => {
   const { mgr } = setup();
-  await mgr.send({ owner: "pm1", prompt: "p" });
+  await mgr.send({ owner: "pm1", goal: "p" });
   assert.equal((await mgr.wait({ remote_id: CAP, timeoutSec: 1 })).state, "running");
   const w = mgr.wait({ remote_id: CAP, timeoutSec: 5 });
   const caught = w.then(() => "resolved", (e: Error) => e.message);
@@ -639,31 +658,31 @@ test("remote_wait: timeout なら state=running のまま返す。待ち中の d
 
 test("remote_delete: stop_cap を同じ cap_id で送って記録を外す。外した後の遅れた返信は記録を復活させない", async () => {
   const { mgr, kicks, stops } = setup();
-  await mgr.send({ owner: "a", prompt: "p" });
+  await mgr.send({ owner: "a", goal: "p" });
   const r = await mgr.delete({ remote_id: CAP });
   assert.deepEqual(r, { remote_id: CAP, deleted: true, stopped: true });
   assert.deepEqual(stops.map((s) => [s.peer.id, s.cmd]), [["id-a", { cap_id: CAP }]]);
   assert.equal(mgr.list().length, 0);
-  kicks[0].resolve({ ...ok(""), ok: false, error: "stop_cap により停止" });
+  kicks[0].resolve({ ...ok(""), state: "failed", error: "stop_cap により停止" });
   await tick();
   assert.equal(mgr.list().length, 0);
   assert.deepEqual(JSON.parse(await readFile(join(dir, "remotes.json"), "utf8")), []);
   // 消した後の指示は最初の kick_cap からやり直す
-  assert.equal((await mgr.send({ owner: "a", prompt: "again" })).created, true);
+  assert.equal((await mgr.send({ owner: "a", goal: "again" })).created, true);
 });
 
 test("remote_delete: remote_id 省略は center の cap。未定義は拒否。どの session からでも消せる（owner を見ない）", async () => {
   const { mgr } = setup();
   await assert.rejects(mgr.delete({}), /未定義の remote/);
-  await mgr.send({ owner: "a", prompt: "p" });
+  await mgr.send({ owner: "a", goal: "p" });
   await assert.rejects(mgr.delete({ remote_id: "zzz" }), /未定義/);
   assert.equal((await mgr.delete({})).deleted, true);
 });
 
 test("remote_delete: 複数 server にある時は server で指定する", async () => {
   const { mgr, stops } = setup();
-  await mgr.send({ owner: "a", prompt: "p" });
-  await mgr.send({ owner: "a", prompt: "p", server: "id-b" });
+  await mgr.send({ owner: "a", goal: "p" });
+  await mgr.send({ owner: "a", goal: "p", server: "id-b" });
   await assert.rejects(mgr.delete({}), /複数の server/);
   await mgr.delete({ server: "id-b" });
   assert.deepEqual(stops.map((s) => s.peer.id), ["id-b"]);
@@ -672,11 +691,11 @@ test("remote_delete: 複数 server にある時は server で指定する", asyn
 
 test("remote_delete: server の peer id が変わっていても名前 + host で探して stop を送る。居なければ running は拒否、force で記録だけ消す", async () => {
   const { mgr, stops, setPeers } = setup();
-  await mgr.send({ owner: "a", prompt: "p" });
+  await mgr.send({ owner: "a", goal: "p" });
   setPeers([{ id: "id-a2", name: "bantou-server", hostname: "host-a" }, peerB]);
   await mgr.delete({});
   assert.equal(stops[0].peer.id, "id-a2");
-  await mgr.send({ owner: "a", prompt: "p" });
+  await mgr.send({ owner: "a", goal: "p" });
   setPeers([peerB]);
   await assert.rejects(mgr.delete({}), /止められない/);
   assert.equal(mgr.list().length, 1);
@@ -687,7 +706,7 @@ test("remote_delete: server の peer id が変わっていても名前 + host �
 
 test("remote_delete: stop が error 返信なら running は拒否。終わった記録は警告付きで消せる", async () => {
   const { mgr, kicks } = setup({ stopCapOn: async () => ({ bantou: 1, type: "error", ok: false, message: "kill 失敗", command: "stop_cap" }) as never });
-  await mgr.send({ owner: "a", prompt: "p" });
+  await mgr.send({ owner: "a", goal: "p" });
   await assert.rejects(mgr.delete({}), /kill 失敗/);
   kicks[0].resolve(ok("x"));
   await tick();
@@ -709,7 +728,7 @@ test("競合: activity（cap=running, worker=running）の後に最初の cap_re
   const n = notifier();
   const activity = createActivityStore();
   const { mgr, kicks } = setup({}, activity, n.notify);
-  await mgr.send({ owner: "pm1", prompt: "p" });
+  await mgr.send({ owner: "pm1", goal: "p" });
   activity.apply(act("running", "running"), "id-a");
   mgr.onActivity(CAP, "id-a");
   // 実機で起きた順序: cap_result の直後に cap=idle の activity が来る（activity の store を更新しない先に cap_result が処理される）
@@ -738,7 +757,7 @@ test("競合: cap_result の時点で store の activity が cap=idle・worker �
   const n = notifier();
   const activity = createActivityStore();
   const { mgr, kicks } = setup({}, activity, n.notify);
-  await mgr.send({ owner: "pm1", prompt: "p" });
+  await mgr.send({ owner: "pm1", goal: "p" });
   activity.apply(act("idle"), "id-a"); // 前の指示のときの idle が残っている
   kicks[0].resolve(ok("first"));
   await tick();
@@ -759,7 +778,7 @@ test("猶予後の status 判定: activity が来ないまま猶予を過ぎた�
   const n = notifier();
   let statusCalls = 0;
   const { mgr, kicks } = setup({ statusOn: async () => (statusCalls++ === 0 ? statusOf("idle") : statusOf("idle")) }, undefined, n.notify);
-  await mgr.send({ owner: "pm1", prompt: "p" }); // status 1 回目（send の cap 確認）
+  await mgr.send({ owner: "pm1", goal: "p" }); // status 1 回目（send の cap 確認）
   const before = statusCalls;
   kicks[0].resolve(ok("fin"));
   await tick();
@@ -777,7 +796,7 @@ test("猶予後の status 判定: store に cap_result 前の古い activity（r
   const n = notifier();
   const activity = createActivityStore();
   const { mgr, kicks } = setup({ statusOn: async () => statusOf("idle") }, activity, n.notify);
-  await mgr.send({ owner: "pm1", prompt: "p" });
+  await mgr.send({ owner: "pm1", goal: "p" });
   activity.apply(act("running", "running"), "id-a"); // cap_result 前の通知。以後 activity は来ない
   kicks[0].resolve(ok("fin"));
   await tick();
@@ -796,7 +815,7 @@ test("猶予後の status 判定: worker が running なら完了にせず追従
   let workers: string[] = [];
   let sends = true;
   const { mgr, kicks } = setup({ statusOn: async () => (sends ? statusOf("idle") : statusOf("idle", workers)) }, undefined, n.notify);
-  await mgr.send({ owner: "pm1", prompt: "p" });
+  await mgr.send({ owner: "pm1", goal: "p" });
   sends = false;
   workers = ["running"];
   kicks[0].resolve(ok("fin"));
@@ -812,8 +831,8 @@ test("猶予後の status 判定: worker が running なら完了にせず追従
 
 test("remote_wait: unknown の間は返らず待ち、status が取れて done になれば返る。timeout なら unknown のまま返す", async () => {
   let down = false;
-  const { mgr } = setup({ kickCapOn: async () => { throw new Error("link down"); }, statusOn: async () => { if (down) throw new Error("no peer"); return statusOf("idle"); } });
-  await mgr.send({ owner: "o", prompt: "p" });
+  const { mgr } = setup({ taskOn: async () => { throw new Error("link down"); }, statusOn: async () => { if (down) throw new Error("no peer"); return statusOf("idle"); } });
+  await mgr.send({ owner: "o", goal: "p" });
   down = true;
   await tick();
   assert.equal(mgr.list()[0].state, "unknown");
@@ -937,57 +956,42 @@ test("restore: store に保存した unknown / 未完了の指示付き done も
 
 const cfgServers = (s: object[]) => parseConfig({ servers: s }, "/x/c.json").servers;
 
-test("send: model / worker_model の指定（新規の cap）。指定が config より優先され、kick_cap と記録と返り値に出る", async () => {
+test("send: worker_model の指定（新規の cap）。指定が config より優先され、task と記録と返り値に出る", async () => {
   const servers = cfgServers([{ name: "s1", peer: "bantou-server", model: "opus", workerModel: "haiku" }]);
   const { mgr, kicks } = setup({}, undefined, undefined, servers);
-  const r = await mgr.send({ owner: "pm1", prompt: "go", model: "sonnet", worker_model: "claude-haiku-4-5" });
-  assert.deepEqual(r, { remote_id: CAP, server: "id-a", serverName: "bantou-server", state: "running", created: true, model: "sonnet", worker_model: "claude-haiku-4-5" });
-  assert.deepEqual(kicks[0].cmd, { cap_id: CAP, prompt: "go", model: "sonnet", worker_model: "claude-haiku-4-5", reason: "remote_send owner=pm1" });
-  const rec = mgr.list()[0];
-  assert.deepEqual([rec.model, rec.worker_model], ["sonnet", "claude-haiku-4-5"]);
-  assert.ok(!("model_ignored" in r));
+  const r = await mgr.send({ owner: "pm1", goal: "go", worker_model: "claude-haiku-4-5" });
+  assert.deepEqual(r, { remote_id: CAP, server: "id-a", serverName: "bantou-server", state: "running", created: true, task_id: r.task_id, worker_model: "claude-haiku-4-5" });
+  assert.equal(kicks[0].cmd.worker_model, "claude-haiku-4-5");
+  assert.equal(mgr.list()[0].worker_model, "claude-haiku-4-5");
 });
 
-test("send: 新規の cap で片方だけ指定したら、もう片方は config の既定", async () => {
+test("send: 新規の cap で worker_model を省けば config の既定", async () => {
   const servers = cfgServers([{ name: "s1", peer: "bantou-server", model: "opus", workerModel: "haiku" }]);
   const { mgr, kicks } = setup({}, undefined, undefined, servers);
-  await mgr.send({ owner: "pm1", prompt: "go", worker_model: "sonnet" });
-  assert.deepEqual(kicks[0].cmd, { cap_id: CAP, prompt: "go", model: "opus", worker_model: "sonnet", reason: "remote_send owner=pm1" });
+  await mgr.send({ owner: "pm1", goal: "go" });
+  assert.equal(kicks[0].cmd.worker_model, "haiku");
 });
 
-test("send: 既存の cap では model を無視して返り値に残す。worker_model は resume の kick_cap に載せて記録を更新（config の既定は載せない）", async () => {
-  const servers = cfgServers([{ name: "s1", peer: "bantou-server", model: "opus", workerModel: "haiku" }]);
+test("send: 既存の cap では worker_model は指定された時だけ task に載せて記録を更新（config の既定は載せない）", async () => {
+  const servers = cfgServers([{ name: "s1", peer: "bantou-server", workerModel: "haiku" }]);
   const { mgr, kicks } = setup({}, undefined, undefined, servers);
-  await mgr.send({ owner: "pm1", prompt: "one" });
+  await mgr.send({ owner: "pm1", goal: "one" });
   kicks[0].resolve(ok("r1"));
   await tick();
   mgr.onActivity(CAP);
-  // 既存の cap: 指定なしなら何も載せない
-  const plain = await mgr.send({ owner: "pm1", prompt: "two" });
-  assert.deepEqual(kicks[1].cmd, { cap_id: CAP, prompt: "two", reason: "remote_send owner=pm1" });
-  assert.ok(!("model_ignored" in plain));
+  await mgr.send({ owner: "pm1", goal: "two" });
+  assert.ok(!("worker_model" in kicks[1].cmd));
   kicks[1].resolve(ok("r2"));
   await tick();
-  // model だけ: 無視（kick_cap に載せない）、返り値で知らせる
-  const ign = await mgr.send({ owner: "pm1", prompt: "three", model: "sonnet" });
-  assert.equal(ign.created, false);
-  assert.equal(ign.model_ignored, true);
-  assert.match(ign.note ?? "", /cap は既存なので model は無視した/);
-  assert.deepEqual(kicks[2].cmd, { cap_id: CAP, prompt: "three", reason: "remote_send owner=pm1" });
-  assert.equal(mgr.list()[0].model, "opus"); // 記録は cap を作った時の値のまま
-  kicks[2].resolve(ok("r3"));
-  await tick();
-  // worker_model: resume の kick_cap に載せ、記録を更新
-  const wm = await mgr.send({ owner: "pm1", prompt: "four", model: "sonnet", worker_model: "sonnet" });
-  assert.deepEqual(kicks[3].cmd, { cap_id: CAP, prompt: "four", worker_model: "sonnet", reason: "remote_send owner=pm1" });
-  assert.deepEqual([wm.worker_model, wm.model_ignored], ["sonnet", true]);
+  const wm = await mgr.send({ owner: "pm1", goal: "three", worker_model: "sonnet" });
+  assert.equal(kicks[2].cmd.worker_model, "sonnet");
+  assert.equal(wm.worker_model, "sonnet");
   assert.equal(mgr.list()[0].worker_model, "sonnet");
 });
 
-test("send: 形式が不正な model / worker_model は、送らず記録も作らず拒否（protocol の MODEL_PATTERN）", async () => {
+test("send: 形式が不正な worker_model は、送らず記録も作らず拒否（protocol の MODEL_PATTERN）", async () => {
   const { mgr, kicks } = setup();
-  await assert.rejects(mgr.send({ owner: "o", prompt: "p", model: "a b" }), /model が不正/);
-  await assert.rejects(mgr.send({ owner: "o", prompt: "p", worker_model: "-x" }), /worker_model が不正/);
+  await assert.rejects(mgr.send({ owner: "o", goal: "p", worker_model: "-x" }), /worker_model が不正/);
   assert.equal(kicks.length, 0);
   assert.equal(mgr.list().length, 0);
 });
@@ -995,20 +999,20 @@ test("send: 形式が不正な model / worker_model は、送らず記録も作�
 test("send: config の servers[] は送信のたびに読み直す（読めない時は直前の値で送り、ログに残す）", async () => {
   const path = join(dir, "config.json");
   const write = (s: object[] | string) => writeFile(path, typeof s === "string" ? s : JSON.stringify({ servers: s }));
-  await write([{ name: "s1", peer: "bantou-server", model: "opus", workerModel: "haiku" }]);
+  await write([{ name: "s1", peer: "bantou-server", workerModel: "haiku" }]);
   const logs: string[] = [];
-  const { mgr, kicks, caps } = setup({}, undefined, undefined, cfgServers([{ name: "s1", peer: "bantou-server", model: "boot-time" }]), { configPath: path, log: (m) => logs.push(m) });
-  await mgr.send({ owner: "o", prompt: "a" });
-  assert.deepEqual([kicks[0].cmd.model, kicks[0].cmd.worker_model], ["opus", "haiku"]); // 起動時の値ではなく、今の config
-  // cap を作り直す（server から消えた）ので、変更した config が次の最初の kick に反映される
+  const { mgr, kicks, caps } = setup({}, undefined, undefined, cfgServers([{ name: "s1", peer: "bantou-server", workerModel: "boot-time" }]), { configPath: path, log: (m) => logs.push(m) });
+  await mgr.send({ owner: "o", goal: "a" });
+  assert.equal(kicks[0].cmd.worker_model, "haiku"); // 起動時の値ではなく、今の config
+  // cap を作り直す（server から消えた）ので、変更した config が次の最初の task に反映される
   caps.set("id-a", []);
-  await write([{ name: "s1", peer: "bantou-server", model: "sonnet" }]);
-  await mgr.send({ owner: "o", prompt: "b" });
-  assert.deepEqual([kicks[1].cmd.model, kicks[1].cmd.worker_model], ["sonnet", undefined]);
+  await write([{ name: "s1", peer: "bantou-server", workerModel: "sonnet" }]);
+  await mgr.send({ owner: "o", goal: "b" });
+  assert.equal(kicks[1].cmd.worker_model, "sonnet");
   caps.set("id-a", []);
   await write("{ 壊れた");
-  await mgr.send({ owner: "o", prompt: "c" });
-  assert.equal(kicks[2].cmd.model, "sonnet"); // 直前に読めた値
+  await mgr.send({ owner: "o", goal: "c" });
+  assert.equal(kicks[2].cmd.worker_model, "sonnet"); // 直前に読めた値
   assert.ok(logs.some((l) => /config の読み直しに失敗/.test(l)));
 });
 
@@ -1028,7 +1032,7 @@ test("restore: 旧形式（作業ごとの cap、history 無し）は読み捨�
   assert.deepEqual(mgr.list({ owner: "pm2" }).map((r) => r.remote_id), ["r-9f8e7d6c5b"]);
   assert.equal(mgr.applyLateReply({ ...ok("x"), cap_id: "r-0a1b2c3d4e" } as never), false);
   // 新しい指示は旧形式に混ぜず、cap の記録を別に作る
-  const r = await mgr.send({ owner: "pm1", prompt: "new" });
+  const r = await mgr.send({ owner: "pm1", goal: "new" });
   assert.equal(r.remote_id, CAP);
   assert.equal(kicks[0].cmd.cap_id, CAP);
   assert.equal(mgr.list().length, 3);
@@ -1088,3 +1092,222 @@ test("config: servers[] の model / workerModel は形式を検証する。省�
 // 型の確認（RemoteManager の公開面）
 const _typecheck = (m: RemoteManager): void => void [m.send, m.delete, m.list, m.wait, m.restore, m.applyLateReply, m.onActivity];
 void _typecheck;
+
+// -- task_result / worker_report / worker_reply（protocol 1.5.0） --
+
+const fullResult = (taskId: string, over: object = {}) => ({
+  ...ok("全部やった", taskId),
+  workers: [{ worker_id: "w-1", role: "implement", state: "done", branch: "feature/x", commit: "abc1234", tests: "npm test: 41 pass", result: "実装した" }],
+  review: { verdict: "issues", items: [{ severity: "low", text: "命名", resolved: true }], rounds: 2 },
+  remaining: ["docs 未更新"],
+  ...over,
+});
+const report = (kind: string, workerId = "w-1", text = "経過", over: object = {}) => ({
+  bantou: 1 as const, type: "worker_report" as const, cap_id: CAP, task_id: "t-1", worker_id: workerId, kind: kind as never, text, at: "2026-11-04T00:00:00.000Z", ...over,
+});
+
+test("task_result: 最新の task_result 本体を task_result に持ち、result は summary。worker_reports は最初は空", async () => {
+  const { mgr, kicks } = setup();
+  const r = await mgr.send({ owner: "pm1", goal: "g" });
+  assert.deepEqual(mgr.list()[0].worker_reports, []);
+  assert.ok(!("task_result" in mgr.list()[0]));
+  const tr = fullResult(r.task_id);
+  kicks[0].resolve(tr);
+  await tick();
+  mgr.onActivity(CAP);
+  const v = mgr.list()[0];
+  assert.deepEqual(v.task_result, tr);
+  assert.equal(v.result, "全部やった");
+  assert.equal(v.state, "done");
+  const saved = JSON.parse(await readFile(join(dir, "remotes.json"), "utf8")) as RemoteRecord[];
+  assert.deepEqual(saved[0].task_result, tr);
+});
+
+test("task_result: state=failed は failed + error、task_result も残る。次の task_result で置き換わる", async () => {
+  const { mgr, kicks } = setup();
+  const a = await mgr.send({ owner: "pm1", goal: "a" });
+  kicks[0].resolve(fullResult(a.task_id, { state: "failed", error: "worker が落ちた", summary: "途中" }));
+  await tick();
+  mgr.onActivity(CAP);
+  assert.deepEqual([mgr.list()[0].state, mgr.list()[0].error, mgr.list()[0].result], ["failed", "worker が落ちた", "途中"]);
+  assert.equal(mgr.list()[0].task_result?.state, "failed");
+  const b = await mgr.send({ owner: "pm1", goal: "b" });
+  kicks[1].resolve(fullResult(b.task_id));
+  await tick();
+  mgr.onActivity(CAP);
+  assert.equal(mgr.list()[0].task_result?.task_id, b.task_id);
+  assert.equal(mgr.list()[0].state, "done");
+});
+
+test("完了判定: 同じ task_id の task_result が重ねて届いても完了通知は 1 回。task_result は最新に更新される", async () => {
+  const n = notifier();
+  const { mgr, kicks } = setup({}, undefined, n.notify);
+  const r = await mgr.send({ owner: "pm1", goal: "g" });
+  kicks[0].resolve(fullResult(r.task_id));
+  await tick();
+  mgr.onActivity(CAP);
+  await tick();
+  assert.equal(n.sent.length, 1);
+  assert.match(n.sent[0].text, /全部やった/);
+  // report 起因の再開で、同じ task_id の task_result がもう一度来る
+  assert.equal(mgr.applyLateReply(fullResult(r.task_id, { summary: "再開後" }) as never), true);
+  await tick();
+  mgr.onActivity(CAP);
+  await sleep(GRACE + 30);
+  assert.equal(n.sent.length, 1);
+  assert.equal(mgr.list()[0].task_result?.summary, "再開後");
+  assert.equal(mgr.list()[0].history.filter((e) => e.type === "instruction" && e.done_at).length, 1);
+  assert.equal(mgr.list()[0].state, "done");
+});
+
+test("完了判定: 返信待ちの task と別の task_id の task_result（過去の task の遅れ）は記録に反映するが、待ちの間は running のまま", async () => {
+  const { mgr, kicks } = setup();
+  const r = await mgr.send({ owner: "pm1", goal: "g" });
+  assert.equal(mgr.applyLateReply(ok("過去の task", "t-old") as never), true);
+  assert.equal(mgr.list()[0].task_result?.task_id, "t-old");
+  assert.equal(mgr.list()[0].state, "running");
+  kicks[0].resolve(fullResult(r.task_id));
+  await tick();
+  assert.equal(mgr.list()[0].task_result?.task_id, r.task_id);
+});
+
+test("worker_report: 記録に到着順で積み（最大 20 件）、remote_list に worker_reports で出る。記録が無い cap_id は捨てる", async () => {
+  const { mgr } = setup();
+  mgr.onWorkerReport(report("done") as never); // 記録が無い
+  await mgr.send({ owner: "pm1", goal: "g" });
+  for (let i = 0; i < 25; i++) mgr.onWorkerReport(report("ask", "w-1", `q${i}`) as never);
+  mgr.onWorkerReport(report("done", "w-1", "x", { cap_id: "other" }) as never);
+  const wr = mgr.list()[0].worker_reports;
+  assert.equal(wr.length, 20);
+  assert.deepEqual([wr[0].text, wr[19].text], ["q5", "q24"]);
+  assert.deepEqual(mgr.list({ owner: "pm1" })[0].worker_reports.length, 20);
+  await tick();
+  const saved = JSON.parse(await readFile(join(dir, "remotes.json"), "utf8")) as RemoteRecord[];
+  assert.equal(saved[0].worker_reports?.length, 20);
+});
+
+test("worker_report: 未完了の指示の owner へ push する。ask / approve には返答の案内。owner が複数なら各 owner へ", async () => {
+  const n = notifier();
+  const { mgr } = setup({}, undefined, n.notify);
+  await mgr.send({ owner: "pm1", goal: "a" });
+  await mgr.send({ owner: "pm2", goal: "b" });
+  mgr.onWorkerReport(report("ask", "w-9", "A と B のどちら？") as never);
+  await tick();
+  assert.deepEqual(n.sent.map((x) => x.owner).sort(), ["pm1", "pm2"]);
+  assert.match(n.sent[0].text, /^\[bantou\] worker_report remote_id=c-0123456789 worker=w-9 kind=ask task_id=t-1\nA と B のどちら？\n返答: worker_reply\(worker_id="w-9", text\)/);
+  mgr.onWorkerReport(report("done", "w-9", "終わった", { task_id: undefined }) as never);
+  await tick();
+  assert.equal(n.sent.length, 4);
+  assert.ok(!/返答:/.test(n.sent[2].text));
+  assert.ok(!/task_id=/.test(n.sent[2].text));
+});
+
+test("worker_report: progress は同じ worker から 60 秒に 1 回まで（別 worker は別枠）。ask / approve / done は毎回。間引いても記録には積む", async () => {
+  let t = 1_000_000;
+  const now = mock.method(Date, "now", () => t);
+  try {
+    const n = notifier();
+    const { mgr } = setup({}, undefined, n.notify);
+    await mgr.send({ owner: "pm1", goal: "g" });
+    mgr.onWorkerReport(report("progress", "w-1", "p1") as never);
+    mgr.onWorkerReport(report("progress", "w-1", "p2") as never);
+    mgr.onWorkerReport(report("progress", "w-2", "p3") as never);
+    await tick();
+    assert.deepEqual(n.sent.map((x) => x.text.split("\n")[1]), ["p1", "p3"]);
+    t += 59_000;
+    mgr.onWorkerReport(report("progress", "w-1", "p4") as never);
+    mgr.onWorkerReport(report("ask", "w-1", "q1") as never);
+    mgr.onWorkerReport(report("approve", "w-1", "ok?") as never);
+    mgr.onWorkerReport(report("done", "w-1", "fin") as never);
+    await tick();
+    assert.deepEqual(n.sent.map((x) => x.text.split("\n")[1]), ["p1", "p3", "q1", "ok?", "fin"]);
+    t += 1_000;
+    mgr.onWorkerReport(report("progress", "w-1", "p5") as never);
+    await tick();
+    assert.equal(n.sent[n.sent.length - 1].text.split("\n")[1], "p5");
+    assert.equal(mgr.list()[0].worker_reports.length, 8);
+  } finally {
+    now.mock.restore();
+  }
+});
+
+test("worker_report: 未完了の指示が無い（owner 不明）・通知先が無い時は push せず、記録だけ残す。通知の失敗・throw で落ちない", async () => {
+  const n = notifier();
+  const { mgr, kicks } = setup({}, undefined, n.notify);
+  const r = await mgr.send({ owner: "pm1", goal: "g" });
+  kicks[0].resolve(fullResult(r.task_id));
+  await tick();
+  mgr.onActivity(CAP); // 完了（未完了の指示 0 件）
+  await tick();
+  const before = n.sent.length;
+  mgr.onWorkerReport(report("ask") as never);
+  await tick();
+  assert.equal(n.sent.length, before);
+  assert.equal(mgr.list()[0].worker_reports.length, 1);
+  const none = setup();
+  await none.mgr.send({ owner: "pm1", goal: "g" });
+  none.mgr.onWorkerReport(report("ask") as never);
+  assert.equal(none.mgr.list()[0].worker_reports.length, 1);
+  const bad = setup({}, undefined, (async () => { throw new Error("push 失敗"); }) as never);
+  await bad.mgr.send({ owner: "pm1", goal: "g" });
+  bad.mgr.onWorkerReport(report("ask") as never);
+  await tick();
+  assert.equal(bad.mgr.list()[0].worker_reports.length, 1);
+});
+
+test("workerReply: center の cap（remote_id 省略）の server へ {cap_id, worker_id, text} を送り、accepted を返す", async () => {
+  const sent: { peer: ServerPeer; cmd: unknown }[] = [];
+  const { mgr } = setup({
+    workerReplyOn: async (peer: ServerPeer, cmd: unknown) => {
+      sent.push({ peer, cmd });
+      return { bantou: 1, type: "worker_reply_result", ok: true, cap_id: CAP, worker_id: "w-1", accepted: true };
+    },
+  } as never);
+  await mgr.send({ owner: "pm1", goal: "g" });
+  const r = await mgr.workerReply({ worker_id: "w-1", text: "OK 進めて" });
+  assert.deepEqual(r, { remote_id: CAP, server: "id-a", worker_id: "w-1", accepted: true });
+  assert.equal(sent[0].peer.id, "id-a");
+  assert.deepEqual(sent[0].cmd, { cap_id: CAP, worker_id: "w-1", text: "OK 進めて" });
+  // remote_id を明示してもよい
+  await mgr.workerReply({ remote_id: CAP, worker_id: "w-1", text: "again" });
+  assert.equal(sent.length, 2);
+});
+
+test("workerReply: error 返信・門（版違い）・未定義の remote・不正な入力は投げ、版違いの時は server へ送らない", async () => {
+  let calls = 0;
+  const { mgr } = setup({
+    workerReplyOn: async () => {
+      calls++;
+      return { bantou: 1, type: "error", ok: false, message: "worker が無い", command: "worker_reply" };
+    },
+  } as never);
+  await mgr.send({ owner: "pm1", goal: "g" });
+  await assert.rejects(mgr.workerReply({ worker_id: "w-1", text: "x" }), /worker が無い/);
+  assert.equal(calls, 1);
+  await assert.rejects(mgr.workerReply({ remote_id: "c-zzz", worker_id: "w-1", text: "x" }), /未定義の remote/);
+  await assert.rejects(mgr.workerReply({ worker_id: "a b", text: "x" }), /worker_id/);
+  await assert.rejects(mgr.workerReply({ worker_id: "w-1", text: "" }), /text/);
+  await assert.rejects(mgr.workerReply({ worker_id: "w-1", text: "a\0b" }), /text/);
+  assert.equal(calls, 1);
+  const gated = setup({
+    gate: (_p: ServerPeer, command: string) => (command === "worker_reply" ? { bantou: 1, type: "error", ok: false, message: "server の protocol の版が合わない（server=1.4.0, center=1.5.0）", code: "version_mismatch", retryable: true } : undefined),
+    workerReplyOn: async () => {
+      calls++;
+      return { bantou: 1, type: "worker_reply_result", ok: true, cap_id: CAP, worker_id: "w-1", accepted: true };
+    },
+  } as never);
+  await gated.mgr.send({ owner: "pm1", goal: "g" }).catch(() => undefined);
+  await assert.rejects(gated.mgr.workerReply({ worker_id: "w-1", text: "x" }), /版が合わない|未定義の remote/);
+  assert.equal(calls, 1);
+});
+
+test("旧 server（protocol_version 不一致）: task も worker_reply も送らず投げる。記録は作らない", async () => {
+  const gate = (_p: ServerPeer, command: string) =>
+    command === "task" || command === "worker_reply"
+      ? { bantou: 1, type: "error", ok: false, message: "server の protocol の版が合わない（server=1.4.0, center=1.5.0）", code: "version_mismatch", retryable: true, command }
+      : undefined;
+  const { mgr, kicks } = setup({ gate } as never);
+  await assert.rejects(mgr.send({ owner: "pm1", goal: "g" }), /版が合わない/);
+  assert.equal(kicks.length, 0);
+  assert.equal(mgr.list().length, 0);
+});
