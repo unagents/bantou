@@ -182,6 +182,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
       sessionAuth: sessionTokens,
       core,
       events,
+      ...(config.workspace ? { workspace: config.workspace } : {}),
       port: args.port,
       bind: args.bind,
       token: config.token,

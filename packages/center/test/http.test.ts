@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { request } from "node:http";
 import { test } from "node:test";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { allowedHostsFor, startHttpServer } from "../src/http.js";
@@ -25,7 +28,7 @@ const TOOLS = [
 ];
 
 async function boot(
-  extra: { sessionIdleTtlMs?: number; sweepIntervalMs?: number; maxSessions?: number; bind?: string; token?: string; keepAliveMs?: number; log?: (msg: string) => void } = {},
+  extra: { sessionIdleTtlMs?: number; sweepIntervalMs?: number; maxSessions?: number; bind?: string; token?: string; keepAliveMs?: number; workspace?: string; log?: (msg: string) => void } = {},
 ) {
   const config = parseConfig({}, "/tmp/c.json");
   const supervisor = {
@@ -601,5 +604,108 @@ test("GET /events: 切断後は購読が外れ、events を渡さなければ 40
     assert.equal((await fetch(`http://127.0.0.1:${bare.port}/events`, { headers: AUTH })).status, 404);
   } finally {
     await bare.close();
+  }
+});
+
+// -- 添付画像 --
+
+const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from("png-body")]);
+const JPG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.from("jpg-body")]);
+
+async function bootAttach(log: (m: string) => void = () => {}) {
+  const ws = await mkdtemp(join(tmpdir(), "bantou-att-"));
+  const b = await boot({ workspace: ws, log });
+  b.core.register("s1");
+  const post = (name: string, body: Buffer | string, type: string | null, auth: Record<string, string> = AUTH) =>
+    fetch(`${b.base}/sessions/${name}/attachments`, {
+      method: "POST",
+      headers: { ...auth, ...(type ? { "content-type": type } : {}) },
+      body: body as BodyInit,
+    });
+  return { ...b, ws, post, done: async () => { await b.h.close(); await rm(ws, { recursive: true, force: true }); } };
+}
+
+test("添付: 保存して {path,bytes,type} を返し、連番が進み、型ごとの拡張子になる。log に本文を残さない", async () => {
+  const logs: string[] = [];
+  const t = await bootAttach((m) => logs.push(m));
+  try {
+    const r1 = await t.post("s1", PNG, "image/png");
+    assert.equal(r1.status, 201);
+    const j1 = (await r1.json()) as { path: string; bytes: number; type: string };
+    assert.equal(j1.bytes, PNG.length);
+    assert.equal(j1.type, "image/png");
+    assert.match(j1.path, new RegExp(`^${t.ws.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/s1/attachments/\\d{8}-\\d{6}-\\d{2}\\.png$`));
+    assert.deepEqual(await readFile(j1.path), PNG);
+    const r2 = await t.post("s1", JPG, "image/jpeg; charset=x");
+    const j2 = (await r2.json()) as { path: string };
+    assert.match(j2.path, /-\d{2}\.jpg$/);
+    // 同じ秒に連続で 5 枚: 連番は全部違う
+    const paths = new Set<string>();
+    for (let i = 0; i < 5; i++) paths.add(((await (await t.post("s1", PNG, "image/png")).json()) as { path: string }).path);
+    assert.equal(paths.size, 5);
+    assert.equal((await readdir(join(t.ws, "s1", "attachments"))).length, 7);
+    assert.ok(logs.some((l) => l.includes("添付を保存") && l.includes("session=s1") && l.includes(`bytes=${PNG.length}`) && l.includes(j1.path)));
+    assert.ok(!logs.some((l) => l.includes("png-body")));
+  } finally {
+    await t.done();
+  }
+});
+
+test("添付: 連番は同秒で 01 から振る（時刻固定）", async () => {
+  const { saveAttachment } = await import("../src/attachments.js");
+  const ws = await mkdtemp(join(tmpdir(), "bantou-att-"));
+  try {
+    const now = new Date(2026, 10, 4, 2, 45, 7);
+    const a = await saveAttachment({ workspace: ws, session: "x", type: "image/gif", body: Buffer.from("GIF89a-"), now });
+    const b = await saveAttachment({ workspace: ws, session: "x", type: "image/gif", body: Buffer.from("GIF89a-"), now });
+    assert.equal(a.path, join(ws, "x", "attachments", "20261104-024507-01.gif"));
+    assert.equal(b.path, join(ws, "x", "attachments", "20261104-024507-02.gif"));
+  } finally {
+    await rm(ws, { recursive: true, force: true });
+  }
+});
+
+test("添付: 型違い・中身が画像でない・空・サイズ超過・未知 session・不正 session 名・method を拒否し、拒否理由を log に残す", async () => {
+  const logs: string[] = [];
+  const t = await bootAttach((m) => logs.push(m));
+  try {
+    assert.equal((await t.post("s1", "hello", "text/plain")).status, 415);
+    assert.equal((await t.post("s1", PNG, null)).status, 415);
+    assert.equal((await t.post("s1", PNG, "image/svg+xml")).status, 415);
+    assert.equal((await t.post("s1", JPG, "image/png")).status, 415); // 宣言と中身が違う
+    assert.equal((await t.post("s1", Buffer.alloc(0), "image/png")).status, 400);
+    const big = Buffer.concat([PNG, Buffer.alloc(20 * 1024 * 1024 - PNG.length + 1)]);
+    assert.equal((await t.post("s1", big, "image/png")).status, 413);
+    const exact = Buffer.concat([PNG, Buffer.alloc(20 * 1024 * 1024 - PNG.length)]);
+    assert.equal((await t.post("s1", exact, "image/png")).status, 201);
+    assert.equal((await t.post("nope", PNG, "image/png")).status, 404);
+    assert.equal((await t.post("..%2Fx", PNG, "image/png")).status, 404);
+    assert.equal((await fetch(`${t.base}/sessions/s1/attachments`, { headers: AUTH })).status, 405);
+    assert.ok(logs.some((l) => l.includes("添付を拒否") && l.includes("session=s1") && l.includes("未対応の型")));
+    assert.ok(logs.some((l) => l.includes("添付を拒否") && l.includes("MB")));
+    // 拒否したものは 20MB ちょうど 1 枚以外ディスクに無い
+    assert.equal((await readdir(join(t.ws, "s1", "attachments"))).length, 1);
+    assert.deepEqual(await readdir(t.ws), ["s1"]);
+  } finally {
+    await t.done();
+  }
+});
+
+test("添付: 認証なし・違う token は 401 で何も書かない。workspace 未設定は 409", async () => {
+  const t = await bootAttach();
+  try {
+    assert.equal((await t.post("s1", PNG, "image/png", {})).status, 401);
+    assert.equal((await t.post("s1", PNG, "image/png", { authorization: "Bearer nope" })).status, 401);
+    assert.deepEqual(await readdir(t.ws), []);
+  } finally {
+    await t.done();
+  }
+  const b = await boot();
+  b.core.register("s1");
+  try {
+    const r = await fetch(`${b.base}/sessions/s1/attachments`, { method: "POST", headers: { ...AUTH, "content-type": "image/png" }, body: PNG });
+    assert.equal(r.status, 409);
+  } finally {
+    await b.h.close();
   }
 });

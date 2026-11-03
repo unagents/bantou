@@ -31,6 +31,13 @@ export {
   type DownloadProgress,
   type Update,
 } from "./updater";
+export {
+  onFilesDropped,
+  sessionAttachBytes,
+  sessionAttachPaths,
+  sessionAttachPick,
+  type AttachOutcome,
+} from "./attachment";
 export { errorText, logWebview } from "./log";
 export { getStatuses, listTasks } from "./tasks";
 export {

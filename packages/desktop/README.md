@@ -64,6 +64,17 @@ second `bantou-core` on the shared broker.
 - 記録するもの: center の MCP 呼び出し（tool 名・HTTP status、失敗時は応答本文）、ターミナル出力 stream の状態変化と拒否（status・応答本文）、入力とサイズ変更の失敗（status・応答本文・送った cols/rows。入力の中身は書かず長さだけ）、セッション一覧の取り直しの結果、アップデータの失敗、broker 接続、webview の失敗（`[webview]` 付き）。
 - 自分の sidecar center のログは別: `~/.local/share/bantou/center-logs/center.log`（`packages/center/README.md` の「ログ」）。
 
+## 画像の添付（master-cap の session）
+
+選択中の session のターミナル欄に、画像を 3 つの方法で渡せる。session の claude は center のホストで動くので、画像は center のホストに保存され、その絶対 path がターミナルの入力に入る（前後に空白 1 つ、Enter は送らない。複数枚は空白区切り）。Enter を押すと claude がその path の画像を読む。
+
+- 貼り付け: クリップボードに画像がある時の Cmd+V / Ctrl+V。文字も一緒にある時は今まで通り文字を貼る。
+- ドラッグ＆ドロップ: 画像ファイルをターミナル欄の上に落とす（欄の外に落としても何も起きない）。
+- 添付ボタン: ターミナル欄の見出し右端のクリップ。ファイル選択ダイアログ（複数選べる）。キャンセルは何も起きない。
+- 受ける型は png / jpeg / gif / webp、1 枚 20MB まで。型の違うもの・超えるものは、理由を見出しに赤字で出して何もしない（他の画像は進む）。送信中は見出しに「画像を送信中… N 枚」。
+- 画像は webview から直接 center に送らず、Rust 側が center へ送る（ターミナル入力と同じ接続先・token）。保存先・route・手で消す方法は `packages/center/README.md` の「添付画像」。自動では消えない。
+- ログ: 保存（path・bytes）・拒否・失敗は `bantou.log` に書く（画像の中身は書かない）。center 側は `center.log`。
+
 ## center（sidecar）
 
 `packages/center` を `bun build --compile` した単体バイナリを sidecar（`bundle.externalBin`）として同梱し、アプリが起動・停止する。
