@@ -21,6 +21,76 @@ use tauri::Emitter;
 
 pub const SESSIONS_CHANGED_EVENT: &str = "bantou://sessions-changed";
 
+/// Max length (chars) of a project setting `instructions` (same limit as the center).
+pub const SESSION_INSTRUCTIONS_MAX: usize = 16_000;
+
+/// Check a project settings object (`{ instructions?: string | null, … }`, same shape as the
+/// center's `settings`). Only `instructions` is known now; other keys pass through unchanged.
+/// A blank `instructions` text becomes `null` (the center removes the item), over the limit is an error.
+fn normalize_settings(settings: Value) -> Result<Value, String> {
+    let Value::Object(mut map) = settings else {
+        return Err("設定はオブジェクトで渡す".to_string());
+    };
+    match map.get("instructions") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(t)) => {
+            if t.trim().is_empty() {
+                map.insert("instructions".into(), Value::Null);
+            } else if t.chars().count() > SESSION_INSTRUCTIONS_MAX {
+                return Err(format!("追加指示は {SESSION_INSTRUCTIONS_MAX} 文字以内"));
+            }
+        }
+        Some(_) => return Err("追加指示は文字列で渡す".to_string()),
+    }
+    Ok(Value::Object(map))
+}
+
+/// Body of the center's `session_create`: `settings` only when it holds something to set
+/// (a `null` item means none, so it is not sent on create).
+fn create_args(name: &str, settings: Option<Value>) -> Value {
+    let mut a = serde_json::json!({ "name": name });
+    if let Some(Value::Object(m)) = settings {
+        let m: serde_json::Map<String, Value> = m.into_iter().filter(|(_, v)| !v.is_null()).collect();
+        if !m.is_empty() {
+            a["settings"] = Value::Object(m);
+        }
+    }
+    a
+}
+
+/// Body of the center's `session_settings_update` (a `null` item removes it).
+fn update_args(name: &str, settings: Value) -> Value {
+    serde_json::json!({ "name": name, "settings": settings })
+}
+
+/// The `settings` of the center's `{ name, settings }` answer (`{}` when absent).
+fn settings_of(answer: &Value) -> Value {
+    match answer.get("settings") {
+        Some(v @ Value::Object(_)) => v.clone(),
+        _ => serde_json::json!({}),
+    }
+}
+
+/// The project settings of `name`, kept by the center (`session_settings_get`).
+#[tauri::command]
+pub async fn session_get_settings(app: tauri::AppHandle, name: String) -> CmdResult<Value> {
+    let v = center_json(&app, "session_settings_get", Some(serde_json::json!({ "name": name.trim() })))
+        .await
+        .map_err(CommandError::Other)?;
+    Ok(settings_of(&v))
+}
+
+/// Merge `settings` into the project settings of `name` on the center (`session_settings_update`) and
+/// return the whole settings after the update. Takes effect from the next start of the session.
+#[tauri::command]
+pub async fn session_update_settings(app: tauri::AppHandle, name: String, settings: Value) -> CmdResult<Value> {
+    let settings = normalize_settings(settings).map_err(CommandError::Other)?;
+    let v = center_json(&app, "session_settings_update", Some(update_args(name.trim(), settings)))
+        .await
+        .map_err(CommandError::Other)?;
+    Ok(settings_of(&v))
+}
+
 /// The center's context usage of a session's claude (`contextUsage` of `session_list`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -53,7 +123,7 @@ pub struct Session {
     /// Context usage of the session's claude; None when the center has none (or is older than this field).
     #[serde(default)]
     pub context_usage: Option<ContextUsage>,
-    /// Whether the session was started with the center's `sessionInstructions` (`--append-system-prompt`). false when the center says no or is older than this field.
+    /// Whether the session was started with instructions (`--append-system-prompt`). false when the center says no or is older than this field.
     #[serde(default)]
     pub instructions: bool,
 }
@@ -169,8 +239,11 @@ pub async fn create_session(
     app: tauri::AppHandle,
     cache: tauri::State<'_, SessionCache>,
     name: String,
+    settings: Option<Value>,
 ) -> CmdResult<Session> {
-    let v = center_json(&app, "session_create", Some(serde_json::json!({ "name": name.trim() })))
+    let name = name.trim().to_string();
+    let settings = settings.map(normalize_settings).transpose().map_err(CommandError::Other)?;
+    let v = center_json(&app, "session_create", Some(create_args(&name, settings)))
         .await
         .map_err(CommandError::Other)?;
     let s: Session =
@@ -193,6 +266,48 @@ mod tests {
             context_usage: None,
             instructions: false,
         }
+    }
+
+    #[test]
+    fn settings_are_checked_and_blank_instructions_become_null() {
+        use serde_json::json;
+        assert_eq!(normalize_settings(json!({ "instructions": "  \n\t" })).unwrap(), json!({ "instructions": null }));
+        assert_eq!(normalize_settings(json!({ "instructions": "a\n  b " })).unwrap(), json!({ "instructions": "a\n  b " }));
+        assert_eq!(normalize_settings(json!({ "instructions": null })).unwrap(), json!({ "instructions": null }));
+        assert_eq!(normalize_settings(json!({})).unwrap(), json!({}));
+        // an item this desktop does not know passes through
+        assert_eq!(normalize_settings(json!({ "outputStyle": "x" })).unwrap(), json!({ "outputStyle": "x" }));
+        assert!(normalize_settings(json!({ "instructions": "あ".repeat(SESSION_INSTRUCTIONS_MAX) })).is_ok());
+        assert!(normalize_settings(json!({ "instructions": "あ".repeat(SESSION_INSTRUCTIONS_MAX + 1) })).is_err());
+        assert!(normalize_settings(json!({ "instructions": 1 })).is_err());
+        assert!(normalize_settings(json!("x")).is_err());
+    }
+
+    #[test]
+    fn create_body_carries_settings_only_when_something_is_set() {
+        use serde_json::json;
+        assert_eq!(create_args("a", None), json!({ "name": "a" }));
+        assert_eq!(create_args("a", Some(json!({}))), json!({ "name": "a" }));
+        assert_eq!(create_args("a", Some(json!({ "instructions": null }))), json!({ "name": "a" }));
+        let v = create_args("a", Some(json!({ "instructions": "x\ny" })));
+        assert_eq!(v["name"], "a");
+        assert_eq!(v["settings"]["instructions"], "x\ny");
+        assert!(v.get("instructions").is_none());
+        assert!(serde_json::to_string(&v).unwrap().contains("x\\ny"));
+    }
+
+    #[test]
+    fn update_body_and_answer_round_trip() {
+        use serde_json::json;
+        let body = update_args("a", json!({ "instructions": null }));
+        assert_eq!(body, json!({ "name": "a", "settings": { "instructions": null } }));
+        let set = update_args("a", json!({ "instructions": "t" }));
+        assert_eq!(set["settings"]["instructions"], "t");
+        // the center answers { name, settings }: the whole settings after the update, unknown items kept
+        let answer = json!({ "name": "a", "settings": { "instructions": "t", "skills": ["s"] } });
+        assert_eq!(settings_of(&answer), json!({ "instructions": "t", "skills": ["s"] }));
+        assert_eq!(settings_of(&json!({ "name": "a" })), json!({}));
+        assert_eq!(settings_of(&json!({ "name": "a", "settings": 3 })), json!({}));
     }
 
     #[test]

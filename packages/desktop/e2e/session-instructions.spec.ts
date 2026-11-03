@@ -3,53 +3,145 @@ import type { Page } from "@playwright/test";
 import { expect, pickSession, sideRow, test } from "./fixtures";
 import { boardSeed } from "./seed";
 
-type Mock = { center: Record<string, unknown>; centerSessions: Record<string, unknown>[] };
+type Mock = {
+  centerSessions: Record<string, unknown>[];
+  centerSettings: Record<string, Record<string, unknown>>;
+  calls: { cmd: string; args?: Record<string, unknown> }[];
+};
 
-const mockCenter = (page: Page) =>
-  page.evaluate(() => (window as unknown as { __BANTOU_MOCK__: Mock }).__BANTOU_MOCK__.center);
+/** Run `fn(mock)` in the page. `fn` is serialized: it must not capture anything. */
+const mock = <T>(page: Page, fn: (m: Mock) => T) =>
+  page.evaluate(
+    (src) =>
+      new Function("m", `return (${src})(m)`)((window as unknown as { __BANTOU_MOCK__: Mock }).__BANTOU_MOCK__),
+    fn.toString(),
+  ) as Promise<T>;
 
 const MULTI = "常に日本語で答える\n2 行目: \"quote\" $HOME\n\n4 行目";
+const NOTE = "保存後に起動する session から効く。動いている session には効かない";
 
 test.describe("session instructions", () => {
-  test("the settings dialog shows the field (empty by default) with the note, saves multi-line text and shows it again", async ({ page }) => {
+  test("the settings dialog has no center-wide instructions field", async ({ page }) => {
     await page.goto("/");
     await page.getByTestId("open-settings").click();
     await page.getByTestId("center-enabled").click();
-    const field = page.getByTestId("center-session-instructions");
-    await expect(page.getByText("master-cap への追加指示（system prompt に追記）")).toBeVisible();
-    await expect(field).toHaveValue("");
-    await expect(page.getByTestId("center-session-instructions-note")).toContainText("保存後に起動する session から効く。動いている session には効かない");
-    await expect(page.getByTestId("center-session-instructions-note")).not.toContainText("再起動");
-
-    const save = page.getByTestId("settings-save");
-    await field.fill(MULTI);
-    await expect(save).toBeEnabled();
-    await save.click();
-    await expect(page.getByText("設定を保存した", { exact: true })).toBeVisible();
-    expect((await mockCenter(page)).sessionInstructions).toBe(MULTI);
-
-    await page.getByTestId("open-settings").click();
-    await expect(page.getByTestId("center-session-instructions")).toHaveValue(MULTI);
-    // nothing changed since the load: nothing to save
-    await expect(page.getByTestId("settings-save")).toBeDisabled();
+    await expect(page.getByTestId("center-claude-path")).toBeVisible();
+    await expect(page.getByTestId("center-session-instructions")).toHaveCount(0);
+    await expect(page.getByText("master-cap への追加指示（system prompt に追記）")).toHaveCount(0);
   });
 
-  test("a saved text fills the field when the dialog opens; clearing it is a change that saves as empty", async ({ page }) => {
+  test.describe("sidebar gear", () => {
+    test.use({ seed: boardSeed });
+
+    test("the gear on a side row opens the project settings; saving keeps it on the center per session and shows it again", async ({ page }) => {
+      await page.goto("/");
+      const gear = (name: string) => page.locator(`[data-testid=session-settings-open][data-name="${name}"]`);
+      await gear("careery").click();
+      const dlg = page.getByTestId("settings-dialog");
+      await expect(dlg.getByTestId("settings-section-instructions")).toBeVisible();
+      await expect(dlg.getByTestId("settings-instructions")).toHaveValue("");
+      await expect(dlg.getByTestId("settings-instructions-note")).toHaveText(NOTE);
+      await expect(dlg.getByTestId("settings-save")).toBeDisabled();
+      await dlg.getByTestId("settings-instructions").fill(MULTI);
+      await dlg.getByTestId("settings-save").click();
+      await expect(dlg).toBeHidden();
+      expect(await mock(page, (m) => m.centerSettings)).toEqual({ careery: { instructions: MULTI } });
+
+      // reopen: the saved text; another session has none
+      await gear("careery").click();
+      await expect(page.getByTestId("settings-instructions")).toHaveValue(MULTI);
+      await page.keyboard.press("Escape");
+      await gear("stroke-board").click();
+      await expect(page.getByTestId("settings-instructions")).toHaveValue("");
+      await page.keyboard.press("Escape");
+
+      // clearing is a change that removes it
+      await gear("careery").click();
+      await page.getByTestId("settings-instructions").fill("");
+      await page.getByTestId("settings-save").click();
+      await expect(page.getByTestId("settings-dialog")).toBeHidden();
+      expect(await mock(page, (m) => m.centerSettings)).toEqual({});
+    });
+
+    test("the dialog reads the initial value from the center; a failed save shows the error and saves nothing", async ({ page }) => {
+      await page.goto("/");
+      await page.evaluate(() => {
+        const m = (window as unknown as { __BANTOU_MOCK__: Mock & { centerSettingsUpdateError: string | null } }).__BANTOU_MOCK__;
+        m.centerSettings.careery = { instructions: "center にある文" };
+        m.centerSettingsUpdateError = "center に接続できない: mock";
+      });
+      await page.locator('[data-testid=session-settings-open][data-name="careery"]').click();
+      const dlg = page.getByTestId("settings-dialog");
+      await expect(dlg.getByTestId("settings-instructions")).toHaveValue("center にある文");
+      await dlg.getByTestId("settings-instructions").fill("変えた文");
+      await dlg.getByTestId("settings-save").click();
+      await expect(dlg.getByTestId("settings-error")).toContainText("center に接続できない");
+      await expect(dlg).toBeVisible();
+      expect(await mock(page, (m) => m.centerSettings)).toEqual({ careery: { instructions: "center にある文" } });
+      // a retry after the center is back succeeds
+      await page.evaluate(() => {
+        (window as unknown as { __BANTOU_MOCK__: { centerSettingsUpdateError: string | null } }).__BANTOU_MOCK__.centerSettingsUpdateError = null;
+      });
+      await dlg.getByTestId("settings-save").click();
+      await expect(dlg).toBeHidden();
+      expect(await mock(page, (m) => m.centerSettings)).toEqual({ careery: { instructions: "変えた文" } });
+    });
+
+    test("the gear is disabled for a project from the center config", async ({ page }) => {
+      await page.goto("/");
+      await page.evaluate(() => {
+        const s = (window as unknown as { __BANTOU_MOCK__: Mock }).__BANTOU_MOCK__.centerSessions.find((x) => x.name === "careery");
+        if (s) s.source = "config";
+      });
+      await page.locator("header h1").click();
+      await expect(page.locator('[data-testid=session-settings-open][data-name="careery"]')).toBeDisabled();
+      await expect(page.locator('[data-testid=session-settings-open][data-name="stroke-board"]')).toBeEnabled();
+    });
+
+    test("the gear does not select the row; an over-long text cannot be saved", async ({ page }) => {
+      await page.goto("/");
+      await pickSession(page, "careery");
+      await page.locator(`[data-testid=session-settings-open][data-name="stroke-board"]`).click();
+      await expect(sideRow(page, "careery")).toHaveAttribute("aria-current", "true");
+      const dlg = page.getByTestId("settings-dialog");
+      await dlg.getByTestId("settings-instructions").fill("あ".repeat(16001));
+      await expect(dlg.getByTestId("settings-problem")).toBeVisible();
+      await expect(dlg.getByTestId("settings-save")).toBeDisabled();
+      await dlg.getByTestId("settings-instructions").fill("あ".repeat(16000));
+      await expect(dlg.getByTestId("settings-problem")).toHaveCount(0);
+      await expect(dlg.getByTestId("settings-save")).toBeEnabled();
+    });
+  });
+
+  test.describe("add dialog", () => {
+  test.use({ seed: boardSeed });
+
+  test("the add dialog has the field with the note and sends the text to the center when creating", async ({ page }) => {
     await page.goto("/");
-    await page.evaluate((t) => {
-      const m = (window as unknown as { __BANTOU_MOCK__: Mock }).__BANTOU_MOCK__;
-      m.center.enabled = true;
-      m.center.sessionInstructions = t;
-    }, MULTI);
-    await page.getByTestId("open-settings").click();
-    const field = page.getByTestId("center-session-instructions");
-    await expect(field).toHaveValue(MULTI);
-    await expect(page.getByTestId("settings-save")).toBeDisabled();
-    await field.fill("");
-    await expect(page.getByTestId("settings-save")).toBeEnabled();
-    await page.getByTestId("settings-save").click();
-    await expect(page.getByText("設定を保存した", { exact: true })).toBeVisible();
-    expect((await mockCenter(page)).sessionInstructions).toBe("");
+    await page.getByTestId("open-add-session").click();
+    const dlg = page.getByTestId("add-dialog");
+    await expect(dlg.getByTestId("add-instructions")).toHaveValue("");
+    await expect(dlg.getByTestId("add-instructions-note")).toHaveText(NOTE);
+    await dlg.getByTestId("add-name").fill("pm-ins");
+    await dlg.getByTestId("add-instructions").fill(MULTI);
+    await dlg.getByTestId("add-create").click();
+    await expect(dlg).toBeHidden();
+    const call = await mock(page, (m) => m.calls.filter((c) => c.cmd === "create_session").at(-1));
+    expect(call?.args).toEqual({ name: "pm-ins", settings: { instructions: MULTI } });
+    expect(await mock(page, (m) => m.centerSettings)).toEqual({ "pm-ins": { instructions: MULTI } });
+  });
+
+  test("creating without instructions sends none and saves none", async ({ page }) => {
+    await page.goto("/");
+    await page.getByTestId("open-add-session").click();
+    await page.getByTestId("add-name").fill("pm-plain");
+    await page.getByTestId("add-instructions").fill("  \n ");
+    await page.getByTestId("add-create").click();
+    await expect(page.getByTestId("add-dialog")).toBeHidden();
+    const call = await mock(page, (m) => m.calls.filter((c) => c.cmd === "create_session").at(-1));
+    expect(call?.args?.settings?.instructions ?? null).toBeNull();
+    expect(await mock(page, (m) => m.centerSettings)).toEqual({});
+  });
   });
 
   test.describe("session mark", () => {

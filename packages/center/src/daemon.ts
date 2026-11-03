@@ -33,7 +33,7 @@ const HARD_EXIT_MARGIN_MS = 5_000;
 export async function runDaemon(args: CliArgs): Promise<void> {
   const configPath = args.config;
   log("起動");
-  const config = await loadConfig(configPath);
+  const config = await loadConfig(configPath, log);
   log(
     `設定読込: ${configPath} (projects=${config.projects.length} servers=${config.servers.length} logDir=${config.logDir})`,
   );

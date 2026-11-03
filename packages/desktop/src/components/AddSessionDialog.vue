@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { createSession } from "~/api";
+import { draftError, emptyDraft, toUpdate } from "~/composables/sessionInstructions";
 
 const open = defineModel<boolean>("open", { required: true });
 const props = defineProps<{ existing: string[] }>();
@@ -8,6 +9,8 @@ const emit = defineEmits<{ done: [name: string] }>();
 const NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 const name = ref("");
+const draft = ref(emptyDraft());
+const problem = computed(() => draftError(draft.value));
 const busy = ref(false);
 const actionError = ref<string | null>(null);
 
@@ -24,7 +27,7 @@ async function create() {
   busy.value = true;
   actionError.value = null;
   try {
-    await createSession(trimmed.value);
+    await createSession(trimmed.value, toUpdate(draft.value));
     emit("done", trimmed.value);
     open.value = false;
   } catch (e) {
@@ -42,11 +45,13 @@ async function create() {
         <UFormField label="新しく作る" :error="nameError ?? undefined" help="英数字と _ - のみ。center の一覧にある名前とは重複できない">
           <UInput v-model="name" class="w-full" placeholder="セッション名" data-testid="add-name" @keydown.enter="create" />
         </UFormField>
+        <ProjectSettingsFields v-model="draft" id-prefix="add" :rows="4" />
+        <p v-if="problem" class="text-cork-danger-text text-xs" data-testid="add-problem">{{ problem }}</p>
         <UButton
           class="self-end"
           label="作成"
           :loading="busy"
-          :disabled="!trimmed || !!nameError"
+          :disabled="!trimmed || !!nameError || !!problem"
           data-testid="add-create"
           @click="create"
         />

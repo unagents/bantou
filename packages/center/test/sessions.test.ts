@@ -13,13 +13,15 @@ import { createEventHub, type SessionsEvent } from "../src/events.js";
 function fakeSupervisor(initial: ProjectConfig[]) {
   const map = new Map<string, RcStatus>();
   const calls: string[] = [];
+  const opts: { add: Record<string, unknown>; start: Record<string, unknown>; setInstr: Record<string, string> } = { add: {}, start: {}, setInstr: {} };
   const mk = (p: ProjectConfig): RcStatus => ({
     project: p.name, path: p.path, state: "stopped", pid: null, sessionUrl: null, environmentUrl: null,
     restarts: 0, lastExit: null, startedAt: null, args: null, instructions: false, claude: { path: "claude", source: "PATH" },
   });
   for (const p of initial) map.set(p.name, mk(p));
   const sup = {
-    add: (p: ProjectConfig, o?: { wrapper?: boolean }) => {
+    add: (p: ProjectConfig, o?: { wrapper?: boolean; instructions?: string }) => {
+      opts.add[p.name] = o;
       if (map.has(p.name)) throw new Error("既に存在");
       calls.push(`add:${p.name}:${p.permissionMode}${o?.wrapper ? ":wrapper" : ""}`);
       map.set(p.name, mk(p));
@@ -28,17 +30,21 @@ function fakeSupervisor(initial: ProjectConfig[]) {
       calls.push(`remove:${n}`);
       map.delete(n);
     },
-    start: async (n: string, o?: { resume?: boolean }) => {
+    start: async (n: string, o?: { resume?: boolean; instructions?: string }) => {
+      opts.start[n] = o;
       calls.push(`start:${n}${o?.resume ? ":resume" : ""}`);
       const s = map.get(n)!;
       s.state = "connected";
       s.sessionUrl = `https://claude.ai/code/session_${n}`;
       return { ...s };
     },
+    setInstructions: (n: string, v: string) => {
+      opts.setInstr[n] = v;
+    },
     status: (n: string) => ({ ...map.get(n)! }),
     list: () => [...map.values()].map((s) => ({ ...s })),
   } as unknown as RemoteControlSupervisor;
-  return { sup, calls };
+  return { sup, calls, opts };
 }
 
 let dir: string;
@@ -203,4 +209,76 @@ test("list: instructions は supervisor の status の真偽（本文は出さ�
   assert.equal((await mgr.create({ name: "pm1" })).instructions, false);
   assert.ok(mgr.list().every((s) => typeof s.instructions === "boolean"));
   assert.ok(!JSON.stringify(mgr.list()).includes("追加指示"));
+});
+
+test("create: settings.instructions は add に渡り、sessions.json の settings に保存される。無し・空は保存しない", async () => {
+  const { mgr, opts } = setup();
+  await mgr.create({ name: "a", settings: { instructions: "日本語で答える\n二行目" } });
+  await mgr.create({ name: "b", settings: { instructions: "" } });
+  await mgr.create({ name: "c" });
+  assert.equal((opts.add.a as { instructions?: string }).instructions, "日本語で答える\n二行目");
+  assert.equal((opts.add.b as { instructions?: string }).instructions, undefined);
+  assert.equal((opts.add.c as { instructions?: string }).instructions, undefined);
+  const saved = JSON.parse(await readFile(join(dir, "sessions.json"), "utf8")) as SavedSession[];
+  assert.deepEqual(saved.find((x) => x.name === "a")?.settings, { instructions: "日本語で答える\n二行目" });
+  assert.ok(!("settings" in saved.find((x) => x.name === "b")!));
+  assert.ok(!("settings" in saved.find((x) => x.name === "c")!));
+});
+
+test("create: 未知の項目も settings に保持する", async () => {
+  const { mgr } = setup();
+  await mgr.create({ name: "a", settings: { instructions: "x", skills: ["s1"], outputStyle: "terse" } });
+  assert.deepEqual(mgr.getSettings("a").settings, { instructions: "x", skills: ["s1"], outputStyle: "terse" });
+});
+
+test("restore: 保存済みの settings.instructions を add に渡す。settings の未知項目は保持", async () => {
+  const store = createJsonListStore<SavedSession>(join(dir, "sessions.json"), () => {});
+  await store.save([
+    { name: "r1", path: join(dir, "r1"), permissionMode: "auto", settings: { instructions: "保存された指示", future: 1 }, createdAt: "2026-01-01T00:00:00Z" },
+    { name: "r2", path: join(dir, "r2"), permissionMode: "auto", createdAt: "2026-01-01T00:00:00Z" },
+  ]);
+  const { mgr, opts, calls } = setup();
+  await mgr.restore();
+  assert.ok(calls.includes("start:r1:resume"));
+  assert.equal((opts.add.r1 as { instructions?: string }).instructions, "保存された指示");
+  assert.equal((opts.add.r2 as { instructions?: string }).instructions, undefined);
+  assert.deepEqual(mgr.getSettings("r1").settings, { instructions: "保存された指示", future: 1 });
+  assert.deepEqual(mgr.getSettings("r2").settings, {});
+});
+
+test("getSettings: 未設定と config 由来は {}。未定義は例外", async () => {
+  const { mgr } = setup();
+  await mgr.create({ name: "pm1" });
+  assert.deepEqual(mgr.getSettings("pm1"), { name: "pm1", settings: {} });
+  assert.deepEqual(mgr.getSettings("cfg"), { name: "cfg", settings: {} });
+  assert.throws(() => mgr.getSettings("nope"), /未定義の session/);
+});
+
+test("updateSettings: 項目ごとのマージ。省略は変えない、null と instructions 空文字は削除、未知項目は保持。保存して supervisor に反映", async () => {
+  const { mgr, opts, calls } = setup();
+  await mgr.create({ name: "pm1", settings: { instructions: "旧", keep: { a: 1 } } });
+  const read = async () => (JSON.parse(await readFile(join(dir, "sessions.json"), "utf8")) as SavedSession[]).find((x) => x.name === "pm1")!;
+  assert.deepEqual(await mgr.updateSettings("pm1", { instructions: "新" }), { name: "pm1", settings: { instructions: "新", keep: { a: 1 } } });
+  assert.deepEqual((await read()).settings, { instructions: "新", keep: { a: 1 } });
+  assert.deepEqual(await mgr.updateSettings("pm1", { other: 2 }), { name: "pm1", settings: { instructions: "新", keep: { a: 1 }, other: 2 } }); // 省略した instructions は変えない
+  assert.deepEqual((await mgr.updateSettings("pm1", { instructions: "" })).settings, { keep: { a: 1 }, other: 2 });
+  await mgr.updateSettings("pm1", { instructions: "再設定" });
+  assert.deepEqual((await mgr.updateSettings("pm1", { instructions: null, keep: null })).settings, { other: 2 });
+  assert.deepEqual((await mgr.updateSettings("pm1", { other: null })).settings, {});
+  assert.ok(!("settings" in (await read())));
+  assert.deepEqual(opts.setInstr.pm1, "");
+  assert.equal(calls.filter((c) => c.startsWith("start:")).length, 1); // 更新で起動し直さない
+});
+
+test("updateSettings: supervisor.setInstructions に値を渡す（次の起動から効く）", async () => {
+  const { mgr, opts } = setup();
+  await mgr.create({ name: "pm1" });
+  await mgr.updateSettings("pm1", { instructions: "次から" });
+  assert.equal(opts.setInstr.pm1, "次から");
+});
+
+test("updateSettings: config 由来・未定義は拒否。保存に失敗したら記録も戻す", async () => {
+  const { mgr } = setup();
+  await assert.rejects(mgr.updateSettings("cfg", { instructions: "x" }), /config 由来/);
+  await assert.rejects(mgr.updateSettings("nope", { instructions: "x" }), /未定義の session/);
 });

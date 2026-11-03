@@ -116,12 +116,37 @@ test("token: 指定すれば保持、空文字・未指定は undefined", () => 
   assert.equal(parseConfig({}, "/x/c.json").token, undefined);
 });
 
-test("remoteControl.sessionInstructions: 任意、複数行はそのまま、長すぎは不正", () => {
-  assert.equal(parseConfig({}, "/x/c.json").remoteControl.sessionInstructions, undefined);
-  const text = "1 行目\n  2 行目 \"quote\" $HOME `x`\n\n4 行目";
-  assert.equal(parseConfig({ remoteControl: { sessionInstructions: text } }, "/x/c.json").remoteControl.sessionInstructions, text);
-  assert.equal(parseConfig({ remoteControl: { sessionInstructions: "" } }, "/x/c.json").remoteControl.sessionInstructions, "");
-  assert.equal(parseConfig({ remoteControl: { sessionInstructions: "a".repeat(SESSION_INSTRUCTIONS_MAX) } }, "/x/c.json").remoteControl.sessionInstructions?.length, SESSION_INSTRUCTIONS_MAX);
-  assert.throws(() => parseConfig({ remoteControl: { sessionInstructions: "a".repeat(SESSION_INSTRUCTIONS_MAX + 1) } }, "/x/c.json"), /config が不正/);
-  assert.throws(() => parseConfig({ remoteControl: { sessionInstructions: 1 } }, "/x/c.json"), /config が不正/);
+test("remoteControl.sessionInstructions: 廃止。値は無視して warning を出す（warn 無しでも落ちない）", () => {
+  const warns: string[] = [];
+  const c = parseConfig({ remoteControl: { sessionInstructions: "x" } }, "/x/c.json", (m) => warns.push(m));
+  assert.ok(!("sessionInstructions" in c.remoteControl));
+  assert.equal(warns.length, 1);
+  assert.match(warns[0], /sessionInstructions/);
+  assert.match(warns[0], /無視/);
+  assert.match(warns[0], /settings\.instructions/);
+  assert.match(warns[0], /session_create の settings \/ session_settings_update/);
+  assert.ok(!/起動要求/.test(warns[0]));
+  assert.ok(!warns[0].includes("\"x\""));
+  // 長すぎ・型違いでも検証エラーにはならない（無視）
+  assert.doesNotThrow(() => parseConfig({ remoteControl: { sessionInstructions: 1 } }, "/x/c.json"));
+  assert.doesNotThrow(() => parseConfig({ remoteControl: { sessionInstructions: "a".repeat(SESSION_INSTRUCTIONS_MAX + 1) } }, "/x/c.json"));
+  // 無い時は warning なし
+  const w2: string[] = [];
+  parseConfig({ remoteControl: {} }, "/x/c.json", (m) => w2.push(m));
+  parseConfig({}, "/x/c.json", (m) => w2.push(m));
+  assert.deepEqual(w2, []);
+});
+
+test("loadConfig: center.json に sessionInstructions があれば warn に渡す", async () => {
+  const d = await mkdtemp(join(tmpdir(), "center-cfg-"));
+  try {
+    const f = join(d, "c.json");
+    await writeFile(f, JSON.stringify({ remoteControl: { sessionInstructions: "旧設定" } }));
+    const warns: string[] = [];
+    await loadConfig(f, (m) => warns.push(m));
+    assert.equal(warns.length, 1);
+    assert.match(warns[0], /sessionInstructions/);
+  } finally {
+    await rm(d, { recursive: true, force: true });
+  }
 });

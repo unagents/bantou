@@ -597,7 +597,7 @@ A server whose protocol version differs, or one waiting to update, is not sent `
 
 Models. `remote_send` no longer takes `model` (the `task` message has no field for the cap's own model); `servers[].model` stays for `cap_kick`.
 `worker_model` is the default model of the workers (`items[].model` wins). It is sent with `task` when given. For a new cap it
-defaults to the center's `servers[].workerModel`, **read again at every `remote_send`** like `sessionInstructions`; for an existing cap the
+defaults to the center's `servers[].workerModel`, **read again at every `remote_send`** like `remoteControl.model` is at every session launch; for an existing cap the
 config default is not re-sent. Precedence for a worker: `worker_start` `model` > the worker's recorded model > the cap's `worker_model` > none.
 
 `remote_list` returns one `RemoteView` per server cap: `RemoteRecord` (`remote_id` = cap id, `server`, `serverName`,

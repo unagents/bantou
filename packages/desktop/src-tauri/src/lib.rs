@@ -113,6 +113,8 @@ pub fn run() {
             session::list_sessions,
             session::refresh_sessions,
             session::create_session,
+            session::session_get_settings,
+            session::session_update_settings,
             center::center_get_settings,
             center::center_set_settings,
             center::center_status,
