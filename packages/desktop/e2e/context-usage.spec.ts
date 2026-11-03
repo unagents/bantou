@@ -46,6 +46,8 @@ test.describe("context usage", () => {
     await expect(side(page, "careery")).toHaveAttribute("data-level", "normal");
     await expect(header(page, "careery")).toHaveText("ctx 42% 84k/200k");
     await expect(header(page, "careery")).toHaveAttribute("data-level", "normal");
+    // header tooltip is unchanged (no tokens); the side tooltip has them
+    await expect(header(page, "careery")).toHaveAttribute("title", "コンテキスト使用量（2026-11-03T10:00:00.000Z 時点）");
     // other sessions without usage show nothing
     await expect(side(page, "stroke-board")).toHaveCount(0);
   });

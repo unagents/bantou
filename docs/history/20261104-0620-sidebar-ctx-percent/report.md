@@ -24,3 +24,10 @@
 
 ## 未確認
 - 実機（Tauri 実アプリ）での見た目。Rust は触っていない。
+
+## レビュー指摘の修正（2 回目）
+- ContextUsage の title: token 数を付けるのは `percent-only`（サイド行）の時だけにした。右列ヘッダーの title は develop と同一（`コンテキスト使用量（… 時点）`）に戻した。ラベル・class・data 属性は develop と同じ。
+- board.spec: サイド行の `side-count` が存在しないことを `toHaveCount(0)` で直接確認する形に強めた。
+- context-usage.spec: 見出しの tooltip が develop と同じ文字列であることの assertion を追加。
+- bun.lock は commit に含めていない（develop 既存のずれ）。
+- e2e 全件を再実行: 97 passed / 0 failed。

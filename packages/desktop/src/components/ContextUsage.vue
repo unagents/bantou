@@ -24,7 +24,8 @@ const label = computed(() => {
 });
 const title = computed(() => {
   const u = props.usage;
-  const tokens = u ? `${compact(u.usedTokens)}${u.windowTokens === null ? "" : `/${compact(u.windowTokens)}`} トークン` : "";
+  // Header: unchanged from before. Only the side row (percent-only) adds the tokens.
+  const tokens = u && props.percentOnly ? `${compact(u.usedTokens)}${u.windowTokens === null ? "" : `/${compact(u.windowTokens)}`} トークン` : "";
   const base = u?.updatedAt ? `コンテキスト使用量（${u.updatedAt} 時点）` : "コンテキスト使用量";
   return tokens ? `${base} ${tokens}` : base;
 });

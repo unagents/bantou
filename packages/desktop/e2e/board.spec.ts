@@ -14,13 +14,13 @@ test("side menu lists the sessions; the right pane shows only the selected one",
   const rows = page.getByTestId("side-row");
   await expect(rows).toHaveCount(3);
   await expect(rows.nth(0)).toContainText("agent-messenger");
-  await expect(rows.nth(0)).not.toContainText("/ 0");
+  await expect(rows.nth(0).getByTestId("side-count")).toHaveCount(0);
   // Nothing selected yet: the first one is shown.
   await expect(session(page, "agent-messenger")).toBeVisible();
   await expect(page.locator("section[aria-label]")).toHaveCount(1);
   await pickSession(page, "careery");
   await expect(page.locator("section[aria-label]")).toHaveCount(1);
-  await expect(sideRow(page, "careery")).not.toContainText("1 / 1");
+  await expect(sideRow(page, "careery").getByTestId("side-count")).toHaveCount(0);
   const careery = session(page, "careery");
   const taskRows = careery.locator("li");
   await expect(taskRows).toHaveCount(2);
