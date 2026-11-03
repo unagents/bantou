@@ -225,7 +225,7 @@ npm run dev -- --config <path>
 
 ## 単体バイナリ
 
-`bun build --compile` で Node 無しで動く単体バイナリにする（`@agent-hand/bantou-protocol` などの依存も同梱）。先に protocol をビルドしておく（`file:../protocol` は `dist` を指す）。
+`bun build --compile` で Node 無しで動く単体バイナリにする（`@agent-hand/bantou-protocol` などの依存も同梱）。先に protocol をビルドしておく（`^0.2.0` は workspace の `packages/protocol` にリンクされ、その `dist` を使う）。
 
 ```bash
 (cd ../protocol && npm run build)

@@ -23,7 +23,7 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@agent-hand/bantou-protocol": "file:../protocol",
+    "@agent-hand/bantou-protocol": "^0.2.0",
     "@modelcontextprotocol/sdk": "1.32.2",
     "@unagents/messenger-client": "0.10.0",
     "zod": "^4.0.0"
