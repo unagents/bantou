@@ -47,7 +47,7 @@ export const encodeResize = (cols: number, rows: number): string => `${JSON.stri
 export const encodeStop = (): string => `${JSON.stringify({ t: "stop" })}\n`;
 
 /** session に足す agent-messenger の MCP（plugin `messenger` の .mcp.json と同じ npx 起動）の版。 */
-export const MESSENGER_VERSION = "0.12.0";
+export const MESSENGER_VERSION = "0.12.2";
 
 /** --mcp-config 内の agent-messenger の entry 名（user scope の `agent-messenger` と衝突させない別名）。 */
 export const MESSENGER_SERVER_KEY = "bantou-messenger";

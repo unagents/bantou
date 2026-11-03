@@ -240,8 +240,8 @@ test("wrapper 起動: wrapper -- claude --remote-control の引数、env の tok
   assert.deepEqual(json.mcpServers["bantou-messenger"], {
     type: "stdio",
     command: "npx",
-    args: ["-y", "@unagents/messenger@0.12.0", "mcp"],
-    env: { AGENT_MESSENGER_NAME: "pm1", AGENT_MESSENGER_CLIENT_SPEC: "0.12.0" },
+    args: ["-y", "@unagents/messenger@0.12.2", "mcp"],
+    env: { AGENT_MESSENGER_NAME: "pm1", AGENT_MESSENGER_CLIENT_SPEC: "0.12.2" },
   });
   assert.equal(l.env.AGENT_MESSENGER_NAME, undefined);
   assert.deepEqual(json.mcpServers.bantou, {

@@ -9,7 +9,7 @@ branch: `fix/session-messenger-peer`（`origin/fix/remote-done-notify` から切
 
 ## 届け方と根拠
 
-`--mcp-config` の JSON に stdio の MCP `bantou-messenger` を足す。`npx -y @unagents/messenger@0.12.0 mcp`（agent-messenger の `plugins/messenger/.mcp.json` と同じ起動）、env `AGENT_MESSENGER_NAME=<session 名>`。
+`--mcp-config` の JSON に stdio の MCP `bantou-messenger` を足す。`npx -y @unagents/messenger@0.12.2 mcp`（agent-messenger の `plugins/messenger/.mcp.json` と同じ起動）、env `AGENT_MESSENGER_NAME=<session 名>`。
 
 根拠（agent-messenger 0.12.0 のコードと README）:
 - `packages/client/src/config.ts`: `name` は `AGENT_MESSENGER_NAME`。登録時に broker へ送る。
