@@ -109,7 +109,7 @@
 
 ### テスト
 
-- center: `bun run test` 311 件 pass / 0 fail（前回 296 → 311）、`bun run typecheck` エラーなし。新規・書き換え: cap_result 直後に activity が来る競合 2 件（実機の順序・store に前回の idle が残る場合）、猶予後の status 判定 2 件（idle で完了・worker running で追従）、unknown（送信失敗・status 不可から回復）、restore 5 件（running のまま復元・status で追従・idle で完了通知・late cap_result の反映と通知・activity での追従）、`remote_send` の model / worker_model（新規時・片方指定・既存時の無視と worker_model の記録更新・不正形式）、config 読み直し（読めない時は直前の値）、schema・tools の引数。
+- center: `bun run test` 313 件 pass / 0 fail（前回 296 → 313）、`bun run typecheck` エラーなし。新規・書き換え: cap_result 直後に activity が来る競合 2 件（実機の順序・store に前回の idle が残る場合）、猶予後の status 判定 3 件（idle で完了・store に cap_result 前の古い running が残っても idle なら完了・worker running で追従）、unknown（送信失敗・status 不可から回復・remote_wait は unknown で待つ）、restore 5 件（running のまま復元・status で追従・idle で完了通知・late cap_result の反映と通知・activity での追従）、`remote_send` の model / worker_model（新規時・片方指定・既存時の無視と worker_model の記録更新・不正形式）、config 読み直し（読めない時は直前の値）、schema・tools の引数。
 - server: `npm test` 203 件 pass（1 件追加。初回に launcher の 1 件が落ちたが、再実行と変更前の stash で通る = 既存の不安定なテスト）。
 - desktop e2e: 81 件 pass、`cargo test`（`src-tauri`）251 passed / 0 failed / 5 ignored、`bun run build:sidecar` 成功。手順は前回と同じ（`bun run generate` の静的ビルドを node の簡易静的サーバーで配信、ms-playwright の chromium-1243 を clone の外の一時 config で指定）。
 - desktop `nuxt typecheck` は前回と同じ理由で未確認。

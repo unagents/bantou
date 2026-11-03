@@ -212,6 +212,8 @@ export function createRemoteManager(opts: {
   const records: RemoteRecord[] = [];
   /** cap_result（や再起動）の後、次の activity か猶予の経過を待っている記録 → 待ち始めた時刻。この間は完了にしない（メモリのみ）。 */
   const settling = new Map<RemoteRecord, number>();
+  /** status で「動いていない」と判定した時刻。これより前に受けた activity は古いので、判定に使わない（メモリのみ）。 */
+  const statusIdleAt = new Map<RemoteRecord, number>();
   /** status で状態を確かめる予約（メモリのみ）。 */
   const probes = new Map<RemoteRecord, ReturnType<typeof setTimeout>>();
   /** 返信待ちの kick_cap の数（メモリのみ）。center の link は同じ cap_id の指示を直列にするので、2 本目以降は 1 本目の返信後に送られる。 */
@@ -228,8 +230,14 @@ export function createRemoteManager(opts: {
   const activityOf = (r: RemoteRecord): RemoteActivity | undefined =>
     opts.activity?.get(r.remote_id, r.server) ?? opts.activity?.get(r.remote_id, "");
 
-  const activityBusy = (r: RemoteRecord): boolean =>
-    activityOf(r)?.agents.some((a) => (a.kind === "worker" || a.kind === "cap") && (a.state === "running" || a.state === "stalled")) ?? false;
+  const activityBusy = (r: RemoteRecord): boolean => {
+    const a = activityOf(r);
+    if (!a) return false;
+    // status で idle と判定した後は、それより前に受けた activity（cap_result 前の running など）を使わない
+    const idleAt = statusIdleAt.get(r);
+    if (idleAt !== undefined && Date.now() - a.received_ms_ago < idleAt) return false;
+    return a.agents.some((x) => (x.kind === "worker" || x.kind === "cap") && (x.state === "running" || x.state === "stalled"));
+  };
 
   /**
    * list と同じ見え方の state。返信待ちの指示がある間・cap_result の後の判定待ち（settling）の間・
@@ -365,6 +373,7 @@ export function createRemoteManager(opts: {
    */
   const probe = async (r: RemoteRecord): Promise<void> => {
     if (!has(r) || r.legacy || (inflight.get(r) ?? 0) > 0) return;
+    const startedAt = Date.now();
     let st: StatusReply;
     try {
       const reply = await link.statusOn(await findPeer(r));
@@ -384,6 +393,7 @@ export function createRemoteManager(opts: {
     if (!has(r) || (inflight.get(r) ?? 0) > 0) return;
     if (statusBusy(st)) {
       settling.delete(r);
+      statusIdleAt.delete(r);
       if (r.state !== "running") log(`remote 追従: ${r.remote_id} cap / worker が動いている（status）`);
       r.state = "running";
       delete r.finishedAt;
@@ -393,12 +403,19 @@ export function createRemoteManager(opts: {
       schedule(r, pollMs);
       return;
     }
+    // status を取っている間に新しい activity が来て、動いていると言っているなら、そちらを信じて次の周期で確かめ直す
+    const fresh = activityOf(r);
+    if (fresh && Date.now() - fresh.received_ms_ago >= startedAt && activityBusy(r)) {
+      schedule(r, pollMs);
+      return;
+    }
     const since = settling.get(r);
     if (since !== undefined && Date.now() - since < graceMs) {
       schedule(r, graceMs - (Date.now() - since));
       return;
     }
     settling.delete(r);
+    statusIdleAt.set(r, Date.now());
     if (r.state === "running" || r.state === "unknown") {
       r.state = "done";
       r.finishedAt = new Date().toISOString();
@@ -561,6 +578,7 @@ export function createRemoteManager(opts: {
         target.state = "running";
         delete target.finishedAt;
         settling.delete(target);
+        statusIdleAt.delete(target);
         unschedule(target);
         trim(target);
         inflight.set(target, (inflight.get(target) ?? 0) + 1);
@@ -609,6 +627,7 @@ export function createRemoteManager(opts: {
       if (i >= 0) records.splice(i, 1);
       inflight.delete(rec);
       settling.delete(rec);
+      statusIdleAt.delete(rec);
       unschedule(rec);
       opts.activity?.forget(rec.remote_id, rec.server);
       wake();
@@ -635,6 +654,8 @@ export function createRemoteManager(opts: {
       if (r) {
         // 新しい activity が来たので、cap_result 後・再起動後の判定待ちは終わり。以後は activity で判定する
         settling.delete(r);
+        // done / failed の記録は、新しい activity が判定の根拠になるので、猶予後の status 判定は要らない
+        if (r.state === "done" || r.state === "failed") unschedule(r);
         if ((inflight.get(r) ?? 0) === 0 && (r.state === "running" || r.state === "unknown")) {
           // 返信待ちでない running（再起動後・status 追従）と unknown は、activity で動いていなければ done に戻す
           if (activityBusy(r)) {
@@ -666,7 +687,9 @@ export function createRemoteManager(opts: {
         for (const t of targets) {
           // 待っている間に delete された cap は、その時点で failed 扱いにはせず待ちから外す
           if (!has(t)) continue;
-          if (stateOf(t) !== "running") return viewOf(t);
+          // unknown は終わっていない（status が取れれば戻る）ので待ち続ける
+          const s = stateOf(t);
+          if (s === "done" || s === "failed") return viewOf(t);
         }
         return undefined;
       };

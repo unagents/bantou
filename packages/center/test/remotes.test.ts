@@ -773,6 +773,24 @@ test("猶予後の status 判定: activity が来ないまま猶予を過ぎた�
   assert.match(n.sent[0].text, /result: fin/);
 });
 
+test("猶予後の status 判定: store に cap_result 前の古い activity（running）が残っていても、status が idle なら完了にして通知する", async () => {
+  const n = notifier();
+  const activity = createActivityStore();
+  const { mgr, kicks } = setup({ statusOn: async () => statusOf("idle") }, activity, n.notify);
+  await mgr.send({ owner: "pm1", prompt: "p" });
+  activity.apply(act("running", "running"), "id-a"); // cap_result 前の通知。以後 activity は来ない
+  kicks[0].resolve(ok("fin"));
+  await tick();
+  assert.equal(mgr.list()[0].state, "running");
+  await sleep(GRACE + 60);
+  assert.equal(mgr.list()[0].state, "done");
+  assert.equal(n.sent.length, 1);
+  // その後に届いた新しい activity は使う（worker が再び running なら running に戻る）
+  await sleep(5);
+  activity.apply(act("idle", "running"), "id-a");
+  assert.equal(mgr.list()[0].state, "running");
+});
+
 test("猶予後の status 判定: worker が running なら完了にせず追従し、終わったら完了にして 1 回だけ通知", async () => {
   const n = notifier();
   let workers: string[] = [];
@@ -790,6 +808,22 @@ test("猶予後の status 判定: worker が running なら完了にせず追従
   await sleep(POLL * 2 + 40);
   assert.equal(mgr.list()[0].state, "done");
   assert.equal(n.sent.length, 1);
+});
+
+test("remote_wait: unknown の間は返らず待ち、status が取れて done になれば返る。timeout なら unknown のまま返す", async () => {
+  let down = false;
+  const { mgr } = setup({ kickCapOn: async () => { throw new Error("link down"); }, statusOn: async () => { if (down) throw new Error("no peer"); return statusOf("idle"); } });
+  await mgr.send({ owner: "o", prompt: "p" });
+  down = true;
+  await tick();
+  assert.equal(mgr.list()[0].state, "unknown");
+  const t0 = Date.now();
+  const timedOut = await mgr.wait({ remote_id: CAP, timeoutSec: 1 });
+  assert.equal(timedOut.state, "unknown");
+  assert.ok(Date.now() - t0 >= 900);
+  const w = mgr.wait({ remote_id: CAP, timeoutSec: 5 });
+  down = false;
+  assert.equal((await w).state, "done");
 });
 
 // -- center 再起動 --
