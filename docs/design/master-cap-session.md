@@ -10,7 +10,7 @@
 |---|---|---|
 | center に session 作成（`session_create`） | 通過 | `pm-route` が `connected` |
 | center が master-cap を起動 | 通過 | `claude remote-control --name pm-route` が center の子として起動 |
-| 番頭 → master-cap の指示 | 失敗 | desktop の「タスク追加を指示」は agent-messenger で session 名宛てに送るが、master-cap は messenger の peer でない |
+| 番頭 → master-cap の指示 | 失敗（経路テスト時点） | desktop の「タスク追加を指示」は agent-messenger で session 名宛てに送るが、master-cap は messenger の peer でなかった。→ 下の「6.1」で peer にした |
 | master-cap → center の `remote_create` | 失敗 | master-cap の MCP 設定に center が無い（`claude mcp list` で確認）。起動引数にも無い |
 | center → server（agent-messenger） | 通過 | アプリ再起動後。更新直後の起動では center だけ broker に届かなかった（下の「別件」） |
 | server → remote-cap → worker | 通過 | 起点は Mac main cap の curl（master-cap ではない） |
@@ -66,6 +66,19 @@ desktop ──(1 か所)── center ホスト
 ### 6. 番頭から master-cap への指示（ユーザー決定）
 
 - 「タスク追加を指示」ボタンはやめる。ユーザーは右の欄（対話の履歴）で master-cap に直接話す。対話セッションと同じ仕様にする。
+
+### 6.1 master-cap を messenger の peer にする（2026-11-03）
+
+center の通知（remote の完了通知など）は owner の session 名の messenger peer へ `push` で送る。そのため session ごとに agent-messenger を組み込み、session 名を peer 名にする。
+
+- 方法: `--mcp-config` の JSON に stdio の MCP `bantou-messenger` を足す。plugin `messenger`（agent-messenger の `plugins/messenger/.mcp.json`）と同じ `npx -y @unagents/messenger@<版> mcp` で、env `AGENT_MESSENGER_NAME=<session 名>` を渡す。名前は MCP の env だけに入れる（claude 本体の環境変数には入れない。plugin も入っている環境で同名 peer が 2 つ並ぶのを避ける）。
+- 根拠（agent-messenger 0.12.0 のコード）: client の `loadConfig` が `AGENT_MESSENGER_NAME` を peer 名にし、登録時に broker へ送る。受信は client が Claude Code の inbox socket（`CLAUDE_CODE_MESSAGING_SOCKET`、claude が MCP 子プロセスへ継承、Claude Code 2.1.224 以降）へ書き、会話に別セッションのメッセージとして現れる。`delivery: "push"` は本文そのもの。pty への文字の書き込みは使わない。
+- broker は center と同じく client が自分で解決する（env `AGENT_MESSENGER_HOST` → `~/.agent-messenger/client.json`・旧 config → UDP 発見 → `127.0.0.1:7901`）。center は broker を指名しない。
+- 再起動・`--continue`: `launch()` が起動のたびに `--mcp-config` を組み直すので、同じ session 名で登録し直される。peer id は変わる。
+- 同名の古い登録: broker は同じ pid + hostname の再登録だけを置き換える。再起動で pid が変わり、旧 client が unregister せず落ちた（SIGKILL・wrapper 異常終了）時は、heartbeat 失効（60 秒）まで同名の peer が 2 つ並ぶ。center の `notifyPeer` は同名が複数なら `registered_at` が最新のものへ送る。この間、他の peer が名前宛て（`send_message to: <session 名>`）で送ると broker は ambiguous で拒否する（id 宛ては届く）。
+- 実測（2026-11-03、204、agent-messenger 0.12.0 の broker を作業 dir で起動）: (1) 上記 MCP 設定で client が session 名で登録、(2) center の `notifyPeer` の push が inbox socket に届く、(3) client を SIGKILL して再起動すると同名 2 件が並び、`notifyPeer` が新しい方へ届く、(4) 実 claude 2.1.317 に同じ `--mcp-config` を渡すと peer 名で登録され、着信通知が会話に出る（env `AGENT_MESSENGER_HOST` / `PORT` も MCP に届く）。
+- 範囲外: config の `projects`（`claude remote-control` のサーバー型）は `--mcp-config` を受けないので対象外（messenger の peer にならない）。
+- 前提: center の子プロセスの PATH に `npx` があること。初回は npx の取得で起動が遅れる。bantou の MCP 窓口（`mcpUrl`）が無くても messenger は付ける。
 
 ### 7. desktop のセッション一覧は center の `session_list` そのもの（ユーザー決定、追加指示 1）
 

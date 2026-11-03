@@ -36,6 +36,9 @@ export interface LinkPeer {
   /** peer の summary（server は `<host> <workspace>`。peer id が変わっても同じ server を指す key に使う）。 */
   summary?: string;
   hostname?: string;
+  /** broker が付ける登録時刻・最終 heartbeat（ISO 8601）。同名 peer の新旧判定に使う。 */
+  registered_at?: string;
+  last_seen?: string;
   protocols?: Array<{ name: string; version: string }>;
 }
 
@@ -594,7 +597,9 @@ export function createServerLink(opts: {
         const own = client.peer?.id ?? null;
         const hits = (await client.listPeers("all")).filter((p) => p.name === name && p.id !== own);
         if (hits.length === 0) return { ok: false, reason: `messenger に peer ${name} がいない（session が agent-messenger につながっていない）` };
-        if (hits.length > 1) log(`通知先の peer が複数: name=${name} ${hits.map((p) => p.id).join(",")} -> ${hits[0].id}`);
+        // session の再起動直後は、止まった client の古い登録が heartbeat 失効（60 秒）まで残り同名が並ぶ。最後に登録した peer を選ぶ
+        hits.sort((a, b) => (b.registered_at ?? "").localeCompare(a.registered_at ?? ""));
+        if (hits.length > 1) log(`通知先の peer が複数: name=${name} ${hits.map((p) => p.id).join(",")} -> ${hits[0].id}（最新の登録）`);
         await client.send(hits[0].id, text, "push");
         return { ok: true, to: hits[0].id };
       } catch (e) {

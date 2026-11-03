@@ -277,12 +277,12 @@ export function createRemoteControlSupervisor(opts: {
       }
       wd.core.register(name);
       const mcpUrl = wd.mcpUrl();
-      if (!mcpUrl) log(`session 向け MCP 窓口が無いので --mcp-config を付けない: project=${name}`);
+      if (!mcpUrl) log(`session 向け MCP 窓口が無いので bantou の MCP を付けない（messenger のみ）: project=${name}`);
       args = buildWrapperArgs({
         claudePath: claude.path,
         name,
         permissionMode: e.project.permissionMode,
-        mcpConfig: mcpUrl ? mcpConfigJson(mcpUrl, name) : null,
+        mcpConfig: mcpConfigJson(mcpUrl, name),
         resume: useContinue,
         ...(wd.core.size(name) ?? {}),
       });
