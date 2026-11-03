@@ -5,7 +5,7 @@
 #   --dry-run : 検査・版上げ・署名ビルド・push 可否の確認まで。push・release・cask・入れ替えはしない
 # 流れ: develop を新規 clone → e2e・cargo test → 版上げ commit → 署名ビルド → latest.json
 #       → server が npm に無い版なら server の test と npm publish
-#       → develop を push・main を早送り → gh release → cask → cask の commit を push → 後始末 → mac200 の入れ替え
+#       → develop を push・main を早送り → gh release → cask → cask の commit を push → 後始末 → npm に tarball が出るのを待つ → mac200 の入れ替え
 # 前提（mac200 claude-cli）: gh が GitHub に認証済み、~/.tauri/bantou-updater.key、bun・cargo・jq・/opt/homebrew/bin/brew。
 #   server の publish が要る時は npm にもログイン済み（desktop は packages/server/package.json の版を対の版として埋め込むため、先に公開する）。
 # commit の末尾に足す行があれば ~/.config/bantou/release-trailer に置く（無ければ足さない）。
@@ -168,6 +168,21 @@ git push origin develop
 step "clean up"
 cd /tmp
 rm -rf "$WORK" "$OUT"
+
+if [[ "$PUBLISH_SERVER" == 1 ]]; then
+  # 新しい center は起動すると server に update_server を送る。npm に tarball が出る前だと server 側が取得に失敗するので、
+  # packument と tarball が取れるようになるまで待ってから入れ替える（最長 20 分。待ち切れなければ center が 5 分おきに再指示する）
+  step "wait for npm to serve bantou@$SERVER_VERSION"
+  for i in $(seq 1 60); do
+    TARBALL="$(curl -fsS "https://registry.npmjs.org/bantou/$SERVER_VERSION" 2>/dev/null | jq -r '.dist.tarball // empty' || true)"
+    if [[ -n "$TARBALL" ]] && curl -fsSIL -o /dev/null "$TARBALL"; then
+      echo "npm serves $TARBALL"
+      break
+    fi
+    [[ "$i" == 60 ]] && echo "warn: bantou@$SERVER_VERSION is not served by npm yet; the center will retry the update later" >&2
+    sleep 20
+  done
+fi
 
 step "swap the app on mac200"
 brew update

@@ -17,7 +17,7 @@ import type { ServerLink, ServerPeer } from "./server-link.js";
  *   unsupported hello を知らない版（protocol 1.3.0 未満）。自動更新できない（手動で起動し直す）
  *   updating    更新指示済み。実行中の cap / worker の終了待ち、または再起動中
  *   mismatch    server の版は組と同じなのに protocol の版が違う（ビルドの不整合）
- *   failed      更新指示が断られた・取得に失敗した（center が再起動するまで同じ版を再指示しない）
+ *   failed      更新指示が断られた・取得に失敗した（失敗から一定時間おいて同じ版を再指示する。npm への反映待ちなど）
  *   lost        updating のまま一定時間 server が戻らない
  *   unknown     hello に答えない（一時的な通信失敗など）
  */
@@ -62,6 +62,8 @@ export const LOST_AFTER_MS = 15 * 60_000;
 export const CHECK_INTERVAL_MS = 30_000;
 /** 更新中の server がいる間の周期（再起動後に早く ok へ戻すため）。 */
 export const UPDATING_INTERVAL_MS = 5_000;
+/** 更新に失敗してから同じ版を再指示するまでの間隔。 */
+export const RETRY_AFTER_MS = 5 * 60_000;
 
 /** "1.3.0" 形式の比較（a < b で負）。pre-release 部は無視する。 */
 export function compareVersions(a: string, b: string): number {
@@ -95,8 +97,8 @@ export function updatingError(
 
 interface Rec {
   entry: FollowEntry;
-  /** 更新指示を断られた版（同じ版を再指示しない）。 */
-  latched?: string;
+  /** 更新に失敗した後、次に同じ版を再指示してよい時刻（ms）。 */
+  retryAt?: number;
   /** updating になった時刻（lost 判定）。 */
   updatingSince?: number;
 }
@@ -107,11 +109,13 @@ export function createFollow(opts: {
   log: Logger;
   intervalMs?: number;
   lostAfterMs?: number;
+  retryAfterMs?: number;
   now?: () => number;
 }): Follow {
   const { link, pair, log } = opts;
   const now = opts.now ?? Date.now;
   const lostAfterMs = opts.lostAfterMs ?? LOST_AFTER_MS;
+  const retryAfterMs = opts.retryAfterMs ?? RETRY_AFTER_MS;
   const recs = new Map<string, Rec>();
   /** peer id -> key（gate は peer id で引く）。 */
   const byId = new Map<string, string>();
@@ -198,13 +202,19 @@ export function createFollow(opts: {
       }
       return;
     }
-    // 版が違う: 更新を指示する（新旧は比べない）
+    // 版が違う: 更新を指示する（新旧は比べない）。
+    // 失敗（指示を断られた・server が取得に失敗した）は一定時間おいて再指示する。publish 直後は npm に tarball が出るまで数分かかるため
     const failedTo = hello.last_update?.to === target ? hello.last_update : undefined;
-    if (rec.latched === target || failedTo) {
-      rec.latched = target;
-      set(rec, { state: "failed", detail: `更新に失敗（→${target}）: ${failedTo?.error ?? "指示を断られた"}` });
+    if (failedTo && rec.retryAt === undefined) {
+      const at = Date.parse(failedTo.at);
+      rec.retryAt = (Number.isNaN(at) ? now() : at) + retryAfterMs;
+    }
+    if (rec.retryAt !== undefined && now() < rec.retryAt) {
+      const wait = Math.max(1, Math.ceil((rec.retryAt - now()) / 60_000));
+      set(rec, { state: "failed", detail: `更新に失敗（→${target}）: ${failedTo?.error ?? "指示を断られた"}。${wait} 分後に再指示` });
       return;
     }
+    rec.retryAt = undefined;
     const upd = await link.updateServer(p, target);
     if (upd.type === "update_result") {
       if (upd.state === "current") {
@@ -224,8 +234,8 @@ export function createFollow(opts: {
         set(rec, { state: "updating", detail: `別の更新が進行中: ${upd.message}` });
         return;
       }
-      rec.latched = target;
-      set(rec, { state: "failed", detail: `更新に失敗（→${target}）: ${upd.message}` });
+      rec.retryAt = now() + retryAfterMs;
+      set(rec, { state: "failed", detail: `更新に失敗（→${target}）: ${upd.message}。${Math.ceil(retryAfterMs / 60_000)} 分後に再指示` });
       return;
     }
     set(rec, { state: "unknown", detail: "update_server に不明な返信" });

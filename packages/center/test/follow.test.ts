@@ -58,7 +58,7 @@ function fake(): Fake {
   return f;
 }
 
-function mk(f: Fake, pairServer: string | null = "0.3.1", extra: { now?: () => number; lostAfterMs?: number } = {}): Follow {
+function mk(f: Fake, pairServer: string | null = "0.3.1", extra: { now?: () => number; lostAfterMs?: number; retryAfterMs?: number } = {}): Follow {
   return createFollow({ link: f.link, pair: { server: pairServer ?? undefined, protocol: PV }, log: () => {}, ...extra });
 }
 
@@ -131,27 +131,52 @@ test("server の版は同じで protocol の版が違えば mismatch（更新し
   assert.deepEqual(f.updates, []);
 });
 
-test("update_server が断られたら failed で、同じ版は center が再起動するまで再指示しない", async () => {
+test("update_server が断られたら failed。再試行の間隔が過ぎるまで同じ版は再指示せず、過ぎたら再指示する", async () => {
   const f = fake();
   f.updateReply = () => err("版 0.3.1 を取得できない", { command: "update_server", code: "update_failed", retryable: false });
-  const fl = mk(f);
+  let t = 1_000_000;
+  const fl = mk(f, "0.3.1", { now: () => t, retryAfterMs: 60_000 });
   await fl.check();
   assert.equal(only(fl).state, "failed");
   assert.match(only(fl).detail, /取得できない/);
+  assert.match(only(fl).detail, /1 分後に再指示/);
+  t += 30_000;
   await fl.check();
   await fl.check();
   assert.equal(f.updates.length, 1);
   assert.equal(only(fl).state, "failed");
+  // 間隔が過ぎたら再指示（npm に反映されていれば通る）
+  t += 31_000;
+  f.updateReply = () => updResult("waiting");
+  await fl.check();
+  assert.equal(f.updates.length, 2);
+  assert.equal(only(fl).state, "updating");
 });
 
-test("hello_result.last_update が組の版の失敗なら failed（指示しない）", async () => {
+test("hello_result.last_update が組の版の失敗なら failed。失敗時刻から間隔が過ぎたら再指示する", async () => {
   const f = fake();
+  const failedAt = Date.parse("2026-10-31T00:00:00.000Z");
   f.helloReply = () => hello({ last_update: { to: "0.3.1", ok: false, error: "起動できない", at: "2026-10-31T00:00:00.000Z" } });
-  const fl = mk(f);
+  let t = failedAt + 10_000;
+  const fl = mk(f, "0.3.1", { now: () => t, retryAfterMs: 60_000 });
   await fl.check();
   assert.equal(only(fl).state, "failed");
   assert.match(only(fl).detail, /起動できない/);
   assert.deepEqual(f.updates, []);
+  // 失敗から 1 分過ぎたら再指示（center を再起動しなくてよい）
+  t = failedAt + 61_000;
+  await fl.check();
+  assert.equal(f.updates.length, 1);
+  assert.equal(only(fl).state, "updating");
+});
+
+test("hello_result.last_update の失敗が古ければ最初の確認で再指示する（center 再起動後など）", async () => {
+  const f = fake();
+  f.helloReply = () => hello({ last_update: { to: "0.3.1", ok: false, error: "取得できない", at: "2026-10-31T00:00:00.000Z" } });
+  const fl = mk(f, "0.3.1", { now: () => Date.parse("2026-10-31T01:00:00.000Z"), retryAfterMs: 60_000 });
+  await fl.check();
+  assert.equal(f.updates.length, 1);
+  assert.equal(only(fl).state, "updating");
 });
 
 test("update_conflict は別の更新が進行中として updating（failed にしない）", async () => {
