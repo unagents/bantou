@@ -29,7 +29,12 @@ branch: `feature/cap-orchestration-policy`（base: develop）。
 
 ## review worker の指摘と対応
 
-（後で追記）
+1. 実施: review worker（別 clone、commit c45052a）。bun install / protocol build / server npm test（203 件、pass 203、fail 0）/ typecheck はいずれも成功。bun.lock は install 後に差分なし。
+2. [中] `docs/architecture.md:27`: 「軽い作業は cap 内のサブエージェント（Agent tool）。」が残っている。同じ段落末尾の「自分では実装しない」および `CAP_GUIDE` と矛盾する。修正案: 該当文を削除する。
+3. [低] `docs/design/cap-orchestration.md` と `prompts.ts` の本文の一致は人手に依存する（現時点では完全一致を確認）。修正案: 設計書の「決まり本文」ブロックと `CAP_GUIDE` を比較するテストを足す。
+4. [低] 旧「軽い作業は Agent tool で済ませてよい」の削除は妥当。「自分では実装しない」「作業は必ず worker にさせる」と衝突し、残すと cap が実装を抱える抜け道になる。要確認事項は、読み取りだけの調査まで禁じるかどうか。現状の本文は「確認」を cap の役割に含めるので禁じていない。必要なら「読み取りだけの調査は cap がしてよい」と 1 行足す（任意）。
+5. 確認済み（指摘なし）: `packages/protocol` 無変更、`kick_cap` の prompt 無変更（変更は `worker_start` の description と `CAP_GUIDE` のみ）、server version 0.4.1 と bun.lock が一致、README / architecture / design / worker_start の記載内容は仕様と一致。
+6. 結論: 要修正 1 件（中）。
 
 ## 残存物
 
