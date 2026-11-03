@@ -167,10 +167,7 @@ function onSessionCreated(name: string) {
                   data-testid="session-instructions-mark"
                   data-scope="side"
                 />
-                <ContextUsage :usage="g.contextUsage" class="ml-auto" data-scope="side" />
-                <span class="text-cork-muted shrink-0 text-xs font-normal" :class="g.contextUsage ? '' : 'ml-auto'" data-testid="side-count">
-                  {{ g.working.length }} / {{ g.queued.length }}
-                </span>
+                <ContextUsage :usage="g.contextUsage" percent-only class="ml-auto" data-scope="side" />
               </button>
               <UButton
                 class="rounded-none"
