@@ -20,7 +20,7 @@ async function poll() {
   polling = true;
   try {
     const all = await centerTool<CenterRemoteRecord[]>("remote_list");
-    remotes.value = props.owner === undefined ? all : all.filter((r) => r.owner === props.owner);
+    remotes.value = props.owner === undefined ? all : all.filter((r) => r.owners.includes(props.owner!));
     fetchedAt.value = Date.now();
     error.value = null;
   } catch (e) {
@@ -68,6 +68,20 @@ const stateLabel: Record<CenterActivityState, string> = {
   lost: "消失",
 };
 
+/** Head of the latest result shown on the row. */
+const RESULT_HEAD_MAX = 80;
+function resultHead(r: CenterRemoteRecord): string {
+  const t = (r.result ?? "").replace(/\s+/g, " ").trim();
+  return t.length > RESULT_HEAD_MAX ? `${t.slice(0, RESULT_HEAD_MAX)}…` : t;
+}
+
+/** The cap is idle, has no worker and no pending instruction: one line "待機中". */
+function waiting(r: CenterRemoteRecord): boolean {
+  if (r.state !== "done" || (r.pending?.length ?? 0) > 0) return false;
+  const agents = r.activity?.agents ?? [];
+  return !agents.some((a) => a.kind === "worker") && !agents.some((a) => a.kind === "cap" && a.state !== "idle" && a.state !== "done");
+}
+
 /** `silent_ms` as of the fetch plus the time since, so host clock skew does not matter. */
 function elapsed(silentMs: number): string {
   const s = Math.max(0, Math.floor((silentMs + (now.value - fetchedAt.value)) / 1000));
@@ -94,7 +108,7 @@ function elapsed(silentMs: number): string {
       <div class="flex items-center gap-2 text-xs">
         <span class="font-medium">{{ r.remote_id }}</span>
         <span class="text-cork-muted">{{ r.serverName ?? r.server }}</span>
-        <span class="text-cork-muted">{{ r.owner }}</span>
+        <span class="text-cork-muted" :data-testid="`${tp}remote-owners`">{{ r.owners.join(", ") }}</span>
         <span v-if="r.model" class="text-cork-muted" :data-testid="`${tp}remote-model`">{{ r.model }}</span>
         <UBadge
           v-if="r.activity?.stale"
@@ -103,12 +117,14 @@ function elapsed(silentMs: number): string {
           label="更新途絶"
           :data-testid="`${tp}remote-stale`"
         />
-        <template v-if="!r.activity">
+        <span v-if="waiting(r)" class="text-cork-muted" :data-testid="`${tp}remote-waiting`">待機中</span>
+        <template v-else-if="!r.activity">
           <span class="text-cork-muted">活動情報なし</span>
           <span class="text-cork-muted">{{ r.state }}</span>
         </template>
+        <span v-if="resultHead(r)" class="text-cork-muted min-w-0 flex-1 truncate" :data-testid="`${tp}remote-result`">{{ resultHead(r) }}</span>
       </div>
-      <template v-if="r.activity">
+      <template v-if="r.activity && !waiting(r)">
         <div
           v-for="a in r.activity.agents"
           :key="`${a.kind}:${a.id}`"

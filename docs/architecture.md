@@ -38,6 +38,13 @@
 - stroke（Gitea `grrowapp/stroke`）: `server/utils/stroke/claude.ts`（`runClaude`、単独 import 可）、`invoke.ts` / `ai.ts`（retry と状態遷移）、`running.ts`（多重起動防止）、`reap*.ts` / `live-processes.ts`（孤児回収）
 - claudep（`stroke-plugin/.origin/tools/claudep`）: Agent SDK `query()` のループ、JSONL ログ、exit 判定
 
+## center の remote-cap（確定: 2026-11-04）
+
+- **remote-cap は 1 つの server につき 1 つだけ**。作業が何であれ、center はその cap に次の指示を送る。作業ごとに cap を作ると、cap の path・プロセス・state が際限なく増える（資源）うえ、同じ server に cap が溜まって片付けも要る（設計）ので止めた。server 側の取り決め（protocol）は変えていない: `kick_cap` は同じ cap_id なら resume で、server は cap ごとに直列実行し、worker の report で cap を再開する
+- cap_id は center ごとに固定の `c-<10 桁 hex>`（center の状態 dir の `center-id` に保存。center を再起動しても同じ）。session からの依頼（MCP `remote_send`、別名 `remote_create`）は、server の `status` で cap の有無を確かめ、無い時だけ最初の `kick_cap`（`model` / `worker_model` は `remote_send` の引数、無ければ center の設定 `servers[]`（送信のたびに読み直す）で決める）、あれば同じ cap_id の `kick_cap` を送る
+- center は「server の cap」単位で記録を持つ（`remote_id` = cap_id。持つのは cap の state・未完了の指示・最新の result / error と時刻・activity だけで、履歴は持たない）。完了は「cap が idle かつ配下の worker に running / stalled が無い」。その時点で未完了の指示を全て完了にし、指示を送った session ごとに 1 回通知する。desktop は server ごとに 1 行（cap の state・最新の result の先頭・配下の worker の一覧と状態。idle で worker・未完了の指示が無ければ「待機中」）を表示する
+- 旧形式（作業ごとの cap）の記録は一覧に出さない。center の起動時に見つけたら server へ `stop_cap` を送り（届かなくてもよい。結果は center.log）、記録を消す
+
 ## desktop ↔ center（確定）
 
 - transport は MCP（center の Streamable HTTP `/mcp`）。agent-messenger は使わない。desktop の Rust 側が MCP client を持ち（`packages/desktop/src-tauri/src/center_mcp.rs`）、webview は Tauri command（`center_call` / `center_connection`）経由でのみ center に触れる

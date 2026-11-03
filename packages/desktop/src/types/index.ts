@@ -264,19 +264,37 @@ export interface CenterRemoteActivity {
   agents: CenterAgentActivity[];
 }
 
-/** `remote_list` element (center `RemoteView`, the part shown). */
+/** A pending (not yet completed) instruction of a remote-cap (center `PendingInstruction`). Removed once completed; no history is kept. */
+export interface CenterPendingInstruction {
+  at: string;
+  /** Session that sent the instruction (the one notified on completion). */
+  owner: string;
+  /** Head of the prompt (at most 200 characters). */
+  prompt: string;
+}
+
+/**
+ * `remote_list` element (center `RemoteView`, the part shown): one remote-cap per server (`remote_id` = cap_id, fixed per center),
+ * with the latest result / error and the pending instructions. No history is kept; old-format records (one cap per task) are cleaned up by center.
+ */
 export interface CenterRemoteRecord {
   remote_id: string;
-  owner: string;
+  /** Sessions with a pending instruction on this cap (oldest first). */
+  owners: string[];
   server: string;
   serverName?: string;
-  state: "running" | "done" | "failed";
-  /** Model given to the remote-cap at `remote_create` (absent = none). */
+  state: "running" | "done" | "failed" | "unknown";
+  /** Model given when the cap was created (absent = none). */
   model?: string;
+  worker_model?: string;
   createdAt: string;
   finishedAt?: string;
+  /** Latest `cap_result` text. */
   result?: string;
+  result_at?: string;
   error?: string;
+  error_at?: string;
+  pending?: CenterPendingInstruction[];
   activity?: CenterRemoteActivity;
 }
 

@@ -16,9 +16,10 @@ export interface RemoteActivity {
 }
 
 export interface ActivityStore {
-  apply(n: ActivityNotice): void;
-  get(capId: string): RemoteActivity | undefined;
-  forget(capId: string): void;
+  /** scope = 通知を送ってきた server の peer id（同じ cap_id が複数 server にある時の取り違え防止）。無ければ空。 */
+  apply(n: ActivityNotice, scope?: string): void;
+  get(capId: string, scope?: string): RemoteActivity | undefined;
+  forget(capId: string, scope?: string): void;
 }
 
 interface Held {
@@ -30,12 +31,13 @@ interface Held {
 export function createActivityStore(opts: { now?: () => number } = {}): ActivityStore {
   const now = opts.now ?? Date.now;
   const held = new Map<string, Held>();
+  const key = (capId: string, scope: string): string => `${scope}\u0000${capId}`;
   return {
-    apply(n) {
-      held.set(n.cap_id, { notice: n, receivedAt: now() });
+    apply(n, scope = "") {
+      held.set(key(n.cap_id, scope), { notice: n, receivedAt: now() });
     },
-    get(capId) {
-      const h = held.get(capId);
+    get(capId, scope = "") {
+      const h = held.get(key(capId, scope));
       if (!h) return undefined;
       const ago = Math.max(0, now() - h.receivedAt);
       const live = h.notice.agents.some((a) => a.state === "running" || a.state === "stalled");
@@ -47,8 +49,8 @@ export function createActivityStore(opts: { now?: () => number } = {}): Activity
         agents: h.notice.agents.map((a) => ({ ...a, silent_ms: a.silent_ms + ago })),
       };
     },
-    forget(capId) {
-      held.delete(capId);
+    forget(capId, scope = "") {
+      held.delete(key(capId, scope));
     },
   };
 }

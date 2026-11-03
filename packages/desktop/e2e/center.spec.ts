@@ -79,7 +79,7 @@ test("without a target the dialog says there is nothing to connect to", async ({
 const agent = (kind: "cap" | "worker", id: string, state: string, extra: Record<string, unknown> = {}) => ({
   kind,
   id,
-  cap_id: "r-0a1b2c3d4e",
+  cap_id: "c-0a1b2c3d4e",
   state,
   task: `task of ${id}`,
   last_activity: null,
@@ -93,19 +93,22 @@ const agent = (kind: "cap" | "worker", id: string, state: string, extra: Record<
 /** `remote_list` shaped as docs of stream-liveness design chapter 4. */
 const remotes = (workerState: string) => [
   {
-    remote_id: "r-0a1b2c3d4e",
-    owner: "bantou-pm",
+    remote_id: "c-0a1b2c3d4e",
+    owners: ["bantou-pm", "careery"],
     server: "p-7c1d",
     serverName: "bantou-server",
-    state: "done",
+    state: "running",
     model: "opus",
     createdAt: "2026-10-29T00:57:00.000Z",
+    result: "整理した",
+    result_at: "2026-10-29T00:58:00.000Z",
+    pending: [{ at: "2026-10-29T00:59:00.000Z", owner: "careery", prompt: "次は PR を見て" }],
     activity: {
       at: "2026-10-29T01:00:05.000Z",
       received_ms_ago: 1200,
       stale: false,
       agents: [
-        agent("cap", "r-0a1b2c3d4e", "idle", { silent_ms: 116200, last_activity: "text: worker を 3 本起動した", model: "opus" }),
+        agent("cap", "c-0a1b2c3d4e", "idle", { silent_ms: 116200, last_activity: "text: worker を 3 本起動した", model: "opus" }),
         agent("worker", "w-1f2e3d4c5b", workerState, { last_activity: "Bash 実行中 60s", model: "claude-sonnet-5-5" }),
         agent("worker", "w-2a3b4c5d6e", "stalled", { silent_ms: 366200 }),
         agent("worker", "w-3c4d5e6f7a", "lost", { silent_ms: 36200, error: "signal SIGKILL で終了" }),
@@ -113,8 +116,8 @@ const remotes = (workerState: string) => [
     },
   },
   {
-    remote_id: "r-9f8e7d6c5b",
-    owner: "bantou-pm",
+    remote_id: "c-9f8e7d6c5b",
+    owners: ["bantou-pm"],
     server: "p-7c1d",
     serverName: "bantou-server",
     state: "running",
@@ -123,10 +126,11 @@ const remotes = (workerState: string) => [
       at: "2026-10-29T00:59:55.000Z",
       received_ms_ago: 45000,
       stale: true,
-      agents: [agent("cap", "r-9f8e7d6c5b", "running", { silent_ms: 46000, last_activity: "thinking" })],
+      agents: [agent("cap", "c-9f8e7d6c5b", "running", { silent_ms: 46000, last_activity: "thinking" })],
     },
   },
-  { remote_id: "r-5a5a5a5a5a", owner: "other-pm", server: "p-7c1d", serverName: "bantou-server", state: "failed", createdAt: "2026-10-28T22:00:00.000Z" },
+  // an idle cap with no worker and no pending instruction (one row, no record of finished work)
+  { remote_id: "c-3c4d5e6f7a", owners: [], server: "p-8e2f", serverName: "other-server", state: "done", createdAt: "2026-10-28T22:00:00.000Z", result: "PR を確認した。\n指摘は 3 件", result_at: "2026-10-28T23:00:00.000Z", pending: [] },
 ];
 
 const seedRemotes = (page: Page, list: unknown[]) =>
@@ -164,9 +168,30 @@ test("the remotes section shows each cap and worker with state, task and time si
   await expect(first.getByTestId("center-remote-stale")).toHaveCount(0);
   await expect(page.getByTestId("center-remote").nth(1).getByTestId("center-remote-stale")).toHaveText("更新途絶");
   const third = page.getByTestId("center-remote").nth(2);
-  await expect(third).toContainText("活動情報なし");
-  await expect(third).toContainText("failed");
+  await expect(third.getByTestId("center-remote-waiting")).toHaveText("待機中");
   await expect(third.getByTestId("center-remote-agent")).toHaveCount(0);
+  await expect(first.getByTestId("center-remote-waiting")).toHaveCount(0);
+});
+
+test("one row per server: cap state, head of the latest result and workers. No history, no old-format badge, no list of finished records", async ({ page }) => {
+  await page.goto("/");
+  await mock(page, { enabled: true });
+  await seedRemotes(page, remotes("running"));
+  await page.getByTestId("open-center").click();
+
+  const rows = page.getByTestId("center-remote");
+  await expect(rows).toHaveCount(3);
+  const first = rows.nth(0);
+  await expect(first.getByTestId("center-remote-owners")).toHaveText("bantou-pm, careery");
+  await expect(first.getByTestId("center-remote-result")).toHaveText("整理した");
+  await expect(first.getByTestId("center-remote-agent").nth(0).getByTestId("center-remote-agent-state")).toHaveText("待機");
+  const idle = rows.nth(2);
+  await expect(idle).toContainText("other-server");
+  await expect(idle.getByTestId("center-remote-result")).toHaveText("PR を確認した。 指摘は 3 件");
+  await expect(page.getByTestId("center-remote-history")).toHaveCount(0);
+  await expect(page.getByTestId("center-remote-history-item")).toHaveCount(0);
+  await expect(page.getByTestId("center-remote-legacy")).toHaveCount(0);
+  await expect(page.getByText("活動情報なし")).toHaveCount(0);
 });
 
 test("the remotes section refreshes by itself without pressing update", async ({ page }) => {

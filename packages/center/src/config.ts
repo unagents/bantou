@@ -76,6 +76,10 @@ const serverSchema = z.object({
   /** server の peer 名または id。省略すると listPeers の protocol 絞り込み（bantou）で自動発見する。 */
   peer: z.string().min(1).optional(),
   timeoutMs: z.number().int().positive().default(DEFAULT_SERVER_TIMEOUT_MS),
+  /** この server の remote-cap（cap を作る最初の kick_cap）に渡す `--model`。省略時は指定しない。 */
+  model: z.string().regex(MODEL_PATTERN, "英数字と . _ [ ] - のみ（先頭は - 不可）").optional(),
+  /** この server の remote-cap が起動する worker の既定モデル。省略時は指定しない。 */
+  workerModel: z.string().regex(MODEL_PATTERN, "英数字と . _ [ ] - のみ（先頭は - 不可）").optional(),
 });
 
 export const configSchema = z

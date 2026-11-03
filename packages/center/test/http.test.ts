@@ -35,8 +35,8 @@ async function boot(
   const link = { list: async () => [] } as unknown as ServerLink;
   const sessions = {} as unknown as SessionManager;
   const remotes = {
-    list: (f?: { owner?: string }) => [{ remote_id: "r-1", owner: f?.owner ?? "(all)" }],
-    create: async (i: { owner: string }) => ({ remote_id: "r-9", server: "s", serverName: "n", state: "running", owner: i.owner }),
+    list: (f?: { owner?: string }) => [{ remote_id: "c-1", owner: f?.owner ?? "(all)" }],
+    send: async (i: { owner: string }) => ({ remote_id: "c-9", server: "s", serverName: "n", state: "running", owner: i.owner }),
   } as unknown as RemoteManager;
   const tokens = createSessionTokens();
   const core = createCore();
@@ -44,7 +44,7 @@ async function boot(
   const created: unknown[] = [];
   const remotes2 = {
     ...remotes,
-    create: async (i: { owner: string }) => (created.push(i), { remote_id: "r-9", server: "s", serverName: "n", state: "running", owner: i.owner }),
+    send: async (i: { owner: string }) => (created.push(i), { remote_id: "c-9", server: "s", serverName: "n", state: "running", owner: i.owner }),
   } as unknown as RemoteManager;
   const h = await startHttpServer({
     createServer: () => createCenterServer({ config, supervisor, link, sessions, remotes }),
@@ -369,12 +369,12 @@ const sessionClient = async (base: string, token: string, name: string) => {
   return c;
 };
 
-test("/mcp/session: 窓口は remote_create / remote_delete / remote_list / remote_wait だけ。owner は header の session 名", async () => {
+test("/mcp/session: 窓口は remote_send / remote_create / remote_delete / remote_list / remote_wait だけ。owner は header の session 名", async () => {
   const { h, tokens, created, base } = await boot();
   const t = tokens.issue("pm1");
   const c = await sessionClient(base, t, "pm1");
   try {
-    assert.deepEqual((await c.listTools()).tools.map((x) => x.name).sort(), ["remote_create", "remote_delete", "remote_list", "remote_wait"]);
+    assert.deepEqual((await c.listTools()).tools.map((x) => x.name).sort(), ["remote_create", "remote_delete", "remote_list", "remote_send", "remote_wait"]);
     await c.callTool({ name: "remote_create", arguments: { prompt: "p", owner: "evil" } });
     assert.deepEqual(created, [{ owner: "pm1", prompt: "p" }]);
     const l = await c.callTool({ name: "remote_list", arguments: {} });

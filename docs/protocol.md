@@ -489,12 +489,63 @@ Remote-control record:
 `resume_worker` (a cap starts and continues workers with `worker_start`) and answers it with an
 `error` reply.
 
-`remote_list` returns `RemoteRecord[]` (`remote_id`, `owner`, `server`, `serverName`,
-`state`, `model?`, `worker_model?`, `createdAt`, `finishedAt?`, `result?`, `error?`, `notifiedAt?`, `notifyError?`). `notifiedAt` = when the center sent the
-done notice (messenger `push` to the peer named like the owner session); `notifyError` = why it could not. `remote_wait`
-(`remote_id?`, `timeout_sec?` default 600, max 1800) waits until the remote has finished and returns its record,
-or returns it with `state: "running"` on timeout. A remote that has received
-`activity` notices also has `activity`:
+**One remote-cap per bantou-server.** Whatever the work is, the center sends the next instruction to that
+cap; it never creates a cap per task. The center's cap id is fixed per center (`c-<10 hex>`, kept in
+`center-id` next to `center.json`, so it survives a restart). In the session window (`/mcp/session`):
+
+| tool | input | output |
+|---|---|---|
+| `remote_send` | `prompt`, `server?`, `model?`, `worker_model?` | `{ remote_id, server, serverName, state: "running", created, model?, worker_model?, model_ignored?, note? }` |
+| `remote_create` | same | alias of `remote_send` (same handling) |
+| `remote_delete` | `remote_id?`, `server?`, `force?` | `{ remote_id, deleted, stopped, warning? }` (`stop_cap` + drop the record) |
+
+`remote_send` first asks the server for `status`. If the cap (`remote_id`) is not there it sends the first `kick_cap`
+(`created: true`); otherwise it sends `kick_cap` with the same `cap_id` (a resume). The server runs a cap's commands
+one at a time, so a busy cap makes the instruction wait.
+
+Models (same format as `kick_cap`'s `model`, checked before sending). `model` is used only when the cap is created; if the
+cap already exists it is ignored and the result carries `model_ignored: true` and `note: "cap は既存なので model は無視した"`.
+`worker_model` is the default model of the workers this instruction's cap starts; it is sent on every `kick_cap` where it is
+given (including a resume), and the server remembers it as the cap's default. Defaults come from the center's `servers[]` config
+(`model` / `workerModel`), **read again at every `remote_send`** like `sessionInstructions`: a new cap gets
+`model` = argument ?? config and `worker_model` = argument ?? config; an existing cap gets `worker_model` only when given
+(the config default is not re-sent). To choose a model per worker, say so in `prompt`: the cap passes `model` to
+`worker_start` (precedence: `worker_start` `model` > the worker's recorded model > the cap's `worker_model` > none). The
+protocol and the server are unchanged (the server already updates `worker_model` on a resume).
+
+`remote_list` returns one `RemoteView` per server cap: `RemoteRecord` (`remote_id` = cap id, `server`, `serverName`,
+`serverHost?`, `state`, `model?`, `worker_model?`, `createdAt`, `finishedAt?`, latest `result?` / `result_at?` / `error?` / `error_at?`, `pending`) plus `owners` (sessions with a pending instruction) and `activity?`. `pending` is the
+unfinished instructions (`{at, owner, prompt (first 200 chars)}`); an instruction is removed when it completes. **No history is kept**
+(no list of past instructions or results, no per-instruction notice status): only the latest result / error and its time. `remote_wait`
+(`remote_id?`, `server?`, `timeout_sec?` default 600, max 1800) waits until the cap is idle and none of its workers is
+`running` / `stalled`, and returns its record, or returns it with the current `state` (`running` / `unknown`) on timeout.
+When the cap becomes idle with no worker running, the center closes **all** pending instructions and sends one done notice
+(messenger `push`) to each session that sent one, not one per `cap_result`.
+
+Completion is decided only when all of these hold: no `kick_cap` reply is pending, and the latest `activity` shows the cap
+`idle` and no worker `running` / `stalled`. A `cap_result` does **not** complete a remote by itself, because the
+`activity` that follows it may still show a running worker (seen in practice: the first `cap_result` arrived 10 s after an
+activity with cap=running / worker=running, and an activity with cap=idle / worker=running came 21 ms later). After a
+`cap_result` the center waits for the next `activity` (which settles it), or for a grace of **15 s** (3 of the server's 5 s notice
+intervals); if no `activity` comes by then it fetches the server's `status` and judges from that (cap `idle`, `queued` 0, no
+worker `running`; the status has no cap-to-worker link, so workers are checked server-wide). While the cap or a worker is running
+the center follows it by `status` every 15 s.
+
+`state` is `running` / `done` / `failed` / `unknown`. `unknown` = the center cannot tell: the `kick_cap` never reached the
+server (the send itself failed or timed out), or `status` cannot be fetched. It is not `failed` (that is a `cap_result` with
+`ok: false` or an `error` reply from the server). The center retries `status` every 15 s and the state returns to `running` /
+`done` when it succeeds (or when an `activity` arrives); nothing is notified while `unknown`.
+
+**Center restart** (the desktop release replaces the app, so the center restarts). Unfinished records are **not** closed as
+`failed`: a record is restored as it was (`running`, pending instructions kept), then the center fetches the server's `status` and
+follows it as above (`unknown` if `status` fails). A `cap_result` that arrives after the restart updates the latest
+`result`, and completes the remote (with the notice) the same way. This relies on the messenger peer name of the center and the
+sessions being the same after the restart (notices go to the session's peer name; a late reply comes back to `bantou-center`). If it
+changed, the notice is not delivered (logged in `center.log`), and use `remote_wait` / `remote_list`. Records of the old format (one cap per task, `remote_id` is not the center's cap id) are not
+listed: at startup the center sends `stop_cap` for each to its server (it may not arrive) and deletes the record, logging the result in `center.log`.
+A record from the version that kept `history` is migrated: only its pending instructions are kept.
+
+A remote that has received `activity` notices also has `activity`:
 
 | key | meaning |
 |---|---|

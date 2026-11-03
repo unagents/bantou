@@ -3,6 +3,7 @@ import type { CapResultReply, ErrorReply } from "@agent-hand/bantou-protocol";
 import type { CliArgs } from "./args.js";
 import { resolveClaude } from "./claude-path.js";
 import { createActivityStore } from "./activity.js";
+import { loadCapId } from "./center-id.js";
 import { loadConfig, MIN_TOKEN_LEN } from "./config.js";
 import { SESSION_MCP_PATH, startHttpServer, type HttpHandle } from "./http.js";
 import { mkdir } from "node:fs/promises";
@@ -69,15 +70,15 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   // 通知は 5 秒ごとに来るので、状態の組が変わった時だけログに出す
   const lastStates = new Map<string, string>();
   // remotes は link の後に作るので、遅れて届く返信はここ経由で渡す
-  let applyLateReply: (r: CapResultReply | ErrorReply) => void = () => {};
-  let onActivity: (capId: string) => void = () => {};
+  let applyLateReply: (r: CapResultReply | ErrorReply, fromId?: string) => void = () => {};
+  let onActivity: (capId: string, fromId?: string) => void = () => {};
   const link = createServerLink({
     config,
     log,
-    onLateCapReply: (r) => applyLateReply(r),
-    onNotice: (n) => {
-      activity.apply(n);
-      onActivity(n.cap_id);
+    onLateCapReply: (r, fromId) => applyLateReply(r, fromId),
+    onNotice: (n, fromId) => {
+      activity.apply(n, fromId ?? "");
+      onActivity(n.cap_id, fromId);
       const states = n.agents.map((a) => `${a.id}=${a.state}`).join(" ");
       if (lastStates.get(n.cap_id) !== states) {
         lastStates.set(n.cap_id, states);
@@ -111,15 +112,20 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     store: createJsonListStore(join(stateDir, "sessions.json"), log),
     log,
   });
+  const capId = await loadCapId(stateDir, log);
+  log(`remote-cap の cap_id: ${capId}（center ごとに固定）`);
   const remotes = createRemoteManager({
     link,
+    capId,
+    servers: config.servers,
+    configPath,
     store: createJsonListStore(join(stateDir, "remotes.json"), log),
     log,
     activity,
     notify: (owner, text) => link.notifyPeer(owner, text),
   });
-  applyLateReply = (r) => void remotes.applyLateReply(r);
-  onActivity = (capId) => remotes.onActivity(capId);
+  applyLateReply = (r, fromId) => void remotes.applyLateReply(r, fromId);
+  onActivity = (id, fromId) => remotes.onActivity(id, fromId);
 
   let closing = false;
   let http: HttpHandle | null = null;

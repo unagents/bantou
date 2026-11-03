@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { AGENT_ID_PATTERN } from "@agent-hand/bantou-protocol";
 import { z } from "zod";
-import { OWNER_HEADER, OWNER_PATTERN, OWNER_QUERY, remoteCreateSchema, remoteWaitSchema, WAIT_DEFAULT_SEC, type RemoteManager } from "./remotes.js";
+import { OWNER_HEADER, OWNER_PATTERN, OWNER_QUERY, remoteSendSchema, remoteWaitSchema, WAIT_DEFAULT_SEC, type RemoteManager } from "./remotes.js";
 import type { RemoteControlSupervisor } from "./remote-control.js";
 import { sessionCreateSchema, SESSION_NAME, type SessionManager } from "./sessions.js";
 import type { Follow } from "./follow.js";
@@ -98,7 +98,7 @@ export function registerTools(
     {
       title: "remote 一覧",
       description:
-        "center が保持する remote（remote_id, server, state, owner, 時刻, 結果）の一覧。owner が分かれば（header / query / 引数）その owner のものだけ、分からなければ全件。" +
+        "center が保持する remote（server の cap 単位。remote_id = cap_id, server, state, owners, 時刻, 最新の結果, 未完了の指示 pending）の一覧。owner が分かれば（header / query / 引数）その owner が指示を送った cap だけ、分からなければ全件。" +
         "server から通知を受けた remote には activity が付く: agents（cap → worker。state は running / stalled / idle / done / failed / lost、task、last_activity、last_output_at、silent_ms = 最後の出力からの経過 ms）、received_ms_ago（最後の通知から）、stale（running の agent がいるのに通知が途絶えた）",
       inputSchema: { owner: ownerArg },
     },
@@ -113,13 +113,13 @@ export function registerTools(
     "remote_wait",
     {
       title: "remote 完了待ち",
-      description: "remote が終わる（state が done / failed。配下の worker が running / stalled の間は終わりでない）まで待って、その remote の記録（state, result, error, notifiedAt など）を返す。remote_id 省略時は owner の running 中のどれかが終わるまで。timeout_sec（既定 "+WAIT_DEFAULT_SEC+"、上限 1800）を超えたら state=running のまま返す。完了通知を受けられない session でもこれで待てる",
+      description: "server の cap が終わる（state が done / failed = cap が idle で、配下の worker が running / stalled でない）まで待って、その cap の記録（state, result, error, pending など）を返す。remote_id 省略時は owner の未完了の指示がある cap のどれかが終わるまで。timeout_sec（既定 "+WAIT_DEFAULT_SEC+"、上限 1800）を超えたら state=running のまま返す。完了通知を受けられない session でもこれで待てる",
       inputSchema: { ...remoteWaitSchema, owner: ownerArg },
     },
-    ({ remote_id, timeout_sec, owner }, extra) =>
+    ({ remote_id, server, timeout_sec, owner }, extra) =>
       guard(async () => {
         const who = resolveOwner(extra as OwnerRequestInfo, owner);
-        return json(await remotes.wait({ ...(remote_id ? { remote_id } : {}), ...(who ? { owner: who } : {}), ...(timeout_sec !== undefined ? { timeoutSec: timeout_sec } : {}) }));
+        return json(await remotes.wait({ ...(remote_id ? { remote_id } : {}), ...(server ? { server } : {}), ...(who ? { owner: who } : {}), ...(timeout_sec !== undefined ? { timeoutSec: timeout_sec } : {}) }));
       }),
   );
 
@@ -222,43 +222,44 @@ export function registerTools(
 export function registerSessionTools(server: McpServer, deps: { remotes: RemoteManager; owner: string }): void {
   const { remotes, owner } = deps;
 
+  const sendHandler = (args: { prompt: string; server?: string; model?: string; worker_model?: string }): Promise<ToolResult> =>
+    guard(async () =>
+      json(await remotes.send({ owner, prompt: args.prompt, ...(args.server ? { server: args.server } : {}), ...(args.model ? { model: args.model } : {}), ...(args.worker_model ? { worker_model: args.worker_model } : {}) })));
+  server.registerTool(
+    "remote_send",
+    {
+      title: "remote-cap へ指示",
+      description:
+        "server の remote-cap に次の指示を送る（cap は server ごとに 1 つ。無ければ作る）。どの session からでも同じ cap に行く。cap が実行中なら server 側で順番に待たされる。完了を待たず {remote_id, state:\"running\", created} を返す。完了は通知（push）か remote_wait / remote_list で確認する。server は protocol bantou で発見した先頭、server 引数で peer id か名前を指定できる。model（cap を最初に作る時だけ有効。既存の cap なら無視して返り値に model_ignored）と worker_model（この指示で cap が起動する worker の既定。server が cap の既定として記憶する）の既定は center の設定 servers[]。worker ごとにモデルを変えたい時は、prompt の中で cap に worker_start の model を指定させる。state は running / done / failed / unknown（server に届かない・status も取れず不明。取れたら戻る）",
+      inputSchema: remoteSendSchema,
+    },
+    sendHandler,
+  );
   server.registerTool(
     "remote_create",
     {
-      title: "remote 作成",
-      description:
-        "server に remote-cap を作らせ、prompt を最初の指示として起動する。完了を待たず {remote_id, state:\"running\"} を返す。完了は remote_list で確認する（state が done / failed になる）。server は protocol bantou で発見した先頭、server 引数で peer id か名前を指定できる",
-      inputSchema: remoteCreateSchema,
+      title: "remote 作成（remote_send の別名）",
+      description: "remote_send の互換の別名（同じ処理）。server の remote-cap に次の指示を送る（cap が無ければ作る）",
+      inputSchema: remoteSendSchema,
     },
-    (args) =>
-      guard(async () => {
-        const r = await remotes.create({ owner, ...args });
-        return json({
-          remote_id: r.remote_id,
-          server: r.server,
-          serverName: r.serverName,
-          state: r.state,
-          ...(r.model ? { model: r.model } : {}),
-          ...(r.worker_model ? { worker_model: r.worker_model } : {}),
-        });
-      }),
+    sendHandler,
   );
   server.registerTool(
     "remote_delete",
     {
       title: "remote 削除",
       description:
-        "remote-cap の実行を止め（server へ stop_cap）、center の記録から外す。止められない時は error（force: true で記録だけ消す）。自分（この session）の remote だけ消せる",
-      inputSchema: { remote_id: agentId, force: z.boolean().optional() },
+        "server の remote-cap の実行を止め（server へ stop_cap）、center の記録から外す。止められない時は error（force: true で記録だけ消す）。cap は共有なので、他の session の指示も止まる。remote_id 省略時は center の cap。複数の server に同じ remote_id がある時は server で指定する",
+      inputSchema: { remote_id: agentId.optional(), server: z.string().min(1).optional(), force: z.boolean().optional() },
     },
-    ({ remote_id, force }) =>
-      guard(async () => json(await remotes.delete({ remote_id, owner, ...(force !== undefined ? { force } : {}) }))),
+    ({ remote_id, server: srv, force }) =>
+      guard(async () => json(await remotes.delete({ ...(remote_id ? { remote_id } : {}), ...(srv ? { server: srv } : {}), ...(force !== undefined ? { force } : {}) }))),
   );
   server.registerTool(
     "remote_list",
     {
       title: "remote 一覧",
-      description: "この session が作った remote（remote_id, server, state, 時刻, 結果、通知を受けたものは activity 付き）の一覧",
+      description: "この session が指示を送った remote-cap（remote_id, server, state, 時刻, 最新の結果, 未完了の指示 pending、通知を受けたものは activity 付き）の一覧",
     },
     () => guard(() => json(remotes.list({ owner }))),
   );
@@ -266,10 +267,10 @@ export function registerSessionTools(server: McpServer, deps: { remotes: RemoteM
     "remote_wait",
     {
       title: "remote 完了待ち",
-      description: "remote が終わる（state が done / failed。配下の worker が running / stalled の間は終わりでない）まで待って、その remote の記録（state, result, error, notifiedAt など）を返す。remote_id 省略時は owner の running 中のどれかが終わるまで。timeout_sec（既定 "+WAIT_DEFAULT_SEC+"、上限 1800）を超えたら state=running のまま返す。完了通知を受けられない session でもこれで待てる",
+      description: "server の cap が終わる（state が done / failed = cap が idle で、配下の worker が running / stalled でない）まで待って、その cap の記録（state, result, error, pending など）を返す。remote_id 省略時は owner の未完了の指示がある cap のどれかが終わるまで。timeout_sec（既定 "+WAIT_DEFAULT_SEC+"、上限 1800）を超えたら state=running のまま返す。完了通知を受けられない session でもこれで待てる",
       inputSchema: remoteWaitSchema,
     },
-    ({ remote_id, timeout_sec }) =>
-      guard(async () => json(await remotes.wait({ owner, ...(remote_id ? { remote_id } : {}), ...(timeout_sec !== undefined ? { timeoutSec: timeout_sec } : {}) }))),
+    ({ remote_id, server: srv, timeout_sec }) =>
+      guard(async () => json(await remotes.wait({ owner, ...(remote_id ? { remote_id } : {}), ...(srv ? { server: srv } : {}), ...(timeout_sec !== undefined ? { timeoutSec: timeout_sec } : {}) }))),
   );
 }
