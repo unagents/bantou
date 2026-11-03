@@ -47,7 +47,7 @@ branch: `feature/session-instructions-per-session`（base: develop）。
 
 - 保存先は center のプロジェクト設定（`session_settings_get` / `session_settings_update` / `session_create` の `settings`）。desktop の `settings.json` には持たない（前の作りは破棄）。
 - Rust（`session.rs`）: `session_get_settings` / `session_update_settings`（center の tool を呼ぶ）、`create_session` が `settings` を受ける。16000 文字・型の検査と、空の `instructions` を `null` にする処理を持つ。未知の項目は素通し。
-- 画面: 左サイドバーの各行の歯車 → `ProjectSettingsDialog`（項目ごとの節。今は追加指示のみ）。追加ダイアログも同じ欄（`ProjectSettingsFields`）。注意文あり。巻物印は据え置き。ヘッダーの「指示」ボタンと、設定ダイアログの center 共通の欄は削除。
+- 画面: 左サイドバーの各行の歯車 → `ProjectSettingsDialog`（項目ごとの節。今は追加指示のみ）。追加ダイアログも同じ欄（`ProjectSettingsFields`）。注意文あり。巻物印は据え置き。設定ダイアログの center 共通の欄は削除。
 - config 由来の project（`session_list` の `source` が `config`）は歯車を無効にする（center が更新を拒否するため）。tooltip「center の config 由来の project は設定を持てない」。`source` が不明（古い center）の時は有効。
 - 将来項目（skills / outputStyle）は `SettingsDraft` と `ProjectSettingsFields` の節を足す形にしただけで、実装していない。
 
@@ -60,7 +60,7 @@ branch: `feature/session-instructions-per-session`（base: develop）。
 
 - `packages/desktop/src-tauri/src/{session,center,lib}.rs`
 - `packages/desktop/src/{api/index.ts,api/sessions.ts,types/index.ts,pages/index.vue}`
-- `packages/desktop/src/components/{ProjectSettingsDialog,ProjectSettingsFields}.vue`（新規）、`AddSessionDialog.vue`、`SessionColumn.vue`、`SettingsDialog.vue`
+- `packages/desktop/src/components/{ProjectSettingsDialog,ProjectSettingsFields}.vue`（新規）、`AddSessionDialog.vue`、`SettingsDialog.vue`
 - `packages/desktop/src/composables/sessionInstructions.ts`（新規）
 - `packages/desktop/e2e/{mock/bantou.ts,session-instructions.spec.ts}`、`packages/desktop/README.md`
 
