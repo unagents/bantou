@@ -14,7 +14,7 @@ bantou の work session ↔ bantou メッセージの共通 TypeScript 型。
 - `guards.ts`: `isEnvelope` / `isTaskMessage` / `isAskMessage` / `parseEnvelope`。
 - `server.ts`: desktop・peer → bantou-server のコマンド `kick_cap` / `resume_worker` / `stop_cap` / `status` / `hello` / `update_server` と reply `cap_result` / `worker_result` / `stop_result` / `status_result` / `hello_result` / `update_result` / `error` の型、ガード（`isServerCommand` / `isServerReply` / `parseServerCommand` / `parseServerReply`）。
 
-- `messenger/`: agent-messenger の protocol 定義（`protocol.json` と `PROTOCOL.md`、name `bantou`）。`server.ts` の型と一致させる（`MESSENGER_PROTOCOL` と test で確認）。server が `setProtocol` で登録し、npm package `bantou` に同梱される（`server/scripts/copy-protocol.mjs`）。
+- `messenger/`: agent-messenger の protocol 定義（`protocol.json` と `PROTOCOL.md`、name `bantou`）。`server.ts` の型と一致させる（`MESSENGER_PROTOCOL` と test で確認）。server が `setProtocol` で登録し、npm package `bantou` に同梱される（`packages/server/scripts/copy-protocol.mjs`）。
 
 ## 未定義
 
@@ -22,9 +22,9 @@ server コマンドの仕様文は `docs/protocol.md` の「bantou-server comman
 
 ## 利用側
 
-- desktop フロント（`desktop/`）
-- server（`server/`）
-- plugin（`plugin/bantou`）
+- desktop フロント（`packages/desktop/`）
+- server（`packages/server/`）
+- plugin（`packages/plugin/bantou`）
 
 ## 開発
 

@@ -10,7 +10,7 @@ claude を headless（`claude -p`）で起動する常駐プロセス。messenge
 - cap に worker の起動・状態・停止の道具を渡し、worker からの報告を受ける口として MCP（HTTP）の `/mcp` を持つ（下記「worker 報告（MCP）」「worker の起動（MCP）」）。
 - cap と worker の stream-json 出力を読み続け、生存と進捗を center へ `activity` 通知で送る（下記「活動情報（activity）」）。
 - bantou-desktop（`../desktop/`）など任意の messenger peer からの指示を受ける。
-- 実行モデルの全体は [`../docs/architecture.md`](../docs/architecture.md)。要約は次の通り。
+- 実行モデルの全体は [`../../docs/architecture.md`](../../docs/architecture.md)。要約は次の通り。
   - `kick_cap` で cap を起動する。初回は `claude -p --session-id <uuid>`、2 回目以降は `--resume <uuid>`。
   - cap ごとに path（`<workspace>/caps/<cap_id>`）を持つ。worker も同様（`workers/<worker_id>`）。
   - 同一 cap（worker）への指示は直列。別の cap（worker）は並行して走る。
@@ -120,7 +120,7 @@ npx bantou --config <path>
 ## protocol 登録
 
 - 接続後に `setProtocol(<protocol dir>)` で bantou protocol（name `bantou`、version は `packages/protocol/messenger/protocol.json` の通り）を登録する。ログ: `protocol 登録: bantou@1.2.0 hash=...`。終了時に `unsetProtocol`（`protocol 解除`）。
-- protocol dir は npm package の `protocol/`（`scripts/copy-protocol.mjs` が `../packages/protocol/messenger/` をコピー。build / dev / e2e / prepack の先頭で実行、`server/protocol` は git 管理外）。`bin/bantou.mjs` が `NUXT_BANTOU_PROTOCOL_DIR`（runtimeConfig `bantou.protocolDir`）に設定する。
+- protocol dir は npm package の `protocol/`（`scripts/copy-protocol.mjs` が `../protocol/messenger/` をコピー。build / dev / e2e / prepack の先頭で実行、`packages/server/protocol` は git 管理外）。`bin/bantou.mjs` が `NUXT_BANTOU_PROTOCOL_DIR`（runtimeConfig `bantou.protocolDir`）に設定する。
 - 登録に失敗しても致命にしない。ログに出して従来の名前待受（peer `bantou-server`）で続ける。
 - 受信 message の `meta.protocol` が `bantou` なら処理、meta 無しは旧形式として処理、他 protocol は無視（`無視(他 protocol)`）。返信は送信元の peer id へ `meta: {protocol: "bantou", version}` 付きで返す（report 起因の `cap_result` も同じ）。
 - center は `list_peers`（`protocol: "bantou"`）で server を発見できる。
@@ -290,12 +290,13 @@ npx bantou --config <path>
 
 ## 開発
 
-依存は `@unagents/messenger-broker` / `@unagents/messenger-client`（0.10.0、npmjs）と、`file:../packages/protocol` 経由の `@agent-hand/bantou-protocol`。
-`../packages/protocol` を先にビルドする。npm publish はプロトコル package の公開まで保留している。
+依存は `@unagents/messenger-broker` / `@unagents/messenger-client`（0.10.0、npmjs）と、monorepo の workspace `packages/protocol` の `@agent-hand/bantou-protocol`（devDependencies `^0.2.0`、bun の workspace がリンクする）。
+repo root で `bun install` し、`packages/protocol` を先にビルドする（`npm install` は使わない。root の `node_modules` は bun のもの）。npm publish はプロトコル package の公開まで保留している。
 
 ```
-(cd ../packages/protocol && npm run build)
-npm install
+bun install                                  # repo root
+(cd packages/protocol && npm run build)
+cd packages/server
 npm run typecheck
 npm run build
 npm test
@@ -325,6 +326,6 @@ npm run e2e
 
 ## 関連資料
 
-- [`../docs/architecture.md`](../docs/architecture.md)
-- [`../docs/protocol.md`](../docs/protocol.md)
+- [`../../docs/architecture.md`](../../docs/architecture.md)
+- [`../../docs/protocol.md`](../../docs/protocol.md)
 - [`../desktop/README.md`](../desktop/README.md)

@@ -8,7 +8,7 @@ import { startBroker } from "@unagents/messenger-broker";
 import { createMessengerClient } from "@unagents/messenger-client";
 import { MESSENGER_PROTOCOL } from "@agent-hand/bantou-protocol";
 
-const protocolDir = fileURLToPath(new URL("../../../../../packages/protocol/messenger", import.meta.url));
+const protocolDir = fileURLToPath(new URL("../../../../../protocol/messenger", import.meta.url));
 
 test("setProtocol で登録でき、listPeers(protocol) で発見され、meta 付きで届く", async () => {
   const dir = await mkdtemp(join(tmpdir(), "bantou-protocol-test-"));

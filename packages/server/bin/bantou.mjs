@@ -95,7 +95,7 @@ if (args.supervise) {
   process.env.NUXT_BANTOU_CONFIG_PATH = configPath;
   // 常駐本体へ自分の npm 版を渡す（hello_result の server_version）
   process.env.NUXT_BANTOU_SERVER_VERSION = packageVersion();
-  // npm package に同梱した protocol 定義（server/protocol/、scripts/copy-protocol.mjs が作る）
+  // npm package に同梱した protocol 定義（packages/server/protocol/、scripts/copy-protocol.mjs が作る）
   process.env.NUXT_BANTOU_PROTOCOL_DIR = join(binDir, "..", "protocol");
   const entry = join(binDir, "..", ".output", "server", "index.mjs");
   await import(entry);

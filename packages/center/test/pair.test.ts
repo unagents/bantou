@@ -26,7 +26,7 @@ test("pair: どちらも無い・不正なら server は undefined（版合わ�
   assert.equal(resolvePair({ envValue: undefined, readPackage: () => "x" }).server, undefined);
 });
 
-test("pair: 既定は作業ツリーの server/package.json の版（src から ../../../server/package.json）", () => {
-  const want = (JSON.parse(readFileSync(new URL("../../../server/package.json", import.meta.url), "utf8")) as { version: string }).version;
+test("pair: 既定は作業ツリーの packages/server/package.json の版（src から ../../server/package.json）", () => {
+  const want = (JSON.parse(readFileSync(new URL("../../server/package.json", import.meta.url), "utf8")) as { version: string }).version;
   assert.equal(resolvePair({ envValue: undefined }).server, want);
 });
