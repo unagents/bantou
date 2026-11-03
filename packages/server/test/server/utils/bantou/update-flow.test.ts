@@ -14,7 +14,7 @@ import {
 } from "@agent-hand/bantou-protocol";
 import { startDaemon } from "../../../../server/utils/bantou/daemon";
 
-const protocolDir = fileURLToPath(new URL("../../../../../packages/protocol/messenger", import.meta.url));
+const protocolDir = fileURLToPath(new URL("../../../../../protocol/messenger", import.meta.url));
 const fakeClaude = fileURLToPath(new URL("../../../fixtures/fake-claude.sh", import.meta.url));
 const msgClient = fileURLToPath(new URL("../../../fixtures/msg-client.mjs", import.meta.url));
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));

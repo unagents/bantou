@@ -25,7 +25,7 @@ SHA256="${2:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$SCRIPT_DIR/.."
 
-# cask の正本は desktop/Casks/bantou.rb。tap は別リポ unagents/homebrew-tap
+# cask の正本は packages/desktop/Casks/bantou.rb。tap は別リポ unagents/homebrew-tap
 # （brew tap unagents/tap）で、publish 時に正本の内容を GitHub API で更新する。
 SOURCE="$REPO_ROOT/Casks/bantou.rb"
 

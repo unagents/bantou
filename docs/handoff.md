@@ -30,7 +30,7 @@ Resume notes for the session developing bantou (compact / session switch).
 ## Open
 
 - Registered sessions do not all follow the protocol: crawling-cap refuses rules delivered by another session (Claude Code safety). My decision (not yet built): session-side join — user types `/bantou-join` in the work session; the session sets its name and sends a join to bantou; bantou registers it and replies with the protocol.
-- `bantou-protocol` skill exists in `plugin/bantou/` but is NOT installed. The user said skills were not permitted; installing is a Claude Code config change and needs the user's direct approval.
+- `bantou-protocol` skill exists in `packages/plugin/bantou/` but is NOT installed. The user said skills were not permitted; installing is a Claude Code config change and needs the user's direct approval.
 - Rust commands `create_task` / `update_task_status` are no longer used by the UI (still registered).
 - Icons are fetched at runtime from `api.iconify.design`.
 

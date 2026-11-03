@@ -68,7 +68,7 @@ test("meta の分類: 無し=旧形式、bantou=処理、他 protocol=無視", (
 });
 
 test("返信 meta は protocol.json の name / version と一致する", async () => {
-  const dir = new URL("../../../../../packages/protocol/messenger/", import.meta.url);
+  const dir = new URL("../../../../../protocol/messenger/", import.meta.url);
   const m = JSON.parse(await readFile(new URL("protocol.json", dir), "utf8")) as { name: string; version: string };
   assert.deepEqual(REPLY_META, { protocol: m.name, version: m.version });
 });

@@ -128,7 +128,7 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 - `worker_resume` / `server_status` は、返信が `error` か `ok: false` の時に `isError: true` になる。本文は返信そのまま。
 - `worker_resume` は返信が来るまで待つ（claude の実行が終わるまで数分）。`timeoutMs` で打ち切り、`タイムアウト` の `error` 返信になる。
 - 同じ `cap_id`（`worker_id`）への指示は center 側でも直列にする。`error` 返信は `cap_id` / `worker_id` があればその ID で照合し、無ければ同じ `command` の最古の待ちに割り当てる。
-- 返信の形は `packages/protocol` の `server.ts` と `server/README.md` を参照。
+- 返信の形は `packages/protocol` の `server.ts` と `packages/server/README.md` を参照。
 
 `RcStatus`:
 
@@ -177,7 +177,7 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 
 ## server の版合わせ
 
-- 組の版: `pair.server` = 組になる server の npm `bantou` の版、`pair.protocol` = このバイナリに bundle した protocol `bantou` の版。server の版は desktop のビルド（`desktop/scripts/build-sidecar.ts`）が `bun build --compile --env=BANTOU_PAIR_*` で env `BANTOU_PAIR_SERVER_VERSION` を埋め込む（値はビルド時に固定され、実行時の env では変わらない）。埋め込みが無い時は作業ツリーの `server/package.json`（`npm run dev` / tsx / dist 用）、それも無ければ不明（版合わせは無効で、protocol の版の門だけ効く）。単体バイナリ（`build:bin`）は埋め込まないので、`BANTOU_PAIR_SERVER_VERSION` を付けてビルドしない限り不明になる。
+- 組の版: `pair.server` = 組になる server の npm `bantou` の版、`pair.protocol` = このバイナリに bundle した protocol `bantou` の版。server の版は desktop のビルド（`packages/desktop/scripts/build-sidecar.ts`）が `bun build --compile --env=BANTOU_PAIR_*` で env `BANTOU_PAIR_SERVER_VERSION` を埋め込む（値はビルド時に固定され、実行時の env では変わらない）。埋め込みが無い時は作業ツリーの `server/package.json`（`npm run dev` / tsx / dist 用）、それも無ければ不明（版合わせは無効で、protocol の版の門だけ効く）。単体バイナリ（`build:bin`）は埋め込まないので、`BANTOU_PAIR_SERVER_VERSION` を付けてビルドしない限り不明になる。
 - 確認: 起動後（`connectAll` の後）と 30 秒ごと（更新中の server がいる間は 5 秒ごと）に、発見した server へ `hello` を送る。server の版が組と違えば `update_server {version: pair.server}` を送る（新旧は比べない）。server は peer の `summary`（`<host> <workspace>`）で同一視する（peer id は再登録で変わる）。
 - 状態: `ok` / `updating`（`update.running` = 待っている cap・worker の件数）/ `unsupported`（protocol 1.3.0 未満。自動更新できず、手動で起動し直す）/ `mismatch`（server の版は組と同じなのに protocol の版が違う）/ `failed`（更新指示が断られた。同じ版は center が再起動するまで再指示しない）/ `lost`（更新中のまま 15 分戻らない）/ `unknown`（hello に答えない）。
 - 門: protocol の版が `pair.protocol` と違う server には、`hello` / `update_server` 以外（`kick_cap` / `stop_cap` / `status`）を送らず `error`（`code:"version_mismatch"`、`retryable:true`）を返す。版が分からない（名前宛てへのフォールバック）時は従来どおり送る。更新中の server への `kick_cap` は送らず `code:"updating"`（retryable）で断る。`remote_create` は断られたら記録を作らず isError で返すので、master-cap が後で再送できる。center は自動では再送しない。
@@ -243,7 +243,7 @@ cd packages/center
 npm run e2e
 ```
 
-- stub の remote-control（確認プロンプトを出し、stdin の `y` を受けてから `Connected` を出す node スクリプト）と、本物の bantou-server（`server/` を `tsx` で起動）を使う。
+- stub の remote-control（確認プロンプトを出し、stdin の `y` を受けてから `Connected` を出す node スクリプト）と、本物の bantou-server（`packages/server/` を `tsx` で起動）を使う。
 - `cap_kick` で claude を 1 回起動するため、claude のログインが要る。数分かかる。
 - 一時ディレクトリは `E2E_ROOT`（既定は OS の tmp）の下に作り、終了時に消す。
 - 確認内容: tool 一覧、`rc_start` → `connected`、stub の異常終了 → `--continue` 付き再起動、`rc_stop`、`server_list`、`cap_kick`、`server_status`、stdin EOF での自己終了。

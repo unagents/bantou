@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const desktopDir = join(scriptDir, "..");
-const packagesDir = join(desktopDir, "..", "packages");
+const packagesDir = join(desktopDir, "..");
 
 const BUN_TARGETS: Record<string, string> = {
   "aarch64-apple-darwin": "bun-darwin-arm64",
@@ -24,9 +24,9 @@ const BUN_TARGETS: Record<string, string> = {
 // (a compiled binary cannot read package.json). The protocol `bantou` version needs no embedding: the
 // center bundles @agent-hand/bantou-protocol.
 function pairServerVersion(): string {
-  const pkg = JSON.parse(readFileSync(join(packagesDir, "..", "server", "package.json"), "utf8")) as { version?: unknown };
+  const pkg = JSON.parse(readFileSync(join(packagesDir, "server", "package.json"), "utf8")) as { version?: unknown };
   if (typeof pkg.version !== "string" || !/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(pkg.version)) {
-    throw new Error(`server/package.json has no valid version: ${String(pkg.version)}`);
+    throw new Error(`packages/server/package.json has no valid version: ${String(pkg.version)}`);
   }
   return pkg.version;
 }

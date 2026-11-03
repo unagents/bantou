@@ -14,11 +14,11 @@ Tailwind CSS 4). The Rust app shell is derived from careery / [Cork](https://git
   file name = title, frontmatter `status` / `order` / `tags` / `date` + `id`.
 - Session = tag value. In-progress tasks are listed right under the session,
   queued (first status) below them, done (last status) folded.
-- Message format and storage: [`../docs/protocol.md`](../docs/protocol.md).
+- Message format and storage: [`../../docs/protocol.md`](../../docs/protocol.md).
 
 ## インストール（macOS）
 
-Homebrew cask で配る。正本は `desktop/Casks/bantou.rb`。tap の実体は別リポ `unagents/homebrew-tap`。
+Homebrew cask で配る。正本は `packages/desktop/Casks/bantou.rb`。tap の実体は別リポ `unagents/homebrew-tap`。
 
 ```sh
 brew tap unagents/tap

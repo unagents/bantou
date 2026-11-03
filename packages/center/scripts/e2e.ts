@@ -17,7 +17,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 const centerDir = fileURLToPath(new URL("..", import.meta.url));
-const serverDir = "/home/vagrant/work/bantou/develop/server";
+const serverDir = "/home/vagrant/work/bantou/develop/packages/server";
 const RUN_TIMEOUT = 300_000;
 const TOOLS = ["cap_kick", "rc_list", "rc_start", "rc_status", "rc_stop", "server_list", "server_status", "worker_resume"];
 
