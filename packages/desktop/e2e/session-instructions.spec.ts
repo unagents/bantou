@@ -21,13 +21,55 @@ const MULTI = "常に日本語で答える\n2 行目: \"quote\" $HOME\n\n4 行�
 const NOTE = "保存後に起動する session から効く。動いている session には効かない";
 
 test.describe("session instructions", () => {
-  test("the settings dialog has no center-wide instructions field", async ({ page }) => {
+  test("the settings dialog has the center-wide instructions: read from the center, saved to it with its own button, shown again", async ({ page }) => {
     await page.goto("/");
+    await mock(page, (m) => {
+      (m as unknown as { centerCommonSettings: Record<string, unknown> }).centerCommonSettings = { instructions: "共通の最初" };
+    });
     await page.getByTestId("open-settings").click();
-    await page.getByTestId("center-enabled").click();
-    await expect(page.getByTestId("center-claude-path")).toBeVisible();
-    await expect(page.getByTestId("center-session-instructions")).toHaveCount(0);
-    await expect(page.getByText("master-cap への追加指示（system prompt に追記）")).toHaveCount(0);
+    const field = page.getByTestId("center-common-instructions");
+    await expect(field).toHaveValue("共通の最初");
+    await expect(page.getByTestId("center-common-note")).toHaveText(NOTE);
+    const save = page.getByTestId("center-common-save");
+    await expect(save).toBeDisabled();
+    await field.fill(MULTI);
+    await expect(save).toBeEnabled();
+    await save.click();
+    await expect(page.getByText("共通の追加指示を保存した", { exact: true })).toBeVisible();
+    await expect(save).toBeDisabled();
+    // it went to the center's tool, not to this PC's settings.json
+    const sent = await mock(page, (m) => m.calls.filter((c) => c.cmd === "center_call" && (c.args as { name: string }).name === "center_settings_update").map((c) => c.args));
+    expect(sent).toEqual([{ name: "center_settings_update", arguments: { settings: { instructions: MULTI } } }]);
+    expect(await mock(page, (m) => (m as unknown as { centerCommonSettings: Record<string, unknown> }).centerCommonSettings)).toEqual({ instructions: MULTI });
+    // the main save button is untouched by this (the center config did not change)
+    await expect(page.getByTestId("settings-save")).toBeDisabled();
+    await page.keyboard.press("Escape");
+    await page.getByTestId("open-settings").click();
+    await expect(page.getByTestId("center-common-instructions")).toHaveValue(MULTI);
+    // blank removes it (null to the center)
+    await page.getByTestId("center-common-instructions").fill("");
+    await page.getByTestId("center-common-save").click();
+    await expect(page.getByText("共通の追加指示を保存した", { exact: true })).toBeVisible();
+    expect(await mock(page, (m) => (m as unknown as { centerCommonSettings: Record<string, unknown> }).centerCommonSettings)).toEqual({});
+  });
+
+  test("the center-wide instructions field reports when the center cannot be asked, and rejects an over-long text", async ({ page }) => {
+    await page.goto("/");
+    await mock(page, (m) => {
+      (m as unknown as { centerCommonSettingsError: string | null }).centerCommonSettingsError = "center に接続できない: mock";
+    });
+    await page.getByTestId("open-settings").click();
+    await expect(page.getByTestId("center-common-error")).toContainText("center に接続できない: mock");
+    await expect(page.getByTestId("center-common-instructions")).toBeDisabled();
+    await page.keyboard.press("Escape");
+    await mock(page, (m) => {
+      (m as unknown as { centerCommonSettingsError: string | null }).centerCommonSettingsError = null;
+    });
+    await page.getByTestId("open-settings").click();
+    await expect(page.getByTestId("center-common-instructions")).toBeEnabled();
+    await page.getByTestId("center-common-instructions").fill("x".repeat(16_001));
+    await expect(page.getByTestId("center-common-problem")).toHaveText("共通の追加指示は 16000 文字以内");
+    await expect(page.getByTestId("center-common-save")).toBeDisabled();
   });
 
   test.describe("sidebar gear", () => {

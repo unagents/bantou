@@ -82,6 +82,10 @@ export class MockBantou {
   pickedDirectory: string | null = null;
   /** Project settings the center keeps per session name (`session_settings_get` / `_update`, merged; `null` removes an item). */
   centerSettings: Record<string, Record<string, unknown>> = {};
+  /** The center-wide settings (`center_settings_get` / `_update`, merged; `null` removes an item). */
+  centerCommonSettings: Record<string, unknown> = {};
+  /** When set, `center_settings_get` / `center_settings_update` fail with this message (center not reachable). */
+  centerCommonSettingsError: string | null = null;
   /** When set, `session_settings_update` fails with this message (center isError / not reachable). */
   centerSettingsUpdateError: string | null = null;
   /** When set, center_set_settings fails with this message (a failed save). */
@@ -494,6 +498,19 @@ export class MockBantou {
             return text({ ok: true, accepted: true });
           case "session_list":
             return text(this.fetchCenterList());
+          case "center_settings_get":
+            if (this.centerCommonSettingsError) throw new Error(this.centerCommonSettingsError);
+            return text({ settings: structuredClone(this.centerCommonSettings) });
+          case "center_settings_update": {
+            if (this.centerCommonSettingsError) throw new Error(this.centerCommonSettingsError);
+            const next = { ...this.centerCommonSettings };
+            for (const [k, v] of Object.entries((args.arguments as { settings: Record<string, unknown> }).settings)) {
+              if (v === null || v === "") delete next[k];
+              else next[k] = v;
+            }
+            this.centerCommonSettings = next;
+            return text({ settings: structuredClone(next) });
+          }
           case "session_create":
             return text(this.createCenterSession((args.arguments as { name: string }).name));
           case "server_list":

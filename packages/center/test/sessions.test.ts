@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 import { parseConfig, type Config, type ProjectConfig } from "../src/config.js";
 import type { RcStatus, RemoteControlSupervisor } from "../src/remote-control.js";
 import { createSessionManager, type SavedSession } from "../src/sessions.js";
-import { createJsonListStore } from "../src/store.js";
+import { createJsonListStore, createJsonObjectStore } from "../src/store.js";
+import type { ProjectSettings } from "../src/project-settings.js";
 import { createEventHub, type SessionsEvent } from "../src/events.js";
 
 /** supervisor の偽物。add / remove / start / list / status だけ持つ。 */
@@ -64,8 +65,9 @@ const setup = () => {
   const events = createEventHub();
   const seen: SessionsEvent[] = [];
   events.subscribe((e) => seen.push(e));
-  const mgr = createSessionManager({ config, supervisor: fs.sup, store, log: () => {}, waitMs: 0, events });
-  return { ...fs, store, mgr, seen };
+  const centerStore = createJsonObjectStore<ProjectSettings>(join(dir, "center-settings.json"), () => {});
+  const mgr = createSessionManager({ config, supervisor: fs.sup, store, centerStore, log: () => {}, waitMs: 0, events });
+  return { ...fs, store, centerStore, mgr, seen };
 };
 
 test("create: path 省略は <workspace>/<name> を作り、起動して保存する。config の projects には書かない", async () => {
@@ -281,4 +283,58 @@ test("updateSettings: config 由来・未定義は拒否。保存に失敗した
   const { mgr } = setup();
   await assert.rejects(mgr.updateSettings("cfg", { instructions: "x" }), /config 由来/);
   await assert.rejects(mgr.updateSettings("nope", { instructions: "x" }), /未定義の session/);
+});
+
+test("center 共通の instructions: session の追加指示の前に空行を挟んで付く。共通だけ・session だけ・両方無しも正しい", async () => {
+  const { mgr, opts } = setup();
+  await mgr.restore();
+  assert.deepEqual(mgr.getCenterSettings(), { settings: {} });
+  assert.deepEqual(await mgr.updateCenterSettings({ instructions: "共通の指示" }), { settings: { instructions: "共通の指示" } });
+  await mgr.create({ name: "a", settings: { instructions: "a の指示" } });
+  await mgr.create({ name: "b" });
+  assert.equal((opts.add.a as { instructions?: string }).instructions, "共通の指示\n\na の指示");
+  assert.equal((opts.add.b as { instructions?: string }).instructions, "共通の指示");
+  // session の更新は共通を保ったまま合成する
+  await mgr.updateSettings("a", { instructions: "a の新指示" });
+  assert.equal(opts.setInstr.a, "共通の指示\n\na の新指示");
+  await mgr.updateSettings("a", { instructions: null });
+  assert.equal(opts.setInstr.a, "共通の指示");
+  // 共通の更新は全 session に反映する（起動し直さない）
+  await mgr.updateSettings("a", { instructions: "a の指示" });
+  await mgr.updateCenterSettings({ instructions: "新しい共通" });
+  assert.deepEqual({ a: opts.setInstr.a, b: opts.setInstr.b }, { a: "新しい共通\n\na の指示", b: "新しい共通" });
+  await mgr.updateCenterSettings({ instructions: "" });
+  assert.deepEqual(mgr.getCenterSettings(), { settings: {} });
+  assert.deepEqual({ a: opts.setInstr.a, b: opts.setInstr.b }, { a: "a の指示", b: "" });
+  // sessions.json には共通を混ぜない
+  const saved = JSON.parse(await readFile(join(dir, "sessions.json"), "utf8")) as SavedSession[];
+  assert.deepEqual(saved.find((x) => x.name === "a")?.settings, { instructions: "a の指示" });
+});
+
+test("center 共通の設定は center-settings.json に保存され、restore で読んで add に渡す。未知の項目も保持", async () => {
+  const first = setup();
+  await first.mgr.restore();
+  await first.mgr.updateCenterSettings({ instructions: "共通", future: { x: 1 } });
+  assert.deepEqual(JSON.parse(await readFile(join(dir, "center-settings.json"), "utf8")), { instructions: "共通", future: { x: 1 } });
+  await first.mgr.create({ name: "r1", settings: { instructions: "r1 の指示" } });
+  const second = setup();
+  await second.mgr.restore();
+  assert.deepEqual(second.mgr.getCenterSettings(), { settings: { instructions: "共通", future: { x: 1 } } });
+  assert.equal((second.opts.add.r1 as { instructions?: string }).instructions, "共通\n\nr1 の指示");
+});
+
+test("center 共通の設定: 保存先が無い時は保存せず、メモリ上だけで効く。壊れたファイルは無いとして読む", async () => {
+  const fs = fakeSupervisor(config.projects);
+  const store = createJsonListStore<SavedSession>(join(dir, "sessions.json"), () => {});
+  const mgr = createSessionManager({ config, supervisor: fs.sup, store, log: () => {}, waitMs: 0 });
+  await mgr.restore();
+  await mgr.updateCenterSettings({ instructions: "共通" });
+  await mgr.create({ name: "a" });
+  assert.equal((fs.opts.add.a as { instructions?: string }).instructions, "共通");
+  await assert.rejects(stat(join(dir, "center-settings.json")));
+  const broken = createJsonObjectStore<ProjectSettings>(join(dir, "broken.json"), () => {});
+  await writeFile(join(dir, "broken.json"), "[1,2]");
+  assert.equal(await broken.load(), undefined);
+  await writeFile(join(dir, "broken.json"), "{not json");
+  assert.equal(await broken.load(), undefined);
 });

@@ -112,6 +112,25 @@ export function registerTools(
     ({ name, settings }) => guard(async () => json(await sessions.updateSettings(name, settings))),
   );
   server.registerTool(
+    "center_settings_get",
+    {
+      title: "center 共通の設定を取得",
+      description:
+        "center 共通の設定 { settings } を返す。settings は { instructions?: string（全 session の --append-system-prompt の先頭に付く共通の追加指示。session の追加指示は空行を挟んでその後ろ）, …将来の項目 }。未設定は {}",
+    },
+    () => guard(async () => json(sessions.getCenterSettings())),
+  );
+  server.registerTool(
+    "center_settings_update",
+    {
+      title: "center 共通の設定を更新",
+      description:
+        "center 共通の設定を項目ごとにマージ更新し、更新後の { settings } を返す。settings に書いた項目だけ変わる。null はその項目を削除。instructions は 16000 文字以内で、空文字は削除と同じ。全 session の次の起動（再起動・--continue 含む）から効く。動いている session には効かない",
+      inputSchema: { settings: projectSettingsPatchSchema },
+    },
+    ({ settings }) => guard(async () => json(await sessions.updateCenterSettings(settings))),
+  );
+  server.registerTool(
     "session_list",
     {
       title: "session 一覧",

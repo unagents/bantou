@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import {
+  centerCommonSettingsGet,
+  centerCommonSettingsUpdate,
   centerConnectSnippets,
   centerIpStatus,
   centerLocalIps,
@@ -8,7 +10,9 @@ import {
   centerRegenerateToken,
   centerSetSettings,
   centerStatus,
+  pickDirectory,
 } from "~/api";
+import { INSTRUCTIONS_MAX, INSTRUCTIONS_NOTE } from "~/composables/sessionInstructions";
 import type { CenterConnectSnippets, CenterIpStatus, CenterParsedConnect, CenterSettings, CenterStatus } from "~/types";
 
 const open = defineModel<boolean>("open", { required: true });
@@ -46,7 +50,53 @@ async function load() {
     error.value = String(e);
   }
   ipChoice.value = null;
-  await Promise.all([refreshStatus(), loadLocalIps(), loadIpStatus()]);
+  await Promise.all([refreshStatus(), loadLocalIps(), loadIpStatus(), loadCommon()]);
+}
+
+/** Native folder dialog for the sidecar's workspace (the center runs on this PC, so its folders are this PC's). */
+async function pickWorkspace() {
+  if (!settings.value) return;
+  try {
+    const p = await pickDirectory();
+    if (p) settings.value.workspace = p;
+  } catch (e) {
+    error.value = String(e);
+  }
+}
+
+// Center-wide instructions: kept by the connected center (own sidecar or the pasted remote), not in this
+// PC's settings.json, so other desktops see the same text. Read and saved through the center's tools.
+const common = ref("");
+const commonBaseline = ref<string | null>(null);
+const commonError = ref<string | null>(null);
+const commonSaving = ref(false);
+const commonDirty = computed(() => commonBaseline.value !== null && common.value !== commonBaseline.value);
+const commonProblem = computed(() => ([...common.value].length > INSTRUCTIONS_MAX ? `共通の追加指示は ${INSTRUCTIONS_MAX} 文字以内` : null));
+async function loadCommon() {
+  commonError.value = null;
+  commonBaseline.value = null;
+  try {
+    const r = await centerCommonSettingsGet();
+    common.value = r.settings.instructions ?? "";
+    commonBaseline.value = common.value;
+  } catch (e) {
+    commonError.value = String(e);
+  }
+}
+async function saveCommon() {
+  if (!commonDirty.value || commonProblem.value) return;
+  commonSaving.value = true;
+  commonError.value = null;
+  try {
+    const r = await centerCommonSettingsUpdate({ instructions: common.value.trim() ? common.value : null });
+    common.value = r.settings.instructions ?? "";
+    commonBaseline.value = common.value;
+    toast.add({ title: "共通の追加指示を保存した", color: "success" });
+  } catch (e) {
+    commonError.value = String(e);
+  } finally {
+    commonSaving.value = false;
+  }
 }
 
 const POLL_MS = 1000;
@@ -368,13 +418,16 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
           </UFormField>
         </div>
 
-        <UFormField label="workspace" description="center が扱う作業ディレクトリ（1 つ）。無ければ作る。~ 始まりも可">
-          <UInput
-            v-model="settings.workspace"
-            placeholder="~/.bantou"
-            class="w-full"
-            data-testid="center-workspace"
-          />
+        <UFormField label="workspace" description="center が扱う作業ディレクトリ（1 つ）。session を作る時の既定の親。無ければ作る。~ 始まりも可">
+          <div class="flex gap-2">
+            <UInput
+              v-model="settings.workspace"
+              placeholder="~/.bantou"
+              class="w-full"
+              data-testid="center-workspace"
+            />
+            <UButton label="選択…" color="neutral" variant="outline" data-testid="center-workspace-pick" @click="pickWorkspace" />
+          </div>
         </UFormField>
 
         <UFormField label="claudePath" description="空なら login shell から自動解決">
@@ -424,6 +477,36 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
             />
           </div>
         </div>
+
+        <section class="border-cork-border flex flex-col gap-1 border-t pt-3" data-testid="center-common-section">
+          <h3 class="text-sm font-semibold">共通の追加指示</h3>
+          <p class="text-cork-muted text-xs">
+            つないでいる center が起動する全 session の system prompt に追記する文（--append-system-prompt）。各 session の追加指示はこの後ろに付く。center に保存する
+          </p>
+          <UTextarea
+            v-model="common"
+            :rows="4"
+            autoresize
+            :maxrows="14"
+            class="w-full"
+            :disabled="commonBaseline === null"
+            data-testid="center-common-instructions"
+          />
+          <p class="text-cork-muted text-xs" data-testid="center-common-note">{{ INSTRUCTIONS_NOTE }}</p>
+          <p v-if="commonProblem" class="text-cork-danger-text text-xs" data-testid="center-common-problem">{{ commonProblem }}</p>
+          <p v-if="commonError" class="text-cork-danger-text text-xs whitespace-pre-wrap" data-testid="center-common-error">
+            center から読めない・保存できない: {{ commonError }}
+          </p>
+          <UButton
+            class="self-end"
+            size="xs"
+            label="共通の追加指示を保存"
+            :loading="commonSaving"
+            :disabled="!commonDirty || !!commonProblem"
+            data-testid="center-common-save"
+            @click="saveCommon"
+          />
+        </section>
 
         <div class="border-cork-border flex flex-col gap-2 border-t pt-3">
           <div class="flex items-center gap-2">

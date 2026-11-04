@@ -43,3 +43,11 @@ export function readSettings(raw: unknown): ProjectSettings {
   if (typeof out.instructions !== "string" || out.instructions === "") delete out.instructions;
   return out;
 }
+
+/**
+ * center 共通の追加指示と session の追加指示を 1 つにする（`--append-system-prompt` の値）。
+ * 共通が先、空行 1 つを挟んで session のもの。どちらも無ければ空文字（付けない）。
+ */
+export function composeInstructions(common: ProjectSettings | undefined, own: ProjectSettings | undefined): string {
+  return [readSettings(common).instructions, readSettings(own).instructions].filter((x): x is string => typeof x === "string").join("\n\n");
+}
