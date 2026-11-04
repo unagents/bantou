@@ -99,11 +99,13 @@ export interface RemoteControlSupervisor {
    * 実行中に project を足す（起動はしない）。同名は拒否。remove で外せるのはこの add で足したものだけ。
    * wrapper: true なら pty wrapper 経由の対話型（`claude --remote-control`）で起動する。省略は従来の `claude remote-control`。
    */
-  add(project: ProjectConfig, opts?: { wrapper?: boolean; instructions?: string }): void;
+  add(project: ProjectConfig, opts?: { wrapper?: boolean; instructions?: string; addDirs?: string[] }): void;
   /** add で足した project を停止して外す。config 由来の project は外せない。 */
   remove(name: string): Promise<void>;
   /** 追加指示（`--append-system-prompt` の値）を差し替える。次の起動から効く（動いている session は起動し直さない）。空で無し。 */
   setInstructions(name: string, instructions: string): void;
+  /** 参照フォルダ（`--add-dir` の値）を差し替える。次の起動から効く。空配列で無し。 */
+  setAddDirs(name: string, addDirs: string[]): void;
   stop(project: string): Promise<RcStatus>;
   status(project: string): RcStatus;
   list(): RcStatus[];
@@ -188,6 +190,8 @@ interface Entry {
   wrapper: boolean;
   /** `--append-system-prompt` に渡す追加指示。空なら付けない。再起動・--continue でも同じ値を使う。 */
   instructions: string;
+  /** `--add-dir` に 1 つずつ渡す参照フォルダ。空なら付けない。再起動・--continue でも同じ値を使う。 */
+  addDirs: string[];
 }
 
 /** wrapper 経由の起動に必要なもの。 */
@@ -249,7 +253,7 @@ export function createRemoteControlSupervisor(opts: {
   const entries = new Map<string, Entry>();
   /** add() で足した project の名前（remove できるのはこれだけ）。 */
   const dynamic = new Set<string>();
-  const newEntry = (p: ProjectConfig, wrapper = false, instructions = ""): Entry => ({
+  const newEntry = (p: ProjectConfig, wrapper = false, instructions = "", addDirs: string[] = []): Entry => ({
       project: p,
       status: {
         project: p.name,
@@ -274,6 +278,7 @@ export function createRemoteControlSupervisor(opts: {
       logStream: null,
       wrapper,
       instructions,
+      addDirs,
   });
   for (const p of config.projects) entries.set(p.name, newEntry(p));
 
@@ -327,6 +332,7 @@ export function createRemoteControlSupervisor(opts: {
         resume: useContinue,
         ...(rc.model ? { model: rc.model } : {}),
         ...(e.instructions ? { appendSystemPrompt: e.instructions } : {}),
+        ...(e.addDirs.length ? { addDirs: e.addDirs } : {}),
         ...(wd.core.size(name) ?? {}),
       });
       command = wd.path ?? resolveWrapperPath();
@@ -647,16 +653,20 @@ export function createRemoteControlSupervisor(opts: {
     return snapshot(e);
   };
 
-  const add = (project: ProjectConfig, addOpts: { wrapper?: boolean; instructions?: string } = {}): void => {
+  const add = (project: ProjectConfig, addOpts: { wrapper?: boolean; instructions?: string; addDirs?: string[] } = {}): void => {
     if (entries.has(project.name)) throw new Error(`project が既に存在: ${project.name}`);
     if (addOpts.wrapper && !opts.wrapper) throw new Error("wrapper の設定が無いので wrapper 起動の project は足せない");
-    entries.set(project.name, newEntry(project, addOpts.wrapper === true, addOpts.instructions));
+    entries.set(project.name, newEntry(project, addOpts.wrapper === true, addOpts.instructions, addOpts.addDirs));
     if (addOpts.wrapper) opts.wrapper?.core.register(project.name);
     dynamic.add(project.name);
   };
 
   const setInstructions = (name: string, instructions: string): void => {
     get(name).instructions = instructions;
+  };
+
+  const setAddDirs = (name: string, addDirs: string[]): void => {
+    get(name).addDirs = [...addDirs];
   };
 
   const remove = async (name: string): Promise<void> => {
@@ -676,6 +686,7 @@ export function createRemoteControlSupervisor(opts: {
     add,
     remove,
     setInstructions,
+    setAddDirs,
     stop,
     status: (name) => snapshot(get(name)),
     list: () => [...entries.values()].map(snapshot),

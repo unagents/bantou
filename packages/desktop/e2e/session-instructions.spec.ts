@@ -29,17 +29,17 @@ test.describe("session instructions", () => {
     await page.getByTestId("open-settings").click();
     const field = page.getByTestId("center-common-instructions");
     await expect(field).toHaveValue("共通の最初");
-    await expect(page.getByTestId("center-common-note")).toHaveText(NOTE);
+    await expect(page.getByTestId("center-common-instructions-note")).toHaveText(NOTE);
     const save = page.getByTestId("center-common-save");
     await expect(save).toBeDisabled();
     await field.fill(MULTI);
     await expect(save).toBeEnabled();
     await save.click();
-    await expect(page.getByText("共通の追加指示を保存した", { exact: true })).toBeVisible();
+    await expect(page.getByText("共通の設定を保存した", { exact: true })).toBeVisible();
     await expect(save).toBeDisabled();
     // it went to the center's tool, not to this PC's settings.json
     const sent = await mock(page, (m) => m.calls.filter((c) => c.cmd === "center_call" && (c.args as { name: string }).name === "center_settings_update").map((c) => c.args));
-    expect(sent).toEqual([{ name: "center_settings_update", arguments: { settings: { instructions: MULTI } } }]);
+    expect(sent).toEqual([{ name: "center_settings_update", arguments: { settings: { instructions: MULTI, addDirs: null } } }]);
     expect(await mock(page, (m) => (m as unknown as { centerCommonSettings: Record<string, unknown> }).centerCommonSettings)).toEqual({ instructions: MULTI });
     // the main save button is untouched by this (the center config did not change)
     await expect(page.getByTestId("settings-save")).toBeDisabled();
@@ -49,7 +49,7 @@ test.describe("session instructions", () => {
     // blank removes it (null to the center)
     await page.getByTestId("center-common-instructions").fill("");
     await page.getByTestId("center-common-save").click();
-    await expect(page.getByText("共通の追加指示を保存した", { exact: true })).toBeVisible();
+    await expect(page.getByText("共通の設定を保存した", { exact: true })).toBeVisible();
     expect(await mock(page, (m) => (m as unknown as { centerCommonSettings: Record<string, unknown> }).centerCommonSettings)).toEqual({});
   });
 
@@ -68,7 +68,7 @@ test.describe("session instructions", () => {
     await page.getByTestId("open-settings").click();
     await expect(page.getByTestId("center-common-instructions")).toBeEnabled();
     await page.getByTestId("center-common-instructions").fill("x".repeat(16_001));
-    await expect(page.getByTestId("center-common-problem")).toHaveText("共通の追加指示は 16000 文字以内");
+    await expect(page.getByTestId("center-common-problem")).toHaveText("追加指示は 16000 文字以内");
     await expect(page.getByTestId("center-common-save")).toBeDisabled();
   });
 
@@ -204,5 +204,94 @@ test.describe("session instructions", () => {
       await expect(page.locator('section[aria-label="careery"]').getByTestId("session-instructions-mark")).toHaveCount(1);
       await expect(mark("stroke-board")).toHaveCount(0);
     });
+  });
+});
+
+test.describe("reference folders (--add-dir)", () => {
+  test.use({ seed: boardSeed });
+
+  test("the gear dialog lists the session's folders; rows are typed or picked, removed, and saved to the center without blanks or duplicates", async ({ page }) => {
+    await page.goto("/");
+    await mock(page, (m) => {
+      m.centerSettings.careery = { addDirs: ["/srv/docs"] };
+      (m as unknown as { centerCanPick: boolean; pickedDirectory: string | null }).centerCanPick = true;
+      (m as unknown as { pickedDirectory: string | null }).pickedDirectory = "/Users/me/shared";
+    });
+    await page.locator('[data-testid=session-settings-open][data-name="careery"]').click();
+    const dlg = page.getByTestId("settings-dialog");
+    await expect(dlg.getByTestId("settings-section-add-dirs")).toBeVisible();
+    await expect(dlg.getByTestId("settings-add-dir")).toHaveCount(1);
+    await expect(dlg.getByTestId("settings-add-dir").first()).toHaveValue("/srv/docs");
+    await expect(dlg.getByTestId("settings-add-dirs-note")).toHaveText(NOTE);
+    await expect(dlg.getByTestId("settings-save")).toBeDisabled();
+    // picked on this PC (own sidecar) → a new row
+    await dlg.getByTestId("settings-add-dir-pick").click();
+    await expect(dlg.getByTestId("settings-add-dir")).toHaveCount(2);
+    await expect(dlg.getByTestId("settings-add-dir").nth(1)).toHaveValue("/Users/me/shared");
+    // typed rows: a blank one and a duplicate are dropped on save, a relative path blocks the save
+    await dlg.getByTestId("settings-add-dir-add").click();
+    await dlg.getByTestId("settings-add-dir-add").click();
+    await expect(dlg.getByTestId("settings-add-dir")).toHaveCount(4);
+    await dlg.getByTestId("settings-add-dir").nth(2).fill("rel/path");
+    await expect(dlg.getByTestId("settings-problem")).toHaveText("参照フォルダは絶対パスで指定する: rel/path");
+    await expect(dlg.getByTestId("settings-save")).toBeDisabled();
+    await dlg.getByTestId("settings-add-dir").nth(2).fill("/srv/docs");
+    await expect(dlg.getByTestId("settings-problem")).toHaveCount(0);
+    await dlg.getByTestId("settings-save").click();
+    await expect(dlg).toBeHidden();
+    expect(await mock(page, (m) => m.centerSettings)).toEqual({ careery: { addDirs: ["/srv/docs", "/Users/me/shared"] } });
+    // removing every row sends null (the center drops the item)
+    await page.locator('[data-testid=session-settings-open][data-name="careery"]').click();
+    await expect(dlg.getByTestId("settings-add-dir")).toHaveCount(2);
+    await dlg.getByTestId("settings-add-dir-remove").first().click();
+    await dlg.getByTestId("settings-add-dir-remove").first().click();
+    await expect(dlg.getByTestId("settings-add-dir")).toHaveCount(0);
+    await dlg.getByTestId("settings-save").click();
+    await expect(dlg).toBeHidden();
+    expect(await mock(page, (m) => m.centerSettings)).toEqual({});
+  });
+
+  test("without this PC's folder dialog (remote center) only typed rows are offered", async ({ page }) => {
+    await page.goto("/");
+    await page.locator('[data-testid=session-settings-open][data-name="careery"]').click();
+    const dlg = page.getByTestId("settings-dialog");
+    await expect(dlg.getByTestId("settings-add-dir-add")).toBeVisible();
+    await expect(dlg.getByTestId("settings-add-dir-pick")).toHaveCount(0);
+  });
+
+  test("the add dialog sends the folders with session_create (only when some are set)", async ({ page }) => {
+    await page.goto("/");
+    await page.getByTestId("open-add-session").click();
+    await page.getByTestId("add-name").fill("pm-dirs");
+    await page.getByTestId("add-add-dir-add").click();
+    await page.getByTestId("add-add-dir").first().fill("/data/one");
+    await page.getByTestId("add-create").click();
+    await expect(page.getByTestId("add-dialog")).toBeHidden();
+    const call = await mock(page, (m) => m.calls.find((c) => c.cmd === "create_session"));
+    expect(call?.args).toEqual({ name: "pm-dirs", path: null, settings: { addDirs: ["/data/one"] } });
+    expect(await mock(page, (m) => m.centerSettings)).toEqual({ "pm-dirs": { addDirs: ["/data/one"] } });
+  });
+
+  test("the center-wide settings carry folders too; the pick button follows the own center switch", async ({ page }) => {
+    await page.goto("/");
+    await mock(page, (m) => {
+      (m as unknown as { centerCommonSettings: Record<string, unknown> }).centerCommonSettings = { addDirs: ["/common/ref"] };
+      (m as unknown as { pickedDirectory: string | null }).pickedDirectory = "/common/picked";
+    });
+    await page.getByTestId("open-settings").click();
+    const sec = page.getByTestId("center-common-section");
+    await expect(sec.getByTestId("center-common-add-dir")).toHaveCount(1);
+    await expect(sec.getByTestId("center-common-add-dir").first()).toHaveValue("/common/ref");
+    // the pick button is for the own center (this PC's folders): it follows the "center を起動する" switch
+    const enabled = await page.getByTestId("center-enabled").isChecked();
+    await expect(sec.getByTestId("center-common-add-dir-pick")).toHaveCount(enabled ? 1 : 0);
+    await page.getByTestId("center-enabled").click();
+    await expect(sec.getByTestId("center-common-add-dir-pick")).toHaveCount(enabled ? 0 : 1);
+    if (enabled) await page.getByTestId("center-enabled").click();
+    await sec.getByTestId("center-common-add-dir-pick").click();
+    await expect(sec.getByTestId("center-common-add-dir")).toHaveCount(2);
+    await sec.getByTestId("center-common-save").click();
+    await expect(page.getByText("共通の設定を保存した", { exact: true })).toBeVisible();
+    expect(await mock(page, (m) => (m as unknown as { centerCommonSettings: Record<string, unknown> }).centerCommonSettings)).toEqual({ addDirs: ["/common/ref", "/common/picked"] });
   });
 });

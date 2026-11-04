@@ -2,7 +2,7 @@ import { mkdir } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { z } from "zod";
 import { projectSchema, PERMISSION_MODES, type Config, type ProjectConfig } from "./config.js";
-import { composeInstructions, mergeSettings, projectSettingsPatchSchema, readSettings, type ProjectSettings, type ProjectSettingsPatch } from "./project-settings.js";
+import { composeAddDirs, composeInstructions, mergeSettings, projectSettingsPatchSchema, readSettings, type ProjectSettings, type ProjectSettingsPatch } from "./project-settings.js";
 import type { Logger } from "./log.js";
 import type { RcStatus, RemoteControlSupervisor } from "./remote-control.js";
 import type { EventHub } from "./events.js";
@@ -41,7 +41,7 @@ export const sessionCreateSchema = {
   name: z.string().regex(SESSION_NAME, "英数字と _ - のみ"),
   path: z.string().min(1).optional().describe("絶対パス。省略時は <workspace>/<name>（無ければ作る）"),
   permissionMode: z.enum(PERMISSION_MODES).optional().describe("省略時 auto"),
-  settings: projectSettingsPatchSchema.optional().describe("プロジェクトごとの設定（{ instructions?: string, … }）。instructions は --append-system-prompt で渡す（再起動・--continue でも付く）。省略・空文字は無し"),
+  settings: projectSettingsPatchSchema.optional().describe("プロジェクトごとの設定（{ instructions?: string, addDirs?: string[], … }）。instructions は --append-system-prompt、addDirs（絶対パス）は 1 つずつ --add-dir で渡す（再起動・--continue でも付く）。省略・空は無し"),
 };
 
 export interface SessionManager {
@@ -112,10 +112,11 @@ export function createSessionManager(opts: {
   const toProject = (s: SavedSession): ProjectConfig =>
     projectSchema.parse({ name: s.name, path: s.path, permissionMode: s.permissionMode });
 
-  /** 共通 + session の settings から supervisor に渡す instructions（あれば）。 */
-  const instrOpt = (s: ProjectSettings | undefined): { instructions?: string } => {
+  /** 共通 + session の settings から supervisor に渡す instructions / addDirs（あれば）。 */
+  const instrOpt = (s: ProjectSettings | undefined): { instructions?: string; addDirs?: string[] } => {
     const i = composeInstructions(common, s);
-    return i ? { instructions: i } : {};
+    const d = composeAddDirs(common, s);
+    return { ...(i ? { instructions: i } : {}), ...(d.length ? { addDirs: d } : {}) };
   };
 
   const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -212,6 +213,7 @@ export function createSessionManager(opts: {
           throw new Error(`状態ファイルに保存できない: ${(e as Error).message}`);
         }
         supervisor.setInstructions(name, composeInstructions(common, next));
+        supervisor.setAddDirs(name, composeAddDirs(common, next));
         log(`session の設定を更新: ${name} (項目: ${Object.keys(next).join(",") || "なし"})`);
         return { name, settings: next };
       }),
@@ -231,7 +233,10 @@ export function createSessionManager(opts: {
         }
         common = next;
         // 全 session の次の起動から効く（動いている session は起動し直さない）
-        for (const rec of saved.values()) supervisor.setInstructions(rec.name, composeInstructions(common, rec.settings));
+        for (const rec of saved.values()) {
+          supervisor.setInstructions(rec.name, composeInstructions(common, rec.settings));
+          supervisor.setAddDirs(rec.name, composeAddDirs(common, rec.settings));
+        }
         log(`center 共通の設定を更新 (項目: ${Object.keys(next).join(",") || "なし"})`);
         return { settings: next };
       }),

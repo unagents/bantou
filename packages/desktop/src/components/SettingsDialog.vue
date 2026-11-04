@@ -12,7 +12,7 @@ import {
   centerStatus,
   pickDirectory,
 } from "~/api";
-import { INSTRUCTIONS_MAX, INSTRUCTIONS_NOTE } from "~/composables/sessionInstructions";
+import { draftError, draftOf, emptyDraft, toUpdate, type SettingsDraft } from "~/composables/sessionInstructions";
 import type { CenterConnectSnippets, CenterIpStatus, CenterParsedConnect, CenterSettings, CenterStatus } from "~/types";
 
 const open = defineModel<boolean>("open", { required: true });
@@ -64,21 +64,24 @@ async function pickWorkspace() {
   }
 }
 
-// Center-wide instructions: kept by the connected center (own sidecar or the pasted remote), not in this
-// PC's settings.json, so other desktops see the same text. Read and saved through the center's tools.
-const common = ref("");
-const commonBaseline = ref<string | null>(null);
+// Center-wide settings (instructions, reference folders): kept by the connected center (own sidecar or the
+// pasted remote), not in this PC's settings.json, so other desktops see the same values. Read and saved
+// through the center's tools, with the same form as a session's project settings.
+const common = ref<SettingsDraft>(emptyDraft());
+const commonBaseline = ref<SettingsDraft | null>(null);
 const commonError = ref<string | null>(null);
 const commonSaving = ref(false);
-const commonDirty = computed(() => commonBaseline.value !== null && common.value !== commonBaseline.value);
-const commonProblem = computed(() => ([...common.value].length > INSTRUCTIONS_MAX ? `共通の追加指示は ${INSTRUCTIONS_MAX} 文字以内` : null));
+const commonDirty = computed(() => commonBaseline.value !== null && JSON.stringify(common.value) !== JSON.stringify(commonBaseline.value));
+const commonProblem = computed(() => draftError(common.value));
+// The folder dialog picks on this PC: right for the own sidecar, not for a pasted remote center.
+const commonCanPick = computed(() => !!settings.value?.enabled);
 async function loadCommon() {
   commonError.value = null;
   commonBaseline.value = null;
   try {
     const r = await centerCommonSettingsGet();
-    common.value = r.settings.instructions ?? "";
-    commonBaseline.value = common.value;
+    common.value = draftOf(r.settings);
+    commonBaseline.value = { ...common.value, addDirs: [...common.value.addDirs] };
   } catch (e) {
     commonError.value = String(e);
   }
@@ -88,10 +91,10 @@ async function saveCommon() {
   commonSaving.value = true;
   commonError.value = null;
   try {
-    const r = await centerCommonSettingsUpdate({ instructions: common.value.trim() ? common.value : null });
-    common.value = r.settings.instructions ?? "";
-    commonBaseline.value = common.value;
-    toast.add({ title: "共通の追加指示を保存した", color: "success" });
+    const r = await centerCommonSettingsUpdate(toUpdate(common.value));
+    common.value = draftOf(r.settings);
+    commonBaseline.value = { ...common.value, addDirs: [...common.value.addDirs] };
+    toast.add({ title: "共通の設定を保存した", color: "success" });
   } catch (e) {
     commonError.value = String(e);
   } finally {
@@ -478,21 +481,14 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
           </div>
         </div>
 
-        <section class="border-cork-border flex flex-col gap-1 border-t pt-3" data-testid="center-common-section">
-          <h3 class="text-sm font-semibold">共通の追加指示</h3>
+        <section class="border-cork-border flex flex-col gap-2 border-t pt-3" data-testid="center-common-section">
+          <span class="text-sm font-semibold">全 session 共通の設定</span>
           <p class="text-cork-muted text-xs">
-            つないでいる center が起動する全 session の system prompt に追記する文（--append-system-prompt）。各 session の追加指示はこの後ろに付く。center に保存する
+            つないでいる center が起動する全 session に効く。追加指示は各 session の追加指示の前に、参照フォルダは各 session のものと合わせて渡す。center に保存する
           </p>
-          <UTextarea
-            v-model="common"
-            :rows="4"
-            autoresize
-            :maxrows="14"
-            class="w-full"
-            :disabled="commonBaseline === null"
-            data-testid="center-common-instructions"
-          />
-          <p class="text-cork-muted text-xs" data-testid="center-common-note">{{ INSTRUCTIONS_NOTE }}</p>
+          <fieldset :disabled="commonBaseline === null" class="min-w-0">
+            <ProjectSettingsFields v-model="common" id-prefix="center-common" :rows="4" :can-pick="commonCanPick" @error="commonError = $event" />
+          </fieldset>
           <p v-if="commonProblem" class="text-cork-danger-text text-xs" data-testid="center-common-problem">{{ commonProblem }}</p>
           <p v-if="commonError" class="text-cork-danger-text text-xs whitespace-pre-wrap" data-testid="center-common-error">
             center から読めない・保存できない: {{ commonError }}
@@ -500,7 +496,7 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
           <UButton
             class="self-end"
             size="xs"
-            label="共通の追加指示を保存"
+            label="共通の設定を保存"
             :loading="commonSaving"
             :disabled="!commonDirty || !!commonProblem"
             data-testid="center-common-save"

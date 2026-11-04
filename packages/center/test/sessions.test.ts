@@ -14,14 +14,14 @@ import { createEventHub, type SessionsEvent } from "../src/events.js";
 function fakeSupervisor(initial: ProjectConfig[]) {
   const map = new Map<string, RcStatus>();
   const calls: string[] = [];
-  const opts: { add: Record<string, unknown>; start: Record<string, unknown>; setInstr: Record<string, string> } = { add: {}, start: {}, setInstr: {} };
+  const opts: { add: Record<string, unknown>; start: Record<string, unknown>; setInstr: Record<string, string>; setDirs: Record<string, string[]> } = { add: {}, start: {}, setInstr: {}, setDirs: {} };
   const mk = (p: ProjectConfig): RcStatus => ({
     project: p.name, path: p.path, state: "stopped", pid: null, sessionUrl: null, environmentUrl: null,
     restarts: 0, lastExit: null, startedAt: null, args: null, instructions: false, claude: { path: "claude", source: "PATH" },
   });
   for (const p of initial) map.set(p.name, mk(p));
   const sup = {
-    add: (p: ProjectConfig, o?: { wrapper?: boolean; instructions?: string }) => {
+    add: (p: ProjectConfig, o?: { wrapper?: boolean; instructions?: string; addDirs?: string[] }) => {
       opts.add[p.name] = o;
       if (map.has(p.name)) throw new Error("既に存在");
       calls.push(`add:${p.name}:${p.permissionMode}${o?.wrapper ? ":wrapper" : ""}`);
@@ -41,6 +41,9 @@ function fakeSupervisor(initial: ProjectConfig[]) {
     },
     setInstructions: (n: string, v: string) => {
       opts.setInstr[n] = v;
+    },
+    setAddDirs: (n: string, v: string[]) => {
+      opts.setDirs[n] = v;
     },
     status: (n: string) => ({ ...map.get(n)! }),
     list: () => [...map.values()].map((s) => ({ ...s })),
@@ -337,4 +340,25 @@ test("center 共通の設定: 保存先が無い時は保存せず、メモリ�
   assert.equal(await broken.load(), undefined);
   await writeFile(join(dir, "broken.json"), "{not json");
   assert.equal(await broken.load(), undefined);
+});
+
+test("addDirs: 共通と session の参照フォルダを合わせて add / setAddDirs に渡す（共通が先、重複は除く）。保存は別々", async () => {
+  const { mgr, opts } = setup();
+  await mgr.restore();
+  await mgr.updateCenterSettings({ addDirs: ["/shared/docs", "/both"] });
+  await mgr.create({ name: "a", settings: { addDirs: ["/a/ref", "/both"] } });
+  await mgr.create({ name: "b" });
+  assert.deepEqual((opts.add.a as { addDirs?: string[] }).addDirs, ["/shared/docs", "/both", "/a/ref"]);
+  assert.deepEqual((opts.add.b as { addDirs?: string[] }).addDirs, ["/shared/docs", "/both"]);
+  assert.deepEqual(mgr.getSettings("a").settings, { addDirs: ["/a/ref", "/both"] });
+  await mgr.updateSettings("a", { addDirs: ["/a/new"] });
+  assert.deepEqual(opts.setDirs.a, ["/shared/docs", "/both", "/a/new"]);
+  await mgr.updateCenterSettings({ addDirs: null });
+  assert.deepEqual({ a: opts.setDirs.a, b: opts.setDirs.b }, { a: ["/a/new"], b: [] });
+  assert.deepEqual(mgr.getCenterSettings(), { settings: {} });
+  await mgr.updateSettings("a", { addDirs: [] });
+  assert.deepEqual(opts.setDirs.a, []);
+  assert.deepEqual(mgr.getSettings("a").settings, {});
+  const saved = JSON.parse(await readFile(join(dir, "sessions.json"), "utf8")) as SavedSession[];
+  assert.ok(!("settings" in saved.find((x) => x.name === "a")!));
 });

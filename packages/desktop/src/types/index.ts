@@ -104,6 +104,8 @@ export interface SessionPathHints {
 export interface ProjectSettings {
   /** Appended to master-cap's system prompt (`claude --append-system-prompt`). */
   instructions?: string | null;
+  /** Folders master-cap may read and edit besides its own (`claude --add-dir`, one per entry; absolute paths on the center's host). */
+  addDirs?: string[] | null;
 }
 
 /** The center's list as last fetched (mirror of `src-tauri/src/session.rs::SessionList`). Memory only. */
