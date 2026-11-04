@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { getSessionSettings, updateSessionSettings } from "~/api";
+import { getSessionSettings, sessionPathHints, updateSessionSettings } from "~/api";
 import { draftError, draftOf, emptyDraft, toUpdate, type SettingsDraft } from "~/composables/sessionInstructions";
 
 const open = defineModel<boolean>("open", { required: true });
@@ -10,6 +10,8 @@ const saved = ref<SettingsDraft>(emptyDraft());
 const loaded = ref(false);
 const busy = ref(false);
 const actionError = ref<string | null>(null);
+/** This PC's folder dialog applies to the folder rows (own sidecar center on macOS / Windows). */
+const canPick = ref(false);
 
 watch(
   open,
@@ -17,6 +19,7 @@ watch(
     if (!v) return;
     loaded.value = false;
     actionError.value = null;
+    sessionPathHints().then((h) => (canPick.value = h.canPick)).catch(() => (canPick.value = false));
     try {
       saved.value = draftOf(await getSessionSettings(props.name));
       loaded.value = true;
@@ -53,7 +56,7 @@ async function save() {
         <UFormField label="フォルダ" help="作成時に決まる（変更できない）。center のホスト上のパス">
           <UInput :model-value="path ?? '（center が返していない）'" class="w-full" readonly data-testid="settings-path" />
         </UFormField>
-        <ProjectSettingsFields v-model="draft" id-prefix="settings" />
+        <ProjectSettingsFields v-model="draft" id-prefix="settings" :can-pick="canPick" @error="actionError = $event" />
         <p v-if="problem" class="text-cork-danger-text text-xs" data-testid="settings-problem">{{ problem }}</p>
         <UButton
           class="self-end"

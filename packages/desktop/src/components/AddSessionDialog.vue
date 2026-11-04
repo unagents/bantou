@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { createSession, pickDirectory, sessionPathHints } from "~/api";
-import { draftError, emptyDraft, toUpdate } from "~/composables/sessionInstructions";
+import { draftError, emptyDraft, toCreate } from "~/composables/sessionInstructions";
 
 const open = defineModel<boolean>("open", { required: true });
 const props = defineProps<{ existing: string[] }>();
@@ -56,7 +56,7 @@ async function create() {
   busy.value = true;
   actionError.value = null;
   try {
-    await createSession(trimmed.value, toUpdate(draft.value), folder.value);
+    await createSession(trimmed.value, toCreate(draft.value), folder.value);
     emit("done", trimmed.value);
     open.value = false;
   } catch (e) {
@@ -87,7 +87,7 @@ async function create() {
             <UButton v-if="canPick" label="選択…" color="neutral" variant="outline" data-testid="add-folder-pick" @click="pick" />
           </div>
         </UFormField>
-        <ProjectSettingsFields v-model="draft" id-prefix="add" :rows="4" />
+        <ProjectSettingsFields v-model="draft" id-prefix="add" :rows="4" :can-pick="canPick" @error="actionError = $event" />
         <p v-if="problem" class="text-cork-danger-text text-xs" data-testid="add-problem">{{ problem }}</p>
         <UButton
           class="self-end"

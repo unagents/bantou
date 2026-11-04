@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { CenterConnection, CenterConnectSnippets, CenterIpStatus, CenterParsedConnect, CenterSettings, CenterStatus, McpToolResult } from "~/types";
+import type { CenterConnection, CenterConnectSnippets, CenterIpStatus, CenterParsedConnect, CenterSettings, CenterStatus, McpToolResult, ProjectSettings } from "~/types";
 
 export const centerGetSettings = () => invoke<CenterSettings>("center_get_settings");
 
@@ -28,6 +28,13 @@ export const centerConnection = () => invoke<CenterConnection>("center_connectio
 
 export const centerCall = (name: string, args?: Record<string, unknown>) =>
   invoke<McpToolResult>("center_call", { name, arguments: args });
+
+/** The center-wide settings (`center_settings_get`): `{ settings }`, same shape as a session's project settings. */
+export const centerCommonSettingsGet = () => centerTool<{ settings: ProjectSettings }>("center_settings_get");
+
+/** Merge `settings` into the center-wide settings (`center_settings_update`; `null` removes an item). Returns the whole settings after. */
+export const centerCommonSettingsUpdate = (settings: ProjectSettings) =>
+  centerTool<{ settings: ProjectSettings }>("center_settings_update", { settings });
 
 /** Call a center tool and parse its JSON text result. */
 export async function centerTool<T>(name: string, args?: Record<string, unknown>): Promise<T> {

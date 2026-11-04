@@ -95,7 +95,7 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-function make(opts: { mcpUrl?: string | null; configPath?: string; logs?: string[]; instructions?: string } = {}) {
+function make(opts: { mcpUrl?: string | null; configPath?: string; logs?: string[]; instructions?: string; addDirs?: string[] } = {}) {
   const core = createCore();
   const tokens = createSessionTokens();
   const url = opts.mcpUrl === undefined ? "http://127.0.0.1:4567/mcp/session" : opts.mcpUrl;
@@ -106,7 +106,7 @@ function make(opts: { mcpUrl?: string | null; configPath?: string; logs?: string
     spawnImpl,
     wrapper: { core, tokens, path: "/fake/bantou-pty-wrapper", mcpUrl: () => url, statusLineSelf: ["/fake/bantou-center"] },
   });
-  sup.add(project, { wrapper: true, ...(opts.instructions !== undefined ? { instructions: opts.instructions } : {}) });
+  sup.add(project, { wrapper: true, ...(opts.instructions !== undefined ? { instructions: opts.instructions } : {}), ...(opts.addDirs ? { addDirs: opts.addDirs } : {}) });
   return { sup, core, tokens };
 }
 
@@ -197,6 +197,35 @@ test("wrapper 起動: --continue が失敗して素の起動へ fallback して�
   assert.ok(!launches[1].args.includes("--continue"));
   assert.equal(valueOf(launches[1].args, "--append-system-prompt"), "fallback でも付く");
   await sup.shutdown();
+});
+
+test("buildWrapperArgs: addDirs は --add-dir <path> を 1 つずつ、--append-system-prompt の後・--mcp-config の前。空・未指定は付けない", () => {
+  const base = { claudePath: "c", name: "n", permissionMode: "auto", mcpConfig: "{}", resume: false };
+  const a = buildWrapperArgs({ ...base, appendSystemPrompt: "x", addDirs: ["/d one", "/d2"] });
+  const i = a.indexOf("--add-dir");
+  assert.deepEqual(a.slice(i, i + 4), ["--add-dir", "/d one", "--add-dir", "/d2"]);
+  assert.ok(a.indexOf("--append-system-prompt") < i && i < a.indexOf("--mcp-config"));
+  assert.ok(!buildWrapperArgs({ ...base, addDirs: [] }).includes("--add-dir"));
+  assert.ok(!buildWrapperArgs(base).includes("--add-dir"));
+});
+
+test("wrapper 起動: addDirs は --add-dir で付き、setAddDirs は次の起動（再起動・resume）から効く", async () => {
+  const { sup } = make({ addDirs: ["/ref/a"] });
+  await sup.start("pm1");
+  const dirsOf = (args: string[]) => args.flatMap((a, i) => (a === "--add-dir" ? [args[i + 1]] : []));
+  assert.deepEqual(dirsOf(launches[0].args), ["/ref/a"]);
+  assert.deepEqual(dirsOf(sup.status("pm1").args!), ["/ref/a"]); // 本文の伏せ字は不要（path は status に出る）
+  sup.setAddDirs("pm1", ["/ref/b", "/ref/c"]);
+  assert.deepEqual(dirsOf(sup.status("pm1").args!), ["/ref/a"]); // 動いている間は変わらない
+  await sup.stop("pm1");
+  await sup.start("pm1", { resume: true });
+  assert.deepEqual(dirsOf(launches[1].args), ["/ref/b", "/ref/c"]);
+  assert.ok(launches[1].args.includes("--continue"));
+  sup.setAddDirs("pm1", []);
+  await sup.stop("pm1");
+  await sup.start("pm1");
+  assert.ok(!launches[2].args.includes("--add-dir"));
+  await sup.stop("pm1");
 });
 
 test("buildWrapperArgs: appendSystemPrompt は --mcp-config の前に 1 組だけ。空・未指定は付けない", () => {

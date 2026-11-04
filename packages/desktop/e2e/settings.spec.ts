@@ -20,6 +20,28 @@ test("the settings dialog saves the center port and shows it again", async ({ pa
   await expect(page.getByTestId("center-port")).toHaveValue("7920");
 });
 
+test("the workspace has a folder dialog button: the picked folder goes into the field (cancel keeps it)", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTestId("open-settings").click();
+  await page.getByTestId("center-enabled").click();
+  await expect(page.getByTestId("center-workspace")).toHaveValue("~/.bantou");
+  await page.evaluate(() => {
+    (window as unknown as { __BANTOU_MOCK__: { pickedDirectory: string | null } }).__BANTOU_MOCK__.pickedDirectory = null;
+  });
+  await page.getByTestId("center-workspace-pick").click();
+  await expect(page.getByTestId("center-workspace")).toHaveValue("~/.bantou");
+  await page.evaluate(() => {
+    (window as unknown as { __BANTOU_MOCK__: { pickedDirectory: string | null } }).__BANTOU_MOCK__.pickedDirectory = "/Users/me/work";
+  });
+  await page.getByTestId("center-workspace-pick").click();
+  await expect(page.getByTestId("center-workspace")).toHaveValue("/Users/me/work");
+  await expect(page.getByTestId("settings-save")).toBeEnabled();
+  await page.getByTestId("settings-save").click();
+  await expect(page.getByText("設定を保存した", { exact: true })).toBeVisible();
+  await page.getByTestId("open-settings").click();
+  await expect(page.getByTestId("center-workspace")).toHaveValue("/Users/me/work");
+});
+
 test("save is disabled until something changes, and a change back to the loaded value disables it again", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("open-settings").click();

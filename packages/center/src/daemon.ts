@@ -16,7 +16,7 @@ import { createRemoteManager } from "./remotes.js";
 import { createRemoteControlSupervisor } from "./remote-control.js";
 import { createContextUsageTracker } from "./context-usage.js";
 import { createSessionManager } from "./sessions.js";
-import { createJsonListStore } from "./store.js";
+import { createJsonListStore, createJsonObjectStore } from "./store.js";
 import { createCenterServer, createSessionMcpServer } from "./server.js";
 import { createCore } from "./core.js";
 import { createEventHub } from "./events.js";
@@ -115,6 +115,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     contextUsage: (name) => contextUsage.get(name),
     supervisor,
     store: createJsonListStore(join(stateDir, "sessions.json"), log),
+    centerStore: createJsonObjectStore(join(stateDir, "center-settings.json"), log),
     log,
   });
   const capId = await loadCapId(stateDir, log);

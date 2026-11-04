@@ -1,5 +1,9 @@
+import { isAbsolute } from "node:path";
 import { z } from "zod";
 import { SESSION_INSTRUCTIONS_MAX } from "./config.js";
+
+/** 参照フォルダ（`--add-dir`）の最大数（1 つの設定あたり）。 */
+export const ADD_DIRS_MAX = 20;
 
 /**
  * プロジェクト（session）ごとの設定。sessions.json の各 session の `settings` に保存する。
@@ -8,13 +12,18 @@ import { SESSION_INSTRUCTIONS_MAX } from "./config.js";
 export interface ProjectSettings {
   /** master-cap の追加指示。起動のたびに `--append-system-prompt <値>` で渡す。 */
   instructions?: string;
+  /** master-cap が参照してよいフォルダ（絶対パス）。起動のたびに 1 つずつ `--add-dir <path>` で渡す。 */
+  addDirs?: string[];
   [key: string]: unknown;
 }
+
+const addDirSchema = z.string().min(1).refine((p) => isAbsolute(p), { message: "参照フォルダは絶対パスで指定する" });
 
 /** 更新の入力。項目ごとに省略可。null はその項目を削除する。未知の項目は素通しする。 */
 export const projectSettingsPatchSchema = z
   .object({
     instructions: z.string().max(SESSION_INSTRUCTIONS_MAX, `${SESSION_INSTRUCTIONS_MAX} 文字以内`).nullable().optional(),
+    addDirs: z.array(addDirSchema).max(ADD_DIRS_MAX, `参照フォルダは ${ADD_DIRS_MAX} 個以内`).nullable().optional(),
   })
   .passthrough();
 
@@ -23,7 +32,8 @@ export type ProjectSettingsPatch = z.infer<typeof projectSettingsPatchSchema>;
 /**
  * patch を current に重ねた新しい settings を返す（current は変えない）。
  * - patch に無い（undefined）項目は変えない。
- * - null はその項目を削除する。`instructions` の空文字も削除と同じ（保存しない）。
+ * - null はその項目を削除する。`instructions` の空文字・`addDirs` の空配列も削除と同じ（保存しない）。
+ * - `addDirs` は重複を除く（先勝ち）。
  * - 未知の項目は値をそのまま入れる。
  */
 export function mergeSettings(current: ProjectSettings | undefined, patch: ProjectSettingsPatch): ProjectSettings {
@@ -31,8 +41,20 @@ export function mergeSettings(current: ProjectSettings | undefined, patch: Proje
   for (const [k, v] of Object.entries(patch)) {
     if (v === undefined) continue;
     if (v === null || (k === "instructions" && v === "")) delete out[k];
-    else out[k] = v;
+    else if (k === "addDirs") {
+      const dirs = uniqueDirs(v);
+      if (dirs.length) out.addDirs = dirs;
+      else delete out.addDirs;
+    } else out[k] = v;
   }
+  return out;
+}
+
+/** 文字列の配列から空と重複を除く（先勝ち）。配列でなければ空。 */
+function uniqueDirs(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  const out: string[] = [];
+  for (const d of v) if (typeof d === "string" && d !== "" && !out.includes(d)) out.push(d);
   return out;
 }
 
@@ -41,5 +63,21 @@ export function readSettings(raw: unknown): ProjectSettings {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};
   const out: ProjectSettings = { ...(raw as Record<string, unknown>) };
   if (typeof out.instructions !== "string" || out.instructions === "") delete out.instructions;
+  const dirs = uniqueDirs(out.addDirs);
+  if (dirs.length) out.addDirs = dirs;
+  else delete out.addDirs;
   return out;
+}
+
+/** center 共通と session の参照フォルダを 1 つにする（共通が先、重複は除く）。`--add-dir` に 1 つずつ渡す。 */
+export function composeAddDirs(common: ProjectSettings | undefined, own: ProjectSettings | undefined): string[] {
+  return uniqueDirs([...(readSettings(common).addDirs ?? []), ...(readSettings(own).addDirs ?? [])]);
+}
+
+/**
+ * center 共通の追加指示と session の追加指示を 1 つにする（`--append-system-prompt` の値）。
+ * 共通が先、空行 1 つを挟んで session のもの。どちらも無ければ空文字（付けない）。
+ */
+export function composeInstructions(common: ProjectSettings | undefined, own: ProjectSettings | undefined): string {
+  return [readSettings(common).instructions, readSettings(own).instructions].filter((x): x is string => typeof x === "string").join("\n\n");
 }

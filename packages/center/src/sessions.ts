@@ -2,11 +2,11 @@ import { mkdir } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { z } from "zod";
 import { projectSchema, PERMISSION_MODES, type Config, type ProjectConfig } from "./config.js";
-import { mergeSettings, projectSettingsPatchSchema, readSettings, type ProjectSettings, type ProjectSettingsPatch } from "./project-settings.js";
+import { composeAddDirs, composeInstructions, mergeSettings, projectSettingsPatchSchema, readSettings, type ProjectSettings, type ProjectSettingsPatch } from "./project-settings.js";
 import type { Logger } from "./log.js";
 import type { RcStatus, RemoteControlSupervisor } from "./remote-control.js";
 import type { EventHub } from "./events.js";
-import type { JsonListStore } from "./store.js";
+import type { JsonListStore, JsonObjectStore } from "./store.js";
 import type { ContextUsage } from "./context-usage.js";
 
 export const SESSION_NAME = /^[A-Za-z0-9_-]+$/;
@@ -41,7 +41,7 @@ export const sessionCreateSchema = {
   name: z.string().regex(SESSION_NAME, "英数字と _ - のみ"),
   path: z.string().min(1).optional().describe("絶対パス。省略時は <workspace>/<name>（無ければ作る）"),
   permissionMode: z.enum(PERMISSION_MODES).optional().describe("省略時 auto"),
-  settings: projectSettingsPatchSchema.optional().describe("プロジェクトごとの設定（{ instructions?: string, … }）。instructions は --append-system-prompt で渡す（再起動・--continue でも付く）。省略・空文字は無し"),
+  settings: projectSettingsPatchSchema.optional().describe("プロジェクトごとの設定（{ instructions?: string, addDirs?: string[], … }）。instructions は --append-system-prompt、addDirs（絶対パス）は 1 つずつ --add-dir で渡す（再起動・--continue でも付く）。省略・空は無し"),
 };
 
 export interface SessionManager {
@@ -55,6 +55,10 @@ export interface SessionManager {
    * session_create で作った session のみ。動いている session には効かず、次の起動から効く。
    */
   updateSettings(name: string, patch: ProjectSettingsPatch): Promise<{ name: string; settings: ProjectSettings }>;
+  /** center 共通の設定（全 session に効く。instructions は各 session の追加指示の前に付く）。未設定は `{}`。 */
+  getCenterSettings(): { settings: ProjectSettings };
+  /** center 共通の設定を項目ごとにマージして保存し、全 session の次の起動に反映する。更新後の全体を返す。 */
+  updateCenterSettings(patch: ProjectSettingsPatch): Promise<{ settings: ProjectSettings }>;
   delete(name: string): Promise<{ name: string; deleted: true }>;
   list(): SessionInfo[];
 }
@@ -67,6 +71,8 @@ export function createSessionManager(opts: {
   config: Config;
   supervisor: RemoteControlSupervisor;
   store: JsonListStore<SavedSession>;
+  /** center 共通の設定の保存先（center-settings.json）。省略時は共通の設定なし（更新は保存されない）。 */
+  centerStore?: JsonObjectStore<ProjectSettings>;
   log: Logger;
   /** create 後、接続（URL 取得）か失敗を待つ上限。0 で待たない。既定 15 秒。 */
   waitMs?: number;
@@ -78,6 +84,8 @@ export function createSessionManager(opts: {
   const { config, supervisor, store, log } = opts;
   const waitMs = opts.waitMs ?? 15_000;
   const saved = new Map<string, SavedSession>();
+  /** center 共通の設定（restore で読む）。 */
+  let common: ProjectSettings = {};
   /** 同時の create / delete を直列にする（重複判定と保存を競合させない）。 */
   let chain: Promise<unknown> = Promise.resolve();
   const serial = <T>(fn: () => Promise<T>): Promise<T> => {
@@ -104,16 +112,21 @@ export function createSessionManager(opts: {
   const toProject = (s: SavedSession): ProjectConfig =>
     projectSchema.parse({ name: s.name, path: s.path, permissionMode: s.permissionMode });
 
-  /** settings から supervisor に渡す instructions（あれば）。 */
-  const instrOpt = (s: ProjectSettings | undefined): { instructions?: string } => {
-    const i = readSettings(s).instructions;
-    return typeof i === "string" ? { instructions: i } : {};
+  /** 共通 + session の settings から supervisor に渡す instructions / addDirs（あれば）。 */
+  const instrOpt = (s: ProjectSettings | undefined): { instructions?: string; addDirs?: string[] } => {
+    const i = composeInstructions(common, s);
+    const d = composeAddDirs(common, s);
+    return { ...(i ? { instructions: i } : {}), ...(d.length ? { addDirs: d } : {}) };
   };
 
   const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
   return {
     async restore() {
+      if (opts.centerStore) {
+        common = readSettings(await opts.centerStore.load());
+        if (Object.keys(common).length) log(`center 共通の設定を読んだ (項目: ${Object.keys(common).join(",")})`);
+      }
       for (const s of await store.load()) {
         try {
           if (!SESSION_NAME.test(s.name) || !isAbsolute(s.path)) throw new Error("保存内容が不正");
@@ -199,9 +212,33 @@ export function createSessionManager(opts: {
           else rec.settings = prev;
           throw new Error(`状態ファイルに保存できない: ${(e as Error).message}`);
         }
-        supervisor.setInstructions(name, typeof next.instructions === "string" ? next.instructions : "");
+        supervisor.setInstructions(name, composeInstructions(common, next));
+        supervisor.setAddDirs(name, composeAddDirs(common, next));
         log(`session の設定を更新: ${name} (項目: ${Object.keys(next).join(",") || "なし"})`);
         return { name, settings: next };
+      }),
+
+    getCenterSettings: () => ({ settings: { ...common } }),
+
+    updateCenterSettings: (patch) =>
+      serial(async () => {
+        const prev = common;
+        const next = mergeSettings(prev, patch);
+        if (opts.centerStore) {
+          try {
+            await opts.centerStore.save(next);
+          } catch (e) {
+            throw new Error(`設定ファイルに保存できない: ${(e as Error).message}`);
+          }
+        }
+        common = next;
+        // 全 session の次の起動から効く（動いている session は起動し直さない）
+        for (const rec of saved.values()) {
+          supervisor.setInstructions(rec.name, composeInstructions(common, rec.settings));
+          supervisor.setAddDirs(rec.name, composeAddDirs(common, rec.settings));
+        }
+        log(`center 共通の設定を更新 (項目: ${Object.keys(next).join(",") || "なし"})`);
+        return { settings: next };
       }),
 
     delete: (name) =>

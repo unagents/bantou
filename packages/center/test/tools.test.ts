@@ -68,11 +68,11 @@ async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partia
 
 const text = (r: unknown): string => (r as { content: { text: string }[] }).content[0].text;
 
-test("外向けの tool は 17 個。remote_create / remote_delete / remote_send / cap_kick は無い", async () => {
+test("外向けの tool は 19 個。remote_create / remote_delete / remote_send / cap_kick は無い", async () => {
   const { client, close } = await connect();
   const names = (await client.listTools()).tools.map((t) => t.name).sort();
   assert.deepEqual(names, [
-    "center_info", "rc_list", "rc_start", "rc_status", "rc_stop", "remote_list", "remote_wait",
+    "center_info", "center_settings_get", "center_settings_update", "rc_list", "rc_start", "rc_status", "rc_stop", "remote_list", "remote_wait",
     "server_list", "server_peers", "server_status", "session_create", "session_delete", "session_list", "session_settings_get", "session_settings_update", "worker_reply", "worker_resume",
   ]);
   for (const gone of ["remote_create", "remote_send", "remote_delete", "cap_kick"]) assert.ok(!names.includes(gone), gone);
@@ -320,6 +320,25 @@ test("session_create の settings は SessionManager.create にそのまま渡�
   assert.deepEqual(JSON.parse(text(r)), { called: "create", i: { name: "pm1", settings: { instructions: "あ\nい", future: [1] } } });
   const long = await client.callTool({ name: "session_create", arguments: { name: "pm2", settings: { instructions: "a".repeat(16_001) } } }).catch((e: unknown) => e);
   assert.ok(long instanceof Error || (long as { isError?: boolean }).isError === true);
+  await close();
+});
+
+test("center_settings_get / center_settings_update は SessionManager に委譲する。null と未知項目を通し、長すぎ・不正は拒否", async () => {
+  const seen: unknown[] = [];
+  const { client, close } = await connect({}, {
+    sessions: {
+      getCenterSettings: () => ({ settings: { instructions: "共通" } }),
+      updateCenterSettings: async (p) => { seen.push(p); return { settings: { ...p, instructions: "後" } }; },
+    },
+  });
+  assert.deepEqual(JSON.parse(text(await client.callTool({ name: "center_settings_get", arguments: {} }))), { settings: { instructions: "共通" } });
+  const u = await client.callTool({ name: "center_settings_update", arguments: { settings: { instructions: null, skills: ["a"] } } });
+  assert.deepEqual(JSON.parse(text(u)), { settings: { instructions: "後", skills: ["a"] } });
+  assert.deepEqual(seen, [{ instructions: null, skills: ["a"] }]);
+  for (const args of [{ settings: { instructions: "a".repeat(16_001) } }, { settings: { instructions: 1 } }, { settings: "x" }, {}]) {
+    const r = await client.callTool({ name: "center_settings_update", arguments: args }).catch((e: unknown) => e);
+    assert.ok(r instanceof Error || (r as { isError?: boolean }).isError === true, JSON.stringify(args).slice(0, 60));
+  }
   await close();
 });
 

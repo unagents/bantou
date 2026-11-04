@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import {
+  centerCommonSettingsGet,
+  centerCommonSettingsUpdate,
   centerConnectSnippets,
   centerIpStatus,
   centerLocalIps,
@@ -8,7 +10,9 @@ import {
   centerRegenerateToken,
   centerSetSettings,
   centerStatus,
+  pickDirectory,
 } from "~/api";
+import { draftError, draftOf, emptyDraft, toUpdate, type SettingsDraft } from "~/composables/sessionInstructions";
 import type { CenterConnectSnippets, CenterIpStatus, CenterParsedConnect, CenterSettings, CenterStatus } from "~/types";
 
 const open = defineModel<boolean>("open", { required: true });
@@ -46,7 +50,56 @@ async function load() {
     error.value = String(e);
   }
   ipChoice.value = null;
-  await Promise.all([refreshStatus(), loadLocalIps(), loadIpStatus()]);
+  await Promise.all([refreshStatus(), loadLocalIps(), loadIpStatus(), loadCommon()]);
+}
+
+/** Native folder dialog for the sidecar's workspace (the center runs on this PC, so its folders are this PC's). */
+async function pickWorkspace() {
+  if (!settings.value) return;
+  try {
+    const p = await pickDirectory();
+    if (p) settings.value.workspace = p;
+  } catch (e) {
+    error.value = String(e);
+  }
+}
+
+// Center-wide settings (instructions, reference folders): kept by the connected center (own sidecar or the
+// pasted remote), not in this PC's settings.json, so other desktops see the same values. Read and saved
+// through the center's tools, with the same form as a session's project settings.
+const common = ref<SettingsDraft>(emptyDraft());
+const commonBaseline = ref<SettingsDraft | null>(null);
+const commonError = ref<string | null>(null);
+const commonSaving = ref(false);
+const commonDirty = computed(() => commonBaseline.value !== null && JSON.stringify(common.value) !== JSON.stringify(commonBaseline.value));
+const commonProblem = computed(() => draftError(common.value));
+// The folder dialog picks on this PC: right for the own sidecar, not for a pasted remote center.
+const commonCanPick = computed(() => !!settings.value?.enabled);
+async function loadCommon() {
+  commonError.value = null;
+  commonBaseline.value = null;
+  try {
+    const r = await centerCommonSettingsGet();
+    common.value = draftOf(r.settings);
+    commonBaseline.value = { ...common.value, addDirs: [...common.value.addDirs] };
+  } catch (e) {
+    commonError.value = String(e);
+  }
+}
+async function saveCommon() {
+  if (!commonDirty.value || commonProblem.value) return;
+  commonSaving.value = true;
+  commonError.value = null;
+  try {
+    const r = await centerCommonSettingsUpdate(toUpdate(common.value));
+    common.value = draftOf(r.settings);
+    commonBaseline.value = { ...common.value, addDirs: [...common.value.addDirs] };
+    toast.add({ title: "共通の設定を保存した", color: "success" });
+  } catch (e) {
+    commonError.value = String(e);
+  } finally {
+    commonSaving.value = false;
+  }
 }
 
 const POLL_MS = 1000;
@@ -368,13 +421,16 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
           </UFormField>
         </div>
 
-        <UFormField label="workspace" description="center が扱う作業ディレクトリ（1 つ）。無ければ作る。~ 始まりも可">
-          <UInput
-            v-model="settings.workspace"
-            placeholder="~/.bantou"
-            class="w-full"
-            data-testid="center-workspace"
-          />
+        <UFormField label="workspace" description="center が扱う作業ディレクトリ（1 つ）。session を作る時の既定の親。無ければ作る。~ 始まりも可">
+          <div class="flex gap-2">
+            <UInput
+              v-model="settings.workspace"
+              placeholder="~/.bantou"
+              class="w-full"
+              data-testid="center-workspace"
+            />
+            <UButton label="選択…" color="neutral" variant="outline" data-testid="center-workspace-pick" @click="pickWorkspace" />
+          </div>
         </UFormField>
 
         <UFormField label="claudePath" description="空なら login shell から自動解決">
@@ -424,6 +480,29 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
             />
           </div>
         </div>
+
+        <section class="border-cork-border flex flex-col gap-2 border-t pt-3" data-testid="center-common-section">
+          <span class="text-sm font-semibold">全 session 共通の設定</span>
+          <p class="text-cork-muted text-xs">
+            つないでいる center が起動する全 session に効く。追加指示は各 session の追加指示の前に、参照フォルダは各 session のものと合わせて渡す。center に保存する
+          </p>
+          <fieldset :disabled="commonBaseline === null" class="min-w-0">
+            <ProjectSettingsFields v-model="common" id-prefix="center-common" :rows="4" :can-pick="commonCanPick" @error="commonError = $event" />
+          </fieldset>
+          <p v-if="commonProblem" class="text-cork-danger-text text-xs" data-testid="center-common-problem">{{ commonProblem }}</p>
+          <p v-if="commonError" class="text-cork-danger-text text-xs whitespace-pre-wrap" data-testid="center-common-error">
+            center から読めない・保存できない: {{ commonError }}
+          </p>
+          <UButton
+            class="self-end"
+            size="xs"
+            label="共通の設定を保存"
+            :loading="commonSaving"
+            :disabled="!commonDirty || !!commonProblem"
+            data-testid="center-common-save"
+            @click="saveCommon"
+          />
+        </section>
 
         <div class="border-cork-border flex flex-col gap-2 border-t pt-3">
           <div class="flex items-center gap-2">

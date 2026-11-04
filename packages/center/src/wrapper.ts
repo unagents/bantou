@@ -93,6 +93,8 @@ export function buildWrapperArgs(opts: {
   model?: string;
   /** claude の --append-system-prompt にそのまま渡す（argv の 1 引数。shell は通らない）。空・未指定なら付けない。 */
   appendSystemPrompt?: string;
+  /** claude の --add-dir に 1 つずつ渡す参照フォルダ（絶対パス）。空・未指定なら付けない。 */
+  addDirs?: string[];
   cols?: number;
   rows?: number;
 }): string[] {
@@ -110,6 +112,7 @@ export function buildWrapperArgs(opts: {
     "--no-chrome", // Chrome 拡張があると対話型 claude が「Claude in Chrome extension detected」の確認で止まる
     ...(opts.model ? ["--model", opts.model] : []),
     ...(opts.appendSystemPrompt ? ["--append-system-prompt", opts.appendSystemPrompt] : []),
+    ...(opts.addDirs ?? []).flatMap((d) => ["--add-dir", d]),
     ...(opts.mcpConfig ? ["--mcp-config", opts.mcpConfig] : []),
     ...(opts.settings ? ["--settings", opts.settings] : []),
     ...(opts.resume ? ["--continue"] : []),
