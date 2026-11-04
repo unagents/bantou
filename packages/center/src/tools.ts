@@ -67,9 +67,19 @@ const ownerArg = z.string().optional().describe(
 
 export function registerTools(
   server: McpServer,
-  deps: { supervisor: RemoteControlSupervisor; link: ServerLink; sessions: SessionManager; remotes: RemoteManager; follow?: Follow; workspace?: string },
+  deps: {
+    supervisor: RemoteControlSupervisor;
+    link: ServerLink;
+    sessions: SessionManager;
+    remotes: RemoteManager;
+    follow?: Follow;
+    workspace?: string;
+    /** master-cap の起動時に付けるシステム埋め込み指示の一覧（center_info 用）。省略時は []。 */
+    systemInstructions?: { id: string; version: number; title: string }[];
+  },
 ): void {
   const { supervisor, link, sessions, remotes, follow, workspace } = deps;
+  const systemInstructions = deps.systemInstructions ?? [];
 
   // -- A. center 上の session（番頭が使う） --
   server.registerTool(
@@ -144,9 +154,9 @@ export function registerTools(
     {
       title: "center の情報",
       description:
-        "center の情報 { workspace: string | null } を返す。workspace は config の workspace（session_create で path を省いた時の置き場所の親。<workspace>/<name>）。未設定は null。将来の項目はこの object に足す",
+        "center の情報 { workspace: string | null, systemInstructions: [{ id, version, title }] } を返す。workspace は config の workspace（session_create で path を省いた時の置き場所の親。<workspace>/<name>）。未設定は null。systemInstructions は master-cap の起動時に --append-system-prompt の先頭に付けるシステム埋め込み指示の部品（利用者の追加指示とは別。center の版で決まる）。将来の項目はこの object に足す",
     },
-    () => guard(() => json({ workspace: workspace ?? null })),
+    () => guard(() => json({ workspace: workspace ?? null, systemInstructions })),
   );
 
   // -- B. remote の読み取り（外向けは一覧だけ。作成・削除は session 向けの窓口 /mcp/session） --
