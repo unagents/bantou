@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { describeSystemInstructions } from "../src/system-instructions.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { parseConfig } from "../src/config.js";
@@ -17,7 +18,7 @@ const rc = (project: string): RcStatus => ({
   claude: { path: "claude", source: "PATH" },
 });
 
-async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partial<SessionManager>; remotes?: Partial<RemoteManager>; follow?: Follow; workspace?: string } = {}) {
+async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partial<SessionManager>; remotes?: Partial<RemoteManager>; follow?: Follow; workspace?: string; systemInstructions?: { id: string; version: number; title: string }[] } = {}) {
   const calls: unknown[] = [];
   const supervisor: RemoteControlSupervisor = {
     start: async (p) => rc(p),
@@ -51,7 +52,7 @@ async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partia
     list: (f: unknown) => (calls.push({ remoteList: f }), []),
     ...mgrs.remotes,
   } as unknown as RemoteManager;
-  const server = createCenterServer({ config: parseConfig(mgrs.workspace ? { workspace: mgrs.workspace } : {}, "/x/c.json"), supervisor, link: fullLink, sessions, remotes, follow: mgrs.follow });
+  const server = createCenterServer({ ...(mgrs.systemInstructions ? { systemInstructions: mgrs.systemInstructions } : {}), config: parseConfig(mgrs.workspace ? { workspace: mgrs.workspace } : {}, "/x/c.json"), supervisor, link: fullLink, sessions, remotes, follow: mgrs.follow });
   const [ct, st] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "t", version: "0" });
   await Promise.all([server.connect(st), client.connect(ct)]);
@@ -79,14 +80,16 @@ test("外向けの tool は 19 個。remote_create / remote_delete / remote_send
   await close();
 });
 
-test("center_info は { workspace } を返す。未設定は null", async () => {
-  const a = await connect({}, { workspace: "/w/ws" });
+test("center_info は { workspace, systemInstructions } を返す。未設定は null / []", async () => {
+  const parts = [{ id: "master-cap-role", version: 1, title: "役割" }];
+  const a = await connect({}, { workspace: "/w/ws", systemInstructions: parts });
   const r = await a.client.callTool({ name: "center_info", arguments: {} });
   assert.notEqual(r.isError, true);
-  assert.deepEqual(JSON.parse(text(r)), { workspace: "/w/ws" });
+  assert.deepEqual(JSON.parse(text(r)), { workspace: "/w/ws", systemInstructions: parts });
   await a.close();
   const b = await connect();
-  assert.deepEqual(JSON.parse(text(await b.client.callTool({ name: "center_info", arguments: {} }))), { workspace: null });
+  // 指定が無ければ center 組み込みの部品
+  assert.deepEqual(JSON.parse(text(await b.client.callTool({ name: "center_info", arguments: {} }))), { workspace: null, systemInstructions: describeSystemInstructions() });
   await b.close();
 });
 

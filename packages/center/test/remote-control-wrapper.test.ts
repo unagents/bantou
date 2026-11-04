@@ -95,7 +95,7 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-function make(opts: { mcpUrl?: string | null; configPath?: string; logs?: string[]; instructions?: string; addDirs?: string[] } = {}) {
+function make(opts: { mcpUrl?: string | null; configPath?: string; logs?: string[]; instructions?: string; addDirs?: string[]; system?: string } = {}) {
   const core = createCore();
   const tokens = createSessionTokens();
   const url = opts.mcpUrl === undefined ? "http://127.0.0.1:4567/mcp/session" : opts.mcpUrl;
@@ -105,6 +105,7 @@ function make(opts: { mcpUrl?: string | null; configPath?: string; logs?: string
     log: (m) => void opts.logs?.push(m),
     spawnImpl,
     wrapper: { core, tokens, path: "/fake/bantou-pty-wrapper", mcpUrl: () => url, statusLineSelf: ["/fake/bantou-center"] },
+    ...(opts.system !== undefined ? { systemInstructions: { build: ({ session }: { session: string }) => opts.system!.replace("{session}", session), labels: ["t@1"] } } : {}),
   });
   sup.add(project, { wrapper: true, ...(opts.instructions !== undefined ? { instructions: opts.instructions } : {}), ...(opts.addDirs ? { addDirs: opts.addDirs } : {}) });
   return { sup, core, tokens };
@@ -258,16 +259,16 @@ test("wrapper 起動: wrapper -- claude --remote-control の引数、env の tok
   assert.equal(l.cmd, "/fake/bantou-pty-wrapper");
   assert.equal(l.cwd, "/tmp/pm1");
   assert.deepEqual(l.args.slice(0, 6), ["--cols", "120", "--rows", "40", "--", "fake-claude"]);
-  assert.deepEqual(l.args.slice(6, 11), ["--remote-control", "pm1", "--permission-mode", "plan", "--no-chrome"]);
-  assert.equal(l.args[11], "--mcp-config");
-  assert.equal(l.args[13], "--settings");
-  assert.equal(l.args.length, 15); // 初回は --continue 無し
+  assert.deepEqual(l.args.slice(6, 10), ["--remote-control", "pm1", "--permission-mode", "plan"]);
+  assert.equal(l.args[10], "--mcp-config");
+  assert.equal(l.args[12], "--settings");
+  assert.equal(l.args.length, 14); // 初回は --continue 無し
   // statusLine は center のサブコマンド。--settings は statusLine のキーだけ。token は argv に載せない
-  const settings = JSON.parse(l.args[14]) as Record<string, { type: string; command: string }>;
+  const settings = JSON.parse(l.args[13]) as Record<string, { type: string; command: string }>;
   assert.deepEqual(Object.keys(settings), ["statusLine"]);
   assert.equal(settings.statusLine.type, "command");
   assert.equal(settings.statusLine.command, "'/fake/bantou-center' 'status-line' '--url' 'http://127.0.0.1:4567/sessions/pm1/status-line'");
-  const json = JSON.parse(l.args[12]) as { mcpServers: { bantou: Record<string, unknown>; "bantou-messenger": Record<string, unknown> } };
+  const json = JSON.parse(l.args[11]) as { mcpServers: { bantou: Record<string, unknown>; "bantou-messenger": Record<string, unknown> } };
   // session 名が messenger の peer 名になる（名前は MCP の env だけ。claude 子プロセスの env には入れない）
   assert.deepEqual(json.mcpServers["bantou-messenger"], {
     type: "stdio",
@@ -491,18 +492,18 @@ test("add: wrapper 設定が無い supervisor では wrapper 起動の project �
 test("wrapper.ts: 引数組み立て / プロトコル行の解釈 / 窓の照合 / wrapper の場所", () => {
   assert.deepEqual(
     buildWrapperArgs({ claudePath: "c", name: "n", permissionMode: "auto", mcpConfig: null, resume: true, cols: 90, rows: 30 }),
-    ["--cols", "90", "--rows", "30", "--", "c", "--remote-control", "n", "--permission-mode", "auto", "--no-chrome", "--continue"],
+    ["--cols", "90", "--rows", "30", "--", "c", "--remote-control", "n", "--permission-mode", "auto", "--continue"],
   );
   // model: 指定時だけ --model を付ける（mcp-config の前）。無ければ従来どおり
   assert.deepEqual(
     buildWrapperArgs({ claudePath: "c", name: "n", permissionMode: "auto", mcpConfig: "{}", resume: false, model: "opus[1m]" }),
-    ["--cols", "120", "--rows", "40", "--", "c", "--remote-control", "n", "--permission-mode", "auto", "--no-chrome", "--model", "opus[1m]", "--mcp-config", "{}"],
+    ["--cols", "120", "--rows", "40", "--", "c", "--remote-control", "n", "--permission-mode", "auto", "--model", "opus[1m]", "--mcp-config", "{}"],
   );
   assert.ok(!buildWrapperArgs({ claudePath: "c", name: "n", permissionMode: "auto", mcpConfig: null, resume: false }).includes("--model"));
   // settings: 指定時だけ --settings（mcp-config の後、--continue の前）
   assert.deepEqual(
     buildWrapperArgs({ claudePath: "c", name: "n", permissionMode: "auto", mcpConfig: "{}", settings: '{"statusLine":{}}', resume: true }),
-    ["--cols", "120", "--rows", "40", "--", "c", "--remote-control", "n", "--permission-mode", "auto", "--no-chrome", "--mcp-config", "{}", "--settings", '{"statusLine":{}}', "--continue"],
+    ["--cols", "120", "--rows", "40", "--", "c", "--remote-control", "n", "--permission-mode", "auto", "--mcp-config", "{}", "--settings", '{"statusLine":{}}', "--continue"],
   );
   assert.ok(!buildWrapperArgs({ claudePath: "c", name: "n", permissionMode: "auto", mcpConfig: null, settings: null, resume: false }).includes("--settings"));
   assert.equal(JSON.parse(mcpConfigJson("http://h/mcp/session", "n")).mcpServers.bantou.headers["X-Bantou-Session"], "n");
@@ -610,4 +611,32 @@ test("読み直し: configPath 無しなら起動時の値のまま（従来動�
   await sup.start("pm1");
   assert.equal(valueOf(launches[0].args, "--append-system-prompt"), "固定");
   await sup.shutdown();
+});
+
+test("wrapper 起動: システム埋め込み指示は --append-system-prompt の先頭、利用者の追加指示は空行を挟んで後ろ。status の instructions は利用者分だけ、systemInstructions は部品の一覧", async () => {
+  const { sup } = make({ system: "system for {session}", instructions: "利用者の指示" });
+  const st = await sup.start("pm1");
+  assert.equal(valueOf(launches[0].args, "--append-system-prompt"), "system for pm1\n\n利用者の指示");
+  assert.equal(st.instructions, true);
+  assert.deepEqual(st.systemInstructions, ["t@1"]);
+  await sup.stop("pm1");
+});
+
+test("wrapper 起動: システム埋め込み指示だけなら instructions は false のまま付く。無ければ付けない", async () => {
+  const a = make({ system: "only system" });
+  const st = await a.sup.start("pm1");
+  assert.equal(valueOf(launches[0].args, "--append-system-prompt"), "only system");
+  assert.equal(st.instructions, false);
+  await a.sup.stop("pm1");
+  launches = [];
+  const b = make({});
+  const st2 = await b.sup.start("pm1");
+  assert.ok(!launches[0].args.includes("--append-system-prompt"));
+  assert.equal(st2.systemInstructions, undefined);
+  await b.sup.stop("pm1");
+});
+
+test("buildWrapperArgs: --no-chrome は付けない", () => {
+  const a = buildWrapperArgs({ claudePath: "c", name: "n", permissionMode: "auto", mcpConfig: "{}", resume: false });
+  assert.ok(!a.includes("--no-chrome"));
 });

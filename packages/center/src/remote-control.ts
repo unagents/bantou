@@ -37,8 +37,10 @@ export interface RcStatus {
   lastError?: string;
   startedAt: string | null;
   args: string[] | null;
-  /** この起動で `--append-system-prompt`（session の instructions）を付けたか。本文は持たない。 */
+  /** この起動で利用者の追加指示（center 共通・session の instructions）を付けたか。本文は持たない。システム埋め込み指示は数えない。 */
   instructions: boolean;
+  /** この起動で付けたシステム埋め込み指示（`<id>@<version>`）。wrapper 起動のみ。 */
+  systemInstructions?: string[];
   /** 起動に使う claude 実行ファイルとその決定元。 */
   claude: ResolvedClaude;
 }
@@ -241,6 +243,11 @@ export function createRemoteControlSupervisor(opts: {
   claude?: ResolvedClaude;
   /** wrapper 経由で起動する entry（add の wrapper: true）に必要なもの。 */
   wrapper?: WrapperDeps;
+  /**
+   * システム埋め込み指示（wrapper 起動のみ）。起動のたびに session 名で文面を作り、`--append-system-prompt` の先頭に付ける
+   * （利用者の追加指示は空行を挟んでその後ろ）。省略時は付けない。
+   */
+  systemInstructions?: { build: (ctx: { session: string }) => string; labels: string[] };
 }): RemoteControlSupervisor {
   const { config, log } = opts;
   const spawnImpl: SpawnImpl = opts.spawnImpl ?? ((c, a, o) => nodeSpawn(c, a, o) as unknown as ChildLike);
@@ -322,6 +329,8 @@ export function createRemoteControlSupervisor(opts: {
       wd.core.register(name);
       const mcpUrl = wd.mcpUrl();
       if (!mcpUrl) log(`session 向け MCP 窓口が無いので bantou の MCP を付けない（messenger のみ）: project=${name}`);
+      const system = opts.systemInstructions?.build({ session: name }) ?? "";
+      const appendSystemPrompt = [system, e.instructions].filter((t) => t !== "").join("\n\n");
       args = buildWrapperArgs({
         claudePath: claude.path,
         name,
@@ -331,7 +340,7 @@ export function createRemoteControlSupervisor(opts: {
         settings: mcpUrl ? statusLineSettingsJson(statusLineCommand(statusLineUrl(mcpUrl, name), wd.statusLineSelf)) : null,
         resume: useContinue,
         ...(rc.model ? { model: rc.model } : {}),
-        ...(e.instructions ? { appendSystemPrompt: e.instructions } : {}),
+        ...(appendSystemPrompt ? { appendSystemPrompt } : {}),
         ...(e.addDirs.length ? { addDirs: e.addDirs } : {}),
         ...(wd.core.size(name) ?? {}),
       });
@@ -353,6 +362,7 @@ export function createRemoteControlSupervisor(opts: {
       startedAt: new Date().toISOString(),
       args: shownArgs,
       instructions: e.wrapper && !!e.instructions,
+      ...(e.wrapper && opts.systemInstructions ? { systemInstructions: [...opts.systemInstructions.labels] } : {}),
     };
     delete e.status.lastError;
 

@@ -109,7 +109,6 @@ export function buildWrapperArgs(opts: {
     opts.name,
     "--permission-mode",
     opts.permissionMode,
-    "--no-chrome", // Chrome 拡張があると対話型 claude が「Claude in Chrome extension detected」の確認で止まる
     ...(opts.model ? ["--model", opts.model] : []),
     ...(opts.appendSystemPrompt ? ["--append-system-prompt", opts.appendSystemPrompt] : []),
     ...(opts.addDirs ?? []).flatMap((d) => ["--add-dir", d]),

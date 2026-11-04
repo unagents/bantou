@@ -1,6 +1,9 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
+/** 書込ごとに違う tmp 名にする（同じ pid の同時 save が互いの tmp を rename して ENOENT になるのを防ぐ）。 */
+let tmpSeq = 0;
+
 /** center の状態ファイル（JSON 配列）。壊れた・無いファイルは空として読み、書込は tmp + rename。 */
 export interface JsonListStore<T> {
   load(): Promise<T[]>;
@@ -29,7 +32,7 @@ export function createJsonListStore<T>(path: string, log: (m: string) => void): 
     },
     async save(items) {
       await mkdir(dirname(path), { recursive: true });
-      const tmp = `${path}.${process.pid}.tmp`;
+      const tmp = `${path}.${process.pid}.${++tmpSeq}.tmp`;
       await writeFile(tmp, `${JSON.stringify(items, null, 2)}\n`, { mode: 0o600 });
       await rename(tmp, path);
     },
@@ -64,7 +67,7 @@ export function createJsonObjectStore<T extends object>(path: string, log: (m: s
     },
     async save(value) {
       await mkdir(dirname(path), { recursive: true });
-      const tmp = `${path}.${process.pid}.tmp`;
+      const tmp = `${path}.${process.pid}.${++tmpSeq}.tmp`;
       await writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
       await rename(tmp, path);
     },

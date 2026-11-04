@@ -17,6 +17,7 @@ import { createRemoteControlSupervisor } from "./remote-control.js";
 import { createContextUsageTracker } from "./context-usage.js";
 import { createSessionManager } from "./sessions.js";
 import { createJsonListStore, createJsonObjectStore } from "./store.js";
+import { SYSTEM_INSTRUCTION_PARTS, buildSystemInstructions, partLabel } from "./system-instructions.js";
 import { createCenterServer, createSessionMcpServer } from "./server.js";
 import { createCore } from "./core.js";
 import { createEventHub } from "./events.js";
@@ -60,6 +61,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     return `http://${host}:${httpPort}${SESSION_MCP_PATH}`;
   };
   const supervisor = createRemoteControlSupervisor({
+    systemInstructions: { build: (ctx) => buildSystemInstructions(ctx), labels: SYSTEM_INSTRUCTION_PARTS.map(partLabel) },
     config,
     configPath,
     log,
