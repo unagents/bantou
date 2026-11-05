@@ -91,6 +91,21 @@ test.describe("session rename / move", () => {
     expect(await mock(page, (m) => m.centerSessions.find((s) => s.name === "careery")?.path)).toBe("/data/other/careery");
   });
 
+  test("the --continue note under the folder shows only while the folder is changed", async ({ page }) => {
+    await page.goto("/");
+    await openGear(page, "careery");
+    const dlg = page.getByTestId("settings-dialog");
+    const original = await dlg.getByTestId("settings-path").inputValue();
+    await expect(dlg.getByTestId("settings-path-note")).toHaveCount(0);
+    await dlg.getByTestId("settings-name").fill("career-5");
+    await expect(dlg.getByTestId("settings-path-note")).toHaveCount(0);
+    await dlg.getByTestId("settings-path").fill("/data/new/careery");
+    await expect(dlg.getByTestId("settings-path-note")).toContainText("--continue");
+    await expect(dlg.getByTestId("settings-path-note")).toContainText("名前の変更だけなら続きは保たれる");
+    await dlg.getByTestId("settings-path").fill(original);
+    await expect(dlg.getByTestId("settings-path-note")).toHaveCount(0);
+  });
+
   test("the folder dialog button shows only for the own center on macOS / Windows", async ({ page }) => {
     await page.goto("/");
     await openGear(page, "careery");

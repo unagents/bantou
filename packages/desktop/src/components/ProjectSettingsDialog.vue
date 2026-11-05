@@ -102,6 +102,9 @@ async function save() {
             <UButton v-if="canPick" label="選択…" color="neutral" variant="outline" data-testid="settings-path-pick" @click="pick" />
           </div>
         </UFormField>
+        <p v-if="pathChanged" class="text-cork-muted text-xs" data-testid="settings-path-note">
+          フォルダを変えると claude の会話の続き（--continue）が引き継がれず、新しい会話として起動する。名前の変更だけなら続きは保たれる
+        </p>
         <UCheckbox
           v-if="pathChanged"
           v-model="moveDir"

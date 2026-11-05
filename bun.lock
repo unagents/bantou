@@ -60,7 +60,7 @@
     },
     "packages/server": {
       "name": "bantou",
-      "version": "0.5.0",
+      "version": "0.6.2",
       "bin": {
         "bantou": "bin/bantou.mjs",
       },

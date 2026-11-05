@@ -23,4 +23,4 @@
 - 動いている session の再起動は desktop に操作が無い。名前・path を変えた後の扱い（claude の再起動要否）は center 側の挙動に依存。
 - `nuxt typecheck` は環境の vue-tsc が MODULE_NOT_FOUND で動かず未実施。型は nuxt generate / e2e のビルドが通ることまで。
 - 設定保存が成功し `session_update` が失敗した場合、設定は新しい値で保存済みのまま（名前・path は旧のまま）。再保存は可能。
-- center の tool 説明: session は止めて新しい名前で起動し直す。path を変えると `--continue` が効かず素の起動になる（会話が引き継がれない）。desktop のダイアログ・README には未記載。
+- center の tool 説明: session は止めて新しい名前で起動し直す。path を変えると `--continue` が効かず素の起動になる（会話が引き継がれない）。desktop は追記済み（フォルダ欄下の `settings-path-note` と README）。
