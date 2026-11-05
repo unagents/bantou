@@ -122,6 +122,7 @@ center は wrapper 経由の session（master-cap）を起動するたび（新�
 | tool | 入力 | 出力 |
 |---|---|---|
 | `session_create` | `name`, `path?`, `permissionMode?`, `settings?`（プロジェクト設定。下記） | `SessionInfo`（下記） |
+| `session_update` | `name`, `newName?`, `path?`（絶対パス）, `move?`（`path` 指定時のみ） | `SessionInfo`（更新後。手順と注意は下記） |
 | `session_settings_get` | `name` | `{ name, settings }`（未設定・config 由来は `settings: {}`） |
 | `session_settings_update` | `name`, `settings`（項目ごとにマージ。`null` で項目を削除） | `{ name, settings }`（更新後の全体） |
 | `center_settings_get` | なし | `{ settings }`（center 共通の設定。未設定は `{}`） |
@@ -167,6 +168,10 @@ center は wrapper 経由の session（master-cap）を起動するたび（新�
 ### session（A）
 
 - `session_create`: pty wrapper 経由の対話型 `claude --remote-control <name> --permission-mode <permissionMode> --mcp-config '<JSON>'`（再起動時は `--continue` 付き）を `path` で起動し、supervisor に動的に足す（起動の詳細は「master-cap の起動（wrapper）」）。`path` 省略時は config の `workspace` の下の `<name>`（無ければ作る）。`workspace` が無ければ `path` が必須。`permissionMode` の既定は `auto`。`name` の重複、既存 project 名との衝突、他の project / session と同じ path は拒否。接続（URL 取得）か早期終了まで最大 15 秒待って状態を返す（待ちきれなければ `starting`）。
+- `session_update`: `session_create` で作ったものだけ（config 由来・未定義は `session_delete` と同じ文言で拒否）。`newName`（既存の session / project 名と重複不可）と `path`（他の session / project と重複不可、絶対パス）を変える。`newName` も `path` も実質変わらない呼び出しは拒否。手順: (1) 検証 (2) `supervisor.remove`（停止・core / token の解除） (3) `path` 指定時は、`move: true` なら今のフォルダを新しい `path` へ `fs.rename` で移動（親 dir は作る。EXDEV など失敗したら error にして何も変えない。コピーはしない）、そうでなければ新しい `path` を作るだけ（今のフォルダは残す。`move` は `path` が無ければ無視） (4) `sessions.json` の `name` / `path` を更新（`settings`・並び順はそのまま） (5) 名前を変えたら remotes の記録を付け替え (6) 新しい名前で `add` → `start(resume)` (7) `session_create` と同じ待ちで `SessionInfo` を返し、`GET /events` に `reason: "updated"`（`name` = 新しい名前）を流す。途中で失敗したら記録・フォルダの移動・remotes の付け替えを戻し、元の名前で起動し直す（best effort。失敗は center.log）。`instructions` / `addDirs` は新しい名前へ引き継ぐ。
+  - **path を変えると `--continue` が効かない**: claude の会話は path ごとに保存されるため、新しい path では `--continue` が「会話が無い」で落ち、既存の fallback で素の起動（新しい会話）になる（仕様）。名前だけ変えた時は同じ path なので会話は続く。`move: true` でフォルダを移しても会話の保存先（`~/.claude/projects/<path を変換した dir>`）は移らない。
+  - **cap_id は変わらない**: remote の記録（`session` と未完了の指示の `owner`）だけ新しい名前へ付け替える。cap_id は `c-<center-id>-<旧名前>` のままで、server 上の cap をそのまま使う（以後の `remote_send` も記録の cap_id を使う）。
+  - 名前を変えると remote-control 名・messenger の peer 名・ログ名（`<name>.log`）・statusLine の URL も新しい名前になる。旧名前宛ての messenger 通知は届かない。
 - `session_delete`: `session_create` で作ったものだけ。remote-control を停止（SIGTERM → `stopGraceMs` 後 SIGKILL）して監視と保存から外す。path は消さない。config 由来の project は拒否。
 - `session_list`: config の project と session の全部。`source` が `config` / `session`。`instructions`（真偽。その session を起動した時に `--append-system-prompt`（session の `instructions`）を付けたか。本文は出さない。`rc_status` の `instructions` と同じで、`rc_status` の `args` でも値は `<N 文字>` に伏せる）が付く。`contextUsage`（`{ usedTokens, windowTokens, percent, updatedAt, model? }`。`model` は statusLine 由来の時だけ。まだ分からない時は `null`）が付く。取得の仕組みは「context 使用量」。
 - プロジェクト設定（`settings`、設計は `docs/design/project-settings.md`）: session ごとの設定。`{ instructions?: string, addDirs?: string[], … }`。`addDirs` は master-cap が参照してよいフォルダ（center のホスト上の絶対パス、20 個以内、重複は除く）で、起動のたびに 1 つずつ `claude --add-dir <path>` で渡す（空配列は削除と同じ）。`session_create` の `settings` で作成時に渡し、`session_settings_get` で読み、`session_settings_update` でマージ更新する（`settings` に書いた項目だけ変わる・省略した項目は変わらない・`null` で項目を削除・未知の項目は保持して返す）。`sessions.json` の各 session の `settings` に保存する。config 由来の project は更新できない（get は `{}`）。更新は次の起動から効く（動いている session は起動し直さない）。
@@ -343,7 +348,7 @@ center プロセス内のモジュール（`src/core.ts`）。session ごとの�
 - `POST /sessions/<name>/input` `{"data":"<base64>"}` → 204（実行中でなければ 409）。
 - `POST /sessions/<name>/resize` `{"cols":N,"rows":N}` → 204。最後に送った側のサイズを覚え、次の wrapper 起動の初期値にする。
 
-- `GET /events`: SSE（外向け token、イベント ID・再送なし）。接続時に `event: sessions` `data: {}`、session の追加・削除・起動時復帰ごとに `event: sessions` `data: {"reason":"created"|"deleted"|"restored"|"context","name":"<name>"}`。15 秒ごとに `: ka`。受け取った側は `session_list` を取り直す。
+- `GET /events`: SSE（外向け token、イベント ID・再送なし）。接続時に `event: sessions` `data: {}`、session の追加・削除・起動時復帰・名前 / path の変更ごとに `event: sessions` `data: {"reason":"created"|"deleted"|"restored"|"updated"|"context","name":"<name>"}`。15 秒ごとに `: ka`。受け取った側は `session_list` を取り直す。
 
 ## 添付画像
 

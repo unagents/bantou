@@ -239,6 +239,11 @@ export interface RemoteManager {
   applyLateReply(reply: CapResultReply | TaskResultReply | ErrorReply, fromId?: string): boolean;
   /** owner を渡すと、その session の cap だけ（includeShared で旧共有 cap も）。省くと全件。 */
   list(filter?: { owner?: string; includeShared?: boolean }): RemoteView[];
+  /**
+   * session の改名に合わせて記録を付け替える（session === old → new、pending[].owner === old → new）。cap_id（remote_id）は変えない。
+   * 付け替えた記録の件数を返す。0 件なら保存しない。
+   */
+  renameSession(oldName: string, newName: string): Promise<number>;
   /** server から activity 通知を受けた時に呼ぶ。cap が idle で worker も無くなったなら、未完了の指示を完了にして通知する・待ちを起こす。 */
   onActivity(capId: string, fromId?: string): void;
   /**
@@ -754,8 +759,9 @@ export function createRemoteManager(opts: {
       if (blocked) throw new Error(blocked.message);
       return serial(peer.id, async () => {
         // cap は session × server に 1 つ。cap_id は center-id と session 名から決まる。無ければ記録を作り、cap は server が最初の task で作る
-        const cid = sessionCapId(capId, input.owner);
+        // 既存の記録があればその remote_id（session の改名後も cap_id は変えない）
         let rec = findRecord(peer, input.owner);
+        const cid = rec?.remote_id ?? sessionCapId(capId, input.owner);
         const st = await link.statusOn(peer, { cap_id: cid });
         if (st.type === "error") throw new Error(`server の cap を確かめられない: ${st.message}`);
         const exists = st.caps.some((c) => c.id === cid);
@@ -817,6 +823,27 @@ export function createRemoteManager(opts: {
           ...(target.worker_model ? { worker_model: target.worker_model } : {}),
         };
       });
+    },
+
+    async renameSession(oldName, newName) {
+      let n = 0;
+      for (const r of records) {
+        let hit = false;
+        if (r.session === oldName) {
+          r.session = newName;
+          hit = true;
+        }
+        for (const p of r.pending) {
+          if (p.owner === oldName) {
+            p.owner = newName;
+            hit = true;
+          }
+        }
+        if (hit) n++;
+      }
+      if (n > 0) await persist();
+      log(`remote の session を付け替えた: ${oldName} -> ${newName} (記録 ${n} 件、cap_id は変えない)`);
+      return n;
     },
 
     async delete({ remote_id, server, force, owner }) {

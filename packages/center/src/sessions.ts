@@ -1,5 +1,5 @@
-import { mkdir } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
+import { mkdir, rename } from "node:fs/promises";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { z } from "zod";
 import { projectSchema, PERMISSION_MODES, type Config, type ProjectConfig } from "./config.js";
 import { composeAddDirs, composeInstructions, mergeSettings, projectSettingsPatchSchema, readSettings, type ProjectSettings, type ProjectSettingsPatch } from "./project-settings.js";
@@ -44,6 +44,20 @@ export const sessionCreateSchema = {
   settings: projectSettingsPatchSchema.optional().describe("プロジェクトごとの設定（{ instructions?: string, addDirs?: string[], … }）。instructions は --append-system-prompt、addDirs（絶対パス）は 1 つずつ --add-dir で渡す（再起動・--continue でも付く）。省略・空は無し"),
 };
 
+export const sessionUpdateSchema = {
+  name: z.string().regex(SESSION_NAME, "英数字と _ - のみ"),
+  newName: z.string().regex(SESSION_NAME, "英数字と _ - のみ").optional().describe("新しい名前。省略時は名前を変えない"),
+  path: z.string().min(1).optional().describe("新しい path（絶対パス）。省略時は path を変えない"),
+  move: z.boolean().optional().describe("path 指定時のみ有効。true = 今のフォルダを新しい path へ移動（rename。失敗したら何も変えない。コピーはしない）。省略・false = 新しい path を作るだけで今のフォルダは残す"),
+};
+
+export interface SessionUpdateInput {
+  name: string;
+  newName?: string;
+  path?: string;
+  move?: boolean;
+}
+
 export interface SessionManager {
   /** 保存済みの session を supervisor に載せて --continue で復帰させる（失敗時は素の起動へ fallback）。 */
   restore(): Promise<void>;
@@ -59,6 +73,11 @@ export interface SessionManager {
   getCenterSettings(): { settings: ProjectSettings };
   /** center 共通の設定を項目ごとにマージして保存し、全 session の次の起動に反映する。更新後の全体を返す。 */
   updateCenterSettings(patch: ProjectSettingsPatch): Promise<{ settings: ProjectSettings }>;
+  /**
+   * session の名前（newName）と path を変える（session_create で作ったものだけ）。停止 → フォルダの移動 / 作成 → 記録の更新 → 新しい名前で起動し直す（resume）。
+   * path を変えた時は --continue が「会話が無い」で落ち、素の起動へ fallback する。cap_id は変えない。失敗時は記録と名前を元に戻して起動し直す（best effort）。
+   */
+  update(input: SessionUpdateInput): Promise<SessionInfo>;
   delete(name: string): Promise<{ name: string; deleted: true }>;
   list(): SessionInfo[];
 }
@@ -80,6 +99,8 @@ export function createSessionManager(opts: {
   events?: EventHub;
   /** session ごとのコンテキスト使用状況の取得元。省略時は常に null。 */
   contextUsage?: (name: string) => ContextUsage | null;
+  /** update で名前を変えた時に remotes の記録（session / pending の owner）を付け替える先。省略時は何もしない。 */
+  renameRemoteSession?: (oldName: string, newName: string) => Promise<unknown> | unknown;
 }): SessionManager {
   const { config, supervisor, store, log } = opts;
   const waitMs = opts.waitMs ?? 15_000;
@@ -117,6 +138,25 @@ export function createSessionManager(opts: {
     const i = composeInstructions(common, s);
     const d = composeAddDirs(common, s);
     return { ...(i ? { instructions: i } : {}), ...(d.length ? { addDirs: d } : {}) };
+  };
+
+  /** 接続（URL 取得）か失敗までを少し待つ。待ちきれなければ starting のまま返す。 */
+  const settle = async (name: string, first: RcStatus): Promise<RcStatus> => {
+    let st = first;
+    const deadline = Date.now() + waitMs;
+    // 一度でも終了したら（trust 未承認などの即死）待たずに、原因（lastError）付きで返す
+    while (Date.now() < deadline && (st.state === "starting" || st.state === "connected") && !st.sessionUrl && !st.lastExit) {
+      await sleep(200);
+      st = supervisor.status(name);
+    }
+    return st;
+  };
+
+  /** saved の順を保ったまま name の記録を差し替える（改名で並びを変えない）。 */
+  const replaceSaved = (oldName: string, rec: SavedSession): void => {
+    const next = [...saved.entries()].map(([k, v]): [string, SavedSession] => (k === oldName ? [rec.name, rec] : [k, v]));
+    saved.clear();
+    for (const [k, v] of next) saved.set(k, v);
   };
 
   const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -176,16 +216,9 @@ export function createSessionManager(opts: {
           throw new Error(`状態ファイルに保存できない: ${(e as Error).message}`);
         }
         opts.events?.publish({ reason: "created", name });
-        let st = await supervisor.start(name);
+        const st = await supervisor.start(name);
         log(`session 作成: ${name} (${path})`);
-        // 接続（URL 取得）か失敗までを少し待つ。待ちきれなければ starting のまま返す
-        const deadline = Date.now() + waitMs;
-        // 一度でも終了したら（trust 未承認などの即死）待たずに、原因（lastError）付きで返す
-        while (Date.now() < deadline && (st.state === "starting" || st.state === "connected") && !st.sessionUrl && !st.lastExit) {
-          await sleep(200);
-          st = supervisor.status(name);
-        }
-        return info(st);
+        return info(await settle(name, st));
       }),
 
     getSettings: (name) => {
@@ -239,6 +272,91 @@ export function createSessionManager(opts: {
         }
         log(`center 共通の設定を更新 (項目: ${Object.keys(next).join(",") || "なし"})`);
         return { settings: next };
+      }),
+
+    update: (input) =>
+      serial(async () => {
+        const { name } = input;
+        const rec = saved.get(name);
+        if (!rec) {
+          const known = supervisor.list().some((s) => s.project === name);
+          throw new Error(known ? `session_create で作ったものではない（config 由来）: ${name}` : `未定義の session: ${name}`);
+        }
+        const existing = supervisor.list();
+        const newName = input.newName ?? name;
+        if (!SESSION_NAME.test(newName)) throw new Error("name は英数字と _ - のみ");
+        const renaming = newName !== name;
+        if (renaming && existing.some((s) => s.project === newName)) throw new Error(`name が既に使われている: ${newName}`);
+        let newPath = rec.path;
+        if (input.path !== undefined) {
+          if (!isAbsolute(input.path)) throw new Error("path は絶対パスで指定する");
+          newPath = resolve(input.path);
+        }
+        const moving = resolve(newPath) !== resolve(rec.path);
+        if (moving) {
+          const clash = existing.find((s) => s.project !== name && resolve(s.path) === newPath);
+          if (clash) throw new Error(`path が既に使われている: ${newPath}（${clash.project}）`);
+        }
+        if (!renaming && !moving) throw new Error("変更が無い: newName か今と違う path を指定する");
+
+        const oldRec = rec;
+        const newRec: SavedSession = { ...rec, name: newName, path: newPath };
+        const doMove = moving && input.move === true;
+        let renamedRemotes = false;
+        let moved = false;
+        let swapped = false;
+        let added = false;
+        await supervisor.remove(name);
+        try {
+          if (moving) {
+            if (doMove) {
+              await mkdir(dirname(newPath), { recursive: true });
+              await rename(oldRec.path, newPath);
+              moved = true;
+            } else {
+              await mkdir(newPath, { recursive: true });
+            }
+          }
+          replaceSaved(name, newRec);
+          swapped = true;
+          try {
+            await persist();
+          } catch (e) {
+            throw new Error(`状態ファイルに保存できない: ${(e as Error).message}`);
+          }
+          if (renaming && opts.renameRemoteSession) {
+            await opts.renameRemoteSession(name, newName);
+            renamedRemotes = true;
+          }
+          supervisor.add(toProject(newRec), { wrapper: true, ...instrOpt(newRec.settings) });
+          added = true;
+          const st = await supervisor.start(newName, { resume: true });
+          opts.events?.publish({ reason: "updated", name: newName });
+          log(`session 更新: ${name} -> ${newName} (${oldRec.path} -> ${newPath}${doMove ? ", フォルダ移動" : ""})`);
+          return info(await settle(newName, st));
+        } catch (e) {
+          const why = e instanceof Error ? e.message : String(e);
+          log(`session 更新失敗、元に戻す: ${name} ${why}`);
+          const undo = async (what: string, fn: () => Promise<unknown> | unknown): Promise<void> => {
+            try {
+              await fn();
+            } catch (e2) {
+              log(`session 更新の巻き戻し失敗 (${what}): ${name} ${e2 instanceof Error ? e2.message : String(e2)}`);
+            }
+          };
+          if (added) await undo("新しい名前の停止", () => supervisor.remove(newName));
+          if (renamedRemotes) await undo("remotes の付け替え", () => opts.renameRemoteSession?.(newName, name));
+          if (swapped) {
+            replaceSaved(newName, oldRec);
+            await undo("状態ファイルの復元", persist);
+          }
+          if (moved) await undo("フォルダの移動を戻す", () => rename(newPath, oldRec.path));
+          await undo("元の名前で起動", async () => {
+            supervisor.add(toProject(oldRec), { wrapper: true, ...instrOpt(oldRec.settings) });
+            await supervisor.start(name, { resume: true });
+          });
+          throw new Error(`session を更新できない（元に戻した）: ${why}`);
+        }
       }),
 
     delete: (name) =>

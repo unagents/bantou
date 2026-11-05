@@ -118,6 +118,8 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     supervisor,
     store: createJsonListStore(join(stateDir, "sessions.json"), log),
     centerStore: createJsonObjectStore(join(stateDir, "center-settings.json"), log),
+    // remotes は sessions の後に作るので、呼ばれる時に参照する
+    renameRemoteSession: (oldName, newName) => remotes.renameSession(oldName, newName),
     log,
   });
   const capId = await loadCapId(stateDir, log);
