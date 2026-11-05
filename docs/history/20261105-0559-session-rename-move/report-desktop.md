@@ -24,3 +24,10 @@
 - `nuxt typecheck` は環境の vue-tsc が MODULE_NOT_FOUND で動かず未実施。型は nuxt generate / e2e のビルドが通ることまで。
 - 設定保存が成功し `session_update` が失敗した場合、設定は新しい値で保存済みのまま（名前・path は旧のまま）。再保存は可能。
 - center の tool 説明: session は止めて新しい名前で起動し直す。path を変えると `--continue` が効かず素の起動になる（会話が引き継がれない）。desktop は追記済み（フォルダ欄下の `settings-path-note` と README）。
+
+## review 第1回の修正
+
+- [medium] 再起動・会話の説明: `session_update` は保存で即座に session を止めて新名前・新 path で起動し直す。フォルダ欄の help を「保存すると session を再起動する。フォルダを変えると以前の会話は引き継がれず新しい会話で始まる（移動チェックの有無に関わらず）」に、移動チェックの description にも同趣旨を追記。README の「次に起動する session から効く」を実装どおり（即座に再起動・path 変更で新しい会話・名前だけなら続きは保たれる）に直し、`settings-path-note` の文は重複させず参照にした。
+- [medium] 選択の付け替え: `renamed` は名前が変わった時だけ `(from, to)` で emit。path だけの変更は `updated`（引数なし）で、`session_update` 成功のたびに emit して一覧を取り直す。`pages/index.vue` は歯車を開いた時点で「その session が選択中だったか」を覚え（保存の戻りより前に一覧が更新されても判定がぶれないため）、選択中だった時だけ新名前へ付け替える。
+- e2e: 非選択 session の改名で選択が変わらない / path のみ変更（選択中・非選択とも）で選択が変わらず一覧が更新される、の 2 件追加。help 表示の確認を既存の注意文テストに追加。
+- テスト: e2e 118 passed / 0 failed。Rust は未変更のため cargo test は再実行せず。

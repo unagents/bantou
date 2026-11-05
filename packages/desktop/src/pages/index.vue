@@ -62,6 +62,12 @@ const selectedName = ref<string | null>(null);
 const fromConfig = (name: string) => centerList.value.sessions.find((r) => r.name === name)?.source === "config";
 /** Session whose project settings dialog is open. */
 const settingsFor = ref<string | null>(null);
+/** Whether the session of the open gear dialog was the selected one when it was opened (the list may refresh before the save returns). */
+let settingsWasSelected = false;
+function openSettings(name: string) {
+  settingsWasSelected = selectedName.value === name;
+  settingsFor.value = name;
+}
 const settingsDialogOpen = computed({
   get: () => settingsFor.value !== null,
   set: (v) => {
@@ -100,8 +106,11 @@ watch(settingsOpen, (v) => {
   void refreshAddTarget();
   void refreshSessions();
 });
-function onSessionRenamed(name: string) {
-  selectedName.value = name;
+/** The gear does not change the selection; a rename only carries it along when the renamed session was the selected one. */
+function onSessionRenamed(from: string, to: string) {
+  if (settingsWasSelected) selectedName.value = to;
+}
+function onSessionUpdated() {
   void refreshSessions();
 }
 
@@ -185,7 +194,7 @@ function onSessionCreated(name: string) {
                 :title="fromConfig(g.name) ? 'center の config 由来の project は設定を持てない' : undefined"
                 data-testid="session-settings-open"
                 :data-name="g.name"
-                @click="settingsFor = g.name"
+                @click="openSettings(g.name)"
               />
             </li>
           </ul>
@@ -251,6 +260,7 @@ function onSessionCreated(name: string) {
       :path="centerList.sessions.find((s) => s.name === settingsFor)?.path ?? null"
       :existing="centerList.sessions.map((s) => s.name)"
       @renamed="onSessionRenamed"
+      @updated="onSessionUpdated"
     />
     <SettingsDialog v-if="settingsOpen" v-model:open="settingsOpen" />
     <CenterDialog v-if="centerOpen" v-model:open="centerOpen" />

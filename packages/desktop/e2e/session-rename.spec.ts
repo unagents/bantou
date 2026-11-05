@@ -91,6 +91,36 @@ test.describe("session rename / move", () => {
     expect(await mock(page, (m) => m.centerSessions.find((s) => s.name === "careery")?.path)).toBe("/data/other/careery");
   });
 
+  test("renaming a session that is not selected leaves the selection alone", async ({ page }) => {
+    await page.goto("/");
+    await pickSession(page, "stroke-board");
+    await openGear(page, "careery");
+    const dlg = page.getByTestId("settings-dialog");
+    await dlg.getByTestId("settings-name").fill("career-6");
+    await dlg.getByTestId("settings-save").click();
+    await expect(dlg).toBeHidden();
+    await expect(page.locator("[data-testid=session-settings-open][data-name=career-6]")).toBeVisible();
+    await expect(page.locator("[aria-current=true]")).toContainText("stroke-board");
+  });
+
+  test("changing only the folder keeps the selection (selected or not) and refreshes the list", async ({ page }) => {
+    await page.goto("/");
+    await pickSession(page, "careery");
+    await openGear(page, "stroke-board");
+    const dlg = page.getByTestId("settings-dialog");
+    await dlg.getByTestId("settings-path").fill("/data/p/stroke-board");
+    await dlg.getByTestId("settings-save").click();
+    await expect(dlg).toBeHidden();
+    await expect(page.locator("[aria-current=true]")).toContainText("careery");
+    await openGear(page, "careery");
+    await dlg.getByTestId("settings-path").fill("/data/p/careery");
+    await dlg.getByTestId("settings-save").click();
+    await expect(dlg).toBeHidden();
+    await expect(page.locator("[aria-current=true]")).toContainText("careery");
+    await openGear(page, "careery");
+    await expect(dlg.getByTestId("settings-path")).toHaveValue("/data/p/careery");
+  });
+
   test("the --continue note under the folder shows only while the folder is changed", async ({ page }) => {
     await page.goto("/");
     await openGear(page, "careery");
@@ -100,6 +130,8 @@ test.describe("session rename / move", () => {
     await dlg.getByTestId("settings-name").fill("career-5");
     await expect(dlg.getByTestId("settings-path-note")).toHaveCount(0);
     await dlg.getByTestId("settings-path").fill("/data/new/careery");
+    await expect(dlg).toContainText("保存すると session を再起動する");
+    await expect(dlg).toContainText("以前の会話は引き継がれず新しい会話で始まる");
     await expect(dlg.getByTestId("settings-path-note")).toContainText("--continue");
     await expect(dlg.getByTestId("settings-path-note")).toContainText("名前の変更だけなら続きは保たれる");
     await dlg.getByTestId("settings-path").fill(original);

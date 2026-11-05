@@ -4,7 +4,7 @@ import { draftError, draftOf, emptyDraft, toUpdate, type SettingsDraft } from "~
 
 const open = defineModel<boolean>("open", { required: true });
 const props = defineProps<{ name: string; path?: string | null; existing?: string[] }>();
-const emit = defineEmits<{ renamed: [name: string] }>();
+const emit = defineEmits<{ renamed: [from: string, to: string]; updated: [] }>();
 
 const NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
 
@@ -75,7 +75,8 @@ async function save() {
         path: pathChanged.value ? newPath.value : undefined,
         move: pathChanged.value ? moveDir.value : undefined,
       });
-      emit("renamed", newName.value);
+      if (nameChanged.value) emit("renamed", props.name, newName.value);
+      emit("updated");
     }
     open.value = false;
   } catch (e) {
@@ -95,7 +96,7 @@ async function save() {
         </UFormField>
         <UFormField
           label="フォルダ"
-          help="center のホスト上の絶対パス（この PC のパスではない）。無ければ作られる。変えると次に起動する session から効く"
+          help="center のホスト上の絶対パス（この PC のパスではない）。無ければ作られる。保存すると session を再起動する。フォルダを変えると以前の会話は引き継がれず新しい会話で始まる（移動チェックの有無に関わらず）"
         >
           <div class="flex gap-2">
             <UInput v-model="pathInput" class="w-full" placeholder="（center が返していない）" data-testid="settings-path" />
@@ -109,7 +110,7 @@ async function save() {
           v-if="pathChanged"
           v-model="moveDir"
           label="今のフォルダを新しい場所へ移動する"
-          description="OFF なら新しいフォルダを作るだけ（中身は移らない）"
+          description="OFF なら新しいフォルダを作るだけ（中身は移らない）。どちらでも session は新しい会話で始まる"
           data-testid="settings-path-move"
         />
         <ProjectSettingsFields v-model="draft" id-prefix="settings" :can-pick="canPick" @error="actionError = $event" />
