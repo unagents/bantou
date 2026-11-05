@@ -241,10 +241,12 @@ export interface RemoteManager {
   list(filter?: { owner?: string; includeShared?: boolean }): RemoteView[];
   /**
    * session 名 name が remote の記録と衝突するか。衝突すれば理由、無ければ null。
-   * create: cap_id（c-<center-id>-<name>）を別の session 名の記録が持っている時だけ（session_delete 後の同名の作り直しは旧 cap を引き継ぐので許す）。
-   * rename: session が name の記録、または cap_id が c-<center-id>-<name> の記録が 1 件でもある時（記録が残る間は再利用できない）。
+   * 別の session の記録と衝突する時だけ拒否する。
+   * (a) create / rename: remote_id が c-<center-id>-<name> の記録があり、その session が name と違う（改名で旧名の cap_id を別名が持つ）。
+   * (b) rename のみ: session が name の記録がある（改名先 name は改名元と必ず違うので、それは別の session の記録 = 削除済み session の残り）。
+   * 許す: create で session が name の記録（session_delete 後の同名の作り直し。旧 cap を続きとして引き継ぐ）。
    */
-  nameConflict(name: string, mode: "create" | "rename"): string | null;
+  conflictsWith(name: string, mode: "create" | "rename"): string | null;
   /**
    * session の改名に合わせて記録を付け替える（session === old → new、pending[].owner === old → new）。cap_id（remote_id）は変えない。
    * 付け替えた記録の件数を返す。0 件なら保存しない。
@@ -831,7 +833,7 @@ export function createRemoteManager(opts: {
       });
     },
 
-    nameConflict(name, mode) {
+    conflictsWith(name, mode) {
       let cid: string;
       try {
         cid = sessionCapId(capId, name);
