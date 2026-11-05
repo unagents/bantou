@@ -507,3 +507,23 @@ test("update: 復元(restore)は更新後の名前・path で行われる", asyn
   await b.mgr.restore();
   assert.deepEqual(b.mgr.list().map((s) => [s.name, s.path]), [["cfg", join(dir, "cfgproj")], ["pm2", np]]);
 });
+
+test("create / update(newName): remote 記録と衝突する名前は理由付きで拒否し、何も止めない。衝突判定は remotes の判定に従う", async () => {
+  const seen: [string, string][] = [];
+  const conflicts = new Map<string, string>([["create:old", "cap_id を別の session が持っている"], ["rename:held", "remote 記録が残っている"]]);
+  const { mgr, calls } = setup({ remoteNameConflict: (n, m) => { seen.push([n, m]); return conflicts.get(`${m}:${n}`) ?? null; } });
+  await assert.rejects(mgr.create({ name: "old" }), /cap_id を別の session が持っている/);
+  assert.deepEqual(mgr.list().map((s) => s.name), ["cfg"]);
+  await mgr.create({ name: "held" }); // create は rename 用の衝突では拒否されない（同名の作り直しは旧 cap を引き継ぐ）
+  await mgr.create({ name: "pm1" });
+  calls.length = 0;
+  await assert.rejects(mgr.update({ name: "pm1", newName: "held" }), /name が既に使われている/); // 既存 session 名が先
+  await mgr.delete("held");
+  calls.length = 0;
+  await assert.rejects(mgr.update({ name: "pm1", newName: "held" }), /remote 記録が残っている/);
+  assert.deepEqual(calls, []);
+  assert.deepEqual((await savedOf()).map((s) => s.name), ["pm1"]);
+  await mgr.update({ name: "pm1", path: join(dir, "p-only") }); // path だけの変更では名前の衝突は見ない
+  assert.ok(seen.some(([n, m]) => n === "held" && m === "rename"));
+  assert.ok(!seen.some(([n, m]) => n === "pm1" && m === "rename"));
+});

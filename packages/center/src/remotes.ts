@@ -240,6 +240,12 @@ export interface RemoteManager {
   /** owner を渡すと、その session の cap だけ（includeShared で旧共有 cap も）。省くと全件。 */
   list(filter?: { owner?: string; includeShared?: boolean }): RemoteView[];
   /**
+   * session 名 name が remote の記録と衝突するか。衝突すれば理由、無ければ null。
+   * create: cap_id（c-<center-id>-<name>）を別の session 名の記録が持っている時だけ（session_delete 後の同名の作り直しは旧 cap を引き継ぐので許す）。
+   * rename: session が name の記録、または cap_id が c-<center-id>-<name> の記録が 1 件でもある時（記録が残る間は再利用できない）。
+   */
+  nameConflict(name: string, mode: "create" | "rename"): string | null;
+  /**
    * session の改名に合わせて記録を付け替える（session === old → new、pending[].owner === old → new）。cap_id（remote_id）は変えない。
    * 付け替えた記録の件数を返す。0 件なら保存しない。
    */
@@ -823,6 +829,24 @@ export function createRemoteManager(opts: {
           ...(target.worker_model ? { worker_model: target.worker_model } : {}),
         };
       });
+    },
+
+    nameConflict(name, mode) {
+      let cid: string;
+      try {
+        cid = sessionCapId(capId, name);
+      } catch {
+        return null;
+      }
+      for (const r of records) {
+        if (mode === "create") {
+          if (r.remote_id === cid && r.session !== undefined && r.session !== name)
+            return `name の cap_id（${cid}）を別の session（${r.session}）の remote 記録が持っている。remote_delete で消すまで再利用できない: ${name}`;
+        } else if (r.session === name || r.remote_id === cid) {
+          return `name に remote 記録が残っている（${r.remote_id}${r.session ? ` session=${r.session}` : ""}）。remote_delete で消すまで再利用できない: ${name}`;
+        }
+      }
+      return null;
     },
 
     async renameSession(oldName, newName) {

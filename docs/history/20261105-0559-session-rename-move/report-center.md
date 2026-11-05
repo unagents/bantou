@@ -28,13 +28,14 @@ branch: `feature/session-rename-move`（packages/center のみ。desktop は w-d
 ## テスト
 
 - `bun run typecheck`: pass。
-- `bun run test`: 424 tests / 424 pass / 0 fail（この環境は linux。macOS 固有の既知失敗は出なかった）。
-- 追加（sessions.test.ts 9 件、tools.test.ts 1 件、remotes.test.ts 3 件）と既存 2 件の更新（tool 数・一覧）:
+- `bun run test`: 426 tests / 426 pass / 0 fail（この環境は linux。macOS 固有の既知失敗は出なかった）。
+- 追加（sessions.test.ts 10 件、tools.test.ts 1 件、remotes.test.ts 4 件）と既存 2 件の更新（tool 数・一覧）:
   - 名前だけ／path だけ（move なし：旧フォルダ残る）／path + move（中身ごと移動）／move は path 無しなら無視／両方＋settings 引き継ぎ＋並び順
   - config 由来・未定義・name 重複・不正・path 重複・相対 path・変更なしの拒否（何も止めない）
   - 失敗時の巻き戻し（rename 失敗／start 失敗でフォルダ・remotes・記録を戻す／remotes 失敗）
   - events の updated、restore が更新後の名前・path で行われる
   - remotes: owner 付け替え、改名後 send が同じ cap_id、他 session 不変、restore（再起動）後も新しい名前＋旧 cap_id
+  - 名前衝突の拒否（sessions: create / rename、remotes: nameConflict の各場合）
   - tools: session_update の委譲・エラー
 
 ## 残り
@@ -43,9 +44,13 @@ branch: `feature/session-rename-move`（packages/center のみ。desktop は w-d
 - 添付の置き場（上記）。
 - version bump はしていない。
 
-## 未解決（cap に確認中）
+## cap_id 衝突の拒否（cap 回答で採用）
 
-- cap_id を変えない設計の副作用: 改名後に旧名で `session_create` して `remote_send` すると、記録が無いため旧 cap_id を作り、改名後の session と同じ server cap に入る。`session_delete` 後に残る remote 記録がある名前へ改名しても、同じ session の記録が同じ server に 2 件できる。仕様の判断が要るため未対処（ask 済み）。
+- `RemoteManager.nameConflict(name, mode)` を追加。`SessionManager` へは `remoteNameConflict` で注入（daemon 配線）。
+- `session_update` の `newName`（mode=rename）: session が同名、または cap_id が `c-<center-id>-<newName>` の記録が 1 件でもあれば拒否。
+- `session_create`（mode=create）: cap_id を**別の session 名の記録**が持つ時だけ拒否（改名で旧名の cap_id を新名が持つ場合）。
+  - 指示は「衝突する記録を持つ名前の作成を拒否」だが、記録の session が同名の場合（`session_delete` 後の作り直し）まで拒否すると、README の「同名の作り直しは旧 cap を引き継ぐ」既存仕様が壊れるため許した。要判断なら言ってほしい。
+- 文言例: 「name に remote 記録が残っている（…）。remote_delete で消すまで再利用できない: <name>」。README に一言追記。
 
 ## その他
 

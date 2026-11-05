@@ -101,6 +101,8 @@ export function createSessionManager(opts: {
   contextUsage?: (name: string) => ContextUsage | null;
   /** update で名前を変えた時に remotes の記録（session / pending の owner）を付け替える先。省略時は何もしない。 */
   renameRemoteSession?: (oldName: string, newName: string) => Promise<unknown> | unknown;
+  /** name が remote の記録と衝突する理由（無ければ null）。create / update の newName の検証に使う。省略時は検査しない。 */
+  remoteNameConflict?: (name: string, mode: "create" | "rename") => string | null;
 }): SessionManager {
   const { config, supervisor, store, log } = opts;
   const waitMs = opts.waitMs ?? 15_000;
@@ -197,6 +199,8 @@ export function createSessionManager(opts: {
         path = resolve(path);
         const clash = existing.find((s) => resolve(s.path) === path);
         if (clash) throw new Error(`path が既に使われている: ${path}（${clash.project}）`);
+        const rc = opts.remoteNameConflict?.(name, "create");
+        if (rc) throw new Error(rc);
         await mkdir(path, { recursive: true });
         const settings = input.settings ? mergeSettings(undefined, input.settings) : undefined;
         const rec: SavedSession = {
@@ -287,6 +291,10 @@ export function createSessionManager(opts: {
         if (!SESSION_NAME.test(newName)) throw new Error("name は英数字と _ - のみ");
         const renaming = newName !== name;
         if (renaming && existing.some((s) => s.project === newName)) throw new Error(`name が既に使われている: ${newName}`);
+        if (renaming) {
+          const rc = opts.remoteNameConflict?.(newName, "rename");
+          if (rc) throw new Error(rc);
+        }
         let newPath = rec.path;
         if (input.path !== undefined) {
           if (!isAbsolute(input.path)) throw new Error("path は絶対パスで指定する");
