@@ -25,6 +25,18 @@ export const refreshSessions = () => invoke<SessionList>("refresh_sessions");
 export const createSession = (name: string, settings?: ProjectSettings, path?: string) =>
   invoke<Session>("create_session", { name, path: path?.trim() || null, settings: settings ?? null });
 
+/**
+ * Rename and / or change the folder of a session on the center (`session_update`). `move` counts with `path` only:
+ * true moves the current folder to the new place, false only makes the new folder. Returns the updated session.
+ */
+export const updateSession = (name: string, change: { newName?: string; path?: string; move?: boolean }) =>
+  invoke<Session>("session_update", {
+    name,
+    newName: change.newName?.trim() || null,
+    path: change.path?.trim() || null,
+    moveDir: change.path?.trim() ? (change.move ?? null) : null,
+  });
+
 /** For the add dialog's folder field: the center's default parent folder and whether this PC's folder dialog applies. */
 export const sessionPathHints = () => invoke<SessionPathHints>("session_path_hints");
 

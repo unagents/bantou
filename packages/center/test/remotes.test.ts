@@ -142,6 +142,108 @@ test("send: 2 回目の指示は同じ cap_id の task（task_id は別）。既
   assert.equal(second.remote_id, first.remote_id);
 });
 
+test("renameSession: session と pending の owner を付け替えて保存する。cap_id は変えず、改名後の send は同じ cap_id の既存の cap へ送る", async () => {
+  const { mgr, kicks, store, caps } = setup();
+  const first = await mgr.send({ owner: "pm1", goal: "one" });
+  assert.equal(first.remote_id, CAP);
+  assert.equal(await mgr.renameSession("pm1", "pm9"), 1);
+  const v = mgr.list();
+  assert.equal(v.length, 1);
+  assert.equal(v[0].remote_id, CAP);
+  assert.equal(v[0].session, "pm9");
+  assert.deepEqual(v[0].owners, ["pm9"]);
+  assert.deepEqual(mgr.list({ owner: "pm1" }), []);
+  assert.equal(mgr.list({ owner: "pm9" }).length, 1);
+  const saved = await store.load();
+  assert.equal(saved[0].session, "pm9");
+  assert.equal(saved[0].pending[0].owner, "pm9");
+  kicks[0].resolve(ok("r1", first.task_id));
+  await tick();
+  const second = await mgr.send({ owner: "pm9", goal: "two" });
+  assert.equal(second.remote_id, CAP);
+  assert.equal(second.created, false);
+  assert.deepEqual(kicks[1].cmd.cap_id, CAP);
+  assert.deepEqual(caps.get(peerA.id), [CAP]);
+  assert.equal(mgr.list().length, 1);
+});
+
+test("renameSession: 他の session の記録・無関係な名前には触れない。該当なしは 0 件", async () => {
+  const { mgr, kicks } = setup();
+  await mgr.send({ owner: "pm1", goal: "a" });
+  await mgr.send({ owner: "pm2", goal: "b" });
+  assert.equal(kicks.length, 2);
+  assert.equal(await mgr.renameSession("nope", "x"), 0);
+  assert.equal(await mgr.renameSession("pm1", "pm3"), 1);
+  assert.deepEqual(mgr.list({ owner: "pm2" }).map((x) => x.remote_id), [CAP2]);
+  assert.deepEqual(mgr.list({ owner: "pm3" }).map((x) => x.remote_id), [CAP]);
+});
+
+test("renameSession: 再起動（同じ store で restore）後も記録は新しい名前のまま、send は旧 cap_id を使い、記録は 1 件", async () => {
+  const a = setup();
+  const first = await a.mgr.send({ owner: "pm1", goal: "one" });
+  a.kicks[0].resolve(ok("r1", first.task_id));
+  await tick();
+  await a.mgr.renameSession("pm1", "pm9");
+  const b = setup({ statusOn: async () => ({ bantou: 1, type: "status_result", ok: true, caps: [{ kind: "cap", id: CAP }], workers: [] }) as never });
+  await b.mgr.restore();
+  assert.deepEqual(b.mgr.list({ owner: "pm9" }).map((x) => [x.remote_id, x.session]), [[CAP, "pm9"]]);
+  assert.deepEqual(b.mgr.list({ owner: "pm1" }), []);
+  const second = await b.mgr.send({ owner: "pm9", goal: "two" });
+  assert.equal(second.remote_id, CAP);
+  assert.equal(second.created, false);
+  assert.equal(b.kicks[0].cmd.cap_id, CAP);
+  assert.equal(b.mgr.list().length, 1);
+});
+
+test("conflictsWith (a): cap_id が c-…-<name> の記録の session が name と違うなら create / rename とも拒否（pm1 → pm9 改名後に pm1 を作る・pm1 へ改名する）。remote_delete で消せば通る", async () => {
+  const { mgr } = setup();
+  await mgr.send({ owner: "pm1", goal: "a" });
+  await mgr.renameSession("pm1", "pm9");
+  assert.match(mgr.conflictsWith("pm1", "create")!, new RegExp(`${CAP}.*pm9.*remote_delete`));
+  assert.match(mgr.conflictsWith("pm1", "rename")!, /remote_delete/);
+  assert.equal(mgr.conflictsWith("other", "create"), null);
+  assert.equal(mgr.conflictsWith("other", "rename"), null);
+  assert.equal(mgr.conflictsWith("bad name!", "create"), null);
+  await mgr.delete({ owner: "pm9", force: true });
+  assert.equal(mgr.conflictsWith("pm1", "create"), null);
+  assert.equal(mgr.conflictsWith("pm1", "rename"), null);
+});
+
+test("conflictsWith: 改名元（oldName）の session が持つ記録は衝突と見なさない。pm1 → pm2 → pm1 が通り、記録の session が pm1 に戻る。create 側は変えない", async () => {
+  const { mgr } = setup();
+  await mgr.send({ owner: "pm1", goal: "a" });
+  await mgr.renameSession("pm1", "pm2");
+  // pm2 が旧名 pm1 へ戻す: 記録は改名元 pm2 のもの
+  assert.equal(mgr.conflictsWith("pm1", "rename", "pm2"), null);
+  // 別の session（pm3）が pm1 へ改名するのは従来どおり拒否。oldName 無しも拒否
+  assert.match(mgr.conflictsWith("pm1", "rename", "pm3")!, /remote_delete/);
+  assert.match(mgr.conflictsWith("pm1", "rename")!, /remote_delete/);
+  // create は変えない
+  assert.match(mgr.conflictsWith("pm1", "create")!, /remote_delete/);
+  assert.equal(await mgr.renameSession("pm2", "pm1"), 1);
+  const v = mgr.list();
+  assert.deepEqual(v.map((x) => [x.remote_id, x.session]), [[CAP, "pm1"]]);
+  assert.equal(mgr.conflictsWith("pm1", "create"), null);
+});
+
+test("conflictsWith (b): session が name の記録（削除済み session の残り）があれば、その名前への改名は拒否", async () => {
+  const { mgr } = setup();
+  await mgr.send({ owner: "pm1", goal: "a" }); // pm1 は session_delete 済みで記録だけ残る想定
+  assert.match(mgr.conflictsWith("pm1", "rename")!, /remote 記録が残っている.*pm1.*remote_delete/);
+  assert.equal(mgr.conflictsWith("pm3", "rename"), null);
+});
+
+test("conflictsWith: 許す場合 — session_delete 後に同名で session_create（session が name の記録を続きとして引き継ぐ）。send も同じ cap_id", async () => {
+  const { mgr, kicks } = setup();
+  const first = await mgr.send({ owner: "pm1", goal: "a" });
+  assert.equal(mgr.conflictsWith("pm1", "create"), null);
+  kicks[0].resolve(ok("r1", first.task_id));
+  await tick();
+  const second = await mgr.send({ owner: "pm1", goal: "b" });
+  assert.equal(second.remote_id, CAP);
+  assert.equal(mgr.list().length, 1);
+});
+
 test("send: 前の指示の返信を待たずに続けて送っても、同じ cap_id で 2 本とも task になる（記録は 1 件）", async () => {
   const { mgr, kicks } = setup();
   await mgr.send({ owner: "pm1", goal: "one" });

@@ -239,6 +239,20 @@ export interface RemoteManager {
   applyLateReply(reply: CapResultReply | TaskResultReply | ErrorReply, fromId?: string): boolean;
   /** owner を渡すと、その session の cap だけ（includeShared で旧共有 cap も）。省くと全件。 */
   list(filter?: { owner?: string; includeShared?: boolean }): RemoteView[];
+  /**
+   * session 名 name が remote の記録と衝突するか。衝突すれば理由、無ければ null。
+   * 別の session の記録と衝突する時だけ拒否する。
+   * (a) create / rename: remote_id が c-<center-id>-<name> の記録があり、その session が name と違う（改名で旧名の cap_id を別名が持つ）。
+   * rename は改名元（oldName）の session が持つ記録を衝突と見なさない（pm1 → pm2 の後に pm2 → pm1 へ戻せる）。
+   * (b) rename のみ: session が name の記録がある（改名先 name は改名元と必ず違うので、それは別の session の記録 = 削除済み session の残り）。
+   * 許す: create で session が name の記録（session_delete 後の同名の作り直し。旧 cap を続きとして引き継ぐ）。
+   */
+  conflictsWith(name: string, mode: "create" | "rename", oldName?: string): string | null;
+  /**
+   * session の改名に合わせて記録を付け替える（session === old → new、pending[].owner === old → new）。cap_id（remote_id）は変えない。
+   * 付け替えた記録の件数を返す。0 件なら保存しない。
+   */
+  renameSession(oldName: string, newName: string): Promise<number>;
   /** server から activity 通知を受けた時に呼ぶ。cap が idle で worker も無くなったなら、未完了の指示を完了にして通知する・待ちを起こす。 */
   onActivity(capId: string, fromId?: string): void;
   /**
@@ -754,8 +768,9 @@ export function createRemoteManager(opts: {
       if (blocked) throw new Error(blocked.message);
       return serial(peer.id, async () => {
         // cap は session × server に 1 つ。cap_id は center-id と session 名から決まる。無ければ記録を作り、cap は server が最初の task で作る
-        const cid = sessionCapId(capId, input.owner);
+        // 既存の記録があればその remote_id（session の改名後も cap_id は変えない）
         let rec = findRecord(peer, input.owner);
+        const cid = rec?.remote_id ?? sessionCapId(capId, input.owner);
         const st = await link.statusOn(peer, { cap_id: cid });
         if (st.type === "error") throw new Error(`server の cap を確かめられない: ${st.message}`);
         const exists = st.caps.some((c) => c.id === cid);
@@ -817,6 +832,45 @@ export function createRemoteManager(opts: {
           ...(target.worker_model ? { worker_model: target.worker_model } : {}),
         };
       });
+    },
+
+    conflictsWith(name, mode, oldName) {
+      let cid: string;
+      try {
+        cid = sessionCapId(capId, name);
+      } catch {
+        return null;
+      }
+      for (const r of records) {
+        if (mode === "create") {
+          if (r.remote_id === cid && r.session !== undefined && r.session !== name)
+            return `name の cap_id（${cid}）を別の session（${r.session}）の remote 記録が持っている。remote_delete で消すまで再利用できない: ${name}`;
+        } else if (r.session !== oldName && (r.session === name || r.remote_id === cid)) {
+          return `name に remote 記録が残っている（${r.remote_id}${r.session ? ` session=${r.session}` : ""}）。remote_delete で消すまで再利用できない: ${name}`;
+        }
+      }
+      return null;
+    },
+
+    async renameSession(oldName, newName) {
+      let n = 0;
+      for (const r of records) {
+        let hit = false;
+        if (r.session === oldName) {
+          r.session = newName;
+          hit = true;
+        }
+        for (const p of r.pending) {
+          if (p.owner === oldName) {
+            p.owner = newName;
+            hit = true;
+          }
+        }
+        if (hit) n++;
+      }
+      if (n > 0) await persist();
+      log(`remote の session を付け替えた: ${oldName} -> ${newName} (記録 ${n} 件、cap_id は変えない)`);
+      return n;
     },
 
     async delete({ remote_id, server, force, owner }) {

@@ -69,12 +69,12 @@ async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partia
 
 const text = (r: unknown): string => (r as { content: { text: string }[] }).content[0].text;
 
-test("外向けの tool は 19 個。remote_create / remote_delete / remote_send / cap_kick は無い", async () => {
+test("外向けの tool は 20 個。remote_create / remote_delete / remote_send / cap_kick は無い", async () => {
   const { client, close } = await connect();
   const names = (await client.listTools()).tools.map((t) => t.name).sort();
   assert.deepEqual(names, [
     "center_info", "center_settings_get", "center_settings_update", "rc_list", "rc_start", "rc_status", "rc_stop", "remote_list", "remote_wait",
-    "server_list", "server_peers", "server_status", "session_create", "session_delete", "session_list", "session_settings_get", "session_settings_update", "worker_reply", "worker_resume",
+    "server_list", "server_peers", "server_status", "session_create", "session_delete", "session_list", "session_settings_get", "session_settings_update", "session_update", "worker_reply", "worker_resume",
   ]);
   for (const gone of ["remote_create", "remote_send", "remote_delete", "cap_kick"]) assert.ok(!names.includes(gone), gone);
   await close();
@@ -197,6 +197,24 @@ test("session_create / session_delete / session_list は SessionManager に委�
   assert.ok(bad instanceof Error || (bad as { isError?: boolean }).isError === true);
   assert.deepEqual(JSON.parse(text(await client.callTool({ name: "session_delete", arguments: { name: "pm1" } }))), { name: "pm1", deleted: true });
   assert.deepEqual(JSON.parse(text(await client.callTool({ name: "session_list", arguments: {} }))), []);
+  await close();
+});
+
+test("session_update は SessionManager に引数をそのまま委譲し、例外は isError。name 以外は省略可・不正な名前は弾く", async () => {
+  const seen: unknown[] = [];
+  const { client, close } = await connect({}, {
+    sessions: { update: async (i) => { seen.push(i); if (i.newName === "dup") throw new Error("name が既に使われている: dup"); return { name: i.newName ?? i.name, path: i.path ?? "/p", state: "connected" } as never; } },
+  });
+  const ok = await client.callTool({ name: "session_update", arguments: { name: "pm1", newName: "pm2", path: "/new/p", move: true } });
+  assert.deepEqual(JSON.parse(text(ok)), { name: "pm2", path: "/new/p", state: "connected" });
+  await client.callTool({ name: "session_update", arguments: { name: "pm1", path: "/only/path" } });
+  assert.deepEqual(seen, [{ name: "pm1", newName: "pm2", path: "/new/p", move: true }, { name: "pm1", path: "/only/path" }]);
+  const dup = await client.callTool({ name: "session_update", arguments: { name: "pm1", newName: "dup" } });
+  assert.equal(dup.isError, true);
+  assert.deepEqual(JSON.parse(text(dup)), { error: "name が既に使われている: dup" });
+  const bad = await client.callTool({ name: "session_update", arguments: { name: "pm1", newName: "a b" } }).catch((e: unknown) => e);
+  assert.ok(bad instanceof Error || (bad as { isError?: boolean }).isError === true);
+  assert.equal(seen.length, 3);
   await close();
 });
 

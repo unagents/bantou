@@ -4,7 +4,7 @@ import { z } from "zod";
 import { OWNER_HEADER, OWNER_PATTERN, OWNER_QUERY, remoteSendSchema, remoteWaitSchema, workerReplySchema, WAIT_DEFAULT_SEC, type RemoteManager, type RemoteSendInput } from "./remotes.js";
 import type { RemoteControlSupervisor } from "./remote-control.js";
 import { projectSettingsPatchSchema } from "./project-settings.js";
-import { sessionCreateSchema, SESSION_NAME, type SessionManager } from "./sessions.js";
+import { sessionCreateSchema, sessionUpdateSchema, SESSION_NAME, type SessionManager } from "./sessions.js";
 import type { Follow } from "./follow.js";
 import type { ServerLink } from "./server-link.js";
 
@@ -100,6 +100,16 @@ export function registerTools(
       inputSchema: { name: z.string().regex(SESSION_NAME, "英数字と _ - のみ") },
     },
     ({ name }) => guard(async () => json(await sessions.delete(name))),
+  );
+  server.registerTool(
+    "session_update",
+    {
+      title: "session の名前・path を変更",
+      description:
+        "session_create で作った session の名前（newName）と path を変える。session を止め、path 指定時はフォルダを作る（move: true なら今のフォルダを新しい path へ rename で移動。EXDEV などで失敗したら error で何も変えない。コピーはしない）、記録を更新して新しい名前で起動し直す。settings（instructions / addDirs）は引き継ぐ。remote の cap_id は変わらず、記録は新しい名前へ付け替わる。path を変えた時は --continue が効かず（会話が無い）素の起動になる。config 由来の project は不可。newName は既存の session / project と重複不可、path は他の session と重複不可。{ SessionInfo } を返す",
+      inputSchema: sessionUpdateSchema,
+    },
+    (args) => guard(async () => json(await sessions.update(args))),
   );
   server.registerTool(
     "session_settings_get",
