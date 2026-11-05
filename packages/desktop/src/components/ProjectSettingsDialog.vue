@@ -96,7 +96,7 @@ async function save() {
         </UFormField>
         <UFormField
           label="フォルダ"
-          help="center のホスト上の絶対パス（この PC のパスではない）。無ければ作られる。保存すると session を再起動する。フォルダを変えると以前の会話は引き継がれず新しい会話で始まる（移動チェックの有無に関わらず）"
+          help="center のホスト上の絶対パス（この PC のパスではない）。無ければ作られる。保存すると session をすぐ再起動する"
         >
           <div class="flex gap-2">
             <UInput v-model="pathInput" class="w-full" placeholder="（center が返していない）" data-testid="settings-path" />
@@ -104,13 +104,13 @@ async function save() {
           </div>
         </UFormField>
         <p v-if="pathChanged" class="text-cork-muted text-xs" data-testid="settings-path-note">
-          フォルダを変えると claude の会話の続き（--continue）が引き継がれず、新しい会話として起動する。名前の変更だけなら続きは保たれる
+          フォルダを変えると以前の会話は引き継がれず新しい会話で始まる（移動チェックの有無に関わらず。claude の --continue が効かない）。名前だけの変更なら会話は続く
         </p>
         <UCheckbox
           v-if="pathChanged"
           v-model="moveDir"
           label="今のフォルダを新しい場所へ移動する"
-          description="OFF なら新しいフォルダを作るだけ（中身は移らない）。どちらでも session は新しい会話で始まる"
+          description="OFF なら新しいフォルダを作るだけ（中身は移らない）。移動してもしなくても、以前の会話は引き継がれず新しい会話で始まる"
           data-testid="settings-path-move"
         />
         <ProjectSettingsFields v-model="draft" id-prefix="settings" :can-pick="canPick" @error="actionError = $event" />

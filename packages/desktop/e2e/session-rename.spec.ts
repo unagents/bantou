@@ -130,10 +130,10 @@ test.describe("session rename / move", () => {
     await dlg.getByTestId("settings-name").fill("career-5");
     await expect(dlg.getByTestId("settings-path-note")).toHaveCount(0);
     await dlg.getByTestId("settings-path").fill("/data/new/careery");
-    await expect(dlg).toContainText("保存すると session を再起動する");
+    await expect(dlg).toContainText("保存すると session をすぐ再起動する");
     await expect(dlg).toContainText("以前の会話は引き継がれず新しい会話で始まる");
-    await expect(dlg.getByTestId("settings-path-note")).toContainText("--continue");
-    await expect(dlg.getByTestId("settings-path-note")).toContainText("名前の変更だけなら続きは保たれる");
+    await expect(dlg.getByTestId("settings-path-note")).toContainText("名前だけの変更なら会話は続く");
+    await expect(dlg).toContainText("移動してもしなくても、以前の会話は引き継がれず新しい会話で始まる");
     await dlg.getByTestId("settings-path").fill(original);
     await expect(dlg.getByTestId("settings-path-note")).toHaveCount(0);
   });
