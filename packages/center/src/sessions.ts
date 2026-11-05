@@ -1,5 +1,5 @@
 import { mkdir, rename } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
 import { projectSchema, PERMISSION_MODES, type Config, type ProjectConfig } from "./config.js";
 import { composeAddDirs, composeInstructions, mergeSettings, projectSettingsPatchSchema, readSettings, type ProjectSettings, type ProjectSettingsPatch } from "./project-settings.js";
@@ -304,6 +304,9 @@ export function createSessionManager(opts: {
         if (moving) {
           const clash = existing.find((s) => s.project !== name && resolve(s.path) === newPath);
           if (clash) throw new Error(`path が既に使われている: ${newPath}（${clash.project}）`);
+          // 移動は今のフォルダの中へはできない（親 dir を作ってから rename が失敗し、空 dir が残る）
+          const rel = relative(resolve(rec.path), newPath);
+          if (input.move === true && rel !== "" && !rel.startsWith("..") && !isAbsolute(rel)) throw new Error(`今のフォルダの配下へは移動できない: ${newPath}（${rec.path}）`);
         }
         if (!renaming && !moving) throw new Error("変更が無い: newName か今と違う path を指定する");
 
@@ -333,8 +336,9 @@ export function createSessionManager(opts: {
             throw new Error(`状態ファイルに保存できない: ${(e as Error).message}`);
           }
           if (renaming && opts.renameRemoteSession) {
-            await opts.renameRemoteSession(name, newName);
+            // 呼び出し中に例外（persist 失敗など）でも remotes のメモリは付け替わりうるので、先に印を立てて戻す
             renamedRemotes = true;
+            await opts.renameRemoteSession(name, newName);
           }
           supervisor.add(toProject(newRec), { wrapper: true, ...instrOpt(newRec.settings) });
           added = true;

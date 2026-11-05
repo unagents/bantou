@@ -527,3 +527,31 @@ test("create / update(newName): remote 記録と衝突する名前は理由付�
   assert.ok(seen.some(([n, m]) => n === "held" && m === "rename"));
   assert.ok(!seen.some(([n, m]) => n === "pm1" && m === "rename"));
 });
+
+test("update: remotes の付け替えが付け替えた後に例外（persist 失敗など）でも、戻す付け替えを呼んで元に戻す", async () => {
+  const renamed: [string, string][] = [];
+  const { mgr } = setup({ renameRemoteSession: (o, n) => { renamed.push([o, n]); if (o === "pm1") throw new Error("persist 失敗"); } });
+  await mgr.create({ name: "pm1" });
+  await assert.rejects(mgr.update({ name: "pm1", newName: "pm2" }), /persist 失敗/);
+  assert.deepEqual(renamed, [["pm1", "pm2"], ["pm2", "pm1"]]);
+  assert.deepEqual((await savedOf()).map((s) => s.name), ["pm1"]);
+  assert.deepEqual(mgr.list().map((s) => s.name), ["cfg", "pm1"]);
+});
+
+test("update: move: true で今のフォルダの配下へは移動できない。検証で拒否し、何も止めず、dir も作らない（move なしの配下 path は許す）", async () => {
+  const { mgr, calls } = setup();
+  const created = await mgr.create({ name: "pm1" });
+  calls.length = 0;
+  const inside = join(created.path, "sub", "deeper");
+  await assert.rejects(mgr.update({ name: "pm1", path: inside, move: true }), /配下へは移動できない/);
+  await assert.rejects(mgr.update({ name: "pm1", newName: "pm2", path: join(created.path, "sub"), move: true }), /配下へは移動できない/);
+  assert.deepEqual(calls, []);
+  await assert.rejects(stat(join(created.path, "sub")));
+  assert.deepEqual((await savedOf()).map((s) => [s.name, s.path]), [["pm1", created.path]]);
+  // 名前が前置一致するだけの兄弟 dir は配下ではない
+  const sibling = created.path + "-x";
+  assert.equal((await mgr.update({ name: "pm1", path: sibling, move: true })).path, sibling);
+  // move なしなら配下でも新しい path を作るだけなので許す
+  const r = await mgr.update({ name: "pm1", path: join(sibling, "child") });
+  assert.equal(r.path, join(sibling, "child"));
+});
