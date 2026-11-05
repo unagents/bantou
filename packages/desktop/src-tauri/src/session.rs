@@ -67,6 +67,21 @@ fn update_args(name: &str, settings: Value) -> Value {
     serde_json::json!({ "name": name, "settings": settings })
 }
 
+/// Body of the center's `session_update`: only what is given. `move` goes with `path` only.
+fn rename_args(name: &str, new_name: Option<&str>, path: Option<&str>, move_dir: Option<bool>) -> Value {
+    let mut a = serde_json::json!({ "name": name });
+    if let Some(n) = new_name.map(str::trim).filter(|n| !n.is_empty()) {
+        a["newName"] = Value::String(n.to_string());
+    }
+    if let Some(p) = path.map(str::trim).filter(|p| !p.is_empty()) {
+        a["path"] = Value::String(p.to_string());
+        if let Some(m) = move_dir {
+            a["move"] = Value::Bool(m);
+        }
+    }
+    a
+}
+
 /// The `settings` of the center's `{ name, settings }` answer (`{}` when absent).
 fn settings_of(answer: &Value) -> Value {
     match answer.get("settings") {
@@ -287,9 +302,40 @@ pub async fn create_session(
     Ok(s)
 }
 
+/// Rename a session and / or change its folder on the center (`session_update`). `move_dir` only
+/// counts with `path` (true: move the current folder there, false: only make the new folder).
+/// The center lists the result, so the list is read again.
+#[tauri::command]
+pub async fn session_update(
+    app: tauri::AppHandle,
+    cache: tauri::State<'_, SessionCache>,
+    name: String,
+    new_name: Option<String>,
+    path: Option<String>,
+    move_dir: Option<bool>,
+) -> CmdResult<Session> {
+    let args = rename_args(name.trim(), new_name.as_deref(), path.as_deref(), move_dir);
+    let v = center_json(&app, "session_update", Some(args)).await.map_err(CommandError::Other)?;
+    let s: Session =
+        serde_json::from_value(v).map_err(|e| CommandError::other(format!("session_update の結果を読めない: {e}")))?;
+    read_list(&app, &cache).await;
+    Ok(s)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_body_carries_only_what_is_given_and_move_only_with_path() {
+        assert_eq!(rename_args("a", None, None, Some(true)), serde_json::json!({"name":"a"}));
+        assert_eq!(rename_args("a", Some(" b "), Some(" "), None), serde_json::json!({"name":"a","newName":"b"}));
+        assert_eq!(
+            rename_args("a", None, Some(" /x/y "), Some(false)),
+            serde_json::json!({"name":"a","path":"/x/y","move":false})
+        );
+        assert_eq!(rename_args("a", None, Some("/x"), None), serde_json::json!({"name":"a","path":"/x"}));
+    }
 
     fn entry(name: &str, state: &str) -> Session {
         Session {

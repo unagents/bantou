@@ -26,6 +26,7 @@ export {
   CENTER_RUNNING_EVENT,
   refreshSessions,
   SESSIONS_CHANGED_EVENT,
+  updateSession,
   updateSessionSettings,
 } from "./sessions";
 export {

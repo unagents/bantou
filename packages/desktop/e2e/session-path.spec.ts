@@ -111,15 +111,13 @@ test.describe("session folder (path)", () => {
     await expect(dlg).toContainText("center のホスト上の絶対パス（この PC のパスではない）");
   });
 
-  test("the gear dialog shows the session's folder read-only, with the note that it is fixed at creation", async ({ page }) => {
+  test("the gear dialog shows the session's folder (editable) and is not dirty until something changes", async ({ page }) => {
     await page.goto("/");
     await page.locator("[data-testid=session-settings-open][data-name=careery]").click();
     const dlg = page.getByTestId("settings-dialog");
     const expected = await mock(page, (m) => String(m.centerSessions.find((s) => s.name === "careery")?.path));
     await expect(dlg.getByTestId("settings-path")).toHaveValue(expected);
-    await expect(dlg.getByTestId("settings-path")).toHaveAttribute("readonly", "");
-    await expect(dlg).toContainText("作成時に決まる");
-    // read-only: the dialog is not dirty
+    await expect(dlg.getByTestId("settings-path")).not.toHaveAttribute("readonly", "");
     await expect(dlg.getByTestId("settings-save")).toBeDisabled();
   });
 });

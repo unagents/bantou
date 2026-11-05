@@ -74,6 +74,8 @@ export class MockBantou {
   sessionCache: SessionList = { sessions: [], reachable: true, reason: null, rev: 0 };
   /** When set, `session_create` fails with this message (center error). */
   centerSessionCreateError: string | null = null;
+  /** When set, `session_update` fails with this message (center error). */
+  centerSessionUpdateError: string | null = null;
   /** The center's `workspace` (`center_info`; `session_path_hints`). null: not set / an older center. */
   centerWorkspace: string | null = "/mock/ws";
   /** `session_path_hints.canPick`: this PC's folder dialog applies (own center on macOS / Windows). */
@@ -269,6 +271,32 @@ export class MockBantou {
     return e;
   }
 
+  /** `session_update` on the center: renames and / or changes the folder; the settings key follows the name. */
+  private updateCenterSession(name: string, newName?: string | null, path?: string | null): Record<string, unknown> {
+    this.fetchCenterList();
+    if (this.centerSessionUpdateError) throw new Error(this.centerSessionUpdateError);
+    const e = this.centerSessions.find((s) => s.name === name);
+    if (!e) throw new Error(`session が無い: ${name}`);
+    if (newName && newName !== name) {
+      if (!/^[A-Za-z0-9_-]+$/.test(newName)) throw new Error("newName は英数字と _ - のみ");
+      if (this.centerSessions.some((s) => s.name === newName)) throw new Error(`name が既に使われている: ${newName}`);
+    }
+    if (path) {
+      if (!path.startsWith("/")) throw new Error("path は絶対パスで指定する");
+      const clash = this.centerSessions.find((s) => s.path === path && s !== e);
+      if (clash) throw new Error(`path が既に使われている: ${path}（${clash.name as string}）`);
+      e.path = path;
+    }
+    if (newName && newName !== name) {
+      e.name = newName;
+      if (this.centerSettings[name]) {
+        this.centerSettings[newName] = this.centerSettings[name];
+        delete this.centerSettings[name];
+      }
+    }
+    return e;
+  }
+
   listenerIds(event: string) {
     return this.listeners.get(event) ?? [];
   }
@@ -339,6 +367,16 @@ export class MockBantou {
         const settings = (args.settings as Record<string, unknown> | null | undefined) ?? {};
         const kept = Object.fromEntries(Object.entries(settings).filter(([, v]) => v !== null && v !== ""));
         if (Object.keys(kept).length) this.centerSettings[name] = kept;
+        this.readList();
+        return structuredClone(s);
+      }
+      case "session_update": {
+        const e = this.updateCenterSession(
+          (args.name as string).trim(),
+          args.newName as string | null | undefined,
+          args.path as string | null | undefined,
+        );
+        const s = this.toSession(e);
         this.readList();
         return structuredClone(s);
       }

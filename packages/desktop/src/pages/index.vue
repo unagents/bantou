@@ -100,6 +100,11 @@ watch(settingsOpen, (v) => {
   void refreshAddTarget();
   void refreshSessions();
 });
+function onSessionRenamed(name: string) {
+  selectedName.value = name;
+  void refreshSessions();
+}
+
 function onSessionCreated(name: string) {
   toast.add({ title: `${name} を作成`, color: "success" });
 }
@@ -244,6 +249,8 @@ function onSessionCreated(name: string) {
       v-model:open="settingsDialogOpen"
       :name="settingsFor"
       :path="centerList.sessions.find((s) => s.name === settingsFor)?.path ?? null"
+      :existing="centerList.sessions.map((s) => s.name)"
+      @renamed="onSessionRenamed"
     />
     <SettingsDialog v-if="settingsOpen" v-model:open="settingsOpen" />
     <CenterDialog v-if="centerOpen" v-model:open="centerOpen" />
