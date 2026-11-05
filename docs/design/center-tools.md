@@ -16,6 +16,7 @@
 |---|---|---|---|
 | `session_create` | `name`（英数 `_-`）、`path?`、`permissionMode?`（既定 `auto`）、`settings?`（プロジェクト設定 `{ instructions?: string, … }`） | `{name, path, state, pid, sessionUrl, startedAt, source, lastError?}` | `claude remote-control --name <name>` を path で起動し、監視対象に加える |
 | `session_delete` | `name` | `{name, deleted}` | remote-control を停止し、監視と保存から外す。path は消さない |
+| `session_update` | `name`、`newName?`、`path?`（絶対パス）、`move?`（`path` 指定時のみ。true で今のフォルダを新しい `path` へ rename で移動、省略・false は新しい `path` を作るだけ） | `SessionInfo`（`session_create` と同じ） | session_create で作ったものの名前と path を変える。停止 → フォルダの移動 / 作成 → 記録の更新 → 新しい名前で resume 起動（path を変えると `--continue` が効かず素の起動）。settings は引き継ぎ、remote の記録は新しい名前へ付け替え（cap_id は変わらない）。別の session の remote 記録と衝突する名前は拒否。失敗時は元に戻す |
 | `session_settings_get` | `name` | `{name, settings}` | session のプロジェクト設定を返す（未設定・config 由来は `settings: {}`） |
 | `session_settings_update` | `name`、`settings`（項目ごとにマージ。`null` で項目を削除） | `{name, settings}` | プロジェクト設定を更新して `sessions.json` に保存。次の起動から効く。config 由来の project は拒否 |
 | `session_list` | なし | 同上の配列 | config の project と session の全部（`source` で区別） |
@@ -67,6 +68,7 @@
 |---|---|---|---|
 | `session_create` | `name`（英数 `_-`）、`path?`、`permissionMode?`（既定 `auto`）、`settings?`（プロジェクト設定 `{ instructions?: string, … }`） | `{name, path, state, pid, sessionUrl, startedAt, source, lastError?}` | `claude remote-control --name <name>` を path で起動し、監視対象に加える |
 | `session_delete` | `name` | `{name, deleted}` | remote-control を停止し、監視と保存から外す。path は消さない |
+| `session_update` | `name`、`newName?`、`path?`（絶対パス）、`move?`（`path` 指定時のみ。true で今のフォルダを新しい `path` へ rename で移動、省略・false は新しい `path` を作るだけ） | `SessionInfo`（`session_create` と同じ） | session_create で作ったものの名前と path を変える。停止 → フォルダの移動 / 作成 → 記録の更新 → 新しい名前で resume 起動（path を変えると `--continue` が効かず素の起動）。settings は引き継ぎ、remote の記録は新しい名前へ付け替え（cap_id は変わらない）。別の session の remote 記録と衝突する名前は拒否。失敗時は元に戻す |
 | `session_settings_get` | `name` | `{name, settings}` | session のプロジェクト設定を返す（未設定・config 由来は `settings: {}`） |
 | `session_settings_update` | `name`、`settings`（項目ごとにマージ。`null` で項目を削除） | `{name, settings}` | プロジェクト設定を更新して `sessions.json` に保存。次の起動から効く。config 由来の project は拒否 |
 | `session_list` | なし | 同上の配列 | config の project と session の全部（`source` で区別） |

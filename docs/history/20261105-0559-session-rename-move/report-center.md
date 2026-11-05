@@ -42,7 +42,7 @@ branch: `feature/session-rename-move`（packages/center のみ。desktop は w-d
 
 - 実機（実 claude / 実 server）での動作は未確認（偽 supervisor でのテストのみ）。path 変更後の「素の起動」fallback は既存挙動に依存し、ここでは検証していない。
 - 添付の置き場（上記）。
-- review 第1回で指摘されたが今回は直していない点: remotes の send 競合、旧名の再利用不可（remote 記録が残る間。拒否で対処済みの範囲を超える改善）、docs/design の表への追記。
+- review 第1回で指摘されたが今回は直していない点: remotes の send 競合、旧名の再利用不可（remote 記録が残る間。拒否で対処済みの範囲を超える改善）。docs/design の表への追記は後で対応済み（下記）。
 - version bump はしていない。
 
 ## cap_id 衝突の拒否（cap 回答で採用）
@@ -62,6 +62,10 @@ branch: `feature/session-rename-move`（packages/center のみ。desktop は w-d
 ## review の追加修正（low 6）
 
 - rename の `conflictsWith(name, "rename", oldName)`: 改名元（oldName）の session が持つ記録は衝突と見なさない。pm1 → pm2 の後に pm2 → pm1 へ戻せる（記録の session は pm1 に戻り、cap_id は不変）。別の session からの改名と create は従来どおり拒否。README の (a) も修正。テスト: remotes に往復と各拒否、sessions に oldName の受け渡し。
+
+## docs の追記（review low 7）
+
+- `docs/design/center-tools.md` の A 節の tool 表に `session_update` の行を追加（同ファイルに同じ表が 2 回あるため両方。重複自体は既存のまま）。`docs/design/master-cap-session.md` の外向け tool の列挙にも `session_update` を追加。コード変更なし。
 
 ## その他
 

@@ -21,7 +21,7 @@
 
 ### 1. tool の窓口を分ける
 
-- 外向け（desktop など token を持つ相手）: `session_create` / `session_delete` / `session_list`。
+- 外向け（desktop など token を持つ相手）: `session_create` / `session_update` / `session_delete` / `session_list`。
 - center が起動したセッション（master-cap）向け: `remote_send`（別名 `remote_create`） / `remote_delete` / `remote_list` / `remote_wait`（2026-11-04 以降。経路テスト当時は `remote_create` / `remote_delete` / `remote_list`）。
 - `remote_*` と `cap_kick` は外向けから外す（`cap_kick` も remote-cap を直接起動できるため）。
 
