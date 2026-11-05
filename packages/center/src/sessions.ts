@@ -102,7 +102,7 @@ export function createSessionManager(opts: {
   /** update で名前を変えた時に remotes の記録（session / pending の owner）を付け替える先。省略時は何もしない。 */
   renameRemoteSession?: (oldName: string, newName: string) => Promise<unknown> | unknown;
   /** name が remote の記録と衝突する理由（無ければ null）。create / update の newName の検証に使う。省略時は検査しない。 */
-  remoteNameConflict?: (name: string, mode: "create" | "rename") => string | null;
+  remoteNameConflict?: (name: string, mode: "create" | "rename", oldName?: string) => string | null;
 }): SessionManager {
   const { config, supervisor, store, log } = opts;
   const waitMs = opts.waitMs ?? 15_000;
@@ -292,7 +292,7 @@ export function createSessionManager(opts: {
         const renaming = newName !== name;
         if (renaming && existing.some((s) => s.project === newName)) throw new Error(`name が既に使われている: ${newName}`);
         if (renaming) {
-          const rc = opts.remoteNameConflict?.(newName, "rename");
+          const rc = opts.remoteNameConflict?.(newName, "rename", name);
           if (rc) throw new Error(rc);
         }
         let newPath = rec.path;

@@ -28,8 +28,8 @@ branch: `feature/session-rename-move`（packages/center のみ。desktop は w-d
 ## テスト
 
 - `bun run typecheck`: pass。
-- `bun run test`: 430 tests / 430 pass / 0 fail（この環境は linux。macOS 固有の既知失敗は出なかった）。
-- 追加（sessions.test.ts 12 件、tools.test.ts 1 件、remotes.test.ts 6 件）と既存 2 件の更新（tool 数・一覧）:
+- `bun run test`: 431 tests / 431 pass / 0 fail（この環境は linux。macOS 固有の既知失敗は出なかった）。
+- 追加（sessions.test.ts 12 件、tools.test.ts 1 件、remotes.test.ts 7 件）と既存 2 件の更新（tool 数・一覧）:
   - 名前だけ／path だけ（move なし：旧フォルダ残る）／path + move（中身ごと移動）／move は path 無しなら無視／両方＋settings 引き継ぎ＋並び順
   - config 由来・未定義・name 重複・不正・path 重複・相対 path・変更なしの拒否（何も止めない）
   - 失敗時の巻き戻し（rename 失敗／start 失敗でフォルダ・remotes・記録を戻す／remotes 失敗）
@@ -58,6 +58,10 @@ branch: `feature/session-rename-move`（packages/center のみ。desktop は w-d
 
 - [low] update の巻き戻し: `renameRemoteSession` が付け替え後に例外（persist 失敗など）を出しても戻るよう、呼び出し前に `renamedRemotes = true` を立てる。テスト: 付け替え後に throw → 戻す付け替え（新→旧）が呼ばれ、記録・list が元のまま。
 - [low] `move: true` で newPath が今の path の配下なら、検証段階（何も変える前）で「今のフォルダの配下へは移動できない」と拒否。親 dir も作らないので空 dir が残らない。名前が前置一致するだけの兄弟 dir は配下ではない。`move` なしの配下 path は新規 dir を作るだけなので許す。テスト: 拒否（何も止めない・dir を作らない）／兄弟 dir は通る／move なしは通る。
+
+## review の追加修正（low 6）
+
+- rename の `conflictsWith(name, "rename", oldName)`: 改名元（oldName）の session が持つ記録は衝突と見なさない。pm1 → pm2 の後に pm2 → pm1 へ戻せる（記録の session は pm1 に戻り、cap_id は不変）。別の session からの改名と create は従来どおり拒否。README の (a) も修正。テスト: remotes に往復と各拒否、sessions に oldName の受け渡し。
 
 ## その他
 

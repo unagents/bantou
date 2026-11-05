@@ -209,6 +209,23 @@ test("conflictsWith (a): cap_id が c-…-<name> の記録の session が name �
   assert.equal(mgr.conflictsWith("pm1", "rename"), null);
 });
 
+test("conflictsWith: 改名元（oldName）の session が持つ記録は衝突と見なさない。pm1 → pm2 → pm1 が通り、記録の session が pm1 に戻る。create 側は変えない", async () => {
+  const { mgr } = setup();
+  await mgr.send({ owner: "pm1", goal: "a" });
+  await mgr.renameSession("pm1", "pm2");
+  // pm2 が旧名 pm1 へ戻す: 記録は改名元 pm2 のもの
+  assert.equal(mgr.conflictsWith("pm1", "rename", "pm2"), null);
+  // 別の session（pm3）が pm1 へ改名するのは従来どおり拒否。oldName 無しも拒否
+  assert.match(mgr.conflictsWith("pm1", "rename", "pm3")!, /remote_delete/);
+  assert.match(mgr.conflictsWith("pm1", "rename")!, /remote_delete/);
+  // create は変えない
+  assert.match(mgr.conflictsWith("pm1", "create")!, /remote_delete/);
+  assert.equal(await mgr.renameSession("pm2", "pm1"), 1);
+  const v = mgr.list();
+  assert.deepEqual(v.map((x) => [x.remote_id, x.session]), [[CAP, "pm1"]]);
+  assert.equal(mgr.conflictsWith("pm1", "create"), null);
+});
+
 test("conflictsWith (b): session が name の記録（削除済み session の残り）があれば、その名前への改名は拒否", async () => {
   const { mgr } = setup();
   await mgr.send({ owner: "pm1", goal: "a" }); // pm1 は session_delete 済みで記録だけ残る想定
