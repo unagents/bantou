@@ -32,4 +32,11 @@ desktop の session 作成ダイアログで名前を入れて作成すると「
 遅い center（起動に数秒）で名前を入れて作成 → 作成中に名前欄が「既に使われている名前」になる。ダイアログの Enter 連打で `session_create` が 2 回飛ぶ。
 
 ## review 指摘と対応
-（後で追記）
+### 第1回（HEAD 6fe8a95）
+- [medium] ProjectSettingsDialog.vue の改名に同根の不具合: center update は newName を supervisor.add して start し、publish("updated") のあと settle で待つ。desktop が一覧を読み直すと existing に newName が入り、改名中に自分の新名が「既に使われている名前」になる。save() にも busy ガードが無かった。
+  - 対応: 名前の重複判定を `!busy.value && ...` に変更、save() 先頭に `if (busy.value) return`。パス欄は未接触（2 箇所のみ）。
+  - テスト: e2e session-rename.spec.ts に「slow rename」1 件追加。mock に `centerSessionUpdateDelayMs`（一覧に載せてから遅れて応答）を追加。
+  - 修正前: fail（改名中に「既に使われている名前」が表示）。修正後: pass。session_update は 1 回。desktop e2e 全 121 件 pass。
+  - 注: 修正前の fail は名前エラーの表示で止まるため、busy ガード単独（呼び出し回数）の fail 確認は未実施。
+- [low] sessions.test.ts の新規 unit は center 無変更のため回帰検出ではなく前提（先に一覧へ載る・並行同名は拒否）の固定。そのまま残す。center は未変更なので center の typecheck / test は再実施していない（前回 432 pass）。
+- 補足: AddSessionDialog は閉じるアニメ中に nameError が戻る懸念があったが、UModal の中身は v-if で即 unmount されるため実害なし。
