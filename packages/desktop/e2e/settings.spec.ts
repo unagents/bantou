@@ -45,6 +45,29 @@ test("the workspace has a folder dialog button: the picked folder goes into the 
   await expect(page.getByTestId("center-workspace")).toHaveValue("/Users/me/work");
 });
 
+test("the workspace falls back to a text input when the folder dialog fails (value kept, typed value saved)", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTestId("open-settings").click();
+  await page.getByTestId("center-enabled").click();
+  const ws = page.getByTestId("center-workspace");
+  await expect(ws).toHaveValue("~/.bantou");
+  await expect(ws).toHaveAttribute("readonly", "");
+  await page.evaluate(() => {
+    (window as unknown as { __BANTOU_MOCK__: { pickError: string | null } }).__BANTOU_MOCK__.pickError = "no dialog";
+  });
+  await ws.click();
+  await expect(page.getByTestId("settings-error")).toContainText("no dialog");
+  await expect(ws).toHaveValue("~/.bantou");
+  await expect(ws).not.toHaveAttribute("readonly", "");
+  await expect(page.getByTestId("center-workspace-pick")).toHaveCount(0);
+  await ws.fill("/typed/ws");
+  await expect(page.getByTestId("settings-save")).toBeEnabled();
+  await page.getByTestId("settings-save").click();
+  await expect(page.getByText("設定を保存した", { exact: true })).toBeVisible();
+  await page.getByTestId("open-settings").click();
+  await expect(page.getByTestId("center-workspace")).toHaveValue("/typed/ws");
+});
+
 test("save is disabled until something changes, and a change back to the loaded value disables it again", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("open-settings").click();

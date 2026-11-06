@@ -22,4 +22,16 @@ branch: feature/path-picker（base: develop 8265347）
 ## 残り・判断メモ
 - center workspace 欄は元々「sidecar は常にボタンを出す」仕様だったため、常に canPick 扱い（text フォールバック無し）。Linux など rfd が使えない環境の扱いは従来どおり未対応。変更するなら別途判断が必要。
 - `nuxt typecheck` は未実行。
-- review 指摘と対応: （後で追記）
+- 残り: ProjectSettingsFields の行ボタン「選択…」が全行同じラベルで aria-label が無い（low、今回は直さない）。
+- review 第1回の low 5 件のうち、残り 2 件は指示に内訳が無かったため未記載（受領後に追記）。
+
+## review 第1回（HEAD 9159943）の指摘と対応
+- [medium] center 起動フォルダ欄が常に readonly で、pickDirectory が使えない環境で編集手段が無い → 対応済み。PathField が pick 失敗時だけその欄を text 入力に切り替える（値保持、エラー emit）。成功・取り消しは readonly のまま。他の canPick 欄も同じ部品なので同様。e2e 追加: settings.spec（workspace 欄、mock `pickError`）、session-path.spec（add-folder）。
+- [medium] readonly 欄のキー操作が Enter のみ → 対応済み。Space（preventDefault）追加、canPick 時は欄とボタンに aria-haspopup="dialog"。e2e 追加: Enter / Space で pick が呼ばれ、aria-haspopup が付く。
+- [low] pick() の多重呼び出し → 対応済み。busy ガード（e2e では押しっぱなしの検証はしていない）。
+- [low] ProjectSettingsDialog の canPick 時 help に「無ければ作られる」が無い → 対応済み。AddSessionDialog と揃えた。
+- [low] report 更新 → 本節。
+- [low] 行ボタンのラベル / aria-label → 今回は直さない（上の「残り」）。
+
+## 再テスト結果（第1回対応後）
+- e2e 121 passed / 0 failed（前回 119 + 追加 2）。Rust 無変更のため cargo test は省略。

@@ -118,6 +118,37 @@ test.describe("session folder (path)", () => {
     await expect(dlg).toContainText("center のホスト上の絶対パス（この PC のパスではない）");
   });
 
+  test("the folder field opens the dialog by Enter and Space too, has aria-haspopup, and a pick failure falls back to text", async ({ page }) => {
+    await page.goto("/");
+    await mock(page, (m) => {
+      m.centerCanPick = true;
+      m.pickedDirectory = "/Users/me/key";
+    });
+    await page.getByTestId("open-add-session").click();
+    const dlg = page.getByTestId("add-dialog");
+    const field = dlg.getByTestId("add-folder");
+    await expect(field).toHaveAttribute("aria-haspopup", "dialog");
+    const picks = () => mock(page, (m) => m.calls.filter((c) => c.cmd === "pick_directory").length);
+    await field.focus();
+    await field.press("Enter");
+    await expect(field).toHaveValue("/Users/me/key");
+    await mock(page, (m) => {
+      m.pickedDirectory = "/Users/me/space";
+    });
+    await field.press("Space");
+    await expect(field).toHaveValue("/Users/me/space");
+    expect(await picks()).toBe(2);
+    // a pick failure turns the field into a text input (value kept) and shows the error
+    await mock(page, (m) => {
+      m.pickError = "no dialog";
+    });
+    await field.press("Enter");
+    await expect(dlg.getByTestId("add-action-error")).toContainText("no dialog");
+    await expect(field).not.toHaveAttribute("readonly", "");
+    await expect(field).toHaveValue("/Users/me/space");
+    await expect(dlg.getByTestId("add-folder-pick")).toHaveCount(0);
+  });
+
   test("the gear dialog with the folder dialog: the saved path is shown read-only; a click picks, a cancel keeps it", async ({ page }) => {
     await page.goto("/");
     await mock(page, (m) => {
