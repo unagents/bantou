@@ -24,11 +24,15 @@ function removeDir(i: number) {
   draft.value = { ...draft.value, addDirs: draft.value.addDirs.filter((_, k) => k !== i) };
 }
 // canPick: "追加" opens the folder dialog and adds the chosen folder as one row (a cancel adds nothing, no blank row).
+// When the dialog itself fails (no dialog on this OS) the add button falls back to typed rows (a blank row).
+const failed = ref(false);
+const dialog = computed(() => !!props.canPick && !failed.value);
 async function pickAdd() {
   try {
     const p = await pickDirectory();
     if (p) addDir(p);
   } catch (e) {
+    failed.value = true;
     emit("error", String(e));
   }
 }
@@ -58,7 +62,7 @@ async function pickAdd() {
         <PathField
           :model-value="d"
           mono
-          :can-pick="props.canPick"
+          :can-pick="dialog"
           placeholder="/path/to/folder"
           :testid="`${idPrefix}-add-dir`"
           :pick-testid="`${idPrefix}-add-dir-row-pick`"
@@ -76,7 +80,7 @@ async function pickAdd() {
       </div>
       <div class="flex gap-2">
         <UButton
-          v-if="props.canPick"
+          v-if="dialog"
           size="xs"
           label="フォルダを追加…"
           color="neutral"

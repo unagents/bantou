@@ -33,5 +33,13 @@ branch: feature/path-picker（base: develop 8265347）
 - [low] report 更新 → 本節。
 - [low] 行ボタンのラベル / aria-label → 今回は直さない（上の「残り」）。
 
+## review 第2回（HEAD 99a865a）の指摘と対応
+- [medium] 参照フォルダの「フォルダを追加…」（pickAdd）が pick 失敗でエラーを出すだけで text へ切り替わらず、ダイアログ不可環境で新規追加の手段が無い → 対応済み。ProjectSettingsFields に failed ref を持ち、失敗後は追加ボタンが「パスを入力して追加」（空行 + text 入力）に切り替わる。共通/個別とも同じ部品で有効。併せて、行の PathField に渡す canPick も `dialog`（canPick && !failed）にした（渡さないと新しい空行が readonly のまま入力できなかった。e2e で発覚）。e2e 追加: 個別（失敗→空行→text 入力→保存）、共通（同）。
+- [low・任意] 失敗フォールバック後に Enter で create が走る検証 → 対応済み（session-path.spec。keyup が閉じたダイアログの opener を再クリックするため keydown のみ送る）。
+- [low] report 更新 → 本節。
+
+## 再テスト結果（第2回対応後）
+- e2e 123 passed / 0 failed（第1回後 121 + 追加 2）。Rust 無変更のため cargo test は省略。
+
 ## 再テスト結果（第1回対応後）
 - e2e 121 passed / 0 failed（前回 119 + 追加 2）。Rust 無変更のため cargo test は省略。

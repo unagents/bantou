@@ -147,6 +147,13 @@ test.describe("session folder (path)", () => {
     await expect(field).not.toHaveAttribute("readonly", "");
     await expect(field).toHaveValue("/Users/me/space");
     await expect(dlg.getByTestId("add-folder-pick")).toHaveCount(0);
+    // Enter in the (now text) field creates the session
+    await dlg.getByTestId("add-name").fill("after-fail");
+    // keydown only: the closing dialog hands the focus back to its opener, whose click would fire on a keyup
+    await field.dispatchEvent("keydown", { key: "Enter" });
+    await expect(dlg).toBeHidden();
+    const call = await mock(page, (m) => m.calls.find((c) => c.cmd === "create_session"));
+    expect(call?.args).toMatchObject({ name: "after-fail", path: "/Users/me/space" });
   });
 
   test("the gear dialog with the folder dialog: the saved path is shown read-only; a click picks, a cancel keeps it", async ({ page }) => {

@@ -285,6 +285,47 @@ test.describe("reference folders (--add-dir)", () => {
     expect(await mock(page, (m) => m.centerSettings)).toEqual({ careery: { addDirs: ["/srv/docs"] } });
   });
 
+  test("a failing folder dialog turns the add button into typed rows (blank row, typed, saved)", async ({ page }) => {
+    await page.goto("/");
+    await mock(page, (m) => {
+      (m as unknown as { centerCanPick: boolean }).centerCanPick = true;
+      (m as unknown as { pickError: string | null }).pickError = "no dialog";
+    });
+    await page.locator('[data-testid=session-settings-open][data-name="careery"]').click();
+    const dlg = page.getByTestId("settings-dialog");
+    await expect(dlg.getByTestId("settings-add-dir-add")).toHaveText("フォルダを追加…");
+    await dlg.getByTestId("settings-add-dir-add").click();
+    await expect(dlg.getByTestId("settings-error")).toContainText("no dialog");
+    await expect(dlg.getByTestId("settings-add-dir")).toHaveCount(0);
+    await expect(dlg.getByTestId("settings-add-dir-add")).toHaveText("パスを入力して追加");
+    await dlg.getByTestId("settings-add-dir-add").click();
+    await expect(dlg.getByTestId("settings-add-dir")).toHaveCount(1);
+    await expect(dlg.getByTestId("settings-add-dir").first()).not.toHaveAttribute("readonly", "");
+    await dlg.getByTestId("settings-add-dir").first().fill("/typed/ref");
+    await dlg.getByTestId("settings-save").click();
+    await expect(dlg).toBeHidden();
+    expect(await mock(page, (m) => m.centerSettings)).toEqual({ careery: { addDirs: ["/typed/ref"] } });
+  });
+
+  test("the center-wide folders fall back to typed rows when the folder dialog fails", async ({ page }) => {
+    await page.goto("/");
+    await mock(page, (m) => {
+      (m as unknown as { pickError: string | null }).pickError = "no dialog";
+    });
+    await page.getByTestId("open-settings").click();
+    const sec = page.getByTestId("center-common-section");
+    if (!(await page.getByTestId("center-enabled").isChecked())) await page.getByTestId("center-enabled").click();
+    const add = sec.getByTestId("center-common-add-dir-add");
+    await expect(add).toHaveText("フォルダを追加…");
+    await add.click();
+    await expect(add).toHaveText("パスを入力して追加");
+    await add.click();
+    await sec.getByTestId("center-common-add-dir").first().fill("/typed/common");
+    await sec.getByTestId("center-common-save").click();
+    await expect(page.getByText("共通の設定を保存した", { exact: true })).toBeVisible();
+    expect(await mock(page, (m) => (m as unknown as { centerCommonSettings: Record<string, unknown> }).centerCommonSettings)).toEqual({ addDirs: ["/typed/common"] });
+  });
+
   test("the add dialog sends the folders with session_create (only when some are set)", async ({ page }) => {
     await page.goto("/");
     await page.getByTestId("open-add-session").click();
