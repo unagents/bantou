@@ -74,6 +74,8 @@ export class MockBantou {
   sessionCache: SessionList = { sessions: [], reachable: true, reason: null, rev: 0 };
   /** When set, `session_create` fails with this message (center error). */
   centerSessionCreateError: string | null = null;
+  /** `session_create` answers this many ms after it listed the session (the real center lists it, then starts and settles it). 0: at once. */
+  centerSessionCreateDelayMs = 0;
   /** When set, `session_update` fails with this message (center error). */
   centerSessionUpdateError: string | null = null;
   /** The center's `workspace` (`center_info`; `session_path_hints`). null: not set / an older center. */
@@ -368,6 +370,9 @@ export class MockBantou {
         const kept = Object.fromEntries(Object.entries(settings).filter(([, v]) => v !== null && v !== ""));
         if (Object.keys(kept).length) this.centerSettings[name] = kept;
         this.readList();
+        if (this.centerSessionCreateDelayMs > 0) {
+          return new Promise((done) => setTimeout(() => done(structuredClone(s)), this.centerSessionCreateDelayMs));
+        }
         return structuredClone(s);
       }
       case "session_update": {

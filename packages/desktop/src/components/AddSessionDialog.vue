@@ -21,7 +21,8 @@ const trimmed = computed(() => name.value.trim());
 const nameError = computed(() => {
   if (!trimmed.value) return null;
   if (!NAME_PATTERN.test(trimmed.value)) return "英数字と _ - のみ";
-  if (props.existing.includes(trimmed.value)) return "既に使われている名前";
+  // While our own create runs, the center already lists the name (it lists, then starts): that is not a clash.
+  if (!busy.value && props.existing.includes(trimmed.value)) return "既に使われている名前";
   return null;
 });
 
@@ -52,7 +53,7 @@ async function pick() {
 }
 
 async function create() {
-  if (!trimmed.value || nameError.value) return;
+  if (busy.value || !trimmed.value || nameError.value) return;
   busy.value = true;
   actionError.value = null;
   try {
