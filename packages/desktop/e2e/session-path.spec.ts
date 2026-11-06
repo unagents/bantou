@@ -93,13 +93,20 @@ test.describe("session folder (path)", () => {
     });
     await page.getByTestId("open-add-session").click();
     const dlg = page.getByTestId("add-dialog");
-    await dlg.getByTestId("add-folder-pick").click();
+    // read-only field; a click on the field or its button opens the dialog
+    await expect(dlg.getByTestId("add-folder")).toHaveAttribute("readonly", "");
+    await dlg.getByTestId("add-folder").click();
     await expect(dlg.getByTestId("add-folder")).toHaveValue("/Users/me/work/pm");
+    await mock(page, (m) => {
+      m.pickedDirectory = "/Users/me/work/other";
+    });
+    await dlg.getByTestId("add-folder-pick").click();
+    await expect(dlg.getByTestId("add-folder")).toHaveValue("/Users/me/work/other");
     await mock(page, (m) => {
       m.pickedDirectory = null;
     });
     await dlg.getByTestId("add-folder-pick").click();
-    await expect(dlg.getByTestId("add-folder")).toHaveValue("/Users/me/work/pm");
+    await expect(dlg.getByTestId("add-folder")).toHaveValue("/Users/me/work/other");
   });
 
   test("another host's center (or no dialog on this OS): no folder dialog button, typing only, and it says the path is on the center", async ({ page }) => {
@@ -109,6 +116,32 @@ test.describe("session folder (path)", () => {
     await expect(dlg.getByTestId("add-folder")).toBeVisible();
     await expect(dlg.getByTestId("add-folder-pick")).toHaveCount(0);
     await expect(dlg).toContainText("center のホスト上の絶対パス（この PC のパスではない）");
+  });
+
+  test("the gear dialog with the folder dialog: the saved path is shown read-only; a click picks, a cancel keeps it", async ({ page }) => {
+    await page.goto("/");
+    await mock(page, (m) => {
+      m.centerCanPick = true;
+      m.pickedDirectory = "/Users/me/moved";
+    });
+    await page.locator("[data-testid=session-settings-open][data-name=careery]").click();
+    const dlg = page.getByTestId("settings-dialog");
+    const original = await mock(page, (m) => String(m.centerSessions.find((s) => s.name === "careery")?.path));
+    await expect(dlg.getByTestId("settings-path")).toHaveValue(original);
+    await expect(dlg.getByTestId("settings-path")).toHaveAttribute("readonly", "");
+    await mock(page, (m) => {
+      m.pickedDirectory = null;
+    });
+    await dlg.getByTestId("settings-path").click();
+    await expect(dlg.getByTestId("settings-path")).toHaveValue(original);
+    await expect(dlg.getByTestId("settings-save")).toBeDisabled();
+    await mock(page, (m) => {
+      m.pickedDirectory = "/Users/me/moved";
+    });
+    await dlg.getByTestId("settings-path").click();
+    await expect(dlg.getByTestId("settings-path")).toHaveValue("/Users/me/moved");
+    await expect(dlg.getByTestId("settings-path-move")).toBeVisible();
+    await expect(dlg.getByTestId("settings-save")).toBeEnabled();
   });
 
   test("the gear dialog shows the session's folder (editable) and is not dirty until something changes", async ({ page }) => {

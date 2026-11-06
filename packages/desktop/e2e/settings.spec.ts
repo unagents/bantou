@@ -28,12 +28,15 @@ test("the workspace has a folder dialog button: the picked folder goes into the 
   await page.evaluate(() => {
     (window as unknown as { __BANTOU_MOCK__: { pickedDirectory: string | null } }).__BANTOU_MOCK__.pickedDirectory = null;
   });
+  await expect(page.getByTestId("center-workspace")).toHaveAttribute("readonly", "");
   await page.getByTestId("center-workspace-pick").click();
+  await expect(page.getByTestId("center-workspace")).toHaveValue("~/.bantou");
+  await page.getByTestId("center-workspace").click();
   await expect(page.getByTestId("center-workspace")).toHaveValue("~/.bantou");
   await page.evaluate(() => {
     (window as unknown as { __BANTOU_MOCK__: { pickedDirectory: string | null } }).__BANTOU_MOCK__.pickedDirectory = "/Users/me/work";
   });
-  await page.getByTestId("center-workspace-pick").click();
+  await page.getByTestId("center-workspace").click();
   await expect(page.getByTestId("center-workspace")).toHaveValue("/Users/me/work");
   await expect(page.getByTestId("settings-save")).toBeEnabled();
   await page.getByTestId("settings-save").click();

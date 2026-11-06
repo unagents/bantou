@@ -7,7 +7,7 @@ const draft = defineModel<SettingsDraft>({ required: true });
 const props = defineProps<{
   idPrefix: string;
   rows?: number;
-  /** This PC's folder dialog applies to the folder rows (the center runs here). Otherwise the rows are typed. */
+  /** This PC's folder dialog applies to the folder rows (the center runs here): rows are read-only, picked by dialog. Otherwise typed. */
   canPick?: boolean;
 }>();
 const emit = defineEmits<{ error: [message: string] }>();
@@ -23,7 +23,8 @@ function setDir(i: number, v: string) {
 function removeDir(i: number) {
   draft.value = { ...draft.value, addDirs: draft.value.addDirs.filter((_, k) => k !== i) };
 }
-async function pickDir() {
+// canPick: "追加" opens the folder dialog and adds the chosen folder as one row (a cancel adds nothing, no blank row).
+async function pickAdd() {
   try {
     const p = await pickDirectory();
     if (p) addDir(p);
@@ -51,15 +52,18 @@ async function pickDir() {
     <section class="flex flex-col gap-1" :data-testid="`${idPrefix}-section-add-dirs`">
       <h3 class="text-sm font-semibold">参照フォルダ</h3>
       <p class="text-cork-muted text-xs">
-        master-cap が自分のフォルダ以外に読み書きしてよいフォルダ（--add-dir。1 行 1 つ、center のホスト上の絶対パス）。空なら付けない
+        master-cap が自分のフォルダ以外に読み書きしてよいフォルダ（--add-dir。1 行 1 つ{{ props.canPick ? '。行をクリックでフォルダ選択ダイアログを開いて変更' : '、center のホスト上の絶対パス' }}）。空なら付けない
       </p>
       <div v-for="(d, i) in draft.addDirs" :key="i" class="flex gap-2" :data-testid="`${idPrefix}-add-dir-row`">
-        <UInput
+        <PathField
           :model-value="d"
-          class="w-full font-mono"
+          mono
+          :can-pick="props.canPick"
           placeholder="/path/to/folder"
-          :data-testid="`${idPrefix}-add-dir`"
-          @update:model-value="setDir(i, String($event))"
+          :testid="`${idPrefix}-add-dir`"
+          :pick-testid="`${idPrefix}-add-dir-row-pick`"
+          @update:model-value="setDir(i, $event)"
+          @error="emit('error', $event)"
         />
         <UButton
           icon="i-lucide-x"
@@ -71,8 +75,16 @@ async function pickDir() {
         />
       </div>
       <div class="flex gap-2">
-        <UButton v-if="props.canPick" size="xs" label="フォルダを選択…" color="neutral" variant="outline" :data-testid="`${idPrefix}-add-dir-pick`" @click="pickDir" />
-        <UButton size="xs" label="パスを入力して追加" color="neutral" variant="outline" :data-testid="`${idPrefix}-add-dir-add`" @click="addDir()" />
+        <UButton
+          v-if="props.canPick"
+          size="xs"
+          label="フォルダを追加…"
+          color="neutral"
+          variant="outline"
+          :data-testid="`${idPrefix}-add-dir-add`"
+          @click="pickAdd"
+        />
+        <UButton v-else size="xs" label="パスを入力して追加" color="neutral" variant="outline" :data-testid="`${idPrefix}-add-dir-add`" @click="addDir()" />
       </div>
       <p class="text-cork-muted text-xs" :data-testid="`${idPrefix}-add-dirs-note`">{{ INSTRUCTIONS_NOTE }}</p>
     </section>
