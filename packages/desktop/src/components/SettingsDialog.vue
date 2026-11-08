@@ -58,7 +58,6 @@ async function load() {
 const common = ref<SettingsDraft>(emptyDraft());
 const commonBaseline = ref<SettingsDraft | null>(null);
 const commonError = ref<string | null>(null);
-const commonSaving = ref(false);
 const commonDirty = computed(() => commonBaseline.value !== null && JSON.stringify(common.value) !== JSON.stringify(commonBaseline.value));
 const commonProblem = computed(() => draftError(common.value));
 // The folder dialog picks on this PC: right for the own sidecar, not for a pasted remote center.
@@ -74,20 +73,11 @@ async function loadCommon() {
     commonError.value = String(e);
   }
 }
+// Throws on failure (save() names which part failed).
 async function saveCommon() {
-  if (!commonDirty.value || commonProblem.value) return;
-  commonSaving.value = true;
-  commonError.value = null;
-  try {
-    const r = await centerCommonSettingsUpdate(toUpdate(common.value));
-    common.value = draftOf(r.settings);
-    commonBaseline.value = { ...common.value, addDirs: [...common.value.addDirs] };
-    toast.add({ title: "共通の設定を保存した", color: "success" });
-  } catch (e) {
-    commonError.value = String(e);
-  } finally {
-    commonSaving.value = false;
-  }
+  const r = await centerCommonSettingsUpdate(toUpdate(common.value));
+  common.value = draftOf(r.settings);
+  commonBaseline.value = { ...common.value, addDirs: [...common.value.addDirs] };
 }
 
 const POLL_MS = 1000;
@@ -284,16 +274,42 @@ function clearRemote() {
   parseSeq++;
 }
 
+const anyDirty = computed(() => dirty.value || commonDirty.value);
+
+// One save for both parts; a part with no change calls no API. Common goes first: saving the center
+// settings can restart the sidecar or switch the connected center, and the common draft belongs to the
+// center it was read from. A failed common save stops there (nothing else is saved, a retry is safe).
+// When the center settings then fail, the common part stays saved (no rollback), the dialog stays open
+// and the error says which part failed. The dialog closes only when everything changed was saved.
 async function save() {
-  if (!settings.value || portError.value || tokenError.value) return;
+  if (!settings.value || saving.value || !anyDirty.value) return;
+  if (portError.value || tokenError.value || commonProblem.value) return;
   saving.value = true;
   error.value = null;
+  commonError.value = null;
+  let commonSaved = false;
   try {
-    settings.value = await centerSetSettings({ ...settings.value, port: Number(settings.value.port) });
+    if (commonDirty.value) {
+      try {
+        await saveCommon();
+        commonSaved = true;
+      } catch (e) {
+        commonError.value = String(e);
+        error.value = `共通の設定の保存に失敗した（center の設定は保存していない）: ${String(e)}`;
+        return;
+      }
+    }
+    if (dirty.value) {
+      try {
+        settings.value = await centerSetSettings({ ...settings.value, port: Number(settings.value.port) });
+      } catch (e) {
+        if (commonSaved) toast.add({ title: "共通の設定を保存した", color: "success" });
+        error.value = `center の設定の保存に失敗した${commonSaved ? "（共通の設定は保存済み）" : ""}: ${String(e)}`;
+        return;
+      }
+    }
     toast.add({ title: "設定を保存した", color: "success" });
     open.value = false;
-  } catch (e) {
-    error.value = String(e);
   } finally {
     saving.value = false;
   }
@@ -473,15 +489,6 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
           <p v-if="commonError" class="text-cork-danger-text text-xs whitespace-pre-wrap" data-testid="center-common-error">
             center から読めない・保存できない: {{ commonError }}
           </p>
-          <UButton
-            class="self-end"
-            size="xs"
-            label="共通の設定を保存"
-            :loading="commonSaving"
-            :disabled="!commonDirty || !!commonProblem"
-            data-testid="center-common-save"
-            @click="saveCommon"
-          />
         </section>
 
         <div class="border-cork-border flex flex-col gap-2 border-t pt-3">
@@ -527,7 +534,7 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
           icon="i-lucide-save"
           label="保存"
           :loading="saving"
-          :disabled="!!portError || !!tokenError || !dirty"
+          :disabled="!!portError || !!tokenError || !!commonProblem || !anyDirty"
           data-testid="settings-save"
           @click="save"
         />
