@@ -19,6 +19,7 @@ host ごとに server 専用の OS ユーザー（既定名 `bantou`）を 1 つ
 | claude CLI / toolchain | `$HOME/.local/bin/claude`、`$HOME/.bun/bin` など |
 
 - host の他ユーザー（vagrant など）と HOME も ACL も共有しない（HOME は `750`）。
+- **設置後は ssh しない**（人が bantou の HOME に入る運用にしない）。やむを得ず状態を見る時は、設置者が sudo で `sudo journalctl -u bantou-server -e` / `sudo systemctl status bantou-server` / `sudo tail server.log` を見る。bantou ユーザーでログインはしない（パスワードログイン不可）。
 - 起動は `npx -y bantou@<ver> --config $HOME/config.json`。既存の `--supervise` 自己更新はそのまま動き、その上に OS 監督が乗る。
 - Linux は **systemd の system unit**（`User=bantou`、`Restart=always`、`WantedBy=multi-user.target`）に決めた。user unit + linger は使わない（linger の設定漏れで host 再起動後に戻らない事故を避けるため）。macOS は launchd の **LaunchDaemon**（`UserName=bantou`、`KeepAlive`）。
 - server 本体の対応: config の `workspace` を省略すると config.json のある dir が root になり、その場合 `session.env.CLAUDE_CONFIG_DIR` の既定は `<root>/.claude`。`--config` を省略すると `$BANTOU_HOME`（無ければ `$HOME`）の `config.json` を使う。`--config` と `workspace` を明示する従来の指定もそのまま動く。install script は明示形の config を書く（root 既定に未対応の公開版でも動く）。
@@ -26,35 +27,57 @@ host ごとに server 専用の OS ユーザー（既定名 `bantou`）を 1 つ
 ## 2. 事前条件（設置者が host に入れておくもの）
 
 - Linux(systemd) または macOS。root（sudo）で入れる設置者。
-- node 22 以上と npm/npx、git を **system 全体**に（`/usr/bin/node` 等。bantou ユーザーの PATH に入る場所）。
+- node 22 以上と npm/npx、git を **system 全体**に（`/usr/bin/node` 等。bantou ユーザーが実行できる場所）。**NVM など人の HOME 配下の node は不可**（bantou から実行できない。script は `sudo -u bantou test -x <node>` で検査して die する）。
+  Ubuntu 24.04 での node 22（NodeSource。[nodesource/distributions](https://github.com/nodesource/distributions) の手順）:
+  ```bash
+  sudo apt install -y curl git
+  curl -fsSL https://deb.nodesource.com/setup_22.x -o nodesource_setup.sh
+  sudo -E bash nodesource_setup.sh
+  sudo apt install -y nodejs        # npm / npx も入る（/usr/bin/node）
+  rm nodesource_setup.sh
+  node -v                           # v22.x
+  ```
 - 外向き通信: `registry.npmjs.org`、`github.com`、Anthropic API、LAN の messenger broker。
 - 同じ host に既に別の bantou server が居る場合は port が衝突する（内蔵 broker 7901、mcp 7902、UDP 7902 discovery）。第 2 instance には `--broker-port` / `--mcp-port` / `--discovery off` を付ける。
 
 ## 3. 設置（1 回だけ）
 
-repo の `packages/server/scripts/install-service.sh` を使う（unit の雛形は `scripts/service/`）。
+`packages/server/scripts/install-service.sh` を使う（unit の雛形は `scripts/service/`）。npm package `bantou` に `scripts/` は入らないので、**作業用に repo を git clone して実行し、終わったら消す**。repo（https://github.com/unagents/bantou）は公開で、clone に認証は要らない（未認証の HTTPS で 200 を確認済み）。
 
 ```bash
-# まず dry-run（何も変更しない）
-sudo packages/server/scripts/install-service.sh --dry-run
+# 設置者の作業 dir に clone（設置後は消す。bantou の HOME には置かない）
+WORK="$(mktemp -d)"
+git clone --depth 1 https://github.com/unagents/bantou.git "$WORK/bantou"
+S="$WORK/bantou/packages/server/scripts/install-service.sh"
 
-sudo packages/server/scripts/install-service.sh \
+# まず dry-run（何も変更しない）
+sudo "$S" --dry-run
+
+sudo "$S" \
   [--user bantou] [--home /home/bantou] [--version 0.6.2] \
   [--broker http://192.168.1.202:7901 ...] \
   [--broker-port N --mcp-port N --discovery off]
+
+# 設置が済んだら clone を消す（unit は /etc/systemd/system に置かれ、clone を参照しない）
+rm -rf "$WORK"
 ```
 
-- 既定: user=`bantou`、home=`/home/bantou`（macOS は `/Users/bantou`。`/var/lib/bantou` にしたい時は `--home`）、version=`latest`。本番は `--version` で版を固定することを勧める（自己更新で追従する）。
-- やること: ユーザー作成（パスワードログイン不可）→ HOME 配下の雛形（`.claude` `.config/git` `.agent-messenger` `.local/bin`）→ `config.json` / `gitconfig` 生成 → unit（plist）配置 → enable・起動 → 「次に手でやること」を表示。
-- 冪等: 既存のユーザー・config.json・gitconfig・認証は上書きしない。unit は内容が変わった時だけ置き換えて restart する。HOME が違う既存ユーザーには die する。
+- 既定: user=`bantou`、home=`/home/bantou`（macOS は `/Users/bantou`。`/var/lib/bantou` にしたい時は `--home`）、version=`latest`。**`--version` での固定は非推奨**（下記）。
+- やること: ユーザー作成（パスワードログイン不可。HOME が先にあって所有が違えば `chown` で bantou にする）→ bantou から node が実行できるか検査 → HOME 配下の雛形（`.claude` `.config/git` `.agent-messenger` `.local/bin`、`server.log` を bantou 所有・`640` で先に作成）→ `config.json` / `gitconfig` 生成 → unit（plist）配置 → enable・起動 → 「次に手でやること」を表示。
+- `latest` が既定なのは、`update_server` による自己更新と整合するため。unit の `ExecStart` は `npx -y bantou@<version>` で、restart / host 再起動のたびにこの版を起動する。`latest` なら自己更新後も追従する。`--version` で固定すると、自己更新で版を上げても **restart / host 再起動で固定版に戻る**。
+- 冪等: 既存のユーザー・config.json・gitconfig・認証は上書きしない。HOME が違う既存ユーザーには die する。unit は内容が変わった時（`--version` を変えて再実行するなど）だけ置き換えて **restart する**。この時 script は警告を出す。restart で実行中の cap / worker は中断されるので、cap が空の時に行う。内容が同じなら start のみ。
 - macOS(launchd) は script を用意したが**実機では未検証**（209 は Linux）。初回は dry-run で内容を確認すること。
 
 ### 設置後に手でやること（正規手順）
 
 ```bash
-# 1. claude を入れて（bantou ユーザーで、公式手順。~/.local/bin/claude）ログイン。対話が要る
-sudo -u bantou -H env CLAUDE_CONFIG_DIR=/home/bantou/.claude claude auth login
-sudo -u bantou -H env CLAUDE_CONFIG_DIR=/home/bantou/.claude claude auth status
+# 1. claude CLI を bantou ユーザーで入れる（公式 native installer。/home/bantou/.local/bin/claude に入る。
+#    https://code.claude.com/docs/en/setup の "Native Install"）
+sudo -u bantou -H bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
+sudo -u bantou -H /home/bantou/.local/bin/claude --version
+#    ログイン（対話が要る。browser が開けない host は、表示された URL を別端末で開き、出た code を貼る）
+sudo -u bantou -H env CLAUDE_CONFIG_DIR=/home/bantou/.claude /home/bantou/.local/bin/claude auth login
+sudo -u bantou -H env CLAUDE_CONFIG_DIR=/home/bantou/.claude /home/bantou/.local/bin/claude auth status
 
 # 2. GitHub の鍵/credential は bantou の HOME 配下に、この host 専用のものを置く
 #    /home/bantou/.config/git/credentials  （https://<user>:<token>@github.com 形式、chmod 600）
@@ -78,47 +101,113 @@ sudo systemctl restart bantou-server        # macOS: sudo launchctl kickstart -k
 
 host 再起動後は OS が自動で起動し、server が peer 登録して center の discovery（`server_peers` / `remote_list`）に再び現れる。**peer id は起動のたびに変わる**ので、再起動後は新しい id を見る。peer 名は全 instance 共通の `bantou-server`（host 名は messenger の host で区別）。
 
-版の更新は従来どおり protocol `bantou` の `update_server`（center から）。unit が追うのは launcher で、launcher は更新の間も残るため systemd と競合しない。launcher を固定する版（`--version`）を上げたい時は script を `--version` 付きで再実行する（unit が変わり restart される）。
+版の更新は従来どおり protocol `bantou` の `update_server`（center から）。unit が追うのは launcher で、launcher は更新の間も残るため systemd と競合しない。
+
+- 既定の `latest` なら、自己更新で上がった版が restart / host 再起動後も保たれる（`npx -y bantou@latest`）。
+- `--version` で固定した場合、`update_server` で上げた版は **restart / host 再起動で固定版に戻る**。固定版自体を上げたい時は script を新しい `--version` 付きで再実行する（unit が変わり restart される。script が警告を出す）。固定は非推奨。
 
 ## 5. トラブル時に見る場所
 
-- `/home/bantou/server.log`（起動・設定読込・broker・`peer 登録: name=bantou-server id=...`・`指示受信`/`返信`）。なお systemd が開くため所有は root のことがある（`sudo tail`）。
-- `journalctl -u bantou-server -e`（macOS は server.log のみ）。
-- `systemctl status bantou-server` が failed → 直前の journal。`Restart=always` / `RestartSec=10` なので連続失敗でも 10 秒間隔で再試行する。
+見るのは設置者が sudo で（ssh して bantou の HOME に入らない。1 章）。
+
+- `/home/bantou/server.log`（起動・設定読込・broker・`peer 登録: name=bantou-server id=...`・`指示受信`/`返信`）。所有は bantou、`640`（script が先に作る）。他ユーザーは読めないので `sudo tail -f /home/bantou/server.log`。
+- `sudo journalctl -u bantou-server -e`（macOS は server.log のみ）。
+- `sudo systemctl status bantou-server` が failed → 直前の journal。`Restart=always` / `RestartSec=10` なので連続失敗でも 10 秒間隔で再試行する。
 - 起動しない: `config.json` の JSON と `workspace`、node ≥ 22 が bantou の PATH にあるか、ポート衝突（`ss -tulnp | grep -E ':79[01][0-9]'`）。
 - 「既に起動中 pid=...」: `server.lock` の pid が生きている。旧手動プロセスが残っていないか `pgrep -af bantou`。
 - messenger に出ない: `$HOME/.agent-messenger/config.json` の broker に host から届くか（`curl <broker>/health`）。
-- claude が動かない: `sudo -u bantou -H env CLAUDE_CONFIG_DIR=$HOME/.claude claude auth status`。
+- claude が動かない: `sudo -u bantou -H env CLAUDE_CONFIG_DIR=$HOME/.claude $HOME/.local/bin/claude auth status`。
 - git/push できない: `sudo -u bantou -H env GIT_CONFIG_GLOBAL=$HOME/.config/git/gitconfig git ls-remote <repo>`。
 
 ## 6. 移行手順
 
 ### 6.1 204（claudeAgent が /home/vagrant を共用していた構成。廃止対象）
 
-旧構成: `claudeAgent` が `/home/vagrant/work/bantou-server-ws` を workspace に、手動 `npx` で起動（unit 無し）。claude の設定は `/home/vagrant/.claude-agent`。
+旧構成: `claudeAgent` が `/home/vagrant/work/bantou-server-ws`（以下 `$WS`）を workspace に、手動 `npx` で起動（unit 無し）。claude の設定は `/home/vagrant/.claude-agent`。204 は **先に旧 server を止めてから**移す（並走しない）。順序は「旧 server 停止 → caps 移送 → 新 server 起動」。設置者が sudo で行う（204 の sudo はパスワードが要る）。
 
-1. 新ユーザーを設置: `sudo install-service.sh --version <ver>`（204 は sudo がパスワード要。設置者が実行）。旧 server と同時に動かす間は `--broker-port` 等で port を分けるか、先に旧を止める（手順 3）。
-2. 旧 workspace の caps 記録を移す（新 server を止めた状態で）:
-   ```bash
-   sudo systemctl stop bantou-server
-   sudo rsync -a /home/vagrant/work/bantou-server-ws/caps/ /home/bantou/caps/
-   sudo chown -R bantou:bantou /home/bantou/caps
-   ```
-   cap の記録に旧パス（`/home/vagrant/...`）が入っている場合、そのパスは bantou から読めないので、進行中の cap が無い状態で移すこと。
-3. 旧プロセスを停止: `pgrep -af bantou` で launcher の PID を確認し、launcher に SIGTERM（cap/worker が全部終わってから）。`server.lock` の pid が消えたことを確認。旧 unit は無いので unit の撤去は不要。
-4. `sudo systemctl start bantou-server` → `server.log` に `peer 登録` が出て center の discovery に現れることを確認。
-5. claude login（`sudo -u bantou`）と GitHub 鍵を 3 章の手順で bantou の HOME に用意する。claudeAgent / vagrant の credentials は共有しない。
-6. 数日 center から問題なく見えたら旧 workspace（`/home/vagrant/work/bantou-server-ws`）と `claudeAgent` ユーザーを片付ける（設置者判断）。
+**0. 事前確認**
+
+```bash
+WS=/home/vagrant/work/bantou-server-ws
+command -v rsync || sudo apt install -y rsync      # 無ければ入れる（代わりに cp -a でも可）
+# 進行中の cap / worker が無いこと（state が running のものが 0 件）
+sudo sh -c "grep -l '\"state\": \"running\"' $WS/caps/*/state.json $WS/workers/*/state.json"   # 何も出なければ OK
+```
+
+- 旧パスの記録について（実コードの確認結果）: `caps/*/state.json` のフィールドは `session_id` / `state` / `last_started_at` / `last_finished_at` / `last_error`（任意）/ `retries` だけで、**パスのフィールドは無い**。`logs/center.json`（center の peer）、`logs/task.json`、worker の `logs/owner.json`（`cap_id`）にもパスは無い。
+- 旧パスが効くのは `session_id` の先。cap / worker は `<root>/caps/<id>`（`workers/<id>`）を cwd に claude を `resume` する。claude の会話記録は旧 `CLAUDE_CONFIG_DIR`（`/home/vagrant/.claude-agent`）側にあり、新 HOME の `.claude` には無い。そのため移した cap を再開すると `session が無いので新規に切り替え`（`server.log`）となり、**会話の文脈は引き継がれず新しい session で始まる**。cap の作業 dir の中身（clone など）と `logs/` は移る。進行中の cap があると中断されるので、上の確認で 0 件にしてから移す。
+
+**1. 旧 server を止める**
+
+```bash
+# 旧の起動引数（--config の指定）と launcher を控える。launcher の PID は server.lock の launcher フィールド
+sudo cat "$WS/server.lock"          # 例: {"pid":1234,"version":"0.6.2","started_at":"...","launcher":1200}
+L="$(sudo node -p "JSON.parse(require('fs').readFileSync('$WS/server.lock','utf8')).launcher")"
+ps -o pid,user,args -p "$L"          # node ... bantou（launcher）であること。--config の値を控える
+# launcher フィールドが無い（旧い launcher）時は lock の pid（supervisor）を使う
+sudo kill -TERM "$L"
+# server.lock が消えるまで待つ（最大 60 秒）
+timeout 60 bash -c "while [ -e '$WS/server.lock' ]; do sleep 1; done" && echo "lock 消えた"
+pgrep -af bantou                     # 旧プロセスが残っていないこと
+```
+
+**2. 旧 config を退避する**（新 HOME には使わない）
+
+旧 config は、上で控えた `--config` の指定先。省略して起動していた場合は旧既定の `~/.config/bantou/config.json`（起動ユーザーの HOME 側）、claudeAgent 側にあればそれ。
+
+```bash
+mkdir -p ~/bantou-migration                       # 設置者の HOME。bantou の HOME ではない
+cp -a <旧 config.json> ~/bantou-migration/config.json.old
+# 中の broker / mcp / discovery / model 等の値を控え、新 config は script の引数で作る（旧 config を /home/bantou に置かない）
+```
+
+退避を確認してから、旧 config を消す（旧 server は止まっているので以後使われない）。
+
+**3. 新ユーザーを設置**
+
+旧 server は止まっているので既定 port のままでよい。script は設置の最後に新 server を起動する（この時点の caps は空）。
+
+```bash
+sudo "$S" --broker <旧 config の broker> ...      # $S は 3 章の script
+```
+
+**4. caps を移す**（新 server を止めてから）
+
+```bash
+sudo systemctl stop bantou-server
+sudo rsync -a "$WS/caps/" /home/bantou/caps/
+sudo rsync -a "$WS/workers/" /home/bantou/workers/        # worker の owner 記録（logs/owner.json）を引き継ぐため
+sudo chown -R bantou:bantou /home/bantou/caps /home/bantou/workers
+# HOME は 750。bantou 自身が読めること
+sudo -u bantou ls /home/bantou/caps | head
+sudo -u bantou sh -c 'for f in /home/bantou/caps/*/state.json; do test -r "$f" || echo "NG $f"; done'
+```
+
+**5. 認証を用意して起動**
+
+claude CLI の導入・login と GitHub 鍵を 3 章の手順で bantou の HOME に用意する（claudeAgent / vagrant の credentials は共有しない）。
+
+```bash
+sudo systemctl start bantou-server
+sudo tail -n 30 /home/bantou/server.log          # 「起動」と「peer 登録」
+```
+
+center の discovery（`server_peers` / `remote_list`）に現れることを確認する。
+
+**6. 後片付け**
+
+数日 center から問題なく見えたら旧 workspace（`$WS`）と `claudeAgent` ユーザー、`~/bantou-migration` を片付ける（設置者判断）。
 
 ### 6.2 209 / 206 / mini10（vagrant 直で動かしている構成）
 
-同じ標準形へ移行する。209 の場合、vagrant 配下の server は worker（cap）自身を動かしているので、**新 instance を先に別 port で立ち上げて動作確認し、切替は cap が空の時に行う**。
+同じ標準形へ移行する。vagrant 配下の server は worker（cap）自身を動かしていることがあるので、**新 instance を先に別 port で立ち上げて動作確認し、切替は cap が空の時に行う**。順序は 6.1 と同じ「旧 server 停止 → caps 移送 → 新 server 起動」で、旧と新を並走させてよいのは移送前の動作確認だけ。**旧が動いている間は caps を rsync しない**。
 
-1. `install-service.sh` を `--broker-port` / `--mcp-port` / `--discovery off` 付きで実行し、第 2 instance として起動・確認（209 でこの手順を実施済み。`docs/history/20261108-*-service-user-install/report.md`）。
-2. claude login と GitHub 鍵を bantou の HOME に用意。
-3. 旧 workspace の `caps/` を新 HOME に移し（6.1 の手順 2）、旧プロセスを cap 完了後に停止。
-4. 新 instance の port を既定に戻したい場合は `config.json` の `broker` / `mcp` を消して restart（旧が止まっていること）。
-5. 旧 workspace は退避してから削除。
+1. `install-service.sh` を `--broker-port` / `--mcp-port` / `--discovery off` 付きで実行し、第 2 instance として起動・確認（209 でこの手順を実施済み。`docs/history/20261108-*-service-user-install/report.md`）。この時の caps は空。
+2. claude CLI の導入・login と GitHub 鍵を bantou の HOME に用意（3 章）。
+3. cap が空になるのを待つ（6.1 の 0 章の確認。running が 0 件）。旧 server を停止する（6.1 の 1 章。`server.lock` の `launcher` に SIGTERM、`server.lock` が消えるまで待つ）。旧 config は 6.1 の 2 章のとおり退避する。
+4. 新 instance を止めて旧 workspace の `caps/` と `workers/` を移す（6.1 の 4 章。旧パスの扱いも同じ）。
+5. 新 instance の port を既定に戻す: `config.json` の `broker` / `mcp` を消し、`sudo systemctl restart bantou-server`（旧は 3 で止まっているので衝突しない）。
+6. 旧 workspace は退避してから削除。
 
 ## 7. 参考: 旧手順書の要点（204 実測 2026-11-03）
 

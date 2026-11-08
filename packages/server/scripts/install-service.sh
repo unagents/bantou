@@ -62,6 +62,9 @@ NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
 [ "$NODE_MAJOR" -ge 22 ] || die "node 22 以上が必要（今: $(node -v)）"
 command -v git >/dev/null || die "git が見つからない"
 
+if [ "$VERSION" != latest ]; then
+  say "警告: --version $VERSION で版を固定する。update_server で版を上げても、restart / host 再起動のたびにこの版に戻る（既定は latest。固定は非推奨）。"
+fi
 say "OS=$OS user=$USER_NAME home=$HOME_DIR version=$VERSION npx=$NPX dry-run=$DRY"
 
 # 1. ユーザー
@@ -85,11 +88,33 @@ else
     run chown "$USER_NAME" "$HOME_DIR"
   fi
 fi
+# HOME が先に存在し所有が違う（useradd は既存 dir の所有を変えない）場合は bantou のものにする
+if [ -d "$HOME_DIR" ]; then
+  if [ "$OS" = Linux ]; then CUR_OWNER="$(stat -c %U "$HOME_DIR")"; else CUR_OWNER="$(stat -f %Su "$HOME_DIR")"; fi
+  if [ "$CUR_OWNER" != "$USER_NAME" ]; then
+    say "HOME の所有を $USER_NAME に直す（今: $CUR_OWNER）: $HOME_DIR"
+    if [ "$OS" = Linux ]; then run chown "$USER_NAME:" "$HOME_DIR"; else run chown "$USER_NAME" "$HOME_DIR"; fi
+  fi
+fi
 run chmod 750 "$HOME_DIR"   # 他ユーザーと HOME を共有しない
+
+# bantou から node が実行できること（NVM など人の HOME 配下の node は不可）
+if [ "$DRY" = 1 ]; then
+  echo "  (dry-run) as $USER_NAME: test -x $NODE_BIN/node"
+else
+  sudo -u "$USER_NAME" -H test -x "$NODE_BIN/node" || die "$USER_NAME から $NODE_BIN/node を実行できない。NVM など人の HOME 配下の node は使えない。system 全体に入れる（docs/ops/server-install.md 2 章）"
+  sudo -u "$USER_NAME" -H test -x "$NPX" || die "$USER_NAME から $NPX を実行できない（docs/ops/server-install.md 2 章）"
+fi
 
 # 2. HOME 配下の雛形
 as_user mkdir -p "$HOME_DIR/.claude" "$HOME_DIR/.config/git" "$HOME_DIR/.agent-messenger" "$HOME_DIR/.local/bin"
 run chmod 700 "$HOME_DIR/.claude" "$HOME_DIR/.config/git"
+
+# server.log は unit の StandardOutput=append: を systemd が root で開く。先に bantou 所有で作っておけば root 所有にならない
+SERVER_LOG="$HOME_DIR/server.log"
+if [ ! -e "$SERVER_LOG" ]; then as_user touch "$SERVER_LOG"; fi
+run chown "$USER_NAME" "$SERVER_LOG"   # 旧設置で root 所有になっていた場合も直す
+run chmod 640 "$SERVER_LOG"
 
 write_if_absent() { # <path> <content>
   local path="$1" content="$2"
@@ -135,6 +160,12 @@ render() { # <template>
       -e "s|@NPX@|$NPX|g" -e "s|@NODE_BIN@|$NODE_BIN|g" "$1"
 }
 
+# 既存の unit が変わる時（--version を変えて再実行など）は server が restart される
+warn_restart() {
+  say "警告: 既存の $1 の内容が変わる。server を restart する（実行中の cap / worker は中断される。cap が空の時に行う）。"
+  say "警告: update_server で上げた版は、unit の版（今回: $VERSION）に戻る。"
+}
+
 if [ "$OS" = Linux ]; then
   command -v systemctl >/dev/null || die "systemd が必要"
   UNIT_PATH="/etc/systemd/system/$UNIT_NAME.service"
@@ -142,6 +173,7 @@ if [ "$OS" = Linux ]; then
   CHANGED=1
   if [ -f "$UNIT_PATH" ] && [ "$(cat "$UNIT_PATH")" = "$NEW" ]; then CHANGED=0; fi
   if [ "$CHANGED" = 1 ]; then
+    [ -f "$UNIT_PATH" ] && warn_restart "unit"
     say "unit を配置: $UNIT_PATH"
     if [ "$DRY" = 1 ]; then printf '%s\n' "$NEW" | sed 's/^/    | /'; else printf '%s\n' "$NEW" > "$UNIT_PATH"; chmod 644 "$UNIT_PATH"; fi
     run systemctl daemon-reload
@@ -150,14 +182,16 @@ if [ "$OS" = Linux ]; then
   fi
   run systemctl enable "$UNIT_NAME.service"
   if [ "$CHANGED" = 1 ]; then run systemctl restart "$UNIT_NAME.service"; else run systemctl start "$UNIT_NAME.service"; fi
-  STATUS_CMD="systemctl status $UNIT_NAME"
-  LOG_CMD="journalctl -u $UNIT_NAME -e   /   tail -f $HOME_DIR/server.log"
+  RESTART_CMD="sudo systemctl restart $UNIT_NAME"
+  STATUS_CMD="sudo systemctl status $UNIT_NAME"
+  LOG_CMD="sudo journalctl -u $UNIT_NAME -e   /   sudo tail -f $HOME_DIR/server.log"
 else
   PLIST_PATH="/Library/LaunchDaemons/$PLIST_LABEL.plist"
   NEW="$(render "$TPL_DIR/com.unagents.bantou.plist.in")"
   CHANGED=1
   if [ -f "$PLIST_PATH" ] && [ "$(cat "$PLIST_PATH")" = "$NEW" ]; then CHANGED=0; fi
   if [ "$CHANGED" = 1 ]; then
+    [ -f "$PLIST_PATH" ] && warn_restart "plist"
     say "plist を配置: $PLIST_PATH"
     if [ "$DRY" = 1 ]; then printf '%s\n' "$NEW" | sed 's/^/    | /'; else
       launchctl bootout "system/$PLIST_LABEL" 2>/dev/null || true
@@ -169,20 +203,24 @@ else
   fi
   run launchctl enable "system/$PLIST_LABEL"
   run launchctl kickstart "system/$PLIST_LABEL"
+  RESTART_CMD="sudo launchctl kickstart -k system/$PLIST_LABEL"
   STATUS_CMD="sudo launchctl print system/$PLIST_LABEL"
-  LOG_CMD="tail -f $HOME_DIR/server.log"
+  LOG_CMD="sudo tail -f $HOME_DIR/server.log"
 fi
 
 cat <<MSG
 
 [install] 完了。次に手でやること（設置者）:
-  1. claude にログイン（対話が要る）:
-       sudo -u $USER_NAME -H env CLAUDE_CONFIG_DIR=$HOME_DIR/.claude claude auth login
-     claude CLI が無ければ、同じ user で入れる（sudo -u $USER_NAME -H で公式手順。~/.local/bin/claude に置く）。
+  1. claude CLI を $USER_NAME に入れて（公式 native installer。$HOME_DIR/.local/bin/claude に入る）ログイン（対話が要る）:
+       sudo -u $USER_NAME -H bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
+       sudo -u $USER_NAME -H env CLAUDE_CONFIG_DIR=$HOME_DIR/.claude $HOME_DIR/.local/bin/claude auth login
+       sudo -u $USER_NAME -H env CLAUDE_CONFIG_DIR=$HOME_DIR/.claude $HOME_DIR/.local/bin/claude auth status
+     login で browser が開けない host は、表示された URL を別端末の browser で開き、出た code を貼る。
   2. GitHub の鍵 / credential を $HOME_DIR 配下に置く（この host の他 user とは共有しない）:
        $HOME_DIR/.config/git/credentials      （git credential store 形式。chmod 600）
        または sudo -u $USER_NAME -H gh auth login
-  3. 確認:
+  3. 認証を置いたら restart して確認（設置後は ssh しない。見る時は設置者が sudo で）:
+       $RESTART_CMD
        $STATUS_CMD
        $LOG_CMD
      server.log に「起動」と「peer 登録」が出れば center の discovery に現れる。
