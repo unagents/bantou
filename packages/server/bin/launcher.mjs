@@ -34,8 +34,8 @@ function alive(pid) {
 
 export function workspaceOf(configPath) {
   const data = readJson(configPath);
-  // workspace 省略時は config.json のある dir（root dir 1 つの構成）
-  const ws = data && typeof data === "object" ? (data.workspace ?? dirname(configPath)) : undefined;
+  // workspace 省略（undefined）時は config.json のある dir（root dir 1 つの構成）。null など他の値は config.ts と同じくエラー
+  const ws = data && typeof data === "object" ? (data.workspace === undefined ? dirname(configPath) : data.workspace) : undefined;
   if (typeof ws !== "string" || ws.length === 0 || !isAbsolute(ws)) throw new Error(`config の workspace は絶対パスの文字列が必須: ${configPath}`);
   return ws;
 }

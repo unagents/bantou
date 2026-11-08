@@ -56,6 +56,7 @@ case "$OS" in
 esac
 HOME_DIR="${HOME_DIR:-$DEFAULT_HOME}"
 [[ "$HOME_DIR" = /* ]] || die "--home must be absolute: $HOME_DIR"
+[[ "$HOME_DIR" =~ ^/[A-Za-z0-9._/-]+$ ]] || die "invalid --home（使える文字は英数字と . _ / - のみ。空白や | & 等は unit と sed 置換を壊す）: $HOME_DIR"
 
 if [ "$DRY" = 0 ] && [ "$(id -u)" != 0 ]; then die "root で実行する（sudo $0 ...）。確認だけなら --dry-run"; fi
 

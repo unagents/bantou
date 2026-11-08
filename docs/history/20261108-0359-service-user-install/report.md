@@ -91,3 +91,20 @@ branch の実 HEAD が指示の 6108f83 ではなく be65049（別 author が M1
 - root 不要の実走（sudo / useradd / passwd / systemctl / chown / id / getent を stub、仮 HOME・仮 unit dir は作業 dir 内）: 1 回目で設置（touch→chown→640、config 生成、restart）。2 回目は config / gitconfig を上書きせず unit 変更なし・start のみ（sha1 一致）。`--version 0.6.2` で警告 4 行→unit 置換→restart。`--version` 無しに戻すと「固定解除」警告。`--no-start` は daemon-reload と enable のみで start / restart が呼ばれない。node 実行検査を落とすと die。
 - `systemd-analyze verify`（レンダリング済み unit）: unit 固有の指摘なし（host 側の他 unit の警告のみ）。
 - 未検証: root での実 useradd / systemd、macOS launchd（`--no-start` の launchd 分岐を含む）、移行手順の通し実行。
+
+## review 指摘と対応（3 回目: 61f2824 への review、medium 1 / low 6）
+
+- **[medium] 5 章の journal の位置付け**: unit は `StandardOutput` / `StandardError` を `append:` で `server.log` に向けるため、server と npx の出力は journal に出ない。docs 5 章と 1 章を直し、「起動失敗の本文は `server.log` を見る」「journal は systemd の起動/停止メッセージ程度（いつ落ちて再起動したかの確認用）」「status が failed → 原因は `server.log` 末尾」と明記。
+- **[low 2] `--home` の読み替え**: 設置後の手順の冒頭に、`/home/bantou` は既定値で `--home` / `--user` を変えたら読み替える旨（5・6 章も同じ）を追加。
+- **[low 3] 既存 HOME の chown**: 直下 1 つだけで再帰しないことを docs に明記。中身の所有が違う場合は空 dir 推奨、または確認の上で設置者が手で `chown -R`。
+- **[low 4] `--home` の文字種**: install-service.sh が `^/[A-Za-z0-9._/-]+$` 以外（空白、`|`、`&`、`;` など）を die。docs にも明記。
+- **[low 5] 6.1 の旧 config と再確認**: 旧 config は移行完了まで消さない（旧 server に戻す道を残す。消すのは 6 の後片付けで旧 workspace と一緒に）。旧 server 停止後に `running` の再確認を追加し、残っていれば停止で中断された cap / worker として控え、起動後に center から再 kick する旨を追記。
+- **[low 6] 6.2 手順 5**: `config.json` の編集は `sudo -u bantou` で行う（root で編集すると所有が root になり bantou が読めない）と実行主体を明記。
+- **[low 7] `workspace: null`**: 揃える先は config.ts（`=== undefined` のみ省略扱い、null はエラー）にした。理由: null は意図的な省略ではなく書き間違いの可能性が高く、起動後に config.ts で落ちるより launcher / supervisor の段階で同じエラーにするほうが一貫する。launcher.mjs / supervisor.mjs の `??` を `=== undefined` に変更し、launcher・supervisor・config の単体テストに null のケースを追加。
+
+### テスト（3 回目）
+
+- protocol を `tsc` でビルド後、packages/server `npm test`: 261 / 261 pass。
+- install-service.sh: `bash -n` OK、shellcheck 0.11.0 警告 0。`--home` に空白 / `|` / `&` / `;` / 相対パスを渡すと die、`/var/lib/bantou-x` は通る。
+- stub 実走（前回と同じ手順）: 1 回目で設置、同一引数の 2 回目は警告 0・config / gitconfig / unit の sha1 一致・start のみ、`--version 0.6.2` で警告 4 行・restart。
+- 未検証は前回と同じ（root での実 useradd / systemd、macOS launchd、移行手順の通し）。

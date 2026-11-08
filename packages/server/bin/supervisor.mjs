@@ -67,8 +67,8 @@ export function readWorkspace(configPath) {
   } catch (e) {
     throw new Error(`config を読めない: ${configPath} (${e.message})`);
   }
-  // workspace 省略時は config.json のある dir（root dir 1 つの構成）
-  const ws = data && typeof data === "object" ? (data.workspace ?? dirname(configPath)) : undefined;
+  // workspace 省略（undefined）時は config.json のある dir（root dir 1 つの構成）。null など他の値は config.ts と同じくエラー
+  const ws = data && typeof data === "object" ? (data.workspace === undefined ? dirname(configPath) : data.workspace) : undefined;
   if (typeof ws !== "string" || ws.length === 0) throw new Error(`config の workspace は必須の文字列: ${configPath}`);
   if (!isAbsolute(ws)) throw new Error(`config の workspace は絶対パス: ${ws}`);
   return ws;

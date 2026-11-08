@@ -65,6 +65,7 @@ test("config: broker / session 一部指定は残りが既定値", async () => {
 
 const bad: [string, unknown, RegExp][] = [
   ["workspace 相対パス", { workspace: "rel/ws" }, /workspace は絶対パス: rel\/ws/],
+  ["workspace null", { workspace: null }, /workspace は文字列/],
   ["broker 非オブジェクト", { workspace: "/w", broker: 1 }, /broker はオブジェクト/],
   ["session 非オブジェクト", { workspace: "/w", session: "x" }, /session はオブジェクト/],
   ["port 小数", { workspace: "/w", broker: { port: 1.5 } }, /broker\.port/],

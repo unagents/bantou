@@ -149,6 +149,8 @@ test("workspaceOf: workspace 省略は config.json のある dir、相対・空�
     assert.throws(() => workspaceOf(cfg), /絶対パス/);
     await writeFile(cfg, JSON.stringify({ workspace: "" }));
     assert.throws(() => workspaceOf(cfg), /絶対パス/);
+    await writeFile(cfg, JSON.stringify({ workspace: null })); // null は省略扱いにしない（config.ts と同じ）
+    assert.throws(() => workspaceOf(cfg), /絶対パス/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

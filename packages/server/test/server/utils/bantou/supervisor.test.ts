@@ -77,6 +77,8 @@ test("readWorkspace: workspace は絶対パスの文字列のみ", async () => {
     assert.equal(readWorkspace(bad), dirname(bad)); // workspace 省略は config.json のある dir
     await writeFile(bad, JSON.stringify({ workspace: "" }));
     assert.throws(() => readWorkspace(bad), /必須/);
+    await writeFile(bad, JSON.stringify({ workspace: null })); // null は省略扱いにしない（config.ts と同じ）
+    assert.throws(() => readWorkspace(bad), /必須/);
     assert.throws(() => readWorkspace(join(ws, "..", "none.json")), /読めない/);
   });
 });

@@ -19,7 +19,7 @@ host ごとに server 専用の OS ユーザー（既定名 `bantou`）を 1 つ
 | claude CLI / toolchain | `$HOME/.local/bin/claude`、`$HOME/.bun/bin` など |
 
 - host の他ユーザー（vagrant など）と HOME も ACL も共有しない（HOME は `750`）。
-- **設置後は ssh しない**（人が bantou の HOME に入る運用にしない）。やむを得ず状態を見る時は、設置者が sudo で `sudo journalctl -u bantou-server -e` / `sudo systemctl status bantou-server` / `sudo tail server.log` を見る。bantou ユーザーでログインはしない（パスワードログイン不可）。
+- **設置後は ssh しない**（人が bantou の HOME に入る運用にしない）。やむを得ず状態を見る時は、設置者が sudo で `sudo tail server.log`（server と npx の出力の本体。起動失敗の原因もここ）、`sudo systemctl status bantou-server`（active/failed と直近の行）、`sudo journalctl -u bantou-server -e`（systemd の起動/停止メッセージ程度。server の出力は出ない）を見る。bantou ユーザーでログインはしない（パスワードログイン不可）。
 - 起動は `npx -y bantou@<ver> --config $HOME/config.json`。既存の `--supervise` 自己更新はそのまま動き、その上に OS 監督が乗る。
 - Linux は **systemd の system unit**（`User=bantou`、`Restart=always`、`WantedBy=multi-user.target`）に決めた。user unit + linger は使わない（linger の設定漏れで host 再起動後に戻らない事故を避けるため）。macOS は launchd の **LaunchDaemon**（`UserName=bantou`、`KeepAlive`）。
 - server 本体の対応: config の `workspace` を省略すると config.json のある dir が root になり、その場合 `session.env.CLAUDE_CONFIG_DIR` の既定は `<root>/.claude`。`--config` を省略すると `$BANTOU_HOME`（無ければ `$HOME`）の `config.json` を使う。そこに無く、旧既定の `~/.config/bantou/config.json` があればそれを使う（後方互換）。`--config` と `workspace` を明示する従来の指定もそのまま動く。install script は明示形の config を書く（root 既定に未対応の公開版でも動く）。
@@ -63,16 +63,20 @@ rm -rf "$WORK"
 ```
 
 - 既定: user=`bantou`、home=`/home/bantou`（macOS は `/Users/bantou`。`/var/lib/bantou` にしたい時は `--home`）、version=`latest`。**`--version` での固定は非推奨**（下記）。
-- やること: ユーザー作成（パスワードログイン不可。HOME が先にあって所有が違えば `chown` で bantou にする）→ bantou から node が実行できるか検査 → HOME 配下の雛形（`.claude` `.config/git` `.agent-messenger` `.local/bin`、`server.log` を bantou 所有・`640` で先に作成）→ `config.json` / `gitconfig` 生成 → unit（plist）配置 → enable・起動 → 「次に手でやること」を表示。
+- やること: ユーザー作成（パスワードログイン不可。HOME が先にあって所有が違えば `chown` で bantou にする。**HOME 直下の 1 つだけで再帰しない**）→ bantou から node が実行できるか検査 → HOME 配下の雛形（`.claude` `.config/git` `.agent-messenger` `.local/bin`、`server.log` を bantou 所有・`640` で先に作成）→ `config.json` / `gitconfig` 生成 → unit（plist）配置 → enable・起動 → 「次に手でやること」を表示。
 - `latest` が既定なのは、`update_server` による自己更新と整合するため。unit の `ExecStart` は `npx -y bantou@<version>` で、restart / host 再起動のたびにこの版を起動する。`latest` なら自己更新後も追従する。`--version` で固定すると、自己更新で版を上げても **restart / host 再起動で固定版に戻る**。
 - 冪等: 既存のユーザー・config.json・gitconfig・認証は上書きしない。HOME が違う既存ユーザーには die する。unit は内容が変わった時だけ置き換えて **restart する**。内容が同じなら start のみ。
   - 特に **`--version` で固定して設置した後に、`--version` 無しで再実行すると unit が `latest` に変わり restart される**（逆に `--version` を付け直しても同じ）。script は設置の作業に入る**前**に「既存 unit の内容が変わる / restart する / `update_server` で上げた版は unit の版に戻る」を警告表示する。確認だけなら `--dry-run`。
   - restart で実行中の cap / worker は中断されるので、再実行は cap が空の時に行う。
   - `--no-start`: unit の配置と enable までで起動しない（移行で caps を移してから起動する用。6.1）。
   - 値の検査: `--broker-port` / `--mcp-port` は 0..65535 の整数、`--discovery` は `on` / `off`、`--broker` は `http(s)://host[:port]` 形式でなければ die する。
+- 既存の HOME を `--home` に指定する場合は、空の dir を推奨する。HOME 直下の所有しか直さないので、中身の所有が違う（別ユーザーのファイルが入っている）なら、事前に中身を整理するか、設置者が `sudo chown -R bantou: <home>` を手で行う（中身が本当に bantou のものでよいか確認してから）。
+- `--home` は絶対パスで、使える文字は英数字と `. _ / -` のみ（空白や `|` `&` などは sed 置換と systemd の `ExecStart` / `Environment` を壊すため die する）。
 - macOS(launchd) は script を用意したが**実機では未検証**（209 は Linux）。初回は dry-run で内容を確認すること。
 
 ### 設置後に手でやること（正規手順）
+
+以下の `/home/bantou` は既定の HOME。`--home` / `--user` を変えた場合は、パスとユーザー名を読み替える（`/home/bantou` → `--home` の値、`bantou` → `--user` の値）。5・6 章のパスも同じ。
 
 ```bash
 # 1. claude CLI を bantou ユーザーで入れる（公式 native installer。/home/bantou/.local/bin/claude に入る。
@@ -116,8 +120,8 @@ host 再起動後は OS が自動で起動し、server が peer 登録して cen
 
 - `/home/bantou/server.log`（起動・設定読込・broker・`peer 登録: name=bantou-server id=...`・`指示受信`/`返信`）。所有は bantou、`640`（script が先に作る）。他ユーザーは読めないので `sudo tail -f /home/bantou/server.log`。
   - 運用メモ: `server.log` は追記のみでローテーションしない。放置すると無限に伸びるので、`du -h /home/bantou/server.log` を時々見て、大きければ設置者が `sudo logrotate` 等で整理する（`copytruncate` が安全。`append:` で開いたままなので mv だけでは書き先が変わらない）。
-- `sudo journalctl -u bantou-server -e`（macOS は server.log のみ）。
-- `sudo systemctl status bantou-server` が failed → 直前の journal。`Restart=always` / `RestartSec=10` なので連続失敗でも 10 秒間隔で再試行する。
+- `sudo journalctl -u bantou-server -e`: systemd の起動/停止/再起動のメッセージ程度。unit は `StandardOutput` / `StandardError` を `append:` で `server.log` に向けているので、**server と npx の出力（起動失敗の本文を含む）は journal に出ず `server.log` にだけ出る**。起動失敗の原因は必ず `server.log` を見る（macOS は `server.log` のみ）。
+- `sudo systemctl status bantou-server` が failed → 原因は `server.log` の末尾（`sudo tail -n 50 /home/bantou/server.log`）。journal は「いつ落ちて再起動したか」の確認用。`Restart=always` / `RestartSec=10` なので連続失敗でも 10 秒間隔で再試行する。
 - 起動しない: `config.json` の JSON と `workspace`、node ≥ 22 が bantou の PATH にあるか、ポート衝突（`ss -tulnp | grep -E ':79[01][0-9]'`）。
 - 「既に起動中 pid=...」: `server.lock` の pid が生きている。旧手動プロセスが残っていないか `pgrep -af bantou`。
 - messenger に出ない: `$HOME/.agent-messenger/config.json` の broker に host から届くか（`curl <broker>/health`）。
@@ -154,7 +158,11 @@ sudo kill -TERM "$L"
 # server.lock が消えるまで待つ（最大 60 秒）
 timeout 60 bash -c "while [ -e '$WS/server.lock' ]; do sleep 1; done" && echo "lock 消えた"
 pgrep -af bantou                     # 旧プロセスが残っていないこと
+# 0 章の確認から停止までの間に cap が走り出した可能性があるので、停止後にもう一度確認する
+sudo sh -c "grep -l '\"state\": \"running\"' $WS/caps/*/state.json $WS/workers/*/state.json"
 ```
+
+- 停止後の再確認で `running` が残っていたら、その cap / worker は停止で中断されたもの（state が `running` のまま残る）。どの cap かを控え、移送・起動の後に center から再度 kick する。
 
 **2. 旧 config を退避する**（新 HOME には使わない）
 
@@ -166,7 +174,7 @@ cp -a <旧 config.json> ~/bantou-migration/config.json.old
 # 中の broker / mcp / discovery / model 等の値を控え、新 config は script の引数で作る（旧 config を /home/bantou に置かない）
 ```
 
-退避を確認してから、旧 config を消す（旧 server は止まっているので以後使われない）。
+旧 config は**移行が完了するまで消さない**（問題があれば旧 server をこの config で起動し直して戻せるようにする）。消すのは 6 の後片付けで、旧 workspace と一緒に。
 
 **3. 新ユーザーを設置（起動はしない）**
 
@@ -210,7 +218,7 @@ center の discovery（`server_peers` / `remote_list`）に現れることを確
 2. claude CLI の導入・login と GitHub 鍵を bantou の HOME に用意（3 章）。
 3. cap が空になるのを待つ（6.1 の 0 章の確認。running が 0 件）。旧 server を停止する（6.1 の 1 章。`server.lock` の `launcher` に SIGTERM、`server.lock` が消えるまで待つ）。旧 config は 6.1 の 2 章のとおり退避する。
 4. 新 instance を止めて旧 workspace の `caps/` と `workers/` を移す（6.1 の 4 章。旧パスの扱いも同じ）。
-5. 新 instance の port を既定に戻す: `config.json` の `broker` / `mcp` を消し、`sudo systemctl restart bantou-server`（旧は 3 で止まっているので衝突しない）。
+5. 新 instance の port を既定に戻す: `config.json` の `broker` / `mcp` を **`sudo -u bantou` で**消し（例: `sudo -u bantou -H nano /home/bantou/config.json`。root で編集すると所有が root になり bantou が読めなくなる）、`sudo systemctl restart bantou-server`（旧は 3 で止まっているので衝突しない）。
 6. 旧 workspace は退避してから削除。
 
 ## 7. 参考: 旧手順書の要点（204 実測 2026-11-03）
