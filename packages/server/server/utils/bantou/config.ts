@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { isAbsolute } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 
 export const DEFAULT_BROKER = {
   port: 7901,
@@ -203,18 +203,25 @@ export async function loadConfig(path: string): Promise<Config> {
     throw new Error(`config が JSON として不正: ${path} (${(e as Error).message})`);
   }
   const obj = isRecord(data) ? data : {};
-  const ws = obj.workspace;
+  // workspace 省略時は config.json のある dir（root dir 1 つの構成）
+  const rootMode = obj.workspace === undefined;
+  const ws = rootMode ? dirname(resolve(path)) : obj.workspace;
   if (typeof ws !== "string" || ws.length === 0) {
-    throw new Error(`config の workspace は必須の文字列: ${path}`);
+    throw new Error(`config の workspace は文字列: ${path}`);
   }
   if (!isAbsolute(ws)) {
     throw new Error(`config の workspace は絶対パス: ${ws}`);
+  }
+  const session = parseSession(obj.session, path);
+  // root 構成では claude の設定も root 配下に置く（明示指定があればそちら）
+  if (rootMode && session.env.CLAUDE_CONFIG_DIR === undefined) {
+    session.env.CLAUDE_CONFIG_DIR = join(ws, ".claude");
   }
   return {
     workspace: ws,
     broker: parseBroker(obj.broker, path),
     mcp: parseMcp(obj.mcp, path),
-    session: parseSession(obj.session, path),
+    session,
     update: parseUpdate(obj.update, path),
   };
 }

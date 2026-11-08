@@ -4,7 +4,9 @@ import { homedir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const DEFAULT_CONFIG = join(homedir(), ".config", "bantou", "config.json");
+// root dir（既定は $BANTOU_HOME、無ければ $HOME）。--config 省略時は <root>/config.json を使い、workspace も root になる
+const ROOT_DIR = process.env.BANTOU_HOME && process.env.BANTOU_HOME.length > 0 ? resolve(process.env.BANTOU_HOME) : homedir();
+const DEFAULT_CONFIG = join(ROOT_DIR, "config.json");
 const binDir = dirname(fileURLToPath(import.meta.url));
 const selfBin = fileURLToPath(import.meta.url);
 

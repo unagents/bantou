@@ -8,7 +8,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 
 export const LOCK_FILE = "server.lock";
 export const READY_FILE = "server.ready";
@@ -67,7 +67,8 @@ export function readWorkspace(configPath) {
   } catch (e) {
     throw new Error(`config を読めない: ${configPath} (${e.message})`);
   }
-  const ws = data && typeof data === "object" ? data.workspace : undefined;
+  // workspace 省略時は config.json のある dir（root dir 1 つの構成）
+  const ws = data && typeof data === "object" ? (data.workspace ?? dirname(configPath)) : undefined;
   if (typeof ws !== "string" || ws.length === 0) throw new Error(`config の workspace は必須の文字列: ${configPath}`);
   if (!isAbsolute(ws)) throw new Error(`config の workspace は絶対パス: ${ws}`);
   return ws;

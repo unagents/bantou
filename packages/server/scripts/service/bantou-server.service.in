@@ -1,0 +1,25 @@
+# bantou server の systemd system unit 雛形（scripts/install-service.sh が @...@ を埋めて /etc/systemd/system に置く）
+[Unit]
+Description=bantou server (user @USER@)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@HOME@
+Environment=HOME=@HOME@
+Environment=BANTOU_HOME=@HOME@
+Environment=CLAUDE_CONFIG_DIR=@HOME@/.claude
+Environment=GIT_CONFIG_GLOBAL=@HOME@/.config/git/gitconfig
+Environment=PATH=@HOME@/.local/bin:@HOME@/.bun/bin:@NODE_BIN@:/usr/local/bin:/usr/bin:/bin
+ExecStart=@NPX@ -y bantou@@VERSION@ --config @HOME@/config.json
+# 自己更新（supervisor の入れ替え）は launcher（この unit の main pid）の下で起きる。launcher が落ちたら OS が戻す
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+StandardOutput=append:@HOME@/server.log
+StandardError=append:@HOME@/server.log
+
+[Install]
+WantedBy=multi-user.target
