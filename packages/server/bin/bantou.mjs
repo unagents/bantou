@@ -1,12 +1,11 @@
 #!/usr/bin/env node
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveDefaultConfig } from "./default-config.mjs";
 
-// root dir（既定は $BANTOU_HOME、無ければ $HOME）。--config 省略時は <root>/config.json を使い、workspace も root になる
-const ROOT_DIR = process.env.BANTOU_HOME && process.env.BANTOU_HOME.length > 0 ? resolve(process.env.BANTOU_HOME) : homedir();
-const DEFAULT_CONFIG = join(ROOT_DIR, "config.json");
+// --config 省略時: $BANTOU_HOME（無ければ $HOME）の config.json。無ければ旧既定 ~/.config/bantou/config.json（default-config.mjs）
+const DEFAULT_CONFIG = resolveDefaultConfig();
 const binDir = dirname(fileURLToPath(import.meta.url));
 const selfBin = fileURLToPath(import.meta.url);
 

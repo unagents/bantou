@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isAlive, readLock } from "../../../../bin/supervisor.mjs";
-import { runLauncher } from "../../../../bin/launcher.mjs";
+import { runLauncher, workspaceOf } from "../../../../bin/launcher.mjs";
 
 const fakeSupervise = fileURLToPath(new URL("../../../fixtures/fake-supervise.mjs", import.meta.url));
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -135,4 +135,21 @@ test("launcher: 二重起動は 2 本目の supervisor が exit 1、2 本目の 
       await killAll(ws);
     }
   });
+});
+
+test("workspaceOf: workspace 省略は config.json のある dir、相対・空は拒否", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "bantou-launcher-ws-"));
+  try {
+    const cfg = join(dir, "config.json");
+    await writeFile(cfg, "{}");
+    assert.equal(workspaceOf(cfg), dir);
+    await writeFile(cfg, JSON.stringify({ workspace: "/abs/ws" }));
+    assert.equal(workspaceOf(cfg), "/abs/ws");
+    await writeFile(cfg, JSON.stringify({ workspace: "rel" }));
+    assert.throws(() => workspaceOf(cfg), /絶対パス/);
+    await writeFile(cfg, JSON.stringify({ workspace: "" }));
+    assert.throws(() => workspaceOf(cfg), /絶対パス/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

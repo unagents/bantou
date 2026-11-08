@@ -24,7 +24,7 @@ claude を headless（`claude -p`）で起動する常駐プロセス。messenge
 npx bantou --config <path>
 ```
 
-- `--config` 省略時は `~/.config/bantou/config.json`。
+- `--config` 省略時は `$BANTOU_HOME`（無ければ `$HOME`）の `config.json`。そこに無く、旧既定の `~/.config/bantou/config.json` があればそれを使う（後方互換）。
 - `npx bantou --version` は package.json の版を 1 行出して exit 0。
 - `npx bantou --handoff-protocol` は引き継ぎ対応版であることを示す `1` を出して exit 0（旧 supervisor が引き継ぐ前に確かめる）。内部用に `--supervise` / `--serve` もある。
 - それ以外の引数は exit 2。実行時エラーは exit 1。
@@ -65,7 +65,7 @@ npx bantou --config <path>
 
 | キー | 必須 | 既定値 | 内容 |
 |---|---|---|---|
-| `workspace` | 必須 | - | workspace フォルダの絶対パス |
+| `workspace` | 任意 | config.json のある dir | workspace フォルダの絶対パス。省略すると config.json のある dir が root になり、その場合 `session.env.CLAUDE_CONFIG_DIR` の既定は `<root>/.claude`（専用ユーザーの HOME を root にする構成。`../../docs/ops/server-install.md`） |
 | `broker.port` | 任意 | `7901` | broker の HTTP port。0..65535 の整数。0 はランダム |
 | `broker.bind` | 任意 | `127.0.0.1` | broker の bind アドレス |
 | `broker.discovery` | 任意 | `"on"` | UDP discovery の応答。`"on"` か `"off"` |
@@ -91,8 +91,12 @@ npx bantou --config <path>
 
 ## workspace レイアウト
 
+`<workspace>` は config の `workspace`（省略時は config.json のある dir = root）。root 構成では config.json・`.claude` などもこの dir に同居する。
+
 ```
 <workspace>/
+  config.json                        root 構成の config（`workspace` 省略時。明示指定の構成では別の場所）
+  server.log / server.lock / server.ready / server.exit / update.json  常駐の記録と更新の状態
   broker.json                        broker の状態ファイル
   caps/<cap-id>/                     cap の path（claude の cwd）
     state.json                       状態

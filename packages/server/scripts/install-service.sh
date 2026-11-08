@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # bantou server を「専用ユーザーの HOME = server root」の service として設置する（設置者が sudo で 1 回だけ実行）。
-#   sudo ./install-service.sh [--user bantou] [--home <dir>] [--version <npm 版|latest>] [--broker <url>]... [--broker-port N] [--mcp-port N] [--discovery on|off] [--dry-run]
+#   sudo ./install-service.sh [--user bantou] [--home <dir>] [--version <npm 版|latest>] [--broker <url>]... [--broker-port N] [--mcp-port N] [--discovery on|off] [--no-start] [--dry-run]
 # 冪等: 何度実行しても既存の config.json / gitconfig / 認証は上書きしない。unit は内容が変わった時だけ置き換えて再起動する。
+# --no-start: unit の配置と enable まで行い、起動しない（caps を移送してから起動する移行用。起動は systemctl start / launchctl kickstart）。
 set -euo pipefail
 
 USER_NAME=bantou
 HOME_DIR=""
 VERSION=latest
 DRY=0
+NO_START=0
 BROKERS=()
 BROKER_PORT=""
 MCP_PORT=""
@@ -30,6 +32,7 @@ while [ $# -gt 0 ]; do
     --broker-port) BROKER_PORT="${2:?}"; shift 2 ;;
     --mcp-port) MCP_PORT="${2:?}"; shift 2 ;;
     --discovery) DISCOVERY="${2:?}"; shift 2 ;;
+    --no-start) NO_START=1; shift ;;
     --dry-run) DRY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; die "unknown argument: $1" ;;
@@ -38,6 +41,13 @@ done
 
 [[ "$USER_NAME" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "invalid --user: $USER_NAME"
 [[ "$VERSION" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid --version: $VERSION"
+valid_port() { [[ "$1" =~ ^[0-9]+$ ]] && [ "${#1}" -le 5 ] && [ "$1" -le 65535 ]; }
+[ -z "$BROKER_PORT" ] || valid_port "$BROKER_PORT" || die "invalid --broker-port（0..65535 の整数）: $BROKER_PORT"
+[ -z "$MCP_PORT" ] || valid_port "$MCP_PORT" || die "invalid --mcp-port（0..65535 の整数）: $MCP_PORT"
+[ -z "$DISCOVERY" ] || [ "$DISCOVERY" = on ] || [ "$DISCOVERY" = off ] || die "invalid --discovery（on か off）: $DISCOVERY"
+for b in "${BROKERS[@]+"${BROKERS[@]}"}"; do
+  [[ "$b" =~ ^https?://[A-Za-z0-9._:-]+(/[A-Za-z0-9._~%/-]*)?$ ]] || die "invalid --broker（http(s)://host[:port] 形式）: $b"
+done
 OS="$(uname -s)"
 case "$OS" in
   Linux) DEFAULT_HOME="/home/$USER_NAME" ;;
@@ -64,6 +74,21 @@ command -v git >/dev/null || die "git が見つからない"
 
 if [ "$VERSION" != latest ]; then
   say "警告: --version $VERSION で版を固定する。update_server で版を上げても、restart / host 再起動のたびにこの版に戻る（既定は latest。固定は非推奨）。"
+fi
+render() { # <template>
+  sed -e "s|@USER@|$USER_NAME|g" -e "s|@HOME@|$HOME_DIR|g" -e "s|@VERSION@|$VERSION|g" \
+      -e "s|@NPX@|$NPX|g" -e "s|@NODE_BIN@|$NODE_BIN|g" "$1"
+}
+
+# 実行前の警告: 既存 unit の内容が変わる（版固定の変更・解除など）と、server が restart され、update_server で上げた版は unit の版に戻る
+if [ "$OS" = Linux ]; then EXISTING_UNIT="/etc/systemd/system/$UNIT_NAME.service"; UNIT_TPL=bantou-server.service.in
+else EXISTING_UNIT="/Library/LaunchDaemons/$PLIST_LABEL.plist"; UNIT_TPL=com.unagents.bantou.plist.in; fi
+if [ -f "$EXISTING_UNIT" ] && [ -f "$TPL_DIR/$UNIT_TPL" ] && [ "$(cat "$EXISTING_UNIT")" != "$(render "$TPL_DIR/$UNIT_TPL")" ]; then
+  say "警告: 既存の $EXISTING_UNIT の内容が変わる（今回の版: $VERSION）。"
+  [ "$VERSION" != latest ] || say "警告: --version を付けない再実行は版固定を解除して latest に戻す。"
+  if [ "$NO_START" = 1 ]; then say "警告: --no-start なので今は再起動しない（動いている server には次の restart で反映される）。"
+  else say "警告: 反映のため server を restart する。実行中の cap / worker は中断されるので cap が空の時に行う。"; fi
+  say "警告: update_server で上げた版は、unit の版（今回: $VERSION）に戻る。"
 fi
 say "OS=$OS user=$USER_NAME home=$HOME_DIR version=$VERSION npx=$NPX dry-run=$DRY"
 
@@ -155,17 +180,6 @@ if [ ${#BROKERS[@]} -gt 0 ]; then
 fi
 
 # 3. unit 登録と起動
-render() { # <template>
-  sed -e "s|@USER@|$USER_NAME|g" -e "s|@HOME@|$HOME_DIR|g" -e "s|@VERSION@|$VERSION|g" \
-      -e "s|@NPX@|$NPX|g" -e "s|@NODE_BIN@|$NODE_BIN|g" "$1"
-}
-
-# 既存の unit が変わる時（--version を変えて再実行など）は server が restart される
-warn_restart() {
-  say "警告: 既存の $1 の内容が変わる。server を restart する（実行中の cap / worker は中断される。cap が空の時に行う）。"
-  say "警告: update_server で上げた版は、unit の版（今回: $VERSION）に戻る。"
-}
-
 if [ "$OS" = Linux ]; then
   command -v systemctl >/dev/null || die "systemd が必要"
   UNIT_PATH="/etc/systemd/system/$UNIT_NAME.service"
@@ -173,7 +187,6 @@ if [ "$OS" = Linux ]; then
   CHANGED=1
   if [ -f "$UNIT_PATH" ] && [ "$(cat "$UNIT_PATH")" = "$NEW" ]; then CHANGED=0; fi
   if [ "$CHANGED" = 1 ]; then
-    [ -f "$UNIT_PATH" ] && warn_restart "unit"
     say "unit を配置: $UNIT_PATH"
     if [ "$DRY" = 1 ]; then printf '%s\n' "$NEW" | sed 's/^/    | /'; else printf '%s\n' "$NEW" > "$UNIT_PATH"; chmod 644 "$UNIT_PATH"; fi
     run systemctl daemon-reload
@@ -181,7 +194,8 @@ if [ "$OS" = Linux ]; then
     say "unit は変更なし: $UNIT_PATH"
   fi
   run systemctl enable "$UNIT_NAME.service"
-  if [ "$CHANGED" = 1 ]; then run systemctl restart "$UNIT_NAME.service"; else run systemctl start "$UNIT_NAME.service"; fi
+  if [ "$NO_START" = 1 ]; then say "--no-start: 起動しない（起動: sudo systemctl start $UNIT_NAME）"
+  elif [ "$CHANGED" = 1 ]; then run systemctl restart "$UNIT_NAME.service"; else run systemctl start "$UNIT_NAME.service"; fi
   RESTART_CMD="sudo systemctl restart $UNIT_NAME"
   STATUS_CMD="sudo systemctl status $UNIT_NAME"
   LOG_CMD="sudo journalctl -u $UNIT_NAME -e   /   sudo tail -f $HOME_DIR/server.log"
@@ -191,18 +205,17 @@ else
   CHANGED=1
   if [ -f "$PLIST_PATH" ] && [ "$(cat "$PLIST_PATH")" = "$NEW" ]; then CHANGED=0; fi
   if [ "$CHANGED" = 1 ]; then
-    [ -f "$PLIST_PATH" ] && warn_restart "plist"
     say "plist を配置: $PLIST_PATH"
     if [ "$DRY" = 1 ]; then printf '%s\n' "$NEW" | sed 's/^/    | /'; else
       launchctl bootout "system/$PLIST_LABEL" 2>/dev/null || true
       printf '%s\n' "$NEW" > "$PLIST_PATH"; chown root:wheel "$PLIST_PATH"; chmod 644 "$PLIST_PATH"
     fi
-    run launchctl bootstrap system "$PLIST_PATH"
+    if [ "$NO_START" = 0 ]; then run launchctl bootstrap system "$PLIST_PATH"; fi   # RunAtLoad なので bootstrap で起動してしまう
   else
     say "plist は変更なし: $PLIST_PATH"
   fi
-  run launchctl enable "system/$PLIST_LABEL"
-  run launchctl kickstart "system/$PLIST_LABEL"
+  if [ "$NO_START" = 1 ]; then say "--no-start: 起動しない（起動: sudo launchctl bootstrap system $PLIST_PATH && sudo launchctl enable system/$PLIST_LABEL）"
+  else run launchctl enable "system/$PLIST_LABEL"; run launchctl kickstart "system/$PLIST_LABEL"; fi
   RESTART_CMD="sudo launchctl kickstart -k system/$PLIST_LABEL"
   STATUS_CMD="sudo launchctl print system/$PLIST_LABEL"
   LOG_CMD="sudo tail -f $HOME_DIR/server.log"

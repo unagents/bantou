@@ -63,3 +63,31 @@ branch: feature/service-user-install（基点 develop 1f2ce896）
 - root での実 useradd / systemd 起動（stub での実走のみ。209 の実機確認は修正前の版）。
 - macOS launchd 実機。host 再起動。
 - 移行手順 6.1 / 6.2 の実行（204 / 209 での通し）。claude native installer の `sudo -u bantou -H bash -c` 実行。
+
+## review 指摘と対応（2 回目: be65049 の検証 + L1 + 任意分）
+
+branch の実 HEAD が指示の 6108f83 ではなく be65049（別 author が M1〜M4 を修正済み）だったため、これを土台にして元の指示の各要件と 1 項目ずつ突き合わせた。
+
+### be65049 が既に満たしていた項目（検証のみ、変更なし）
+
+- M1: `server.log` を bantou 所有・640 で先に作成（touch → chown → chmod。systemd / launchd 共通のコード）。docs 5 章の「root のことがある」/「sudo tail」を修正済み。
+- M2: 既定 latest、`--version` 固定は非推奨で「再起動で版が戻る」を docs 3・4 章に明記。
+- M3 (a) git clone → 実行 → 消すコマンド (b) NodeSource の node 22 手順と `sudo -u bantou test -x node` の die (c) claude 公式 installer のコマンド (d) 既存 HOME の `chown bantou:` (e) 「設置後は ssh しない」と journalctl / systemctl status / server.log の位置付け。
+- M4: server.lock の launcher pid を `node -p` で取り SIGTERM → lock が消えるまで待つ手順、旧 config 退避、state.json のフィールド記述、running 確認の grep、rsync 有無確認、chown -R 後の読み取り確認。state.json は `session_id` `state` `last_started_at` `last_finished_at` `retries` のみでパスのフィールドは無い（state.ts と実 state.json で再確認。旧パスが効くのは session_id の先の claude 会話記録）。
+- 念のため確認: repo / claude installer URL が未認証で 200（`curl -I`）。
+
+### 今回追加で直した項目
+
+- M1 追加: docs 5 章に server.log が無限に伸びる旨の運用メモ 1 行（ローテーション無し、`copytruncate` を使う理由）。
+- M2 追加: 警告が設置の途中（unit 配置時）に出ていたのを、設置作業に入る**前**に出すよう移動（`render` を前に出して既存 unit と比較）。「`--version` 固定後に無しで再実行すると latest に戻り restart」「restart する／しない（--no-start）」「update_server の版が unit の版に戻る」を表示。docs 3 章の冪等性の説明に同旨を追記。
+- M4 追加: 6.1 の順序が「旧停止 → 新 server 起動（空 caps）→ 停止 → caps 移送 → 起動」で、指示の「旧停止 → caps 移送 → 新 server 起動」と違っていた。script に `--no-start`（unit 配置と enable まで。macOS は RunAtLoad のため bootstrap もしない）を足し、6.1 を「旧停止 → `--no-start` で設置 → caps 移送 → 起動」に直した。HOME 750 でも bantou 所有なので読める旨を明記。
+- L1: `--config` 省略時は `$BANTOU_HOME`（無ければ `$HOME`）の `config.json`、無く旧 `~/.config/bantou/config.json` があれば旧へ fallback（`bin/default-config.mjs` 新規、`bantou.mjs` から利用）。`packages/server/README.md` の既定パス、`workspace` 任意（省略時は config.json のある dir）、レイアウト節（root 構成）を更新。docs 1 章にも fallback を追記。
+- 任意: install-service.sh の値検証（`--broker-port` / `--mcp-port` は 0..65535 整数、`--discovery` は on/off、`--broker` は `http(s)://host[:port]`）。launcher の `workspaceOf` を export して workspace 省略 fallback の単体テスト、`resolveDefaultConfig` の単体テスト（BANTOU_HOME 優先、旧への fallback）。
+
+### テスト（2 回目）
+
+- protocol を `tsc` でビルド後、packages/server `npm test`: 260 / 260 pass（追加 3 件）。
+- install-service.sh: `bash -n` OK、shellcheck 0.11.0 警告 0、不正な引数 5 種で die、`--dry-run` は副作用なし。
+- root 不要の実走（sudo / useradd / passwd / systemctl / chown / id / getent を stub、仮 HOME・仮 unit dir は作業 dir 内）: 1 回目で設置（touch→chown→640、config 生成、restart）。2 回目は config / gitconfig を上書きせず unit 変更なし・start のみ（sha1 一致）。`--version 0.6.2` で警告 4 行→unit 置換→restart。`--version` 無しに戻すと「固定解除」警告。`--no-start` は daemon-reload と enable のみで start / restart が呼ばれない。node 実行検査を落とすと die。
+- `systemd-analyze verify`（レンダリング済み unit）: unit 固有の指摘なし（host 側の他 unit の警告のみ）。
+- 未検証: root での実 useradd / systemd、macOS launchd（`--no-start` の launchd 分岐を含む）、移行手順の通し実行。

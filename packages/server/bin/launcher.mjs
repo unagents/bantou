@@ -32,7 +32,7 @@ function alive(pid) {
   }
 }
 
-function workspaceOf(configPath) {
+export function workspaceOf(configPath) {
   const data = readJson(configPath);
   // workspace 省略時は config.json のある dir（root dir 1 つの構成）
   const ws = data && typeof data === "object" ? (data.workspace ?? dirname(configPath)) : undefined;
