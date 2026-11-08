@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { getSessionSettings, pickDirectory, sessionPathHints, updateSession, updateSessionSettings } from "~/api";
+import { getSessionSettings, sessionPathHints, updateSession, updateSessionSettings } from "~/api";
 import { draftError, draftOf, emptyDraft, toUpdate, type SettingsDraft } from "~/composables/sessionInstructions";
 
 const open = defineModel<boolean>("open", { required: true });
@@ -56,15 +56,6 @@ const nameError = computed(() => {
 });
 const problem = computed(() => draftError(draft.value));
 
-async function pick() {
-  try {
-    const p = await pickDirectory();
-    if (p) pathInput.value = p;
-  } catch (e) {
-    actionError.value = String(e);
-  }
-}
-
 async function save() {
   if (busy.value) return;
   busy.value = true;
@@ -98,12 +89,13 @@ async function save() {
         </UFormField>
         <UFormField
           label="フォルダ"
-          help="center のホスト上の絶対パス（この PC のパスではない）。無ければ作られる。保存すると session をすぐ再起動する"
+          :help="
+            canPick
+              ? 'クリックでフォルダ選択ダイアログを開く。無ければ作られる。保存すると session をすぐ再起動する'
+              : 'center のホスト上の絶対パス（この PC のパスではない）。無ければ作られる。保存すると session をすぐ再起動する'
+          "
         >
-          <div class="flex gap-2">
-            <UInput v-model="pathInput" class="w-full" placeholder="（center が返していない）" data-testid="settings-path" />
-            <UButton v-if="canPick" label="選択…" color="neutral" variant="outline" data-testid="settings-path-pick" @click="pick" />
-          </div>
+          <PathField v-model="pathInput" :can-pick="canPick" placeholder="（center が返していない）" testid="settings-path" @error="actionError = $event" />
         </UFormField>
         <p v-if="pathChanged" class="text-cork-muted text-xs" data-testid="settings-path-note">
           フォルダを変えると以前の会話は引き継がれず新しい会話で始まる（移動チェックの有無に関わらず。claude の --continue が効かない）。名前だけの変更なら会話は続く

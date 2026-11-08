@@ -86,6 +86,8 @@ export class MockBantou {
   centerCanPick = false;
   /** What the folder dialog (`pick_directory`) returns (null: cancelled). */
   pickedDirectory: string | null = null;
+  /** When set, the folder dialog (`pick_directory`) fails with this message (no dialog on this OS). */
+  pickError: string | null = null;
   /** Project settings the center keeps per session name (`session_settings_get` / `_update`, merged; `null` removes an item). */
   centerSettings: Record<string, Record<string, unknown>> = {};
   /** The center-wide settings (`center_settings_get` / `_update`, merged; `null` removes an item). */
@@ -338,6 +340,7 @@ export class MockBantou {
         this.dir = args.path as string;
         return null;
       case "pick_directory":
+        if (this.pickError) throw new Error(this.pickError);
         return this.pickedDirectory;
       case "session_path_hints":
         return { workspace: this.centerWorkspace, canPick: this.centerCanPick };

@@ -10,7 +10,6 @@ import {
   centerRegenerateToken,
   centerSetSettings,
   centerStatus,
-  pickDirectory,
 } from "~/api";
 import { draftError, draftOf, emptyDraft, toUpdate, type SettingsDraft } from "~/composables/sessionInstructions";
 import type { CenterConnectSnippets, CenterIpStatus, CenterParsedConnect, CenterSettings, CenterStatus } from "~/types";
@@ -51,17 +50,6 @@ async function load() {
   }
   ipChoice.value = null;
   await Promise.all([refreshStatus(), loadLocalIps(), loadIpStatus(), loadCommon()]);
-}
-
-/** Native folder dialog for the sidecar's workspace (the center runs on this PC, so its folders are this PC's). */
-async function pickWorkspace() {
-  if (!settings.value) return;
-  try {
-    const p = await pickDirectory();
-    if (p) settings.value.workspace = p;
-  } catch (e) {
-    error.value = String(e);
-  }
 }
 
 // Center-wide settings (instructions, reference folders): kept by the connected center (own sidecar or the
@@ -421,16 +409,8 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
           </UFormField>
         </div>
 
-        <UFormField label="workspace" description="center が扱う作業ディレクトリ（1 つ）。session を作る時の既定の親。無ければ作る。~ 始まりも可">
-          <div class="flex gap-2">
-            <UInput
-              v-model="settings.workspace"
-              placeholder="~/.bantou"
-              class="w-full"
-              data-testid="center-workspace"
-            />
-            <UButton label="選択…" color="neutral" variant="outline" data-testid="center-workspace-pick" @click="pickWorkspace" />
-          </div>
+        <UFormField label="workspace" description="center が扱う作業ディレクトリ（1 つ）。session を作る時の既定の親。クリックでフォルダ選択ダイアログを開く。無ければ作る">
+          <PathField v-model="settings.workspace" can-pick placeholder="~/.bantou" testid="center-workspace" pick-testid="center-workspace-pick" @error="error = $event" />
         </UFormField>
 
         <UFormField label="claudePath" description="空なら login shell から自動解決">

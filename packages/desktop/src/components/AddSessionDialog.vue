@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { createSession, pickDirectory, sessionPathHints } from "~/api";
+import { createSession, sessionPathHints } from "~/api";
 import { draftError, emptyDraft, toCreate } from "~/composables/sessionInstructions";
 
 const open = defineModel<boolean>("open", { required: true });
@@ -43,15 +43,6 @@ onMounted(async () => {
   }
 });
 
-async function pick() {
-  try {
-    const p = await pickDirectory();
-    if (p) folder.value = p;
-  } catch (e) {
-    actionError.value = String(e);
-  }
-}
-
 async function create() {
   if (busy.value || !trimmed.value || nameError.value) return;
   busy.value = true;
@@ -79,14 +70,11 @@ async function create() {
           label="フォルダ"
           :help="
             canPick
-              ? 'この session 用に作るフォルダ（絶対パス）。空なら既定の場所に作る。無ければ作られる'
+              ? 'クリックでフォルダ選択ダイアログを開く。選ばなければ既定の場所に作る。無ければ作られる'
               : 'center のホスト上の絶対パス（この PC のパスではない）。空なら center の既定の場所に作る。無ければ作られる'
           "
         >
-          <div class="flex gap-2">
-            <UInput v-model="folder" class="w-full" :placeholder="folderPlaceholder" data-testid="add-folder" @keydown.enter="create" />
-            <UButton v-if="canPick" label="選択…" color="neutral" variant="outline" data-testid="add-folder-pick" @click="pick" />
-          </div>
+          <PathField v-model="folder" :can-pick="canPick" :placeholder="folderPlaceholder" testid="add-folder" @enter="create" @error="actionError = $event" />
         </UFormField>
         <ProjectSettingsFields v-model="draft" id-prefix="add" :rows="4" :can-pick="canPick" @error="actionError = $event" />
         <p v-if="problem" class="text-cork-danger-text text-xs" data-testid="add-problem">{{ problem }}</p>
