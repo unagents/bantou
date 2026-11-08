@@ -8,6 +8,7 @@ type Mock = {
   centerSessions: Record<string, unknown>[];
   centerSettings: Record<string, Record<string, unknown>>;
   centerSessionUpdateError: string | null;
+  centerSessionUpdateDelayMs: number;
   calls: { cmd: string; args?: Record<string, unknown> }[];
 };
 
@@ -42,6 +43,27 @@ test.describe("session rename / move", () => {
     await expect(page.locator("[data-testid=session-settings-open][data-name=career-2]")).toBeVisible();
     await expect(page.locator("[data-testid=session-settings-open][data-name=careery]")).toHaveCount(0);
     await expect(page.locator("[aria-current=true]")).toContainText("career-2");
+  });
+
+  test("a slow rename: the new name does not turn into 'already used' while it runs, and a repeated save sends session_update once", async ({ page }) => {
+    await page.goto("/");
+    await mock(page, (m) => {
+      m.centerSessionUpdateDelayMs = 1500;
+    });
+    await openGear(page, "careery");
+    const dlg = page.getByTestId("settings-dialog");
+    await dlg.getByTestId("settings-name").fill("career-slow");
+    // two saves before any list update arrives (double click)
+    await dlg.getByTestId("settings-save").evaluate((el) => {
+      for (let i = 0; i < 2; i++) (el as HTMLButtonElement).click();
+    });
+    // the center already lists the new name (event), the answer comes later
+    await expect(page.locator("[data-testid=session-settings-open][data-name=career-slow]")).toBeVisible();
+    await expect(dlg).not.toContainText("既に使われている名前");
+    await dlg.getByTestId("settings-save").click({ force: true });
+    await expect(dlg).toBeHidden();
+    expect((await updateCalls(page)).length).toBe(1);
+    await expect(page.getByTestId("settings-error")).toHaveCount(0);
   });
 
   test("rename keeps the project settings (center key follows) and sends session_update_settings first when both changed", async ({ page }) => {

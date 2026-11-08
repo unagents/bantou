@@ -50,7 +50,8 @@ const dirty = computed(() => settingsDirty.value || nameChanged.value || pathCha
 const nameError = computed(() => {
   if (!newName.value) return "名前を入れる";
   if (!NAME_PATTERN.test(newName.value)) return "英数字と _ - のみ";
-  if (nameChanged.value && props.existing?.includes(newName.value)) return "既に使われている名前";
+  // While our own rename runs, the center already lists the new name (it lists, then settles): that is not a clash.
+  if (!busy.value && nameChanged.value && props.existing?.includes(newName.value)) return "既に使われている名前";
   return null;
 });
 const problem = computed(() => draftError(draft.value));
@@ -65,6 +66,7 @@ async function pick() {
 }
 
 async function save() {
+  if (busy.value) return;
   busy.value = true;
   actionError.value = null;
   try {

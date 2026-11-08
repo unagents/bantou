@@ -91,6 +91,23 @@ test("create: path 省略は <workspace>/<name> を作り、起動して保存�
   assert.deepEqual(config.projects.map((p) => p.name), ["cfg"]);
 });
 
+test("create: 1 回の作成で add / start は 1 回だけ。起動前に created event で一覧へ載り、その間の同名 create は重複で拒否される（クライアントは再送しない）", async () => {
+  const events = createEventHub();
+  const { mgr, calls } = setup({ events });
+  const listed: string[][] = [];
+  events.subscribe((e) => {
+    if (e.reason === "created") listed.push(mgr.list().map((x) => x.name));
+  });
+  const first = mgr.create({ name: "pm1" });
+  const second = mgr.create({ name: "pm1" });
+  const [ok, dup] = await Promise.allSettled([first, second]);
+  assert.equal(ok.status, "fulfilled");
+  assert.equal(dup.status, "rejected");
+  assert.match(String((dup as PromiseRejectedResult).reason), /name が既に使われている: pm1/);
+  assert.deepEqual(calls, ["add:pm1:auto:wrapper", "start:pm1"]);
+  assert.deepEqual(listed, [["cfg", "pm1"]]);
+});
+
 test("create: path と permissionMode を指定できる。相対 path は拒否", async () => {
   const { mgr, calls } = setup();
   const r = await mgr.create({ name: "a", path: join(dir, "elsewhere"), permissionMode: "plan" });

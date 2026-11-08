@@ -11,6 +11,7 @@ type Mock = {
   centerReachable: boolean;
   centerSessions: Record<string, unknown>[];
   centerSessionCreateError: string | null;
+  centerSessionCreateDelayMs: number;
   calls: { cmd: string }[];
   centerDrop: (name: string) => void;
   centerSessionsChanged: (reason?: string | null, name?: string | null) => void;
@@ -91,6 +92,41 @@ test.describe("center on", () => {
     await expect(dlg).toBeHidden();
     await pickSession(page, "pm-main_1");
     expect(await withMock(page, (m) => m.centerSessions.some((s) => s.name === "pm-main_1"))).toBe(true);
+  });
+
+  test("a slow create is sent once: Enter / click again while it runs sends nothing and shows no 'already used' error", async ({ page }) => {
+    await page.goto("/");
+    await withMock(page, (m) => {
+      m.centerSessionCreateDelayMs = 1500;
+    });
+    await page.getByTestId("open-add-session").click();
+    const dlg = page.getByTestId("add-dialog");
+    const name = dlg.getByTestId("add-name");
+    await name.fill("pm-slow");
+    // two Enters before any list update arrives (key repeat / double press)
+    await name.evaluate((el) => {
+      for (let i = 0; i < 2; i++) el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    await expect(page.getByTestId("side-row").filter({ hasText: "pm-slow" })).toHaveCount(1);
+    await name.press("Enter");
+    await dlg.getByTestId("add-create").click({ force: true });
+    await expect(dlg).toBeHidden();
+    expect(await withMock(page, (m) => m.calls.filter((c) => c.cmd === "create_session").length)).toBe(1);
+    await expect(page.getByTestId("add-action-error")).toHaveCount(0);
+  });
+
+  test("the name does not turn into 'already used' while its own create runs", async ({ page }) => {
+    await page.goto("/");
+    await withMock(page, (m) => {
+      m.centerSessionCreateDelayMs = 1500;
+    });
+    await page.getByTestId("open-add-session").click();
+    const dlg = page.getByTestId("add-dialog");
+    await dlg.getByTestId("add-name").fill("pm-slow2");
+    await dlg.getByTestId("add-create").click();
+    await expect(page.getByTestId("side-row").filter({ hasText: "pm-slow2" })).toHaveCount(1);
+    await expect(dlg).not.toContainText("既に使われている名前");
+    await expect(dlg).toBeHidden();
   });
 
   test("a name already used or invalid cannot be created", async ({ page }) => {
