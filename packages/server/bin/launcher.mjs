@@ -10,7 +10,7 @@
 // launcher は lock.launcher が自分で、lock.pid が生きている間見張り、系列が消えたら終了コードを決めて終わる。
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -32,9 +32,10 @@ function alive(pid) {
   }
 }
 
-function workspaceOf(configPath) {
+export function workspaceOf(configPath) {
   const data = readJson(configPath);
-  const ws = data && typeof data === "object" ? data.workspace : undefined;
+  // workspace 省略（undefined）時は config.json のある dir（root dir 1 つの構成）。null など他の値は config.ts と同じくエラー
+  const ws = data && typeof data === "object" ? (data.workspace === undefined ? dirname(configPath) : data.workspace) : undefined;
   if (typeof ws !== "string" || ws.length === 0 || !isAbsolute(ws)) throw new Error(`config の workspace は絶対パスの文字列が必須: ${configPath}`);
   return ws;
 }

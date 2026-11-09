@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveDefaultConfig } from "./default-config.mjs";
 
-const DEFAULT_CONFIG = join(homedir(), ".config", "bantou", "config.json");
+// --config 省略時: $BANTOU_HOME（無ければ $HOME）の config.json。無ければ旧既定 ~/.config/bantou/config.json（default-config.mjs）
+const DEFAULT_CONFIG = resolveDefaultConfig();
 const binDir = dirname(fileURLToPath(import.meta.url));
 const selfBin = fileURLToPath(import.meta.url);
 

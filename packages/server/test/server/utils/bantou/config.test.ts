@@ -64,8 +64,8 @@ test("config: broker / session 一部指定は残りが既定値", async () => {
 });
 
 const bad: [string, unknown, RegExp][] = [
-  ["workspace 欠落", {}, /workspace/],
   ["workspace 相対パス", { workspace: "rel/ws" }, /workspace は絶対パス: rel\/ws/],
+  ["workspace null", { workspace: null }, /workspace は文字列/],
   ["broker 非オブジェクト", { workspace: "/w", broker: 1 }, /broker はオブジェクト/],
   ["session 非オブジェクト", { workspace: "/w", session: "x" }, /session はオブジェクト/],
   ["port 小数", { workspace: "/w", broker: { port: 1.5 } }, /broker\.port/],
@@ -120,5 +120,23 @@ test("config: workerKeepMs は既定 30 分、0 は掃除しない、負・小�
   assert.equal((await load({ workspace: "/w", session: { workerKeepMs: 5000 } })).session.workerKeepMs, 5000);
   for (const bad of [-1, 1.5, "10"]) {
     await assert.rejects(load({ workspace: "/w", session: { workerKeepMs: bad } }), /workerKeepMs/);
+  }
+});
+
+test("config: workspace 省略は config.json のある dir が root。CLAUDE_CONFIG_DIR は <root>/.claude", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "bantou-config-root-"));
+  try {
+    const p = join(dir, "config.json");
+    await writeFile(p, JSON.stringify({}));
+    const c = await loadConfig(p);
+    assert.equal(c.workspace, dir);
+    assert.equal(c.session.env.CLAUDE_CONFIG_DIR, join(dir, ".claude"));
+    await writeFile(p, JSON.stringify({ session: { env: { CLAUDE_CONFIG_DIR: "/c" } } }));
+    assert.equal((await loadConfig(p)).session.env.CLAUDE_CONFIG_DIR, "/c");
+    // workspace を明示した従来構成は env を足さない
+    await writeFile(p, JSON.stringify({ workspace: "/w" }));
+    assert.deepEqual((await loadConfig(p)).session.env, {});
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 });

@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   acquireLock,
@@ -74,6 +74,10 @@ test("readWorkspace: workspace は絶対パスの文字列のみ", async () => {
     await writeFile(bad, JSON.stringify({ workspace: "rel" }));
     assert.throws(() => readWorkspace(bad), /絶対パス/);
     await writeFile(bad, "{}");
+    assert.equal(readWorkspace(bad), dirname(bad)); // workspace 省略は config.json のある dir
+    await writeFile(bad, JSON.stringify({ workspace: "" }));
+    assert.throws(() => readWorkspace(bad), /必須/);
+    await writeFile(bad, JSON.stringify({ workspace: null })); // null は省略扱いにしない（config.ts と同じ）
     assert.throws(() => readWorkspace(bad), /必須/);
     assert.throws(() => readWorkspace(join(ws, "..", "none.json")), /読めない/);
   });
