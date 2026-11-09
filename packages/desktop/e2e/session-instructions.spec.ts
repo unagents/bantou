@@ -21,7 +21,7 @@ const MULTI = "常に日本語で答える\n2 行目: \"quote\" $HOME\n\n4 行�
 const NOTE = "保存後に起動する session から効く。動いている session には効かない";
 
 test.describe("session instructions", () => {
-  test("the settings dialog has the center-wide instructions: read from the center, saved to it with its own button, shown again", async ({ page }) => {
+  test("the settings dialog has the center-wide instructions: read from the center, saved to it with the one save button, shown again", async ({ page }) => {
     await page.goto("/");
     await mock(page, (m) => {
       (m as unknown as { centerCommonSettings: Record<string, unknown> }).centerCommonSettings = { instructions: "共通の最初" };
@@ -30,26 +30,28 @@ test.describe("session instructions", () => {
     const field = page.getByTestId("center-common-instructions");
     await expect(field).toHaveValue("共通の最初");
     await expect(page.getByTestId("center-common-instructions-note")).toHaveText(NOTE);
-    const save = page.getByTestId("center-common-save");
+    // the common part has no save button of its own any more
+    await expect(page.getByTestId("center-common-save")).toHaveCount(0);
+    const save = page.getByTestId("settings-save");
     await expect(save).toBeDisabled();
     await field.fill(MULTI);
     await expect(save).toBeEnabled();
     await save.click();
-    await expect(page.getByText("共通の設定を保存した", { exact: true })).toBeVisible();
-    await expect(save).toBeDisabled();
+    await expect(page.getByText("設定を保存した", { exact: true })).toBeVisible();
+    // saving closes the dialog
+    await expect(page.getByTestId("settings-dialog")).toBeHidden();
     // it went to the center's tool, not to this PC's settings.json
     const sent = await mock(page, (m) => m.calls.filter((c) => c.cmd === "center_call" && (c.args as { name: string }).name === "center_settings_update").map((c) => c.args));
     expect(sent).toEqual([{ name: "center_settings_update", arguments: { settings: { instructions: MULTI, addDirs: null } } }]);
     expect(await mock(page, (m) => (m as unknown as { centerCommonSettings: Record<string, unknown> }).centerCommonSettings)).toEqual({ instructions: MULTI });
-    // the main save button is untouched by this (the center config did not change)
-    await expect(page.getByTestId("settings-save")).toBeDisabled();
-    await page.keyboard.press("Escape");
+    // only the common part changed: the center config API was not called
+    expect(await mock(page, (m) => m.calls.filter((c) => c.cmd === "center_set_settings").length)).toBe(0);
     await page.getByTestId("open-settings").click();
     await expect(page.getByTestId("center-common-instructions")).toHaveValue(MULTI);
     // blank removes it (null to the center)
     await page.getByTestId("center-common-instructions").fill("");
-    await page.getByTestId("center-common-save").click();
-    await expect(page.getByText("共通の設定を保存した", { exact: true })).toBeVisible();
+    await page.getByTestId("settings-save").click();
+    await expect(page.getByTestId("settings-dialog")).toBeHidden();
     expect(await mock(page, (m) => (m as unknown as { centerCommonSettings: Record<string, unknown> }).centerCommonSettings)).toEqual({});
   });
 
@@ -69,7 +71,90 @@ test.describe("session instructions", () => {
     await expect(page.getByTestId("center-common-instructions")).toBeEnabled();
     await page.getByTestId("center-common-instructions").fill("x".repeat(16_001));
     await expect(page.getByTestId("center-common-problem")).toHaveText("追加指示は 16000 文字以内");
-    await expect(page.getByTestId("center-common-save")).toBeDisabled();
+    await expect(page.getByTestId("settings-save")).toBeDisabled();
+  });
+
+  test("one save writes the common and the center settings (one call each); one changed part calls only its API", async ({ page }) => {
+    const count = (cmd: "center_set_settings" | "center_settings_update") =>
+      cmd === "center_set_settings"
+        ? mock(page, (m) => m.calls.filter((c) => c.cmd === "center_set_settings").length)
+        : mock(page, (m) => m.calls.filter((c) => c.cmd === "center_call" && (c.args as { name: string }).name === "center_settings_update").length);
+    await page.goto("/");
+    await page.getByTestId("open-settings").click();
+    await expect(page.getByTestId("center-common-instructions")).toBeEnabled();
+    // both parts changed -> both APIs once
+    await page.getByTestId("center-enabled").click();
+    await page.getByTestId("center-port").fill("7920");
+    await page.getByTestId("center-common-instructions").fill("共通 A");
+    await page.getByTestId("settings-save").click();
+    await expect(page.getByTestId("settings-dialog")).toBeHidden();
+    expect(await count("center_set_settings")).toBe(1);
+    expect(await count("center_settings_update")).toBe(1);
+    expect(await mock(page, (m) => (m as unknown as { centerCommonSettings: Record<string, unknown> }).centerCommonSettings)).toEqual({ instructions: "共通 A" });
+    expect(await mock(page, (m) => (m as unknown as { center: { port: number } }).center.port)).toBe(7920);
+    // only the center part changed -> only center_set_settings
+    await page.getByTestId("open-settings").click();
+    await page.getByTestId("center-port").fill("7930");
+    await page.getByTestId("settings-save").click();
+    await expect(page.getByTestId("settings-dialog")).toBeHidden();
+    expect(await count("center_set_settings")).toBe(2);
+    expect(await count("center_settings_update")).toBe(1);
+    // only the common part changed -> only center_settings_update
+    await page.getByTestId("open-settings").click();
+    await page.getByTestId("center-common-instructions").fill("共通 B");
+    await page.getByTestId("settings-save").click();
+    await expect(page.getByTestId("settings-dialog")).toBeHidden();
+    expect(await count("center_set_settings")).toBe(2);
+    expect(await count("center_settings_update")).toBe(2);
+  });
+
+  test("a failed common save names the common part, saves nothing else and keeps the dialog open", async ({ page }) => {
+    await page.goto("/");
+    await page.getByTestId("open-settings").click();
+    await expect(page.getByTestId("center-common-instructions")).toBeEnabled();
+    await page.getByTestId("center-enabled").click();
+    await page.getByTestId("center-common-instructions").fill("共通 C");
+    await mock(page, (m) => {
+      (m as unknown as { centerCommonSettingsError: string | null }).centerCommonSettingsError = "共通を保存できない: mock";
+    });
+    await page.getByTestId("settings-save").click();
+    await expect(page.getByTestId("settings-error")).toContainText("共通の設定の保存に失敗した");
+    await expect(page.getByTestId("settings-error")).toContainText("共通を保存できない: mock");
+    await expect(page.getByTestId("center-common-error")).toContainText("共通を保存できない: mock");
+    await expect(page.getByTestId("settings-dialog")).toBeVisible();
+    // the center config was not touched
+    expect(await mock(page, (m) => m.calls.filter((c) => c.cmd === "center_set_settings").length)).toBe(0);
+    // retry after the center is back saves both
+    await mock(page, (m) => {
+      (m as unknown as { centerCommonSettingsError: string | null }).centerCommonSettingsError = null;
+    });
+    await page.getByTestId("settings-save").click();
+    await expect(page.getByTestId("settings-dialog")).toBeHidden();
+    expect(await mock(page, (m) => m.calls.filter((c) => c.cmd === "center_set_settings").length)).toBe(1);
+  });
+
+  test("a failed center save after the common part was saved names the center part, keeps the common part saved and the dialog open", async ({ page }) => {
+    await page.goto("/");
+    await page.getByTestId("open-settings").click();
+    await expect(page.getByTestId("center-common-instructions")).toBeEnabled();
+    await page.getByTestId("center-enabled").click();
+    await page.getByTestId("center-common-instructions").fill("共通 D");
+    await mock(page, (m) => {
+      (m as unknown as { centerSetSettingsError: string | null }).centerSetSettingsError = "center を保存できない: mock";
+    });
+    await page.getByTestId("settings-save").click();
+    await expect(page.getByTestId("settings-error")).toContainText("center の設定の保存に失敗した（共通の設定は保存済み）");
+    await expect(page.getByTestId("settings-error")).toContainText("center を保存できない: mock");
+    await expect(page.getByTestId("settings-dialog")).toBeVisible();
+    expect(await mock(page, (m) => (m as unknown as { centerCommonSettings: Record<string, unknown> }).centerCommonSettings)).toEqual({ instructions: "共通 D" });
+    // retry: the common part is no longer a change, so only the center API is called again
+    await mock(page, (m) => {
+      (m as unknown as { centerSetSettingsError: string | null }).centerSetSettingsError = null;
+    });
+    await page.getByTestId("settings-save").click();
+    await expect(page.getByTestId("settings-dialog")).toBeHidden();
+    const calls = (name: string) => mock(page, (m) => m.calls.filter((c) => c.cmd === "center_call" && (c.args as { name: string }).name === "center_settings_update").length);
+    expect(await calls("center_settings_update")).toBe(1);
   });
 
   test.describe("sidebar gear", () => {
@@ -321,8 +406,8 @@ test.describe("reference folders (--add-dir)", () => {
     await expect(add).toHaveText("パスを入力して追加");
     await add.click();
     await sec.getByTestId("center-common-add-dir").first().fill("/typed/common");
-    await sec.getByTestId("center-common-save").click();
-    await expect(page.getByText("共通の設定を保存した", { exact: true })).toBeVisible();
+    await page.getByTestId("settings-save").click();
+    await expect(page.getByTestId("settings-dialog")).toBeHidden();
     expect(await mock(page, (m) => (m as unknown as { centerCommonSettings: Record<string, unknown> }).centerCommonSettings)).toEqual({ addDirs: ["/typed/common"] });
   });
 
@@ -360,8 +445,8 @@ test.describe("reference folders (--add-dir)", () => {
     await expect(sec.getByTestId("center-common-add-dir").first()).toHaveAttribute("readonly", "");
     await addBtn.click();
     await expect(sec.getByTestId("center-common-add-dir")).toHaveCount(2);
-    await sec.getByTestId("center-common-save").click();
-    await expect(page.getByText("共通の設定を保存した", { exact: true })).toBeVisible();
+    await page.getByTestId("settings-save").click();
+    await expect(page.getByTestId("settings-dialog")).toBeHidden();
     expect(await mock(page, (m) => (m as unknown as { centerCommonSettings: Record<string, unknown> }).centerCommonSettings)).toEqual({ addDirs: ["/common/ref", "/common/picked"] });
   });
 });
