@@ -237,6 +237,19 @@ center は wrapper 経由の session（master-cap）を起動するたび（新�
 
 `remoteControl.claude` 指定時はそのまま使う（`config`、検証しない）。結果はログと `rc_status` / `rc_list` の `claude` に出る。
 
+## PATH の補完
+
+GUI 起動の app（macOS の bantou.app の sidecar）は PATH が `/usr/bin:/bin:/usr/sbin:/sbin` だけになり、bun / node / npx / gh や MCP の `npx` が見つからない。center は起動時に 1 回 PATH を合成して自身の `process.env.PATH` に入れる。session と remote-control の子プロセスはこれを継承する。macOS / Linux のみ（他 OS は変えない）。
+
+1. `$SHELL -lc` で login shell の PATH を取る（`SHELL` 未設定は `/bin/sh`、5 秒で打ち切り、1 回だけ）。rc ファイルが余計な行を出しても、目印（`__BANTOU_PATH_BEGIN__`〜`__BANTOU_PATH_END__`）の間だけを採る。絶対パスでない要素は捨てる
+2. 取れた時: login shell の PATH → 現在の PATH → 固定候補のうち存在して未掲載のもの、の順
+3. 取れなかった時（失敗・タイムアウト・目印なし）: 固定候補のうち存在するもの → 現在の PATH、の順。理由はログに出す
+4. 重複は先に出た方を残す。空の要素は捨てる
+
+固定候補（存在するものだけ。この順）: macOS は `/opt/homebrew/bin`、`/usr/local/bin`、`~/.local/bin`、`~/.cargo/bin`、`~/.bun/bin`。Linux は `~/.local/bin`、`~/.cargo/bin`、`~/.bun/bin`。
+
+config の `env.PATH` は補完より優先する（`project.env` > `remoteControl.env` > 補完後の PATH。値はそのまま渡し、補わない）。結果の PATH と取得元（`login-shell` / `fixed-list`）は center のログに出る。
+
 ## ログ
 
 - center 自身: stderr に `<ISO> bantou-center: <msg>`。daemon 起動時は同じ行を `logDir/center.log` にも追記する。
@@ -336,7 +349,7 @@ session（`session_create` で作った wrapper 経由の claude。master-cap �
 ## master-cap の起動（wrapper）
 
 - `session_create` の session は `bantou-pty-wrapper --cols N --rows N -- claude --remote-control <name> --permission-mode <m> --mcp-config '<JSON>' [--continue]` で起動する。wrapper は `dirname(process.execPath)/bantou-pty-wrapper`、env `BANTOU_PTY_WRAPPER` で上書き。config の `projects`（`rc_*`）は従来の `claude remote-control` のまま。supervisor は 1 つで、entry ごとに起動方式を選ぶ（再起動・`--continue`・素の起動への fallback・ログ・有効化確認への自動応答は共通）。
-- `--mcp-config` の JSON には `bantou`（http、`/mcp/session`。窓口が無い時は付けない）と `bantou-messenger`（stdio、agent-messenger）が入る。`bantou-messenger` は `npx -y @unagents/messenger@0.12.2 mcp` を env `AGENT_MESSENGER_NAME=<session 名>` で起動し、session 名を messenger の peer 名にする。受信は Claude Code の inbox socket 経由で会話に現れる（pty への書き込みではない）。broker は client が env → config → UDP 発見で解決する（center は指名しない）。再起動・`--continue` でも同じ名前で登録し直す。center の子プロセスの PATH に `npx` が要る。
+- `--mcp-config` の JSON には `bantou`（http、`/mcp/session`。窓口が無い時は付けない）と `bantou-messenger`（stdio、agent-messenger）が入る。`bantou-messenger` は `npx -y @unagents/messenger@0.12.2 mcp` を env `AGENT_MESSENGER_NAME=<session 名>` で起動し、session 名を messenger の peer 名にする。受信は Claude Code の inbox socket 経由で会話に現れる（pty への書き込みではない）。broker は client が env → config → UDP 発見で解決する（center は指名しない）。再起動・`--continue` でも同じ名前で登録し直す。center の子プロセスの PATH に `npx` が要る（center が起動時に PATH を補う。「PATH の補完」参照）。
 - wrapper との間は 1 行 1 JSON（wrapper の stdout: `started` / `output`（base64）/ `text`（制御文字を除いた文字列）/ `exit`、stdin: `input` / `resize` / `stop`）。session URL と接続状態は `text` の直近 16 KiB の窓に対して照合する（行単位ではない）。有効化確認への自動応答は `input`（`y\r`）。
 - `--settings` で center の statusLine を渡す（引数の順は `--mcp-config` の後、`--continue` の前）。利用者の statusLine 設定より center のものが優先される（「context 使用量」の「statusLine 方式」）。
 - 停止は wrapper へ `stop` を送って待ち、`stopGraceMs` 内に終わらなければ SIGKILL。
