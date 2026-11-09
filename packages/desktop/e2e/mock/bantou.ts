@@ -13,6 +13,10 @@ export interface Seed {
   center?: Partial<CenterSettings>;
   /** When set, `plugin:updater|check` reports this release as available. */
   update?: { version: string; currentVersion?: string; body?: string };
+  /** The first this-many `plugin:updater|check` calls fail (offline at launch). */
+  updateCheckFailures?: number;
+  /** Tauri window label reported to the app (default "main"; other labels skip the auto update check). */
+  windowLabel?: string;
 }
 
 export interface InvokeRecord {
@@ -33,6 +37,9 @@ export class MockBantou {
   statuses: string[];
   supplement: string;
   update: Seed["update"];
+  /** Remaining `plugin:updater|check` calls that fail; each failure counts down. */
+  updateCheckFailures = 0;
+  windowLabel = "main";
   /** bind "" = no IP saved: center_get_settings shows the default (first external IPv4). */
   center: CenterSettings = { enabled: false, port: 7910, bind: "", workspace: "~/.bantou", token: "mock-token-000000000000000000000001" };
   /** Number of tokens minted by center_regenerate_token (the next one is mock-token-<n>). */
@@ -130,6 +137,8 @@ export class MockBantou {
     }
     this.sessionCache = { sessions: this.centerSessions.map((e) => this.toSession(e)), reachable: true, reason: null, rev: 0 };
     this.update = seed.update;
+    this.updateCheckFailures = seed.updateCheckFailures ?? 0;
+    this.windowLabel = seed.windowLabel ?? "main";
   }
 
   private now() {
@@ -577,6 +586,10 @@ export class MockBantou {
         }
       }
       case "plugin:updater|check":
+        if (this.updateCheckFailures > 0) {
+          this.updateCheckFailures--;
+          throw new Error("error sending request for url (https://example.invalid/latest.json)");
+        }
         return this.update
           ? {
               rid: 4242,
