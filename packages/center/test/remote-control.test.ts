@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { afterEach, beforeEach, test } from "node:test";
 import { parseConfig, type Config } from "../src/config.js";
+import { resolveSessionPath } from "../src/path-env.js";
 import {
   buildRcArgs,
   createRemoteControlSupervisor,
@@ -425,6 +426,60 @@ test("子プロセスには remoteControl.env と project.env が合成されて
   assert.equal(children[0].env.Z, "rc");
   assert.equal(children[0].env.TMUX, undefined);
   await sup.shutdown();
+});
+
+const MIN_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
+
+async function withProcessPath(fn: () => Promise<void>): Promise<void> {
+  const saved = process.env.PATH;
+  try {
+    await fn();
+  } finally {
+    if (saved === undefined) delete process.env.PATH;
+    else process.env.PATH = saved;
+  }
+}
+
+test("PATH が最小の環境でも、起動した session の env.PATH に存在する追加 dir が入る", async () => {
+  await withProcessPath(async () => {
+    const r = await resolveSessionPath(() => {}, {
+      exec: async () => {
+        throw new Error("login shell 不可");
+      },
+      isDir: (p) => p === "/opt/homebrew/bin" || p === "/Users/u/.bun/bin",
+      env: { PATH: MIN_PATH, SHELL: "/bin/zsh" },
+      home: "/Users/u",
+      platform: "darwin",
+    });
+    process.env.PATH = r.path;
+    const sup = make();
+    await sup.start("p1");
+    assert.equal(children[0].env.PATH, `/opt/homebrew/bin:/Users/u/.bun/bin:${MIN_PATH}`);
+    await sup.shutdown();
+  });
+});
+
+test("config の env.PATH（project.env > remoteControl.env）は補完より優先される", async () => {
+  await withProcessPath(async () => {
+    process.env.PATH = `/opt/homebrew/bin:${MIN_PATH}`;
+    cfg = parseConfig(
+      {
+        projects: [
+          { name: "p1", path: "/tmp/p1", env: { PATH: "/proj/bin" } },
+          { name: "p2", path: "/tmp/p2" },
+        ],
+        remoteControl: { claude: "fake-claude", env: { PATH: "/rc/bin" } },
+        logDir: join(dir, "logs"),
+      },
+      join(dir, "c.json"),
+    );
+    const sup = make();
+    await sup.start("p1");
+    await sup.start("p2");
+    assert.equal(children[0].env.PATH, "/proj/bin");
+    assert.equal(children[1].env.PATH, "/rc/bin");
+    await sup.shutdown();
+  });
 });
 
 test("start: launch の前に reap を 1 回呼ぶ（再起動では呼ばない）", async () => {

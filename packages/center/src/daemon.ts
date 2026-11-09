@@ -2,6 +2,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import type { CapResultReply, ErrorReply, TaskResultReply, WorkerReportNotice } from "@agent-hand/bantou-protocol";
 import type { CliArgs } from "./args.js";
 import { resolveClaude } from "./claude-path.js";
+import { resolveSessionPath } from "./path-env.js";
 import { createActivityStore } from "./activity.js";
 import { loadCapId } from "./center-id.js";
 import { loadConfig, MIN_TOKEN_LEN } from "./config.js";
@@ -49,6 +50,8 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   } catch (e) {
     log(`center.log を開けない（stderr のみ）: ${e instanceof Error ? e.message : String(e)}`);
   }
+  // GUI 起動（macOS の bantou.app の sidecar）は PATH が最小。center 自身と、子（session・MCP の npx 等）が継承する PATH をここで補う
+  process.env.PATH = (await resolveSessionPath(log)).path;
   const claude = await resolveClaude(config.remoteControl.claude, log);
   const core = createCore();
   const sessionTokens = createSessionTokens();
