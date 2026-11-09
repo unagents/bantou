@@ -8,6 +8,7 @@ import type { RcStatus, RemoteControlSupervisor } from "./remote-control.js";
 import type { EventHub } from "./events.js";
 import type { JsonListStore, JsonObjectStore } from "./store.js";
 import type { ContextUsage } from "./context-usage.js";
+import type { SessionActivityView } from "./session-activity.js";
 
 export const SESSION_NAME = /^[A-Za-z0-9_-]+$/;
 
@@ -33,6 +34,13 @@ export interface SessionInfo {
   lastError?: string;
   /** claude のコンテキスト使用状況。まだ分からない（transcript が無い等）時は null。 */
   contextUsage: ContextUsage | null;
+  /**
+   * 作業状態。working = turn 実行中 / needs-input = 利用者の入力待ち（permission・AskUserQuestion・plan 承認）/ idle = turn が終わり次の指示待ち / unknown = 不明（停止中・起動し直し直後・center 再起動直後）。
+   * unknown の時、desktop は何も表示しない。thread の ask（waiting）は center の知らない desktop 側の情報なので、ここには含まない。
+   */
+  activity: SessionActivityView["activity"];
+  /** activity が最後に変わった時刻（ISO）。unknown の時は null。 */
+  activityAt: string | null;
   /** 起動時に追加指示（instructions）を付けたか。本文は出さない。 */
   instructions: boolean;
 }
@@ -99,6 +107,8 @@ export function createSessionManager(opts: {
   events?: EventHub;
   /** session ごとのコンテキスト使用状況の取得元。省略時は常に null。 */
   contextUsage?: (name: string) => ContextUsage | null;
+  /** session ごとの作業状態の取得元（startedAt = 今回の起動時刻、running = 起動中か）。省略時は常に unknown。 */
+  activity?: (name: string, startedAt: string | null, running: boolean) => SessionActivityView;
   /** update で名前を変えた時に remotes の記録（session / pending の owner）を付け替える先。省略時は何もしない。 */
   renameRemoteSession?: (oldName: string, newName: string) => Promise<unknown> | unknown;
   /** name が remote の記録と衝突する理由（無ければ null）。create / update の newName の検証に使う。省略時は検査しない。 */
@@ -129,6 +139,7 @@ export function createSessionManager(opts: {
     source: saved.has(s.project) ? "session" : "config",
     ...(s.lastError ? { lastError: s.lastError } : {}),
     contextUsage: opts.contextUsage?.(s.project) ?? null,
+    ...(opts.activity?.(s.project, s.startedAt, s.state === "starting" || s.state === "connected") ?? { activity: "unknown" as const, activityAt: null }),
     instructions: s.instructions,
   });
 

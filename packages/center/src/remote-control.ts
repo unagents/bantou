@@ -21,7 +21,7 @@ import {
   TEXT_WINDOW,
   windowConnected,
 } from "./wrapper.js";
-import { statusLineCommand, statusLineSettingsJson, statusLineUrl } from "./status-line.js";
+import { hookCommand, hookUrl, statusLineCommand, statusLineSettingsJson, statusLineUrl } from "./status-line.js";
 
 export type RcState = "stopped" | "starting" | "connected" | "error";
 
@@ -337,7 +337,10 @@ export function createRemoteControlSupervisor(opts: {
         permissionMode: e.project.permissionMode,
         mcpConfig: mcpConfigJson(mcpUrl, name),
         // statusLine は center のものを渡す（利用者の statusLine 設定より優先される）。窓口が無い（stdio）時は付けない
-        settings: mcpUrl ? statusLineSettingsJson(statusLineCommand(statusLineUrl(mcpUrl, name), wd.statusLineSelf)) : null,
+        // hooks（作業状態の通知）も同じ --settings で渡す。利用者の hooks は置き換わらず足し合わされる
+        settings: mcpUrl
+          ? statusLineSettingsJson(statusLineCommand(statusLineUrl(mcpUrl, name), wd.statusLineSelf), hookCommand(hookUrl(mcpUrl, name), wd.statusLineSelf))
+          : null,
         resume: useContinue,
         ...(rc.model ? { model: rc.model } : {}),
         ...(appendSystemPrompt ? { appendSystemPrompt } : {}),

@@ -26,6 +26,7 @@ export function normalizePath(p: string): string {
 }
 
 const STATUS_LINE_PATH = /^\/sessions\/([A-Za-z0-9_-]+)\/status-line$/;
+const HOOK_PATH = /^\/sessions\/([A-Za-z0-9_-]+)\/hook$/;
 const CORE_PATH = /^\/sessions\/([A-Za-z0-9_-]+)\/(output|input|resize|attachments)$/;
 /** POST ボディの上限。 */
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
@@ -161,6 +162,8 @@ export async function startHttpServer(opts: {
   workspace?: string;
   /** session の claude の statusLine が渡した JSON（POST /sessions/<name>/status-line、session token 認証）。渡すと提供する。sessionAuth と一緒に渡す。 */
   onStatusLine?: (name: string, payload: unknown) => void;
+  /** session の claude の hook が渡した JSON（POST /sessions/<name>/hook、session token 認証）。渡すと提供する。sessionAuth と一緒に渡す。 */
+  onHook?: (name: string, payload: unknown) => void;
   /** セッション増減の通知。渡すと GET /events（外向け token）を提供する。 */
   events?: EventHub;
   /** SSE の keep-alive 間隔（テスト用）。 */
@@ -249,8 +252,14 @@ export async function startHttpServer(opts: {
     }
   };
 
-  /** statusLine の JSON の受信（session token 認証。外向け token は通さない）。 */
-  const handleStatusLine = async (req: IncomingMessage, res: ServerResponse, name: string): Promise<void> => {
+  /** statusLine / hook の JSON の受信（session token 認証。外向け token は通さない）。 */
+  const handleSessionJson = async (
+    req: IncomingMessage,
+    res: ServerResponse,
+    name: string,
+    label: string,
+    sink: (name: string, payload: unknown) => void,
+  ): Promise<void> => {
     const auth = req.headers.authorization;
     if (!auth?.startsWith("Bearer ") || !opts.sessionAuth!.verify(name, auth.slice("Bearer ".length))) {
       sendJson(res, 401, { error: "unauthorized" }, { "www-authenticate": "Bearer" });
@@ -267,17 +276,17 @@ export async function startHttpServer(opts: {
       if (e instanceof HttpError) {
         sendJson(res, e.status, { error: e.message }, { connection: "close" });
       } else {
-        log(`statusLine の JSON が不正: session=${name}`);
+        log(`${label} の JSON が不正: session=${name}`);
         sendJson(res, 400, { error: (e as Error).message });
       }
       return;
     }
     if (typeof body !== "object" || body === null || Array.isArray(body)) {
-      log(`statusLine の JSON が object でない: session=${name}`);
+      log(`${label} の JSON が object でない: session=${name}`);
       sendJson(res, 400, { error: "JSON object が必要" });
       return;
     }
-    opts.onStatusLine!(name, body);
+    sink(name, body);
     res.writeHead(204);
     res.end();
   };
@@ -377,6 +386,7 @@ export async function startHttpServer(opts: {
     const path = normalizePath(rawPath);
     const coreMatch = opts.core ? CORE_PATH.exec(path) : null;
     const statusLineMatch = opts.onStatusLine && opts.sessionAuth ? STATUS_LINE_PATH.exec(path) : null;
+    const hookMatch = opts.onHook && opts.sessionAuth ? HOOK_PATH.exec(path) : null;
     let window: "external" | "session";
     let owner: string | undefined;
     if (path === MCP_PATH) {
@@ -425,7 +435,10 @@ export async function startHttpServer(opts: {
       });
       return;
     } else if (statusLineMatch) {
-      await handleStatusLine(req, res, statusLineMatch[1]);
+      await handleSessionJson(req, res, statusLineMatch[1], "statusLine", opts.onStatusLine!);
+      return;
+    } else if (hookMatch) {
+      await handleSessionJson(req, res, hookMatch[1], "hook", opts.onHook!);
       return;
     } else if (coreMatch) {
       if (!bearerMatches(req.headers.authorization, token)) {

@@ -33,7 +33,7 @@ bantou-center [--config <path>] [--transport stdio|http] [--port <n>] [--bind <a
 
 ### http transport
 
-- エンドポイントは `http://<bind>:<port>/mcp`（外向け。MCP Streamable HTTP。POST / GET / DELETE）と `/mcp/session`（master-cap 向け。下記「窓口の分離」）。pty 出力の配信は `/sessions/<name>/{output,input,resize,attachments}`（下記「core」「添付画像」）。statusLine の受信は `POST /sessions/<name>/status-line`（session token。下記「context 使用量」）。それ以外は 404。
+- エンドポイントは `http://<bind>:<port>/mcp`（外向け。MCP Streamable HTTP。POST / GET / DELETE）と `/mcp/session`（master-cap 向け。下記「窓口の分離」）。pty 出力の配信は `/sessions/<name>/{output,input,resize,attachments}`（下記「core」「添付画像」）。statusLine の受信は `POST /sessions/<name>/status-line`、claude の hook の受信は `POST /sessions/<name>/hook`（どちらも session token。下記「context 使用量」「作業状態（activity）」）。それ以外は 404。
 - **認証は Bearer token**。`/mcp` へのリクエスト（POST / GET / DELETE すべて）は `Authorization: Bearer <config の token>` が必要で、欠落・形式違い・不一致は 401（`WWW-Authenticate: Bearer`）。比較は定時間。token が無い・12 文字未満だと http は起動しない。既定は loopback にだけ bind する。`--bind 0.0.0.0` 等で外に出しても、token を知らない相手は rc_start などを呼べない（ただし TLS は無いので平文。信頼できる LAN だけで使う）。
 - MCP session ごとに McpServer を作る。supervisor と server 接続は全 session で共有。
 - SIGTERM / SIGINT で http server・全 session・全 project を停止して exit 0。http では stdin を見ない（親が `/dev/null` を渡しても落ちない。親は SIGTERM で止める）。
@@ -328,6 +328,28 @@ session（`session_create` で作った wrapper 経由の claude。master-cap �
 - `used_percentage` が `null` の間（初回の API 応答前・`/compact` 直後）は使用量を持たない。その間は transcript の値を使い、窓だけ statusLine の `context_window_size` で補う。statusLine の値が取れたらそれが transcript に優先する。起動し直したら statusLine の値は捨てる。
 - master-cap の端末では、statusLine を設定していなかった利用者でも、footer の `esc to interrupt` や `? for shortcuts` などの hint が消える（custom statusLine を設定した時の claude の仕様。docs 記載、実機では footer の hint 消失までは見ていない）。
 - 更新: POST のたびに反映し、値（使用量・窓・percent・model）が変わった時だけ `GET /events` に `reason: "context"` を流す。claude は 300ms の debounce で呼ぶ。
+
+## 作業状態（activity）
+
+session（`session_create` で作った wrapper 経由の claude。config 由来の project は対象外）ごとの作業状態を `session_list` の `activity` に載せる。`src/session-activity.ts`。pty 出力の文字列解析はしない。
+
+- `session_list` の各要素: `"activity": "working" | "needs-input" | "idle" | "unknown"`、`"activityAt": "<ISO>" | null`（最後に状態が変わった時刻。unknown は null）。既存の `state`（stopped / starting / connected / error）はそのまま。
+  - `working` = turn 実行中 / `needs-input` = 利用者の入力待ち（permission の確認、AskUserQuestion、plan 承認） / `idle` = turn が終わり次の指示待ち / `unknown` = 不明（表示しない）。
+  - thread の ask（status `waiting`）は desktop 側の情報で center は持たないので、`activity` には含まない（desktop が needs-input として合成する）。
+- 取得元は Claude Code の hooks。center は wrapper 経由の session を起動する時、statusLine と同じ `--settings` に `hooks` を足す（利用者の hooks は置き換わらず足し合わされる。`~/.claude/settings.json` / `~/.claude.json` は触らない）。hook のコマンドは center 自身のサブコマンド `bantou-center hook --url <center>/sessions/<name>/hook`。stdin の JSON に発火時刻（`bantou_ts`）を足して POST する。token は argv にも設定にも載せず、claude の env の `BANTOU_SESSION_TOKEN` から読む。失敗しても終了コードは 0（claude を止めない）。
+- `POST /sessions/<name>/hook`: 認証は**その session の token**（外向け token・他の session の token・token 無しは 401）。本文は JSON object（壊れた JSON・object 以外は 400）。204。起動中（starting / connected）の session だけ反映する。
+- event → 状態:
+
+| event | 状態 |
+| --- | --- |
+| SessionStart（source が compact 以外） / Stop / StopFailure / Notification `idle_prompt` | idle |
+| UserPromptSubmit / PreToolUse（下記以外の tool） / PostToolUse / PostToolUseFailure / PermissionDenied | working |
+| PreToolUse（AskUserQuestion・ExitPlanMode） / PermissionRequest / Notification（`permission_prompt`・`elicitation_dialog`・`elicitation_url_dialog`・`agent_needs_input`） | needs-input |
+
+  上記以外の event・Notification は状態を変えない。Stop / StopFailure の hook だけ同期（他は `async: true`。claude が Stop 直後に終了する -p では async の hook が cancel される）。
+- 古い状態を残さない: 保持はメモリのみで、起動時刻（`startedAt`）ごと。session が停止・error・起動し直しになると `unknown`（token も起動ごとに作り直すので、前の claude の遅れた hook は 401）。center 再起動直後は、次の hook まで `unknown`。発火時刻が最後に反映した event より古い hook は捨てる（到着順の入れ替わり対策）。
+- 変わった時だけ `GET /events` に `reason: "activity"` を流す（受け手は `session_list` を取り直す）。
+- 限界: 利用者が Esc で turn を中断した時は Stop が来ない。working / needs-input のまま残り、次の hook か idle_prompt（約 1 分の入力待ち通知）で idle に戻る。
 
 ## 未決
 

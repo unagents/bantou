@@ -154,7 +154,7 @@ export function registerTools(
     "session_list",
     {
       title: "session 一覧",
-      description: "center が監視する全 session（config の project と session_create で作ったもの）の状態を返す。source で区別できる",
+      description: "center が監視する全 session（config の project と session_create で作ったもの）の状態を返す。source で区別できる。activity（working / needs-input / idle / unknown）と activityAt は claude の作業状態（unknown = 不明・停止中）",
     },
     () => guard(() => json(sessions.list())),
   );
