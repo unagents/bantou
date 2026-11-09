@@ -26,11 +26,19 @@ const autoCheckFiredOnce = { current: false };
 
 // One auto-check timer per process, owned by the `main` window's composable.
 // `owner` is that composable's token; a second instance never arms a timer.
+// `failures` and `settled` outlive the owner so a remount (HMR) continues the backoff:
+// `failures` = consecutive failed auto checks, `settled` = the owner has seen a check finish.
+// Only the owner updates them (a stale instance finishing late must not).
 const autoSchedule: {
   owner: symbol | null;
   timer: ReturnType<typeof setTimeout> | null;
   failures: number;
-} = { owner: null, timer: null, failures: 0 };
+  settled: boolean;
+} = { owner: null, timer: null, failures: 0, settled: false };
+
+function backoffDelay(failures: number) {
+  return RETRY_BACKOFF_MS[Math.min(Math.max(failures, 1), RETRY_BACKOFF_MS.length) - 1]!;
+}
 
 export function useUpdater() {
   const state = shallowRef<UpdaterState>({ kind: "idle" });
@@ -70,10 +78,11 @@ export function useUpdater() {
       const update = await checkForUpdate();
       logWebview("info", `update check (${mode}): ${update ? `v${update.version} available` : "up to date"}`);
       if (id !== requestId) return;
+      if (autoSchedule.owner === token) autoSchedule.settled = true;
       if (update) {
         state.value = { kind: "available", update, version: update.version };
       } else {
-        autoSchedule.failures = 0;
+        if (autoSchedule.owner === token) autoSchedule.failures = 0;
         armAutoTimer(RECHECK_INTERVAL_MS);
         // Manual checks need an explicit "no update" answer (shown briefly); auto stays silent.
         if (mode === "manual") {
@@ -88,14 +97,16 @@ export function useUpdater() {
     } catch (e) {
       logWebview("error", `update check failed (${mode}): ${errorText(e)}`);
       if (id !== requestId) return;
+      if (autoSchedule.owner === token) autoSchedule.settled = true;
       if (mode === "manual") {
         state.value = { kind: "error", message: String(e), version: null };
       } else {
         console.error("Auto update check failed:", e);
         state.value = { kind: "idle" };
-        const delay = RETRY_BACKOFF_MS[Math.min(autoSchedule.failures, RETRY_BACKOFF_MS.length - 1)]!;
-        autoSchedule.failures++;
-        armAutoTimer(delay);
+        if (autoSchedule.owner === token) {
+          autoSchedule.failures++;
+          armAutoTimer(backoffDelay(autoSchedule.failures));
+        }
       }
     }
   }
@@ -136,12 +147,17 @@ export function useUpdater() {
     const win = getCurrentWebviewWindow();
     if (win.label === MAIN_WINDOW_LABEL && autoSchedule.owner === null) {
       autoSchedule.owner = token;
-      autoSchedule.failures = 0;
       if (!autoCheckFiredOnce.current) {
         autoCheckFiredOnce.current = true;
         void runCheck("auto");
+      } else if (!autoSchedule.settled) {
+        // Remount while the previous owner's check was unfinished: run it again now.
+        void runCheck("auto");
+      } else if (autoSchedule.failures > 0) {
+        // Remount during a backoff: continue it.
+        armAutoTimer(backoffDelay(autoSchedule.failures));
       } else {
-        // Remount after an unmount: no second launch check, just resume the periodic one.
+        // Remount after a good check: no second launch check, just resume the periodic one.
         armAutoTimer(RECHECK_INTERVAL_MS);
       }
     }

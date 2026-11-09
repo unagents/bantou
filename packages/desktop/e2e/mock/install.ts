@@ -27,8 +27,8 @@ mock.emitter = (event, payload) => {
 
 window.__TAURI_INTERNALS__ = {
   metadata: {
-    currentWindow: { label: "main" },
-    currentWebview: { windowLabel: "main", label: "main" },
+    currentWindow: { label: mock.windowLabel },
+    currentWebview: { windowLabel: mock.windowLabel, label: mock.windowLabel },
   },
   invoke(cmd: string, args: unknown, options?: { headers?: Record<string, string> }) {
     try {

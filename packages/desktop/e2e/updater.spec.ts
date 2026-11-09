@@ -130,6 +130,22 @@ test.describe("auto check periodic", () => {
   });
 });
 
+// A remount (HMR) cannot be driven here: mounting the Nuxt app a second time renders nothing, so the
+// page's useUpdater never mounts again. The remount paths were checked with a throwaway bun test
+// (stubbed deps, fake timers); see the report.
+test.describe("auto check in a non-main window", () => {
+  test.use({ seed: { ...defaultSeed, windowLabel: "workspace-1" } });
+
+  test("no launch check and no timer", async ({ page }) => {
+    await page.clock.install();
+    await page.goto("/");
+    await settle(page);
+    await page.clock.fastForward(7 * HOUR);
+    await settle(page);
+    expect(await checks(page)).toBe(0);
+  });
+});
+
 test.describe("auto check stays off when not idle", () => {
   test.use({ seed: { ...defaultSeed, update: { version: "9.9.9" } } });
 
