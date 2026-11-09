@@ -62,13 +62,18 @@ const configPath = resolve(args.config);
 if (!args.serve && !args.supervise) {
   // 既定: launcher。起動時に全コードを読み込み、supervisor（--supervise）を起動して見張る。以後 supervisor が入れ替わっても残る
   const launcher = await import("./launcher.mjs");
+  // host 単位の多重起動 guard（1 host に bantou-server は 1 つ。競合なら message を出して exit 1。解放は process 終了時）
+  const { guardHostLock } = await import("./host-lock.mjs");
+  const releaseHostLock = guardHostLock({ info: { workspace: (() => { try { return launcher.workspaceOf(configPath); } catch { return undefined; } })(), version: packageVersion() } });
   let code;
   try {
     code = await launcher.runLauncher({ configPath, selfBin });
   } catch (e) {
     console.error(`${new Date().toISOString()} bantou: ${e instanceof Error ? e.message : String(e)}`);
+    releaseHostLock();
     process.exit(1);
   }
+  releaseHostLock();
   process.exit(code);
 }
 

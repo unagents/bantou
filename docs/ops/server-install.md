@@ -114,6 +114,10 @@ host 再起動後は OS が自動で起動し、server が peer 登録して cen
 - 既定の `latest` なら、自己更新で上がった版が restart / host 再起動後も保たれる（`npx -y bantou@latest`）。
 - `--version` で固定した場合、`update_server` で上げた版は **restart / host 再起動で固定版に戻る**。固定版自体を上げたい時は script を新しい `--version` 付きで再実行する（unit が変わり restart される。script が警告を出す）。固定は非推奨。
 
+### 多重起動 guard（host lock）
+
+1 host に bantou-server は 1 つだけ。launcher は起動時に host 共通の lock `/tmp/bantou-server.lock`（user をまたぐ固定パス。0666、中身は pid / user / workspace / 起動時刻）を取り、既に別の bantou-server が生きていれば、既存の pid・user・止め方を stderr に出して exit code 1 で終了する（`server.log` に出る。systemd の `Restart=always` 配下では 10 秒ごとに同じ失敗を繰り返すので、2 つ目の unit は無効にする）。test・開発で意図して複数動かす時だけ env `BANTOU_SERVER_ALLOW_MULTI=1` で外せる（取得も解放もしない）。lock は正常終了で消え、SIGKILL・OOM・host 再起動で残った lock は、pid の生存と起動時刻（pid 再利用の判別）で stale と判断して次の起動が取り直すため、手で消す必要はない。`<workspace>/server.lock` は別物で、supervisor の交代・引き継ぎを workspace 内で守るもの（host lock は launcher の寿命の間だけ保持され、自己更新で supervisor が替わっても自分の lock と衝突しない）。
+
 ## 5. トラブル時に見る場所
 
 見るのは設置者が sudo で（ssh して bantou の HOME に入らない。1 章）。

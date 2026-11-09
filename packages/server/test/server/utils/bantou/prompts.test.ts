@@ -165,3 +165,9 @@ test("task_result: 取り出せなければ summary に生の返答、review.ver
   assert.equal(ng.error, "exit 1");
   assert.equal(ng.review.verdict, "unknown");
 });
+
+test("prompts: worker の system prompt に常設の制約（server / center を install・起動・停止・再起動しない）を含む", () => {
+  assert.ok(WORKER_GUIDE.includes("[常設の制約]"));
+  assert.ok(WORKER_GUIDE.includes("bantou-server / bantou-center を install・起動・停止・再起動しない"));
+  assert.ok(WORKER_GUIDE.includes("report で報告するだけ"));
+});
