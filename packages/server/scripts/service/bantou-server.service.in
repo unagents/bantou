@@ -17,6 +17,8 @@ ExecStart=@NPX@ -y bantou@@VERSION@ --config @HOME@/config.json
 # 自己更新（supervisor の入れ替え）は launcher（この unit の main pid）の下で起きる。launcher が落ちたら OS が戻す
 Restart=always
 RestartSec=10
+# 多重起動 guard（host lock）の競合は exit 75。無効にし忘れた 2 つ目の unit が 10 秒ごとに npx を走らせ続けないよう再起動しない
+RestartPreventExitStatus=75
 TimeoutStopSec=30
 StandardOutput=append:@HOME@/server.log
 StandardError=append:@HOME@/server.log

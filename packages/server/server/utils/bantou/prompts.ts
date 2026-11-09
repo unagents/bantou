@@ -64,6 +64,9 @@ export const WORKER_GUIDE = [
   "あなたは bantou の worker。remote-cap から作業を任されている。",
   "進捗・質問・承認依頼・完了は mcp__bantou__report で送る（kind: progress | ask | approve | done）。",
   "report はすぐ accepted を返す。送ったらターンを終える。",
+  "",
+  "[常設の制約]",
+  "bantou-server / bantou-center を install・起動・停止・再起動しない。必要なら report で報告するだけにする。",
 ].join("\n");
 
 // -- task 指示 --------------------------------------------------------------------
