@@ -11,8 +11,9 @@ import {
 } from "../src/path-env.js";
 
 const HOME = "/Users/u";
+const RUSTUP = "/opt/homebrew/opt/rustup/bin";
 const MIN = "/usr/bin:/bin:/usr/sbin:/sbin";
-const ALL_MAC = ["/opt/homebrew/bin", "/usr/local/bin", `${HOME}/.local/bin`, `${HOME}/.cargo/bin`, `${HOME}/.bun/bin`];
+const ALL_MAC = ["/opt/homebrew/bin", "/usr/local/bin", `${HOME}/.local/bin`, `${HOME}/.cargo/bin`, RUSTUP, `${HOME}/.bun/bin`];
 
 const wrap = (p: string): string => `${PATH_BEGIN}${p}${PATH_END}`;
 
@@ -52,6 +53,18 @@ test("composePath: 存在する候補だけを、既存 PATH の前に固定順�
     isDir: (d) => d === "/opt/homebrew/bin" || d === `${HOME}/.cargo/bin`,
   });
   assert.equal(p, `/opt/homebrew/bin:${HOME}/.cargo/bin:${MIN}`);
+});
+
+test("composePath: macOS の rustup dir は ~/.cargo/bin の次、存在する時だけ入る", () => {
+  const base = { current: MIN, loginPath: null, platform: "darwin" as const, home: HOME };
+  assert.equal(
+    composePath({ ...base, isDir: (d) => [`${HOME}/.bun/bin`, RUSTUP, `${HOME}/.cargo/bin`].includes(d) }),
+    `${HOME}/.cargo/bin:${RUSTUP}:${HOME}/.bun/bin:${MIN}`,
+  );
+  assert.equal(composePath({ ...base, isDir: (d) => d === "/opt/homebrew/bin" }), `/opt/homebrew/bin:${MIN}`);
+  assert.equal(composePath({ ...base, current: `${RUSTUP}:${MIN}`, isDir: (d) => d === RUSTUP }), `${RUSTUP}:${MIN}`);
+  const linux = composePath({ ...base, platform: "linux", isDir: () => true });
+  assert.ok(!linux.includes(RUSTUP));
 });
 
 test("composePath: 重複を除く（先に出た方を残す）。既に入っている候補は動かさない", () => {

@@ -246,7 +246,7 @@ GUI 起動の app（macOS の bantou.app の sidecar）は PATH が `/usr/bin:/b
 3. 取れなかった時（失敗・タイムアウト・目印なし）: 固定候補のうち存在するもの → 現在の PATH、の順。理由はログに出す
 4. 重複は先に出た方を残す。空の要素は捨てる
 
-固定候補（存在するものだけ。この順）: macOS は `/opt/homebrew/bin`、`/usr/local/bin`、`~/.local/bin`、`~/.cargo/bin`、`~/.bun/bin`。Linux は `~/.local/bin`、`~/.cargo/bin`、`~/.bun/bin`。
+固定候補（存在するものだけ。この順）: macOS は `/opt/homebrew/bin`、`/usr/local/bin`、`~/.local/bin`、`~/.cargo/bin`、`/opt/homebrew/opt/rustup/bin`（Homebrew の rustup は cargo / rustc の proxy を `~/.cargo/bin` ではなくここに置く）、`~/.bun/bin`。Linux は `~/.local/bin`、`~/.cargo/bin`、`~/.bun/bin`。
 
 config の `env.PATH` は補完より優先する（`project.env` > `remoteControl.env` > 補完後の PATH。値はそのまま渡し、補わない）。結果の PATH と取得元（`login-shell` / `fixed-list`）は center のログに出る。
 

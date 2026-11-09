@@ -42,10 +42,14 @@ export const defaultPathResolveDeps = (): PathResolveDeps => ({
   platform: process.platform,
 });
 
-/** 補う候補（優先順）。macOS は Homebrew 系 + home 配下、Linux は home 配下のみ。それ以外の OS は空。 */
+/** 補う候補（優先順）。macOS は Homebrew 系（rustup の proxy を含む）+ home 配下、Linux は home 配下のみ。それ以外の OS は空。 */
 export const fixedPathCandidates = (platform: NodeJS.Platform, home: string): string[] => {
   const homeDirs = home ? [join(home, ".local", "bin"), join(home, ".cargo", "bin"), join(home, ".bun", "bin")] : [];
-  if (platform === "darwin") return ["/opt/homebrew/bin", "/usr/local/bin", ...homeDirs];
+  if (platform === "darwin") {
+    const [localBin, cargoBin, bunBin] = homeDirs;
+    // Homebrew の rustup は cargo / rustc の proxy を ~/.cargo/bin ではなくここに置く
+    return ["/opt/homebrew/bin", "/usr/local/bin", ...(home ? [localBin, cargoBin, "/opt/homebrew/opt/rustup/bin", bunBin] : ["/opt/homebrew/opt/rustup/bin"])];
+  }
   if (platform === "linux") return homeDirs;
   return [];
 };
