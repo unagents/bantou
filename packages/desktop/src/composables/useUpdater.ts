@@ -14,22 +14,56 @@ const MAIN_WINDOW_LABEL = "main";
 // How long "最新" stays in the header before it returns to the idle label.
 const LATEST_SHOWN_MS = 2000;
 
-// The auto-check fires once per process: only the `main` window runs it
+// Failed auto checks retry after these delays (the last one repeats, i.e. the cap is 30 min).
+const RETRY_BACKOFF_MS = [60_000, 5 * 60_000, 30 * 60_000];
+// While idle and up to date, re-check this often.
+const RECHECK_INTERVAL_MS = 6 * 60 * 60_000;
+
+// The launch auto-check fires once per process: only the `main` window runs it
 // (workspace-* windows skip it), and this flag keeps HMR / remounts from
 // firing it twice.
 const autoCheckFiredOnce = { current: false };
+
+// One auto-check timer per process, owned by the `main` window's composable.
+// `owner` is that composable's token; a second instance never arms a timer.
+const autoSchedule: {
+  owner: symbol | null;
+  timer: ReturnType<typeof setTimeout> | null;
+  failures: number;
+} = { owner: null, timer: null, failures: 0 };
 
 export function useUpdater() {
   const state = shallowRef<UpdaterState>({ kind: "idle" });
   // A stale resolve from an earlier check must not overwrite a fresher one.
   let requestId = 0;
   let latestTimer: ReturnType<typeof setTimeout> | null = null;
+  const token = Symbol("useUpdater");
+
+  function clearAutoTimer() {
+    if (autoSchedule.owner !== token) return;
+    if (autoSchedule.timer) clearTimeout(autoSchedule.timer);
+    autoSchedule.timer = null;
+  }
+
+  // Arms the single auto-check timer. The callback only checks while idle:
+  // available / checking / downloading / installing / error are left alone and
+  // the transition out of them (manual up-to-date) arms it again.
+  function armAutoTimer(delayMs: number) {
+    if (autoSchedule.owner !== token) return;
+    clearAutoTimer();
+    autoSchedule.timer = setTimeout(() => {
+      autoSchedule.timer = null;
+      if (state.value.kind === "idle") void runCheck("auto");
+    }, delayMs);
+  }
 
   async function runCheck(mode: "auto" | "manual") {
     const k = state.value.kind;
     if (k === "checking" || k === "downloading" || k === "installing") return;
 
     if (latestTimer) clearTimeout(latestTimer);
+    // A manual check supersedes any pending auto timer; it re-arms below if still up to date.
+    clearAutoTimer();
     const id = ++requestId;
     state.value = { kind: "checking" };
     try {
@@ -39,6 +73,8 @@ export function useUpdater() {
       if (update) {
         state.value = { kind: "available", update, version: update.version };
       } else {
+        autoSchedule.failures = 0;
+        armAutoTimer(RECHECK_INTERVAL_MS);
         // Manual checks need an explicit "no update" answer (shown briefly); auto stays silent.
         if (mode === "manual") {
           state.value = { kind: "latest" };
@@ -57,6 +93,9 @@ export function useUpdater() {
       } else {
         console.error("Auto update check failed:", e);
         state.value = { kind: "idle" };
+        const delay = RETRY_BACKOFF_MS[Math.min(autoSchedule.failures, RETRY_BACKOFF_MS.length - 1)]!;
+        autoSchedule.failures++;
+        armAutoTimer(delay);
       }
     }
   }
@@ -92,17 +131,30 @@ export function useUpdater() {
   }
 
   let unlisten: (() => void) | null = null;
+  let unmounted = false;
   onMounted(async () => {
     const win = getCurrentWebviewWindow();
-    if (!autoCheckFiredOnce.current && win.label === MAIN_WINDOW_LABEL) {
-      autoCheckFiredOnce.current = true;
-      void runCheck("auto");
+    if (win.label === MAIN_WINDOW_LABEL && autoSchedule.owner === null) {
+      autoSchedule.owner = token;
+      autoSchedule.failures = 0;
+      if (!autoCheckFiredOnce.current) {
+        autoCheckFiredOnce.current = true;
+        void runCheck("auto");
+      } else {
+        // Remount after an unmount: no second launch check, just resume the periodic one.
+        armAutoTimer(RECHECK_INTERVAL_MS);
+      }
     }
     // Menu "アップデートを確認..." (emitted to the focused window only).
-    unlisten = await win.listen(CHECK_FOR_UPDATES_EVENT, () => void runCheck("manual"));
+    const off = await win.listen(CHECK_FOR_UPDATES_EVENT, () => void runCheck("manual"));
+    if (unmounted) off();
+    else unlisten = off;
   });
   onBeforeUnmount(() => {
+    unmounted = true;
     unlisten?.();
+    clearAutoTimer();
+    if (autoSchedule.owner === token) autoSchedule.owner = null;
     if (latestTimer) clearTimeout(latestTimer);
   });
 
