@@ -35,9 +35,22 @@
 ## 残課題
 - 既に動いている旧 launcher は guard を持たない。launcher は起動時に凍結されるため、自己更新だけでは host lock は付かず、再起動（launcher の入れ替え）後に有効になる。
 - guard は launcher 経路のみ。`--supervise` / `--serve` の手起動は従来の server.lock のみ。
-- 競合時の systemd 配下は `Restart=always` で 10 秒ごとに失敗を繰り返す（2 つ目の unit は無効にする運用。docs に記載）。
+- launchd は exit code ごとの再起動除外ができない（KeepAlive の SuccessfulExit / Crashed は 75 だけを除外できず、Crashed にすると通常の異常終了も再起動しなくなる）ため、競合時は ThrottleInterval 10 秒で再試行し続ける。docs に制約を明記（対応は見送り）。
 - stale の同時取り直しは 60ms の読み直しで判定する確率的な窓が残る（極めて狭い）。
 - 既存の typecheck error 7 件は未対応（範囲外）。
 
 ## review 指摘と対応
-（後で追記）
+
+### 第 1 回（HEAD e1fa22e）
+- M1 [medium] overwriteInPlace が symlink を辿る → 対応済み。lock の open は全て O_NOFOLLOW、fstat で通常 file・nlink=1 を確認（自分の link() 直後の nlink=2 は 20ms × 5 回見直す）。不正なら HostLockError で取らずに終了（exit 75）。symlink・hardlink・dir の test を追加（victim file が無傷なことも確認）。
+- M2 [medium] 他 user が先に置いた lock で起動不能・EACCES で stack trace → 対応済み。読めない/書けない（EACCES・EPERM）は HostLockError にして guardHostLock が catch、stack trace なしの message で exit 75。message に「root が rm <path>」と BANTOU_SERVER_ALLOW_MULTI=1 を常に出す。競合 message に lock の owner uid を出し、token 無しで owner が root でも自分でもない lock は「信頼できない lock の可能性」と明示（挙動は止める側のまま）。0000 / 0444 の stale、token 無し pid:1 の test を追加。
+- M3 [medium] 競合時の systemd 10 秒ループ → 対応済み（systemd）。競合・信頼できない lock は exit 75（EXIT_CONFLICT）。scripts/service/bantou-server.service.in に RestartPreventExitStatus=75 を追加し、unit 雛形と定数の一致を test。install-service.sh は bash -n 通過、--dry-run（--user bantoutest --home /home/bantoutest）で RestartPreventExitStatus=75 が描画されることを確認（shellcheck は未導入）。launchd は上記のとおり同等の設定ができず、docs に制約を明記。docs/ops/server-install.md の段落を更新（専用 exit code、unit 設定、無効にし忘れた 2 つ目は 75 で止まる、既存 unit は install-service.sh 再実行で更新）。
+- L2 [low] 止め方の順序 → 対応済み。systemctl stop / launchctl bootout を先、kill -TERM は「手起動の場合のみ」と明記。
+- L5 [low] この節を実際の指摘と対応で更新 → 対応済み。
+- L4 [low] launcher 経路の配線 test → 対応済み。bin/bantou.mjs を存在しない config で起動し、競合時に 75 で終了すること（launcher を起動しない）を test。
+- 追加で発見・修正: test fixture の SIGTERM handler 登録前に held を出していたため、親が即 SIGTERM すると解放前に落ちて flaky になっていた。handler を先に登録するよう fixture を修正。
+
+### 残り（直さない low）
+- L1 stale の同時取り直しに 60ms 読み直しの窓が残る。
+- L3 startToken の boot_id（host 再起動をまたぐ starttime の一致）は未対応。
+- 稼働中の旧 launcher は guard を持たない（上記残課題）。

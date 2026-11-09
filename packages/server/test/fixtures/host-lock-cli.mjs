@@ -7,11 +7,12 @@ if (process.argv[2] === "hold") {
     console.log("busy");
     process.exit(3);
   }
-  console.log("held");
+  // handler を先に入れてから held を出す（親が held を見て即 SIGTERM しても取りこぼさない）
   process.on("SIGTERM", () => {
     r.release();
     process.exit(0);
   });
+  console.log("held");
   setInterval(() => {}, 1000);
 } else {
   guardHostLock();
