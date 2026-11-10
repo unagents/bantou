@@ -217,6 +217,8 @@ const DISCOVERY_SLOT = "(discovery)";
 
 /** 識別を取れなかった peer（hello が届かない）を再試行するまでの間隔。 */
 export const IDENTIFY_RETRY_MS = 60_000;
+/** 同じ server_id を名乗る peer の生存確認（hello）を、同じ顔ぶれに対してやり直す最小の間隔。 */
+export const DUP_RECHECK_MS = 30_000;
 /** 識別の取得（hello）の返信待ち。 */
 export const IDENTIFY_TIMEOUT_MS = 3_000;
 
@@ -657,7 +659,51 @@ export function createServerLink(opts: {
     );
     return peers.map((p) => ({ ...p, ...(identities.get(p.id) ?? {}) }));
   };
-  const identifiedPeers = async (): Promise<ServerPeer[]> => identify(await discoverPeers());
+  /**
+   * 同じ server_id を名乗る peer が複数いる時、その全員へ hello を送り直し、応答した peer だけを残す。
+   * server が再起動・再登録すると、死んだ旧 peer id が発見に残る間（messenger 側の失効待ち）、新旧が同じ server_id を名乗る。
+   * 旧 peer は hello に答えず落ちるので、新 peer だけが残り、重複エラーにならない。全員が応答した時だけ重複（本当のコピー）として残す。
+   * 誰も応答しなければ何も落とさない（生きている peer が分からない）。同じ顔ぶれへの再確認は DUP_RECHECK_MS に 1 回まで、同時実行は 1 つにまとめる。
+   */
+  const dupChecks = new Map<string, { at: number; alive: Set<string> }>();
+  const dupInflight = new Map<string, Promise<Set<string>>>();
+  const aliveOnly = async (peers: ServerPeer[]): Promise<ServerPeer[]> => {
+    const groups = new Map<string, ServerPeer[]>();
+    for (const p of peers) if (p.server_id !== undefined) groups.set(p.server_id, [...(groups.get(p.server_id) ?? []), p]);
+    const drop = new Set<string>();
+    await Promise.all(
+      [...groups.values()].filter((g) => g.length > 1).map(async (g) => {
+        const key = g.map((p) => p.id).sort().join(",");
+        const cached = dupChecks.get(key);
+        let alive: Set<string>;
+        if (cached && nowMs() - cached.at < DUP_RECHECK_MS) alive = cached.alive;
+        else {
+          let pr = dupInflight.get(key);
+          if (!pr) {
+            pr = (async () => {
+              const rs = await Promise.all(
+                g.map(async (p) => {
+                  const r = await request<HelloResultReply>(discoveryName, "hello_result", p.id, {}, { target: peerTarget(p), timeoutMs: identifyTimeoutMs });
+                  return r.type === "hello_result" ? p.id : undefined;
+                }),
+              );
+              const a = new Set(rs.filter((x): x is string => x !== undefined));
+              for (const [k, v] of dupChecks) if (nowMs() - v.at >= DUP_RECHECK_MS * 10) dupChecks.delete(k);
+              dupChecks.set(key, { at: nowMs(), alive: a });
+              return a;
+            })().finally(() => dupInflight.delete(key));
+            dupInflight.set(key, pr);
+          }
+          alive = await pr;
+        }
+        if (alive.size === 0) return;
+        for (const p of g) if (!alive.has(p.id)) drop.add(p.id);
+      }),
+    );
+    if (drop.size > 0) log(`hello に答えない peer を除く（同じ server_id の旧 peer id）: ${[...drop].join(",")}`);
+    return drop.size > 0 ? peers.filter((p) => !drop.has(p.id)) : peers;
+  };
+  const identifiedPeers = async (): Promise<ServerPeer[]> => aliveOnly(await identify(await discoverPeers()));
 
   // 再登録などで peer id が変わると、旧 id 宛ての返信は届かない。待ちを即エラーにして作り直す
   const watcher = setInterval(() => {
@@ -704,7 +750,7 @@ export function createServerLink(opts: {
       if (peers.length === 0) throw new Error("protocol bantou の server が見つからない（server が起動・protocol 登録済みか、同じ broker につながっているか確認）");
       if (sel === undefined) {
         // 同じ server_id を名乗る peer の検知には識別が要る（2 つ以上居る時だけ取る。取得済みは再送しない）
-        if (peers.length > 1) peers = await identify(peers);
+        if (peers.length > 1) peers = await aliveOnly(await identify(peers));
         const dup = sameServerIdPeers(peers, peers[0]);
         if (dup.length > 1) throw new Error(duplicateServerIdMessage(dup[0].server_id!, dup.map((p) => ({ ...p, peerId: p.id }))));
         return peers[0];
@@ -715,6 +761,12 @@ export function createServerLink(opts: {
         peers = await identify(peers);
         hits = matchServerPeers(peers, sel);
       }
+      // peer id の指定は常に通す（生存確認で除かれる旧 peer も、利用者が明示したなら指せる）
+      const exact = peers.find((p) => p.id === sel);
+      if (exact) return exact;
+      // 同じ server_id を名乗る peer が複数いるなら、応答しない旧 peer を除いてから判定する
+      peers = await aliveOnly(peers);
+      hits = matchServerPeers(peers, sel);
       if (hits.length === 0) throw new Error(`server が見つからない: ${sel}（候補: ${peers.map(peerLabel).join(", ")}）`);
       // 同じ server_id を名乗る peer 同士の曖昧さは、見分けが付かない表示にならないよう peer id を添えて断る
       if (hits.length > 1 && hits[0].server_id !== undefined && hits.every((p) => p.server_id === hits[0].server_id)) {

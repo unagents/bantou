@@ -122,7 +122,7 @@ branch: `feat/server-identity`。この節は worker w-id-server の担当。cen
 ### review 第1回（HEAD 705e9c6）の指摘と対応
 
 - M1 [medium] 直した: `resolveRecord` が peer id 一致を識別より先に見て、同じ peer id に別 server_id が現れると新しい記録に届かなかった。識別（server_id）があれば先に server_id 一致で探し、server_id を持たない旧形式だけ peer id で探す。あわせて `syncRecord` が、その peer id を別の server_id の記録に残さない（旧記録の `peer` / `peer_seen_at` を外す）。再現 test 追加（遅延返信が新しい記録に届き、旧記録の peer が外れる）。補足: 二つの修正のどちらか一方でも再現 test は通る（外す方が堅い）。
-- L1 [low] 直した: 同じ server_id を名乗る peer が live に複数いる時、`selectPeer`（server 指定なし・server_id・host 名で複数一致）と `findPeer`（記録の server_id）は peer id・user・workspace 付きのエラーで送らない。peer id 指定は通る。`learnIdentity` は、旧 peer id が発見に居る間は同じ server_id の識別を捨てない（揺れ・hello 再送を防ぐ）。注意: server 再登録直後は旧 peer id が失効するまで（約 60 秒）このエラーになり得る。test 追加（2 peer、識別が揺れない、hello 再送なし、remote_delete は stop_cap を送らない）。
+- L1 [low] 直した: 同じ server_id を名乗る peer が live に複数いる時、`selectPeer`（server 指定なし・server_id・host 名で複数一致）と `findPeer`（記録の server_id）は peer id・user・workspace 付きのエラーで送らない。peer id 指定は通る。`learnIdentity` は、旧 peer id が発見に居る間は同じ server_id の識別を捨てない（揺れ・hello 再送を防ぐ）。（第2回 N1 で、再起動直後に誤ってこのエラーになる点を直した。下記）test 追加（2 peer、識別が揺れない、hello 再送なし、remote_delete は stop_cap を送らない）。
 - L2 [low] 直した: `restoreInner` は発見に失敗した時 `clearStalePeers` を呼ばない（prune と同じ）。test 追加。
 - L4 [low] 直した: README と本 report の互換の記述を、版完全一致の門（旧 server に task / status は通らない、旧 center に新 server を当てると巻き戻される、移行は server を 1.7.0 へ更新してから）に合わせた。
 - L5 [low] 直した: README の移行節に downgrade（非推奨、`remotes.json.pre-server-id.bak` を戻す、退避は最初の 1 回で上書きしないので移行後の新規 cap は失われる）を追記。
@@ -140,3 +140,26 @@ branch: `feat/server-identity`。この節は worker w-id-server の担当。cen
 #### review 第1回後のテスト結果
 
 - center: typecheck エラー無し、test 481 pass / 0 fail（+4）。
+
+### review 第2回（HEAD 231ae42）の指摘と対応
+
+- N1 [medium] 直した: 第1回 L1 の重複エラーは、server 再起動で旧 peer id（死んでいるが発見に残る）と新 peer id が同じ server_id を名乗る間にも出て、再起動のたびに送信・追従が詰まり得た（server_id を入れた目的と衝突）。
+  - 方式: **同じ server_id の peer が複数いる時、その全員へ hello を投げ直し、応答した peer だけを残す**（`aliveOnly`）。両方が応答した時だけ重複エラー（本当の workspace / VM のコピー）。誰も応答しなければ何も落とさない。
+  - 方式の選択: (a) 全員へ hello を再送して応答した peer を残す、(b) 重複判定を「直近で応答した peer」に限る、を比べた。(b) は応答の履歴を持ち続ける必要があり、識別を学習済みの旧 peer が履歴に居ない初回の判定が決まらない。(a) は判定の時点の生存を直接確かめ、旧 peer は hello の timeout で落ちる。(a) を採った。
+  - 適用箇所: `selectPeer`（指定なし・server_id・host 名）と `identifiedPeers`（remotes の `findPeer` / 一覧が使う）。remotes.ts の findPeer は無変更で、除かれた一覧に対して判定する。
+  - 抑制: 同じ顔ぶれ（peer id の集合）への再確認は `DUP_RECHECK_MS`（30 秒）に 1 回まで。同時の要求は 1 つの確認にまとめる（in-flight 共有）。死んだ peer の確認は identify と同じ timeout（既定 3 秒）で済む。
+  - peer id の指定は常に通す（応答しない旧 peer でも、利用者の明示は止めない）。
+  - 「約 60 秒」は messenger broker 側の挙動で未検証だった。新方式は broker の失効時間に依存しない。README の該当記述を新仕様に直した。
+  - 既存 test の期待値: 第1回の L1 test の「hello を再送しない」は、重複時のみ再確認する新仕様でも通る（確認の結果が間隔内でキャッシュされ、test の計測点より後に hello が増えないため）。ただし意味が変わる: 重複時は初回に生存確認の hello が増え（識別 2 + 確認 2 = 4）、間隔内は増えず、間隔後に 1 回増える。この新仕様は新 test（`review N1: 両方が hello に答える時…`）で件数を明示した。
+  - test: 旧 peer が答えず新 peer が答える時、指定なし / server_id / host 名のすべてで新 peer が選ばれ、一覧からも旧 peer が除かれる。両方が答える時は重複エラー、再確認は間隔内に増えず間隔後に 1 回。peer id 指定は旧 peer でも通る。
+- N2 [low] 直した: 同じ peer を持つ 2 記録を restore で読み込み（発見失敗で syncRecord を通さない）、遅延返信が識別一致の新記録に届く test を追加。resolveRecord の順序修正を外すとこの test だけが落ちることを確認した（第1回の test は syncRecord の peer 外しでも通っていた）。
+
+#### 残り（第2回で直していない）
+
+- N3: server.json の link() 非対応 FS への fallback は w-id-server の担当。直していない。
+- N4: 15b64f6 の Claude-Session トレーラ（第1回 L3 と同件）。force push になるので直さない。
+- 生存確認は hello の応答を見る。応答が遅いだけの生きた peer（3 秒超）は一時的に除かれ得るが、次の確認（30 秒後）で戻る。
+
+#### review 第2回後のテスト結果
+
+- center: typecheck エラー無し、test 484 pass / 0 fail。

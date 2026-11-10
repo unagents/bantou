@@ -6,7 +6,7 @@ import { afterEach, beforeEach, test } from "node:test";
 import { MESSENGER_PROTOCOL, parseServerReply } from "@agent-hand/bantou-protocol";
 import { parseConfig } from "../src/config.js";
 import { createRemoteManager, type RemoteRecord } from "../src/remotes.js";
-import { IDENTIFY_RETRY_MS, createServerLink, matchServerPeers, type LinkClient, type LinkInbound, type LinkMeta, type LinkPeer, type ServerLink, type ServerPeer } from "../src/server-link.js";
+import { DUP_RECHECK_MS, IDENTIFY_RETRY_MS, createServerLink, matchServerPeers, type LinkClient, type LinkInbound, type LinkMeta, type LinkPeer, type ServerLink, type ServerPeer } from "../src/server-link.js";
 import { backupFileOnce, createJsonListStore } from "../src/store.js";
 
 let dir: string;
@@ -471,4 +471,60 @@ test("review L2: restore で発見に失敗した時は、古い到達先（peer
   await tick();
   assert.equal((await readRecords())[0].peer, "pa-1", "発見失敗では消さない");
   assert.equal(mgr.list().length, 1);
+});
+
+// -- review 第2回 --
+
+test("review N1: server 再起動直後（旧 peer id が発見に残り、hello に答えない）でも、新 peer が選ばれる。peer id 指定は旧 peer でも通る", async () => {
+  const c = new FakeClient();
+  c.peers = [lp("old-1", "lenovo")];
+  c.helloReplies.set("old-1", hello(idOf("srv-ffffffffff", "lenovo", "alice", "/w")));
+  const link = linkWith(c);
+  await link.identifiedPeers!(); // 旧 peer の識別を学習済み
+  // server 再起動: 新 peer id が同じ server_id で現れ、旧 peer は死んだが発見に残る
+  c.peers = [lp("old-1", "lenovo"), lp("new-2", "lenovo")];
+  c.helloReplies.delete("old-1");
+  c.helloReplies.set("new-2", hello(idOf("srv-ffffffffff", "lenovo", "alice", "/w")));
+  assert.equal((await link.selectPeer()).id, "new-2", "指定なし");
+  assert.equal((await link.selectPeer("srv-ffffffffff")).id, "new-2", "server_id");
+  assert.equal((await link.selectPeer("lenovo")).id, "new-2", "host 名");
+  assert.deepEqual((await link.identifiedPeers!()).map((p) => p.id), ["new-2"], "findPeer が使う一覧からも旧 peer は除かれる");
+  assert.equal((await link.selectPeer("old-1")).id, "old-1", "peer id 指定は常に通る");
+  assert.equal((await link.selectPeer("new-2")).id, "new-2");
+  await link.close();
+});
+
+test("review N1: 両方が hello に答える時は従来どおり重複エラー。再確認は DUP_RECHECK_MS に 1 回まで（連打しない）。間隔を過ぎれば再確認する", async () => {
+  const c = new FakeClient();
+  c.peers = [lp("c-1", "lenovo"), lp("c-2", "lenovo")];
+  c.helloReplies.set("c-1", hello(idOf("srv-eeeeeeeeee", "lenovo", "alice", "/home/alice/ws")));
+  c.helloReplies.set("c-2", hello(idOf("srv-eeeeeeeeee", "lenovo", "alice", "/mnt/copy/ws")));
+  let t = 5_000_000;
+  const link = linkWith(c, () => t);
+  const helloCount = () => c.sent.filter((s) => s.msg.type === "hello").length;
+  await assert.rejects(link.selectPeer(), /同じ server_id srv-eeeeeeeeee/); // 識別 2 + 生存確認 2
+  assert.equal(helloCount(), 4);
+  await assert.rejects(link.selectPeer("srv-eeeeeeeeee"), /同じ server_id/);
+  await link.identifiedPeers!();
+  await Promise.all([link.selectPeer("c-1"), link.identifiedPeers!(), link.identifiedPeers!()]);
+  assert.equal(helloCount(), 4, "間隔内は再確認しない");
+  t += DUP_RECHECK_MS;
+  await assert.rejects(Promise.all([link.selectPeer(), link.selectPeer()]), /同じ server_id/);
+  assert.equal(helloCount(), 6, "間隔を過ぎたら 1 回だけ（同時実行は 1 つにまとめる）再確認する");
+  await link.close();
+});
+
+test("review N2: 同じ peer を持つ 2 記録を restore で読み込んでも（syncRecord を通さない）、遅延返信は識別が一致する新しい記録に届く", async () => {
+  const SID_D = "srv-dddddddddd";
+  const base = { remote_id: CAP, session: "pm1", serverName: "bantou-server", serverHost: "lenovo", state: "done", createdAt: "2026-11-03T00:00:00.000Z", pending: [], peer: "p-1" };
+  await writeFile(join(dir, "remotes.json"), JSON.stringify([{ ...base, server: SID_A, server_id: SID_A }, { ...base, server: SID_D, server_id: SID_D }]));
+  const { mgr, setFail } = setup([peerOf("p-1", { server_id: SID_D, host: "lenovo", user: "alice", workspace: "/w2" })]);
+  setFail(true); // 発見に失敗 = restore が記録を同期しない
+  await mgr.restore();
+  await tick();
+  const ok = mgr.applyLateReply({ bantou: 1, type: "error", ok: false, message: "late-n2", task_id: "t-old", cap_id: CAP } as never, "p-1");
+  assert.equal(ok, true);
+  const recs = mgr.list();
+  assert.match(String(recs.find((x) => x.server_id === SID_D)?.error ?? ""), /late-n2/);
+  assert.doesNotMatch(String(recs.find((x) => x.server_id === SID_A)?.error ?? ""), /late-n2/);
 });
