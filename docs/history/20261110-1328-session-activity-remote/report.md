@@ -5,6 +5,7 @@
 ## 設計
 - center が `session_list[].remote = { running, waitingReply }` を返す（running = pending がある server の数、waitingReply = 動いている cap の未返答 ask/approve 数）。変化時だけ `GET /events` に `reason: "remote"`。
 - desktop の優先順位（`useBoard.ts`）: thread の waiting／claude の needs-input → remote の waitingReply > 0（判断待ち）→ claude の working → remote の running > 0（remote 作業中）→ idle。claude が unknown/idle でも remote の事実は出す。
+- ask の後に同じ worker から done 等（progress 以外）が来ると、center が前の ask/approve に `superseded_at` を付けて `waitingReply` に数えなくなり、判断待ちが解消される（desktop は `waitingReply` をそのまま使う。center README「remote の反映」の「解消」と同じ規則）。
 - 表示条件（判断）: claude の状態と remote running は **connected の session だけ**。停止・起動中・error の session に残った pending でスピナーが回り続けるのを避け、既存の「停止・error は今の表示のまま」に合わせるため。一方 **未返答の worker の質問は state に関わらず出す**: 人の返事を待つ事実で、thread の ask の合成（state 非依存）と同じ扱い。center に問い合わせられない時はどちらも出さない。
 - 印: `data-testid="session-activity"`、`data-activity="remote-working"`（label「remote 作業中」、回る `i-lucide-server-cog`、色は作業中と同じ info）。判断待ちの tooltip は「…（worker の質問に未返答 N 件）」。
 - 集計・絞り込み: 「remote 作業中」は「作業中」に数える（chip は増やさない。`session-activity-summary-working` の `data-count` に含む）。「作業中」の絞り込みは remote-working の行も残す。
