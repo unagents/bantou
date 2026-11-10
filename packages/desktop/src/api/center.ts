@@ -60,6 +60,42 @@ export async function centerToolStrict<T>(name: string, args?: Record<string, un
   return JSON.parse(text) as T;
 }
 
+/**
+ * Check a URL before it is handed to the OS: trimmed, no control characters, http(s) only, a host, no userinfo.
+ * Returns the normalized string (`URL.href`) to open; throws a readable error otherwise.
+ * The host is not restricted to claude's login host (no primary source for the full list; a fixed list could block a valid URL).
+ */
+export function checkExternalUrl(raw: string): string {
+  const s = raw.trim();
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(s)) throw new Error("URL に制御文字・改行が入っている");
+  let u: URL;
+  try {
+    u = new URL(s);
+  } catch {
+    throw new Error("URL として読めない");
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error("http(s) の URL のみ開ける");
+  if (!u.hostname) throw new Error("URL に host が無い");
+  if (u.username || u.password) throw new Error("URL にユーザー情報（user:pass@）が入っている");
+  return u.href;
+}
+
+/**
+ * Open an http(s) URL in this Mac's default browser (tauri-plugin-shell `open`, permission `shell:allow-open`).
+ * The re-login URL is opened here, on the desktop's machine — never on the center's host.
+ * The URL comes from the center (another host), so it is checked here, right before `invoke`.
+ */
+export const openExternalUrl = (url: string) => {
+  let href: string;
+  try {
+    href = checkExternalUrl(url);
+  } catch (e) {
+    return Promise.reject(e instanceof Error ? e : new Error(String(e)));
+  }
+  return invoke<void>("plugin:shell|open", { path: href });
+};
+
 /** Start `/login` in the session's claude (`session_login`): resolves with the URL to open in a browser. */
 export const sessionLogin = (name: string) => centerToolStrict<CenterLoginStart>("session_login", { name });
 

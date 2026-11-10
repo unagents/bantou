@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { sessionLogin, sessionLoginCode, sessionRestart } from "~/api";
+import { openExternalUrl, sessionLogin, sessionLoginCode, sessionRestart } from "~/api";
 import type { CenterAuthState } from "~/types";
 
 const open = defineModel<boolean>("open", { required: true });
@@ -49,6 +49,17 @@ async function start() {
   } catch (e) {
     actionError.value = String(e);
     step.value = "idle";
+  }
+}
+
+/** Open the URL in this Mac's browser (the center's host does not open it). */
+async function openUrl() {
+  if (!loginUrl.value) return;
+  actionError.value = null;
+  try {
+    await openExternalUrl(loginUrl.value);
+  } catch (e) {
+    actionError.value = `ブラウザで開けない（URL をコピーして開く）: ${String(e)}`;
   }
 }
 
@@ -135,9 +146,17 @@ async function restart() {
             @click="start"
           />
           <template v-if="loginUrl">
-            <p class="text-cork-muted text-xs">この URL をブラウザで開き、認証後に表示されるコードを下に貼る。</p>
+            <p class="text-cork-muted text-xs">この URL をこの Mac のブラウザで開き（center の Mac では開かない）、認証後に表示されるコードを下に貼る。</p>
             <div class="flex items-start gap-2">
               <code class="bg-cork-elevated border-cork-border min-w-0 flex-1 overflow-hidden rounded border p-2 text-[11px] break-all select-all" data-testid="login-url">{{ loginUrl }}</code>
+              <UButton
+                size="xs"
+                variant="subtle"
+                icon="i-lucide-external-link"
+                label="開く"
+                data-testid="login-open"
+                @click="openUrl"
+              />
               <UButton
                 size="xs"
                 variant="subtle"
