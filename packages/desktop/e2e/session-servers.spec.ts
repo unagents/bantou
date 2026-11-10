@@ -155,7 +155,7 @@ test("center-wide settings: the same 使う server field is saved to center_sett
   await page.getByTestId("settings-save").click();
   await expect(page.getByTestId("settings-dialog")).toBeHidden();
   const sent = await mock(page, (m) => m.calls.filter((c) => c.cmd === "center_call" && (c.args as { name: string }).name === "center_settings_update").map((c) => c.args));
-  expect(sent).toEqual([{ name: "center_settings_update", arguments: { settings: { instructions: null, addDirs: null, outputStyle: null, servers: ["srv-mac"] } } }]);
+  expect(sent).toEqual([{ name: "center_settings_update", arguments: { settings: { instructions: null, addDirs: null, outputStyle: null, servers: ["srv-mac"], memory: null } } }]);
   expect(await mock(page, (m) => m.centerCommonSettings)).toEqual({ servers: ["srv-mac"] });
   await page.getByTestId("open-settings").click();
   await expect(section.getByTestId("center-common-servers-limit")).toBeChecked();

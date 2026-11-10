@@ -74,6 +74,11 @@ function removeServer(e: string) {
   draft.value = { ...draft.value, servers: (draft.value.servers ?? []).filter((x) => x !== e) };
 }
 
+// memory: the center never returns the saved token, so the token field starts blank (blank on save = keep the saved one).
+function setMemory(patch: Partial<SettingsDraft["memory"]>) {
+  draft.value = { ...draft.value, memory: { ...draft.value.memory, ...patch } };
+}
+
 const failed = ref(false);
 const dialog = computed(() => !!props.canPick && !failed.value);
 async function pickAdd() {
@@ -184,6 +189,49 @@ async function pickAdd() {
         <p v-if="(draft.servers ?? []).length === 0" class="text-cork-danger-text pl-6 text-xs" :data-testid="`${idPrefix}-servers-none`">1 つも選んでいない: この範囲ではどの server も使わない</p>
       </template>
       <p class="text-cork-muted text-xs" :data-testid="`${idPrefix}-servers-note`">保存すると次の呼び出しからすぐ効く（起動し直し不要）。host 名は同じ host の server すべてに効く</p>
+    </section>
+    <section class="flex flex-col gap-1" :data-testid="`${idPrefix}-section-memory`">
+      <h3 class="text-sm font-semibold">外部記憶</h3>
+      <p class="text-cork-muted text-xs">
+        外部記憶（memory）の MCP endpoint。設定すると master-cap の起動時に MCP として足され、記憶の問い合わせ（context / recall）ができる。session の値があれば共通の値は使わない。URL が空なら使わない
+      </p>
+      <UInput
+        :model-value="draft.memory.url"
+        class="w-full"
+        size="sm"
+        placeholder="http://host:port/mcp"
+        autocomplete="off"
+        :data-testid="`${idPrefix}-memory-url`"
+        @update:model-value="setMemory({ url: String($event ?? '') })"
+      />
+      <UInput
+        :model-value="draft.memory.token"
+        type="password"
+        class="w-full"
+        size="sm"
+        autocomplete="new-password"
+        :placeholder="draft.memory.tokenSet ? '設定済み（変えるときだけ入力）' : 'token（Bearer。無ければ空）'"
+        :data-testid="`${idPrefix}-memory-token`"
+        @update:model-value="setMemory({ token: String($event ?? '') })"
+      />
+      <p v-if="draft.memory.tokenSet" class="text-cork-muted text-xs" :data-testid="`${idPrefix}-memory-token-set`">token は設定済み（値は表示しない。空のまま保存すると今の token のまま）</p>
+      <UCheckbox
+        v-if="draft.memory.tokenSet"
+        :model-value="draft.memory.tokenClear"
+        label="保存済みの token を消す"
+        :data-testid="`${idPrefix}-memory-token-clear`"
+        @update:model-value="setMemory({ tokenClear: !!$event })"
+      />
+      <UInput
+        :model-value="draft.memory.agentId"
+        class="w-full"
+        size="sm"
+        placeholder="agent ID（空なら session 名）"
+        autocomplete="off"
+        :data-testid="`${idPrefix}-memory-agent-id`"
+        @update:model-value="setMemory({ agentId: String($event ?? '') })"
+      />
+      <p class="text-cork-muted text-xs" :data-testid="`${idPrefix}-memory-note`">{{ INSTRUCTIONS_NOTE }}</p>
     </section>
   </div>
 </template>

@@ -111,7 +111,7 @@ export interface SessionPathHints {
 
 /**
  * Project (= session) settings kept by the center (`settings` of `session_settings_get`). `instructions`,
- * `addDirs` and `outputStyle`; the center keeps items this desktop does not know and returns them as they are.
+ * `addDirs`, `outputStyle`, `servers` and `memory`; the center keeps items this desktop does not know and returns them as they are.
  * In an update, `null` removes an item.
  */
 export interface ProjectSettings {
@@ -123,6 +123,11 @@ export interface ProjectSettings {
   outputStyle?: string | null;
   /** Servers the session may use (host names or server_ids). Absent / null = all (or the center-wide value); `[]` = none. */
   servers?: string[] | null;
+  /**
+   * External memory (an MCP endpoint). In an update the object replaces the stored one: an omitted `token` keeps the
+   * stored token and "" removes it. The center never returns the token: it answers `tokenSet` instead.
+   */
+  memory?: { url: string; token?: string; agentId?: string; tokenSet?: boolean } | null;
 }
 
 /** The center's list as last fetched (mirror of `src-tauri/src/session.rs::SessionList`). Memory only. */

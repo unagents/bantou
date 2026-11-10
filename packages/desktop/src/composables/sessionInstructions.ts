@@ -15,6 +15,11 @@ export const OUTPUT_STYLE_MAX = 32_000;
 /** Max number of `servers` entries (same limit as the center). */
 export const SERVERS_MAX = 50;
 
+/** Max lengths of the external-memory fields (same limits as the center). */
+export const MEMORY_URL_MAX = 2048;
+export const MEMORY_TOKEN_MAX = 4096;
+export const MEMORY_AGENT_ID_MAX = 64;
+
 /** What a `servers` entry may be: a host name or a server_id (same patterns as the center). */
 const SERVER_REF = /^(?:[A-Za-z0-9_-]{1,64}|[A-Za-z0-9][A-Za-z0-9._-]{0,252})$/;
 
@@ -31,9 +36,27 @@ export interface SettingsDraft {
   outputStyle: string;
   /** Servers the session may use (host names or server_ids). null = not set (all, or the center-wide value); [] = none. */
   servers: string[] | null;
+  /** External memory (MCP endpoint). All blank = not set. */
+  memory: MemoryDraft;
 }
 
-export const emptyDraft = (): SettingsDraft => ({ instructions: "", addDirs: [], outputStyle: "", servers: null });
+/**
+ * The external-memory fields. The center never returns the saved token (it answers `tokenSet`): `token` is only what
+ * is typed now (blank = keep the saved one), `tokenClear` removes the saved one.
+ */
+export interface MemoryDraft {
+  url: string;
+  token: string;
+  agentId: string;
+  /** A token is saved on the center (shown as a note, never the value). */
+  tokenSet: boolean;
+  /** Remove the saved token on save. */
+  tokenClear: boolean;
+}
+
+export const emptyMemory = (): MemoryDraft => ({ url: "", token: "", agentId: "", tokenSet: false, tokenClear: false });
+
+export const emptyDraft = (): SettingsDraft => ({ instructions: "", addDirs: [], outputStyle: "", servers: null, memory: emptyMemory() });
 
 /** The form values for the settings the center returned. */
 export const draftOf = (s: ProjectSettings): SettingsDraft => ({
@@ -41,7 +64,13 @@ export const draftOf = (s: ProjectSettings): SettingsDraft => ({
   addDirs: Array.isArray(s.addDirs) ? s.addDirs.filter((d): d is string => typeof d === "string") : [],
   outputStyle: s.outputStyle ?? "",
   servers: Array.isArray(s.servers) ? cleanServers(s.servers.filter((d): d is string => typeof d === "string")) : null,
+  memory: s.memory
+    ? { url: s.memory.url ?? "", token: "", agentId: s.memory.agentId ?? "", tokenSet: s.memory.tokenSet === true, tokenClear: false }
+    : emptyMemory(),
 });
+
+/** True when no memory field is filled in (the item is not set). */
+const memoryBlank = (m: MemoryDraft): boolean => !m.url.trim() && !m.token.trim() && !m.agentId.trim() && !m.tokenClear;
 
 /** The server rows as the center takes them: trimmed, blanks dropped, duplicates dropped. */
 export const cleanServers = (list: string[]): string[] => {
@@ -66,6 +95,14 @@ export const toUpdate = (d: SettingsDraft): ProjectSettings => {
     outputStyle: d.outputStyle.trim() ? d.outputStyle : null,
     // null (not set) removes the item; an empty list is kept and means "no server"
     servers: d.servers === null ? null : cleanServers(d.servers),
+    // The center replaces the whole object: an omitted token keeps the saved one, "" removes it. Blank url = remove the item.
+    memory: !d.memory.url.trim()
+      ? null
+      : {
+          url: d.memory.url.trim(),
+          ...(d.memory.token.trim() ? { token: d.memory.token.trim() } : d.memory.tokenClear ? { token: "" } : {}),
+          ...(d.memory.agentId.trim() ? { agentId: d.memory.agentId.trim() } : {}),
+        },
   };
 };
 
@@ -89,6 +126,26 @@ export const draftError = (d: SettingsDraft): string | null => {
     if (list.length > SERVERS_MAX) return `server は ${SERVERS_MAX} 個以内`;
     const badServer = list.find((s) => !SERVER_REF.test(s));
     if (badServer !== undefined) return `server は host 名か server_id（英数字と . _ - のみ）で指定する: ${badServer}`;
+  }
+  const m = d.memory;
+  if (!memoryBlank(m)) {
+    const url = m.url.trim();
+    if (!url) return "外部記憶の URL を入れる（token / agent ID だけでは保存できない）";
+    if ([...url].length > MEMORY_URL_MAX) return `外部記憶の URL は ${MEMORY_URL_MAX} 文字以内`;
+    let u: URL | null = null;
+    try {
+      u = new URL(url);
+    } catch {
+      u = null;
+    }
+    if (!u || (u.protocol !== "http:" && u.protocol !== "https:")) return "外部記憶の URL は http / https の絶対 URL";
+    if (u.username || u.password) return "外部記憶の URL に user:pass@ は書けない（token は token 欄に入れる）";
+    const token = m.token.trim();
+    if ([...token].length > MEMORY_TOKEN_MAX) return `外部記憶の token は ${MEMORY_TOKEN_MAX} 文字以内`;
+    if (!/^[\x21-\x7E]*$/.test(token)) return "外部記憶の token に空白・制御文字・日本語は使えない";
+    const agentId = m.agentId.trim();
+    if ([...agentId].length > MEMORY_AGENT_ID_MAX) return `外部記憶の agent ID は ${MEMORY_AGENT_ID_MAX} 文字以内`;
+    if (agentId && !/^[A-Za-z0-9_-]+$/.test(agentId)) return "外部記憶の agent ID は英数字と _ - のみ";
   }
   return null;
 };
