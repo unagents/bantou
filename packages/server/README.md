@@ -29,6 +29,7 @@ npx bantou --config <path>
 - `npx bantou --handoff-protocol` は引き継ぎ対応版であることを示す `1` を出して exit 0（旧 supervisor が引き継ぐ前に確かめる）。内部用に `--supervise` / `--serve` もある。
 - それ以外の引数は exit 2。実行時エラーは exit 1。
 - SIGTERM / SIGINT で実行中の claude を止め、peer 解除・broker 停止して exit 0（5 秒で打ち切り）。
+- `<workspace>/server.retired` がある workspace では起動せず exit 75（退役済み。下記「退役」）。
 
 ### launcher・supervisor と自己更新
 
@@ -41,6 +42,17 @@ npx bantou --config <path>
 - 取得元は config `update.spec`。`--version` を持たない版は更新先にできない（取得確認で失敗する）。
 - 版をまたぐ取り決めは変えない（変えるなら後方互換を保つ）: launcher と supervisor の間（config の workspace、lock の `pid` / `launcher`、`server.exit` の `{launcher, code}`、信号の中継、`BANTOU_LAUNCHER_PID`）、supervisor と子の間（`--serve`、`BANTOU_SUPERVISOR_PID`、`server.lock` / `server.ready` / `update.json`、更新時の exit 0）、supervisor 同士（`--handoff-protocol`、`--supervise`、`next` の形、`BANTOU_HANDOFF_TOKEN`）。
 - 0.3.0 以前の server（launcher を持たず supervisor が最初の版のまま残る）から、この仕組みへは一度だけ手で起動し直す。0.3.0 の supervisor の下でも新版の子は動く（子だけ入れ替わる）が、supervisor は 0.3.0 のまま。
+
+### 退役（retire_server）
+
+center から server を外す指示（protocol 1.8.0、`docs/protocol.md` の `retire_server`）。host に入って root で止めなくてよくする。
+
+- 順序: `server_id` の確認 → `<workspace>/server.retired` を書く（書けなければ何も止めず `error`）→ 更新予約の取消と新規 `kick_cap` / `task` / `worker_reply` / `update_server` / MCP `worker_start`・`report` の拒否（`error` `retiring:true`, `retryable:false`）→ 実行中の cap・worker を止める（`manager.shutdown`、shutdown と同じ経路）→ `retire_result` を返信 → 3 秒の猶予（center の poll が返信を取る時間）→ peer 登録解除・broker 停止 → **exit 76**。返信を送れなくても、受付から最長 15 秒で終了へ進む。途中の失敗（停止・解除）は log に残して最後まで進むので、launcher だけ・supervisor だけ・登録だけが残る半端な状態にならない。
+- launcher と systemd / launchd に戻させない仕組み: 追加の通信は無い。`--serve` の子が exit 76 で終わると、既存の仕組み（supervisor が子の exit code を `server.exit` に書く → launcher がその code で終わる）でそのまま launcher の終了コードが 76 になる（launcher・supervisor は変更なし）。host lock `/tmp/bantou-server.lock` と `server.lock` は終了で解放される。systemd は unit の `RestartPreventExitStatus=75 76` で再起動しない。
+- 再起動の保険: `server.retired`（退役の印）がある間、`bin/bantou.mjs` は launcher を起動せず exit 75 で終わる（host lock の競合と同じ 75）。`RestartPreventExitStatus=75` だけの**旧 unit**でも、76 で一度（10 秒後）起動し直されるが、この拒否の 75 で止まる。印を消せば再び起動できる（再有効化）。
+- launchd: plist の `KeepAlive` を `PathState`（`<HOME>/server.retired` が**無い**間だけ起動し直す）にした。Apple の launchd.plist(5) の記述（「PathState: If the value of the key is true, then the job will be kept alive as long as the path exists」、false は逆の条件。複数キーは OR）に基づく。**macOS 実機では未検証**。制約: path は plist に固定で `workspace = HOME`（`install-service.sh` の標準形）が前提。旧 plist（`KeepAlive` が `true`）は印があっても 10 秒ごとに起動し直す（exit 75 の message が `server.log` に残るだけで害は無いが止まらない）。`install-service.sh` を再実行して plist を更新するか、`sudo launchctl bootout system/com.unagents.bantou`。
+- 自分の unit は無効化しない（専用ユーザーで動き、権限が無い）。代わりに返信 `retire_result.host_steps` に、root が host で行う 1〜3 行（unit 削除 → user 削除 → workspace 削除。値は quote 済み）を載せる。unit 名は systemd の cgroup / launchd の `XPC_SERVICE_NAME` から取り、取れなければ `install-service.sh` の既定名（`service.detected:false`）。
+- 旧 server（protocol 1.8.0 未満）は `retire_server` を無返信で無視する。center は `supportsRetire` を満たす server にだけ送る。
 
 ## config.json
 

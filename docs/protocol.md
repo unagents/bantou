@@ -113,8 +113,8 @@ sender peer as one JSON object.
 ### Messenger protocol `bantou`
 
 The protocol definition is `packages/protocol/messenger/protocol.json` (JSON
-Schemas of `kick_cap`, `stop_cap`, `status`, `hello`, `update_server`, `task`, `worker_reply`, `cap_result`, `stop_result`, `status_result`, `hello_result`, `update_result`, `task_result`, `worker_reply_result`, `error`, `activity`, `worker_report`)
-and `PROTOCOL.md`. It is the agent-messenger protocol version (`1.7.0`,
+Schemas of `kick_cap`, `stop_cap`, `status`, `hello`, `update_server`, `task`, `worker_reply`, `retire_server`, `cap_result`, `stop_result`, `status_result`, `hello_result`, `update_result`, `task_result`, `worker_reply_result`, `retire_result`, `error`, `activity`, `worker_report`)
+and `PROTOCOL.md`. It is the agent-messenger protocol version (`1.8.0`,
 `MESSENGER_PROTOCOL` in `server.ts`); the body field `bantou: 1` is a separate
 version of the JSON bodies below. Changing the definition needs a new protocol
 `version` (same name and version with other content is `PROTOCOL_CONFLICT`).
@@ -137,7 +137,7 @@ version of the JSON bodies below. Changing the definition needs a new protocol
 | key | required | meaning |
 |---|---|---|
 | `bantou` | yes | protocol version, always `1` |
-| `type` | yes | `kick_cap`, `stop_cap`, `status`, `hello`, `update_server`, `task` or `worker_reply` |
+| `type` | yes | `kick_cap`, `stop_cap`, `status`, `hello`, `update_server`, `task`, `worker_reply` or `retire_server` |
 
 ### `kick_cap` — start or resume a cap
 
@@ -230,7 +230,7 @@ a center sends it after a restart to take its caps' notices back. A server older
 ```
 
 No other fields. Reply: `hello_result`
-`{"bantou":1,"type":"hello_result","ok":true,"server_version":"0.3.0","protocol_version":"1.7.0","server_id":"srv-0a1b2c3d4e","host":"lenovo","user":"bantou","workspace":"/home/bantou","update":null,"last_update":null}`.
+`{"bantou":1,"type":"hello_result","ok":true,"server_version":"0.3.0","protocol_version":"1.8.0","server_id":"srv-0a1b2c3d4e","host":"lenovo","user":"bantou","workspace":"/home/bantou","update":null,"last_update":null}`.
 `server_version` is the npm `bantou` version of the running server. `server_id`, `host`, `user`, `workspace` are the server identity (1.7.0, all optional, see "Server identity" below). `update` is
 `{"state":"waiting"|"restarting","from","to","running":{"caps","workers","reports"}}` while an update is
 in progress. `last_update` is `{"to","ok":false,"error","at"}` for the last update that failed (kept until the
@@ -266,7 +266,50 @@ from the center's. All other commands are not sent to a server whose protocol ve
 refuses with `error` `code:"version_mismatch"`, `retryable:true`).
 
 `error` replies may carry `code` (`updating` | `update_failed` | `update_conflict` | `invalid_version` |
-`version_mismatch`) and `retryable` (boolean).
+`version_mismatch`), `retryable` (boolean) and, from 1.8.0, `retiring: true` (the server is retiring and refuses
+the command for good, see `retire_server`).
+
+### `retire_server` — retire the server (1.8.0)
+
+```json
+{"bantou":1,"type":"retire_server","server_id":"srv-0a1b2c3d4e","reason":"lenovo の残り"}
+```
+
+Takes a server out of service from the center, so nobody has to log in to the host and stop it as root.
+Both fields are optional. `server_id` is the expected target: when it differs from the server's own, the server
+answers `error` (`command:"retire_server"`) and stops nothing. All servers are named `bantou-server`, so a center
+sends it. `reason` is free text (logged and written to `server.retired`).
+
+Order on the server (every step after 2 runs to the end even if it fails, so no half-retired server stays):
+
+1. check `server_id`. 2. write `<workspace>/server.retired` (if this fails: `error`, nothing is stopped, the server keeps
+serving). 3. stop accepting: cancel a pending update, refuse new `kick_cap` / `task` / `worker_reply` / `update_server`
+with `error` `{"retiring":true,"retryable":false}`, refuse MCP `worker_start` and `report`. `hello`, `status`, `stop_cap` are still
+served. 4. count and stop every running cap and worker (the same path as shutdown; interrupted `kick_cap`s still get
+their `cap_result` with `ok:false`). 5. reply `retire_result`. 6. after a grace of 3 seconds (the reply is pulled by the
+center's poll, 1 s interval) unregister from the messenger, close the broker and exit with code **76**.
+If the reply cannot be sent, step 6 still runs at the latest 15 seconds after 2.
+
+Reply `retire_result`:
+
+```json
+{"bantou":1,"type":"retire_result","ok":true,"state":"retiring","stopped":{"caps":1,"workers":2},"exit_at":"2026-11-10T08:00:03.000Z","exit_code":76,
+ "host_steps":["sudo systemctl disable --now 'bantou-server.service' && sudo rm -f '/etc/systemd/system/bantou-server.service' && sudo systemctl daemon-reload","sudo userdel -r 'bantou'"],
+ "service":{"manager":"systemd","name":"bantou-server.service","detected":true},
+ "server_id":"srv-0a1b2c3d4e","host":"lenovo","user":"bantou","workspace":"/home/bantou"}
+```
+
+`host_steps` (1 to 3 shell lines, values shell-quoted, order: unit, user, workspace) is what an operator with root does on
+the host. The server cannot: it runs as an unprivileged user, so it never tries to disable its own unit. The unit name
+is read from the process (systemd cgroup, launchd `XPC_SERVICE_NAME`); `service.detected:false` means it is the
+`install-service.sh` default, not confirmed. A second `retire_server` while retiring gets the same reply. After
+`exit_at` the server is gone: success is "`retire_result` received, then the peer disappears".
+
+**Compatibility.** `retire_server` is a control command like `update_server` (accepted whatever the sender's protocol
+version is, so a server with a different version can be retired). A server older than 1.8.0 does not know it and
+**sends no reply**, so a center sends it only after `supportsRetire(peer.version)` (`RETIRE_MIN_PROTOCOL = "1.8.0"`;
+unknown version = false) and never reads "no reply" as "retired". All new fields are optional; older replies and
+errors are still valid.
 
 ### Worker reports (MCP `/mcp`)
 
@@ -526,6 +569,7 @@ A messenger peer id changes whenever a server restarts or registers again, and e
 | `<workspace>/caps/<cap_id>/` | cap path = cwd of claude |
 | `<workspace>/workers/<worker_id>/` | worker path, same layout as a cap |
 | `<workspace>/server.json` | server identity (`{"server_id","created_at"}`, 1.7.0; created at the first start and kept) |
+| `<workspace>/server.retired` | retirement mark (1.8.0; written by `retire_server`; while it exists the server does not start: exit 75) |
 | `<path>/state.json` | agent state (shape below) |
 | `<cap path>/logs/center.json` | center of the cap (`{"center_id":"<last peer id>","center_name":"<peer name>"}`; `center_name` is absent in a record from before 1.6.0) |
 | `<worker path>/logs/owner.json` | cap that owns the worker (`{"cap_id":"..."}`) |

@@ -128,6 +128,26 @@ host 再起動後は OS が自動で起動し、server が peer 登録して cen
 - **同じ host に 2 つ server がある時**（例: 移行中に旧 vagrant 直の server と bantou ユーザーの server が並ぶ）は、`host` が同じでも `user` と `workspace` と `server_id` が違うので、それで見分ける。名前（`bantou-server`）は全部同じで、見分ける材料にならない。
 - 確認: `sudo grep server_id= /home/bantou/server.log | tail -1`（起動行 `server_id=... host=... user=...`）、または `sudo cat /home/bantou/server.json`。
 
+## 4.6 退役（server を外す）
+
+host に入って root で止めずに、center から server を退役させる（protocol 1.8.0 の `retire_server`。center の tool / desktop から）。**不可逆**: 印 `<workspace>/server.retired` が残り、消すまで起動しない。
+
+1. **center から退役を指示する**（`server_id` を付ける。名前は全 server が `bantou-server` なので、host・user・workspace・`server_id` で対象を確かめる。4.5）。server は新しい task / worker_start を断り、動いている cap・worker を止め、messenger の登録を外し、**exit 76** で終わる（launcher・supervisor も一緒に終わる）。返信 `retire_result` に止めた cap / worker の数、終了予定時刻、host で消す手順（`host_steps`）が入る。
+2. **host で消す**（設置者が sudo で。server は専用ユーザーで動き権限が無いので、自分の unit は消せない）。`host_steps` の例（systemd、workspace = HOME）:
+   ```bash
+   sudo systemctl disable --now 'bantou-server.service' && sudo rm -f '/etc/systemd/system/bantou-server.service' && sudo systemctl daemon-reload
+   sudo userdel -r 'bantou'      # 専用ユーザーの時だけ。HOME（= workspace）ごと消える
+   ```
+   workspace が HOME の外なら 3 行目に `sudo rm -rf '<workspace>'`。macOS は `sudo launchctl bootout 'system/<label>'; sudo rm -f '/Library/LaunchDaemons/<label>.plist'` と `sudo sysadminctl -deleteUser`。専用でないユーザー（人のアカウント）では user 削除を**実行しない**。
+3. **戻らない仕組み**: 子の exit 76 が既存の経路（supervisor の `server.exit` → launcher の終了コード）で launcher の終了コードになる。unit は `RestartPreventExitStatus=75 76` で再起動しない。host lock と `server.lock` は解放される。印がある間 `bin/bantou.mjs` は起動せず exit 75。
+4. **再び使う**: 印 `<workspace>/server.retired` を消してから起動する（unit を消していない場合）。
+
+制約:
+- **旧 unit**（`RestartPreventExitStatus=75` だけ）は、76 で一度（10 秒後）起動し直すが、印の拒否（exit 75）で止まる。unit を更新するなら `install-service.sh` を再実行する（restart が走るので cap が空の時に）。
+- 旧 unit かつ `--version` で**旧版に固定**した構成では、起動し直しで走る旧版の `bantou.mjs` が印を見ないため、server が戻る。固定を外して `install-service.sh` で unit を更新してから退役するか、host の手順（1 の unit 削除）を先に行う。
+- **launchd**: plist は `KeepAlive` の `PathState` で `<HOME>/server.retired` がある間は起動し直さない（launchd.plist(5) の記述に基づく。**macOS 実機は未検証**）。path は plist に固定なので `workspace = HOME` の標準形が前提。旧 plist（`KeepAlive true`）は 10 秒ごとに起動し直し、そのたびに exit 75 の message が `server.log` に残る（止めるには plist の更新か `sudo launchctl bootout system/com.unagents.bantou`）。
+- protocol 1.8.0 未満の旧 server は `retire_server` を知らず、無返信になる。center はその server には送らない（手で止める）。無返信を退役済みと見なさない。
+
 ## 5. トラブル時に見る場所
 
 見るのは設置者が sudo で（ssh して bantou の HOME に入らない。1 章）。
