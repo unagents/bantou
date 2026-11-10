@@ -28,6 +28,10 @@ test("master-cap-role: session 名が入り、作業は remote-cap に回す旨�
   assert.ok(t.includes("自分では実装"));
   for (const tool of ["remote_send", "remote_wait", "remote_list", "worker_reply", "remote_delete"]) assert.ok(t.includes(tool), tool);
   assert.ok(t.includes("repo / branch の引数は使わず"));
+  assert.ok(t.includes("progress は push されない。進捗は remote_list で見る"));
+  assert.ok(t.includes("worker の report（ask / approve / done）は messenger の push"));
+  assert.ok(!t.includes("（progress / ask / approve / done）"));
+  assert.equal(MASTER_CAP_ROLE.version, 2);
 });
 
 test("master-cap-availability: 2 つ目に並び、いつでも受けられる・remote_send・background・turn を塞がない旨がある。label は master-cap-availability@1", () => {
@@ -49,7 +53,7 @@ test("buildSystemInstructions: 出力で master-cap-availability の文面が ma
 });
 
 test("describeSystemInstructions: 既定は 3 件（role, availability, memory の順）。memory は条件付きだと title で分かる", () => {
-  assert.deepEqual(describeSystemInstructions().map((d) => `${d.id}@${d.version}`), ["master-cap-role@1", "master-cap-availability@1", "memory@1"]);
+  assert.deepEqual(describeSystemInstructions().map((d) => `${d.id}@${d.version}`), ["master-cap-role@2", "master-cap-availability@1", "memory@1"]);
   assert.ok(describeSystemInstructions()[2]!.title.includes("設定がある session だけ"));
 });
 
@@ -58,9 +62,9 @@ test("memory@1: memory 設定がある session だけに付く。context / recal
   assert.ok(!MEMORY_USAGE.title.includes("\n"));
   const t = MEMORY_USAGE.text({ session: "s", memory: true });
   for (const w of ["mcp__memory__", "context", "recall", "起動した時", "判断する前", "自動で渡す", "自分では書き込み"]) assert.ok(t.includes(w), w);
-  assert.deepEqual(applicableParts({ session: "s" }).map(partLabel), ["master-cap-role@1", "master-cap-availability@1"]);
-  assert.deepEqual(applicableParts({ session: "s", memory: false }).map(partLabel), ["master-cap-role@1", "master-cap-availability@1"]);
-  assert.deepEqual(applicableParts({ session: "s", memory: true }).map(partLabel), ["master-cap-role@1", "master-cap-availability@1", "memory@1"]);
+  assert.deepEqual(applicableParts({ session: "s" }).map(partLabel), ["master-cap-role@2", "master-cap-availability@1"]);
+  assert.deepEqual(applicableParts({ session: "s", memory: false }).map(partLabel), ["master-cap-role@2", "master-cap-availability@1"]);
+  assert.deepEqual(applicableParts({ session: "s", memory: true }).map(partLabel), ["master-cap-role@2", "master-cap-availability@1", "memory@1"]);
 });
 
 test("buildSystemInstructions: memory 無しの出力は従来どおり（role + availability のみ）。memory ありは末尾に memory@1 が空行区切りで付く", () => {

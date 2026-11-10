@@ -33,7 +33,7 @@ export const PROMPT_HEAD_MAX = 200;
 const NOTIFY_PROMPT_MAX = 80;
 /** 記録・返却する worker_report の最大件数（到着順で、古いものから捨てる）。 */
 export const WORKER_REPORTS_MAX = 20;
-/** progress の push を同じ worker から間引く間隔（ms）。ask / approve / done は間引かない。 */
+/** progress の push（config の remotes.pushProgress が true の時だけ）を同じ worker から間引く間隔（ms）。ask / approve / done は間引かない。 */
 export const PROGRESS_THROTTLE_MS = 60_000;
 /** push に載せる worker_report の本文の長さ。 */
 export const NOTIFY_REPORT_MAX = 2000;
@@ -274,7 +274,7 @@ export interface RemoteManager {
   send(input: RemoteSendInput): Promise<RemoteSendResult>;
   /** worker_reply を server へ送る（owner を渡すとその session の cap だけが対象。remote_id 省略時は owner の cap）。版が合わない server へは送らず投げる。 */
   workerReply(input: { remote_id?: string; server?: string; worker_id: string; text: string; owner?: string }): Promise<{ remote_id: string; server: string; worker_id: string; accepted: true }>;
-  /** server から worker_report を受けた時に呼ぶ。記録に積み、未完了の指示の owner へ push する（progress は同じ worker から 60 秒に 1 回）。 */
+  /** server から worker_report を受けた時に呼ぶ。記録に積み、未完了の指示の owner へ push する（progress は既定で push しない。config の remotes.pushProgress が true の時だけ、同じ worker から 60 秒に 1 回）。 */
   onWorkerReport(report: WorkerReportNotice, fromId?: string): void;
   /** stop_cap を送って記録を外す。owner（session）を渡すと対象はその session の cap（と、remote_id で明示した旧共有 cap）だけ。remote_id 省略時は owner の cap（server が複数なら server で絞る）。 */
   delete(input: { remote_id?: string; server?: string; force?: boolean; owner?: string }): Promise<{ remote_id: string; deleted: true; stopped: boolean; warning?: string }>;
@@ -397,6 +397,8 @@ export function createRemoteManager(opts: {
   onSummaryChange?: (session: string) => void;
   /** 確認できない到達先（peer）を消すまでの時間（既定 PEER_TTL_MS）。 */
   peerTtlMs?: number;
+  /** worker_report の kind=progress を push するか（config の remotes.pushProgress の起動時の値。既定 false）。configPath があれば progress を受けるたびに読み直す。 */
+  pushProgress?: boolean;
   /** 完了通知の送り先。owner の session へ text を送る。省けば通知しない。 */
   notify?: (owner: string, text: string) => Promise<{ ok: true } | { ok: false; reason: string }>;
 }): RemoteManager {
@@ -406,6 +408,7 @@ export function createRemoteManager(opts: {
   const graceMs = opts.graceMs ?? SETTLE_GRACE_MS;
   const pollMs = opts.pollMs ?? PROBE_POLL_MS;
   let lastGoodServers = opts.servers;
+  let lastGoodPushProgress = opts.pushProgress ?? false;
   const records: RemoteRecord[] = [];
   /** cap_result（や再起動）の後、次の activity か猶予の経過を待っている記録 → 待ち始めた時刻。この間は完了にしない（メモリのみ）。 */
   const settling = new Map<RemoteRecord, number>();
@@ -962,6 +965,17 @@ export function createRemoteManager(opts: {
     return lastGoodServers;
   };
 
+  /** progress を push するか。config を読み直した値（読めない・不正な時は直前に読めた値）。 */
+  const currentPushProgress = (): boolean => {
+    if (!opts.configPath) return lastGoodPushProgress;
+    try {
+      lastGoodPushProgress = loadConfigSync(opts.configPath).remotes.pushProgress;
+    } catch (e) {
+      log(`config の読み直しに失敗。直前の remotes.pushProgress で判定: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    return lastGoodPushProgress;
+  };
+
   /** config の servers[] から、この server の model / workerModel を引く（peer id・peer 名・name・指定された sel のどれかで一致）。 */
   const serverModels = (peer: ServerPeer, sel?: string): { model?: string; worker_model?: string } => {
     const cfg = currentServers()?.find((s) => s.peer === peer.id || s.peer === peer.name || s.name === peer.name || (sel !== undefined && s.name === sel));
@@ -1292,8 +1306,9 @@ export function createRemoteManager(opts: {
       if (r.worker_reports.length > WORKER_REPORTS_MAX) r.worker_reports.splice(0, r.worker_reports.length - WORKER_REPORTS_MAX);
       void persist();
       wake();
-      // progress は同じ worker から PROGRESS_THROTTLE_MS に 1 回まで。ask / approve / done は毎回
+      // progress は既定で push しない（記録には積む）。remotes.pushProgress が true なら、同じ worker から PROGRESS_THROTTLE_MS に 1 回まで。ask / approve / done は毎回
       if (report.kind === "progress") {
+        if (!currentPushProgress()) return;
         const key = `${r.remote_id}|${r.server}|${report.worker_id}`;
         const last = lastProgressPush.get(key);
         const now = Date.now();

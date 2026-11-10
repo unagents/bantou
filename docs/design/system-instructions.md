@@ -6,7 +6,7 @@
 
 center が master-cap（session の対話型 `claude --remote-control`）を起動するたびに、`--append-system-prompt` の値の**先頭**に付ける bantou 側の決まり文。利用者が設定で入れる追加指示（center 共通の `settings.instructions`、session ごとの `settings.instructions`）とは**別に管理**する。利用者の設定画面には出さず、編集もさせない。
 
-最初の部品は `master-cap-role`: master-cap は自分では実装・修正・長い調査をせず、remote-cap（server 上のオーケストレーター）に `remote_send` で指示を出し、report と `task_result` で結果を確かめ、利用者に報告する、という運用の案内（remote-cap 側の決まりは `docs/design/cap-orchestration.md`）。
+最初の部品は `master-cap-role`: master-cap は自分では実装・修正・長い調査をせず、remote-cap（server 上のオーケストレーター）に `remote_send` で指示を出し、report と `task_result` で結果を確かめ、利用者に報告する、という運用の案内（remote-cap 側の決まりは `docs/design/cap-orchestration.md`）。v2（2026-11-10）: worker の progress report は push されない（push は ask / approve / done と完了通知）。進捗は `remote_list` で見る、の 1 行を道具の節に反映（center の config `remotes.pushProgress` で push する側に戻せるが、文面は既定に合わせる）。
 
 2 つ目の部品は `master-cap-availability`: master-cap は常に利用者の指示をいつでも受けられる状態で働く。ビルド・テスト・release・長い待ちで自分の turn を塞がず、時間のかかる作業は remote-cap に預ける。この Mac のローカルでしかできない作業（release の署名ビルド・publish など）は、ローカルのサブエージェント（Agent tool）か background 実行（`run_in_background`）に任せる（`master-cap-role` の「自分ではしない」の例外）。待つ時は turn を終えて通知で受け、並行の指示には普通に応える。
 
@@ -43,7 +43,7 @@ export const SYSTEM_INSTRUCTION_PARTS = [MASTER_CAP_ROLE, MASTER_CAP_AVAILABILIT
 - 文面は center の package の中に TypeScript の文字列として持つ。ファイル・config・環境変数からは読まない。理由: (1) center の版と一緒に配り、版で内容が決まる。(2) bun で 1 本に compile するので外部ファイルの同梱より単純。(3) テストで文面の要点（道具名、役割）を検証できる。
 - 部品が見てよい文脈は `ctx` だけ（今は session 名と、memory の設定があるか `memory?: boolean`）。将来 center id や permissionMode を足す時も `ctx` に足す。
 - 変更の手順: 文面を直す → `version` を上げる → `test/system-instructions.test.ts` の要点を更新する → 必要なら `docs/design` を直す。部品の追加は配列に足すだけ。
-- 見える化: 起動した session の status に `systemInstructions: ["master-cap-role@1", …]`、`center_info` に `systemInstructions: [{ id, version, title }]`（条件付きの部品も全部出る。`memory@1` の title に「設定がある session だけ」と書く）。本文は status にも log にも出さない（`--append-system-prompt` の値は長さだけに伏せる）。
+- 見える化: 起動した session の status に `systemInstructions: ["master-cap-role@2", …]`、`center_info` に `systemInstructions: [{ id, version, title }]`（条件付きの部品も全部出る。`memory@1` の title に「設定がある session だけ」と書く）。本文は status にも log にも出さない（`--append-system-prompt` の値は長さだけに伏せる）。
 
 ## 配線
 
