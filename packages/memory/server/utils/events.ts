@@ -3,7 +3,10 @@ import type { Db } from "./db";
 
 export const EVENT_KINDS = ["user_prompt", "assistant_message", "task", "result", "report", "reply"] as const;
 
-const id128 = z.string().min(1).max(128);
+// PostgreSQL の text は NUL を保存できない。DB error（500 相当）にせず入力検証で弾く
+const noNul = (s: string) => !s.includes("\u0000");
+const id128 = z.string().min(1).max(128).refine(noNul, "NUL 文字は使えない");
+const DAY_MS = 24 * 60 * 60 * 1000;
 const party = z.object({ session: id128.optional(), capId: id128.optional(), workerId: id128.optional() });
 
 /** event tool の入力。agent_id は含めない（認証済みの X-Agent-Id から確定する） */
@@ -14,8 +17,11 @@ export const eventShape = {
   remoteId: id128.optional(),
   taskId: id128.optional(),
   kind: z.enum(EVENT_KINDS),
-  body: z.string().min(1).max(65536),
-  at: z.iso.datetime({ offset: true }).describe("発生時刻（ISO 8601）"),
+  body: z.string().min(1).max(65536).refine(noNul, "NUL 文字は使えない"),
+  at: z.iso
+    .datetime({ offset: true })
+    .refine((s) => Date.parse(s) <= Date.now() + DAY_MS, "at は現在から 1 日より先にできない")
+    .describe("発生時刻（ISO 8601）"),
 };
 export const eventSchema = z.object(eventShape);
 export type EventInput = z.infer<typeof eventSchema>;
@@ -38,7 +44,17 @@ export async function recordEvent(db: Db, agentId: string, raw: unknown): Promis
         e.remoteId ?? null, e.taskId ?? null, e.kind, e.body, e.at,
       ],
     );
-    if (ins.rows.length === 0) return { status: "duplicate" as const, eventId: e.eventId };
+    if (ins.rows.length === 0) {
+      // 同じ eventId で本文が違う再送は、先の event を正として無視する。気づけるよう warn を残す（本文は log に出さない）
+      const prev = await q.query<{ same: boolean }>(
+        "SELECT (body = $3) AS same FROM memory_events WHERE agent_id = $1 AND event_id = $2",
+        [agentId, e.eventId, e.body],
+      );
+      if (prev.rows[0] && !prev.rows[0].same) {
+        console.warn(`[memory] event ${e.eventId} (agent ${agentId}) was resent with a different body; ignored`);
+      }
+      return { status: "duplicate" as const, eventId: e.eventId };
+    }
     // Graphiti 同期用 Outbox（同じ transaction。event_id が冪等キー）。反映は Phase 2
     await q.query(
       `INSERT INTO outbox_events (agent_id, topic, idempotency_key, payload)

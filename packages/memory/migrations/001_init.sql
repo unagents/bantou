@@ -27,9 +27,14 @@ CREATE TABLE memory_events (
   at timestamptz NOT NULL,
   recorded_at timestamptz NOT NULL DEFAULT now(),
   processed_at timestamptz,
+  -- 抽出の排他（lease）と失敗管理。attempts が上限に達した event は failed_at を立てて処理対象から外す（dead-letter）
+  claimed_at timestamptz,
+  attempts integer NOT NULL DEFAULT 0,
+  failed_at timestamptz,
+  last_error text,
   PRIMARY KEY (agent_id, event_id)
 );
-CREATE INDEX memory_events_unprocessed ON memory_events (agent_id, at) WHERE processed_at IS NULL;
+CREATE INDEX memory_events_unprocessed ON memory_events (agent_id, at) WHERE processed_at IS NULL AND failed_at IS NULL;
 CREATE INDEX memory_events_task ON memory_events (agent_id, task_id, at);
 
 -- 記憶本体。agent_id は所有 agent（設計書の ownerAgentId）。

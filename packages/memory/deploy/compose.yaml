@@ -6,6 +6,7 @@ services:
     container_name: memory-postgres
     restart: unless-stopped
     environment:
+      # 注意: この POSTGRES_USER は superuser。migration 専用で、memory 本体の MEMORY_DATABASE_URL には使わない（RLS が効かず、起動時に拒否される）
       POSTGRES_USER: memory_owner
       POSTGRES_PASSWORD: ${MEMORY_PG_OWNER_PASSWORD:?set in .env}
       POSTGRES_DB: memory
@@ -20,9 +21,14 @@ services:
       retries: 6
 
   ollama:
-    image: ollama/ollama:latest
+    image: ollama/ollama:0.40.16
     container_name: memory-ollama
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
     ports:
       - "127.0.0.1:${MEMORY_OLLAMA_PORT:-11435}:11434"
     volumes:

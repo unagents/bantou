@@ -195,7 +195,7 @@ export const explainShape = { id: z.string().uuid() };
 export interface ExplainResult {
   item: RecallResult & { scope: string; supersededBy?: string };
   sources: { eventId: string; kind: string; at: string; sender: { session?: string; capId?: string; workerId?: string }; taskId?: string; remoteId?: string; body: string }[];
-  verification: { status: string; hasUserPromptSource: boolean; rule: string };
+  verification: { status: string; hasUserPromptSource: boolean; onlyUserPromptSources: boolean; rule: string };
 }
 
 /** 出典 event と検証状態。見えない item（他 agent の private）は存在しないものとして扱う */
@@ -239,7 +239,8 @@ export async function explain(db: Db, agentId: string, raw: unknown): Promise<Ex
       verification: {
         status: row.status,
         hasUserPromptSource: hasUser,
-        rule: "confirmed は kind=user_prompt の出典を持つ時だけ。それ以外は inferred",
+        onlyUserPromptSources: sources.length > 0 && sources.every((s) => s.kind === "user_prompt"),
+        rule: "confirmed は出典が全て kind=user_prompt の時だけ。それ以外（user_prompt が無い・他の種類が混ざる）は inferred",
       },
     };
   });
