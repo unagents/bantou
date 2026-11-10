@@ -274,6 +274,13 @@ function clearRemote() {
   parseSeq++;
 }
 
+// The desktop talks to another host's center and runs no sidecar of its own: center off with a remote set.
+// Judged from the settings draft alone (enabled starts the sidecar and picks the target, see
+// center_mcp.rs::select_target), so it is known as soon as the settings are loaded. The sidecar-only parts
+// (on/off switch, run state, restart count, logs) are not shown then. Off without a remote (nothing
+// connected yet) is not this case: the switch stays, it is the way to start the sidecar.
+const remoteOnly = computed(() => !!settings.value && !settings.value.enabled && !!settings.value.remote);
+
 const anyDirty = computed(() => dirty.value || commonDirty.value);
 
 // One save for both parts; a part with no change calls no API. Common goes first: saving the center
@@ -319,7 +326,7 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
 </script>
 
 <template>
-  <UModal v-model:open="open" title="設定" description="center（sidecar）の起動、token、接続設定" :ui="{ content: 'max-w-3xl' }">
+  <UModal v-model:open="open" title="設定" :description="remoteOnly ? '接続先 center の設定' : 'center（sidecar）の起動、token、接続設定'" :ui="{ content: 'max-w-3xl' }">
     <template #body>
       <div v-if="settings" class="flex flex-col gap-4" data-testid="settings-dialog">
         <div
@@ -362,8 +369,10 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
             {{ newIp }} を選んだ。保存すると接続設定に反映する
           </p>
         </div>
-        <span class="text-sm font-semibold">この PC の center</span>
-        <USwitch v-model="settings.enabled" label="center を起動する" data-testid="center-enabled" />
+        <template v-if="!remoteOnly">
+          <span class="text-sm font-semibold">この PC の center</span>
+          <USwitch v-model="settings.enabled" label="center を起動する" data-testid="center-enabled" />
+        </template>
         <!-- Everything below is this host's center: hidden (not reset) while it is off. -->
         <div v-if="settings.enabled" class="flex flex-col gap-4" data-testid="center-own-section">
         <div class="flex gap-3">
@@ -445,6 +454,9 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
           <p class="text-cork-muted text-xs">
             相手の設定画面でコピーした接続設定（mcp.json か claude mcp add）を貼る。保存すると sidecar ではなくこちらに接続する
           </p>
+          <p v-if="remoteOnly" class="text-cork-muted text-xs" data-testid="center-remote-only-hint">
+            この PC の center（sidecar）は起動していない。使う時は「解除」して起動する
+          </p>
           <UTextarea
             :model-value="pasteText"
             :rows="4"
@@ -491,7 +503,7 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
           </p>
         </section>
 
-        <div class="border-cork-border flex flex-col gap-2 border-t pt-3">
+        <div v-if="!remoteOnly" class="border-cork-border flex flex-col gap-2 border-t pt-3" data-testid="center-status-section">
           <div class="flex items-center gap-2">
             <span class="text-sm font-medium">状態</span>
             <UBadge
