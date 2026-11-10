@@ -1,6 +1,6 @@
 # 外部記憶（external memory）の接続設計
 
-2026-11-11 決定。横断 PM 向け Persistent Memory 基盤（`packages/memory`、以下「memory」）を、bantou に**後付けで**つなぐための bantou 側の形と、memory 側の実装方針。
+2026-11-11 決定。横断 PM 向け Persistent Memory 基盤（設計書の原文は `memory-design.md`。実装は `packages/memory`、以下「memory」）を、bantou に**後付けで**つなぐための bantou 側の形と、memory 側の実装方針。
 
 ## 何を決めたか
 
