@@ -13,6 +13,8 @@ type Mock = {
   centerLoginUrl: string;
   centerLoginCodeResult: { ok: boolean; auth: string; error: string | null };
   loginCalls: { tool: string; name: string; code?: string; resume?: boolean }[];
+  calls: { cmd: string; args: Record<string, unknown> }[];
+  invoke: (cmd: string, raw: unknown) => unknown;
   centerAuth: (name: string, auth: string, loginError?: string | null) => void;
 };
 
@@ -123,4 +125,49 @@ test("restart from the dialog: rc_stop then rc_start with resume", async ({ page
     { tool: "rc_start", name: "careery", resume: true },
   ]);
   await expect(termAuth(page)).toHaveCount(0);
+});
+
+test("the login URL opens in this Mac's browser (plugin:shell|open) and can be copied", async ({ page, context }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.goto("/");
+  await pickSession(page, "careery");
+  await withMock(page, (m) => m.centerAuth("careery", "login_required"));
+  await termAuth(page).click();
+  // no open / copy before the URL
+  await expect(page.getByTestId("login-open")).toHaveCount(0);
+  await page.getByTestId("login-start").click();
+  const url = "https://claude.com/cai/oauth/authorize?code=true&client_id=mock&state=mock-state";
+  await expect(page.getByTestId("login-url")).toHaveText(url);
+
+  await page.getByTestId("login-open").click();
+  await expect
+    .poll(() => withMock(page, (m) => m.calls.filter((c) => c.cmd === "plugin:shell|open").map((c) => c.args)))
+    .toEqual([{ path: url }]);
+  // opening is local: the center is not asked for anything more than session_login
+  expect(await withMock(page, (m) => m.loginCalls)).toEqual([{ tool: "session_login", name: "careery" }]);
+  await expect(page.getByTestId("login-action-error")).toHaveCount(0);
+
+  await page.getByTestId("login-copy").click();
+  await expect(page.getByTestId("login-copy")).toHaveText(/コピー済/);
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(url);
+  // the code step is still there (opening the URL does not change the flow)
+  await expect(page.getByTestId("login-code")).toBeVisible();
+});
+
+test("opening the URL fails: an error with the copy hint, the dialog keeps working", async ({ page }) => {
+  await page.goto("/");
+  await pickSession(page, "careery");
+  await withMock(page, (m) => m.centerAuth("careery", "login_required"));
+  await termAuth(page).click();
+  await page.getByTestId("login-start").click();
+  await withMock(page, (m) => {
+    const orig = m.invoke.bind(m);
+    m.invoke = (cmd: string, raw: unknown) => {
+      if (cmd === "plugin:shell|open") throw new Error("Not allowed to open url");
+      return orig(cmd, raw);
+    };
+  });
+  await page.getByTestId("login-open").click();
+  await expect(page.getByTestId("login-action-error")).toHaveText(/ブラウザで開けない.*Not allowed to open url/);
+  await expect(page.getByTestId("login-code")).toBeVisible();
 });

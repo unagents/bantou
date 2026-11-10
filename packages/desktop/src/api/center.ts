@@ -61,6 +61,15 @@ export async function centerToolStrict<T>(name: string, args?: Record<string, un
 }
 
 /** Start `/login` in the session's claude (`session_login`): resolves with the URL to open in a browser. */
+/**
+ * Open an http(s) URL in this Mac's default browser (tauri-plugin-shell `open`, permission `shell:allow-open`).
+ * The re-login URL is opened here, on the desktop's machine — never on the center's host.
+ */
+export const openExternalUrl = (url: string) => {
+  if (!/^https?:\/\//.test(url)) return Promise.reject(new Error(`http(s) の URL のみ開ける: ${url}`));
+  return invoke<void>("plugin:shell|open", { path: url });
+};
+
 export const sessionLogin = (name: string) => centerToolStrict<CenterLoginStart>("session_login", { name });
 
 /**

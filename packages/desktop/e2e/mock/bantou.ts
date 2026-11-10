@@ -645,6 +645,8 @@ export class MockBantou {
       case "plugin:updater|download_and_install":
       case "plugin:process|restart":
         return null;
+      case "plugin:shell|open":
+        return null;
       case "plugin:fs|watch":
         return 1;
       case "plugin:resources|close":
