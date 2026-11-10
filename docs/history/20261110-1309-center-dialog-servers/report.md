@@ -69,3 +69,16 @@ branch: fix/center-dialog-servers
 
 - `RemoteActivity.vue` の owner 未指定経路、`CenterServerStatus` / `CenterAgentState` 型は未使用のまま残してある。
 - join の制約（上記）。center が server_id を list に返す案は別件。
+
+## review 第2回（HEAD 5698860）の指摘と対応
+
+テストのみ変更（`CenterDialog.vue` の表示は変えていない）。
+
+- [medium] 狭い幅のテストが回帰を捕まえない: データを実際の崩れ条件に寄せた（同 host の 2 peer、長い user / workspace、server_version、state=updating で待機表示、幅 520px）。検証は「host 幅 100px 以上」「host が行内かつ行頭」「最後の要素（待機 cap/worker）が host より下の行に折り返す」。
+- [low] `ib.y > hb.y || ib.x > hb.x` は host が潰れても常に真だったため削除し、host 幅の確認に置き換えた。
+- 変異確認（自分で実施）:
+  - `CenterDialog.vue` の `flex-wrap` と host の `min-w-32 max-w-full` を外して再ビルド → 新テストは **失敗**（host 幅 32.6px、`wide: false` と `wrapped: false`）。
+  - 元に戻して再ビルド → **通る**。
+- 全件実行で dialog の開閉アニメ中に位置が 1px ずれて 1 回 flaky になったため、位置は `expect.poll` で安定してから判定する形にした（変異では poll の後も落ちること、元では 5 回連続 pass を確認）。
+
+テスト（第2回対応後）: `nuxt typecheck` exit 0。e2e 全件 148 passed（flaky 無し、前回と同じ方法）。

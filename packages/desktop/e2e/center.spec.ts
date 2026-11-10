@@ -530,27 +530,48 @@ test("the remote session list stays and keeps its place above the servers", asyn
   await expect(page.getByText("remote session", { exact: true })).toBeVisible();
 });
 
-test("in a narrow window the host name stays readable and first, and the row wraps", async ({ page }) => {
+test("in a narrow window a long row wraps and the host name keeps its width, first on the row", async ({ page }) => {
   await page.setViewportSize({ width: 520, height: 800 });
   await page.goto("/");
   await mock(page, { enabled: true });
   const host = "a-very-long-host-name-of-a-build-machine.example.internal";
-  await seedVersions(page, {
-    pair: { server: "0.3.0", protocol: "1.3.0" },
-    peers: [versionPeer({ key: "a", id: "pa", host, server_id: "srv-1111111111", user: "alice", workspace: "/home/alice/ws" })],
-  });
+  const longRow = (key: string, id: string, user: string) =>
+    versionPeer({
+      key,
+      id,
+      host,
+      server_id: `srv-${key}111111111`,
+      user,
+      workspace: `/home/${user}/workspaces/a-deeply/nested/workspace-directory`,
+      server_version: "0.3.0",
+      state: "updating",
+      detail: "更新中",
+      update: { to: "0.3.1", running: { caps: 1, workers: 2, reports: 0 } },
+    });
+  await seedVersions(page, { pair: { server: "0.3.1", protocol: "1.3.0" }, peers: [longRow("a", "pa", "alice"), longRow("b", "pb", "bob")] });
   await seedLinks(page, []);
   await page.getByTestId("open-center").click();
-  const h = page.getByTestId("center-server-host");
+  const row = page.getByTestId("center-server-row").first();
+  const h = row.getByTestId("center-server-host");
   await expect(h).toBeVisible();
   await expect(h).toHaveAttribute("title", host);
-  const hb = (await h.boundingBox())!;
-  expect(hb.width).toBeGreaterThanOrEqual(100);
-  const ib = (await page.getByTestId("center-server-id").boundingBox())!;
-  // the server_id is never left of the host name on the first line
-  expect(ib.y > hb.y || ib.x > hb.x).toBe(true);
-  const row = (await page.getByTestId("center-server-row").boundingBox())!;
-  expect(hb.x + hb.width).toBeLessThanOrEqual(row.x + row.width + 1);
+  await expect(row.getByTestId("center-server-who")).toBeVisible();
+  // the dialog is still opening (it moves a little): poll until the layout settles
+  await expect
+    .poll(async () => {
+      const hb = (await h.boundingBox())!;
+      const rb = (await row.boundingBox())!;
+      const last = (await row.getByTestId("center-server-running").boundingBox())!;
+      return {
+        // the host name keeps a readable width, stays inside the row and is at its start
+        wide: hb.width >= 100,
+        inside: hb.x + hb.width <= rb.x + rb.width + 1,
+        first: hb.x <= rb.x + 1,
+        // the row is too long for one line: the last item wraps to a line below the host name
+        wrapped: last.y > hb.y + hb.height - 1,
+      };
+    })
+    .toEqual({ wide: true, inside: true, first: true, wrapped: true });
 });
 
 test("the server_peers error is cleared when the center goes away", async ({ page }) => {
