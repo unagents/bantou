@@ -74,7 +74,7 @@ function setup(extra: Partial<Parameters<typeof createRemoteManager>[0]> = {}) {
   const store = createJsonListStore<RemoteRecord>(join(dir, "remotes.json"), () => {});
   const mgr = createRemoteManager({
     link, store, log: () => {}, capId: CENTER, activity, graceMs: 60, pollMs: 40,
-    ackTimeoutMs: 200, ackPollMs: 10, reachCheckMs: 0, reachThreshold: 2, reachRetryMs: 20_000, now: () => clock.t,
+    ackTimeoutMs: 200, ackPollMs: 10, reachCheckMs: 0, reachThreshold: 2, reachRetryMs: 20_000, reachRequestDelayMs: 0, now: () => clock.t,
     onSummaryChange: (s) => changes.push(s),
     ...extra,
   });
@@ -87,13 +87,13 @@ test("remote_send: server が task を受け付けた（status の cap が変わ
   const { mgr } = setup();
   const r = await mgr.send({ owner: "pm1", goal: "go" });
   assert.equal(r.delivered, true);
-  assert.equal(r.delivery, "accepted");
+  assert.equal(r.delivery, "observed");
   assert.match(r.delivered_at ?? "", /^\d{4}-\d\d-\d\dT/);
   assert.equal(r.error, undefined);
   const [v] = mgr.list();
-  assert.equal(v.pending[0].delivery, "accepted");
+  assert.equal(v.pending[0].delivery, "observed");
   assert.ok(v.pending[0].sent_at);
-  assert.ok(v.pending[0].accepted_at);
+  assert.ok(v.pending[0].observed_at);
   assert.equal(v.reachability.reachable, true);
   assert.ok(v.reachability.last_ok_at);
 });
@@ -122,7 +122,7 @@ test("remote_send: 受付を確認できない（ack timeout）なら delivered:
   st.results[0](taskResult(r.task_id));
   await tick();
   const p = mgr.list()[0].pending[0];
-  assert.ok(p === undefined || (p.delivery === "accepted" && p.delivery_basis === "task_result"));
+  assert.ok(p === undefined || (p.delivery === "observed" && p.delivery_basis === "task_result"));
 });
 
 test("remote_send: 受付未確認の同じ指示は再送しない（task を二重に送らず、確認だけやり直す）。違う指示は送る", async () => {
@@ -169,7 +169,7 @@ test("受付判定(c): 先行する task が既に status に見えていれば�
   const b = await mgr.send({ owner: "pm1", goal: "second" });
   assert.equal(b.delivered, true, "cap が実行中なら待ちが増えて受付");
   assert.equal(st.queued, 1);
-  assert.deepEqual(mgr.list()[0].pending.map((p) => p.delivery), ["accepted", "accepted"]);
+  assert.deepEqual(mgr.list()[0].pending.map((p) => p.delivery), ["observed", "observed"]);
 });
 
 // 既知の限界（受付判定(a)）: server は task を受けた時だけでなく、worker の report 起因の resume でも cap を running にして last_started_at を更新する。
@@ -238,6 +238,7 @@ test("到達性: 同時刻の複数経路（hello・status）の失敗は 1 回�
   mgr.noteReach(peerA, false, "hello timeout");
   await Promise.all([mgr.checkReachability(), mgr.checkReachability()]);
   mgr.noteReach(peerA, false, "hello timeout");
+  await sleep(30);
   assert.equal(mgr.list()[0].reachability.failures, 1);
   assert.equal(mgr.list()[0].reachability.reachable, true);
   assert.notEqual(mgr.list()[0].state, "unknown");
@@ -277,21 +278,58 @@ test("到達性: 同時刻の複数経路（hello・status）の失敗は 1 回�
   assert.equal(mgr.list()[0].reachability.reachable, true);
 });
 
-test("到達性: follow の hello の失敗（noteReach）も同じ束ね窓を通す。記録の無い server は無視。応答で戻る", async () => {
-  const { mgr, changes, clock } = setup();
+test("到達性: hello・受付確認などの失敗は failures を直接数えず、再確認(checkReachability)を起こす。再確認が成功すれば数えない。連続して失敗した時だけ到達不能", async () => {
+  const { mgr, st, changes, clock } = setup();
   mgr.noteReach(peerA, false, "hello に答えない");
   await mgr.send({ owner: "pm1", goal: "go" });
+  // hello だけが失敗（server は status に答える）: 再確認が成功するので数えない
   mgr.noteReach(peerA, false, "hello timeout");
   mgr.noteReach(peerA, false, "hello timeout");
+  await sleep(30);
+  assert.equal(mgr.list()[0].reachability.failures, 0);
+  assert.equal(mgr.list()[0].reachability.reachable, true);
+  // server が本当に止まった: 再確認が失敗して 1 回目。窓の内の hello 失敗は増やさない
+  st.down = true;
+  mgr.noteReach(peerA, false, "hello timeout");
+  await sleep(30);
+  assert.equal(mgr.list()[0].reachability.failures, 1);
+  mgr.noteReach(peerA, false, "hello timeout");
+  await sleep(30);
   assert.equal(mgr.list()[0].reachability.failures, 1);
   assert.equal(mgr.list()[0].reachability.reachable, true);
+  // REACH_RETRY_MS 経過後の再確認の失敗で 2 回目
   clock.t += 20_000;
   mgr.noteReach(peerA, false, "hello timeout");
+  await sleep(30);
   assert.equal(mgr.list()[0].reachability.reachable, false);
   assert.equal(mgr.list()[0].state, "unknown");
   assert.ok(changes.includes("pm1"));
+  // 応答で戻る
+  st.down = false;
   mgr.noteReach(peerA, true);
   assert.equal(mgr.list()[0].reachability.reachable, true);
+});
+
+test("到達性: 記録の無い server の hello 失敗は無視する", async () => {
+  const { mgr, st } = setup();
+  st.down = true;
+  mgr.noteReach(peerA, false, "hello timeout");
+  await sleep(30);
+  assert.equal(st.statusCalls, 0, "記録が無ければ再確認もしない");
+});
+
+test("delivery_basis task_id: 自分の task_id の worker_report が届いたら observed（根拠 task_id）。他の task_id では変えない", async () => {
+  const { mgr, st } = setup();
+  st.accept = false;
+  const r = await mgr.send({ owner: "pm1", goal: "go" });
+  assert.equal(r.delivered, false);
+  const rep = (task_id: string) => ({ bantou: 1, type: "worker_report", cap_id: CAP, task_id, worker_id: "w-1", kind: "done", text: "x", at: "2026-11-10T00:00:00.000Z" }) as never;
+  mgr.onWorkerReport(rep("t-other"), "id-a");
+  assert.equal(mgr.list()[0].pending[0].delivery, "sent");
+  mgr.onWorkerReport(rep(r.task_id), "id-a");
+  const p = mgr.list()[0].pending[0];
+  assert.equal(p.delivery, "observed");
+  assert.equal(p.delivery_basis, "task_id");
 });
 
 test("cap lost の通知で cap_state が lost・state failed・summary.lost。新しい task が動けば戻る。SSE が出る", async () => {

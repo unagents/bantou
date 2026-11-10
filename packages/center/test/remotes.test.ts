@@ -108,7 +108,7 @@ test("send: task を送る（goal のみなら deliverables {} / verify {} / con
   const { mgr, kicks } = setup({}, undefined, undefined, servers);
   const r = await mgr.send({ owner: "pm1", goal: "go" });
   assert.match(r.task_id, /^[A-Za-z0-9_-]+$/);
-  assert.deepEqual(r, { remote_id: CAP, server: "id-a", peer: "id-a", host: "host-a", serverName: "bantou-server", state: "running", created: true, task_id: r.task_id, worker_model: "haiku", delivered: true, delivery: "accepted", delivered_at: r.delivered_at, delivery_basis: "status" });
+  assert.deepEqual(r, { remote_id: CAP, server: "id-a", peer: "id-a", host: "host-a", serverName: "bantou-server", state: "running", created: true, task_id: r.task_id, worker_model: "haiku", delivered: true, delivery: "observed", delivered_at: r.delivered_at, delivery_basis: "status" });
   assert.match(r.delivered_at ?? "", /^\d{4}-\d\d-\d\dT/);
   assert.equal(kicks.length, 1);
   assert.equal(kicks[0].peer.id, "id-a");
@@ -1097,7 +1097,7 @@ test("send: worker_model の指定（新規の cap）。指定が config より�
   const servers = cfgServers([{ name: "s1", peer: "bantou-server", model: "opus", workerModel: "haiku" }]);
   const { mgr, kicks } = setup({}, undefined, undefined, servers);
   const r = await mgr.send({ owner: "pm1", goal: "go", worker_model: "claude-haiku-4-5" });
-  assert.deepEqual(r, { remote_id: CAP, server: "id-a", peer: "id-a", host: "host-a", serverName: "bantou-server", state: "running", created: true, task_id: r.task_id, worker_model: "claude-haiku-4-5", delivered: true, delivery: "accepted", delivered_at: r.delivered_at, delivery_basis: "status" });
+  assert.deepEqual(r, { remote_id: CAP, server: "id-a", peer: "id-a", host: "host-a", serverName: "bantou-server", state: "running", created: true, task_id: r.task_id, worker_model: "claude-haiku-4-5", delivered: true, delivery: "observed", delivered_at: r.delivered_at, delivery_basis: "status" });
   assert.equal(kicks[0].cmd.worker_model, "claude-haiku-4-5");
   assert.equal(mgr.list()[0].worker_model, "claude-haiku-4-5");
 });

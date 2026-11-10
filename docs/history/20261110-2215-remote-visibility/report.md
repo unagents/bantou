@@ -2,6 +2,13 @@
 
 branch: `feat/remote-visibility`（基点 origin/develop 4564c8e（作業中に c7f8b7b から rebase））。server・protocol 版・bun.lock・version は変更なし。
 
+
+## 確認結果（review 第1回の追加方針）: task_id は status に出ない
+
+- protocol（`packages/protocol/src/server.ts`）の `status_result.caps[]`（`AgentStatus`）は `state` / `last_started_at` / `last_finished_at` / `retries` / `queued` / `model` のみで **task_id を持たない**。activity の `agents[].task` は kick_cap / worker_start の prompt の先頭（200 字）で task_id ではない。task_id が現れるのは `task_result`（完了時）と `worker_report`（cap の最新の task_id）だけ（server は `rememberTask` で cap ごとに最後の task_id を覚える。`packages/server` は読むだけで変更なし）。
+- よって「送った task_id が cap の queued / running の task に現れた」では判定できない。方針どおり、**delivery を `accepted` と名乗らず `observed`（server への到達を観測）に改名**し、`delivery_basis` で根拠を示す: `task_id`（自分の task_id の worker_report が届いた。確実）/ `task_result`（確実）/ `status`（status の変化からの推定。周期 status では格上げしない・先行する未確認 task 数 `ahead` を基準に含める・曖昧なら observed にしない）。`delivered_at` は観測時刻（フィールド名は `observed_at` に改名）。
+- `delivered: true` は観測できた時だけ。docs・tool 説明に「server の ack ではない」を明記。
+
 ## 背景（2026-11-10 UTC の事象）
 
 1. 20:57 server の host が落ちた。center は hello タイムアウトを log に書いたが、remote_list は state running のまま、画面も変わらなかった。
@@ -48,13 +55,13 @@ cap の `state`（RemoteState）と `cap_state`、server の `reachable`:
 | --- | --- | --- | --- | --- |
 | remote_send 直後（messenger へ未送信） | - | running | 直前の値 | unsent |
 | messenger へ送り出した | - | running | - | sent |
-| status で cap が変わった / task_result | true | running | running | accepted |
+| status で cap が変わった / task_result | true | running | running | observed |
 | 15 秒待っても変わらない | - | running | - | sent のまま（isError・delivered:false） |
 | status / hello が 1 回失敗 | true（failures=1） | 変わらない | 変わらない | 変わらない |
 | 連続 2 回失敗（作業中の cap） | false | unknown | unknown | 変わらない |
-| 応答が戻る | true（failures=0） | 元に戻る（status で取り直し） | status / activity の値 | 受付が分かれば accepted |
+| 応答が戻る | true（failures=0） | 元に戻る（status で取り直し） | status / activity の値 | 受付が分かれば observed |
 | activity の cap が lost | - | failed（未完了の指示は終了として通知） | lost | 変わらない |
-| 新しい task が受け付けられる / cap が動き直す | - | running | running | accepted |
+| 新しい task が受け付けられる / cap が動き直す | - | running | running | observed |
 
 ### task の送信を task_result の chain から外す（安全性）
 
@@ -67,7 +74,7 @@ cap の `state`（RemoteState）と `cap_state`、server の `reachable`:
 ## 変更点
 
 center（`packages/center`）:
-- `remotes.ts`: `remote_send` が受付を確認してから返す（`delivered` / `delivery` / `delivered_at` / `error`）。pending に `delivery` / `sent_at` / `accepted_at` / `fp` / `base`。`RemoteView` に `reachability`、`cap_state`。`cap_lost` の記録。`checkReachability()`（周期 + 直接）、`noteReach()`。`summary()` に `unreachable[]` / `lost[]`（`{server, remoteId, lastOkAt|at}`）。集計が変わると `onSummaryChange` → `GET /events` の `reason: "remote"`（既存の経路）。
+- `remotes.ts`: `remote_send` が受付を確認してから返す（`delivered` / `delivery` / `delivered_at` / `error`）。pending に `delivery` / `sent_at` / `observed_at` / `fp` / `base`。`RemoteView` に `reachability`、`cap_state`。`cap_lost` の記録。`checkReachability()`（周期 + 直接）、`noteReach()`。`summary()` に `unreachable[]` / `lost[]`（`{server, remoteId, lastOkAt|at}`）。集計が変わると `onSummaryChange` → `GET /events` の `reason: "remote"`（既存の経路）。
 - `server-link.ts`: task の送信を task_result の chain から外す（`releaseOnSend`）、`taskOn` の `onSent` hook、status 返信を peer で取り違えない `Pending.peer`、`isTransportError`（無返信・送信失敗と server の error の区別）。
 - `follow.ts` / `daemon.ts`: hello の応答の有無を `remotes.noteReach` へ接続。
 - `tools.ts`: `remote_send` は `delivered:false` で isError。説明の更新。
@@ -92,14 +99,14 @@ tooltip: 到達不能 = 「到達不能: remote の server に届かない…: s
 
 ## 返り値の形
 
-remote_send（成功）: `{remote_id, server, server_id?, peer, host?, serverName, state:"running", created, task_id, worker_model?, delivered:true, delivery:"accepted", delivered_at}`。
+remote_send（成功）: `{remote_id, server, server_id?, peer, host?, serverName, state:"running", created, task_id, worker_model?, delivered:true, delivery:"observed", delivered_at}`。
 remote_send（受付を確認できない）: isError で `{…同じ, delivered:false, delivery:"sent"|"unsent", error}`（`delivered_at` 無し）。
-remote_list: 各 cap に `reachability: {reachable, last_ok_at, failures, last_error?}`、`cap_state: running|idle|lost|unknown`、`pending[].delivery: unsent|sent|accepted` と `sent_at` / `accepted_at`。
+remote_list: 各 cap に `reachability: {reachable, last_ok_at, failures, last_error?}`、`cap_state: running|idle|lost|unknown`、`pending[].delivery: unsent|sent|observed` と `sent_at` / `observed_at`。
 
 ## テスト結果
 
 - `packages/center`（rebase 後）: `npm run typecheck` OK。`env -u BANTOU_SESSION_TOKEN npm test` 564 件中 563 pass、1 fail（`rc-orphan.test.ts`「center を SIGKILL すると rc が孤児で残り…」: `stub A が ppid=1 で残る` のタイムアウト）。この test と対象の src は無変更で、origin/develop 4564c8e 単体（別 worktree で `rc-orphan.test.ts` のみ実行）でも同じ失敗（環境起因と推定: 孤児化した stub の ppid が 1 にならない）。
-- 新規 `test/remote-visibility.test.ts` 7 件 pass: ack 成功で delivered:true、ack 取れず delivered:false（pending に sent で残り後で accepted）、再送しない（task を二重に送らない）、tool の isError、status 失敗で unknown→回復で reachable が戻る（SSE の通知つき）、hello 失敗（noteReach）、cap lost で cap_state が lost→復帰。fake の server link のみ。
+- 新規 `test/remote-visibility.test.ts` 7 件 pass: ack 成功で delivered:true、ack 取れず delivered:false（pending に sent で残り後で observed）、再送しない（task を二重に送らない）、tool の isError、status 失敗で unknown→回復で reachable が戻る（SSE の通知つき）、hello 失敗（noteReach）、cap lost で cap_state が lost→復帰。fake の server link のみ。
 - `packages/desktop`: `npm run typecheck` OK。Rust `cargo test --offline --lib remote_is_read` OK（rebase 前の実行。develop 側の `session.rs` は c7f8b7b..4564c8e で無変更。sidecar の実体が無く build できないため空のダミーを置いて実行し、実行後に削除済み）。
 - e2e: nuxt generate の静的ビルド + node の簡易サーバー（port 14850）+ ms-playwright chromium-1243、bun が無いので mock bundle は esbuild で作成。結果は下記。新規 `e2e/remote-visibility.spec.ts` 5 件（icon・tooltip・文字が出ないこと・chip・SSE 即時反映・優先順位）。
 
@@ -107,7 +114,7 @@ e2e 全件（rebase 後）207 件 pass、失敗 0（新規 5 件を含む）。
 
 ## server 側の変更が要る点（今回は変更しない）
 
-- `task` の ack（受付時に即 `task_accepted` 等を返す）。現状は status の cap の変化で推定しており、受付の直後に別の要因で cap が変わると偽陽性になりうる（queued / last_started_at は task 単位の識別ではない）。ack があれば推定は不要。
+- `task` の ack（受付時に即 `task_observed` 等を返す）。現状は status の cap の変化で推定しており、受付の直後に別の要因で cap が変わると偽陽性になりうる（queued / last_started_at は task 単位の識別ではない）。ack があれば推定は不要。
 - `task_id` の重複排除（現状は二重実行になる。center は再送を抑止して回避）。
 - 復帰した server が、再起動前の cap と新 peer の対応を hello / status で明示する情報（今は server_id で突き合わせている）。
 - `docs/protocol.md` は変更なし（protocol 版を上げずに済んだ）。
@@ -137,10 +144,10 @@ develop 4564c8e への rebase で衝突したのは README 2 件のみ。どち�
 
 ### H2 受付判定の偽陽性（high）
 
-- (b) 周期の status では pending を accepted に格上げしない（`recordStatus` は cap の状態を記録するだけ）。受付の判定は `awaitAck` の直接の観測と、同じ cap への次の送信時の status の直接の観測だけ。後から受付が分かる経路は `task_result`（根拠 `task_result`）のみ。
-- (c) base に先行する未確認の task の数 `ahead` を持ち、**cap の負荷（実行中 1 + 待ち queued）が base から `ahead + 1` 本分増えるまで accepted にしない**。先行が無い時だけ、負荷が戻っていても `last_started_at` の変化（速く終わった）を認める。先行がある時に曖昧なら accepted にせず `delivered:false`（pending に `sent` で残す）。先行の task が既に status で見えているなら、次の送信の時点で受付済みにしてから基準を取る（ahead に数えない）。送り出せなかった task（`unsent` のまま失敗）と 10 分を過ぎた task は ahead に数えない。
-- (a) report 起因の resume との区別は server を変えずには付かない。**`delivered: true` / `delivery: "accepted"` の意味を「受付を観測（status の変化）。server の ack ではない」と定義**し、返り値と pending に `delivery_basis: "status" | "task_result"` を足した。tool 説明・`center-tools.md`・README に「server は task に ack を返さない。status の変化からの推定で、cap が別要因で動き直した場合の偽陽性が理論上ある」と明記。server 側の希望は下記。
-- test: (b) 周期 status で格上げされず task_result で accepted（根拠 task_result）、(c) 2 本目が 1 本目の到着で誤って accepted にならない（`ahead` を外すと落ちることを確認）・先行が見えていれば待ちの増加で受付、(a) の限界は test のコメントと docs に残した。
+- (b) 周期の status では pending を observed に格上げしない（`recordStatus` は cap の状態を記録するだけ）。受付の判定は `awaitAck` の直接の観測と、同じ cap への次の送信時の status の直接の観測だけ。後から受付が分かる経路は `task_result`（根拠 `task_result`）のみ。
+- (c) base に先行する未確認の task の数 `ahead` を持ち、**cap の負荷（実行中 1 + 待ち queued）が base から `ahead + 1` 本分増えるまで observed にしない**。先行が無い時だけ、負荷が戻っていても `last_started_at` の変化（速く終わった）を認める。先行がある時に曖昧なら observed にせず `delivered:false`（pending に `sent` で残す）。先行の task が既に status で見えているなら、次の送信の時点で受付済みにしてから基準を取る（ahead に数えない）。送り出せなかった task（`unsent` のまま失敗）と 10 分を過ぎた task は ahead に数えない。
+- (a) report 起因の resume との区別は server を変えずには付かない。**`delivered: true` / `delivery: "observed"` の意味を「受付を観測（status の変化）。server の ack ではない」と定義**し、返り値と pending に `delivery_basis: "status" | "task_result"` を足した。tool 説明・`center-tools.md`・README に「server は task に ack を返さない。status の変化からの推定で、cap が別要因で動き直した場合の偽陽性が理論上ある」と明記。server 側の希望は下記。
+- test: (b) 周期 status で格上げされず task_result で observed（根拠 task_result）、(c) 2 本目が 1 本目の到着で誤って observed にならない（`ahead` を外すと落ちることを確認）・先行が見えていれば待ちの増加で受付、(a) の限界は test のコメントと docs に残した。
 
 ### M1 releaseOnSend による task_id の帰属（medium）
 
@@ -193,3 +200,10 @@ develop 4564c8e への rebase で衝突したのは README 2 件のみ。どち�
 - center: typecheck OK。`env -u BANTOU_SESSION_TOKEN npm test` 569 件中 568 pass、1 fail（`rc-orphan.test.ts`、環境起因。origin/develop 単体でも同じ）。
 - desktop: typecheck OK。e2e 全件 220 件 pass、失敗 0（nuxt generate の静的ビルド + 簡易サーバー port 15750 + chromium-1243。簡易サーバーは停止し port 解放を確認）。
 - Rust（`session.rs`）は第1回対応で未変更。
+
+## review 第1回への追加方針の対応（H1 の一本化、H2 の observed 化）
+
+- H1: 到達性の判定を `checkReachability` 1 本に寄せた。hello（follow→`noteReach`）・probe・announce・受付確認（awaitAck）・`remote_send` の status の失敗は `failures` を直接 +1 せず、`suspect`（失敗の理由を記録して `requestReach` = `checkReachability` を起こす要求）だけを行う。`checkReachability` は同時に呼ばれても 1 回の確認にまとめ（in-flight を共有）、自身の status の失敗だけを `failures` に数える。さらに `REACH_RETRY_MS` の束ね窓は、`checkReachability` の失敗の数え方にも残した（周期の確認と要求による確認が近接しても 1 回）。到達不能への遷移は `checkReachability` が窓を空けて連続 2 回失敗した時だけ。hello だけが失敗して status に答える server は、再確認が成功するので数えない（test あり）。応答（status・hello・activity・report・task_result）は従来どおり即 `markOk`。複雑さは小さく（`suspect` と in-flight の共有だけ）、束ね窓だけでは「hello の失敗が status の成功と食い違う」ケースを防げないため一本化を採った。
+- H2: `accepted` → `observed`、`accepted_at` → `observed_at`、`delivery_basis` に `task_id` を追加（worker_report の task_id 照合。test あり）。
+- 再確認の要求は `REACH_REQUEST_DELAY_MS`（1 秒）待ってから走らせ、同時に失敗した複数の経路を 1 回にまとめる（option `reachRequestDelayMs`）。待ちを入れたのは、要求が即時に走ると restore の announce と status 呼び出しが重なって test が揺れたため。
+- テスト（追加方針の対応後）: center typecheck OK、`npm test` 571 件中 570 pass、1 fail = rc-orphan（環境起因、develop 単体でも同じ）。desktop typecheck OK、e2e 全件 220 pass・失敗 0（port 15760、簡易サーバー停止・解放確認済み）。
