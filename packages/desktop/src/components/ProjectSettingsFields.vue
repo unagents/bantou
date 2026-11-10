@@ -12,6 +12,8 @@ const props = defineProps<{
   canPick?: boolean;
   /** Hide the 使う server section: the center-wide settings have none (it is set per session only). */
   noServers?: boolean;
+  /** Leave out the reference folders (paths on the center's host; meaningful for the own sidecar only). The draft's value is kept as it is. */
+  hideAddDirs?: boolean;
 }>();
 const emit = defineEmits<{ error: [message: string] }>();
 
@@ -111,7 +113,7 @@ async function pickAdd() {
       />
       <p class="text-cork-muted text-xs" :data-testid="`${idPrefix}-instructions-note`">{{ INSTRUCTIONS_NOTE }}</p>
     </section>
-    <section class="flex flex-col gap-1" :data-testid="`${idPrefix}-section-add-dirs`">
+    <section v-if="!hideAddDirs" class="flex flex-col gap-1" :data-testid="`${idPrefix}-section-add-dirs`">
       <h3 class="text-sm font-semibold">参照フォルダ</h3>
       <p class="text-cork-muted text-xs">
         master-cap が自分のフォルダ以外に読み書きしてよいフォルダ（--add-dir。1 行 1 つ{{ props.canPick ? '。行をクリックでフォルダ選択ダイアログを開いて変更' : '、center のホスト上の絶対パス' }}）。空なら付けない
