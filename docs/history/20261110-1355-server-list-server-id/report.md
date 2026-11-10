@@ -26,3 +26,10 @@
 ## 残課題
 - `servers[].peer` 名前指定の link は識別が出ない（center が名前宛ての返信の from_id から serverPeer を更新する等が要るが、範囲外）。
 - link は次の request まで識別を学習しない（status / hello 前は server_id 無し）。
+
+## review 第1回（HEAD c9577e9）の指摘と対応
+- [medium] list() が identities.get(serverPeer) を引くため、server 再登録で旧 peer id が発見から消える（discoverPeers の prune）と、次の request で serverPeer が更新されるまで server_id / host が載らず、desktop で 2 行分裂が残る。
+  - 対応: 識別を slot 側（`Slot.identity`）に持たせた。learnIdentity が serverPeer と一致する peer の非空の識別を slot.identity へ写す。resolveTarget で serverPeer が別 peer に変わった時は identities.get(新 id) ?? {} に置き換え（未学習なら捨てる）、同じ peer なら保つ。名前宛て（servers[].peer / フォールバック）は空。list() は slot.identity を展開。identities の既存用途（findPeer / selectPeer / aliveOnly 等）は変更なし。
+  - test 追加 3: 旧 id が発見から消えても server_id / host が残る（review の再現）／別 peer に変わって未学習なら出ない／学習済みなら新しい識別が出る。
+- [low] desktop e2e のモックが実態（再登録直後の窓）に一致する旨をコメントに追記（コード変更なし）。
+- 結果: center typecheck OK / test 491 pass / 0 fail。desktop はコメントのみの変更で、e2e 全件の再実行は省略（前回 149 pass）。

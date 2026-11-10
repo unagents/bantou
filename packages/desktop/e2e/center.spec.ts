@@ -513,6 +513,7 @@ test("a link joins its peer by server_id even when the peer id changed; without 
     pair: { server: "0.3.0", protocol: "1.3.0" },
     peers: [
       // re-registered: the link still points at the old id "old-id"
+      // (the real center returns this right after a re-registration: serverPeer is still the old id, which has left discovery, and server_id is kept from the last reply)
       versionPeer({ key: "r", id: "new-id", host: "host-rereg", server_id: "srv-r" }),
       versionPeer({ key: "o", id: "pold", host: "host-legacy" }),
     ],

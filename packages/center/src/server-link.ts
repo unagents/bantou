@@ -190,6 +190,11 @@ interface Slot {
   serverId: string | null;
   /** 直近に解決した送信先（id か名前）。list 表示用。 */
   serverPeer: string | null;
+  /**
+   * serverPeer から最後に学習した識別（list 表示用）。identities（発見から消えた peer id は捨てる）とは別に持つので、
+   * 再登録で旧 peer id が一覧から消えても、serverPeer が更新されるまでは残る。serverPeer が別の peer に変わって未学習なら空。
+   */
+  identity: ServerIdentity;
 }
 
 /** server の送信先と、meta に載せる version。 */
@@ -325,7 +330,7 @@ export function createServerLink(opts: {
   let closed = false;
   const slots = new Map<string, Slot>();
   for (const s of config.servers.length > 0 ? config.servers : [{ name: DISCOVERY_SLOT, timeoutMs: DEFAULT_SERVER_TIMEOUT_MS } as ServerConfig]) {
-    slots.set(s.name, { cfg: s, client: null, unsubscribe: null, connected: false, peerId: null, connecting: null, pending: [], chains: new Map(), serverId: null, serverPeer: null });
+    slots.set(s.name, { cfg: s, client: null, unsubscribe: null, connected: false, peerId: null, connecting: null, pending: [], chains: new Map(), serverId: null, serverPeer: null, identity: {} });
   }
   const slotOf = (name: string): Slot => {
     const s = slots.get(name);
@@ -356,6 +361,8 @@ export function createServerLink(opts: {
     // 識別の無い返信（旧 server・一部だけ載せる返信）で、学習済みの識別を消さない
     if (Object.keys(ident).length > 0 || !identities.has(peerId)) identities.set(peerId, ident);
     identifyFailedAt.delete(peerId);
+    // この peer が link の直近の送信先なら、list 用に slot 側へも写す（識別の無い返信では消さない）
+    if (Object.keys(ident).length > 0) for (const slot of slots.values()) if (slot.serverPeer === peerId) slot.identity = ident;
   };
 
   /** 発見ベースの要求に使う slot。config.servers があれば先頭の client を共有し、無ければ内部 slot を使う。 */
@@ -518,6 +525,7 @@ export function createServerLink(opts: {
     if (slot.cfg.peer) {
       slot.serverId = null;
       slot.serverPeer = slot.cfg.peer;
+      slot.identity = {};
       return { to: slot.cfg.peer, meta };
     }
     if (client.listPeers) {
@@ -528,6 +536,8 @@ export function createServerLink(opts: {
           if (peers.length > 1) log(`bantou server が複数: server=${slot.cfg.name} ${peers.map((p) => peerLabel({ id: p.id, name: p.name, ...(identities.get(p.id) ?? {}), ...(p.hostname ? { hostname: p.hostname } : {}) })).join(",")} -> ${pick.name}(${pick.id})`);
           const v = pick.protocols?.find((p) => p.name === MESSENGER_PROTOCOL.protocol)?.version;
           slot.serverId = pick.id;
+          // 送信先が別の peer に変わったら古い識別は捨てる（別 server に付けない）。同じ peer なら最後に学習したものを保つ
+          if (slot.serverPeer !== pick.id) slot.identity = identities.get(pick.id) ?? {};
           slot.serverPeer = pick.id;
           return {
             to: pick.id,
@@ -543,6 +553,7 @@ export function createServerLink(opts: {
     }
     slot.serverId = null;
     slot.serverPeer = SERVER_NAME;
+    slot.identity = {};
     return { to: SERVER_NAME, meta };
   };
 
@@ -738,7 +749,7 @@ export function createServerLink(opts: {
           reachable: await healthCheck(slot.cfg).catch(() => false),
           peerId: slot.connected ? (slot.client?.peer?.id ?? null) : null,
           serverPeer: slot.serverPeer,
-          ...(slot.serverPeer !== null ? (identities.get(slot.serverPeer) ?? {}) : {}),
+          ...slot.identity,
         })),
       );
     },
