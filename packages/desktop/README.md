@@ -64,6 +64,16 @@ second `bantou-core` on the shared broker.
 - 記録するもの: center の MCP 呼び出し（tool 名・HTTP status、失敗時は応答本文）、ターミナル出力 stream の状態変化と拒否（status・応答本文）、入力とサイズ変更の失敗（status・応答本文・送った cols/rows。入力の中身は書かず長さだけ）、セッション一覧の取り直しの結果、アップデータの失敗、broker 接続、webview の失敗（`[webview]` 付き）。
 - 自分の sidecar center のログは別: `~/.local/share/bantou/center-logs/center.log`（`packages/center/README.md` の「ログ」）。
 
+## ペインの幅
+
+左（セッション一覧）・中央（remote と task）・右（ターミナル）の境界 2 本をドラッグして幅を変える（`PaneResizer.vue`、`composables/usePaneWidths.ts`、新しい依存なし）。
+
+- 仕切りは 6px の当たり判定に 1px の線。ホバー・フォーカス・ドラッグ中は accent 色の 3px になり、cursor は col-resize。ダブルクリック（または Enter）で既定に戻す。
+- 最小幅: 一覧 160px / 中央 320px / ターミナル 320px。既定: 一覧 240px / 中央 420px（右は残り）。ウィンドウが 812px（最小幅の合計＋仕切り）より狭い時は幅を詰めず、ペイン行が横スクロールする。
+- 操作: pointer events + `setPointerCapture`（ターミナル上・ウィンドウ外へ出ても追従）。ドラッグ中は選択を止め、cursor を固定する。仕切りは `role="separator"` / `aria-orientation="vertical"` / `aria-valuenow|min|max`。フォーカスして ←→ で 16px（Shift で 64px）、Home / End で最小 / 最大。
+- 保存: webview の `localStorage` の `bantou.paneWidths` に `{"v":1,"side":240,"middle":420}`（px）。ドラッグ・キー操作の終了時に書く。読めない値は既定に戻す。狭いウィンドウでは表示だけ詰め、保存値は変えない（広げると戻る）。
+- ターミナルは幅が変わると xterm の fit が走り、100ms まとめて 1 回 `session_resize` を center へ送る（ドラッグ中の連続 resize はこれで間引かれる）。e2e は `e2e/pane-resize.spec.ts`。
+
 ## 画像の添付（master-cap の session）
 
 選択中の session のターミナル欄に、画像を 3 つの方法で渡せる。session の claude は center のホストで動くので、画像は center のホストに保存され、その絶対 path がターミナルの入力に入る（前後に空白 1 つ、Enter は送らない。複数枚は空白区切り）。Enter を押すと claude がその path の画像を読む。

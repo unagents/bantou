@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { useIntervalFn } from "@vueuse/core";
+import { useElementSize, useIntervalFn } from "@vueuse/core";
 import { brokerConnect, brokerStatus, centerGetSettings } from "~/api";
 import type { BrokerStatus, SessionActivity, Task } from "~/types";
 
@@ -7,6 +7,10 @@ const { dir, loaded, load, pickAndOpen } = useWorkspace();
 const { refreshNow: refreshSessions } = useSessionRefresh();
 const { threads, centerList, sessions, activityCounts, waitingCount, running, refresh } = useBoard(dir);
 const toast = useToast();
+// --- pane widths (side | middle | right; drag the dividers) ---
+const paneRow = ref<HTMLElement | null>(null);
+const { width: paneRowWidth } = useElementSize(paneRow);
+const pane = usePaneWidths(paneRowWidth);
 const { state: updaterState, checkManually, installAndRestart } = useUpdater();
 
 useWorkspaceWatcher(dir, () => void refresh());
@@ -172,8 +176,9 @@ function onSessionCreated(name: string) {
     </div>
 
     <template v-else-if="dir">
-      <div class="flex min-h-0 flex-1">
-        <nav aria-label="セッション一覧" class="border-cork-border w-60 shrink-0 overflow-y-auto border-r">
+      <div ref="paneRow" class="flex min-h-0 flex-1 overflow-x-auto" data-testid="pane-row">
+      <div class="flex min-h-0 flex-1" :style="{ minWidth: `${PANE_ROW_MIN}px` }">
+        <nav aria-label="セッション一覧" class="shrink-0 overflow-y-auto" :style="{ width: `${pane.side.value}px` }">
           <UTooltip v-if="!centerList.reachable" :text="centerList.reason ?? 'center に問い合わせられなかった'">
             <UBadge
               class="m-2"
@@ -249,13 +254,23 @@ function onSessionCreated(name: string) {
             </li>
           </ul>
         </nav>
+        <PaneResizer
+          label="セッション一覧の幅"
+          :model-value="pane.side.value"
+          :min="PANE_MIN.side"
+          :max="pane.sideMax.value"
+          @update:model-value="pane.setSide"
+          @commit="pane.save"
+          @reset="pane.resetSide"
+        />
         <main
           v-if="selectedGroup"
-          class="grid min-h-0 min-w-0 flex-1 grid-cols-[minmax(20rem,2fr)_minmax(0,3fr)] grid-rows-[minmax(0,1fr)]"
+          class="grid min-h-0 min-w-0 flex-1 grid-rows-[minmax(0,1fr)]"
+          :style="{ gridTemplateColumns: `${pane.middle.value}px auto minmax(0,1fr)` }"
           data-testid="session-main"
         >
           <!-- middle: remote instruction tasks of the session, the Cork task list below them -->
-          <div class="border-cork-border flex min-w-0 flex-col gap-4 overflow-y-auto border-r p-4" data-testid="middle-col">
+          <div class="flex min-w-0 flex-col gap-4 overflow-y-auto p-4" data-testid="middle-col">
             <RemoteActivity :key="selectedGroup.name" :owner="selectedGroup.name" />
             <SessionColumn
               :key="selectedGroup.name"
@@ -265,6 +280,15 @@ function onSessionCreated(name: string) {
               @open-thread="openThread"
             />
           </div>
+          <PaneResizer
+            label="中央列の幅"
+            :model-value="pane.middle.value"
+            :min="PANE_MIN.middle"
+            :max="pane.middleMax.value"
+            @update:model-value="pane.setMiddle"
+            @commit="pane.save"
+            @reset="pane.resetMiddle"
+          />
           <!-- right: conversation history (the session's terminal) -->
           <div
             class="min-h-0 min-w-0 overflow-hidden"
@@ -286,6 +310,7 @@ function onSessionCreated(name: string) {
             />
           </div>
         </main>
+      </div>
       </div>
     </template>
 
