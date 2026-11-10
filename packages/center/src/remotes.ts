@@ -937,7 +937,12 @@ export function createRemoteManager(opts: {
     if (allowed === undefined) return link.selectPeer(sel);
     const inRange = (p: ServerPeer): boolean => serverAllowed(allowed, { ...(p.server_id !== undefined ? { server_id: p.server_id } : {}), ...(hostOf(p) ? { host: hostOf(p) } : {}) });
     if (sel !== undefined) {
-      const p = await link.selectPeer(sel);
+      // 範囲内に絞ってから解決する（同じ host に 2 台いて片方だけが範囲内の時、host 名指定を曖昧エラーにしない）
+      const matches = matchServerPeers(await livePeers().catch(() => [] as ServerPeer[]), sel);
+      const inR = matches.filter(inRange);
+      if (matches.length > 0 && inR.length === 0) throw new Error(notInServers(describeServer({ ...matches[0], peerId: matches[0].id }), allowed, owner));
+      // 範囲内が 1 台に決まるなら、その server_id（無ければ peer id）で直接解決する。2 台以上は従来どおり曖昧エラー
+      const p = await link.selectPeer(inR.length === 1 && inR.length < matches.length ? (inR[0].server_id ?? inR[0].id) : sel);
       if (!inRange(p)) throw new Error(notInServers(describeServer({ ...p, peerId: p.id }), allowed, owner));
       return p;
     }

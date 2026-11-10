@@ -120,3 +120,12 @@ test("owner の無い呼び出し（desktop の center_call など）は servers
   assert.equal(r.server, "srv-mac");
   assert.equal(replies.length, 1);
 });
+
+test("servers=[片方の server_id]: host 名の指定は範囲内の 1 台に届く。省略も範囲内の 1 台。両方の server_id を範囲にして host 名で指すと曖昧エラー", async () => {
+  const { mgr, tasks } = setup({ pm1: ["srv-lenovo-b"], pm2: ["srv-lenovo-a", "srv-lenovo-b"], pm3: ["srv-mac"] });
+  assert.equal((await mgr.send({ owner: "pm1", goal: "a", server: "lenovo" })).server, "srv-lenovo-b");
+  assert.equal((await mgr.send({ owner: "pm1", goal: "b" })).server, "srv-lenovo-b");
+  await assert.rejects(mgr.send({ owner: "pm2", goal: "c", server: "lenovo" }), /曖昧/);
+  await assert.rejects(mgr.send({ owner: "pm3", goal: "d", server: "lenovo" }), /この session の servers に無い/);
+  assert.deepEqual(tasks.map((t) => t.peer), ["p-lb", "p-lb"]);
+});

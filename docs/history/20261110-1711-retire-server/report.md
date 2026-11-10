@@ -114,3 +114,9 @@ center から server を退役させる手段の追加。branch `feat/retire-ser
 ### center 全体の除外は作らなかった理由（利用者の指示）
 
 利用者の指示で、center 全体で server を除外する `servers.exclude` は作らない。代わりに session ごとの `servers` で範囲を持つ。center 設定画面の server 一覧は center 全体を今までどおり全部出す。
+
+### review 第1回（HEAD c13864a）の指摘と対応
+
+- [low] `selectPeerFor`: session の `servers` が `[server_id]` のみで、server に同 host の host 名を指定すると、全 peer で解決するため曖昧エラーになり範囲内の 1 台を選べなかった。対応: 先に発見済み peer を指定で絞り、範囲内が 1 台に決まる時はその server_id（無ければ peer id）で解決する。範囲内が 2 台以上なら従来どおり曖昧エラー、範囲内が 0 台なら「この session の servers に無い」。test 追加（`session-servers.test.ts`: 片方の server_id を範囲にして host 名指定・省略が範囲内の 1 台に届く／両方の server_id を範囲にして host 名で指すと曖昧／範囲外 host はエラー）。
+- [low] 範囲外 server からの通知の扱い。判断: フィルタしない（受け取る）。`servers` は送信先の範囲であり、既に起動済みの cap からの通知を捨てるものではない。docs/design/project-settings.md と center README に明記した。
+- 他の center / desktop の指摘は無し。
