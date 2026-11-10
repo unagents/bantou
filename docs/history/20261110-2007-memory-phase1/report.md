@@ -129,3 +129,8 @@ branch `feat/memory-phase1`（基点 develop d20aac2）。設計は `docs/design
 - Skip 時の個別 claim 解除を外す: 検出されず。最後の一括解除が兼ねているため冗長と判断し、個別解除を削除した。
 
 テスト結果: `npm test` 52 pass / 0 fail（unit 25 + PGlite 統合 27）+ docker 統合 1 suite SKIP（docker 無し。docker 版には並行 test が 1 本増えたが未実行）。`npm run typecheck` 通過。
+
+## review 第2回への補足指示の反映
+- budget は LLM 呼び出し回数（20 回）と経過時間（10 分、lease 15 分より短い）の**両方**に上限があり、超えたら残りの claim を解除して打ち切る（実装済み・test あり）。
+- README に「SKIP LOCKED と適用時の再確認は、真の並行ふるまいが PGlite（単一接続）では未検証。docker 版の並行 test が要る」と明記（PGlite で確かめているのは逐次に再現できる場面のみ）。
+- bun.lock は未更新。
