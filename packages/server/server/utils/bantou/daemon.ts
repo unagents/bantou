@@ -23,6 +23,7 @@ import { CAP_ID_HEADER, WORKER_ID_HEADER, type McpListener } from "./mcp";
 import { agentDir, runLogDir } from "./paths";
 import { CAP_GUIDE, WORKER_GUIDE, buildTaskPrompt, buildTaskResult } from "./prompts";
 import { createReportHub, setReportHandler } from "./reports";
+import { EXIT_RETIRED, allowedWhileRetiring, createRetireController, detectService, retiringError } from "./retire";
 import { cliRunner } from "./runner";
 import {
   createUpdateController,
@@ -32,6 +33,8 @@ import {
   type UpdateController,
 } from "./update";
 import { createWorkerHub, readOwner, setWorkerHandler, writeOwner, type WorkerHub } from "./workers";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { prepareWorkspace } from "./workspace";
 
 /** 返信に付ける messenger の meta（bantou protocol の登録と同じ値）。 */
@@ -189,6 +192,8 @@ export async function executeUpdate(cmd: ServerCommand, update: UpdateController
 /** 起動済みの daemon。stop は実行中の claude・peer・broker を止める（プロセス終了は呼び出し側）。 */
 export interface Daemon {
   stop(): Promise<void>;
+  /** process の終了コード。退役を受けた後は EXIT_RETIRED（launcher・systemd が再起動しない）、それ以外は 0。 */
+  exitCode(): number;
 }
 
 /** daemon が使う外部資源。/mcp の listener は Nitro の h3App が要るので plugin から渡す。 */
@@ -321,6 +326,39 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
     },
     log,
   });
+  // 退役（retire_server）。受付停止 → cap / worker 停止 → 返信 → messenger 解除 → exit 76
+  const retire = createRetireController({
+    workspace: config.workspace,
+    identity,
+    count: () => manager.activeCount(),
+    cancelUpdate: () => update.close(),
+    refuse: () => {
+      // worker_start / report は /mcp 側の handler で断る（実行中の cap / worker は stopAll が止める）
+      setWorkerHandler({
+        start: async () => {
+          throw new Error("server は退役中のため worker を起動できない");
+        },
+        status: (capId, workerId) => workerHub.status(capId, workerId),
+        stop: (capId, workerId) => workerHub.stop(capId, workerId),
+      });
+      setReportHandler(async () => {
+        throw new Error("server は退役中のため report を受け付けない");
+      });
+    },
+    stopAll: () => manager.shutdown(),
+    finish: () => (deps.requestExit ?? (() => log("終了を頼む先が無いため終了できない")))("retire"),
+    service: () => {
+      let cgroup: string | undefined;
+      try {
+        cgroup = readFileSync("/proc/self/cgroup", "utf8");
+      } catch {
+        cgroup = undefined;
+      }
+      return detectService({ platform: process.platform, env: process.env, cgroup });
+    },
+    home: homedir(),
+    log,
+  });
   // 実行中の指示。claude の実行は数分かかるので全体は直列にしない。
   // 同一 agent の直列化は manager の queue が担い、別 agent は並行して走る
   const inflight = new Set<Promise<void>>();
@@ -345,7 +383,12 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
       }
       log(`指示受信: type=${cmd.type} from=${from} ${describeCommand(cmd)}`.trimEnd());
       let reply: ServerReply;
-      if (cmd.type === "hello" || cmd.type === "update_server") {
+      if (cmd.type === "retire_server") {
+        reply = await retire.request(cmd, from);
+      } else if (retire.isRetiring() && !allowedWhileRetiring(cmd)) {
+        // 退役中は新しい指示を断る（再送しても通らない）
+        reply = retiringError(cmd);
+      } else if (cmd.type === "hello" || cmd.type === "update_server") {
         reply = await executeUpdate(cmd, update);
       } else if ((cmd.type === "kick_cap" || cmd.type === "task") && update.isUpdating()) {
         // 更新待機中は新しい指示を受け付けず、理由付きで断る（center は再起動後に再送できる）
@@ -373,6 +416,8 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
       } catch (e) {
         log(`返信失敗: to=${m.from_id} ${e instanceof Error ? e.message : String(e)}`);
       }
+      // 退役の返信を出し終えた（失敗でも）。猶予の後に messenger を解除して終了する
+      if (cmd.type === "retire_server") retire.replied();
     } catch (e) {
       log(`エラー: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
@@ -461,5 +506,5 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
     log(`server.ready を書けない: ${e instanceof Error ? e.message : String(e)}`),
   );
   log(`常駐開始: version=${serverVersion}`);
-  return { stop };
+  return { stop, exitCode: () => (retire.isRetiring() ? EXIT_RETIRED : 0) };
 }

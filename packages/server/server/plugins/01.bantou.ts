@@ -17,10 +17,10 @@ export default defineNitroPlugin((nitro) => {
   const shutdown = (signal: string): void => {
     if (stopping) return;
     stopping = true;
-    log(signal === "update" ? "更新のため終了処理" : `${signal} 受信、終了処理`);
+    log(signal === "update" ? "更新のため終了処理" : signal === "retire" ? "退役のため終了処理" : `${signal} 受信、終了処理`);
     const hard = setTimeout(() => {
       log("終了処理タイムアウト");
-      process.exit(0);
+      process.exit(daemon?.exitCode() ?? 0);
     }, 5000);
     void (async () => {
       try {
@@ -30,8 +30,9 @@ export default defineNitroPlugin((nitro) => {
         log(`終了処理エラー: ${e instanceof Error ? e.message : String(e)}`);
       }
       clearTimeout(hard);
-      log("終了");
-      process.exit(0);
+      const code = daemon?.exitCode() ?? 0;
+      log(code === 0 ? "終了" : `終了 (exit ${code})`);
+      process.exit(code);
     })();
   };
   process.on("SIGTERM", () => shutdown("SIGTERM"));

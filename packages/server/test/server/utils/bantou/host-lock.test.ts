@@ -273,5 +273,7 @@ test("host lock: bin/bantou.mjs の launcher 経路は guard を通り、競合�
 test("host lock: systemd unit 雛形は競合の exit code で再起動しない（RestartPreventExitStatus が EXIT_CONFLICT と一致）", () => {
   const unit = readFileSync(fileURLToPath(new URL("../../../../scripts/service/bantou-server.service.in", import.meta.url)), "utf8");
   assert.ok(unit.includes(`RestartPreventExitStatus=${EXIT_CONFLICT}`));
+  // 退役（exit 76）も同じ行で止める
+  assert.match(unit, new RegExp(`^RestartPreventExitStatus=${EXIT_CONFLICT} 76$`, "m"));
   assert.ok(unit.includes("Restart=always"));
 });

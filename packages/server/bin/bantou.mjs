@@ -1,11 +1,15 @@
 #!/usr/bin/env node
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveDefaultConfig } from "./default-config.mjs";
 
 // --config 省略時: $BANTOU_HOME（無ければ $HOME）の config.json。無ければ旧既定 ~/.config/bantou/config.json（default-config.mjs）
 const DEFAULT_CONFIG = resolveDefaultConfig();
+/** 退役の印（daemon の retire.ts RETIRED_FILE と同じ名前。test が突き合わせる）。 */
+const RETIRED_FILE = "server.retired";
+/** 退役済みの起動拒否の exit code。host lock の競合（EXIT_CONFLICT）と同じ 75 を使う: これまでに配った unit も RestartPreventExitStatus=75 を持つので、unit を更新していなくても再起動ループにならない。 */
+const EXIT_RETIRED_START = 75;
 const binDir = dirname(fileURLToPath(import.meta.url));
 const selfBin = fileURLToPath(import.meta.url);
 
@@ -62,6 +66,19 @@ const configPath = resolve(args.config);
 if (!args.serve && !args.supervise) {
   // 既定: launcher。起動時に全コードを読み込み、supervisor（--supervise）を起動して見張る。以後 supervisor が入れ替わっても残る
   const launcher = await import("./launcher.mjs");
+  // 退役済み（retire_server が <workspace>/server.retired を書いた）なら起動しない。exit 75 は systemd unit の RestartPreventExitStatus（旧 unit も 75 は持つ）で再起動ループにならない
+  try {
+    const ws = launcher.workspaceOf(configPath);
+    if (existsSync(join(ws, RETIRED_FILE))) {
+      console.error(
+        `${new Date().toISOString()} bantou: この server は退役済み（${join(ws, RETIRED_FILE)}）。起動しない。` +
+          `再び使うなら、その file を消してから起動する。host から外すなら unit・user・workspace を消す（docs/ops/server-install.md「退役」）`,
+      );
+      process.exit(EXIT_RETIRED_START);
+    }
+  } catch {
+    // workspace を読めない時は従来どおり launcher がエラーにする
+  }
   // host 単位の多重起動 guard（1 host に bantou-server は 1 つ。競合なら message を出して exit 1。解放は process 終了時）
   const { guardHostLock } = await import("./host-lock.mjs");
   const releaseHostLock = guardHostLock({ info: { workspace: (() => { try { return launcher.workspaceOf(configPath); } catch { return undefined; } })(), version: packageVersion() } });
