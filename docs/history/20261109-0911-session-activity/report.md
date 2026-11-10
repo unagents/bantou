@@ -35,10 +35,18 @@ header の「返答待ち N」は thread 件数、集計の「判断待ち N」�
 ## 画面
 `sidebar.png`（同ディレクトリ）: 左サイドバー上部に「作業中 1 / 判断待ち 1 / 待機 1」の集計、各行の右に「作業中（回る icon）」「判断待ち（黄・太字）」「待機（緑 icon）」と context %。
 
+## 補足（review 指摘の反映）
+- 印を出す条件: center の activity 由来の印は state が connected の session だけ。**waiting thread による needs-input の合成は state に関わらず出す**（意図どおり。ユーザーへの質問が残っているのは session の接続と無関係なため）。
+- 集計の「判断待ち」は session 数で、center の needs-input と thread の waiting を同じ 1 に畳む（両方ある session も 1）。ヘッダーの「返答待ち」は thread 件数で別物。
+- 更新経路: README の誤記（「center からのイベントによる即時反映は無い」）を直した。SSE `sessions`（reason は created / deleted / restored / updated / context / activity。絞り込みなし）→ `center-sessions-changed` → `session_list` 取り直し。
+- `tracker.forget()` は呼んでいない。状態は startedAt ごとに持ち、起動し直すと別物として扱う（get は startedAt 不一致・非 running で unknown）ので表示に影響せず、削除済み session の 1 件分のメモリが center 再起動まで残るだけ。削除経路へ配線する変更は範囲外として見送り（必要なら別 task）。
+- center の typecheck / test 456/456 は review worker が再実行して通過。この worker でも center の typecheck / test を再実行した（結果は下記テスト節の末尾）。
+
 ## 残課題・確認できなかった項目
-- 対話モードでの needs-input（permission 確認 UI・AskUserQuestion・plan 承認）と Notification の `notification_type` 実値（center-notes 引き継ぎ）。
-- 本物の bantou-pty-wrapper 経由の確認（cargo 無し）。
-- Esc 中断では Stop が来ず working が残りうる。
-- cargo test 未実施。
-- README の既存文「center からのイベントによる即時反映は無い」は center_events.rs の存在と食い違って見える（既存記述のため触っていない。要判断）。
-- 実機の Tauri アプリでの目視は未実施（Linux の chromium e2e のみ）。
+- **拒否・中断で状態が残る（実機の対話モード未確認）**: 公式 docs（https://code.claude.com/docs/en/hooks、2026-11-10 確認）では、PermissionDenied は auto mode の拒否のみ（手動拒否では動かない）、PostToolUseFailure は permission 拒否・キャンセルで発火しない、Stop は Esc で発火するか記述なし。拒否・中断の出口になる hook が見つからないため hook の対応表に足していない。影響: PermissionRequest 由来の **needs-input が拒否・中断後も残り**「判断待ち」が出続けうる。working も Esc 中断で残りうる。次の UserPromptSubmit などの hook か idle_prompt で戻る想定だが未確認。時間切れ表示のような仕組みは推測になるので足していない。center README と desktop README にも明記した。
+- 対話モードでの needs-input（permission 確認 UI・AskUserQuestion・plan 承認）と Notification の `notification_type` 実値は未確認。
+- background task（subagent 等）が Stop の後に動いて hook が来ると working に戻りうる（未確認）。
+- 発火時刻が同一ミリ秒の event は到着順になる。
+- PreToolUse / PostToolUse ごとに hook サブコマンドが 1 回起動する負荷は未計測。
+- 本物の bantou-pty-wrapper 経由の確認（cargo 無し）、cargo test 未実施（session.rs の追加テスト未実行）。
+- 実 Tauri アプリでの目視は未実施（Linux の chromium e2e のみ）。

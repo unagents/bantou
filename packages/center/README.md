@@ -349,7 +349,8 @@ session（`session_create` で作った wrapper 経由の claude。config 由来
   上記以外の event・Notification は状態を変えない。Stop / StopFailure の hook だけ同期（他は `async: true`。claude が Stop 直後に終了する -p では async の hook が cancel される）。
 - 古い状態を残さない: 保持はメモリのみで、起動時刻（`startedAt`）ごと。session が停止・error・起動し直しになると `unknown`（token も起動ごとに作り直すので、前の claude の遅れた hook は 401）。center 再起動直後は、次の hook まで `unknown`。発火時刻が最後に反映した event より古い hook は捨てる（到着順の入れ替わり対策）。
 - 変わった時だけ `GET /events` に `reason: "activity"` を流す（受け手は `session_list` を取り直す）。
-- 限界: 利用者が Esc で turn を中断した時は Stop が来ない。working / needs-input のまま残り、次の hook か idle_prompt（約 1 分の入力待ち通知）で idle に戻る。
+- 限界（実機の対話モードでは未確認。公式 docs の記述からの整理）: 利用者が Esc で turn を中断した時、または permission の確認を利用者が拒否した時に発火する hook は、公式 docs（https://code.claude.com/docs/en/hooks、2026-11-10 確認）に見当たらない。`PermissionDenied` は auto mode が拒否した時だけで「手動で permission ダイアログを拒否した時は動かない」と書かれ、`PostToolUseFailure` は「permission denial では発火しない」「実行中 tool のキャンセルでは発火しない」と書かれ、`Stop` は「Claude が応答を終えた時」で Esc で発火するかは書かれていない。このため出口の hook は足していない（推測で足さない）。結果として、PermissionRequest 由来の **needs-input（判断待ち）が、利用者が拒否・中断した後も残り**、画面に「判断待ち」が出続けうる（実際は判断待ちでない）。working も Esc 中断で残りうる。次の hook（UserPromptSubmit など）か idle_prompt（約 1 分の入力待ち通知）が来れば戻る想定だが、これも未確認。時間切れで消す仕組みも足していない。
+- 他の未確認: background task（subagent・バックグラウンド実行）が Stop の後に動き続けて hook が来ると working に戻りうる。発火時刻が同一ミリ秒の event は到着順になる。PreToolUse / PostToolUse ごとに hook サブコマンドが 1 回起動する負荷は未計測。
 
 ## 未決
 
