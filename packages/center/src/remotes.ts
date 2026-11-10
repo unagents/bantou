@@ -617,19 +617,19 @@ export function createRemoteManager(opts: {
     try {
       peer = await findPeer(r);
     } catch (e) {
-      (count ? markFail : suspect)(r, e instanceof Error ? e.message : String(e));
+      (count ? markFail : suspect)(r, `status に応答しない: ${e instanceof Error ? e.message : String(e)}`);
       throw e;
     }
     let reply: Awaited<ReturnType<ServerLink["statusOn"]>>;
     try {
       reply = await link.statusOn(peer, { cap_id: r.remote_id });
     } catch (e) {
-      (count ? markFail : suspect)(r, e instanceof Error ? e.message : String(e));
+      (count ? markFail : suspect)(r, `status に応答しない: ${e instanceof Error ? e.message : String(e)}`);
       throw e;
     }
     if (reply.type === "error") {
       // center の側の失敗（無返信・送信失敗）は届かない印。server の返した error（版の門の断りなど）は応答があったと数える
-      if (isTransportError(reply)) (count ? markFail : suspect)(r, reply.message);
+      if (isTransportError(reply)) (count ? markFail : suspect)(r, `status に応答しない: ${reply.message}`);
       else markOk(r);
       throw new Error(reply.message);
     }
@@ -704,6 +704,15 @@ export function createRemoteManager(opts: {
       for (const x of recordsOfKey(key)) if (isActiveRec(x) && (inflight.get(x) ?? 0) === 0) schedule(x, 0);
     }
     wake();
+  };
+  /**
+   * hello の成功。最後の応答の時刻だけ更新し、failures と束ね窓の基準は戻さない（cap に係る応答ではない）。
+   * hello だけ答えて status に答えない server は、checkReachability の連続失敗で到達不能（cap の状態が分からない = unknown）になる。
+   */
+  const touchOkKey = (key: string): void => {
+    const h = health.get(key) ?? { failures: 0 };
+    h.lastOkAt = nowMs();
+    health.set(key, h);
   };
   /** server から応答が無かった（無返信・発見から消えた）。連続 reachThreshold 回で到達不能。 */
   const markFailKey = (key: string, message: string): void => {
@@ -780,7 +789,7 @@ export function createRemoteManager(opts: {
     void persist();
     wake();
   };
-  /** 取れた status を、同じ server の記録に反映する（cap の状態）。受付の判定は awaitAck の直接の観測だけで行い、周期の status では pending を accepted にしない（別の要因の変化を受付と取り違えるため）。 */
+  /** 取れた status を、同じ server の記録に反映する（cap の状態）。受付の判定は awaitAck の直接の観測だけで行い、周期の status では pending を observed にしない（別の要因の変化を受付と取り違えるため）。 */
   const recordStatus = (key: string, st: StatusReply): void => {
     for (const x of recordsOfKey(key)) capSnap.set(x, { at: Date.now(), cap: st.caps.find((c) => c.id === x.remote_id) });
   };
@@ -1511,7 +1520,7 @@ export function createRemoteManager(opts: {
         ? failure.transport
           ? `task を送れなかった（server には届いていない）: ${failure.message}。pending に未送信（unsent）で残してある。再送してよい`
           : `server が task を受け付けなかった: ${failure.message}`
-        : `${note ?? "task は送ったが、server が受け付けたことを確認できない"}（${Math.round(ackTimeoutMs / 1000)} 秒待った。届いていない可能性も、届いたが status に変化が出なかった可能性もある）。task は pending に ${delivery === "unsent" ? "未送信（unsent）" : "送信済（sent）"}で残っている。再送する前に remote_list で delivery を確認する（task_result が返れば accepted になる。受付未確認の同じ指示は ${Math.round(resendAfterMs / 60_000)} 分は再送されない）`;
+        : `${note ?? "task は送ったが、server が受け付けたことを確認できない"}（${Math.round(ackTimeoutMs / 1000)} 秒待った。届いていない可能性も、届いたが status に変化が出なかった可能性もある）。task は pending に ${delivery === "unsent" ? "未送信（unsent）" : "送信済（sent）"}で残っている。再送する前に remote_list で delivery を確認する（task_result が返る、または自分の task_id の worker_report が届けば observed になる。受付未確認の同じ指示は ${Math.round(resendAfterMs / 60_000)} 分は再送されない）`;
     return {
       remote_id: r.remote_id,
       server: peer.server_id ?? peer.id,
@@ -1711,7 +1720,7 @@ export function createRemoteManager(opts: {
     noteReach(peer, ok, message) {
       const key = peer.server_id ?? peer.id;
       if (!records.some((x) => healthKeyOf(x) === key)) return;
-      if (ok) markOkKey(key);
+      if (ok) touchOkKey(key);
       else suspectKey(key, message ?? "hello に答えない");
     },
 

@@ -207,3 +207,31 @@ develop 4564c8e への rebase で衝突したのは README 2 件のみ。どち�
 - H2: `accepted` → `observed`、`accepted_at` → `observed_at`、`delivery_basis` に `task_id` を追加（worker_report の task_id 照合。test あり）。
 - 再確認の要求は `REACH_REQUEST_DELAY_MS`（1 秒）待ってから走らせ、同時に失敗した複数の経路を 1 回にまとめる（option `reachRequestDelayMs`）。待ちを入れたのは、要求が即時に走ると restore の announce と status 呼び出しが重なって test が揺れたため。
 - テスト（追加方針の対応後）: center typecheck OK、`npm test` 571 件中 570 pass、1 fail = rc-orphan（環境起因、develop 単体でも同じ）。desktop typecheck OK、e2e 全件 220 pass・失敗 0（port 15760、簡易サーバー停止・解放確認済み）。
+
+## review 第2回の指摘と対応（HEAD 42ccb6c、条件付き ok）
+
+### M1 hello 成功が failures を戻す（medium）
+
+- 指摘: `noteReach(ok=true)` → `markOkKey` が failures と束ねの基準を 0 に戻すため、status に答えず hello だけ成功する server は、checkReachability が失敗しても hello 成功で毎回リセットされ、到達不能にならない（S1: 21 秒おきの status 失敗 + hello 成功を 4 周しても reachable=true）。
+- 対応: **hello の成功は `last_ok_at` の更新だけにし、failures と束ね窓の基準（countedAt）を戻さない**（`touchOkKey`）。リセットするのは cap に係る応答（status の成功・activity・worker_report・task_result・send 内の status 成功）に限る。逆に hello だけ失敗して status に答える server は従来どおり数えない（suspect のみ）。
+- 誤報にならないかの検討: hello が通るのに status に答えない server は、生きていても cap の状態（running / idle / lost）を取れず、task の観測もできない。実害として状態が分からない = unknown が妥当で、「到達不能」の表示は「cap の状態が分からない」の意味。誤報ではなく、原因を `reachability.last_error` に「status に応答しない: …」と出して区別できるようにした（tooltip の「最後の応答」は hello でも更新される）。
+- test: S1 の再現（status 失敗 + hello 成功を 4 周、fake の時計）で 2 回目の確認の失敗で到達不能、hello 成功では戻らず status の成功で復帰、last_error が「status に応答しない」。`touchOkKey` を `markOkKey` に戻すと落ちることを確認。
+
+### 遷移表の更新
+
+| 契機 | reachable | failures |
+| --- | --- | --- |
+| hello の成功 | 変わらない | 変わらない（`last_ok_at` だけ更新） |
+| status の成功・activity・worker_report・task_result | true | 0（束ね窓もリセット） |
+| hello の失敗 | 変わらない（再確認を要求） | 変わらない |
+| checkReachability の status の失敗 | 窓を空けた 2 回目で false | +1（窓内は束ねる） |
+
+### L1 / L2
+
+- L1: `sendResult` の error 文の旧名 accepted を observed に直し、根拠（task_result / 自分の task_id の worker_report）を書いた。
+- L2: test のタイトル・コメントの旧名を observed に統一。`git grep -n -i accepted` で残りを確認（worker_reply の `accepted:true`、protocol、server、memory、`acceptEdits` など別の意味の語、および「accepted とは名乗らない」と説明する docs・コメントのみ）。
+
+### 第2回対応後のテスト結果
+
+- center: typecheck OK、`npm test` 572 件中 571 pass、1 fail = rc-orphan（環境起因、develop 単体でも同じ）。
+- desktop: typecheck OK、e2e 全件 220 pass・失敗 0（port 15900、簡易サーバー停止・解放確認済み）。

@@ -83,7 +83,7 @@ function setup(extra: Partial<Parameters<typeof createRemoteManager>[0]> = {}) {
 
 const taskResult = (taskId: string) => ({ bantou: 1, type: "task_result", cap_id: CAP, task_id: taskId, state: "done", summary: "R", workers: [], review: { verdict: "unknown", items: [], rounds: 0 }, remaining: [] });
 
-test("remote_send: server が task を受け付けた（status の cap が変わった）ら delivered:true と送達時刻。pending は accepted", async () => {
+test("remote_send: server への到達を観測（status の cap が変わった）したら delivered:true と送達時刻。pending は observed", async () => {
   const { mgr } = setup();
   const r = await mgr.send({ owner: "pm1", goal: "go" });
   assert.equal(r.delivered, true);
@@ -98,7 +98,7 @@ test("remote_send: server が task を受け付けた（status の cap が変わ
   assert.ok(v.reachability.last_ok_at);
 });
 
-test("remote_send: 受付を確認できない（ack timeout）なら delivered:false。pending に sent で残り、周期の status では格上げされず、task_result で accepted（根拠 task_result）になる", async () => {
+test("remote_send: 受付を確認できない（ack timeout）なら delivered:false。pending に sent で残り、周期の status では格上げされず、task_result で observed（根拠 task_result）になる", async () => {
   const { mgr, st } = setup();
   st.accept = false;
   const t0 = Date.now();
@@ -112,7 +112,7 @@ test("remote_send: 受付を確認できない（ack timeout）なら delivered:
   assert.match(r.error ?? "", /再送する前に remote_list で delivery を確認/);
   assert.ok(r.task_id);
   assert.equal(mgr.list()[0].pending[0].delivery, "sent");
-  // 後から cap が動いた（別の要因かもしれない）。周期の status では accepted に格上げしない
+  // 後から cap が動いた（別の要因かもしれない）。周期の status では observed に格上げしない
   st.capExists = true;
   st.running = true;
   st.started++;
@@ -148,7 +148,7 @@ test("remote_send: 受付未確認の同じ指示は再送しない（task を�
   assert.notEqual(d.task_id, a.task_id);
 });
 
-test("受付判定(c): 先行する task が未確認の間に送った 2 本目は、先行する task の到着だけでは accepted にならない", async () => {
+test("受付判定(c): 先行する task が未確認の間に送った 2 本目は、先行する task の到着だけでは observed にならない", async () => {
   const { mgr, st } = setup();
   st.accept = false;
   const a = await mgr.send({ owner: "pm1", goal: "first" });
@@ -157,7 +157,7 @@ test("受付判定(c): 先行する task が未確認の間に送った 2 本目
   st.landAt = st.statusCalls + 2;
   const b = await mgr.send({ owner: "pm1", goal: "second" });
   assert.equal(st.taskCalls, 2);
-  assert.equal(b.delivered, false, "2 本目は 1 本目の到着で accepted にならない");
+  assert.equal(b.delivered, false, "2 本目は 1 本目の到着で observed にならない");
   assert.equal(b.delivery, "sent");
   assert.deepEqual(mgr.list()[0].pending.map((p) => p.delivery), ["sent", "sent"]);
 });
@@ -173,7 +173,7 @@ test("受付判定(c): 先行する task が既に status に見えていれば�
 });
 
 // 既知の限界（受付判定(a)）: server は task を受けた時だけでなく、worker の report 起因の resume でも cap を running にして last_started_at を更新する。
-// status の変化だけでは両者を区別できないので、届いていない task が accepted（根拠 status）になる偽陽性が理論上ある。server に task の ack が要る。
+// status の変化だけでは両者を区別できないので、届いていない task が observed（根拠 status）になる偽陽性が理論上ある。server に task の ack が要る。
 test("受付判定(a)の限界: 根拠は status（推定）。delivery_basis に出る", async () => {
   const { mgr } = setup();
   const r = await mgr.send({ owner: "pm1", goal: "go" });
@@ -304,10 +304,39 @@ test("到達性: hello・受付確認などの失敗は failures を直接数え
   assert.equal(mgr.list()[0].reachability.reachable, false);
   assert.equal(mgr.list()[0].state, "unknown");
   assert.ok(changes.includes("pm1"));
-  // 応答で戻る
+  // hello が成功しても戻らない（cap に係る応答ではない）。status の成功で戻る
   st.down = false;
   mgr.noteReach(peerA, true);
+  assert.equal(mgr.list()[0].reachability.reachable, false);
+  await mgr.checkReachability();
   assert.equal(mgr.list()[0].reachability.reachable, true);
+  assert.equal(mgr.list()[0].reachability.failures, 0);
+});
+
+test("到達性(S1): hello は成功するが status に答えない server は、hello 成功で failures を戻されず、checkReachability の連続 2 回の失敗で到達不能。status の成功で復帰。last_error に原因", async () => {
+  const { mgr, st, clock } = setup();
+  await mgr.send({ owner: "pm1", goal: "go" });
+  st.down = true; // status だけ無応答
+  const okBefore = mgr.list()[0].reachability.last_ok_at;
+  for (let i = 0; i < 4; i++) {
+    mgr.noteReach(peerA, true); // hello は毎回成功
+    await mgr.checkReachability();
+    clock.t += 21_000;
+    if (i === 0) assert.equal(mgr.list()[0].reachability.reachable, true, "1 回目の失敗では到達不能にしない");
+    if (i >= 1) assert.equal(mgr.list()[0].reachability.reachable, false, "2 回目の確認の失敗で到達不能");
+  }
+  const v = mgr.list()[0];
+  assert.equal(v.state, "unknown");
+  assert.equal(v.cap_state, "unknown");
+  assert.match(v.reachability.last_error ?? "", /status に応答しない/);
+  assert.notEqual(v.reachability.last_ok_at, okBefore, "最後の応答の時刻は hello でも更新する");
+  assert.equal(mgr.summary("pm1").unreachable?.length, 1);
+  // status が答えれば戻る
+  st.down = false;
+  await mgr.checkReachability();
+  assert.equal(mgr.list()[0].reachability.reachable, true);
+  assert.equal(mgr.list()[0].reachability.failures, 0);
+  assert.equal(mgr.summary("pm1").unreachable, undefined);
 });
 
 test("到達性: 記録の無い server の hello 失敗は無視する", async () => {
