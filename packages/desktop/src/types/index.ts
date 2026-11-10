@@ -90,10 +90,12 @@ export interface Session {
   activity: "working" | "needs-input" | "idle" | "unknown" | null;
   /** When `activity` last changed (ISO string). null: none. */
   activityAt: string | null;
+  /** Work left on remote-caps (`session_list` `remote`). null: the center sent none (older center). */
+  remote: { running: number; waitingReply: number } | null;
 }
 
 /** The work state shown on the side menu (`unknown` is not shown). */
-export type SessionActivity = "working" | "needs-input" | "idle";
+export type SessionActivity = "working" | "needs-input" | "idle" | "remote-working";
 
 /** What the add dialog needs for the folder field (mirror of `session.rs::PathHints`). */
 export interface SessionPathHints {

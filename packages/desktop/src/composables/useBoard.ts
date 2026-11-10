@@ -31,6 +31,8 @@ export interface SessionGroup {
    * could be asked and the session is connected (stopped / starting / error keep their own display).
    */
   activity: SessionActivity | null;
+  /** Unanswered worker asks / approvals on this session's remote-caps (already counted in a "needs-input" activity). */
+  remoteWaiting: number;
   /** In-progress tasks (statuses between the first and the last). */
   working: Task[];
   /** Queued tasks (the first status, Cork's "Todo"). */
@@ -101,11 +103,26 @@ export function useBoard(dir: Ref<string | null>) {
     const first = statuses.value[0];
     const last = statuses.value[statuses.value.length - 1];
     const map = new Map<string, SessionGroup>();
+    // Priority: claude needs-input > remote waitingReply > claude working > remote running > idle.
+    // (A waiting thread is added in the task loop below and beats everything.)
+    // claude's own state and "remote running" need a connected session; an unanswered worker ask is shown whatever
+    // the state is, like a thread ask (it waits for a person even if the master-cap stopped).
     const centerActivity = (name: string): SessionActivity | null => {
       if (!centerList.value.reachable) return null;
       const r = centerList.value.sessions.find((x) => x.name === name);
-      if (!r || r.state !== "connected") return null;
-      return r.activity === "working" || r.activity === "needs-input" || r.activity === "idle" ? r.activity : null;
+      if (!r) return null;
+      const a = r.activity === "working" || r.activity === "needs-input" || r.activity === "idle" ? r.activity : null;
+      const connected = r.state === "connected";
+      if (connected && a === "needs-input") return "needs-input";
+      if ((r.remote?.waitingReply ?? 0) > 0) return "needs-input";
+      if (!connected) return null;
+      if (a === "working") return "working";
+      if ((r.remote?.running ?? 0) > 0) return "remote-working";
+      return a;
+    };
+    const remoteWaiting = (name: string): number => {
+      if (!centerList.value.reachable) return 0;
+      return centerList.value.sessions.find((x) => x.name === name)?.remote?.waitingReply ?? 0;
     };
     const group = (name: string) => {
       let g = map.get(name);
@@ -117,6 +134,7 @@ export function useBoard(dir: Ref<string | null>) {
           contextUsage: centerList.value.sessions.find((r) => r.name === name)?.contextUsage ?? null,
           instructions: centerList.value.sessions.find((r) => r.name === name)?.instructions ?? false,
           activity: centerActivity(name),
+          remoteWaiting: remoteWaiting(name),
           working: [],
           queued: [],
           done: [],
@@ -145,8 +163,9 @@ export function useBoard(dir: Ref<string | null>) {
 
   /** Sessions per work state (the side menu summary). */
   const activityCounts = computed<Record<SessionActivity, number>>(() => {
-    const c = { working: 0, "needs-input": 0, idle: 0 };
-    for (const g of sessions.value) if (g.activity) c[g.activity]++;
+    const c: Record<SessionActivity, number> = { working: 0, "needs-input": 0, idle: 0, "remote-working": 0 };
+    // "remote-working" counts as "working" in the summary (the key stays 0).
+    for (const g of sessions.value) if (g.activity) c[g.activity === "remote-working" ? "working" : g.activity]++;
     return c;
   });
 

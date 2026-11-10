@@ -193,6 +193,7 @@ export class MockBantou {
       instructions: (e.instructions as boolean | undefined) ?? false,
       activity: (e.activity as Session["activity"] | undefined) ?? null,
       activityAt: (e.activityAt as string | undefined) ?? null,
+      remote: (e.remote as Session["remote"] | undefined) ?? null,
     };
   }
 

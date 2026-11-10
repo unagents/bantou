@@ -83,14 +83,14 @@ watch(
 );
 // --- work state summary / filter (side menu) ---------------------------------
 
-const ACTIVITY_CHIPS: { key: SessionActivity; label: string; icon: string }[] = [
+const ACTIVITY_CHIPS: { key: Exclude<SessionActivity, "remote-working">; label: string; icon: string }[] = [
   { key: "working", label: "作業中", icon: "i-lucide-loader-circle" },
   { key: "needs-input", label: "判断待ち", icon: "i-lucide-message-circle-question" },
   { key: "idle", label: "待機", icon: "i-lucide-circle-check" },
 ];
 /** Narrow the rows to one work state (click again to release). Memory only. */
 const activityFilter = ref<SessionActivity | null>(null);
-function toggleFilter(k: SessionActivity) {
+function toggleFilter(k: Exclude<SessionActivity, "remote-working">) {
   activityFilter.value = activityFilter.value === k ? null : k;
 }
 // The filter releases itself when no session is in that state any more (otherwise the list would stay empty).
@@ -98,7 +98,11 @@ watch(activityCounts, (c) => {
   if (activityFilter.value && c[activityFilter.value] === 0) activityFilter.value = null;
 });
 const sideRows = computed(() =>
-  activityFilter.value ? sessions.value.filter((g) => g.activity === activityFilter.value) : sessions.value,
+  activityFilter.value
+    ? sessions.value.filter((g) =>
+        activityFilter.value === "working" ? g.activity === "working" || g.activity === "remote-working" : g.activity === activityFilter.value,
+      )
+    : sessions.value,
 );
 const selectedGroup = computed(() => sessions.value.find((g) => g.name === selectedName.value));
 
@@ -224,7 +228,7 @@ function onSessionCreated(name: string) {
                   data-testid="session-instructions-mark"
                   data-scope="side"
                 />
-                <SessionActivityMark v-if="g.activity" :activity="g.activity" class="ml-auto" />
+                <SessionActivityMark v-if="g.activity" :activity="g.activity" :waiting-reply="g.remoteWaiting" class="ml-auto" />
                 <ContextUsage :usage="g.contextUsage" percent-only :class="g.activity ? '' : 'ml-auto'" data-scope="side" />
               </button>
               <UButton
