@@ -379,8 +379,9 @@ master-cap が server の remote-cap に仕事を預けて待っている間も�
   - `running` = その session の cap（remotes の記録で `session` が一致）で、未完了の指示（`pending`）がある **server の数**（session × server で記録が 1 件なので、記録の数）。task の数ではない。
   - `waitingReply` = その session の cap の worker_report（kind `ask` / `approve`）で、worker_reply がまだ返っていない数。**動いている cap（pending あり、または state running）のものだけ**数える（止まった cap の未返答が残って「判断待ち」が消えなくなるのを避ける）。
 - 返答済みの印: worker_reply が server に受理されると、その cap の記録の中で、同じ `worker_id` の未返答の ask / approve の `worker_reports[].replied_at`（ISO）に時刻を入れる。`remotes.json` に保存されるので center 再起動後も保たれる。送れなかった（error）時は付けない。`remote_list` の `worker_reports` にも `replied_at` が出る。
+- 解消: 同じ cap の同じ `worker_id` から、未返答の ask / approve より後に progress 以外の report（done・新しい ask / approve。protocol に failed は無いが progress 以外なら同様）が来たら、前の未返答は返答なしで解消と見なし `worker_reports[].superseded_at`（ISO）を付けて `waitingReply` に数えない（保存される。`remote_list` にも出る）。progress・別 worker・別 cap の report では解消しない。
 - 変わった時だけ `GET /events` に `reason: "remote"`（`name` = session 名）を流す（受け手は `session_list` を取り直す）。記録の保存のたびに前回通知した集計と比べるので、task 送信・task_result・worker_report・worker_reply・完了判定・remote_delete のどれで変わっても 1 回だけ流れる。progress / done の report のように集計が変わらないものでは流さない。polling は増やしていない。
-- 限界: worker_reports は 1 つの cap で最新 20 件までなので、古い未返答の ask が progress 等で押し出されると数えなくなる。ask の後に同じ worker が別経路で進んだ（返答なしに done など）場合も未返答のまま残る（推測で消さない）。実際の server・desktop を繋いだ確認はしていない（unit test のみ）。
+- 限界: worker_reports は 1 つの cap で最新 20 件までなので、古い未返答の ask が progress 等で押し出されると数えなくなる。実際の server・desktop を繋いだ確認はしていない（unit test のみ）。
 
 ## 未決
 

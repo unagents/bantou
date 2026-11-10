@@ -20,5 +20,13 @@ src/remotes.ts / src/sessions.ts / src/events.ts / src/daemon.ts / README.md / t
 ## 未確認・限界
 - 実 server・desktop・実 center 常駐との結合は未確認（unit test のみ）。
 - worker_reports は 20 件上限。progress 等で押し出された古い未返答 ask は数えなくなる。
-- 返答なしで worker が先へ進んだ場合は未返答のまま残る（推測で消さない）。
 - 集計の再計算は persist ごとに全 session を走査（記録は少数の前提）。
+
+## 追加: 返答なしで先へ進んだ ask / approve の解消（superseded_at）
+- 規則: onWorkerReport で、同じ記録（= 同じ cap）の同じ worker_id の未返答（replied_at / superseded_at 無し）の ask / approve に、progress 以外の report（done・新しい ask / approve）が来たら `superseded_at`（center の時刻、ISO）を付ける。waitingReply は replied_at も superseded_at も無い ask / approve だけ数える。
+- progress・別 worker・別 cap(別記録)は解消しない。返答済み(replied_at)には付けない。
+- 注意: protocol の WorkerReportKind は progress / ask / approve / done の 4 種で failed は無い。条件を「progress 以外」にしてあるので、failed 相当が done で来る場合も、将来 kind が増えても解消になる。test は未知 kind "failed" でも確認。
+- 保存: worker_reports の一部として remotes.json に保存（再起動後も保たれる。test 済み）。remote_list の worker_reports にも出る。
+- SSE: 解消で集計が変わる時だけ persist 経由で reason "remote" が 1 回。変わらない時（既に解消済みの後の done など）は流れない。
+- 20 件上限との関係: 古い順に捨てるので、押し出された ask は記録ごと消え数えない(解消の有無に関係なく)。progress が 20 件続くと未返答の ask が押し出される限界は残る(上限のロジックは変えていない)。解消済みの ask が先に押し出される分には集計に影響しない。
+- テスト: test/remotes.test.ts に 4 件追加。

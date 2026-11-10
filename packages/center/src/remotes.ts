@@ -45,8 +45,14 @@ export const SETTLE_GRACE_MS = 15_000;
 /** status で追従する間隔（ms）。unknown の再試行・再起動後や cap 再開中の追従。 */
 export const PROBE_POLL_MS = 15_000;
 
-/** 記録に保存する worker_report。replied_at = ask / approve に worker_reply を送った時刻（ISO。無ければ未返答）。 */
-export type StoredWorkerReport = WorkerReportNotice & { replied_at?: string };
+/**
+ * 記録に保存する worker_report。replied_at = ask / approve に worker_reply を送った時刻（ISO。無ければ未返答）。
+ * superseded_at = 返答なしで、同じ cap の同じ worker から progress 以外の後続の report が来て解消と見なした時刻（ISO）。
+ */
+export type StoredWorkerReport = WorkerReportNotice & { replied_at?: string; superseded_at?: string };
+
+/** 返答待ちの ask / approve（返答済みでも解消済みでもない）。 */
+const isOpenAsk = (w: StoredWorkerReport): boolean => (w.kind === "ask" || w.kind === "approve") && w.replied_at === undefined && w.superseded_at === undefined;
 
 /** session ごとの remote の集計（session_list の `remote`）。 */
 export interface RemoteSummary {
@@ -423,7 +429,7 @@ export function createRemoteManager(opts: {
       if (r.session !== session) continue;
       if (r.pending.length > 0) running++;
       if (r.pending.length > 0 || r.state === "running") {
-        waitingReply += (r.worker_reports ?? []).filter((w) => (w.kind === "ask" || w.kind === "approve") && w.replied_at === undefined).length;
+        waitingReply += (r.worker_reports ?? []).filter(isOpenAsk).length;
       }
     }
     return { running, waitingReply };
@@ -1210,7 +1216,7 @@ export function createRemoteManager(opts: {
       if (reply.type === "error") throw new Error(reply.message);
       // この worker の未返答の ask / approve を返答済みにする（返答は worker に 1 つ届く。永続化される）
       const repliedAt = new Date().toISOString();
-      for (const w of rec.worker_reports ?? []) if (w.worker_id === worker_id && (w.kind === "ask" || w.kind === "approve") && w.replied_at === undefined) w.replied_at = repliedAt;
+      for (const w of rec.worker_reports ?? []) if (w.worker_id === worker_id && isOpenAsk(w)) w.replied_at = repliedAt;
       void persist();
       wake();
       log(`remote worker_reply: ${rec.remote_id} worker=${worker_id} server=${rec.serverName}`);
@@ -1222,6 +1228,11 @@ export function createRemoteManager(opts: {
       if (!r) {
         log(`worker_report を捨てる（記録が無い）: cap_id=${report.cap_id} worker=${report.worker_id} kind=${report.kind}`);
         return;
+      }
+      // 返答なしで同じ worker が先へ進んだ（progress 以外の後続の report）なら、前の未返答の ask / approve は解消。別 worker・別 cap（resolveRecord で別の記録）は対象外
+      if (report.kind !== "progress") {
+        const at = new Date().toISOString();
+        for (const w of r.worker_reports ?? []) if (w.worker_id === report.worker_id && isOpenAsk(w)) w.superseded_at = at;
       }
       (r.worker_reports ??= []).push(report);
       if (r.worker_reports.length > WORKER_REPORTS_MAX) r.worker_reports.splice(0, r.worker_reports.length - WORKER_REPORTS_MAX);
