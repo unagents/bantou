@@ -11,7 +11,33 @@ export const SERVER_NAME = "bantou-server";
  * agent-messenger protocol registration (messenger/protocol.json) used in `meta` of send / listPeers.
  * Not the body schema version (`bantou: 1`, PROTOCOL_VERSION). Keep in sync with messenger/protocol.json.
  */
-export const MESSENGER_PROTOCOL = { protocol: "bantou", version: "1.7.0" } as const;
+export const MESSENGER_PROTOCOL = { protocol: "bantou", version: "1.8.0" } as const;
+
+/**
+ * retire_server / retire_result exist from this protocol version. A server older than this ignores retire_server
+ * (an unknown command gets no reply), so a center must not send it there and must never read "no reply" as "retired".
+ * retire_server is a control command like update_server: a server accepts it whatever the sender's protocol version is.
+ */
+export const RETIRE_MIN_PROTOCOL = "1.8.0";
+
+/**
+ * Exit code a retired server leaves with (supervisor child -> server.exit -> launcher -> process).
+ * systemd: RestartPreventExitStatus lists it, so the unit is not restarted.
+ */
+export const RETIRE_EXIT_CODE = 76;
+
+/** Does a server that declares protocol `version` understand retire_server? Unknown / malformed version = false. */
+export function supportsRetire(version: string | undefined): boolean {
+  if (typeof version !== "string") return false;
+  const m = /^(\d+)\.(\d+)\.(\d+)/.exec(version);
+  const min = /^(\d+)\.(\d+)\.(\d+)/.exec(RETIRE_MIN_PROTOCOL);
+  if (!m || !min) return false;
+  for (let i = 1; i <= 3; i++) {
+    const d = Number(m[i]) - Number(min[i]);
+    if (d !== 0) return d > 0;
+  }
+  return true;
+}
 
 /**
  * hello / update_server (and their replies) exist from this protocol version. A server older than this
@@ -51,7 +77,8 @@ export type ServerCommandType =
   | "hello"
   | "update_server"
   | "task"
-  | "worker_reply";
+  | "worker_reply"
+  | "retire_server";
 
 export interface ServerCommandBase {
   /** Protocol version, always 1. */
@@ -210,7 +237,23 @@ export interface WorkerReplyCommand extends ServerCommandBase {
   text: string;
 }
 
+/**
+ * Retire the server: refuse new work, stop every cap / worker, unregister from the messenger, release the host lock and
+ * exit (supervisor and launcher with it; exit code RETIRE_EXIT_CODE so the OS service manager does not restart it).
+ * Reply: retire_result (sent before the server goes away), or error. Irreversible: the server writes
+ * <workspace>/server.retired and refuses to start again until that file is removed. Protocol 1.8.0.
+ * A server older than 1.8.0 ignores it without a reply (see RETIRE_MIN_PROTOCOL / supportsRetire).
+ */
+export interface RetireServerCommand extends ServerCommandBase {
+  type: "retire_server";
+  /** SERVER_ID_PATTERN. Optional. When given and different from the server's own server_id the server refuses (error, nothing is stopped). Peer names are all `bantou-server`, so a center should send it. */
+  server_id?: string;
+  /** Free text, logged and written to server.retired. */
+  reason?: string;
+}
+
 export type ServerCommand =
+  | RetireServerCommand
   | KickCapCommand
   | ResumeWorkerCommand
   | StopCapCommand
@@ -229,6 +272,7 @@ export type ServerReplyType =
   | "update_result"
   | "task_result"
   | "worker_reply_result"
+  | "retire_result"
   | "error";
 
 /** Runs still alive on the server. An update waits until all of them are 0. */
@@ -360,6 +404,43 @@ export interface WorkerReplyResultReply {
   accepted: true;
 }
 
+/** What the server stopped for a retire. */
+export interface RetireStopped {
+  caps: number;
+  workers: number;
+}
+
+/** How the server is run by the OS, as far as the server can tell from its own process. */
+export interface RetireService {
+  /** systemd / launchd = started by that manager; none = started by hand. */
+  manager: "systemd" | "launchd" | "none";
+  /** Unit name (systemd) or label (launchd). Absent for `none`. */
+  name?: string;
+  /** true = read from the running process (systemd cgroup / launchd env); false = the install-service.sh default name, not confirmed. */
+  detected?: boolean;
+}
+
+/**
+ * Reply to retire_server. The server is retiring: it exits shortly after sending this (exit_at), so the next
+ * message from it is its disappearance. Sending retire_server again meanwhile gets the same reply.
+ * `host_steps` = what an operator with root does on the host afterwards (the server cannot: it runs as an unprivileged user).
+ */
+export interface RetireResultReply extends ServerIdentityFields {
+  bantou: typeof PROTOCOL_VERSION;
+  type: "retire_result";
+  ok: true;
+  state: "retiring";
+  /** Runs that were stopped (caps and workers that were running). */
+  stopped: RetireStopped;
+  /** ISO 8601. When the server starts to exit (after the reply has had time to be pulled). */
+  exit_at: string;
+  /** Exit code the server leaves with (RETIRE_EXIT_CODE). */
+  exit_code: number;
+  /** 1..3 shell lines: remove the service unit, the OS user, the workspace. Values are shell-quoted. */
+  host_steps: string[];
+  service?: RetireService;
+}
+
 export interface CapResultReply extends RunOutcome {
   bantou: typeof PROTOCOL_VERSION;
   type: "cap_result";
@@ -445,6 +526,8 @@ export interface ErrorReply {
   code?: ErrorCode;
   /** true when the same command may be sent again later. */
   retryable?: boolean;
+  /** true = the server is retiring (retire_server accepted) and refuses this command for good. Protocol 1.8.0; an older center ignores it. */
+  retiring?: true;
 }
 
 /**
@@ -465,6 +548,7 @@ export type ServerReply =
   | UpdateResultReply
   | TaskResultReply
   | WorkerReplyResultReply
+  | RetireResultReply
   | ErrorReply;
 
 /** Liveness of one cap / worker as seen from its `claude -p` stream-json output. */
@@ -571,7 +655,8 @@ function isCommandType(v: unknown): v is ServerCommandType {
     v === "hello" ||
     v === "update_server" ||
     v === "task" ||
-    v === "worker_reply"
+    v === "worker_reply" ||
+    v === "retire_server"
   );
 }
 
@@ -706,9 +791,15 @@ export function isServerCommand(v: unknown): v is ServerCommand {
       return isTaskCommandBody(v);
     case "worker_reply":
       return isValidAgentId(v.cap_id) && isValidAgentId(v.worker_id) && nonEmptyString(v.text);
+    case "retire_server":
+      return (v.server_id === undefined || (typeof v.server_id === "string" && SERVER_ID_PATTERN.test(v.server_id))) && optPlainString(v.reason);
     default:
       return false;
   }
+}
+
+export function isRetireServerCommand(v: unknown): v is RetireServerCommand {
+  return isServerCommand(v) && v.type === "retire_server";
 }
 
 export function isTaskCommand(v: unknown): v is TaskCommand {
@@ -769,6 +860,19 @@ function isServerIdentity(v: Record<string, unknown>): boolean {
     optString(v.host) &&
     optString(v.user) &&
     optString(v.workspace)
+  );
+}
+
+function isCount(v: unknown): boolean {
+  return typeof v === "number" && Number.isInteger(v) && v >= 0;
+}
+
+function isRetireService(v: unknown): v is RetireService {
+  return (
+    isRecord(v) &&
+    (v.manager === "systemd" || v.manager === "launchd" || v.manager === "none") &&
+    optString(v.name) &&
+    (v.detected === undefined || typeof v.detected === "boolean")
   );
 }
 
@@ -878,6 +982,23 @@ export function isServerReply(v: unknown): v is ServerReply {
       );
     case "worker_reply_result":
       return v.ok === true && isValidAgentId(v.cap_id) && isValidAgentId(v.worker_id) && v.accepted === true;
+    case "retire_result":
+      return (
+        v.ok === true &&
+        v.state === "retiring" &&
+        isServerIdentity(v) &&
+        isRecord(v.stopped) &&
+        isCount(v.stopped.caps) &&
+        isCount(v.stopped.workers) &&
+        typeof v.exit_at === "string" &&
+        typeof v.exit_code === "number" &&
+        Number.isInteger(v.exit_code) &&
+        Array.isArray(v.host_steps) &&
+        v.host_steps.length >= 1 &&
+        v.host_steps.length <= 3 &&
+        v.host_steps.every((x) => typeof x === "string" && x.length > 0) &&
+        (v.service === undefined || isRetireService(v.service))
+      );
     case "error":
       return (
         v.ok === false &&
@@ -887,7 +1008,8 @@ export function isServerReply(v: unknown): v is ServerReply {
         (v.worker_id === undefined || isValidAgentId(v.worker_id)) &&
         (v.task_id === undefined || isValidAgentId(v.task_id)) &&
         (v.code === undefined || isErrorCode(v.code)) &&
-        (v.retryable === undefined || typeof v.retryable === "boolean")
+        (v.retryable === undefined || typeof v.retryable === "boolean") &&
+        (v.retiring === undefined || v.retiring === true)
       );
     default:
       return false;
