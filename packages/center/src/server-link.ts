@@ -689,7 +689,8 @@ export function createServerLink(opts: {
               );
               const a = new Set(rs.filter((x): x is string => x !== undefined));
               for (const [k, v] of dupChecks) if (nowMs() - v.at >= DUP_RECHECK_MS * 10) dupChecks.delete(k);
-              dupChecks.set(key, { at: nowMs(), alive: a });
+              // 誰も応答しなかった結果は保持しない（全員が一時的に無応答→復帰した時に、間隔の間エラーが残らない）
+              if (a.size > 0) dupChecks.set(key, { at: nowMs(), alive: a });
               return a;
             })().finally(() => dupInflight.delete(key));
             dupInflight.set(key, pr);

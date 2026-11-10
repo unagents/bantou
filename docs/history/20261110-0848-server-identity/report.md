@@ -163,3 +163,15 @@ branch: `feat/server-identity`。この節は worker w-id-server の担当。cen
 #### review 第2回後のテスト結果
 
 - center: typecheck エラー無し、test 484 pass / 0 fail。
+
+### review 第3回（HEAD a3221d7）の指摘と対応
+
+- H1 [high] 直した: a3221d7 で `packages/center/README.md` が 418 行 → 224 行に切り詰められていた（+1/-194）。「server の識別（server_id）」節の「識別の取得」以外の項目（記録・server の指定・表示・旧形式の移行・互換と更新の順序・downgrade・prune）と、その後の 13 節超が消えていた。意図した変更は「識別の取得」の 1 行（N1 の新仕様）だけ。
+  - 原因: 編集スクリプトの置換範囲の誤り。節の途中の文字列から終端の文字列を `indexOf` で探し、終端が見つからない（-1）場合を弾かず、その結果で文字列を切り取って以降を捨てた。
+  - 復元: `git show 231ae42:packages/center/README.md` を基にし、「識別の取得」の 1 行だけを a3221d7 の版へ差し替えた。ファイル全体は書き直していない。`git diff 231ae42 -- packages/center/README.md` は +1/-1、行数は 418。
+  - 再発防止: 編集スクリプトは置換位置が見つからない時に必ず投げる（範囲指定の終端も）。push 前に `git diff --stat origin/feat/server-identity..HEAD` で意図した範囲の差分だけか確認する。
+- N1 補足 [low] 直した: 誰も hello に答えなかった確認結果は 30 秒キャッシュしない（`alive.size > 0` の時だけ保持）。全員が一時的に無応答→復帰した場合に、間隔の間重複エラーが残らない。test 追加。README の識別の取得の 1 行を同じ内容に直した。
+
+#### review 第3回後のテスト結果
+
+- center: typecheck エラー無し、test 485 pass / 0 fail。

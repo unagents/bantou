@@ -528,3 +528,21 @@ test("review N2: 同じ peer を持つ 2 記録を restore で読み込んでも
   assert.match(String(recs.find((x) => x.server_id === SID_D)?.error ?? ""), /late-n2/);
   assert.doesNotMatch(String(recs.find((x) => x.server_id === SID_A)?.error ?? ""), /late-n2/);
 });
+
+// -- review 第3回 --
+
+test("review N1 補足: 全員が一時的に hello に答えなかった結果は保持しない。復帰後は間隔を待たず、答えた peer だけが選ばれる", async () => {
+  const c = new FakeClient();
+  c.peers = [lp("old-1", "lenovo"), lp("new-2", "lenovo")];
+  for (const id of ["old-1", "new-2"]) c.helloReplies.set(id, hello(idOf("srv-ffffffffff", "lenovo", "alice", "/w")));
+  let t = 7_000_000;
+  const link = linkWith(c, () => t);
+  await assert.rejects(link.selectPeer(), /同じ server_id/); // 識別を取り、両方が答える = 重複
+  t += DUP_RECHECK_MS; // 前の確認結果は古い
+  const orig = c.helloReplies;
+  c.helloReplies = new Map(); // 全員が一時的に無応答
+  await assert.rejects(link.selectPeer(), /同じ server_id/); // 誰も答えない = 落とさない
+  c.helloReplies = new Map([["new-2", orig.get("new-2")!]]); // new-2 が復帰（時刻は進めない）
+  assert.equal((await link.selectPeer()).id, "new-2", "無応答の結果が残らず、同じ時刻でも再確認される");
+  await link.close();
+});
