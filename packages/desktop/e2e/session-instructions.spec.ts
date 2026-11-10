@@ -7,6 +7,7 @@ type Mock = {
   centerSessions: Record<string, unknown>[];
   centerSettings: Record<string, Record<string, unknown>>;
   calls: { cmd: string; args?: Record<string, unknown> }[];
+  loginCalls: { tool: string; name: string; resume?: boolean }[];
 };
 
 /** Run `fn(mock)` in the page. `fn` is serialized: it must not capture anything. */
@@ -507,5 +508,53 @@ test.describe("output style", () => {
     await expect(page.getByTestId("add-dialog")).toBeHidden();
     const call = await mock(page, (m) => m.calls.find((c) => c.cmd === "create_session"));
     expect(call?.args).toEqual({ name: "pm-style", path: null, settings: { outputStyle: STYLE } });
+  });
+});
+
+test.describe("restart from the gear", () => {
+  test.use({ seed: boardSeed });
+  const gear = (page: Page, name: string) => page.locator(`[data-testid=session-settings-open][data-name="${name}"]`);
+
+  test("「再起動」: nothing to save, rc_stop then rc_start with resume; the dialog closes", async ({ page }) => {
+    await page.goto("/");
+    await gear(page, "careery").click();
+    const dlg = page.getByTestId("settings-dialog");
+    await expect(dlg.getByTestId("settings-restart")).toHaveText(/^再起動$/);
+    await expect(dlg.getByTestId("settings-save")).toBeDisabled();
+    await dlg.getByTestId("settings-restart").click();
+    await expect(dlg).toBeHidden();
+    expect(await mock(page, (m) => m.loginCalls)).toEqual([
+      { tool: "rc_stop", name: "careery" },
+      { tool: "rc_start", name: "careery", resume: true },
+    ]);
+    expect(await mock(page, (m) => m.calls.filter((c) => c.cmd === "center_call" && (c.args as { name: string }).name === "session_settings_update").length)).toBe(0);
+  });
+
+  test("「保存して再起動」: saves the settings to the center first, then restarts; an invalid form disables it", async ({ page }) => {
+    await page.goto("/");
+    await gear(page, "careery").click();
+    const dlg = page.getByTestId("settings-dialog");
+    await dlg.getByTestId("settings-instructions").fill("x".repeat(16_001));
+    await expect(dlg.getByTestId("settings-restart")).toBeDisabled();
+    await dlg.getByTestId("settings-instructions").fill(MULTI);
+    await expect(dlg.getByTestId("settings-restart")).toHaveText("保存して再起動");
+    await dlg.getByTestId("settings-restart").click();
+    await expect(dlg).toBeHidden();
+    expect(await mock(page, (m) => m.centerSettings)).toEqual({ careery: { instructions: MULTI } });
+    expect(await mock(page, (m) => m.loginCalls)).toEqual([
+      { tool: "rc_stop", name: "careery" },
+      { tool: "rc_start", name: "careery", resume: true },
+    ]);
+  });
+
+  test("a rename restarts on the center already: 「保存して再起動」 does not stop / start it again", async ({ page }) => {
+    await page.goto("/");
+    await gear(page, "careery").click();
+    const dlg = page.getByTestId("settings-dialog");
+    await dlg.getByTestId("settings-name").fill("career-2");
+    await dlg.getByTestId("settings-restart").click();
+    await expect(dlg).toBeHidden();
+    await expect(page.locator("[data-testid=session-settings-open][data-name=career-2]")).toBeVisible();
+    expect(await mock(page, (m) => m.loginCalls)).toEqual([]);
   });
 });
