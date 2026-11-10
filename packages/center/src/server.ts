@@ -29,8 +29,9 @@ export function createCenterServer(deps: {
   remotes: RemoteManager;
   follow?: Follow;
   /** center_info に出すシステム埋め込み指示の一覧。省略時は center に組み込みの部品（system-instructions.ts）。 */
-  login?: LoginFlow;
   systemInstructions?: { id: string; version: number; title: string }[];
+  /** session の再ログイン（pty 入力が要るので wrapper 経由の起動がある時だけ）。 */
+  login?: LoginFlow;
 }): McpServer {
   const server = new McpServer({ name: "bantou-center", version: packageVersion() });
   registerTools(server, { systemInstructions: deps.systemInstructions ?? describeSystemInstructions(), supervisor: deps.supervisor, link: deps.link, sessions: deps.sessions, remotes: deps.remotes, follow: deps.follow, login: deps.login, workspace: deps.config.workspace });

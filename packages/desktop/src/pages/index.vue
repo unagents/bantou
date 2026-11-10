@@ -355,7 +355,6 @@ function onLoggedIn(name: string) {
       @updated="onSessionUpdated"
     />
     <LoginDialog
-    <LoginDialog
       v-if="loginOpen && selectedGroup"
       v-model:open="loginOpen"
       :session="selectedGroup.name"

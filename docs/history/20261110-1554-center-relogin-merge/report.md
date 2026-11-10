@@ -54,3 +54,12 @@ host に bun / cargo が無い。npm 経路で実施。
 - cargo test（`session.rs` の test）は cargo のある環境で未確認。
 - `docs/design/center-tools.md` の二重化（develop 既存）。
 - 実際の `/login` 往復は実機のみ。
+
+## review 第1回（HEAD 3275427）の指摘と対応
+
+- [medium] `packages/desktop/src/pages/index.vue` の `<LoginDialog` 重複行を 1 個に修正。属性・イベント（`v-if` / `v-model:open` / `:session` / `:auth` / `:login-error` / `@done`）は feat/center-relogin の元の並びと一致することを確認。
+- [low] `packages/center/src/server.ts`: `login?: LoginFlow` を `systemInstructions` の下へ移し、`systemInstructions` の doc comment の対応を戻した。`login` に自前のコメントを付けた。
+- [low] `packages/center/README.md`: SessionInfo の旧行（`SessionInfo`: name, path, state…）を新行に統合した。`state` の値（stopped / starting / connected / error）を新行へ移し、情報は落としていない。
+- 直さない: `docs/design/center-tools.md` の前提〜A 節の二重は develop 由来のため、残課題のまま。
+
+再テスト: center tsc OK、test 519/519 pass。desktop `nuxt typecheck` exit 0、e2e 168/168 pass（login.spec 4 件含む）。`nuxt generate` の警告は chunk size / PLUGIN_TIMINGS / H3 import の 4 件で、重複タグ由来のものは無い（修正前の警告数は取っていないため、減少の比較はできていない）。

@@ -170,7 +170,7 @@ center は wrapper 経由の session（master-cap）を起動するたび（新�
 | `loginUrl` | `/login` が表示した認証 URL。`Login successful` か次の起動まで残る |
 | `loginError` | `/login` の失敗理由（`Invalid code` / `Couldn't save your login`）。`session_login` / `session_login_code` の開始と成功で消える |
 
-`SessionInfo` は `RcStatus` の `project`（`name` として）/ `path` / `state` / `pid` / `sessionUrl` / `startedAt` / `lastError?` / `auth` / `loginUrl` / `loginError` に `source`（`config` / `session`）を足したもの。
+`SessionInfo` は `RcStatus` の `project`（`name` として）/ `path` / `state` / `pid` / `sessionUrl` / `startedAt` / `lastError?` / `auth` / `loginUrl` / `loginError` に `source`（`config` / `session`）を足したもの。`state` は `stopped` / `starting` / `connected` / `error`。
 
 ### session（A）
 
@@ -197,8 +197,6 @@ center は wrapper 経由の session（master-cap）を起動するたび（新�
 - 通知: `auth` / `loginUrl` / `loginError` が変わると `GET /events` に `{"reason":"changed","name"}` を流す。desktop はそれで `session_list` を取り直し、該当 session に「要再ログイン」/「keychain ロック中」を出す。
 - `session_login`: Esc → `/login` → Enter（ログイン方法の先頭 = Claude account with subscription）を pty に打ち、`loginUrl` が付くまで待つ。`session_login_code`: コードを打ち、Enter は 300 ms 後に別送する（同じチャンクだと貼り付け扱いで Enter が落ちる。実測）。結果は `Login successful`（`ok: true`）/ `Invalid code` / `Couldn't save your login`（keychain ロック。ホストで解錠してから `session_login` からやり直す）。入力の間隔と待ち上限は `login.ts` の `DEFAULT_LOGIN_TIMINGS`。
 - 認証は同じホストの全 session で共有だが、他の session が新しい token を拾い直すかは未確認。desktop の再ログイン画面から `rc_stop` → `rc_start { resume: true }` で session を再起動できる。
-
-`SessionInfo`: `name`, `path`, `state`（`stopped` / `starting` / `connected` / `error`）, `pid`, `sessionUrl`, `startedAt`, `source`, `lastError?`。
 
 ### remote（B）
 
