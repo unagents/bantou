@@ -304,7 +304,7 @@ test("到達性: hello・受付確認などの失敗は failures を直接数え
   assert.equal(mgr.list()[0].reachability.reachable, false);
   assert.equal(mgr.list()[0].state, "unknown");
   assert.ok(changes.includes("pm1"));
-  // hello が成功しても戻らない（cap に係る応答ではない）。status の成功で戻る
+  // hello が成功しても戻らない（到達性の判定に使わない）。status の成功で戻る
   st.down = false;
   mgr.noteReach(peerA, true);
   assert.equal(mgr.list()[0].reachability.reachable, false);
@@ -313,7 +313,7 @@ test("到達性: hello・受付確認などの失敗は failures を直接数え
   assert.equal(mgr.list()[0].reachability.failures, 0);
 });
 
-test("到達性(S1): hello は成功するが status に答えない server は、hello 成功で failures を戻されず、checkReachability の連続 2 回の失敗で到達不能。status の成功で復帰。last_error に原因", async () => {
+test("到達性(S1): hello は成功するが status に答えない server は、hello 成功は到達性に使われず（failures・窓・last_ok_at とも不変）、checkReachability の連続 2 回の失敗で到達不能。status の成功で即復帰。last_error に原因", async () => {
   const { mgr, st, clock } = setup();
   await mgr.send({ owner: "pm1", goal: "go" });
   st.down = true; // status だけ無応答
@@ -329,7 +329,7 @@ test("到達性(S1): hello は成功するが status に答えない server は�
   assert.equal(v.state, "unknown");
   assert.equal(v.cap_state, "unknown");
   assert.match(v.reachability.last_error ?? "", /status に応答しない/);
-  assert.notEqual(v.reachability.last_ok_at, okBefore, "最後の応答の時刻は hello でも更新する");
+  assert.equal(v.reachability.last_ok_at, okBefore, "最後の応答の時刻は hello では更新しない（status 成功系の時刻のまま）");
   assert.equal(mgr.summary("pm1").unreachable?.length, 1);
   // status が答えれば戻る
   st.down = false;

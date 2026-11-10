@@ -381,7 +381,7 @@ export interface RemoteManager {
    * 発見から消えた server・無返信の server は失敗に数え、REACH_FAIL_THRESHOLD 回続くと到達不能（作業中の cap の state は unknown）。応答があれば戻る。
    */
   checkReachability(): Promise<void>;
-  /** follow の hello の応答の有無を到達性に反映する（ok=false は無返信・送信失敗）。記録の無い server は無視する。 */
+  /** follow の hello の失敗（ok=false: 無返信・送信失敗）を再確認の要求にする。hello の成功は到達性の判定に使わない（status 成功系だけで戻る）。記録の無い server は無視する。 */
   noteReach(peer: ServerPeer, ok: boolean, message?: string): void;
   /** worker_reply を server へ送る（owner を渡すとその session の cap だけが対象。remote_id 省略時は owner の cap）。版が合わない server へは送らず投げる。 */
   workerReply(input: { remote_id?: string; server?: string; worker_id: string; text: string; owner?: string }): Promise<{ remote_id: string; server: string; worker_id: string; accepted: true }>;
@@ -704,15 +704,6 @@ export function createRemoteManager(opts: {
       for (const x of recordsOfKey(key)) if (isActiveRec(x) && (inflight.get(x) ?? 0) === 0) schedule(x, 0);
     }
     wake();
-  };
-  /**
-   * hello の成功。最後の応答の時刻だけ更新し、failures と束ね窓の基準は戻さない（cap に係る応答ではない）。
-   * hello だけ答えて status に答えない server は、checkReachability の連続失敗で到達不能（cap の状態が分からない = unknown）になる。
-   */
-  const touchOkKey = (key: string): void => {
-    const h = health.get(key) ?? { failures: 0 };
-    h.lastOkAt = nowMs();
-    health.set(key, h);
   };
   /** server から応答が無かった（無返信・発見から消えた）。連続 reachThreshold 回で到達不能。 */
   const markFailKey = (key: string, message: string): void => {
@@ -1720,8 +1711,9 @@ export function createRemoteManager(opts: {
     noteReach(peer, ok, message) {
       const key = peer.server_id ?? peer.id;
       if (!records.some((x) => healthKeyOf(x) === key)) return;
-      if (ok) touchOkKey(key);
-      else suspectKey(key, message ?? "hello に答えない");
+      // hello の成功は到達性の判定に使わない（failures・束ね窓・last_ok_at・suspect に触れない）。hello は identity の学習と follow の peer 追従にだけ使う。
+      // 到達性は checkReachability（status）の成功だけで戻る
+      if (!ok) suspectKey(key, message ?? "hello に答えない");
     },
 
     conflictsWith(name, mode, oldName) {

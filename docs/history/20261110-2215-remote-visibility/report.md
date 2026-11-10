@@ -235,3 +235,10 @@ develop 4564c8e への rebase で衝突したのは README 2 件のみ。どち�
 
 - center: typecheck OK、`npm test` 572 件中 571 pass、1 fail = rc-orphan（環境起因、develop 単体でも同じ）。
 - desktop: typecheck OK、e2e 全件 220 pass・失敗 0（port 15900、簡易サーバー停止・解放確認済み）。
+
+## review 第2回の追加方針（M1 を厳しい方に確定）
+
+- **failures・束ね窓のリセットと reachable の復帰は、status 成功系（checkReachability の成功、activity、worker_report、task_result など cap に係る応答）だけで行う**。hello の成功は到達性の判定に一切使わない: failures・束ね窓・suspect・reachable に触れず、`reachability.last_ok_at` も更新しない（前節の「hello でも last_ok_at は更新」は取り消し）。hello は identity の学習と follow の peer 追従にだけ使う。`noteReach(ok=true)` は何もしない。
+- 遷移表の更新: hello 成功 → reachable・failures・last_ok_at とも不変。他は前節のとおり。
+- test（fake の時計）: status 失敗 + hello だけ成功を 4 周して、窓を空けた 2 回目の確認失敗で unreachable（state / cap_state unknown）、last_ok_at が hello で変わらない、status 成功で即 reachable に戻る。hello だけ失敗して status に答える server は数えない（既存）。
+- テスト結果（追加方針の対応後）: center typecheck OK、`npm test` 572 件中 571 pass、1 fail = rc-orphan（環境起因）。desktop typecheck OK、e2e 全件 220 pass・失敗 0（port 15910、簡易サーバー停止・解放確認済み）。
