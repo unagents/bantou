@@ -21,7 +21,7 @@
 ## テスト
 - desktop `nuxt typecheck`: error 0。
 - e2e（session-activity 9 + board 8 + context-usage 4）: 実行 21 件。初回の同時実行（typecheck と並走）で board の先頭 1 件が cold start の timeout で落ち、board 単独で再実行して 8/8 通過。session-activity は 9/9 通過（追加: remote running が idle の claude で「remote 作業中」・集計は作業中に数え chip は 3 つのまま・絞り込み、waitingReply で判断待ち＋tooltip と集計、優先順位と connected 外の扱いと旧 center、SSE reason "remote" で session_list が取り直される事＝クリック無しでイベントのみ）。
-- center: typecheck error 0、test 491/491（protocol を先に build）。
+- center: typecheck error 0、test 495/495（impl-center の追加 commit 55e4aa5 まで取り込んだ状態）（protocol を先に build）。
 - bun が無いので npx / esbuild shim で代替。
 - `cargo test`: cargo が無く **未実施**（追加した `remote_is_read_when_the_center_sends_it_and_none_otherwise` は未実行）。
 
