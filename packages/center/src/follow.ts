@@ -8,7 +8,7 @@ import {
 } from "@agent-hand/bantou-protocol";
 import type { Logger } from "./log.js";
 import type { Pair } from "./pair.js";
-import type { ServerLink, ServerPeer } from "./server-link.js";
+import { isTransportError, type ServerLink, type ServerPeer } from "./server-link.js";
 import { describeServer, identityOfReply, type ServerIdentity } from "./server-identity.js";
 
 /**
@@ -112,6 +112,8 @@ export function createFollow(opts: {
   lostAfterMs?: number;
   retryAfterMs?: number;
   now?: () => number;
+  /** hello の応答の有無を知らせる（remote の到達性に使う）。ok=false は center の側の失敗（無返信・送信失敗）。server の返した error は ok=true。 */
+  onReach?: (peer: ServerPeer, ok: boolean, message?: string) => void;
 }): Follow {
   const { link, pair, log } = opts;
   const now = opts.now ?? Date.now;
@@ -178,6 +180,8 @@ export function createFollow(opts: {
       return;
     }
     const hello = await link.hello(p);
+    if (hello.type === "error" && isTransportError(hello)) opts.onReach?.(p, false, hello.message);
+    else opts.onReach?.(p, true);
     if (hello.type !== "hello_result") {
       if (rec.entry.state === "updating") return; // 再起動中の取りこぼしは更新中のまま
       set(rec, { state: "unknown", detail: `版を確認できない: ${hello.type === "error" ? hello.message : "不明な返信"}` });

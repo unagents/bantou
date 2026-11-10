@@ -87,14 +87,18 @@ watch(
 );
 // --- work state summary / filter (side menu) ---------------------------------
 
-const ACTIVITY_CHIPS: { key: Exclude<SessionActivity, "remote-working">; label: string; icon: string }[] = [
+type ChipKey = Exclude<SessionActivity, "remote-working">;
+/** hideZero: shown only while at least one session is in that state (the three work states are always shown). */
+const ACTIVITY_CHIPS: { key: ChipKey; label: string; icon: string; hideZero?: boolean; cls?: string }[] = [
   { key: "working", label: "作業中", icon: "i-lucide-loader-circle" },
   { key: "needs-input", label: "判断待ち", icon: "i-lucide-message-circle-question" },
   { key: "idle", label: "待機", icon: "i-lucide-circle-check" },
+  { key: "remote-unreachable", label: "到達不能", icon: "i-lucide-server-off", hideZero: true, cls: "text-error" },
+  { key: "remote-lost", label: "lost", icon: "i-lucide-unplug", hideZero: true, cls: "text-error" },
 ];
 /** Narrow the rows to one work state (click again to release). Memory only. */
 const activityFilter = ref<SessionActivity | null>(null);
-function toggleFilter(k: Exclude<SessionActivity, "remote-working">) {
+function toggleFilter(k: ChipKey) {
   activityFilter.value = activityFilter.value === k ? null : k;
 }
 // The filter releases itself when no session is in that state any more (otherwise the list would stay empty).
@@ -203,13 +207,13 @@ function onLoggedIn(name: string) {
             title="session ごとの作業状態（押すと絞り込み）。ヘッダーの「返答待ち」は thread の件数"
           >
             <button
-              v-for="c in ACTIVITY_CHIPS"
+              v-for="c in ACTIVITY_CHIPS.filter((x) => !x.hideZero || activityCounts[x.key] > 0)"
               :key="c.key"
               type="button"
               class="flex items-center gap-1 rounded px-1.5 py-0.5 hover:bg-cork-elevated"
               :class="[
                 activityFilter === c.key ? 'bg-cork-elevated ring-1 ring-current' : '',
-                c.key === 'needs-input' && activityCounts[c.key] > 0 ? 'text-warning font-semibold' : 'text-cork-muted',
+                c.key === 'needs-input' && activityCounts[c.key] > 0 ? 'text-warning font-semibold' : c.cls ?? 'text-cork-muted',
               ]"
               :aria-pressed="activityFilter === c.key"
               :title="c.label"
@@ -252,7 +256,7 @@ function onLoggedIn(name: string) {
                   data-testid="side-auth"
                   :data-auth="g.auth"
                 />
-                <SessionActivityMark v-if="g.activity" :activity="g.activity" :waiting-reply="g.remoteWaiting" class="ml-auto" />
+                <SessionActivityMark v-if="g.activity" :activity="g.activity" :waiting-reply="g.remoteWaiting" :issues="g.remoteIssues" class="ml-auto" />
                 <ContextUsage :usage="g.contextUsage" percent-only :class="g.activity ? '' : 'ml-auto'" data-scope="side" />
               </button>
               <UButton

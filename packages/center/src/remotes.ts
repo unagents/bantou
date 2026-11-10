@@ -1,8 +1,9 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { z } from "zod";
 import {
   AGENT_ID_PATTERN,
   MODEL_PATTERN,
+  type AgentStatus,
   type CapResultReply,
   type ErrorReply,
   type StatusReply,
@@ -13,7 +14,7 @@ import {
 import type { ActivityStore, RemoteActivity } from "./activity.js";
 import { loadConfigSync, type ServerConfig } from "./config.js";
 import type { Logger } from "./log.js";
-import { matchServerPeers, type ServerLink, type ServerPeer, type TaskInput } from "./server-link.js";
+import { isTransportError, matchServerPeers, type ServerLink, type ServerPeer, type TaskInput } from "./server-link.js";
 import { ambiguousServerMessage, describeServer, duplicateServerIdMessage, hostOf, type ServerRef } from "./server-identity.js";
 import type { JsonListStore } from "./store.js";
 import { sessionCapId } from "./center-id.js";
@@ -47,6 +48,66 @@ export const SETTLE_GRACE_MS = 15_000;
 export const PROBE_POLL_MS = 15_000;
 
 /**
+ * remote_send が、server が task を受け付けたこと（status の cap に載る）を確かめるまで待つ上限（ms）。環境変数 BANTOU_REMOTE_ACK_TIMEOUT_MS で変えられる。
+ * server は task を受けると cap の state を running にする（既に実行中なら queued を増やす）ので、status の往復（通常 1 秒未満、上限 FOLLOW_TIMEOUT_MS=10 秒）を
+ * 数回やり直せて、cap の作成（workspace の準備）にも足りる長さ。これより長いと、呼び出し側の session が待たされすぎる。
+ */
+export const ACK_TIMEOUT_MS = 15_000;
+/** 受付の確認で status を取り直す間隔（ms）。 */
+export const ACK_POLL_MS = 1_000;
+/** 受け付けを確認できなかった task を、同じ指示の再送で送り直してよいと見なすまでの時間（ms）。それまでは再送せず、確認だけやり直す（server は task_id の重複を除かない）。 */
+export const RESEND_AFTER_MS = 10 * 60_000;
+/** server に届かないと見なす、連続した失敗（status の無返信・発見から消えた）の回数。1 回の取りこぼしで表示を揺らさない。 */
+export const REACH_FAIL_THRESHOLD = 2;
+/** server への到達の確認（status）の間隔（ms）。follow の hello（30 秒）と同じ。 */
+export const REACH_CHECK_MS = 30_000;
+/**
+ * 失敗を数える最小の間隔（ms）。server 単位で、最後に数えた失敗からこれ未満の失敗は 1 回に束ねる（1 回の通信の断・遅延で、hello・status・probe・受付確認が同時に失敗しても 1 回）。
+ * 失敗中の再確認の間隔でもある。環境変数 BANTOU_REMOTE_REACH_RETRY_MS で変えられる。連続 2 回で到達不能なので、実際の検出は止まってから 40〜60 秒後になる。
+ */
+export const REACH_RETRY_MS = 20_000;
+/** 失敗した経路（hello・受付確認など）が再確認を要求してから checkReachability を走らせるまでの待ち（ms）。同時に失敗した複数の経路の要求を 1 回にまとめる。 */
+export const REACH_REQUEST_DELAY_MS = 1_000;
+/** 環境変数 BANTOU_REMOTE_REACH_RETRY_MS（正の整数 ms）。無い・不正は既定。 */
+export function reachRetryFromEnv(env: NodeJS.ProcessEnv = process.env): number {
+  const v = Number(env.BANTOU_REMOTE_REACH_RETRY_MS);
+  return Number.isInteger(v) && v > 0 ? v : REACH_RETRY_MS;
+}
+
+/** 環境変数 BANTOU_REMOTE_ACK_TIMEOUT_MS（正の整数 ms）。無い・不正は既定。 */
+export function ackTimeoutFromEnv(env: NodeJS.ProcessEnv = process.env): number {
+  const v = Number(env.BANTOU_REMOTE_ACK_TIMEOUT_MS);
+  return Number.isInteger(v) && v > 0 ? v : ACK_TIMEOUT_MS;
+}
+
+/** task の送達状態。unsent = center の記録だけで messenger へ未送信 / sent = messenger に送り出した（server への到達は未確認） / observed = server への到達を観測した（server の ack ではない。根拠は delivery_basis）。task_id で確かめられない（status に task_id が出ない）ので accepted とは名乗らない。 */
+export type DeliveryState = "unsent" | "sent" | "observed";
+/** 観測の根拠。task_id = 自分の task_id の worker_report が届いた（確実）/ task_result = server が task の結果を返した（確実）/ status = 送る前から cap の負荷が変わったことを観測した推定（server は task に ack を返さない。cap が別の要因で動き直した場合の偽陽性が理論上ある）。 */
+export type DeliveryBasis = "task_id" | "status" | "task_result";
+/** cap の server 側の状態。unknown = server に届かない・まだ status も通知も無い。 */
+export type CapState = "running" | "idle" | "lost" | "unknown";
+
+/** server の到達性。last_ok_at = 最後に status / 通知が返った時刻（ISO。center の再起動後は最初の応答まで null）。 */
+export interface Reachability {
+  reachable: boolean;
+  last_ok_at: string | null;
+  /** 連続した失敗の回数（応答があれば 0）。REACH_FAIL_THRESHOLD に達すると reachable=false。 */
+  failures: number;
+  last_error?: string;
+}
+
+/** session の集計に載せる、到達不能な server・lost の cap の 1 件。 */
+export interface RemoteIssue {
+  /** 表示用の server（server_label）。 */
+  server: string;
+  remoteId: string;
+  /** 到達不能: 最後の応答の時刻（ISO、無ければ null）。 */
+  lastOkAt?: string | null;
+  /** lost: lost を受けた時刻（ISO）。 */
+  at?: string;
+}
+
+/**
  * 記録に保存する worker_report。replied_at = ask / approve に worker_reply を送った時刻（ISO。無ければ未返答）。
  * superseded_at = 返答なしで、同じ cap の同じ worker から progress 以外の後続の report が来て解消と見なした時刻（ISO）。
  */
@@ -61,6 +122,10 @@ export interface RemoteSummary {
   running: number;
   /** その session の cap の ask / approve で、worker_reply がまだ返っていない数（動いている cap のものだけ）。 */
   waitingReply: number;
+  /** server に届かない cap（作業中の指示がある、または state が running / unknown のもの）。無ければ省く。 */
+  unreachable?: RemoteIssue[];
+  /** server が lost と通知した cap（新しい task が受け付けられるまで）。届かない server の cap は unreachable の側に載る。無ければ省く。 */
+  lost?: RemoteIssue[];
 }
 
 /** 未完了の指示（完了したら消す）。通知先 = owner の session。 */
@@ -73,6 +138,27 @@ export interface PendingInstruction {
   prompt: string;
   /** この指示で送った task の task_id。 */
   task_id?: string;
+  /** 送達状態。無い（旧形式の記録）は sent として扱う。 */
+  delivery?: DeliveryState;
+  /** messenger に送り出した時刻（ISO）。 */
+  sent_at?: string;
+  /** server の受付を確認した時刻（ISO）。 */
+  observed_at?: string;
+  /** 受付の根拠。status = status の変化から推定（server の ack ではない） / task_result = server が task の結果を返した。 */
+  delivery_basis?: DeliveryBasis;
+  /** 同じ指示の再送を見分ける印（cap_id と task の中身の hash）。 */
+  fp?: string;
+  /** 送る直前の cap の状態（server の status）。受付の判定は、後の status がこれから変わったかで見る（server と center の時計は比べない）。 */
+  base?: AckBase;
+}
+
+/** task を送る直前の cap の状態。ahead = 送る時点で受付が未確認だった、この cap の先行する task の数（受付は ahead + 1 本分の増加を見るまで認めない）。 */
+export interface AckBase {
+  exists: boolean;
+  running: boolean;
+  queued: number;
+  started: string | null;
+  ahead?: number;
 }
 
 /**
@@ -119,12 +205,20 @@ export interface RemoteRecord {
   error?: string;
   /** 最新の失敗の時刻。 */
   error_at?: string;
+  /** server が cap を lost と通知した（実行中に server が落ちた等で実行が失われた）。新しい task が受け付けられる、または cap が動き直すまで残す。 */
+  cap_lost?: { at: string; error?: string };
   /** 未完了の指示（古い順）。完了したら消す。履歴は持たない。 */
   pending: PendingInstruction[];
 }
 
 /** remote_list が返す 1 件。通知がまだ無ければ activity は無い。 */
-export type RemoteView = Omit<RemoteRecord, "worker_reports"> & {
+export type RemoteView = Omit<RemoteRecord, "worker_reports" | "pending"> & {
+  /** 未完了の指示。delivery は送達状態（旧形式の記録は sent）。 */
+  pending: (PendingInstruction & { delivery: DeliveryState })[];
+  /** server の到達性（server_id 単位。同じ server の cap は同じ値）。到達不能の間、作業中の cap の state は unknown。 */
+  reachability: Reachability;
+  /** cap の server 側の状態。 */
+  cap_state: CapState;
   owners: string[];
   worker_reports: StoredWorkerReport[];
   activity?: RemoteActivity;
@@ -241,6 +335,16 @@ export interface RemoteSendResult {
   /** この指示の task_id（center が採番。task_result・worker_report と照合する）。 */
   task_id: string;
   worker_model?: string;
+  /** server が task を受け付けたことを確かめられたか。false の時、呼び出し側（tool）は isError にする。pending には送信済（または未送信）のまま残る。 */
+  delivered: boolean;
+  /** 送達状態（delivered=true は observed）。 */
+  delivery: DeliveryState;
+  /** 受付を確認した時刻（ISO。delivered=true の時）。 */
+  delivered_at?: string;
+  /** 受付の根拠（delivered=true の時）。status = status の変化からの推定 / task_result = server が結果を返した。 */
+  delivery_basis?: DeliveryBasis;
+  /** delivered=false の理由（届いていない旨）。 */
+  error?: string;
 }
 
 export interface RemoteSendInput {
@@ -272,6 +376,13 @@ export interface RemoteManager {
    * 返信（task_result）は待たず、running で返る。cap が実行中なら server 側で直列に待たされる。
    */
   send(input: RemoteSendInput): Promise<RemoteSendResult>;
+  /**
+   * 記録のある server 全てへ status を送り、到達性（最後の応答・連続失敗）と cap の状態を更新する。周期（reachCheckMs）でも走る。
+   * 発見から消えた server・無返信の server は失敗に数え、REACH_FAIL_THRESHOLD 回続くと到達不能（作業中の cap の state は unknown）。応答があれば戻る。
+   */
+  checkReachability(): Promise<void>;
+  /** follow の hello の失敗（ok=false: 無返信・送信失敗）を再確認の要求にする。hello の成功は到達性の判定に使わない（status 成功系だけで戻る）。記録の無い server は無視する。 */
+  noteReach(peer: ServerPeer, ok: boolean, message?: string): void;
   /** worker_reply を server へ送る（owner を渡すとその session の cap だけが対象。remote_id 省略時は owner の cap）。版が合わない server へは送らず投げる。 */
   workerReply(input: { remote_id?: string; server?: string; worker_id: string; text: string; owner?: string }): Promise<{ remote_id: string; server: string; worker_id: string; accepted: true }>;
   /** server から worker_report を受けた時に呼ぶ。記録に積み、未完了の指示の owner へ push する（progress は同じ worker から 60 秒に 1 回）。 */
@@ -397,11 +508,26 @@ export function createRemoteManager(opts: {
   onSummaryChange?: (session: string) => void;
   /** 確認できない到達先（peer）を消すまでの時間（既定 PEER_TTL_MS）。 */
   peerTtlMs?: number;
+  /** remote_send が受付を待つ上限（ms）。既定は環境変数 BANTOU_REMOTE_ACK_TIMEOUT_MS、無ければ ACK_TIMEOUT_MS。 */
+  ackTimeoutMs?: number;
+  /** 受付の確認で status を取り直す間隔（ms）。既定 ACK_POLL_MS。 */
+  ackPollMs?: number;
+  /** 受け付けを確認できなかった task を再送してよいと見なすまで（ms）。既定 RESEND_AFTER_MS。 */
+  resendAfterMs?: number;
+  /** 到達性の確認（status）の間隔（ms）。0 = 周期の確認をしない（checkReachability を直接呼ぶ）。既定 REACH_CHECK_MS。 */
+  reachCheckMs?: number;
+  /** 到達不能と見なす連続失敗の回数。既定 REACH_FAIL_THRESHOLD。 */
+  reachThreshold?: number;
+  /** 失敗を数える最小の間隔（ms）。この未満の失敗は 1 回に束ねる。既定は環境変数 BANTOU_REMOTE_REACH_RETRY_MS、無ければ REACH_RETRY_MS。 */
+  reachRetryMs?: number;
+  /** 再確認の要求から確認を走らせるまでの待ち（ms）。既定 REACH_REQUEST_DELAY_MS。 */
+  reachRequestDelayMs?: number;
   /** 完了通知の送り先。owner の session へ text を送る。省けば通知しない。 */
   notify?: (owner: string, text: string) => Promise<{ ok: true } | { ok: false; reason: string }>;
 }): RemoteManager {
   const { link, store, log, capId } = opts;
   const nowMs = opts.now ?? Date.now;
+  const reachRequestDelayMs = opts.reachRequestDelayMs ?? REACH_REQUEST_DELAY_MS;
   const peerTtlMs = opts.peerTtlMs ?? PEER_TTL_MS;
   const graceMs = opts.graceMs ?? SETTLE_GRACE_MS;
   const pollMs = opts.pollMs ?? PROBE_POLL_MS;
@@ -432,18 +558,43 @@ export function createRemoteManager(opts: {
 
   const has = (r: RemoteRecord): boolean => records.includes(r);
 
+  const ackTimeoutMs = opts.ackTimeoutMs ?? ackTimeoutFromEnv();
+  const ackPollMs = opts.ackPollMs ?? ACK_POLL_MS;
+  const resendAfterMs = opts.resendAfterMs ?? RESEND_AFTER_MS;
+  const reachCheckMs = opts.reachCheckMs ?? REACH_CHECK_MS;
+  const reachThreshold = opts.reachThreshold ?? REACH_FAIL_THRESHOLD;
+  const reachRetryMs = opts.reachRetryMs ?? reachRetryFromEnv();
+
+  /** server（server_id、無ければ peer id）ごとの到達性（メモリのみ）。 */
+  interface Health {
+    lastOkAt?: number;
+    failures: number;
+    /** 最後に失敗を数えた時刻。これから reachRetryMs 未満の失敗は数えない（成功でリセット）。 */
+    countedAt?: number;
+    lastError?: string;
+  }
+  const health = new Map<string, Health>();
+  /** 最後に取れた status の cap（記録ごと。cap が無ければ cap は undefined。メモリのみ）。cap_state の根拠。 */
+  const capSnap = new Map<RemoteRecord, { at: number; cap: AgentStatus | undefined }>();
+  /** task を server が断った・送れなかった理由（task_id → 理由。メモリのみ）。受付の待ちを早く終えるのに使う。 */
+  const taskFailures = new Map<string, { message: string; transport: boolean }>();
+
   /** 動いている cap（未完了の指示がある、または remote_list と同じ見え方 stateOf が running = 返信待ち・判定待ち・cap / worker が動いている）。止まった cap の未返答 ask は数えない（残り続けて「判断待ち」が消えなくなるのを避ける）。 */
   const summarize = (session: string): RemoteSummary => {
     let running = 0;
     let waitingReply = 0;
+    const unreachable: RemoteIssue[] = [];
+    const lost: RemoteIssue[] = [];
     for (const r of records) {
       if (r.session !== session) continue;
       if (r.pending.length > 0) running++;
       if (r.pending.length > 0 || stateOf(r) === "running") {
         waitingReply += (r.worker_reports ?? []).filter(isOpenAsk).length;
       }
+      if (unreachableActive(r)) unreachable.push({ server: labelOf(r), remoteId: r.remote_id, lastOkAt: lastOkIso(r) });
+      else if (r.cap_lost) lost.push({ server: labelOf(r), remoteId: r.remote_id, at: r.cap_lost.at });
     }
-    return { running, waitingReply };
+    return { running, waitingReply, ...(unreachable.length > 0 ? { unreachable } : {}), ...(lost.length > 0 ? { lost } : {}) };
   };
   /** 通知済みの集計（メモリのみ。session → "running/waitingReply"）。 */
   const notified = new Map<string, string>();
@@ -452,12 +603,39 @@ export function createRemoteManager(opts: {
     for (const r of records) if (r.session !== undefined) sessions.add(r.session);
     for (const s of sessions) {
       const v = summarize(s);
-      const key = `${v.running}/${v.waitingReply}`;
-      const prev = notified.get(s) ?? "0/0";
-      if (key === "0/0") notified.delete(s);
+      const key = `${v.running}/${v.waitingReply}/${(v.unreachable ?? []).map((i) => i.remoteId).join(",")}/${(v.lost ?? []).map((i) => i.remoteId).join(",")}`;
+      const prev = notified.get(s) ?? "0/0//";
+      if (key === "0/0//") notified.delete(s);
       else notified.set(s, key);
       if (key !== prev) opts.onSummaryChange?.(s);
     }
+  };
+
+  /** 記録の server の status を取る（cap_id 付き = 通知先の取り戻しも兼ねる）。応答の有無を到達性に数え、cap の状態と task の受付を反映する。取れなければ投げる。 */
+  const statusOfRec = async (r: RemoteRecord, count = false): Promise<StatusReply> => {
+    let peer: ServerPeer;
+    try {
+      peer = await findPeer(r);
+    } catch (e) {
+      (count ? markFail : suspect)(r, `status に応答しない: ${e instanceof Error ? e.message : String(e)}`);
+      throw e;
+    }
+    let reply: Awaited<ReturnType<ServerLink["statusOn"]>>;
+    try {
+      reply = await link.statusOn(peer, { cap_id: r.remote_id });
+    } catch (e) {
+      (count ? markFail : suspect)(r, `status に応答しない: ${e instanceof Error ? e.message : String(e)}`);
+      throw e;
+    }
+    if (reply.type === "error") {
+      // center の側の失敗（無返信・送信失敗）は届かない印。server の返した error（版の門の断りなど）は応答があったと数える
+      if (isTransportError(reply)) (count ? markFail : suspect)(r, `status に応答しない: ${reply.message}`);
+      else markOk(r);
+      throw new Error(reply.message);
+    }
+    markOk(r);
+    recordStatus(healthKeyOf(r), reply);
+    return reply;
   };
 
   /**
@@ -467,9 +645,7 @@ export function createRemoteManager(opts: {
   const announce = async (r: RemoteRecord, attempt = 0): Promise<void> => {
     if (!has(r)) return;
     try {
-      const peer = await findPeer(r);
-      const reply = await link.statusOn(peer, { cap_id: r.remote_id });
-      if (reply.type === "error") throw new Error(reply.message);
+      await statusOfRec(r);
       log(`通知先を server へ伝えた（status cap_id）: ${r.remote_id} server=${describeServer(refOf(r))}`);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -494,11 +670,145 @@ export function createRemoteManager(opts: {
     return a.agents.some((x) => (x.kind === "worker" || x.kind === "cap") && (x.state === "running" || x.state === "stalled"));
   };
 
+  // -- server の到達性 --
+
+  const healthKeyOf = (r: RemoteRecord): string => serverKeyOf(r);
+  const recordsOfKey = (key: string): RemoteRecord[] => records.filter((x) => healthKeyOf(x) === key);
+  const reachOf = (r: RemoteRecord): Reachability => {
+    const h = health.get(healthKeyOf(r));
+    const failures = h?.failures ?? 0;
+    return {
+      reachable: failures < reachThreshold,
+      last_ok_at: h?.lastOkAt !== undefined ? new Date(h.lastOkAt).toISOString() : null,
+      failures,
+      ...(h?.lastError !== undefined && failures > 0 ? { last_error: h.lastError } : {}),
+    };
+  };
+  const lastOkIso = (r: RemoteRecord): string | null => reachOf(r).last_ok_at;
+  /** 動いている（または動いているはずの）記録の server が、連続して応答しない。作業の終わった記録は、server が落ちても結果は変わらないので対象にしない。 */
+  const unreachableActive = (r: RemoteRecord): boolean => (health.get(healthKeyOf(r))?.failures ?? 0) >= reachThreshold && isActiveRec(r);
+
+  /** server から応答（status・通知）があった。落ちていた server が戻ったなら、動いていた記録の状態を status で取り直す。 */
+  const markOkKey = (key: string): void => {
+    const h = health.get(key) ?? { failures: 0 };
+    const wasDown = h.failures >= reachThreshold;
+    const changed = h.failures > 0;
+    h.lastOkAt = nowMs();
+    h.failures = 0;
+    delete h.countedAt;
+    delete h.lastError;
+    health.set(key, h);
+    if (!changed) return;
+    if (wasDown) {
+      log(`server に届くようになった: ${key}`);
+      for (const x of recordsOfKey(key)) if (isActiveRec(x) && (inflight.get(x) ?? 0) === 0) schedule(x, 0);
+    }
+    wake();
+  };
+  /** server から応答が無かった（無返信・発見から消えた）。連続 reachThreshold 回で到達不能。 */
+  const markFailKey = (key: string, message: string): void => {
+    const h = health.get(key) ?? { failures: 0 };
+    const before = h.failures;
+    const t = nowMs();
+    h.lastError = message;
+    // 同じ障害で hello・status・probe・受付確認が同時に失敗しても 1 回に束ねる（失敗は呼び出しの回数でなく時間で数える）
+    if (h.failures > 0 && h.countedAt !== undefined && t - h.countedAt < reachRetryMs) {
+      health.set(key, h);
+      return;
+    }
+    h.failures++;
+    h.countedAt = t;
+    health.set(key, h);
+    if (before < reachThreshold && h.failures >= reachThreshold) {
+      log(`server に届かない: ${key} 連続 ${h.failures} 回 ${message}`);
+      wake();
+    }
+  };
+  /**
+   * 到達性を疑う失敗（hello・probe・announce・受付確認・send の status）。failures は数えず、再確認の要求（checkReachability）だけを起こす。
+   * 到達不能への遷移は checkReachability が連続して失敗した時だけ（1 障害で複数経路が同時に失敗しても閾値に達しない）。
+   */
+  const suspectKey = (key: string, message: string): void => {
+    const h = health.get(key) ?? { failures: 0 };
+    h.lastError = message;
+    health.set(key, h);
+    requestReach();
+  };
+  const suspect = (r: RemoteRecord, message: string): void => suspectKey(healthKeyOf(r), message);
+  let reachRequest: ReturnType<typeof setTimeout> | undefined;
+  const requestReach = (): void => {
+    if (reachRequest !== undefined) return;
+    reachRequest = setTimeout(() => {
+      reachRequest = undefined;
+      void checkReachability();
+    }, reachRequestDelayMs);
+    reachRequest.unref?.();
+  };
+  const markOk = (r: RemoteRecord): void => markOkKey(healthKeyOf(r));
+  const markFail = (r: RemoteRecord, message: string): void => markFailKey(healthKeyOf(r), message);
+
+  /** cap にいる task の数（実行中 + 待ち）。 */
+  const loadOf = (cap: { state?: string; queued?: number }): number => (cap.state === "running" ? 1 : 0) + (cap.queued ?? 0);
+  /**
+   * 受付の判定（status の変化からの推定。server は task に ack を返さない）。送る前（base）から、先行する未確認の task の数（ahead）+ 1 本分、cap の負荷（実行中 + 待ち）が増えたら受付。
+   * 先行する未確認の task が無い時に限り、負荷が戻っていても last_started_at が変わっていれば（速く終わった）受付とする。先行がある時は曖昧なので認めない（届いたかもしれない、を届いたと言わない）。
+   * 限界: server は report 起因の resume でも cap を running にし last_started_at を更新するので、別の要因で cap が動き直した場合の偽陽性が理論上ある。
+   */
+  const observedBy = (st: StatusReply, r: RemoteRecord, p: PendingInstruction): boolean => {
+    const cap = st.caps.find((c) => c.id === r.remote_id);
+    if (!cap) return false;
+    const b = p.base;
+    if (!b) return cap.state === "running" || (cap.queued ?? 0) > 0;
+    const ahead = b.ahead ?? 0;
+    const baseLoad = b.exists ? (b.running ? 1 : 0) + b.queued : 0;
+    if (loadOf(cap) - baseLoad >= ahead + 1) return true;
+    if (ahead > 0) return false;
+    if (!b.exists) return true;
+    return (cap.last_started_at ?? null) !== b.started;
+  };
+  const baseOf = (st: StatusReply, id: string, ahead: number): AckBase => {
+    const cap = st.caps.find((c) => c.id === id);
+    return { exists: cap !== undefined, running: cap?.state === "running", queued: cap?.queued ?? 0, started: cap?.last_started_at ?? null, ahead };
+  };
+  const markObserved = (r: RemoteRecord, p: PendingInstruction, basis: DeliveryBasis): void => {
+    if (p.delivery === "observed") return;
+    p.delivery = "observed";
+    p.delivery_basis = basis;
+    p.observed_at = new Date().toISOString();
+    delete r.cap_lost;
+    log(`remote 受付: ${r.remote_id} task_id=${p.task_id ?? "-"} 根拠=${basis}`);
+    void persist();
+    wake();
+  };
+  /** 取れた status を、同じ server の記録に反映する（cap の状態）。受付の判定は awaitAck の直接の観測だけで行い、周期の status では pending を observed にしない（別の要因の変化を受付と取り違えるため）。 */
+  const recordStatus = (key: string, st: StatusReply): void => {
+    for (const x of recordsOfKey(key)) capSnap.set(x, { at: Date.now(), cap: st.caps.find((c) => c.id === x.remote_id) });
+  };
+
+  /** cap の server 側の状態。通知（activity）と status の新しい方を使う。 */
+  const capStateOf = (r: RemoteRecord): CapState => {
+    if (unreachableActive(r)) return "unknown";
+    if (r.cap_lost) return "lost";
+    const a = activityOf(r);
+    const cap = a?.agents.find((x) => x.kind === "cap" && x.id === r.remote_id);
+    const snap = capSnap.get(r);
+    const fromActivity = (): CapState => (cap!.state === "lost" ? "lost" : cap!.state === "running" || cap!.state === "stalled" ? "running" : "idle");
+    const fromStatus = (): CapState => (snap!.cap === undefined ? "unknown" : snap!.cap.state === "running" || (snap!.cap.queued ?? 0) > 0 ? "running" : "idle");
+    if (cap && snap) return a!.received_ms_ago <= Date.now() - snap.at ? fromActivity() : fromStatus();
+    if (cap) return fromActivity();
+    if (snap) return fromStatus();
+    return "unknown";
+  };
+
   /**
    * list と同じ見え方の state。返信待ちの指示がある間・cap_result の後の判定待ち（settling）の間・
    * cap の turn が終わっていても cap か worker が動いている間は running。
    */
   const stateOf = (r: RemoteRecord): RemoteState => {
+    // server に届かない間は、動いているはずの cap の状態が分からない（r.state は書き換えない。戻ったら自然に戻る）
+    if (unreachableActive(r)) return "unknown";
+    // server が lost と通知した cap は、返信待ちがあっても動いていない
+    if (r.cap_lost) return "failed";
     if (r.state === "running" || (inflight.get(r) ?? 0) > 0) return "running";
     if (r.state === "unknown") return "unknown";
     if (settling.has(r)) return "running";
@@ -531,7 +841,7 @@ export function createRemoteManager(opts: {
 
   const viewOf = (r: RemoteRecord): RemoteView => {
     const state = stateOf(r);
-    const base: RemoteView = { ...r, server_label: labelOf(r), pending: r.pending.map((p) => ({ ...p })), owners: ownersOf(r), worker_reports: (r.worker_reports ?? []).map((w) => ({ ...w })), state };
+    const base: RemoteView = { ...r, server_label: labelOf(r), reachability: reachOf(r), cap_state: capStateOf(r), pending: r.pending.map((p) => ({ ...p, delivery: p.delivery ?? ("sent" as const) })), owners: ownersOf(r), worker_reports: (r.worker_reports ?? []).map((w) => ({ ...w })), state };
     if (state === "running") delete base.finishedAt;
     const activity = activityOf(r);
     return { ...base, ...(activity ? { activity } : {}) };
@@ -635,10 +945,7 @@ export function createRemoteManager(opts: {
     const startedAt = Date.now();
     let st: StatusReply;
     try {
-      const peer = await findPeer(r);
-      const reply = await link.statusOn(peer, { cap_id: r.remote_id });
-      if (reply.type === "error") throw new Error(reply.message);
-      st = reply;
+      st = await statusOfRec(r);
     } catch (e) {
       if (!has(r) || (inflight.get(r) ?? 0) > 0) return;
       const msg = e instanceof Error ? e.message : String(e);
@@ -652,6 +959,7 @@ export function createRemoteManager(opts: {
     }
     if (!has(r) || (inflight.get(r) ?? 0) > 0) return;
     if (statusBusy(st, r)) {
+      delete r.cap_lost;
       settling.delete(r);
       statusIdleAt.delete(r);
       if (r.state !== "running") log(`remote 追従: ${r.remote_id} cap / worker が動いている（status）`);
@@ -1106,6 +1414,155 @@ export function createRemoteManager(opts: {
       );
   };
 
+  /** activity の通知を記録に反映する（応答があった = 到達できている。cap が lost なら記録に残す）。 */
+  const handleActivity = (r: RemoteRecord): void => {
+    markOk(r);
+    // 新しい activity が来たので、cap_result 後・再起動後の判定待ちは終わり。以後は activity で判定する
+    settling.delete(r);
+    const capAgent = activityOf(r)?.agents.find((x) => x.kind === "cap" && x.id === r.remote_id);
+    if (capAgent?.state === "lost") {
+      if (!r.cap_lost) {
+        r.cap_lost = { at: new Date().toISOString(), ...(capAgent.error ? { error: capAgent.error } : {}) };
+        r.error = `cap が lost（${capAgent.error ?? "server の再起動などで実行が失われた"}）`;
+        r.error_at = r.cap_lost.at;
+        r.state = "failed";
+        r.finishedAt = r.cap_lost.at;
+        unschedule(r);
+        log(`remote cap lost: ${r.remote_id} server=${describeServer(refOf(r))} ${capAgent.error ?? ""}`);
+        void persist();
+        // 実行が失われたので、未完了の指示は終わりとして owner へ知らせる
+        completeIfIdle(r);
+      }
+      return;
+    }
+    if (r.cap_lost && capAgent) {
+      // lost の後、cap が動き直した（新しい task）
+      delete r.cap_lost;
+      void persist();
+    }
+    // done / failed の記録は、新しい activity が判定の根拠になるので、猶予後の status 判定は要らない
+    if (r.state === "done" || r.state === "failed") unschedule(r);
+    if ((inflight.get(r) ?? 0) === 0 && (r.state === "running" || r.state === "unknown")) {
+      // 返信待ちでない running（再起動後・status 追従）と unknown は、activity で動いていなければ done に戻す
+      if (activityBusy(r)) {
+        r.state = "running";
+      } else {
+        r.state = "done";
+        r.finishedAt = new Date().toISOString();
+        unschedule(r);
+      }
+      if (r.error?.startsWith(STATUS_ERR)) delete r.error;
+      void persist();
+    }
+    completeIfIdle(r);
+  };
+
+  /** 同じ指示の見分け（cap_id と task の中身）。再送で二重に送らないために pending に持つ。 */
+  const fingerprintOf = (cid: string, input: RemoteSendInput): string =>
+    createHash("sha1")
+      .update(
+        JSON.stringify([cid, input.goal, input.repo ?? null, input.branch ?? null, input.deliverables ?? {}, input.verify ?? {}, input.constraints ?? [], input.workers ?? {}, input.worker_model ?? null]),
+      )
+      .digest("hex")
+      .slice(0, 16);
+
+  /** 非同期の途中で変わるので、型の絞り込みを避けて関数で読む。 */
+  const isObserved = (p: PendingInstruction): boolean => p.delivery === "observed";
+
+  const sleepMs = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+  /**
+   * server が task を受け付けるまで待つ（上限 ackTimeoutMs）。status を取り直し、cap が送る前から変わったら受付。
+   * task_result が返った・server が断った・送り出せなかった時は、その時点で終える。受け付けられたら true。
+   */
+  const awaitAck = async (r: RemoteRecord, p: PendingInstruction, peer: ServerPeer): Promise<boolean> => {
+    const startedAt = Date.now();
+    for (;;) {
+      if (isObserved(p)) return true;
+      if (p.task_id !== undefined && taskFailures.has(p.task_id)) return false;
+      const remaining = ackTimeoutMs - (Date.now() - startedAt);
+      if (remaining <= 0) return false;
+      try {
+        const reply = await Promise.race([link.statusOn(peer, { cap_id: r.remote_id }), sleepMs(remaining).then(() => undefined)]);
+        if (reply?.type === "status_result") {
+          markOk(r);
+          recordStatus(healthKeyOf(r), reply);
+          if (observedBy(reply, r, p)) {
+            markObserved(r, p, "status");
+            return true;
+          }
+        } else if (reply?.type === "error" && isTransportError(reply)) {
+          suspect(r, reply.message);
+        }
+      } catch (e) {
+        suspect(r, e instanceof Error ? e.message : String(e));
+      }
+      if (isObserved(p)) return true;
+      await sleepMs(Math.min(ackPollMs, Math.max(0, ackTimeoutMs - (Date.now() - startedAt))));
+    }
+  };
+
+  const sendResult = (r: RemoteRecord, p: PendingInstruction, peer: ServerPeer, ok: boolean, exists: boolean, workerModel: string | undefined, note: string | undefined): RemoteSendResult => {
+    const failure = p.task_id !== undefined ? taskFailures.get(p.task_id) : undefined;
+    const delivery: DeliveryState = p.delivery ?? "sent";
+    const error = ok
+      ? undefined
+      : failure
+        ? failure.transport
+          ? `task を送れなかった（server には届いていない）: ${failure.message}。pending に未送信（unsent）で残してある。再送してよい`
+          : `server が task を受け付けなかった: ${failure.message}`
+        : `${note ?? "task は送ったが、server が受け付けたことを確認できない"}（${Math.round(ackTimeoutMs / 1000)} 秒待った。届いていない可能性も、届いたが status に変化が出なかった可能性もある）。task は pending に ${delivery === "unsent" ? "未送信（unsent）" : "送信済（sent）"}で残っている。再送する前に remote_list で delivery を確認する（task_result が返る、または自分の task_id の worker_report が届けば observed になる。受付未確認の同じ指示は ${Math.round(resendAfterMs / 60_000)} 分は再送されない）`;
+    return {
+      remote_id: r.remote_id,
+      server: peer.server_id ?? peer.id,
+      ...(peer.server_id ? { server_id: peer.server_id } : {}),
+      peer: peer.id,
+      ...(hostOf(peer) ? { host: hostOf(peer) } : {}),
+      serverName: peer.name,
+      state: stateOf(r),
+      created: !exists,
+      task_id: p.task_id ?? "",
+      ...((workerModel ?? r.worker_model) ? { worker_model: (workerModel ?? r.worker_model)! } : {}),
+      delivered: ok,
+      delivery,
+      ...(ok && p.observed_at ? { delivered_at: p.observed_at } : {}),
+      ...(ok && p.delivery_basis ? { delivery_basis: p.delivery_basis } : {}),
+      ...(error ? { error } : {}),
+    };
+  };
+
+  /** 記録のある server それぞれへ status を送り、到達性と cap の状態を更新する。 */
+  let reachRun: Promise<void> | undefined;
+  const checkReachability = (): Promise<void> => {
+    // 同時に呼ばれても 1 回の確認にまとめる
+    reachRun ??= runReachCheck().finally(() => {
+      reachRun = undefined;
+    });
+    return reachRun;
+  };
+  const runReachCheck = async (): Promise<void> => {
+    const reps = new Map<string, RemoteRecord>();
+    for (const r of records) if (!reps.has(healthKeyOf(r))) reps.set(healthKeyOf(r), r);
+    await Promise.all(
+      [...reps.values()].map(async (r) => {
+        try {
+          await statusOfRec(r, true);
+        } catch (e) {
+          log(`server の確認に失敗: ${r.remote_id} server=${describeServer(refOf(r))} ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }),
+    );
+  };
+  let reachTimer: ReturnType<typeof setTimeout> | undefined;
+  const scheduleReach = (): void => {
+    if (reachCheckMs <= 0) return;
+    const failing = [...health.values()].some((h) => h.failures > 0 && h.failures < reachThreshold);
+    reachTimer = setTimeout(() => {
+      void checkReachability().finally(scheduleReach);
+    }, failing ? Math.min(reachRetryMs, reachCheckMs) : reachCheckMs);
+    reachTimer.unref?.();
+  };
+
   return {
     async restore() {
       restoring = true;
@@ -1114,6 +1571,7 @@ export function createRemoteManager(opts: {
       } finally {
         restoring = false;
       }
+      if (reachTimer === undefined) scheduleReach();
     },
 
     async send(input) {
@@ -1125,14 +1583,49 @@ export function createRemoteManager(opts: {
       // protocol の版が合わない・更新待ちの server へは、記録を作らず isError で返す（session が後で再送できる）
       const blocked = link.gate?.(peer, "task");
       if (blocked) throw new Error(blocked.message);
-      return serial(peer.server_id ?? peer.id, async () => {
+      // 送信までを server ごとに直列にし、受付の確認（最大 ackTimeoutMs）は直列の外で待つ（他の session の送信を待たせない）
+      const finish = await serial<() => Promise<RemoteSendResult>>(peer.server_id ?? peer.id, async () => {
         // cap は session × server に 1 つ。cap_id は center-id と session 名から決まる。無ければ記録を作り、cap は server が最初の task で作る
         // 既存の記録があればその remote_id（session の改名後も cap_id は変えない）
         let rec = findRecord(peer, input.owner, live);
         const cid = rec?.remote_id ?? sessionCapId(capId, input.owner);
-        const st = await link.statusOn(peer, { cap_id: cid });
-        if (st.type === "error") throw new Error(`server の cap を確かめられない: ${st.message}`);
+        const healthKey = peer.server_id ?? peer.id;
+        let st: Awaited<ReturnType<ServerLink["statusOn"]>>;
+        try {
+          st = await link.statusOn(peer, { cap_id: cid });
+        } catch (e) {
+          suspectKey(healthKey, e instanceof Error ? e.message : String(e));
+          throw e;
+        }
+        if (st.type === "error") {
+          if (isTransportError(st)) suspectKey(healthKey, st.message);
+          else markOkKey(healthKey);
+          throw new Error(`server の cap を確かめられない: ${st.message}`);
+        }
+        markOkKey(healthKey);
         const exists = st.caps.some((c) => c.id === cid);
+        const fp = fingerprintOf(cid, input);
+        // 同じ指示を、受け付けを確認できないまま再び送ろうとしている: 送り直さない（server は task_id の重複を除かないので二重に実行される）。確認だけやり直す
+        // 未確認 = 受付が確認されておらず、送り出した（または送り出し中の）task。送り出せなかった task（unsent のまま失敗）は含めない（server に届いていないので再送してよく、受付の基準にも数えない）
+        const unconfirmed = (p: PendingInstruction): boolean =>
+          p.task_id !== undefined &&
+          p.delivery !== "observed" &&
+          Date.now() - Date.parse(p.at) < resendAfterMs &&
+          ((p.delivery ?? "sent") === "sent" || (rec !== undefined && inflightTasks.get(rec)?.has(p.task_id) === true));
+        const dup = rec?.pending.find((p) => p.fp === fp && unconfirmed(p));
+        if (rec && dup) {
+          recordStatus(healthKeyOf(rec), st);
+          log(`remote 再送しない（前の送信の受付が未確認）: ${cid} task_id=${dup.task_id}`);
+          const dupRec = rec;
+          return async () => {
+            const ok = await awaitAck(dupRec, dup, peer);
+            return sendResult(dupRec, dup, peer, ok, exists, undefined, "前に送った同じ指示の受付を確認できない（再送はしていない）");
+          };
+        }
+        // 先行する未確認の task が、今の status で見えているなら受付済みにする（直接の観測）。見えないものは後から届くかもしれないので、基準（ahead）に数える
+        if (rec) for (const p of rec.pending) if (unconfirmed(p) && observedBy(st, rec, p)) markObserved(rec, p, "status");
+        // 先行する未確認の task の数（受付は、その分も含めて cap の負荷が増えるまで認めない）
+        const ahead = rec ? rec.pending.filter(unconfirmed).length : 0;
         // 新規の cap: 指定 > config。既存の cap: worker_model は指定された時だけ送る（server が cap の既定として記憶する）
         const cfgModels = exists ? {} : serverModels(peer, input.server);
         const workerModel = input.worker_model ?? cfgModels.worker_model;
@@ -1144,11 +1637,13 @@ export function createRemoteManager(opts: {
         }
         syncRecord(rec, peer);
         consolidate();
+        recordStatus(healthKeyOf(rec), st);
         // cap を作る時は、記録も作った時の値にする
         if (!exists && !workerModel) delete rec.worker_model;
         if (workerModel) rec.worker_model = workerModel;
         const target = rec;
-        target.pending.push({ at: now, owner: input.owner, prompt: input.goal.slice(0, PROMPT_HEAD_MAX), task_id: taskId });
+        const entry: PendingInstruction = { at: now, owner: input.owner, prompt: input.goal.slice(0, PROMPT_HEAD_MAX), task_id: taskId, delivery: "unsent", fp, base: baseOf(st, cid, ahead) };
+        target.pending.push(entry);
         target.state = "running";
         delete target.finishedAt;
         settling.delete(target);
@@ -1161,6 +1656,21 @@ export function createRemoteManager(opts: {
         const settle = (res: { ok: boolean; text: string; error?: string }, kind: "cap_result" | "error" | "transport", taskResult?: TaskResultReply): void => {
           inflight.set(target, Math.max(0, (inflight.get(target) ?? 1) - 1));
           inflightTasks.get(target)?.delete(taskId);
+          if (kind === "cap_result") {
+            // task_result が返った = server が受け付けて実行した
+            markObserved(target, entry, "task_result");
+            markOk(target);
+          } else if (kind === "error") {
+            // server の返した error（task を断った）。応答はあった
+            taskFailures.set(taskId, { message: res.error ?? "失敗", transport: false });
+            markOk(target);
+          } else if (entry.delivery === "unsent") {
+            // messenger へ送り出す前に失敗した: server には何も届いていない。pending には未送信（unsent）のまま残す（再送は止めない）
+            taskFailures.set(taskId, { message: res.error ?? "送信できなかった", transport: true });
+            log(`remote 送信できなかった（pending に unsent で残す）: ${cid} task_id=${taskId} ${res.error ?? ""}`);
+          } else {
+            taskFailures.set(taskId, { message: res.error ?? "返信が来ない", transport: true });
+          }
           applyResult(target, res, kind, taskResult);
           log(`remote 結果: ${cid} task_id=${taskId} state=${stateOf(target)}`);
         };
@@ -1176,23 +1686,34 @@ export function createRemoteManager(opts: {
           workers: input.workers ?? {},
           ...(workerModel ? { worker_model: workerModel } : {}),
         };
-        void link.taskOn(peer, cmd).then(
-          (reply) => settle(resultOf(reply), reply.type === "task_result" ? "cap_result" : "error", reply.type === "task_result" ? reply : undefined),
+        const onSent = (): void => {
+          if (entry.delivery !== "unsent") return;
+          entry.delivery = "sent";
+          entry.sent_at = new Date().toISOString();
+          void persist();
+          wake();
+        };
+        void link.taskOn(peer, cmd, { onSent }).then(
+          (reply) => settle(resultOf(reply), reply.type === "task_result" ? "cap_result" : reply.type === "error" && isTransportError(reply) ? "transport" : "error", reply.type === "task_result" ? reply : undefined),
           (e: unknown) => settle({ ok: false, text: "", error: e instanceof Error ? e.message : String(e) }, "transport"),
         );
-        return {
-          remote_id: cid,
-          server: peer.server_id ?? peer.id,
-          ...(peer.server_id ? { server_id: peer.server_id } : {}),
-          peer: peer.id,
-          ...(hostOf(peer) ? { host: hostOf(peer) } : {}),
-          serverName: peer.name,
-          state: "running" as const,
-          created: !exists,
-          task_id: taskId,
-          ...(target.worker_model ? { worker_model: target.worker_model } : {}),
+        // 受け付けられたことを確かめてから返す（server は task に ack を返さないので、status の cap の変化で見る）。直列の外で待つ。次の送信の基準は ahead（未確認の task の数）で補う
+        return async () => {
+          const ok = await awaitAck(target, entry, peer);
+          return sendResult(target, entry, peer, ok, exists, workerModel, undefined);
         };
       });
+      return finish();
+    },
+
+    checkReachability,
+
+    noteReach(peer, ok, message) {
+      const key = peer.server_id ?? peer.id;
+      if (!records.some((x) => healthKeyOf(x) === key)) return;
+      // hello の成功は到達性の判定に使わない（failures・束ね窓・last_ok_at・suspect に触れない）。hello は identity の学習と follow の peer 追従にだけ使う。
+      // 到達性は checkReachability（status）の成功だけで戻る
+      if (!ok) suspectKey(key, message ?? "hello に答えない");
     },
 
     conflictsWith(name, mode, oldName) {
@@ -1283,6 +1804,12 @@ export function createRemoteManager(opts: {
         log(`worker_report を捨てる（記録が無い）: cap_id=${report.cap_id} worker=${report.worker_id} kind=${report.kind}`);
         return;
       }
+      markOk(r);
+      // 自分の task_id の report が届いた = その task を server が受けている（確実な根拠）
+      if (report.task_id !== undefined) {
+        const hit = r.pending.find((x) => x.task_id === report.task_id);
+        if (hit) markObserved(r, hit, "task_id");
+      }
       // 返答なしで同じ worker が先へ進んだ（progress 以外の後続の report）なら、前の未返答の ask / approve は解消。別 worker・別 cap（resolveRecord で別の記録）は対象外
       if (report.kind !== "progress") {
         const at = new Date().toISOString();
@@ -1323,6 +1850,7 @@ export function createRemoteManager(opts: {
       const id = reply.cap_id;
       const rec = id === undefined ? undefined : resolveRecord(id, fromId);
       if (!rec) return false;
+      markOk(rec);
       // 返信待ちがある間（inflight）はここへ来る返信も待ちに照合されるはずなので、取り違えを避けて触らない。
       // ただし task_id が付いていて、待ちの task_id のどれとも違う（過去の task の遅れた task_result・error）なら反映する
       const taskId = reply.type === "task_result" || reply.type === "error" ? reply.task_id : undefined;
@@ -1369,25 +1897,20 @@ export function createRemoteManager(opts: {
 
     onActivity(id, fromId) {
       const r = resolveRecord(id, fromId);
-      if (r) {
-        // 新しい activity が来たので、cap_result 後・再起動後の判定待ちは終わり。以後は activity で判定する
-        settling.delete(r);
-        // done / failed の記録は、新しい activity が判定の根拠になるので、猶予後の status 判定は要らない
-        if (r.state === "done" || r.state === "failed") unschedule(r);
-        if ((inflight.get(r) ?? 0) === 0 && (r.state === "running" || r.state === "unknown")) {
-          // 返信待ちでない running（再起動後・status 追従）と unknown は、activity で動いていなければ done に戻す
-          if (activityBusy(r)) {
-            r.state = "running";
-          } else {
-            r.state = "done";
-            r.finishedAt = new Date().toISOString();
-            unschedule(r);
-          }
-          if (r.error?.startsWith(STATUS_ERR)) delete r.error;
-          void persist();
-        }
-        completeIfIdle(r);
+      if (!r && fromId !== undefined && records.some((x) => x.remote_id === id)) {
+        // server が再登録して新しい peer id から届いた（識別が未取得で、同じ cap_id の記録が複数ありどれか決められない）: hello で識別を取ってから 1 回だけ解決し直す
+        void livePeers().then(
+          () => {
+            const again = resolveRecord(id, fromId);
+            if (again) handleActivity(again);
+            else log(`activity を捨てる（記録を決められない）: cap_id=${id} from=${fromId}`);
+            wake();
+          },
+          () => wake(),
+        );
+        return;
       }
+      if (r) handleActivity(r);
       wake();
     },
 

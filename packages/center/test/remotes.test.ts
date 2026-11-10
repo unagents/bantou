@@ -34,6 +34,8 @@ function setup(over: Partial<ServerLink> = {}, activity?: ActivityStore, notify?
   const stops: { peer: ServerPeer; cmd: unknown }[] = [];
   /** server ごとの cap の有無（status_result.caps）。 */
   const caps = new Map<string, string[]>();
+  /** cap ごとに受けた task の数（status の last_started_at に出す）。 */
+  const taskCount = new Map<string, number>();
   let peers = [peerA, peerB];
   const link = {
     peers: async () => peers,
@@ -47,14 +49,17 @@ function setup(over: Partial<ServerLink> = {}, activity?: ActivityStore, notify?
       bantou: 1,
       type: "status_result",
       ok: true,
-      caps: (caps.get(peer.id) ?? []).map((id) => ({ kind: "cap", id })),
+      // task を受けるたびに last_started_at が変わる（server が cap を起動する）。受付はこの変化で判定される
+      caps: (caps.get(peer.id) ?? []).map((id) => ({ kind: "cap", id, state: "idle", queued: 0, last_started_at: `s${taskCount.get(id) ?? 0}` })),
       workers: [],
     }),
-    taskOn: (peer: ServerPeer, cmd: Record<string, unknown>) =>
+    taskOn: (peer: ServerPeer, cmd: Record<string, unknown>, hooks?: { onSent?: () => void }) =>
       new Promise((resolve) => {
         kicks.push({ peer, cmd, resolve });
         // server は task で cap を作る（次の status には載る）
         caps.set(peer.id, [...new Set([...(caps.get(peer.id) ?? []), cmd.cap_id as string])]);
+        taskCount.set(cmd.cap_id as string, (taskCount.get(cmd.cap_id as string) ?? 0) + 1);
+        hooks?.onSent?.();
       }),
     stopCapOn: async (peer: ServerPeer, cmd: unknown) => {
       stops.push({ peer, cmd });
@@ -65,7 +70,7 @@ function setup(over: Partial<ServerLink> = {}, activity?: ActivityStore, notify?
     ...over,
   } as unknown as ServerLink;
   const store = createJsonListStore<RemoteRecord>(join(dir, "remotes.json"), () => {});
-  const mgr = createRemoteManager({ link, store, log: () => {}, capId: CENTER, graceMs: GRACE, pollMs: POLL, ...(servers ? { servers } : {}), ...(activity ? { activity } : {}), ...(notify ? { notify } : {}), ...extra });
+  const mgr = createRemoteManager({ link, store, log: () => {}, capId: CENTER, graceMs: GRACE, pollMs: POLL, ackTimeoutMs: 300, ackPollMs: 10, reachCheckMs: 0, ...(servers ? { servers } : {}), ...(activity ? { activity } : {}), ...(notify ? { notify } : {}), ...extra });
   return { mgr, kicks, stops, store, caps, setPeers: (p: ServerPeer[]) => (peers = p) };
 }
 /** テストでは猶予・追従間隔を短くする（本番は 15 秒）。 */
@@ -103,7 +108,8 @@ test("send: task を送る（goal のみなら deliverables {} / verify {} / con
   const { mgr, kicks } = setup({}, undefined, undefined, servers);
   const r = await mgr.send({ owner: "pm1", goal: "go" });
   assert.match(r.task_id, /^[A-Za-z0-9_-]+$/);
-  assert.deepEqual(r, { remote_id: CAP, server: "id-a", peer: "id-a", host: "host-a", serverName: "bantou-server", state: "running", created: true, task_id: r.task_id, worker_model: "haiku" });
+  assert.deepEqual(r, { remote_id: CAP, server: "id-a", peer: "id-a", host: "host-a", serverName: "bantou-server", state: "running", created: true, task_id: r.task_id, worker_model: "haiku", delivered: true, delivery: "observed", delivered_at: r.delivered_at, delivery_basis: "status" });
+  assert.match(r.delivered_at ?? "", /^\d{4}-\d\d-\d\dT/);
   assert.equal(kicks.length, 1);
   assert.equal(kicks[0].peer.id, "id-a");
   assert.deepEqual(kicks[0].cmd, { cap_id: CAP, task_id: r.task_id, goal: "go", deliverables: {}, verify: {}, constraints: [], workers: {}, worker_model: "haiku" });
@@ -366,14 +372,14 @@ test("remote_list の形: server ごとに 1 件。state・最新の result / er
   const { mgr, kicks } = setup();
   await mgr.send({ owner: "pm1", goal: "one" });
   const [r] = mgr.list();
-  assert.deepEqual(Object.keys(r).sort(), ["createdAt", "owners", "peer", "peer_seen_at", "pending", "remote_id", "server", "serverHost", "serverName", "server_label", "session", "state", "worker_reports"]);
+  assert.deepEqual(Object.keys(r).sort(), ["cap_state", "createdAt", "owners", "peer", "peer_seen_at", "pending", "reachability", "remote_id", "server", "serverHost", "serverName", "server_label", "session", "state", "worker_reports"]);
   assert.deepEqual(r.owners, ["pm1"]);
   kicks[0].resolve(ok("R"));
   await tick();
   mgr.onActivity(CAP);
   await tick();
   const [d] = mgr.list();
-  assert.deepEqual(Object.keys(d).sort(), ["createdAt", "finishedAt", "owners", "peer", "peer_seen_at", "pending", "remote_id", "result", "result_at", "server", "serverHost", "serverName", "server_label", "session", "state", "task_result", "worker_reports"]);
+  assert.deepEqual(Object.keys(d).sort(), ["cap_state", "createdAt", "finishedAt", "owners", "peer", "peer_seen_at", "pending", "reachability", "remote_id", "result", "result_at", "server", "serverHost", "serverName", "server_label", "session", "state", "task_result", "worker_reports"]);
   assert.deepEqual([d.state, d.result, d.pending], ["done", "R", []]);
 });
 
@@ -390,7 +396,8 @@ test("未完了の指示の prompt は goal の先頭 200 文字だけ。task �
 test("送信自体の失敗（server に届かない reject）は failed でなく unknown。status が取れたら戻り、完了を通知する", async () => {
   const n = notifier();
   let down = false;
-  const { mgr } = setup({ taskOn: async () => { throw new Error("link down"); }, statusOn: async () => { if (down) throw new Error("no peer"); return { bantou: 1, type: "status_result", ok: true, caps: [{ kind: "cap", id: CAP, state: "idle" }], workers: [] } as never; } }, undefined, n.notify);
+  let sent = false;
+  const { mgr } = setup({ taskOn: async (_p: ServerPeer, _c: unknown, h?: { onSent?: () => void }) => { h?.onSent?.(); sent = true; throw new Error("link down"); }, statusOn: async () => { if (down) throw new Error("no peer"); return { bantou: 1, type: "status_result", ok: true, caps: [{ kind: "cap", id: CAP, state: "idle", queued: 0, last_started_at: sent ? "s1" : null }], workers: [] } as never; } }, undefined, n.notify);
   await mgr.send({ owner: "pm1", goal: "p" });
   down = true; // 送信後は status も取れない
   await tick();
@@ -960,7 +967,8 @@ test("猶予後の status 判定: worker が running なら完了にせず追従
 
 test("remote_wait: unknown の間は返らず待ち、status が取れて done になれば返る。timeout なら unknown のまま返す", async () => {
   let down = false;
-  const { mgr } = setup({ taskOn: async () => { throw new Error("link down"); }, statusOn: async () => { if (down) throw new Error("no peer"); return statusOf("idle"); } });
+  let sent = false;
+  const { mgr } = setup({ taskOn: async (_p: ServerPeer, _c: unknown, h?: { onSent?: () => void }) => { h?.onSent?.(); sent = true; throw new Error("link down"); }, statusOn: async () => { if (down) throw new Error("no peer"); const s = statusOf("idle") as { caps: Record<string, unknown>[] }; s.caps = s.caps.map((c) => ({ ...c, queued: 0, last_started_at: sent ? "s1" : null })); return s as never; } });
   await mgr.send({ owner: "pm1", goal: "p" });
   down = true;
   await tick();
@@ -1089,7 +1097,7 @@ test("send: worker_model の指定（新規の cap）。指定が config より�
   const servers = cfgServers([{ name: "s1", peer: "bantou-server", model: "opus", workerModel: "haiku" }]);
   const { mgr, kicks } = setup({}, undefined, undefined, servers);
   const r = await mgr.send({ owner: "pm1", goal: "go", worker_model: "claude-haiku-4-5" });
-  assert.deepEqual(r, { remote_id: CAP, server: "id-a", peer: "id-a", host: "host-a", serverName: "bantou-server", state: "running", created: true, task_id: r.task_id, worker_model: "claude-haiku-4-5" });
+  assert.deepEqual(r, { remote_id: CAP, server: "id-a", peer: "id-a", host: "host-a", serverName: "bantou-server", state: "running", created: true, task_id: r.task_id, worker_model: "claude-haiku-4-5", delivered: true, delivery: "observed", delivered_at: r.delivered_at, delivery_basis: "status" });
   assert.equal(kicks[0].cmd.worker_model, "claude-haiku-4-5");
   assert.equal(mgr.list()[0].worker_model, "claude-haiku-4-5");
 });
@@ -1321,7 +1329,7 @@ test("restore: 旧形式の running と未完了の指示（history 形式）は
   await mgr.restore();
   const r = mgr.list()[0];
   assert.equal(r.remote_id, "r-0a1b2c3d4e");
-  assert.deepEqual(r.pending, [{ at: "t1", owner: "pm1", prompt: "open one" }]);
+  assert.deepEqual(r.pending, [{ at: "t1", owner: "pm1", prompt: "open one", delivery: "sent" }]);
   assert.equal(stops.length, 0);
 });
 
@@ -1398,7 +1406,8 @@ test("restore: running の記録は状態の追従の status が cap_id 付き�
   await sleep(20);
   assert.deepEqual(calls, [CAP]); // probe の 1 回だけ（announce と二重にしない）
   await mgr.send({ owner: "pm1", goal: "x" });
-  assert.deepEqual(calls, [CAP, CAP]);
+  // send は status を cap_id 付きで取り（受付の確認の取り直しも同じ）
+  assert.ok(calls.length >= 2 && calls.every((c) => c === CAP));
 });
 
 test("restore: 履歴を持っていた版の cap の記録は、未完了の指示だけ引き継いで history を捨てる", async () => {
@@ -1415,7 +1424,7 @@ test("restore: 履歴を持っていた版の cap の記録は、未完了の指
   await mgr.restore();
   const r = mgr.list()[0];
   assert.equal("history" in r, false);
-  assert.deepEqual(r.pending, [{ at: "t3", owner: "pm2", prompt: "open one" }]);
+  assert.deepEqual(r.pending, [{ at: "t3", owner: "pm2", prompt: "open one", delivery: "sent" }]);
 });
 
 test("restore: 不正な remote_id の記録は読み飛ばす", async () => {

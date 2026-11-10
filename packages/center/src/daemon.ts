@@ -105,7 +105,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   // desktop のビルドと組になる版。違う server には更新を指示し、版が揃うまで指示を送らない
   const pair = resolvePair({ warn: log });
   log(`組の版: server=${pair.server ?? "(不明、版合わせは無効)"} protocol=${pair.protocol}`);
-  const follow = createFollow({ link, pair, log });
+  const follow = createFollow({ link, pair, log, onReach: (peer, ok, message) => remotes.noteReach(peer, ok, message) });
   link.setGate((peer, command) => follow.gate(peer, command));
   // session / remote の保存先は config と同じ dir（config の projects には書かない）
   const stateDir = dirname(resolve(configPath));

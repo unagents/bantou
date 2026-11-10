@@ -80,6 +80,11 @@ export interface ServerInfo extends ServerIdentity {
   /** serverPeer の識別（server_id / host / user / workspace）。その peer から hello_result / status_result で学んだものだけ（未学習・旧 server は無い）。 */
 }
 
+/** taskOn の途中経過。onSent = messenger が task を送り出した（broker が受け取った）時に 1 回呼ぶ。 */
+export interface TaskHooks {
+  onSent?: () => void;
+}
+
 export type KickCapInput = Omit<KickCapCommand, "bantou" | "type">;
 export type ResumeWorkerInput = Omit<ResumeWorkerCommand, "bantou" | "type">;
 export type StopCapInput = Omit<StopCapCommand, "bantou" | "type">;
@@ -132,7 +137,7 @@ export interface ServerLink {
   /** 指定 peer へ kick_cap を送り、返信（cap_result / error）まで待つ。 */
   kickCapOn(peer: ServerPeer, cmd: KickCapInput): Promise<CapResultReply | ErrorReply>;
   /** 指定 peer へ task を送り、返信（task_result / error）まで待つ。同じ task_id の task_result が後から重ねて届く分は onLateReply へ渡る。 */
-  taskOn(peer: ServerPeer, cmd: TaskInput): Promise<TaskResultReply | ErrorReply>;
+  taskOn(peer: ServerPeer, cmd: TaskInput, hooks?: TaskHooks): Promise<TaskResultReply | ErrorReply>;
   /** 指定 peer へ worker_reply を送り、返信（worker_reply_result / error）を待つ（FOLLOW_TIMEOUT_MS で切る）。 */
   workerReplyOn(peer: ServerPeer, cmd: WorkerReplyInput): Promise<WorkerReplyResultReply | ErrorReply>;
   /**
@@ -176,6 +181,8 @@ export interface ServerLink {
 type ReplyKind = "cap_result" | "task_result" | "worker_reply_result" | "worker_result" | "stop_result" | "status_result" | "hello_result" | "update_result" | "retire_result";
 
 interface Pending {
+  /** 送り先の peer id（発見で分かった時のみ）。status の返信を、別 server の status と取り違えないために使う。 */
+  peer?: string;
   kind: ReplyKind;
   command: ServerCommandType;
   /** cap_id / worker_id（worker_reply は cap_id:worker_id）。status は無し。 */
@@ -286,6 +293,20 @@ const errorReply = (message: string, command?: ServerCommandType, extra: { code?
   ...(extra.code ? { code: extra.code } : {}),
   ...(extra.retryable !== undefined ? { retryable: extra.retryable } : {}),
 });
+
+/**
+ * center の側で作った「server に届かない・返信が来ない」error（server が返したものではない）。到達性の判定に使う。
+ * ErrorReply の形のまま、印だけ足す。
+ */
+const transportError = (message: string, command?: ServerCommandType): ErrorReply => {
+  const e = errorReply(message, command);
+  // 列挙されない印にする（JSON や返信の形には出さない）
+  Object.defineProperty(e, "transport", { value: true, enumerable: false });
+  return e;
+};
+
+/** r が transportError か（server の返信ではなく、タイムアウト・接続失敗・送信失敗・中断）。 */
+export const isTransportError = (r: { type: string }): boolean => r.type === "error" && (r as { transport?: unknown }).transport === true;
 
 /** protocol の版が合わない server への指示を断る error。 */
 export function versionMismatchError(declared: string | undefined, command: ServerCommandType): ErrorReply {
@@ -444,6 +465,8 @@ export function createServerLink(opts: {
     // hello を知らない旧 server の error: 識別なしとして扱う（再送しない）
     else if (r.type === "error" && r.command === "hello" && m.from_id !== undefined) learnIdentity(m.from_id, {});
     let target: Pending | undefined;
+    // status は cap_id を付けないと server を区別できない（cap_id は session ごとに全 server で同じ）ので、送り先の peer と返信の送信元で照合する
+    const fromPeer = (p: Pending): boolean => p.kind !== "status_result" || p.peer === undefined || m.from_id === undefined || p.peer === m.from_id;
     if (r.type === "cap_result") {
       target = slot.pending.find((p) => p.kind === "cap_result" && p.key === r.cap_id);
     } else if (r.type === "task_result") {
@@ -455,7 +478,7 @@ export function createServerLink(opts: {
     } else if (r.type === "stop_result") {
       target = slot.pending.find((p) => p.kind === "stop_result" && p.key === r.cap_id);
     } else if (r.type === "status_result") {
-      target = slot.pending.find((p) => p.kind === "status_result");
+      target = slot.pending.find((p) => p.kind === "status_result" && fromPeer(p));
     } else if (r.type === "hello_result" || r.type === "update_result" || r.type === "retire_result") {
       // 複数 server へ同時に送るので、送り先の peer id（from_id）で照合する
       target = slot.pending.find((p) => p.kind === r.type && (m.from_id === undefined || p.key === m.from_id));
@@ -478,7 +501,7 @@ export function createServerLink(opts: {
       );
     } else {
       target = r.command
-        ? slot.pending.find((p) => p.command === r.command)
+        ? slot.pending.find((p) => p.command === r.command && fromPeer(p))
         : slot.pending[0];
     }
     if (!target) {
@@ -530,7 +553,7 @@ export function createServerLink(opts: {
   const dropClient = async (slot: Slot, reason = "接続を作り直したため中断"): Promise<void> => {
     slot.connected = false;
     slot.peerId = null;
-    for (const p of [...slot.pending]) settle(slot, p, errorReply(reason, p.command));
+    for (const p of [...slot.pending]) settle(slot, p, transportError(reason, p.command));
     slot.unsubscribe?.();
     slot.unsubscribe = null;
     const c = slot.client;
@@ -587,7 +610,7 @@ export function createServerLink(opts: {
     kind: ReplyKind,
     key: string | undefined,
     payload: object,
-    opts: { target?: Target; timeoutMs?: number; taskId?: string } = {},
+    opts: { target?: Target; timeoutMs?: number; taskId?: string; onSent?: () => void; releaseOnSend?: boolean } = {},
   ): Promise<R | ErrorReply> => {
     let slot: Slot;
     try {
@@ -596,17 +619,29 @@ export function createServerLink(opts: {
       return Promise.reject(e);
     }
     const command = KIND_COMMAND[kind];
+    // 送り出した（または送れずに終わった）印。releaseOnSend の指示は、これで次の同じ key の指示を通す
+    let markSent!: () => void;
+    const sentP = new Promise<void>((r) => {
+      markSent = r;
+    });
     const run = async (): Promise<R | ErrorReply> => {
-      if (closed) return errorReply("center 終了", command);
+      try {
+        return await runInner();
+      } finally {
+        markSent();
+      }
+    };
+    const runInner = async (): Promise<R | ErrorReply> => {
+      if (closed) return transportError("center 終了", command);
       let client: LinkClient;
       try {
         client = await ensure(slot);
       } catch (e) {
-        return errorReply(`server に接続できない: ${server} (${(e as Error).message})`, command);
+        return transportError(`server に接続できない: ${server} (${(e as Error).message})`, command);
       }
-      if (closed) return errorReply("center 終了", command);
+      if (closed) return transportError("center 終了", command);
       const target = opts.target ?? (await resolveTarget(slot, client));
-      if (closed) return errorReply("center 終了", command);
+      if (closed) return transportError("center 終了", command);
       // 版の門: protocol の版が合わない server、更新待ちの server へは送らない（hello / update_server は別）
       const blocked = gateOf({ id: target.peerId ?? target.to, ...(target.declared ? { version: target.declared } : {}) }, command);
       if (blocked) {
@@ -619,22 +654,31 @@ export function createServerLink(opts: {
           kind,
           command,
           key,
+          ...(target.peerId !== undefined ? { peer: target.peerId } : {}),
           ...(opts.taskId !== undefined ? { taskId: opts.taskId } : {}),
           resolve: resolve as (r: unknown) => void,
           timer: setTimeout(() => {
             log(`タイムアウト: server=${server} type=${command}${key ? ` id=${key}` : ""}`);
-            settle(slot, p, errorReply(`タイムアウト (${timeoutMs}ms)`, command));
+            settle(slot, p, transportError(`タイムアウト (${timeoutMs}ms)`, command));
           }, timeoutMs),
         };
         slot.pending.push(p);
         client
           .send(target.to, JSON.stringify({ bantou: PROTOCOL_VERSION, type: command, ...payload }), "pull", target.meta)
           .then(
-            () => log(`指示送信: server=${server} to=${target.to} type=${command}${key ? ` id=${key}` : ""} meta=${target.meta.protocol}@${target.meta.version}`),
+            () => {
+              log(`指示送信: server=${server} to=${target.to} type=${command}${key ? ` id=${key}` : ""} meta=${target.meta.protocol}@${target.meta.version}`);
+              markSent();
+              try {
+                opts.onSent?.();
+              } catch (e) {
+                log(`送信後の処理に失敗: server=${server} type=${command} ${e instanceof Error ? e.message : String(e)}`);
+              }
+            },
             (e: unknown) => {
               // 送信失敗は接続が壊れている可能性が高いので、次回使用時に作り直す
               if (slot.client === client) slot.connected = false;
-              settle(slot, p, errorReply(`送信失敗: ${e instanceof Error ? e.message : String(e)}`, command));
+              settle(slot, p, transportError(`送信失敗: ${e instanceof Error ? e.message : String(e)}`, command));
             },
           );
       });
@@ -643,9 +687,11 @@ export function createServerLink(opts: {
     const chainKey = `${kind}:${key}`;
     const prev = slot.chains.get(chainKey) ?? Promise.resolve();
     const next = prev.then(run, run);
-    slot.chains.set(chainKey, next);
-    void next.finally(() => {
-      if (slot.chains.get(chainKey) === next) slot.chains.delete(chainKey);
+    // task は返信（task_result = cap の完了）を待たずに次の task を送り出せる（server が cap ごとに直列に実行する）。他の指示は返信まで直列
+    const tail: Promise<unknown> = opts.releaseOnSend ? sentP : next;
+    slot.chains.set(chainKey, tail);
+    void tail.finally(() => {
+      if (slot.chains.get(chainKey) === tail) slot.chains.delete(chainKey);
     });
     return next;
   };
@@ -815,8 +861,8 @@ export function createServerLink(opts: {
     },
     kickCapOn: (peer, cmd) =>
       request<CapResultReply>(discoveryName, "cap_result", cmd.cap_id, cmd, { target: peerTarget(peer) }),
-    taskOn: (peer, cmd) =>
-      request<TaskResultReply>(discoveryName, "task_result", cmd.cap_id, cmd, { target: peerTarget(peer), taskId: cmd.task_id }),
+    taskOn: (peer, cmd, hooks) =>
+      request<TaskResultReply>(discoveryName, "task_result", cmd.cap_id, cmd, { target: peerTarget(peer), taskId: cmd.task_id, releaseOnSend: true, ...(hooks?.onSent ? { onSent: hooks.onSent } : {}) }),
     workerReplyOn: (peer, cmd) =>
       request<WorkerReplyResultReply>(discoveryName, "worker_reply_result", `${cmd.cap_id}:${cmd.worker_id}`, cmd, { target: peerTarget(peer), timeoutMs: FOLLOW_TIMEOUT_MS }),
     statusOn: (peer, opts) =>
@@ -863,7 +909,7 @@ export function createServerLink(opts: {
       closed = true;
       clearInterval(watcher);
       for (const slot of slots.values()) {
-        for (const p of [...slot.pending]) settle(slot, p, errorReply("center 終了", p.command));
+        for (const p of [...slot.pending]) settle(slot, p, transportError("center 終了", p.command));
         await dropClient(slot);
       }
     },
