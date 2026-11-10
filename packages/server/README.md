@@ -119,6 +119,7 @@ center から server を外す指示（protocol 1.8.0、`docs/protocol.md` の `
     logs/model.json                  指定されたモデル（`{"model":"...","worker_model":"..."}`、指定が無ければ作らない）
     logs/mcp.json                    cap の `--mcp-config`（実行ごとに上書き）
     logs/system-prompt.md            cap の `--append-system-prompt-file`（実行ごとに上書き）
+    tmp/                             claude の `TMPDIR`（mode 700。起動のたびに無ければ作る。`.git/info/exclude` 対象。worker の掃除で消える）
   workers/<worker-id>/               worker の path。構成は cap と同じ
     logs/owner.json                  この worker の持ち主 cap（`{"cap_id":"..."}`）
     logs/repo.json                   clone 元（`{"repo":"...","branch":"..."}`。認証情報を含みうるので 0600）。掃除後の再開で clone し直すのに使う
@@ -127,7 +128,7 @@ center から server を外す指示（protocol 1.8.0、`docs/protocol.md` の `
 
 - 起動時に `<workspace>/caps` と `<workspace>/workers` が無ければ作る。
 - `cap_id` / `worker_id` は `[A-Za-z0-9_-]+`。
-- `repo` を指定した指示では、path を git repo として扱う。path が無ければ clone、`.git` があれば fetch、`.git` が無い既存 path はエラー。clone 後は `.git/info/exclude` に `state.json` と `logs/` を追記する。
+- `repo` を指定した指示では、path を git repo として扱う。path が無ければ clone、`.git` があれば fetch、`.git` が無い既存 path はエラー。clone 後は `.git/info/exclude` に `state.json`・`logs/`・`tmp/` を追記する。
 - 既存の `.git` がある場合は `fetch` だけ行う。`repo` / `branch` の違いは検知しない。
 - `repo` 無しなら path を作るだけ（掃除済みの worker は `logs/repo.json` の clone 元で clone し直す。`repo.json` が無ければ空のまま）。
 - 掃除済み（`logs/cleaned.json` があり `.git` が無い）の worker に `repo` 付きの指示が来たら、tmp に clone して中身を移し、clone し直す。`logs/` と `state.json`（session_id）はそのまま。
@@ -151,7 +152,7 @@ center から server を外す指示（protocol 1.8.0、`docs/protocol.md` の `
 ## worker 報告（MCP）
 
 - Nitro の `/mcp`（Streamable HTTP、stateless、JSON 応答）。listener は `mcp.bind` / `mcp.port` で server が自前で立てる（preset `node-listener` は listen しないため）。起動ログ `mcp 起動: url=http://<host>:<port>/mcp` に実 URL が出る。
-- tool は `report` 1 つ。引数は `kind`（`progress` / `ask` / `approve` / `done`）と `text`（1..20000 文字）。
+- tool は `report`（と `bash`、下記「worker の起動（MCP）」）。`report` の引数は `kind`（`progress` / `ask` / `approve` / `done`）と `text`（1..20000 文字）。
 - 送信元は header `x-bantou-cap-id` / `x-bantou-worker-id` で判定する（token は使わない。認証は全体で後回し）。
 - tool は記録して queue に積んだ時点で `accepted` を返す。worker はそこでターンを終える。不正な id・存在しない cap・終了中は `isError` で返す。
 - 受けた report は `logs/reports.jsonl` に追記し、該当 cap の queue に積んで `--resume` で起動する。prompt は `worker <id> から <kind>: <text>` と、worker へ返す時の MCP 情報（URL・header 名）。実行中の cap には、終わってから渡す。
@@ -176,6 +177,7 @@ center から server を外す指示（protocol 1.8.0、`docs/protocol.md` の `
 | `worker_start` | `prompt`、`worker_id?`、`repo?`、`branch?`、`model?` | `{"worker_id":"w-1f2e3d4c5b","accepted":true}` |
 | `worker_status` | `worker_id?` | `{"workers":[AgentActivity,...]}` |
 | `worker_stop` | `worker_id` | `{"worker_id":"w-...","stopped":true}` |
+| `bash` | `action`（今は `rm` のみ）、`paths`（1..100 件、各 1024 文字まで）、`recursive?` | `{"removed":["..."],"skipped":[{"path":"...","reason":"..."}]}` |
 
 - `worker_start`: `worker_id` を省くと `w-<hex10>` を採番して新規、既存の id なら同じ session を `--resume`（続きの指示）。完了を待たずに返る。実行中なら queue で直列。失敗は activity と `state.json` に出る。path は `<workspace>/workers/<worker_id>/`（`repo` 指定時は clone / fetch）。cap の存在を確かめる（無ければ `cap が存在しない`）。
 - cap の運用の決まり: `CAP_GUIDE`（system prompt の固定部分。正本は `docs/design/cap-orchestration.md`）に、cap は自分で実装せず worker にさせる、最小の分担は実装 worker と review worker の 2 体（review は別 clone で差分を読みテストを回して report、指摘は同じ `worker_id` の `worker_start` で実装 worker に戻し、最大 3 回）、独立な部分は別 worker で並列、worker への指示に成果物（branch・commit・report の置き場）と確認方法（回すテスト）を入れる、最終返答に各 worker の結果・review の結論・残った問題を書く、を入れてある。`kick_cap` の prompt には触らない。
@@ -183,6 +185,11 @@ center から server を外す指示（protocol 1.8.0、`docs/protocol.md` の `
 - 持ち主は `workers/<worker_id>/logs/owner.json` に記録する。別の cap の worker は `worker_start` / `worker_status` / `worker_stop` とも `別の cap の worker: <id>` で拒否する。
 - `worker_status`: 呼んだ cap の worker だけ。server 再起動後など活動情報が無い worker は `state.json` から補う（idle → idle、failed / error → failed、running → running。起動直後で `state.json` が無いものは running / `starting`）。
 - `worker_stop`: process group に SIGTERM、3 秒で SIGKILL（`stop_cap` と同じ）。
+- `bash`（cap と worker の両方に載る。cap / worker の起動時に `--allowedTools mcp__bantou__bash` も付く）: Bash の `rm -rf` が permission 分類器に止まる問題を、範囲を server が保証する tool で避ける。任意のシェル文字列は受けず、`action` は handler 表（今は `rm`）で引く。未知の `action` と引数の形の不正（件数・長さ・型）だけ `isError`。全部拒否でも `isError` にせず `skipped` に理由を返す。
+  - 範囲: 呼び出し元の自分の path 配下だけ（worker は `workers/<worker_id>/`、cap は `caps/<cap_id>/` と、`logs/owner.json` の `cap_id` が自分の worker は `worker:<id>/<path>` で指す）。`paths` は自分の path からの相対。
+  - 拒否: 絶対パス・`~`・`..`・バックスラッシュ・NUL、path そのもの（`.` や空）、`state.json` と `logs/`（`./`・末尾 `/`・大文字小文字違いも。symlink を解決した後も判定）、realpath が範囲外のもの、他の cap の worker、worker から `worker:` 接頭辞。
+  - symlink は辿らず link 自体を消す。親が範囲外を指す symlink は拒否。dir は `recursive: true` の時だけ消し、再帰削除でも symlink は辿らない。削除の直前に lstat と親の realpath を取り直す（検査の後で変わっていたら消さない）。
+  - `TMPDIR`: 起動のたび（resume でも）に `<path>/tmp` を無ければ mode 700 で作り（symlink・file なら消して作り直す）、claude の env `TMPDIR` に渡す（`session.env` では上書きできない）。`tmp` は `bash` の `rm` の範囲内。
 - worker の timeout・retry・sandbox 設定は cap と同じ `config.session`。
 - cap への案内（`CAP_GUIDE`）は claude の `--system-prompt-snapshot`（既定 on）により session の初回に固定される。変更前に作った cap session は resume しても新しい案内を受けない（新しい cap から効く）。
 

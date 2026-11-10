@@ -20,6 +20,7 @@ import { loadConfig } from "./config";
 import { buildIdentity, loadOrCreateServerId } from "./identity";
 import { log } from "./log";
 import { CAP_ID_HEADER, WORKER_ID_HEADER, type McpListener } from "./mcp";
+import { setBashWorkspace } from "./bash";
 import { agentDir, runLogDir } from "./paths";
 import { CAP_GUIDE, WORKER_GUIDE, buildTaskPrompt, buildTaskResult } from "./prompts";
 import { createReportHub, setReportHandler } from "./reports";
@@ -253,8 +254,8 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
       appendSystemPromptFile,
       extraAllowedTools:
         kind === "cap"
-          ? ["mcp__bantou__worker_start", "mcp__bantou__worker_status", "mcp__bantou__worker_stop"]
-          : ["mcp__bantou__report"],
+          ? ["mcp__bantou__worker_start", "mcp__bantou__worker_status", "mcp__bantou__worker_stop", "mcp__bantou__bash"]
+          : ["mcp__bantou__report", "mcp__bantou__bash"],
     };
   };
   const manager = createAgentManager({ config, runner: cliRunner, log, observer: tracker, runExtras });
@@ -465,6 +466,7 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
     return hub.report(capId, workerId, kind, text);
   });
   setWorkerHandler(workerHub);
+  setBashWorkspace(config.workspace);
   // 起動時に回収した running は lost として center へ知らせる
   for (const r of reaped.reaped) {
     const capId = r.kind === "cap" ? r.id : await readOwner(config.workspace, r.id);
@@ -478,6 +480,7 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
       // 実行中の claude を止め、中断の返信を出し切るのを少し待つ
       setReportHandler(undefined);
       setWorkerHandler(undefined);
+      setBashWorkspace(undefined);
       hub.close();
       await manager.shutdown();
       await Promise.race([

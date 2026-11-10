@@ -314,7 +314,7 @@ test("再開: 掃除が途中で止まった dir（印あり・.git 無し・残
     await hub.start("c1", { worker_id: "w4", prompt: "norepo" });
     await settleRuns();
     assert.equal((await readState(dir)).state, "idle");
-    assert.deepEqual(await names(dir), ["logs", "state.json"]);
+    assert.deepEqual(await names(dir), ["logs", "state.json", "tmp"]);
   });
 });
 
@@ -358,7 +358,7 @@ test("再開: repo 無しで作った worker（自分で clone する運用）�
     await hub.start("c1", { worker_id: "w5", prompt: "again" });
     await settleRuns();
     assert.equal((await readState(dir)).state, "idle");
-    assert.deepEqual(await names(dir), ["logs", "state.json"]); // 空のまま
+    assert.deepEqual(await names(dir), ["logs", "state.json", "tmp"]); // 空のまま
     assert.equal((await readState(dir)).session_id, sid);
     assert.equal(prompts.at(-1)?.startsWith("again"), true);
     assert.ok(prompts.at(-1)?.includes("掃除されて空"));
@@ -433,12 +433,12 @@ test("再開: repo 無し worker の注記は掃除後の最初の再開 1 回�
     await cleanWorkerDir(dir); // 1 回目の掃除
     await hub.start("c1", { worker_id: "w6", prompt: "p2" }); // 空 dir で起動（注記あり、印を外す）
     await settleRuns();
-    assert.deepEqual(await names(dir), ["logs", "state.json"]);
+    assert.deepEqual(await names(dir), ["logs", "state.json", "tmp"]);
     await assert.rejects(stat(cleanedFile(dir)), /ENOENT/);
     await selfClone("own");
     await hub.start("c1", { worker_id: "w6", prompt: "p3" }); // 掃除していない再々開: 注記なし、作業物はそのまま
     await settleRuns();
-    assert.deepEqual(await names(dir), ["logs", "own", "state.json"]);
+    assert.deepEqual(await names(dir), ["logs", "own", "state.json", "tmp"]);
 
     await cleanWorkerDir(dir); // 2 回目の掃除（印を改めて書く）
     await hub.start("c1", { worker_id: "w6", prompt: "p4" });
@@ -446,7 +446,7 @@ test("再開: repo 無し worker の注記は掃除後の最初の再開 1 回�
     await selfClone("own2");
     await hub.start("c1", { worker_id: "w6", prompt: "p5" });
     await settleRuns();
-    assert.deepEqual(await names(dir), ["logs", "own2", "state.json"]);
+    assert.deepEqual(await names(dir), ["logs", "own2", "state.json", "tmp"]);
 
     const note = "掃除されて空";
     assert.deepEqual(prompts.map((p) => p.includes(note)), [false, true, false, true, false]);

@@ -12,7 +12,7 @@ import {
 import type { Config } from "./config";
 import { assertModel, readModelRecord, writeModelRecord, type WithModel } from "./model";
 import { killGroup, type ClaudeRunOptions, type ClaudeRunResult, type RunMode } from "./claude";
-import { agentDir, cleanedFile, removeNonKept, runLogDir } from "./paths";
+import { agentDir, cleanedFile, ensureTmpDir, removeNonKept, runLogDir } from "./paths";
 import { listLiveProcesses, matchesSession, type LiveProcess } from "./processes";
 import type { AgentRunner } from "./runner";
 import { readState, writeState, type AgentStateFile } from "./state";
@@ -190,7 +190,7 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
     await git(["clone", ...(branch ? [`--branch=${branch}`] : []), "--", repo, target], "clone");
     const info = join(target, ".git", "info");
     await mkdir(info, { recursive: true });
-    await appendFile(join(info, "exclude"), "state.json\nlogs/\n");
+    await appendFile(join(info, "exclude"), "state.json\nlogs/\ntmp/\n");
   }
 
   /** 掃除済み（logs/cleaned.json があり .git が無い）の worker の dir か。 */
@@ -343,6 +343,8 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
           break;
         }
         const extras = deps.runExtras ? await deps.runExtras(kind, id, input) : {};
+        // clone などの準備の後、起動のたび（resume でも）に tmp/ を用意する。在れば何もしない
+        const tmp = await ensureTmpDir(dir);
         r = await runner.run({
           ...extras,
           claude: config.session.claude,
@@ -357,7 +359,8 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
           extraArgs: config.session.extraArgs,
           ...(model !== undefined ? { model } : {}),
           timeoutMs: config.session.timeoutMs,
-          env: { ...process.env, ...config.session.env },
+          // TMPDIR は config.session.env でも上書きさせない（自分の path の tmp/ だけ）
+          env: { ...process.env, ...config.session.env, TMPDIR: tmp },
           logFile: join(runLogDir(dir), `${sessionId}.jsonl`),
           onLine: (line) => observe((o) => o.line(kind, id, line)),
           onSpawn: (child) => {

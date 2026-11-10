@@ -36,7 +36,7 @@ test("mcp: report tool は header の cap_id / worker_id で handler を呼び a
     const tools = await (await rpc(url, { jsonrpc: "2.0", id: 1, method: "tools/list" }, h)).json() as {
       result: { tools: Array<{ name: string }> };
     };
-    assert.deepEqual(tools.result.tools.map((t) => t.name), ["report"]);
+    assert.deepEqual(tools.result.tools.map((t) => t.name), ["report", "bash"]);
 
     const ok = await (await rpc(url, call("done", "all good"), h)).json() as {
       result: { content: Array<{ text: string }>; isError?: boolean };
@@ -108,8 +108,8 @@ test("mcp: tool 一覧は header で変わる（cap は worker_*、worker は re
   const l = await startMcpListener(toNodeListener(app), { port: 0, bind: "127.0.0.1" });
   try {
     const url = `http://127.0.0.1:${l.port}/mcp`;
-    assert.deepEqual(await listTools(url, { "x-bantou-cap-id": "c1" }), ["report", "worker_start", "worker_status", "worker_stop"]);
-    assert.deepEqual(await listTools(url, { "x-bantou-cap-id": "c1", "x-bantou-worker-id": "w1" }), ["report"]);
+    assert.deepEqual(await listTools(url, { "x-bantou-cap-id": "c1" }), ["report", "bash", "worker_start", "worker_status", "worker_stop"]);
+    assert.deepEqual(await listTools(url, { "x-bantou-cap-id": "c1", "x-bantou-worker-id": "w1" }), ["report", "bash"]);
     assert.deepEqual(await listTools(url, {}), ["report"]);
   } finally {
     await l.close();

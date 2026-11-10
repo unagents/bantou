@@ -3,6 +3,7 @@ import type { AddressInfo } from "node:net";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
+import { MAX_BASH_PATHS, MAX_BASH_PATH_LENGTH, getBashWorkspace, runBash, type BashCaller } from "./bash";
 import { MAX_REPORT_TEXT, REPORT_KINDS, getReportHandler } from "./reports";
 import { getWorkerHandler } from "./workers";
 
@@ -20,6 +21,7 @@ const noNul = (s: string): boolean => !s.includes("\0");
 /**
  * /mcp の 1 リクエストを処理する（stateless、JSON 応答）。
  * `report` は常に登録する。送信元は header の cap_id / worker_id で判定し、すぐ "accepted" を返す。
+ * `bash` は cap と worker の両方に載せる（header で呼び出し元を判定。header 無しには載せない）。
  * cap（x-bantou-cap-id があり x-bantou-worker-id が無い）にだけ worker_start / worker_status / worker_stop も登録する。
  */
 export async function handleMcpRequest(req: Request): Promise<Response> {
@@ -49,6 +51,7 @@ export async function handleMcpRequest(req: Request): Promise<Response> {
       }
     },
   );
+  if (capId) registerBashTool(server, workerId ? { kind: "worker", capId, workerId } : { kind: "cap", capId });
   if (capId && !workerId) registerWorkerTools(server, capId);
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
@@ -56,6 +59,34 @@ export async function handleMcpRequest(req: Request): Promise<Response> {
   });
   await server.connect(transport);
   return transport.handleRequest(req);
+}
+
+function registerBashTool(server: McpServer, caller: BashCaller): void {
+  server.registerTool(
+    "bash",
+    {
+      description:
+        "Server-guaranteed file operations inside your own path (no shell string). Use it instead of Bash rm to delete temporary things. " +
+        "action: 'rm' (only). rm deletes paths relative to your own path (a worker: <workspace>/workers/<worker_id>/; a cap: <workspace>/caps/<cap_id>/, and a worker of yours as 'worker:<worker_id>/<path>'). " +
+        "Absolute paths, '..', anything resolving (realpath) outside, your path itself, state.json and logs/ are refused (listed in skipped, not an error). " +
+        "Symlinks are never followed: the link itself is removed. A directory needs recursive: true. $TMPDIR is <your path>/tmp, so 'tmp' (recursive: true) clears it. " +
+        "Returns {removed: string[], skipped: [{path, reason}]}.",
+      inputSchema: {
+        action: z.string().min(1).max(32),
+        paths: z.array(z.string().max(MAX_BASH_PATH_LENGTH)).min(1).max(MAX_BASH_PATHS),
+        recursive: z.boolean().optional(),
+      },
+    },
+    async (args) => {
+      const ws = getBashWorkspace();
+      if (!ws) return json({ error: "server が起動中のため受け付けられない" }, true);
+      try {
+        return json(await runBash(ws, caller, args));
+      } catch (e) {
+        return fail(e);
+      }
+    },
+  );
 }
 
 function registerWorkerTools(server: McpServer, capId: string): void {

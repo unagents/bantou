@@ -1,4 +1,4 @@
-import { readdir, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, readdir, rm, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { isValidAgentId, type AgentKind } from "@agent-hand/bantou-protocol";
 
@@ -33,4 +33,27 @@ export async function removeNonKept(dir: string): Promise<number> {
   const names = (await readdir(dir)).filter((n) => !KEEP_ENTRIES.includes(n)).sort((a, b) => (a === ".git" ? -1 : b === ".git" ? 1 : 0));
   for (const name of names) await rm(join(dir, name), { recursive: true, force: true });
   return names.length;
+}
+
+/** cap / worker の TMPDIR（dir 直下の tmp/）。 */
+export function tmpDir(dir: string): string {
+  return join(dir, "tmp");
+}
+
+/**
+ * tmp/ を無ければ mode 700 で作る（在れば何もしない。mode は保つ）。
+ * tmp が dir でない（symlink・file）時は TMPDIR が自分の path の外を指しうるので、それ自体を消して作り直す。
+ * 返り値は tmp/ の path。
+ */
+export async function ensureTmpDir(dir: string): Promise<string> {
+  const tmp = tmpDir(dir);
+  try {
+    if ((await lstat(tmp)).isDirectory()) return tmp;
+    await unlink(tmp);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+  }
+  await mkdir(tmp, { mode: 0o700 });
+  await chmod(tmp, 0o700); // umask に左右されない
+  return tmp;
 }
