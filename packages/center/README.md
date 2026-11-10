@@ -141,7 +141,7 @@ center は wrapper 経由の session（master-cap）を起動するたび（新�
 | `rc_stop` | `project` | `RcStatus` |
 | `rc_status` | `project` | `RcStatus` |
 | `server_peers` | `refresh?` | `{ pair: { server, protocol }, peers: FollowEntry[] }`。下記「server の版合わせ」 |
-| `server_list` | なし | `{ name, connected, reachable, peerId, serverPeer }[]`（`reachable` は broker への接続を確保できたか、`peerId` は center 自身の peer id、`serverPeer` は直近に解決した server の送信先（peer id か名前、未解決は null）） |
+| `server_list` | なし | `{ name, connected, reachable, peerId, serverPeer, server_id?, host?, user?, workspace? }[]`（`reachable` は broker への接続を確保できたか、`peerId` は center 自身の peer id、`serverPeer` は直近に解決した server の送信先（peer id か名前、未解決は null）。`server_id` / `host` / `user` / `workspace` は、その `serverPeer` から hello_result / status_result で識別を学習済みの時だけ付く（未学習・旧 server は無い。`server_peers` の `server_id` と突き合わせる鍵）） |
 | `worker_resume` | `server`, `worker_id`, `prompt`, `repo?`, `branch?` | `worker_result` / `error` 返信そのまま |
 | `server_status` | `server` | `status_result` / `error` 返信そのまま |
 

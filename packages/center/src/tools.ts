@@ -249,7 +249,7 @@ export function registerTools(
     "server_list",
     {
       title: "server 一覧",
-      description: "設定済みの bantou-server と、その接続・到達状況を返す。server の peer は bantou protocol で自動発見し（servers[].peer 指定があればその名前）、serverPeer に直近の送信先を返す",
+      description: "設定済みの bantou-server と、その接続・到達状況を返す。server の peer は bantou protocol で自動発見し（servers[].peer 指定があればその名前）、serverPeer に直近の送信先を返す。serverPeer の peer から識別を学習済みなら server_id / host / user / workspace も返す（未学習・旧 server は無い。server_peers との突き合わせに使う）",
     },
     () => guard(async () => json(await link.list())),
   );
