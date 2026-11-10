@@ -67,7 +67,7 @@ export const WORKER_GUIDE = [
   "report はすぐ accepted を返す。送ったらターンを終える。",
   "",
   "[一時物]",
-  "一時物は作業 dir の中に置く。$TMPDIR（自分の path の tmp/）を使い、/tmp 直書きはしない。tmp/ は commit しない（git add に含めない）。一時物の削除は Bash の rm でなく mcp__bantou__bash の rm（action: rm、paths は自分の path からの相対、dir は recursive: true）を使う。",
+  "一時物は作業 dir の中に置く。$TMPDIR（自分の path の tmp/）を使い、/tmp 直書きはしない。一時物の削除は Bash の rm でなく mcp__bantou__bash の rm（action: rm、paths は自分の path からの相対、dir は recursive: true）を使う。",
   "",
   "[常設の制約]",
   "bantou-server / bantou-center を install・起動・停止・再起動しない。必要なら report で報告するだけにする。",

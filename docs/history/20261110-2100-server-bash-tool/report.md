@@ -37,7 +37,7 @@ worker / cap の Bash の `rm -rf` が permission 分類器に止められる問
 ### TMPDIR
 
 - `agents.ts` の実行ループで、`runExtras`（clone などの準備）の後、`runner.run` の直前に毎回 `ensureTmpDir(dir)`。new でも resume でも、再試行でも作る。
-- 無ければ mode 700 で作る（chmod で umask に左右されない）。在れば、自分の所有で group / other に権限がある時だけ 700 に戻す（review 対応。緩い mode のまま TMPDIR を使わせない。厳しい mode は触らない）。symlink・file だった場合は外を指しうるので、それ自体を消して dir を作り直す。
+- 無ければ mode 700 で作る（chmod で umask に左右されない）。在れば何もしない（mode を保つ）。symlink・file だった場合は外を指しうるので、それ自体を消して dir を作り直す。
 - env は `{...process.env, ...session.env, TMPDIR}` の順。`session.env` で上書きできない。
 - `tmp/` は `bash` の rm の範囲内（protected は `logs` と `state.json` のみ）。`tmp` 自体の削除は `recursive: true` で許可、無しの dir は拒否。
 - worker の掃除（`removeNonKept`）は logs/ と state.json 以外を消すので、`tmp/` も消える（コード変更なし。test で固定）。
@@ -69,7 +69,17 @@ worker / cap の Bash の `rm -rf` が permission 分類器に止められる問
 - test: prefix 兄弟 dir（w-1 と w-10、c-1 と c-10）を指す symlink 経由の拒否を追加。`isInside` の `root + sep` を `root` に変異させると落ちることを確認（戻した）。
 - test: `LOGS` / `Logs/x` / `STATE.JSON` が保護の文言で拒否されることを追加。`toLowerCase` を外す変異で落ちることを確認（戻した）。
 - test: NUL / バックスラッシュ / `~` は reason 文字列まで assert。
-- `ensureTmpDir`: 既存 tmp が自分の所有で 700 より緩い時は 700 に戻す。理由: 以前の実行・外部操作で緩んだ mode のまま TMPDIR に使うと、他ユーザーに一時物が見える。tmpdir.test.ts の「既存なら mode 保持」は、緩い mode → 700、厳しい mode（500）は保持、に直した。
-- `WORKER_GUIDE` に「tmp/ は commit しない（git add に含めない）」を追加。
+- 実装は変えない方針（利用者の制約）に変えたため、先に入れていた `ensureTmpDir` の緩い mode → 700 への変更、`WORKER_GUIDE` への「tmp/ は commit しない」、tmpdir.test.ts の変更は取り消した（コードは f93d0a7 と同じ）。
 - docs: 認証の前提を README の bash 節と上の「残課題」に明記（コード変更なし）。
-- テスト: npm test 340 pass / 0 fail。typecheck は develop 時点と同じ 6 error。
+- テスト: 結果は下の「確定結果」。
+
+## 残り（別 task で扱う）
+
+- `ensureTmpDir`: 既存 tmp の mode が 700 より緩い時に 700 へ戻す（現状は保つ）。
+- `WORKER_GUIDE`: 「tmp/ は commit しない（git add に含めない）」の 1 句。
+
+## 確定結果（review 対応後）
+
+- npm test: 340 tests / 340 pass / 0 fail。typecheck: develop 時点と同じ 6 error（default-config.test.ts）。
+- 変異: `isInside` の `root + sep` → `root` で prefix 兄弟 test が落ちる。`toLowerCase` を外すと大文字小文字 test が落ちる。いずれも戻した。
+- 実装（server/ 配下）は f93d0a7 から変更なし。追加は test と docs のみ。
