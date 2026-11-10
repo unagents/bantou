@@ -9,6 +9,9 @@ export const INSTRUCTIONS_MAX = 16_000;
 /** Max number of `addDirs` entries (same limit as the center). */
 export const ADD_DIRS_MAX = 20;
 
+/** Max length (chars) of `outputStyle` (same limit as the center). */
+export const OUTPUT_STYLE_MAX = 32_000;
+
 /**
  * What the project-settings form edits: one value per item. A new item (skills, output style, …) is
  * a field here, a section in `ProjectSettingsFields.vue`, and a line in the functions below.
@@ -18,14 +21,17 @@ export interface SettingsDraft {
   instructions: string;
   /** Reference folders (`--add-dir`), one per row; blank rows are dropped on save. */
   addDirs: string[];
+  /** The body of claude's output style (markdown). */
+  outputStyle: string;
 }
 
-export const emptyDraft = (): SettingsDraft => ({ instructions: "", addDirs: [] });
+export const emptyDraft = (): SettingsDraft => ({ instructions: "", addDirs: [], outputStyle: "" });
 
 /** The form values for the settings the center returned. */
 export const draftOf = (s: ProjectSettings): SettingsDraft => ({
   instructions: s.instructions ?? "",
   addDirs: Array.isArray(s.addDirs) ? s.addDirs.filter((d): d is string => typeof d === "string") : [],
+  outputStyle: s.outputStyle ?? "",
 });
 
 /** The folder rows as the center takes them: trimmed, blanks dropped, duplicates dropped. */
@@ -41,6 +47,7 @@ export const toUpdate = (d: SettingsDraft): ProjectSettings => {
   return {
     instructions: d.instructions.trim() ? d.instructions : null,
     addDirs: dirs.length ? dirs : null,
+    outputStyle: d.outputStyle.trim() ? d.outputStyle : null,
   };
 };
 
@@ -58,5 +65,6 @@ export const draftError = (d: SettingsDraft): string | null => {
   if (dirs.length > ADD_DIRS_MAX) return `参照フォルダは ${ADD_DIRS_MAX} 個以内`;
   const bad = dirs.find((p) => !isAbsolutePath(p));
   if (bad !== undefined) return `参照フォルダは絶対パスで指定する: ${bad}`;
+  if ([...d.outputStyle].length > OUTPUT_STYLE_MAX) return `出力スタイルは ${OUTPUT_STYLE_MAX} 文字以内`;
   return null;
 };

@@ -41,13 +41,13 @@ export function hookCommand(url: string, self: string[] = selfCommand(), platfor
  * `claude --settings` に渡す JSON 文字列。statusLine と（hookCmd があれば）hooks のキーだけを持つ（他の設定は上書きしない）。
  * hooks は利用者の hooks と足し合わされる（置き換えない）。async: true で claude の動作を待たせない（ただし Stop / StopFailure は同期。async のままだと、claude が Stop 直後に終了する時（-p）に hook が cancel され idle が届かない）。
  */
-export const statusLineSettingsJson = (command: string, hookCmd?: string): string =>
-  JSON.stringify({
-    statusLine: { type: "command", command },
-    ...(hookCmd
-      ? { hooks: Object.fromEntries(HOOK_EVENTS.map((ev) => [ev, [{ hooks: [{ type: "command", command: hookCmd, ...(SYNC_HOOK_EVENTS.has(ev) ? {} : { async: true }), timeout: 10 }] }]])) }
-      : {}),
-  });
+export const statusLineSettings = (command: string, hookCmd?: string): Record<string, unknown> => ({
+  statusLine: { type: "command", command },
+  ...(hookCmd
+    ? { hooks: Object.fromEntries(HOOK_EVENTS.map((ev) => [ev, [{ hooks: [{ type: "command", command: hookCmd, ...(SYNC_HOOK_EVENTS.has(ev) ? {} : { async: true }), timeout: 10 }] }]])) }
+    : {}),
+});
+export const statusLineSettingsJson = (command: string, hookCmd?: string): string => JSON.stringify(statusLineSettings(command, hookCmd));
 
 /** サブコマンドの POST のタイムアウト。claude は更新のたびに実行し、遅いと実行を打ち切るので短くする。 */
 export const STATUS_LINE_TIMEOUT_MS = 2000;

@@ -2,7 +2,7 @@ import { mkdir, rename } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
 import { projectSchema, PERMISSION_MODES, type Config, type ProjectConfig } from "./config.js";
-import { composeAddDirs, composeInstructions, mergeSettings, projectSettingsPatchSchema, readSettings, type ProjectSettings, type ProjectSettingsPatch } from "./project-settings.js";
+import { composeAddDirs, composeInstructions, composeOutputStyle, mergeSettings, projectSettingsPatchSchema, readSettings, type ProjectSettings, type ProjectSettingsPatch } from "./project-settings.js";
 import type { Logger } from "./log.js";
 import type { RcStatus, RemoteControlSupervisor } from "./remote-control.js";
 import type { EventHub } from "./events.js";
@@ -56,7 +56,7 @@ export const sessionCreateSchema = {
   name: z.string().regex(SESSION_NAME, "英数字と _ - のみ"),
   path: z.string().min(1).optional().describe("絶対パス。省略時は <workspace>/<name>（無ければ作る）"),
   permissionMode: z.enum(PERMISSION_MODES).optional().describe("省略時 auto"),
-  settings: projectSettingsPatchSchema.optional().describe("プロジェクトごとの設定（{ instructions?: string, addDirs?: string[], … }）。instructions は --append-system-prompt、addDirs（絶対パス）は 1 つずつ --add-dir で渡す（再起動・--continue でも付く）。省略・空は無し"),
+  settings: projectSettingsPatchSchema.optional().describe("プロジェクトごとの設定（{ instructions?: string, addDirs?: string[], outputStyle?: string, … }）。instructions は --append-system-prompt、addDirs（絶対パス）は 1 つずつ --add-dir で渡す、outputStyle（claude の output style の markdown 本文）は session のフォルダの .claude/output-styles/bantou.md に書いて --settings で選ぶ（再起動・--continue でも付く）。省略・空は無し"),
 };
 
 export const sessionUpdateSchema = {
@@ -159,11 +159,12 @@ export function createSessionManager(opts: {
   const toProject = (s: SavedSession): ProjectConfig =>
     projectSchema.parse({ name: s.name, path: s.path, permissionMode: s.permissionMode });
 
-  /** 共通 + session の settings から supervisor に渡す instructions / addDirs（あれば）。 */
-  const instrOpt = (s: ProjectSettings | undefined): { instructions?: string; addDirs?: string[] } => {
+  /** 共通 + session の settings から supervisor に渡す instructions / addDirs / outputStyle（あれば）。 */
+  const instrOpt = (s: ProjectSettings | undefined): { instructions?: string; addDirs?: string[]; outputStyle?: string } => {
     const i = composeInstructions(common, s);
     const d = composeAddDirs(common, s);
-    return { ...(i ? { instructions: i } : {}), ...(d.length ? { addDirs: d } : {}) };
+    const o = composeOutputStyle(common, s);
+    return { ...(i ? { instructions: i } : {}), ...(d.length ? { addDirs: d } : {}), ...(o ? { outputStyle: o } : {}) };
   };
 
   /** 接続（URL 取得）か失敗までを少し待つ。待ちきれなければ starting のまま返す。 */
@@ -275,6 +276,7 @@ export function createSessionManager(opts: {
         }
         supervisor.setInstructions(name, composeInstructions(common, next));
         supervisor.setAddDirs(name, composeAddDirs(common, next));
+        supervisor.setOutputStyle(name, composeOutputStyle(common, next));
         log(`session の設定を更新: ${name} (項目: ${Object.keys(next).join(",") || "なし"})`);
         return { name, settings: next };
       }),
@@ -297,6 +299,7 @@ export function createSessionManager(opts: {
         for (const rec of saved.values()) {
           supervisor.setInstructions(rec.name, composeInstructions(common, rec.settings));
           supervisor.setAddDirs(rec.name, composeAddDirs(common, rec.settings));
+          supervisor.setOutputStyle(rec.name, composeOutputStyle(common, rec.settings));
         }
         log(`center 共通の設定を更新 (項目: ${Object.keys(next).join(",") || "なし"})`);
         return { settings: next };

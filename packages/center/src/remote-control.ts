@@ -21,7 +21,8 @@ import {
   TEXT_WINDOW,
   windowConnected,
 } from "./wrapper.js";
-import { hookCommand, hookUrl, statusLineCommand, statusLineSettingsJson, statusLineUrl } from "./status-line.js";
+import { OUTPUT_STYLE_NAME, syncOutputStyleSync } from "./output-style.js";
+import { hookCommand, hookUrl, statusLineCommand, statusLineSettings, statusLineUrl } from "./status-line.js";
 
 export type RcState = "stopped" | "starting" | "connected" | "error";
 
@@ -114,13 +115,15 @@ export interface RemoteControlSupervisor {
    * 実行中に project を足す（起動はしない）。同名は拒否。remove で外せるのはこの add で足したものだけ。
    * wrapper: true なら pty wrapper 経由の対話型（`claude --remote-control`）で起動する。省略は従来の `claude remote-control`。
    */
-  add(project: ProjectConfig, opts?: { wrapper?: boolean; instructions?: string; addDirs?: string[] }): void;
+  add(project: ProjectConfig, opts?: { wrapper?: boolean; instructions?: string; addDirs?: string[]; outputStyle?: string }): void;
   /** add で足した project を停止して外す。config 由来の project は外せない。 */
   remove(name: string): Promise<void>;
   /** 追加指示（`--append-system-prompt` の値）を差し替える。次の起動から効く（動いている session は起動し直さない）。空で無し。 */
   setInstructions(name: string, instructions: string): void;
   /** 参照フォルダ（`--add-dir` の値）を差し替える。次の起動から効く。空配列で無し。 */
   setAddDirs(name: string, addDirs: string[]): void;
+  /** 出力スタイルの本文を差し替える（次の起動から効く。空で解除）。 */
+  setOutputStyle(name: string, outputStyle: string): void;
   stop(project: string): Promise<RcStatus>;
   status(project: string): RcStatus;
   list(): RcStatus[];
@@ -289,6 +292,8 @@ interface Entry {
   instructions: string;
   /** `--add-dir` に 1 つずつ渡す参照フォルダ。空なら付けない。再起動・--continue でも同じ値を使う。 */
   addDirs: string[];
+  /** 出力スタイルの本文。起動のたびに project の `.claude/output-styles/bantou.md` に書き `--settings` で選ぶ。空なら書かず、古いファイルは消す。 */
+  outputStyle: string;
 }
 
 /** wrapper 経由の起動に必要なもの。 */
@@ -357,7 +362,7 @@ export function createRemoteControlSupervisor(opts: {
   const entries = new Map<string, Entry>();
   /** add() で足した project の名前（remove できるのはこれだけ）。 */
   const dynamic = new Set<string>();
-  const newEntry = (p: ProjectConfig, wrapper = false, instructions = "", addDirs: string[] = []): Entry => ({
+  const newEntry = (p: ProjectConfig, wrapper = false, instructions = "", addDirs: string[] = [], outputStyle = ""): Entry => ({
       project: p,
       status: {
         project: p.name,
@@ -386,6 +391,7 @@ export function createRemoteControlSupervisor(opts: {
       wrapper,
       instructions,
       addDirs,
+      outputStyle,
   });
   for (const p of config.projects) entries.set(p.name, newEntry(p));
 
@@ -444,16 +450,25 @@ export function createRemoteControlSupervisor(opts: {
       if (!mcpUrl) log(`session 向け MCP 窓口が無いので bantou の MCP を付けない（messenger のみ）: project=${name}`);
       const system = opts.systemInstructions?.build({ session: name }) ?? "";
       const appendSystemPrompt = [system, e.instructions].filter((t) => t !== "").join("\n\n");
+      // 出力スタイルは project の .claude/output-styles/ に書いて名前で選ぶ。書けなくても起動は止めない（style 無しで起動）
+      let outputStyle = false;
+      try {
+        outputStyle = syncOutputStyleSync(e.project.path, e.outputStyle);
+      } catch (err) {
+        log(`出力スタイルを書けない（style 無しで起動）: project=${name} ${(err as Error).message}`);
+      }
+      const settings = {
+        // statusLine は center のものを渡す（利用者の statusLine 設定より優先される）。窓口が無い（stdio）時は付けない
+        // hooks（作業状態の通知）も同じ --settings で渡す。利用者の hooks は置き換わらず足し合わされる
+        ...(mcpUrl ? statusLineSettings(statusLineCommand(statusLineUrl(mcpUrl, name), wd.statusLineSelf), hookCommand(hookUrl(mcpUrl, name), wd.statusLineSelf)) : {}),
+        ...(outputStyle ? { outputStyle: OUTPUT_STYLE_NAME } : {}),
+      };
       args = buildWrapperArgs({
         claudePath: claude.path,
         name,
         permissionMode: e.project.permissionMode,
         mcpConfig: mcpConfigJson(mcpUrl, name),
-        // statusLine は center のものを渡す（利用者の statusLine 設定より優先される）。窓口が無い（stdio）時は付けない
-        // hooks（作業状態の通知）も同じ --settings で渡す。利用者の hooks は置き換わらず足し合わされる
-        settings: mcpUrl
-          ? statusLineSettingsJson(statusLineCommand(statusLineUrl(mcpUrl, name), wd.statusLineSelf), hookCommand(hookUrl(mcpUrl, name), wd.statusLineSelf))
-          : null,
+        settings: Object.keys(settings).length ? JSON.stringify(settings) : null,
         resume: useContinue,
         ...(rc.model ? { model: rc.model } : {}),
         ...(appendSystemPrompt ? { appendSystemPrompt } : {}),
@@ -804,10 +819,10 @@ export function createRemoteControlSupervisor(opts: {
     return snapshot(e);
   };
 
-  const add = (project: ProjectConfig, addOpts: { wrapper?: boolean; instructions?: string; addDirs?: string[] } = {}): void => {
+  const add = (project: ProjectConfig, addOpts: { wrapper?: boolean; instructions?: string; addDirs?: string[]; outputStyle?: string } = {}): void => {
     if (entries.has(project.name)) throw new Error(`project が既に存在: ${project.name}`);
     if (addOpts.wrapper && !opts.wrapper) throw new Error("wrapper の設定が無いので wrapper 起動の project は足せない");
-    entries.set(project.name, newEntry(project, addOpts.wrapper === true, addOpts.instructions, addOpts.addDirs));
+    entries.set(project.name, newEntry(project, addOpts.wrapper === true, addOpts.instructions, addOpts.addDirs, addOpts.outputStyle));
     if (addOpts.wrapper) opts.wrapper?.core.register(project.name);
     dynamic.add(project.name);
   };
@@ -818,6 +833,9 @@ export function createRemoteControlSupervisor(opts: {
 
   const setAddDirs = (name: string, addDirs: string[]): void => {
     get(name).addDirs = [...addDirs];
+  };
+  const setOutputStyle = (name: string, outputStyle: string): void => {
+    get(name).outputStyle = outputStyle;
   };
 
   const remove = async (name: string): Promise<void> => {
@@ -838,6 +856,7 @@ export function createRemoteControlSupervisor(opts: {
     remove,
     setInstructions,
     setAddDirs,
+    setOutputStyle,
     stop,
     status: (name) => snapshot(get(name)),
     list: () => [...entries.values()].map(snapshot),

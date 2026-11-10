@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
@@ -95,7 +95,7 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-function make(opts: { mcpUrl?: string | null; configPath?: string; logs?: string[]; instructions?: string; addDirs?: string[]; system?: string } = {}) {
+function make(opts: { mcpUrl?: string | null; configPath?: string; logs?: string[]; instructions?: string; addDirs?: string[]; outputStyle?: string; path?: string; system?: string } = {}) {
   const core = createCore();
   const tokens = createSessionTokens();
   const url = opts.mcpUrl === undefined ? "http://127.0.0.1:4567/mcp/session" : opts.mcpUrl;
@@ -107,7 +107,15 @@ function make(opts: { mcpUrl?: string | null; configPath?: string; logs?: string
     wrapper: { core, tokens, path: "/fake/bantou-pty-wrapper", mcpUrl: () => url, statusLineSelf: ["/fake/bantou-center"] },
     ...(opts.system !== undefined ? { systemInstructions: { build: ({ session }: { session: string }) => opts.system!.replace("{session}", session), labels: ["t@1"] } } : {}),
   });
-  sup.add(project, { wrapper: true, ...(opts.instructions !== undefined ? { instructions: opts.instructions } : {}), ...(opts.addDirs ? { addDirs: opts.addDirs } : {}) });
+  sup.add(
+    { ...project, ...(opts.path ? { path: opts.path } : {}) },
+    {
+      wrapper: true,
+      ...(opts.instructions !== undefined ? { instructions: opts.instructions } : {}),
+      ...(opts.addDirs ? { addDirs: opts.addDirs } : {}),
+      ...(opts.outputStyle !== undefined ? { outputStyle: opts.outputStyle } : {}),
+    },
+  );
   return { sup, core, tokens };
 }
 
@@ -227,6 +235,51 @@ test("wrapper 起動: addDirs は --add-dir で付き、setAddDirs は次の起�
   await sup.start("pm1");
   assert.ok(!launches[2].args.includes("--add-dir"));
   await sup.stop("pm1");
+});
+
+test("wrapper 起動: outputStyle があれば <path>/.claude/output-styles/bantou.md に書き --settings に outputStyle: bantou を付ける。setOutputStyle は次の起動から。空で解除しファイルも消す", async () => {
+  const path = join(dir, "pm1");
+  await mkdir(path, { recursive: true });
+  const logs: string[] = [];
+  const { sup } = make({ outputStyle: "Be brief.", path, logs });
+  const file = join(path, ".claude", "output-styles", "bantou.md");
+  const settingsOf = (args: string[]) => JSON.parse(valueOf(args, "--settings")!) as Record<string, unknown>;
+  await sup.start("pm1");
+  assert.equal(settingsOf(launches[0].args).outputStyle, "bantou");
+  assert.ok("statusLine" in settingsOf(launches[0].args)); // 既存の statusLine / hooks はそのまま
+  assert.ok((await readFile(file, "utf8")).startsWith("---\nname: bantou\n"));
+  assert.ok((await readFile(file, "utf8")).endsWith("Be brief.\n"));
+  sup.setOutputStyle("pm1", "Changed.");
+  assert.ok((await readFile(file, "utf8")).endsWith("Be brief.\n")); // 動いている間は変わらない
+  await sup.stop("pm1");
+  await sup.start("pm1", { resume: true });
+  assert.ok((await readFile(file, "utf8")).endsWith("Changed.\n"));
+  assert.equal(settingsOf(launches[1].args).outputStyle, "bantou");
+  await sup.stop("pm1");
+  sup.setOutputStyle("pm1", "");
+  await sup.start("pm1");
+  assert.equal(settingsOf(launches[2].args).outputStyle, undefined);
+  await assert.rejects(readFile(file, "utf8"));
+  assert.throws(() => sup.setOutputStyle("nope", "x"), /未定義の project/);
+  await sup.shutdown();
+});
+
+test("wrapper 起動: outputStyle だけ（MCP 窓口が無い stdio）でも --settings に outputStyle を付ける。書けない時は log に出して style 無しで起動する", async () => {
+  const path = join(dir, "pm1");
+  await mkdir(path, { recursive: true });
+  const { sup } = make({ outputStyle: "Be brief.", path, mcpUrl: null });
+  await sup.start("pm1");
+  assert.deepEqual(JSON.parse(valueOf(launches[0].args, "--settings")!), { outputStyle: "bantou" });
+  await sup.shutdown();
+  // path が普通のファイル: .claude/ を作れない
+  const blocked = join(dir, "blocked");
+  await writeFile(blocked, "x");
+  const logs: string[] = [];
+  const { sup: sup2 } = make({ outputStyle: "Be brief.", path: blocked, logs });
+  await sup2.start("pm1");
+  assert.equal(JSON.parse(valueOf(launches[1].args, "--settings")!).outputStyle, undefined);
+  assert.ok(logs.some((l) => l.includes("出力スタイルを書けない")));
+  await sup2.shutdown();
 });
 
 test("buildWrapperArgs: appendSystemPrompt は --mcp-config の前に 1 組だけ。空・未指定は付けない", () => {

@@ -92,5 +92,20 @@ async function pickAdd() {
       </div>
       <p class="text-cork-muted text-xs" :data-testid="`${idPrefix}-add-dirs-note`">{{ INSTRUCTIONS_NOTE }}</p>
     </section>
+    <section class="flex flex-col gap-1" :data-testid="`${idPrefix}-section-output-style`">
+      <h3 class="text-sm font-semibold">出力スタイル</h3>
+      <p class="text-cork-muted text-xs">
+        claude の output style の本文（markdown。`~/.claude/output-styles/*.md` の中身を貼る。先頭の frontmatter は center が付け直す）。session の値があれば共通の値は使わない。空なら claude の既定
+      </p>
+      <UTextarea
+        v-model="draft.outputStyle"
+        :rows="rows ?? 8"
+        autoresize
+        :maxrows="18"
+        class="w-full font-mono text-xs"
+        :data-testid="`${idPrefix}-output-style`"
+      />
+      <p class="text-cork-muted text-xs" :data-testid="`${idPrefix}-output-style-note`">{{ INSTRUCTIONS_NOTE }}</p>
+    </section>
   </div>
 </template>

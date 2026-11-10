@@ -5,6 +5,9 @@ import { SESSION_INSTRUCTIONS_MAX } from "./config.js";
 /** 参照フォルダ（`--add-dir`）の最大数（1 つの設定あたり）。 */
 export const ADD_DIRS_MAX = 20;
 
+/** 出力スタイル本文の最大文字数。 */
+export const OUTPUT_STYLE_MAX = 32_000;
+
 /**
  * プロジェクト（session）ごとの設定。sessions.json の各 session の `settings` に保存する。
  * 既知の項目は検証し、未知の項目は JSON のまま保持する（将来の項目を足しても古い center が消さない）。
@@ -14,6 +17,11 @@ export interface ProjectSettings {
   instructions?: string;
   /** master-cap が参照してよいフォルダ（絶対パス）。起動のたびに 1 つずつ `--add-dir <path>` で渡す。 */
   addDirs?: string[];
+  /**
+   * claude の output style の本文（markdown）。起動のたびに session のフォルダの `.claude/output-styles/bantou.md` に書き、
+   * `--settings {"outputStyle":"bantou"}` で選ぶ。session の値があれば共通の値は使わない（連結しない）。
+   */
+  outputStyle?: string;
   [key: string]: unknown;
 }
 
@@ -24,6 +32,7 @@ export const projectSettingsPatchSchema = z
   .object({
     instructions: z.string().max(SESSION_INSTRUCTIONS_MAX, `${SESSION_INSTRUCTIONS_MAX} 文字以内`).nullable().optional(),
     addDirs: z.array(addDirSchema).max(ADD_DIRS_MAX, `参照フォルダは ${ADD_DIRS_MAX} 個以内`).nullable().optional(),
+    outputStyle: z.string().max(OUTPUT_STYLE_MAX, `出力スタイルは ${OUTPUT_STYLE_MAX} 文字以内`).nullable().optional(),
   })
   .passthrough();
 
@@ -32,7 +41,7 @@ export type ProjectSettingsPatch = z.infer<typeof projectSettingsPatchSchema>;
 /**
  * patch を current に重ねた新しい settings を返す（current は変えない）。
  * - patch に無い（undefined）項目は変えない。
- * - null はその項目を削除する。`instructions` の空文字・`addDirs` の空配列も削除と同じ（保存しない）。
+ * - null はその項目を削除する。`instructions` / `outputStyle` の空文字・`addDirs` の空配列も削除と同じ（保存しない）。
  * - `addDirs` は重複を除く（先勝ち）。
  * - 未知の項目は値をそのまま入れる。
  */
@@ -40,7 +49,7 @@ export function mergeSettings(current: ProjectSettings | undefined, patch: Proje
   const out: ProjectSettings = { ...(current ?? {}) };
   for (const [k, v] of Object.entries(patch)) {
     if (v === undefined) continue;
-    if (v === null || (k === "instructions" && v === "")) delete out[k];
+    if (v === null || ((k === "instructions" || k === "outputStyle") && v === "")) delete out[k];
     else if (k === "addDirs") {
       const dirs = uniqueDirs(v);
       if (dirs.length) out.addDirs = dirs;
@@ -63,6 +72,7 @@ export function readSettings(raw: unknown): ProjectSettings {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};
   const out: ProjectSettings = { ...(raw as Record<string, unknown>) };
   if (typeof out.instructions !== "string" || out.instructions === "") delete out.instructions;
+  if (typeof out.outputStyle !== "string" || out.outputStyle === "") delete out.outputStyle;
   const dirs = uniqueDirs(out.addDirs);
   if (dirs.length) out.addDirs = dirs;
   else delete out.addDirs;
@@ -80,4 +90,12 @@ export function composeAddDirs(common: ProjectSettings | undefined, own: Project
  */
 export function composeInstructions(common: ProjectSettings | undefined, own: ProjectSettings | undefined): string {
   return [readSettings(common).instructions, readSettings(own).instructions].filter((x): x is string => typeof x === "string").join("\n\n");
+}
+
+/**
+ * 出力スタイルの本文。session の値があればそれ、無ければ center 共通の値、どちらも無ければ空文字（付けない）。
+ * output style は 1 つしか選べないので連結しない。
+ */
+export function composeOutputStyle(common: ProjectSettings | undefined, own: ProjectSettings | undefined): string {
+  return readSettings(own).outputStyle ?? readSettings(common).outputStyle ?? "";
 }

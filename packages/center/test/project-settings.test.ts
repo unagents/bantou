@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { composeAddDirs, composeInstructions, mergeSettings, projectSettingsPatchSchema, readSettings } from "../src/project-settings.js";
+import { composeAddDirs, composeInstructions, composeOutputStyle, mergeSettings, projectSettingsPatchSchema, readSettings } from "../src/project-settings.js";
 
 test("mergeSettings: 省略は変えない・値は上書き・null は削除・instructions の空文字は削除・未知項目は保持。元は変えない", () => {
   const cur = { instructions: "a", x: 1, y: { z: 2 } };
@@ -55,4 +55,22 @@ test("composeInstructions / composeAddDirs: 共通が先。instructions は空�
   assert.deepEqual(composeAddDirs(undefined, { addDirs: ["/s1"] }), ["/s1"]);
   assert.deepEqual(composeAddDirs({ addDirs: ["/c1"] }, undefined), ["/c1"]);
   assert.deepEqual(composeAddDirs({}, {}), []);
+});
+
+test("outputStyle: schema は 32000 文字以内の string か null。merge は空文字・null で削除。read は壊れた値を落とす。compose は session 優先で連結しない", () => {
+  assert.equal(projectSettingsPatchSchema.safeParse({ outputStyle: "# style" }).success, true);
+  assert.equal(projectSettingsPatchSchema.safeParse({ outputStyle: null }).success, true);
+  assert.equal(projectSettingsPatchSchema.safeParse({ outputStyle: "a".repeat(32_001) }).success, false);
+  assert.equal(projectSettingsPatchSchema.safeParse({ outputStyle: 1 }).success, false);
+  assert.deepEqual(mergeSettings({ instructions: "i" }, { outputStyle: "s" }), { instructions: "i", outputStyle: "s" });
+  assert.deepEqual(mergeSettings({ outputStyle: "s" }, { outputStyle: "" }), {});
+  assert.deepEqual(mergeSettings({ outputStyle: "s" }, { outputStyle: null }), {});
+  assert.deepEqual(readSettings({ outputStyle: "", a: 1 }), { a: 1 });
+  assert.deepEqual(readSettings({ outputStyle: 3 }), {});
+  assert.deepEqual(readSettings({ outputStyle: "s" }), { outputStyle: "s" });
+  assert.equal(composeOutputStyle({ outputStyle: "共通" }, { outputStyle: "個別" }), "個別");
+  assert.equal(composeOutputStyle({ outputStyle: "共通" }, {}), "共通");
+  assert.equal(composeOutputStyle(undefined, { outputStyle: "個別" }), "個別");
+  assert.equal(composeOutputStyle({ outputStyle: "共通" }, { outputStyle: "" }), "共通");
+  assert.equal(composeOutputStyle(undefined, undefined), "");
 });

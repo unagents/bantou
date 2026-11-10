@@ -16,7 +16,7 @@ function fakeSupervisor(initial: ProjectConfig[]) {
   const calls: string[] = [];
   /** start が投げる名前。 */
   const failStart = new Set<string>();
-  const opts: { add: Record<string, unknown>; start: Record<string, unknown>; setInstr: Record<string, string>; setDirs: Record<string, string[]> } = { add: {}, start: {}, setInstr: {}, setDirs: {} };
+  const opts: { add: Record<string, unknown>; start: Record<string, unknown>; setInstr: Record<string, string>; setDirs: Record<string, string[]>; setStyle: Record<string, string> } = { add: {}, start: {}, setInstr: {}, setDirs: {}, setStyle: {} };
   const mk = (p: ProjectConfig): RcStatus => ({
     project: p.name, path: p.path, state: "stopped", pid: null, sessionUrl: null, environmentUrl: null,
     restarts: 0, lastExit: null, startedAt: null, args: null, instructions: false, claude: { path: "claude", source: "PATH" },
@@ -48,6 +48,9 @@ function fakeSupervisor(initial: ProjectConfig[]) {
     },
     setAddDirs: (n: string, v: string[]) => {
       opts.setDirs[n] = v;
+    },
+    setOutputStyle: (n: string, v: string) => {
+      opts.setStyle[n] = v;
     },
     status: (n: string) => ({ ...map.get(n)! }),
     list: () => [...map.values()].map((s) => ({ ...s })),
@@ -301,6 +304,25 @@ test("updateSettings: supervisor.setInstructions に値を渡す（次の起動�
   await mgr.create({ name: "pm1" });
   await mgr.updateSettings("pm1", { instructions: "次から" });
   assert.equal(opts.setInstr.pm1, "次から");
+});
+
+test("outputStyle: session の値があればそれ、無ければ center 共通の値。連結しない。更新は setOutputStyle で次の起動から", async () => {
+  const { mgr, opts, calls } = setup();
+  await mgr.restore();
+  await mgr.updateCenterSettings({ outputStyle: "共通 style" });
+  await mgr.create({ name: "a", settings: { outputStyle: "a の style" } });
+  await mgr.create({ name: "b" });
+  assert.equal((opts.add.a as { outputStyle?: string }).outputStyle, "a の style");
+  assert.equal((opts.add.b as { outputStyle?: string }).outputStyle, "共通 style");
+  await mgr.updateSettings("a", { outputStyle: null });
+  assert.equal(opts.setStyle.a, "共通 style");
+  await mgr.updateCenterSettings({ outputStyle: "" });
+  assert.equal(opts.setStyle.a, "");
+  assert.equal(opts.setStyle.b, "");
+  assert.deepEqual(mgr.getCenterSettings(), { settings: {} });
+  await mgr.updateSettings("b", { outputStyle: "b だけ" });
+  assert.equal(opts.setStyle.b, "b だけ");
+  assert.equal(calls.filter((c) => c.startsWith("start:")).length, 2); // 更新で起動し直さない
 });
 
 test("updateSettings: config 由来・未定義は拒否。保存に失敗したら記録も戻す", async () => {

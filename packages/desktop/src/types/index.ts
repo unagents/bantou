@@ -110,8 +110,8 @@ export interface SessionPathHints {
 }
 
 /**
- * Project (= session) settings kept by the center (`settings` of `session_settings_get`). Only
- * `instructions` for now; the center keeps items this desktop does not know and returns them as they are.
+ * Project (= session) settings kept by the center (`settings` of `session_settings_get`). `instructions`,
+ * `addDirs` and `outputStyle`; the center keeps items this desktop does not know and returns them as they are.
  * In an update, `null` removes an item.
  */
 export interface ProjectSettings {
@@ -119,6 +119,8 @@ export interface ProjectSettings {
   instructions?: string | null;
   /** Folders master-cap may read and edit besides its own (`claude --add-dir`, one per entry; absolute paths on the center's host). */
   addDirs?: string[] | null;
+  /** The body (markdown) of claude's output style: the center writes it into the session's folder and selects it with `--settings`. A session's value replaces the center-wide one. */
+  outputStyle?: string | null;
 }
 
 /** The center's list as last fetched (mirror of `src-tauri/src/session.rs::SessionList`). Memory only. */

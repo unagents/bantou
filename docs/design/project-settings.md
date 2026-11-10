@@ -25,6 +25,8 @@ master-cap への追加指示（`--append-system-prompt`）を session ごとに
 | 項目 | 型 | 意味 |
 |---|---|---|
 | `instructions` | string（16000 文字以内、空文字 = 無し） | master-cap への追加指示。起動のたびに claude へ `--append-system-prompt <値>`（新規・再起動・`--continue`・復元のすべて）。wrapper 経由の session だけが対象 |
+| `addDirs` | string[]（絶対パス、20 個以内、空配列 = 無し） | master-cap が参照してよいフォルダ。起動のたびに 1 つずつ `--add-dir <path>`。center 共通の値が先、session の値が後ろ（重複は除く） |
+| `outputStyle` | string（32000 文字以内、空文字 = 無し） | claude の output style の本文（markdown）。起動のたびに session のフォルダの `.claude/output-styles/bantou.md` に書き、`--settings {"outputStyle":"bantou"}` で選ぶ。session の値があれば center 共通の値は使わない（1 つしか選べないので連結しない）。2026-11-11 追加。比較した案: (A) 共通の `instructions` に style の本文を貼る（実装不要だが claude 既定の出力指示が残る）、(B) ホストの `~/.claude/output-styles/` の style を名前で指定（bantou 外のファイルが要る）、(C) 本文を設定に持ち center が書き出す。(C) を採用 |
 
 ## session のフォルダ（path）
 
@@ -36,9 +38,9 @@ settings の項目ではなく、session の記録の `path`（master-cap の cl
 - 表示: 歯車のダイアログは `session_list` の `path` を読み取り専用で出す（`session_settings_get` は変えない）。
 - 比較した案（workspace の取り方）: (A) `session_list` の返り値を `{sessions, workspace}` に変える（既存の読み手を壊す）、(B) `session_settings_get` に載せる（追加ダイアログの時点では session が無い）、(C) 新 tool `center_info`。(C) を採用。
 
-## 項目を足す手順（将来用。今は実装しない）
+## 項目を足す手順
 
-skills・出力スタイルなど新しい項目を足す時は、次を同じ場所に足す。
+skills など新しい項目を足す時は、次を同じ場所に足す（`addDirs`・`outputStyle` はこの手順で足した）。
 
 1. `packages/center/src/project-settings.ts` の `ProjectSettings` に型、`projectSettingsPatchSchema` に検証（`nullable().optional()`。`null` で削除できる形を保つ）を足す。値の空の扱い（`instructions` の空文字のような正規化）が要る項目は `mergeSettings` に規則を足す。
 2. その項目を使う起動の引数は `buildWrapperArgs` と `launch`（`remote-control.ts`）に足す。supervisor の entry に値を持たせ、更新は `setInstructions` と同じ形の関数で次の起動に反映する。

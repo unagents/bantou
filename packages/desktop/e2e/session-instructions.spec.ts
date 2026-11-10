@@ -42,7 +42,7 @@ test.describe("session instructions", () => {
     await expect(page.getByTestId("settings-dialog")).toBeHidden();
     // it went to the center's tool, not to this PC's settings.json
     const sent = await mock(page, (m) => m.calls.filter((c) => c.cmd === "center_call" && (c.args as { name: string }).name === "center_settings_update").map((c) => c.args));
-    expect(sent).toEqual([{ name: "center_settings_update", arguments: { settings: { instructions: MULTI, addDirs: null } } }]);
+    expect(sent).toEqual([{ name: "center_settings_update", arguments: { settings: { instructions: MULTI, addDirs: null, outputStyle: null } } }]);
     expect(await mock(page, (m) => (m as unknown as { centerCommonSettings: Record<string, unknown> }).centerCommonSettings)).toEqual({ instructions: MULTI });
     // only the common part changed: the center config API was not called
     expect(await mock(page, (m) => m.calls.filter((c) => c.cmd === "center_set_settings").length)).toBe(0);
@@ -448,5 +448,64 @@ test.describe("reference folders (--add-dir)", () => {
     await page.getByTestId("settings-save").click();
     await expect(page.getByTestId("settings-dialog")).toBeHidden();
     expect(await mock(page, (m) => (m as unknown as { centerCommonSettings: Record<string, unknown> }).centerCommonSettings)).toEqual({ addDirs: ["/common/ref", "/common/picked"] });
+  });
+});
+
+test.describe("output style", () => {
+  test.use({ seed: boardSeed });
+  const STYLE = "---\nname: Concise Plus\n---\nLead with the result.\n- no filler";
+
+  test("the center-wide output style: read from the center, saved with the one save button, blank removes it", async ({ page }) => {
+    await page.goto("/");
+    await mock(page, (m) => {
+      (m as unknown as { centerCommonSettings: Record<string, unknown> }).centerCommonSettings = { outputStyle: "共通の style" };
+    });
+    await page.getByTestId("open-settings").click();
+    const field = page.getByTestId("center-common-output-style");
+    await expect(field).toHaveValue("共通の style");
+    await expect(page.getByTestId("center-common-output-style-note")).toHaveText(NOTE);
+    await expect(page.getByTestId("settings-save")).toBeDisabled();
+    await field.fill(STYLE);
+    await page.getByTestId("settings-save").click();
+    await expect(page.getByTestId("settings-dialog")).toBeHidden();
+    expect(await mock(page, (m) => (m as unknown as { centerCommonSettings: Record<string, unknown> }).centerCommonSettings)).toEqual({ outputStyle: STYLE });
+    await page.getByTestId("open-settings").click();
+    await expect(page.getByTestId("center-common-output-style")).toHaveValue(STYLE);
+    await page.getByTestId("center-common-output-style").fill("");
+    await page.getByTestId("settings-save").click();
+    await expect(page.getByTestId("settings-dialog")).toBeHidden();
+    expect(await mock(page, (m) => (m as unknown as { centerCommonSettings: Record<string, unknown> }).centerCommonSettings)).toEqual({});
+  });
+
+  test("a session's output style is kept per session on the center; an over-long text is rejected", async ({ page }) => {
+    await page.goto("/");
+    const gear = (name: string) => page.locator(`[data-testid=session-settings-open][data-name="${name}"]`);
+    await gear("careery").click();
+    const dlg = page.getByTestId("settings-dialog");
+    await expect(dlg.getByTestId("settings-section-output-style")).toBeVisible();
+    await expect(dlg.getByTestId("settings-output-style")).toHaveValue("");
+    await dlg.getByTestId("settings-output-style").fill("x".repeat(32_001));
+    await expect(dlg.getByTestId("settings-save")).toBeDisabled();
+    await expect(dlg.getByText("出力スタイルは 32000 文字以内")).toBeVisible();
+    await dlg.getByTestId("settings-output-style").fill(STYLE);
+    await dlg.getByTestId("settings-save").click();
+    await expect(dlg).toBeHidden();
+    expect(await mock(page, (m) => m.centerSettings)).toEqual({ careery: { outputStyle: STYLE } });
+    await gear("stroke-board").click();
+    await expect(page.getByTestId("settings-output-style")).toHaveValue("");
+    await page.keyboard.press("Escape");
+    await gear("careery").click();
+    await expect(page.getByTestId("settings-output-style")).toHaveValue(STYLE);
+  });
+
+  test("the add dialog sends the output style with session_create", async ({ page }) => {
+    await page.goto("/");
+    await page.getByTestId("open-add-session").click();
+    await page.getByTestId("add-name").fill("pm-style");
+    await page.getByTestId("add-output-style").fill(STYLE);
+    await page.getByTestId("add-create").click();
+    await expect(page.getByTestId("add-dialog")).toBeHidden();
+    const call = await mock(page, (m) => m.calls.find((c) => c.cmd === "create_session"));
+    expect(call?.args).toEqual({ name: "pm-style", path: null, settings: { outputStyle: STYLE } });
   });
 });

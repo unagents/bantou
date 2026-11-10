@@ -109,7 +109,7 @@ export function registerTools(
     {
       title: "session の名前・path を変更",
       description:
-        "session_create で作った session の名前（newName）と path を変える。session を止め、path 指定時はフォルダを作る（move: true なら今のフォルダを新しい path へ rename で移動。EXDEV などで失敗したら error で何も変えない。コピーはしない）、記録を更新して新しい名前で起動し直す。settings（instructions / addDirs）は引き継ぐ。remote の cap_id は変わらず、記録は新しい名前へ付け替わる。path を変えた時は --continue が効かず（会話が無い）素の起動になる。config 由来の project は不可。newName は既存の session / project と重複不可、path は他の session と重複不可。{ SessionInfo } を返す",
+        "session_create で作った session の名前（newName）と path を変える。session を止め、path 指定時はフォルダを作る（move: true なら今のフォルダを新しい path へ rename で移動。EXDEV などで失敗したら error で何も変えない。コピーはしない）、記録を更新して新しい名前で起動し直す。settings（instructions / addDirs / outputStyle）は引き継ぐ。remote の cap_id は変わらず、記録は新しい名前へ付け替わる。path を変えた時は --continue が効かず（会話が無い）素の起動になる。config 由来の project は不可。newName は既存の session / project と重複不可、path は他の session と重複不可。{ SessionInfo } を返す",
       inputSchema: sessionUpdateSchema,
     },
     (args) => guard(async () => json(await sessions.update(args))),
@@ -119,7 +119,7 @@ export function registerTools(
     {
       title: "session の設定を取得",
       description:
-        "session のプロジェクト設定 { name, settings } を返す。settings は { instructions?: string（--append-system-prompt に渡す追加指示）, addDirs?: string[]（--add-dir で渡す参照フォルダ。絶対パス）, …将来の項目 }。未設定は {}。config 由来の project も {}",
+        "session のプロジェクト設定 { name, settings } を返す。settings は { instructions?: string（--append-system-prompt に渡す追加指示）, addDirs?: string[]（--add-dir で渡す参照フォルダ。絶対パス）, outputStyle?: string（claude の output style の markdown 本文。session のフォルダの .claude/output-styles/bantou.md に書いて --settings {\"outputStyle\":\"bantou\"} で選ぶ）, …将来の項目 }。未設定は {}。config 由来の project も {}",
       inputSchema: { name: z.string().regex(SESSION_NAME, "英数字と _ - のみ") },
     },
     ({ name }) => guard(async () => json(sessions.getSettings(name))),
@@ -129,7 +129,7 @@ export function registerTools(
     {
       title: "session の設定を更新",
       description:
-        "session のプロジェクト設定を項目ごとにマージ更新し、更新後の { name, settings } を返す。settings に書いた項目だけ変わる（省略した項目はそのまま）。null はその項目を削除。instructions は 16000 文字以内で、空文字は削除と同じ。addDirs は絶対パスの配列（20 個以内。空配列は削除と同じ。center 共通の addDirs と合わせて --add-dir に 1 つずつ付く）。未知の項目は保持する。session_create で作った session のみ。動いている session には効かず、次の起動（再起動・--continue 含む）から効く",
+        "session のプロジェクト設定を項目ごとにマージ更新し、更新後の { name, settings } を返す。settings に書いた項目だけ変わる（省略した項目はそのまま）。null はその項目を削除。instructions は 16000 文字以内で、空文字は削除と同じ。addDirs は絶対パスの配列（20 個以内。空配列は削除と同じ。center 共通の addDirs と合わせて --add-dir に 1 つずつ付く）。outputStyle は 32000 文字以内で、空文字は削除と同じ（session の値があれば center 共通の outputStyle は使わない）。未知の項目は保持する。session_create で作った session のみ。動いている session には効かず、次の起動（再起動・--continue 含む）から効く",
       inputSchema: { name: z.string().regex(SESSION_NAME, "英数字と _ - のみ"), settings: projectSettingsPatchSchema },
     },
     ({ name, settings }) => guard(async () => json(await sessions.updateSettings(name, settings))),
@@ -139,7 +139,7 @@ export function registerTools(
     {
       title: "center 共通の設定を取得",
       description:
-        "center 共通の設定 { settings } を返す。settings は { instructions?: string（全 session の --append-system-prompt の先頭に付く共通の追加指示。session の追加指示は空行を挟んでその後ろ）, addDirs?: string[]（全 session に --add-dir で付く参照フォルダ。絶対パス。session の addDirs はその後ろ）, …将来の項目 }。未設定は {}",
+        "center 共通の設定 { settings } を返す。settings は { instructions?: string（全 session の --append-system-prompt の先頭に付く共通の追加指示。session の追加指示は空行を挟んでその後ろ）, addDirs?: string[]（全 session に --add-dir で付く参照フォルダ。絶対パス。session の addDirs はその後ろ）, outputStyle?: string（全 session の claude の output style の markdown 本文。session に outputStyle があればそちらを使う）, …将来の項目 }。未設定は {}",
     },
     () => guard(async () => json(sessions.getCenterSettings())),
   );
@@ -148,7 +148,7 @@ export function registerTools(
     {
       title: "center 共通の設定を更新",
       description:
-        "center 共通の設定を項目ごとにマージ更新し、更新後の { settings } を返す。settings に書いた項目だけ変わる。null はその項目を削除。instructions は 16000 文字以内で、空文字は削除と同じ。addDirs は絶対パスの配列（20 個以内。空配列は削除と同じ）。全 session の次の起動（再起動・--continue 含む）から効く。動いている session には効かない",
+        "center 共通の設定を項目ごとにマージ更新し、更新後の { settings } を返す。settings に書いた項目だけ変わる。null はその項目を削除。instructions は 16000 文字以内で、空文字は削除と同じ。addDirs は絶対パスの配列（20 個以内。空配列は削除と同じ）。outputStyle は 32000 文字以内で、空文字は削除と同じ。全 session の次の起動（再起動・--continue 含む）から効く。動いている session には効かない",
       inputSchema: { settings: projectSettingsPatchSchema },
     },
     ({ settings }) => guard(async () => json(await sessions.updateCenterSettings(settings))),
