@@ -7,7 +7,7 @@ const props = defineProps<{
   waitingReply?: number;
 }>();
 
-/** The mark of a session's work state on the side row: icon + short Japanese label. */
+/** The mark of a session's work state on the side row: icon only. The label is only in the title (tooltip) and aria-label. */
 const META: Record<SessionActivity, { label: string; icon: string; cls: string; tip: string }> = {
   working: { label: "作業中", icon: "i-lucide-loader-circle", cls: "text-info animate-spin", tip: "作業が続いている" },
   "remote-working": {
@@ -22,7 +22,8 @@ const META: Record<SessionActivity, { label: string; icon: string; cls: string; 
 const tip = computed(() => {
   const base = META[props.activity].tip;
   const n = props.waitingReply ?? 0;
-  return props.activity === "needs-input" && n > 0 ? `${base}（worker の質問に未返答 ${n} 件）` : base;
+  const detail = props.activity === "needs-input" && n > 0 ? `${base}（worker の質問に未返答 ${n} 件）` : base;
+  return `${META[props.activity].label}: ${detail}`;
 });
 </script>
 
@@ -31,10 +32,11 @@ const tip = computed(() => {
     class="flex shrink-0 items-center gap-1 text-xs"
     :class="activity === 'needs-input' ? 'text-warning font-semibold' : 'text-cork-muted'"
     :title="tip"
+    role="img"
+    :aria-label="tip"
     data-testid="session-activity"
     :data-activity="activity"
   >
-    <UIcon :name="META[activity].icon" class="size-3.5" :class="META[activity].cls" />
-    {{ META[activity].label }}
+    <UIcon :name="META[activity].icon" class="size-3.5" :class="META[activity].cls" aria-hidden="true" />
   </span>
 </template>
