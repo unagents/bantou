@@ -102,7 +102,7 @@ test.describe("remote visibility (unreachable server / lost cap)", () => {
     await expect(count(page, "remote-unreachable")).toHaveCount(0);
   });
 
-  test("priority: a worker ask (needs-input) beats unreachable; unreachable beats lost and working; stopped session shows nothing", async ({ page }) => {
+  test("priority: a worker ask (needs-input) beats unreachable; unreachable beats lost and working; shown even when the session is stopped", async ({ page }) => {
     await page.goto("/");
     await pickSession(page, "careery");
     await setSession(page, "stroke-board", { activity: "working", state: "connected", remote: { ...LOST, ...UNREACHABLE, waitingReply: 1 } });
@@ -114,7 +114,14 @@ test.describe("remote visibility (unreachable server / lost cap)", () => {
     await setSession(page, "stroke-board", { remote: LOST, activity: "working" });
     await act(page);
     await expect(mark(page, "stroke-board")).toHaveAttribute("data-activity", "remote-lost");
+    // not connected: the remote trouble is still shown (the work state of the session itself is not)
     await setSession(page, "stroke-board", { state: "stopped" });
+    await act(page);
+    await expect(mark(page, "stroke-board")).toHaveAttribute("data-activity", "remote-lost");
+    await setSession(page, "stroke-board", { remote: UNREACHABLE });
+    await act(page);
+    await expect(mark(page, "stroke-board")).toHaveAttribute("data-activity", "remote-unreachable");
+    await setSession(page, "stroke-board", { remote: { running: 0, waitingReply: 0 } });
     await act(page);
     await expect(mark(page, "stroke-board")).toHaveCount(0);
   });

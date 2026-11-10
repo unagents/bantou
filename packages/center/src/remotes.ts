@@ -61,8 +61,16 @@ export const RESEND_AFTER_MS = 10 * 60_000;
 export const REACH_FAIL_THRESHOLD = 2;
 /** server への到達の確認（status）の間隔（ms）。follow の hello（30 秒）と同じ。 */
 export const REACH_CHECK_MS = 30_000;
-/** 失敗した後、到達不能と決めるまでの再確認の間隔（ms）。 */
-export const REACH_RETRY_MS = 10_000;
+/**
+ * 失敗を数える最小の間隔（ms）。server 単位で、最後に数えた失敗からこれ未満の失敗は 1 回に束ねる（1 回の通信の断・遅延で、hello・status・probe・受付確認が同時に失敗しても 1 回）。
+ * 失敗中の再確認の間隔でもある。環境変数 BANTOU_REMOTE_REACH_RETRY_MS で変えられる。連続 2 回で到達不能なので、実際の検出は止まってから 40〜60 秒後になる。
+ */
+export const REACH_RETRY_MS = 20_000;
+/** 環境変数 BANTOU_REMOTE_REACH_RETRY_MS（正の整数 ms）。無い・不正は既定。 */
+export function reachRetryFromEnv(env: NodeJS.ProcessEnv = process.env): number {
+  const v = Number(env.BANTOU_REMOTE_REACH_RETRY_MS);
+  return Number.isInteger(v) && v > 0 ? v : REACH_RETRY_MS;
+}
 
 /** 環境変数 BANTOU_REMOTE_ACK_TIMEOUT_MS（正の整数 ms）。無い・不正は既定。 */
 export function ackTimeoutFromEnv(env: NodeJS.ProcessEnv = process.env): number {
@@ -72,6 +80,8 @@ export function ackTimeoutFromEnv(env: NodeJS.ProcessEnv = process.env): number 
 
 /** task の送達状態。unsent = center の記録だけで messenger へ未送信 / sent = messenger に送り出した（server の受付は未確認） / accepted = server が受け付けた（status の cap に載った、または task_result が返った）。 */
 export type DeliveryState = "unsent" | "sent" | "accepted";
+/** 受付の根拠。server は task に ack を返さないので、status = 送る前から cap が変わったことを観測した推定（cap が別の要因で動き直した場合の偽陽性が理論上ある）/ task_result = server が結果を返した（確実）。 */
+export type DeliveryBasis = "status" | "task_result";
 /** cap の server 側の状態。unknown = server に届かない・まだ status も通知も無い。 */
 export type CapState = "running" | "idle" | "lost" | "unknown";
 
@@ -132,18 +142,21 @@ export interface PendingInstruction {
   sent_at?: string;
   /** server の受付を確認した時刻（ISO）。 */
   accepted_at?: string;
+  /** 受付の根拠。status = status の変化から推定（server の ack ではない） / task_result = server が task の結果を返した。 */
+  delivery_basis?: DeliveryBasis;
   /** 同じ指示の再送を見分ける印（cap_id と task の中身の hash）。 */
   fp?: string;
   /** 送る直前の cap の状態（server の status）。受付の判定は、後の status がこれから変わったかで見る（server と center の時計は比べない）。 */
   base?: AckBase;
 }
 
-/** task を送る直前の cap の状態。 */
+/** task を送る直前の cap の状態。ahead = 送る時点で受付が未確認だった、この cap の先行する task の数（受付は ahead + 1 本分の増加を見るまで認めない）。 */
 export interface AckBase {
   exists: boolean;
   running: boolean;
   queued: number;
   started: string | null;
+  ahead?: number;
 }
 
 /**
@@ -326,6 +339,8 @@ export interface RemoteSendResult {
   delivery: DeliveryState;
   /** 受付を確認した時刻（ISO。delivered=true の時）。 */
   delivered_at?: string;
+  /** 受付の根拠（delivered=true の時）。status = status の変化からの推定 / task_result = server が結果を返した。 */
+  delivery_basis?: DeliveryBasis;
   /** delivered=false の理由（届いていない旨）。 */
   error?: string;
 }
@@ -501,6 +516,8 @@ export function createRemoteManager(opts: {
   reachCheckMs?: number;
   /** 到達不能と見なす連続失敗の回数。既定 REACH_FAIL_THRESHOLD。 */
   reachThreshold?: number;
+  /** 失敗を数える最小の間隔（ms）。この未満の失敗は 1 回に束ねる。既定は環境変数 BANTOU_REMOTE_REACH_RETRY_MS、無ければ REACH_RETRY_MS。 */
+  reachRetryMs?: number;
   /** 完了通知の送り先。owner の session へ text を送る。省けば通知しない。 */
   notify?: (owner: string, text: string) => Promise<{ ok: true } | { ok: false; reason: string }>;
 }): RemoteManager {
@@ -541,11 +558,14 @@ export function createRemoteManager(opts: {
   const resendAfterMs = opts.resendAfterMs ?? RESEND_AFTER_MS;
   const reachCheckMs = opts.reachCheckMs ?? REACH_CHECK_MS;
   const reachThreshold = opts.reachThreshold ?? REACH_FAIL_THRESHOLD;
+  const reachRetryMs = opts.reachRetryMs ?? reachRetryFromEnv();
 
   /** server（server_id、無ければ peer id）ごとの到達性（メモリのみ）。 */
   interface Health {
     lastOkAt?: number;
     failures: number;
+    /** 最後に失敗を数えた時刻。これから reachRetryMs 未満の失敗は数えない（成功でリセット）。 */
+    countedAt?: number;
     lastError?: string;
   }
   const health = new Map<string, Health>();
@@ -668,8 +688,9 @@ export function createRemoteManager(opts: {
     const h = health.get(key) ?? { failures: 0 };
     const wasDown = h.failures >= reachThreshold;
     const changed = h.failures > 0;
-    h.lastOkAt = Date.now();
+    h.lastOkAt = nowMs();
     h.failures = 0;
+    delete h.countedAt;
     delete h.lastError;
     health.set(key, h);
     if (!changed) return;
@@ -683,8 +704,15 @@ export function createRemoteManager(opts: {
   const markFailKey = (key: string, message: string): void => {
     const h = health.get(key) ?? { failures: 0 };
     const before = h.failures;
-    h.failures++;
+    const t = nowMs();
     h.lastError = message;
+    // 同じ障害で hello・status・probe・受付確認が同時に失敗しても 1 回に束ねる（失敗は呼び出しの回数でなく時間で数える）
+    if (h.failures > 0 && h.countedAt !== undefined && t - h.countedAt < reachRetryMs) {
+      health.set(key, h);
+      return;
+    }
+    h.failures++;
+    h.countedAt = t;
     health.set(key, h);
     if (before < reachThreshold && h.failures >= reachThreshold) {
       log(`server に届かない: ${key} 連続 ${h.failures} 回 ${message}`);
@@ -694,36 +722,42 @@ export function createRemoteManager(opts: {
   const markOk = (r: RemoteRecord): void => markOkKey(healthKeyOf(r));
   const markFail = (r: RemoteRecord, message: string): void => markFailKey(healthKeyOf(r), message);
 
-  /** 受付の判定。後の status の cap が、送る前（base）から変わったか。base が無い（旧形式の記録）は、cap が動いている・待ちがあるかで見る。 */
+  /** cap にいる task の数（実行中 + 待ち）。 */
+  const loadOf = (cap: { state?: string; queued?: number }): number => (cap.state === "running" ? 1 : 0) + (cap.queued ?? 0);
+  /**
+   * 受付の判定（status の変化からの推定。server は task に ack を返さない）。送る前（base）から、先行する未確認の task の数（ahead）+ 1 本分、cap の負荷（実行中 + 待ち）が増えたら受付。
+   * 先行する未確認の task が無い時に限り、負荷が戻っていても last_started_at が変わっていれば（速く終わった）受付とする。先行がある時は曖昧なので認めない（届いたかもしれない、を届いたと言わない）。
+   * 限界: server は report 起因の resume でも cap を running にし last_started_at を更新するので、別の要因で cap が動き直した場合の偽陽性が理論上ある。
+   */
   const acceptedBy = (st: StatusReply, r: RemoteRecord, p: PendingInstruction): boolean => {
     const cap = st.caps.find((c) => c.id === r.remote_id);
     if (!cap) return false;
     const b = p.base;
     if (!b) return cap.state === "running" || (cap.queued ?? 0) > 0;
+    const ahead = b.ahead ?? 0;
+    const baseLoad = b.exists ? (b.running ? 1 : 0) + b.queued : 0;
+    if (loadOf(cap) - baseLoad >= ahead + 1) return true;
+    if (ahead > 0) return false;
     if (!b.exists) return true;
-    if ((cap.queued ?? 0) > b.queued) return true;
-    if ((cap.last_started_at ?? null) !== b.started) return true;
-    return cap.state === "running" && !b.running;
+    return (cap.last_started_at ?? null) !== b.started;
   };
-  const baseOf = (st: StatusReply, id: string): AckBase => {
+  const baseOf = (st: StatusReply, id: string, ahead: number): AckBase => {
     const cap = st.caps.find((c) => c.id === id);
-    return { exists: cap !== undefined, running: cap?.state === "running", queued: cap?.queued ?? 0, started: cap?.last_started_at ?? null };
+    return { exists: cap !== undefined, running: cap?.state === "running", queued: cap?.queued ?? 0, started: cap?.last_started_at ?? null, ahead };
   };
-  const markAccepted = (r: RemoteRecord, p: PendingInstruction): void => {
+  const markAccepted = (r: RemoteRecord, p: PendingInstruction, basis: DeliveryBasis): void => {
     if (p.delivery === "accepted") return;
     p.delivery = "accepted";
+    p.delivery_basis = basis;
     p.accepted_at = new Date().toISOString();
     delete r.cap_lost;
-    log(`remote 受付: ${r.remote_id} task_id=${p.task_id ?? "-"}`);
+    log(`remote 受付: ${r.remote_id} task_id=${p.task_id ?? "-"} 根拠=${basis}`);
     void persist();
     wake();
   };
-  /** 取れた status を、同じ server の記録に反映する（cap の状態と、受付が未確認だった task の受付）。 */
+  /** 取れた status を、同じ server の記録に反映する（cap の状態）。受付の判定は awaitAck の直接の観測だけで行い、周期の status では pending を accepted にしない（別の要因の変化を受付と取り違えるため）。 */
   const recordStatus = (key: string, st: StatusReply): void => {
-    for (const x of recordsOfKey(key)) {
-      capSnap.set(x, { at: Date.now(), cap: st.caps.find((c) => c.id === x.remote_id) });
-      for (const p of x.pending) if (p.delivery !== "accepted" && acceptedBy(st, x, p)) markAccepted(x, p);
-    }
+    for (const x of recordsOfKey(key)) capSnap.set(x, { at: Date.now(), cap: st.caps.find((c) => c.id === x.remote_id) });
   };
 
   /** cap の server 側の状態。通知（activity）と status の新しい方を使う。 */
@@ -1429,7 +1463,7 @@ export function createRemoteManager(opts: {
           markOk(r);
           recordStatus(healthKeyOf(r), reply);
           if (acceptedBy(reply, r, p)) {
-            markAccepted(r, p);
+            markAccepted(r, p, "status");
             return true;
           }
         } else if (reply?.type === "error" && isTransportError(reply)) {
@@ -1450,9 +1484,9 @@ export function createRemoteManager(opts: {
       ? undefined
       : failure
         ? failure.transport
-          ? `task を送れなかった（server には届いていない）: ${failure.message}`
+          ? `task を送れなかった（server には届いていない）: ${failure.message}。pending に未送信（unsent）で残してある。再送してよい`
           : `server が task を受け付けなかった: ${failure.message}`
-        : `${note ?? "task は送ったが、server が受け付けたことを確認できない"}（${Math.round(ackTimeoutMs / 1000)} 秒待った。届いていない可能性がある。pending には ${delivery === "unsent" ? "未送信" : "送信済"}で残してあり、受け付けられたと分かれば remote_list の delivery が accepted になる）`;
+        : `${note ?? "task は送ったが、server が受け付けたことを確認できない"}（${Math.round(ackTimeoutMs / 1000)} 秒待った。届いていない可能性も、届いたが status に変化が出なかった可能性もある）。task は pending に ${delivery === "unsent" ? "未送信（unsent）" : "送信済（sent）"}で残っている。再送する前に remote_list で delivery を確認する（task_result が返れば accepted になる。受付未確認の同じ指示は ${Math.round(resendAfterMs / 60_000)} 分は再送されない）`;
     return {
       remote_id: r.remote_id,
       server: peer.server_id ?? peer.id,
@@ -1467,6 +1501,7 @@ export function createRemoteManager(opts: {
       delivered: ok,
       delivery,
       ...(ok && p.accepted_at ? { delivered_at: p.accepted_at } : {}),
+      ...(ok && p.delivery_basis ? { delivery_basis: p.delivery_basis } : {}),
       ...(error ? { error } : {}),
     };
   };
@@ -1491,7 +1526,7 @@ export function createRemoteManager(opts: {
     const failing = [...health.values()].some((h) => h.failures > 0 && h.failures < reachThreshold);
     reachTimer = setTimeout(() => {
       void checkReachability().finally(scheduleReach);
-    }, failing ? Math.min(REACH_RETRY_MS, reachCheckMs) : reachCheckMs);
+    }, failing ? Math.min(reachRetryMs, reachCheckMs) : reachCheckMs);
     reachTimer.unref?.();
   };
 
@@ -1515,7 +1550,8 @@ export function createRemoteManager(opts: {
       // protocol の版が合わない・更新待ちの server へは、記録を作らず isError で返す（session が後で再送できる）
       const blocked = link.gate?.(peer, "task");
       if (blocked) throw new Error(blocked.message);
-      return serial(peer.server_id ?? peer.id, async () => {
+      // 送信までを server ごとに直列にし、受付の確認（最大 ackTimeoutMs）は直列の外で待つ（他の session の送信を待たせない）
+      const finish = await serial<() => Promise<RemoteSendResult>>(peer.server_id ?? peer.id, async () => {
         // cap は session × server に 1 つ。cap_id は center-id と session 名から決まる。無ければ記録を作り、cap は server が最初の task で作る
         // 既存の記録があればその remote_id（session の改名後も cap_id は変えない）
         let rec = findRecord(peer, input.owner, live);
@@ -1537,20 +1573,31 @@ export function createRemoteManager(opts: {
         const exists = st.caps.some((c) => c.id === cid);
         const fp = fingerprintOf(cid, input);
         // 同じ指示を、受け付けを確認できないまま再び送ろうとしている: 送り直さない（server は task_id の重複を除かないので二重に実行される）。確認だけやり直す
-        const dup = rec?.pending.find((p) => p.fp === fp && p.delivery !== "accepted" && p.task_id !== undefined && Date.now() - Date.parse(p.at) < resendAfterMs);
+        // 未確認 = 受付が確認されておらず、送り出した（または送り出し中の）task。送り出せなかった task（unsent のまま失敗）は含めない（server に届いていないので再送してよく、受付の基準にも数えない）
+        const unconfirmed = (p: PendingInstruction): boolean =>
+          p.task_id !== undefined &&
+          p.delivery !== "accepted" &&
+          Date.now() - Date.parse(p.at) < resendAfterMs &&
+          ((p.delivery ?? "sent") === "sent" || (rec !== undefined && inflightTasks.get(rec)?.has(p.task_id) === true));
+        const dup = rec?.pending.find((p) => p.fp === fp && unconfirmed(p));
         if (rec && dup) {
           recordStatus(healthKeyOf(rec), st);
           log(`remote 再送しない（前の送信の受付が未確認）: ${cid} task_id=${dup.task_id}`);
-          const ok = await awaitAck(rec, dup, peer);
-          return sendResult(rec, dup, peer, ok, exists, undefined, "前に送った同じ指示の受付を確認できない（再送はしていない）");
+          const dupRec = rec;
+          return async () => {
+            const ok = await awaitAck(dupRec, dup, peer);
+            return sendResult(dupRec, dup, peer, ok, exists, undefined, "前に送った同じ指示の受付を確認できない（再送はしていない）");
+          };
         }
+        // 先行する未確認の task が、今の status で見えているなら受付済みにする（直接の観測）。見えないものは後から届くかもしれないので、基準（ahead）に数える
+        if (rec) for (const p of rec.pending) if (unconfirmed(p) && acceptedBy(st, rec, p)) markAccepted(rec, p, "status");
+        // 先行する未確認の task の数（受付は、その分も含めて cap の負荷が増えるまで認めない）
+        const ahead = rec ? rec.pending.filter(unconfirmed).length : 0;
         // 新規の cap: 指定 > config。既存の cap: worker_model は指定された時だけ送る（server が cap の既定として記憶する）
         const cfgModels = exists ? {} : serverModels(peer, input.server);
         const workerModel = input.worker_model ?? cfgModels.worker_model;
         const taskId = newTaskId();
         const now = new Date().toISOString();
-        const prevState = rec?.state;
-        const createdRec = !rec;
         if (!rec) {
           rec = { remote_id: cid, session: input.owner, server: peer.server_id ?? peer.id, serverName: peer.name, state: "running", createdAt: now, pending: [] };
           records.push(rec);
@@ -1562,7 +1609,7 @@ export function createRemoteManager(opts: {
         if (!exists && !workerModel) delete rec.worker_model;
         if (workerModel) rec.worker_model = workerModel;
         const target = rec;
-        const entry: PendingInstruction = { at: now, owner: input.owner, prompt: input.goal.slice(0, PROMPT_HEAD_MAX), task_id: taskId, delivery: "unsent", fp, base: baseOf(st, cid) };
+        const entry: PendingInstruction = { at: now, owner: input.owner, prompt: input.goal.slice(0, PROMPT_HEAD_MAX), task_id: taskId, delivery: "unsent", fp, base: baseOf(st, cid, ahead) };
         target.pending.push(entry);
         target.state = "running";
         delete target.finishedAt;
@@ -1578,23 +1625,16 @@ export function createRemoteManager(opts: {
           inflightTasks.get(target)?.delete(taskId);
           if (kind === "cap_result") {
             // task_result が返った = server が受け付けて実行した
-            markAccepted(target, entry);
+            markAccepted(target, entry, "task_result");
             markOk(target);
           } else if (kind === "error") {
             // server の返した error（task を断った）。応答はあった
             taskFailures.set(taskId, { message: res.error ?? "失敗", transport: false });
             markOk(target);
           } else if (entry.delivery === "unsent") {
-            // messenger へ送り出す前に失敗した: server には何も届いていない。指示を残さない（再送を止めてしまわないように）
+            // messenger へ送り出す前に失敗した: server には何も届いていない。pending には未送信（unsent）のまま残す（再送は止めない）
             taskFailures.set(taskId, { message: res.error ?? "送信できなかった", transport: true });
-            const i = target.pending.indexOf(entry);
-            if (i >= 0) target.pending.splice(i, 1);
-            if (createdRec && target.pending.length === 0 && target.result_at === undefined && target.error_at === undefined) forgetRecord(target);
-            else if (prevState !== undefined && target.pending.length === 0) target.state = prevState;
-            void persist();
-            wake();
-            log(`remote 送信できなかった: ${cid} task_id=${taskId} ${res.error ?? ""}`);
-            return;
+            log(`remote 送信できなかった（pending に unsent で残す）: ${cid} task_id=${taskId} ${res.error ?? ""}`);
           } else {
             taskFailures.set(taskId, { message: res.error ?? "返信が来ない", transport: true });
           }
@@ -1624,10 +1664,13 @@ export function createRemoteManager(opts: {
           (reply) => settle(resultOf(reply), reply.type === "task_result" ? "cap_result" : reply.type === "error" && isTransportError(reply) ? "transport" : "error", reply.type === "task_result" ? reply : undefined),
           (e: unknown) => settle({ ok: false, text: "", error: e instanceof Error ? e.message : String(e) }, "transport"),
         );
-        // 受け付けられたことを確かめてから返す（server は task に ack を返さないので、status の cap の変化で見る）。server ごとの直列の中で待ち、次の送信の基準を汚さない
-        const ok = await awaitAck(target, entry, peer);
-        return sendResult(target, entry, peer, ok, exists, workerModel, undefined);
+        // 受け付けられたことを確かめてから返す（server は task に ack を返さないので、status の cap の変化で見る）。直列の外で待つ。次の送信の基準は ahead（未確認の task の数）で補う
+        return async () => {
+          const ok = await awaitAck(target, entry, peer);
+          return sendResult(target, entry, peer, ok, exists, workerModel, undefined);
+        };
       });
+      return finish();
     },
 
     checkReachability,

@@ -121,10 +121,11 @@ export function useBoard(dir: Ref<string | null>) {
       const connected = r.state === "connected";
       if (connected && a === "needs-input") return "needs-input";
       if ((r.remote?.waitingReply ?? 0) > 0) return "needs-input";
-      if (!connected) return null;
       // A server that does not answer / a lost cap: the work left there is not going on, so it beats "working".
+      // Shown whatever the session state is (like an unanswered worker ask): the trouble is on the remote side, not in the session.
       if ((r.remote?.unreachable?.length ?? 0) > 0) return "remote-unreachable";
       if ((r.remote?.lost?.length ?? 0) > 0) return "remote-lost";
+      if (!connected) return null;
       if (a === "working") return "working";
       if ((r.remote?.running ?? 0) > 0) return "remote-working";
       return a;

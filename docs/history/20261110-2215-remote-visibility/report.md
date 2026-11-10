@@ -34,7 +34,7 @@ branch: `feat/remote-visibility`（基点 origin/develop 4564c8e（作業中に 
 | `ACK_POLL_MS` | 1 秒 | 受付確認の取り直し間隔 |
 | `RESEND_AFTER_MS` | 10 分 | 受付未確認の同じ指示を再送しない期間 |
 | `REACH_FAIL_THRESHOLD` | 2 回 | 一過性の取りこぼしを除く |
-| `REACH_CHECK_MS` / `REACH_RETRY_MS` | 30 秒 / 10 秒 | follow の hello と同じ周期。失敗中は短く再確認し 2 回目で素早く判定する |
+| `REACH_CHECK_MS` / `REACH_RETRY_MS` | 30 秒 / 20 秒 | 周期は follow の hello と同じ。`REACH_RETRY_MS` は失敗を束ねる最小間隔で、失敗中の再確認間隔でもある（下記 review 第1回 H1） |
 
 ### 再送の冪等性
 
@@ -126,3 +126,70 @@ develop 4564c8e への rebase で衝突したのは README 2 件のみ。どち�
 - center の再起動直後は `last_ok_at` が null（最初の応答まで）。
 - `follow` の `onReach` 接続の単体 test は無い（`noteReach` の test で代替）。
 - desktop の chip は到達不能・lost を session 数で数える。cap 単位の件数は tooltip で見る。
+
+## review 第1回の指摘と対応（HEAD a1c4cac への指摘。origin/develop 829c3c9 へ rebase 済み）
+
+### H1 失敗が「時間」でなく「呼び出し回数」で数わる（high）
+
+- 対応: 失敗は server 単位で、**最後に数えた失敗から `REACH_RETRY_MS`（既定 20 秒、環境変数 `BANTOU_REMOTE_REACH_RETRY_MS`、option `reachRetryMs`）未満の失敗は 1 回に束ねる**。hello（follow→`noteReach`）・周期の status・probe・announce・受付確認（awaitAck）の失敗は全て `markFailKey` の同じ束ね窓を通る。成功で `failures=0` と束ねの基準（`countedAt`）をリセット。失敗中の再確認間隔も `REACH_RETRY_MS`。
+- 影響: 連続 2 回で到達不能なので、表示が変わるまでは止まってから **40〜60 秒**（1 回目の失敗 + 20 秒以上空けた 2 回目の失敗 + status のタイムアウト）。以前より遅くなるが、1 回の通信の断・遅延で到達不能とちらつくことは無くなる。
+- test（fake の時計）: 同時刻の hello・status 複数の失敗が 1 回、19 秒後も 1 回、20 秒後で 2 回目になり unknown、成功で戻る、成功直後の失敗は 1 回目、hello 失敗も同じ窓。
+
+### H2 受付判定の偽陽性（high）
+
+- (b) 周期の status では pending を accepted に格上げしない（`recordStatus` は cap の状態を記録するだけ）。受付の判定は `awaitAck` の直接の観測と、同じ cap への次の送信時の status の直接の観測だけ。後から受付が分かる経路は `task_result`（根拠 `task_result`）のみ。
+- (c) base に先行する未確認の task の数 `ahead` を持ち、**cap の負荷（実行中 1 + 待ち queued）が base から `ahead + 1` 本分増えるまで accepted にしない**。先行が無い時だけ、負荷が戻っていても `last_started_at` の変化（速く終わった）を認める。先行がある時に曖昧なら accepted にせず `delivered:false`（pending に `sent` で残す）。先行の task が既に status で見えているなら、次の送信の時点で受付済みにしてから基準を取る（ahead に数えない）。送り出せなかった task（`unsent` のまま失敗）と 10 分を過ぎた task は ahead に数えない。
+- (a) report 起因の resume との区別は server を変えずには付かない。**`delivered: true` / `delivery: "accepted"` の意味を「受付を観測（status の変化）。server の ack ではない」と定義**し、返り値と pending に `delivery_basis: "status" | "task_result"` を足した。tool 説明・`center-tools.md`・README に「server は task に ack を返さない。status の変化からの推定で、cap が別要因で動き直した場合の偽陽性が理論上ある」と明記。server 側の希望は下記。
+- test: (b) 周期 status で格上げされず task_result で accepted（根拠 task_result）、(c) 2 本目が 1 本目の到着で誤って accepted にならない（`ahead` を外すと落ちることを確認）・先行が見えていれば待ちの増加で受付、(a) の限界は test のコメントと docs に残した。
+
+### M1 releaseOnSend による task_id の帰属（medium）
+
+- 帰属の誤りを承知で docs に明記した（`center-tools.md`・README・tool 説明）: 直列実行は server の `agents.ts` invoke の chains で cap ごとに保証され、順序は到着順。server は `tasks.set(capId, taskId)` で上書きするので、1 本目の実行中の worker_report・report 起因の task_result の task_id は最後に受けた task の id になる。center の task_result の照合は cap_id + task_id なので取り違えない。
+- **releaseOnSend を「cap が idle の時のみ」に限定する案は採用しない**。理由: chain 外しの目的は、cap が実行中でも次の task を送り出せること（事象 3 の「指示送信」が数分出ない遅延の解消）。idle の時だけ外すと、実行中に送る場合（遅延が起きていた場面）が元の chain に戻り、目的を満たさない。idle の時は元々 chain が詰まらないので、限定しても効果が無い。代わりに ahead による受付の厳格化と、docs の帰属の明記で対処する。
+
+### M2 awaitAck が server 単位の serial 内で待つ（medium）
+
+- 対応: 送信までを serial、`awaitAck` は serial の外で待つ（再送抑止の確認も同様）。次の送信の基準は `ahead` で補う。test: 別 session の 3 本が互いの ack 待ちで直列化されない（3 本で約 1 本分の待ち）。
+
+### M3 誤報時の error 文（medium）
+
+- error 文と tool 説明に「task は pending に送信済（sent）で残っている。再送する前に remote_list で delivery を確認する（受付未確認の同じ指示は 10 分は再送されない）。届いたが status に変化が出なかった可能性もある」を明記。
+
+### L1 unsent の扱い（low）
+
+- 送り出せなかった task も **pending に `delivery: "unsent"` で残す**（記録も残す）。再送抑止の対象にしない（`sent` / 送り出し中だけが対象）。error 文に「pending に未送信（unsent）で残してある。再送してよい」。docs・README の記述を統一（README の「残さない」を削除）。test あり。
+- 副作用: unsent の pending が残るので、後の probe で cap が動いていなければ state が done になり、完了通知が出る（error 付き）。
+
+### L2 切断中の表示（low）
+
+- 到達不能・lost は session が connected でなくても出す（`useBoard.ts` で `!connected` の判定より前に移した）。e2e と README を更新。
+
+### 状態の遷移表の更新（束ね窓）
+
+| 契機 | reachable | failures | state | cap_state |
+| --- | --- | --- | --- | --- |
+| 1 回目の失敗（hello・status・probe・受付確認のどれか） | true | 1（countedAt=now） | 変わらない | 変わらない |
+| 20 秒未満の失敗（同じ server の別経路を含む） | true | 1 のまま | 変わらない | 変わらない |
+| 20 秒以上空けた失敗 | false | 2 | unknown（作業中の cap） | unknown |
+| 応答（status・hello・activity・report・task_result） | true | 0（countedAt もリセット） | 元に戻る | status / activity の値 |
+
+返り値: `remote_send` に `delivery_basis: "status" | "task_result"`（delivered:true の時）。`remote_list` の pending にも `delivery_basis?`。上の定数表の `REACH_CHECK_MS / REACH_RETRY_MS` は 30 秒 / 20 秒（束ね窓）に読み替える。
+
+### server 側の希望（変更は要求しない）
+
+- `task` の ack（受付時に即返す）。あれば status の推定と `delivery_basis: "status"` の偽陽性が不要になる。
+- `task_id` の重複排除（再送の冪等性。現状は center が再送を抑止して回避）。
+- report 起因の resume と task 起因の起動の区別（status に起動の理由、または task_id を載せる）。
+- `tasks.set(capId, taskId)` の上書きをやめ、worker_report の task_id の帰属を task 単位にする。
+
+### 残課題（追加）
+
+- unsent の pending が残った後の完了通知の文面（L1 の副作用）。
+- 検出の遅れは 40〜60 秒。
+- 受付確認が曖昧な時は delivered:false を返す（安全側）ため、実際は届いていても isError になりうる。`remote_list` の delivery と task_result で確認する運用。
+
+### 第1回対応後のテスト結果
+
+- center: typecheck OK。`env -u BANTOU_SESSION_TOKEN npm test` 569 件中 568 pass、1 fail（`rc-orphan.test.ts`、環境起因。origin/develop 単体でも同じ）。
+- desktop: typecheck OK。e2e 全件 220 件 pass、失敗 0（nuxt generate の静的ビルド + 簡易サーバー port 15750 + chromium-1243。簡易サーバーは停止し port 解放を確認）。
+- Rust（`session.rs`）は第1回対応で未変更。
