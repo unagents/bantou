@@ -97,6 +97,7 @@ npx bantou --config <path>
 <workspace>/
   config.json                        root 構成の config（`workspace` 省略時。明示指定の構成では別の場所）
   server.log / server.lock / server.ready / server.exit / update.json  常駐の記録と更新の状態
+  server.json                        server の安定 id（`server_id`）。初回起動で 1 回生成
   broker.json                        broker の状態ファイル
   caps/<cap-id>/                     cap の path（claude の cwd）
     state.json                       状態
@@ -253,7 +254,16 @@ npx bantou --config <path>
 - 実行が失敗しても `cap_result` で返る（`ok: false` と `error`）。
 - `error` は実行に入る前の失敗（git 失敗、state が `running` / `error` で起動できない、state 破損など）。
 - `cap_id` / `worker_id` が不正（`[A-Za-z0-9_-]+` でない）な指示は `error` を返さず、指示でないメッセージとして無視する（ログに `無視:`）。
+- `status_result` / `hello_result` には server の identity（protocol 1.7.0、すべて optional）が載る: `server_id`・`host`（`os.hostname()`）・`user`（server を動かす OS ユーザー）・`workspace`（絶対パス）。`status_result` には加えて `server_version`（npm `bantou` の版）と `protocol_version`。旧い server（1.7.0 未満）はこれらを返さないので、center は messenger の peer id で扱う。
 - `status_result` の `state` は `idle` / `running` / `failed` / `error`。`queued` は待ち行列の件数。state.json が壊れていれば `error`。
+
+## server_id（server の安定 id）
+
+- messenger の peer id は server の再起動・再登録のたびに変わる。代わりに server は workspace に 1 つの `server_id`（`srv-` + hex 10 桁、例 `srv-0a1b2c3d4e`）を持つ。
+- 保存先は `<workspace>/server.json`（`{"server_id","created_at"}`）。初回起動で 1 回だけ生成する。再起動・自己更新（`update_server`）・workspace の移動（dir ごと移した場合）でも、同じ workspace なら変わらない。別の workspace は別の id。
+- server.json が無い・`server_id` が無い旧形式・壊れている（JSON 不正、形が不正、`server_id` が `^[A-Za-z0-9_-]{1,64}$` でない）・読めない時は、起動を止めずに `server_id` を再生成して書く（旧形式なら他のキーを残す。`server.log` に `server_id 生成: ... (理由)` を出す）。壊れた場合は id が変わる。保存に失敗した時はその起動だけの id で動き、log に残す。
+- 同じ host に server が 2 つある時の見分け方: `hello_result` / `status_result` の `server_id` + `workspace` を見る（`host` と `user` は同じでも `workspace` と `server_id` が違う）。`server.log` の起動行（`server_id=... host=... user=...`）でも確かめられる。
+- server.json は `logs/` と `state.json` の掃除（cap / worker の dir）の対象外（workspace 直下なので触らない）。
 
 ## state.json
 

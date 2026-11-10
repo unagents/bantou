@@ -7,7 +7,7 @@ import {
   isActivityState, isServerNotice, parseServerNotice, ACTIVITY_STATES,
   isValidAgentId, isAgentState, SERVER_NAME, MESSENGER_PROTOCOL, AGENT_ID_PATTERN,
   isHelloCommand, isUpdateServerCommand, isValidServerVersion, isErrorCode, ERROR_CODES,
-  FOLLOW_MIN_PROTOCOL, SERVER_VERSION_PATTERN, MODEL_PATTERN, isValidModel,
+  FOLLOW_MIN_PROTOCOL, SERVER_VERSION_PATTERN, SERVER_ID_PATTERN, MODEL_PATTERN, isValidModel,
   isTaskCommand, isWorkerReplyCommand, isWorkerRole, isWorkerReportKind,
 } from "../dist/index.js";
 
@@ -229,7 +229,7 @@ test("stop_cap / stop_result", () => {
   assert.equal(isServerReply({ ...stopResult, cap_id: "a b" }), false);
   assert.ok(isServerReply({ bantou: 1, type: "error", ok: false, message: "x", command: "stop_cap", cap_id: "c1" }));
   assert.deepEqual(manifest.messages.error.properties.command.enum, ["kick_cap", "resume_worker", "stop_cap", "status", "hello", "update_server", "task", "worker_reply"]);
-  assert.equal(MESSENGER_PROTOCOL.version, "1.6.0");
+  assert.equal(MESSENGER_PROTOCOL.version, "1.7.0");
 });
 
 test("model: kick_cap の model / worker_model は省略可、形式を検証、知らない版は無視できる", () => {
@@ -318,9 +318,9 @@ test("error code / retryable", () => {
   assert.ok(isServerReply({ bantou: 1, type: "error", ok: false, message: "x" }));
 });
 
-test("protocol version 1.6.0 (status cap_id)", () => {
-  assert.equal(MESSENGER_PROTOCOL.version, "1.6.0");
-  assert.equal(manifest.version, "1.6.0");
+test("protocol version 1.7.0 (server identity; 1.6.0 added status cap_id)", () => {
+  assert.equal(MESSENGER_PROTOCOL.version, "1.7.0");
+  assert.equal(manifest.version, "1.7.0");
 });
 
 test("status accepts an optional cap_id (1.6.0)", () => {
@@ -395,4 +395,42 @@ test("worker_report notice guard", () => {
   }
   assert.equal(isServerReply(workerReport), false);
   assert.equal(isServerCommand(workerReport), false);
+});
+
+const identity = { server_id: "srv-0a1b2c3d4e", host: "lenovo", user: "vagrant", workspace: "/home/vagrant/bantou-ws" };
+
+test("server identity (1.7.0): hello_result / status_result carry optional server_id, host, user, workspace", () => {
+  const h = { ...helloResult, ...identity };
+  assert.ok(isServerReply(h));
+  assert.deepEqual(parseServerReply(JSON.stringify(h)), h);
+  const st = { ...statusReply, ...identity, server_version: "0.6.2", protocol_version: "1.7.0" };
+  assert.ok(isServerReply(st));
+  assert.deepEqual(parseServerReply(JSON.stringify(st)), st);
+  // every field is in the schema
+  for (const f of Object.keys(identity)) {
+    assert.ok(f in manifest.messages.hello_result.properties, "hello_result." + f);
+    assert.ok(f in manifest.messages.status_result.properties, "status_result." + f);
+    assert.ok(!manifest.messages.hello_result.required.includes(f) && !manifest.messages.status_result.required.includes(f), f + " must stay optional");
+  }
+  assert.equal(SERVER_ID_PATTERN.source, manifest.messages.hello_result.properties.server_id.pattern);
+  assert.equal(SERVER_ID_PATTERN.source, manifest.messages.status_result.properties.server_id.pattern);
+});
+
+test("server identity (1.7.0): a reply from an older server (no new fields) is still accepted", () => {
+  // helloResult / statusReply above are the pre-1.7.0 shapes
+  for (const k of Object.keys(identity)) assert.ok(!(k in helloResult) && !(k in statusReply), k);
+  assert.ok(isServerReply(helloResult));
+  assert.ok(isServerReply(statusReply));
+  assert.deepEqual(parseServerReply(JSON.stringify(helloResult)), helloResult);
+});
+
+test("server identity (1.7.0): malformed identity fields are rejected", () => {
+  for (const id of ["", "a b", "../x", "x".repeat(65), 1, null]) {
+    assert.equal(isServerReply({ ...helloResult, server_id: id }), false, "hello " + String(id));
+    assert.equal(isServerReply({ ...statusReply, server_id: id }), false, "status " + String(id));
+  }
+  for (const f of ["host", "user", "workspace", "server_version", "protocol_version"]) {
+    assert.equal(isServerReply({ ...statusReply, [f]: 1 }), false, "status " + f);
+  }
+  for (const f of ["host", "user", "workspace"]) assert.equal(isServerReply({ ...helloResult, [f]: 1 }), false, "hello " + f);
 });

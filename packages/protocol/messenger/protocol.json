@@ -1,6 +1,6 @@
 {
   "name": "bantou",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "bantou-server commands (kick_cap, stop_cap, status, hello, update_server, task, worker_reply), replies (cap_result, stop_result, status_result, hello_result, update_result, task_result, worker_reply_result, error) and notices (activity, worker_report). Message body is one JSON object in the text; `bantou: 1` is the body schema version.",
   "messages": {
     "hello": {
@@ -22,6 +22,10 @@
         "ok": { "const": true },
         "server_version": { "type": "string", "description": "npm `bantou` version of the running server." },
         "protocol_version": { "type": "string", "description": "Registered messenger protocol version of the running server." },
+        "server_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$", "description": "Stable id of this server (generated once per workspace, kept in <workspace>/server.json). Since 1.7.0; absent from an older server - fall back to the messenger peer id." },
+        "host": { "type": "string", "description": "os.hostname() of the server's machine. Since 1.7.0." },
+        "user": { "type": "string", "description": "OS user the server runs as. Since 1.7.0." },
+        "workspace": { "type": "string", "description": "Absolute workspace path of the server. Since 1.7.0." },
         "update": {
           "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/update_progress" }],
           "description": "The update in progress, or null."
@@ -174,6 +178,12 @@
         "bantou": { "const": 1 },
         "type": { "const": "status_result" },
         "ok": { "const": true },
+        "server_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$", "description": "Stable id of this server (generated once per workspace, kept in <workspace>/server.json). Since 1.7.0; absent from an older server - fall back to the messenger peer id." },
+        "host": { "type": "string", "description": "os.hostname() of the server's machine. Since 1.7.0." },
+        "user": { "type": "string", "description": "OS user the server runs as. Since 1.7.0." },
+        "workspace": { "type": "string", "description": "Absolute workspace path of the server. Since 1.7.0." },
+        "server_version": { "type": "string", "description": "npm `bantou` version of the running server. Since 1.7.0." },
+        "protocol_version": { "type": "string", "description": "Registered messenger protocol version of the running server. Since 1.7.0." },
         "caps": { "type": "array", "items": { "$ref": "#/$defs/agent_status" } },
         "workers": { "type": "array", "items": { "$ref": "#/$defs/agent_status" } }
       },

@@ -6,6 +6,7 @@ import {
   MESSENGER_PROTOCOL,
   PROTOCOL_VERSION,
   type HelloResultReply,
+  type ServerIdentityFields,
   type UpdateFailure,
   type UpdateProgress,
   type UpdateResultReply,
@@ -133,6 +134,8 @@ export interface UpdateControllerDeps {
   workspace: string;
   /** 自分の npm 版。 */
   serverVersion: string;
+  /** hello_result に載せる server の identity（protocol 1.7.0）。省略なら載せない。 */
+  identity?: ServerIdentityFields;
   /** config の update.spec。 */
   specTemplate: string;
   /** 実行中の件数（cap / worker / report 起因）。 */
@@ -278,6 +281,7 @@ export function createUpdateController(deps: UpdateControllerDeps): UpdateContro
       ok: true,
       server_version: serverVersion,
       protocol_version: MESSENGER_PROTOCOL.version,
+      ...(deps.identity ?? {}),
       update: progress(),
       last_update: lastFailure,
     }),
