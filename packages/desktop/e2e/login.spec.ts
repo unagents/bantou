@@ -171,3 +171,38 @@ test("opening the URL fails: an error with the copy hint, the dialog keeps worki
   await expect(page.getByTestId("login-action-error")).toHaveText(/ブラウザで開けない.*Not allowed to open url/);
   await expect(page.getByTestId("login-code")).toBeVisible();
 });
+
+// The URL comes from the center (another host): refused before it reaches the OS.
+for (const [label, bad] of [
+  ["userinfo", "https://user:pw@evil.example/x"],
+  ["empty host", "https://"],
+  ["newline inside", "https://claude.com/a\nb"],
+  ["javascript:", "javascript:alert(1)"],
+  ["file:", "file:///etc/passwd"],
+  ["data:", "data:text/html,<b>x</b>"],
+] as const) {
+  test(`a bad login URL is not opened: ${label}`, async ({ page }) => {
+    await page.goto("/");
+    await pickSession(page, "careery");
+    await withMock(page, (m, u) => { m.centerLoginUrl = u; }, bad);
+    await withMock(page, (m) => m.centerAuth("careery", "login_required"));
+    await termAuth(page).click();
+    await page.getByTestId("login-start").click();
+    await page.getByTestId("login-open").click();
+    await expect(page.getByTestId("login-action-error")).toHaveText(/ブラウザで開けない/);
+    expect(await withMock(page, (m) => m.calls.filter((c) => c.cmd === "plugin:shell|open").length)).toBe(0);
+  });
+}
+
+test("the URL is trimmed and normalized before it is opened (uppercase scheme)", async ({ page }) => {
+  await page.goto("/");
+  await pickSession(page, "careery");
+  await withMock(page, (m) => { m.centerLoginUrl = "  HTTPS://claude.com/cai/oauth/authorize?code=true  "; });
+  await withMock(page, (m) => m.centerAuth("careery", "login_required"));
+  await termAuth(page).click();
+  await page.getByTestId("login-start").click();
+  await page.getByTestId("login-open").click();
+  await expect
+    .poll(() => withMock(page, (m) => m.calls.filter((c) => c.cmd === "plugin:shell|open").map((c) => c.args)))
+    .toEqual([{ path: "https://claude.com/cai/oauth/authorize?code=true" }]);
+});

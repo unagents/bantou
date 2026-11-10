@@ -44,3 +44,18 @@ desktop は普段使いの Mac、center は別 host（mac200）の構成で、�
 - 実機確認: desktop(Mac) → center(mac200) で再ログイン → 「開く」で手元のブラウザが開く。
 - 上記 (1)〜(3) の確証が要るなら、実機で `BROWSER` を center の env に入れた時の `/login` 画面（URL が text に残るか）を観察する。残るなら center の spawn env で `BROWSER` を抑える案が成立する。
 - `bun.lock` が `bun install` で変わったが commit していない。
+
+## review 第1回（HEAD 0e4117b）の指摘と対応
+
+1. [medium] `openExternalUrl` の URL 検査が弱い → 対応済み。`checkExternalUrl`（`packages/desktop/src/api/center.ts`）を `invoke` の直前の関数内に置いた: 前後空白を trim → 制御文字（`\u0000-\u001f` / `\u007f`、改行含む）を拒否 → `new URL()` でパース → protocol は http: / https: のみ → host 必須 → username / password があれば拒否 → 開く対象は正規化済みの `url.href`（大文字 `HTTPS://` は小文字に正規化されて通る）。e2e に拒否ケース（userinfo / 空 host / 改行入り / javascript: / file: / data:）と、trim + 大文字 scheme の正規化を追加。既存の「開く」の厳密比較（`{ path: url }`）は通る。
+   - host を claude 認証の host に限定しなかった理由: 許可 host の一次情報（公式 docs 等）が確認できず、固定リストにすると正当な URL（別環境・将来の host 変更）を開けなくなる恐れがあるため。
+2. [low] JSDoc の対応ずれ → 対応済み。`openExternalUrl` のブロックを `sessionLogin` の上から外し、`sessionLogin` の doc を `sessionLogin` の直前に戻した。
+3. [low] center README の断定 → 対応済み。「binary の文字列からの判断で、`/login` の実機・macOS では未確認」を追記。
+
+テスト（第1回の修正後）: desktop nuxt typecheck exit 0・TS error 0（vue-router/volar 解決警告は変更前と同じ）。e2e 全件 177 passed（前回 170 + 追加 7）。簡易 server は停止し 1420 解放を確認。center は README のみの変更のため省略。bun.lock は戻して未 commit。
+
+### 残り
+
+- `tauri.conf.json` の `plugins.shell.open`（open の scope を正規表現で絞る多層化）は、`fix/signing-identity` が `tauri.conf.json` を変更中のため見送り。
+- `tauri-plugin-shell` の `open` から plugin-opener への移行は別 task。
+- 実機確認（Tauri の `open` で既定ブラウザが開く）は前回から未了。
