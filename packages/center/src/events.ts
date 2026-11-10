@@ -1,7 +1,7 @@
 /** center のセッション増減の通知（GET /events の SSE に流す）。 */
 export interface SessionsEvent {
-  /** updated = 名前か path を変えた（name は新しい名前）。context = コンテキスト使用状況が変わった（受け手は session_list を取り直す）。activity = 作業状態（working / needs-input / idle）が変わった（同じく取り直す）。 */
-  reason: "created" | "deleted" | "restored" | "updated" | "context" | "activity";
+  /** updated = 名前か path を変えた（name は新しい名前）。context = コンテキスト使用状況が変わった（受け手は session_list を取り直す）。activity = 作業状態（working / needs-input / idle）が変わった（同じく取り直す）。remote = その session の remote 集計（session_list の remote）が変わった（同じく取り直す）。 */
+  reason: "created" | "deleted" | "restored" | "updated" | "context" | "activity" | "remote";
   name: string;
 }
 

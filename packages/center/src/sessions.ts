@@ -9,6 +9,7 @@ import type { EventHub } from "./events.js";
 import type { JsonListStore, JsonObjectStore } from "./store.js";
 import type { ContextUsage } from "./context-usage.js";
 import type { SessionActivityView } from "./session-activity.js";
+import type { RemoteSummary } from "./remotes.js";
 
 export const SESSION_NAME = /^[A-Za-z0-9_-]+$/;
 
@@ -41,6 +42,8 @@ export interface SessionInfo {
   activity: SessionActivityView["activity"];
   /** activity が最後に変わった時刻（ISO）。unknown の時は null。 */
   activityAt: string | null;
+  /** その session の cap（remote）の集計。running = 未完了の指示がある server の数、waitingReply = worker_reply が未返答の ask / approve の数。cap が無ければ 0 / 0。 */
+  remote: RemoteSummary;
   /** 起動時に追加指示（instructions）を付けたか。本文は出さない。 */
   instructions: boolean;
 }
@@ -109,6 +112,8 @@ export function createSessionManager(opts: {
   contextUsage?: (name: string) => ContextUsage | null;
   /** session ごとの作業状態の取得元（startedAt = 今回の起動時刻、running = 起動中か）。省略時は常に unknown。 */
   activity?: (name: string, startedAt: string | null, running: boolean) => SessionActivityView;
+  /** session ごとの remote 集計の取得元。省略時は常に 0 / 0。 */
+  remote?: (name: string) => RemoteSummary;
   /** update で名前を変えた時に remotes の記録（session / pending の owner）を付け替える先。省略時は何もしない。 */
   renameRemoteSession?: (oldName: string, newName: string) => Promise<unknown> | unknown;
   /** name が remote の記録と衝突する理由（無ければ null）。create / update の newName の検証に使う。省略時は検査しない。 */
@@ -140,6 +145,7 @@ export function createSessionManager(opts: {
     ...(s.lastError ? { lastError: s.lastError } : {}),
     contextUsage: opts.contextUsage?.(s.project) ?? null,
     ...(opts.activity?.(s.project, s.startedAt, s.state === "starting" || s.state === "connected") ?? { activity: "unknown" as const, activityAt: null }),
+    remote: opts.remote?.(s.project) ?? { running: 0, waitingReply: 0 },
     instructions: s.instructions,
   });
 

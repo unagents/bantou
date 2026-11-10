@@ -120,6 +120,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     config,
     events,
     activity: (name, startedAt, running) => activityTracker.get(name, startedAt, running),
+    remote: (name) => remotes.summary(name),
     contextUsage: (name) => contextUsage.get(name),
     supervisor,
     store: createJsonListStore(join(stateDir, "sessions.json"), log),
@@ -143,6 +144,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     },
     log,
     activity,
+    onSummaryChange: (name) => events.publish({ reason: "remote", name }),
     notify: (owner, text) => link.notifyPeer(owner, text),
   });
   applyLateReply = (r, fromId) => void remotes.applyLateReply(r, fromId);

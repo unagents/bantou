@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, mock, test } from "node:test";
 import { createActivityStore, type ActivityStore } from "../src/activity.js";
+import { createEventHub } from "../src/events.js";
 import { z } from "zod";
 import { parseConfig } from "../src/config.js";
 import { loadCapId } from "../src/center-id.js";
@@ -1686,4 +1687,95 @@ test("旧 server（protocol_version 不一致）: task も worker_reply も送�
   await assert.rejects(mgr.send({ owner: "pm1", goal: "g" }), /版が合わない/);
   assert.equal(kicks.length, 0);
   assert.equal(mgr.list().length, 0);
+});
+
+// -- session ごとの remote 集計（summary）と SSE 用の onSummaryChange --
+
+const replyOk = {
+  workerReplyOn: async (_p: ServerPeer, cmd: { cap_id: string; worker_id: string }) => ({ bantou: 1, type: "worker_reply_result", ok: true, cap_id: cmd.cap_id, worker_id: cmd.worker_id, accepted: true }),
+} as never;
+
+test("summary: 未完了の指示がある server の数 (running) と、未返答の ask / approve の数 (waitingReply)。progress / done・他 session の cap は数えない", async () => {
+  const { mgr, kicks } = setup();
+  assert.deepEqual(mgr.summary("pm1"), { running: 0, waitingReply: 0 });
+  const r = await mgr.send({ owner: "pm1", goal: "a" });
+  await mgr.send({ owner: "pm1", goal: "b", server: "id-b" });
+  await mgr.send({ owner: "pm2", goal: "c" });
+  assert.deepEqual(mgr.summary("pm1"), { running: 2, waitingReply: 0 });
+  assert.deepEqual(mgr.summary("pm2"), { running: 1, waitingReply: 0 });
+  mgr.onWorkerReport(report("ask", "w-1") as never, "id-a");
+  mgr.onWorkerReport(report("approve", "w-2") as never, "id-a");
+  mgr.onWorkerReport(report("progress", "w-3") as never, "id-a");
+  mgr.onWorkerReport(report("done", "w-4") as never, "id-a");
+  mgr.onWorkerReport(report("ask", "w-1", "x", { cap_id: CAP2 }) as never);
+  assert.deepEqual(mgr.summary("pm1"), { running: 2, waitingReply: 2 });
+  assert.deepEqual(mgr.summary("pm2"), { running: 1, waitingReply: 1 });
+  // 完了すれば running が減り、止まった cap の未返答 ask は数えない
+  kicks[0].resolve(ok("r", r.task_id));
+  await sleep(GRACE + 120);
+  assert.deepEqual(mgr.summary("pm1"), { running: 1, waitingReply: 0 });
+});
+
+test("summary: worker_reply で、その worker の未返答 ask / approve が減る（別の worker の分は残る）。replied_at が記録に付く", async () => {
+  const { mgr } = setup(replyOk);
+  await mgr.send({ owner: "pm1", goal: "g" });
+  mgr.onWorkerReport(report("ask", "w-1", "q1") as never);
+  mgr.onWorkerReport(report("approve", "w-1", "q2") as never);
+  mgr.onWorkerReport(report("ask", "w-2", "q3") as never);
+  assert.equal(mgr.summary("pm1").waitingReply, 3);
+  await mgr.workerReply({ worker_id: "w-1", text: "OK" });
+  assert.equal(mgr.summary("pm1").waitingReply, 1);
+  const wr = mgr.list()[0].worker_reports;
+  assert.deepEqual(wr.map((w) => w.replied_at !== undefined), [true, true, false]);
+  // 送れなかった返答では減らない
+  const bad = setup({ workerReplyOn: async () => { throw new Error("届かない"); } } as never);
+  await bad.mgr.send({ owner: "pm1", goal: "g" });
+  bad.mgr.onWorkerReport(report("ask", "w-1") as never);
+  await assert.rejects(bad.mgr.workerReply({ worker_id: "w-1", text: "x" }), /届かない/);
+  assert.equal(bad.mgr.summary("pm1").waitingReply, 1);
+});
+
+test("summary: center 再起動（同じ store で restore）後も返答済みが保たれる。未返答は残る", async () => {
+  const a = setup(replyOk);
+  await a.mgr.send({ owner: "pm1", goal: "g" });
+  a.mgr.onWorkerReport(report("ask", "w-1", "q1") as never);
+  a.mgr.onWorkerReport(report("ask", "w-2", "q2") as never);
+  await a.mgr.workerReply({ worker_id: "w-1", text: "OK" });
+  await sleep(80); // 保存（非同期）を待つ
+  const b = setup({ statusOn: async () => ({ bantou: 1, type: "status_result", ok: true, caps: [{ kind: "cap", id: CAP }], workers: [] }) as never });
+  await b.mgr.restore();
+  assert.deepEqual(b.mgr.summary("pm1"), { running: 1, waitingReply: 1 });
+  assert.deepEqual(b.mgr.list()[0].worker_reports.map((w) => [w.worker_id, w.replied_at !== undefined]), [["w-1", true], ["w-2", false]]);
+});
+
+test("onSummaryChange: task 送信・worker_report (ask)・worker_reply・完了・delete で、集計が変わった session にだけ 1 回ずつ呼ぶ。変わらない report (progress) では呼ばない", async () => {
+  const calls: string[] = [];
+  const { mgr, kicks } = setup(replyOk, undefined, undefined, undefined, { onSummaryChange: (s) => calls.push(s) });
+  const r = await mgr.send({ owner: "pm1", goal: "g" });
+  assert.deepEqual(calls, ["pm1"]);
+  mgr.onWorkerReport(report("progress") as never);
+  assert.deepEqual(calls, ["pm1"]);
+  mgr.onWorkerReport(report("ask") as never);
+  assert.deepEqual(calls, ["pm1", "pm1"]);
+  await mgr.workerReply({ worker_id: "w-1", text: "OK" });
+  assert.equal(calls.length, 3);
+  kicks[0].resolve(ok("r", r.task_id));
+  await sleep(GRACE + 120);
+  assert.equal(calls.length, 4); // running 1 -> 0
+  await mgr.send({ owner: "pm1", goal: "again" });
+  assert.equal(calls.length, 5);
+  await mgr.delete({ owner: "pm1", force: true });
+  assert.equal(calls.length, 6); // running 1 -> 0
+  assert.ok(calls.every((c) => c === "pm1"));
+});
+
+test("SSE: onSummaryChange を EventHub.publish({ reason: \"remote\", name: session }) に繋ぐと、集計が変わるたびに購読者へ流れる（daemon.ts と同じ繋ぎ方）", async () => {
+  const events = createEventHub();
+  const got: { reason: string; name: string }[] = [];
+  events.subscribe((ev) => got.push(ev));
+  const { mgr } = setup(replyOk, undefined, undefined, undefined, { onSummaryChange: (name) => events.publish({ reason: "remote", name }) });
+  await mgr.send({ owner: "pm1", goal: "g" });
+  mgr.onWorkerReport(report("ask") as never);
+  await mgr.workerReply({ worker_id: "w-1", text: "OK" });
+  assert.deepEqual(got, [{ reason: "remote", name: "pm1" }, { reason: "remote", name: "pm1" }, { reason: "remote", name: "pm1" }]);
 });
