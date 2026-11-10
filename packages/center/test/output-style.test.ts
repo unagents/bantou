@@ -13,11 +13,14 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-test("outputStyleContent: center の frontmatter（name: bantou）を付ける。本文の frontmatter は置き換える。末尾は改行 1 つ", () => {
+test("outputStyleContent: name は bantou に差し替え、他の frontmatter の key は残す。frontmatter が無ければ name と description を付ける。末尾は改行 1 つ", () => {
   assert.equal(outputStyleContent("Be brief."), `---\nname: ${OUTPUT_STYLE_NAME}\ndescription: bantou の設定（outputStyle）で指定した出力スタイル\n---\nBe brief.\n`);
   assert.equal(outputStyleContent("Be brief.\n"), outputStyleContent("Be brief."));
-  const pasted = "---\nname: Concise Plus\ndescription: x\n---\n\nYou are terse.\n";
-  assert.equal(outputStyleContent(pasted), outputStyleContent("You are terse."));
+  // 貼った frontmatter: name だけ変え、description と keep-coding-instructions はそのまま
+  const pasted = "---\nname: Concise Plus\ndescription: x\nkeep-coding-instructions: true\n---\n\nYou are terse.\n";
+  assert.equal(outputStyleContent(pasted), `---\nname: ${OUTPUT_STYLE_NAME}\ndescription: x\nkeep-coding-instructions: true\n---\nYou are terse.\n`);
+  // description が無い frontmatter には足す
+  assert.equal(outputStyleContent("---\nname: a\nkeep-coding-instructions: true\n---\nbody"), `---\nname: ${OUTPUT_STYLE_NAME}\nkeep-coding-instructions: true\ndescription: bantou の設定（outputStyle）で指定した出力スタイル\n---\nbody\n`);
   assert.equal(outputStyleContent("---\r\nname: a\r\n---\r\nbody"), outputStyleContent("body"));
   // 区切りが閉じていない --- は本文として残す
   assert.ok(outputStyleContent("---\nnot frontmatter").endsWith("---\nnot frontmatter\n"));

@@ -95,7 +95,7 @@ async function pickAdd() {
     <section class="flex flex-col gap-1" :data-testid="`${idPrefix}-section-output-style`">
       <h3 class="text-sm font-semibold">出力スタイル</h3>
       <p class="text-cork-muted text-xs">
-        claude の output style の本文（markdown。`~/.claude/output-styles/*.md` の中身を貼る。先頭の frontmatter は center が付け直す）。session の値があれば共通の値は使わない。空なら claude の既定
+        claude の output style の本文（markdown。`~/.claude/output-styles/*.md` の中身を貼る。frontmatter の name は center が差し替え、他の key は残る）。session の値があれば共通の値は使わない。空なら claude の既定
       </p>
       <UTextarea
         v-model="draft.outputStyle"
