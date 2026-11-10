@@ -421,14 +421,14 @@ export function createRemoteManager(opts: {
 
   const has = (r: RemoteRecord): boolean => records.includes(r);
 
-  /** 動いている cap（未完了の指示がある・running）。止まった cap の未返答 ask は数えない（残り続けて「判断待ち」が消えなくなるのを避ける）。 */
+  /** 動いている cap（未完了の指示がある、または remote_list と同じ見え方 stateOf が running = 返信待ち・判定待ち・cap / worker が動いている）。止まった cap の未返答 ask は数えない（残り続けて「判断待ち」が消えなくなるのを避ける）。 */
   const summarize = (session: string): RemoteSummary => {
     let running = 0;
     let waitingReply = 0;
     for (const r of records) {
       if (r.session !== session) continue;
       if (r.pending.length > 0) running++;
-      if (r.pending.length > 0 || r.state === "running") {
+      if (r.pending.length > 0 || stateOf(r) === "running") {
         waitingReply += (r.worker_reports ?? []).filter(isOpenAsk).length;
       }
     }
@@ -527,6 +527,8 @@ export function createRemoteManager(opts: {
   };
 
   const wake = (): void => {
+    // activity / settling / inflight の変化は persist を通らないことがある。変化点（wake を呼ぶ所）で集計を再評価し、変わった時だけ通知する
+    if (!restoring) emitSummaryChanges();
     for (const w of [...waiters]) w();
   };
 
@@ -1212,11 +1214,13 @@ export function createRemoteManager(opts: {
       const peer = await findPeer(rec);
       const blocked = link.gate?.(peer, "worker_reply");
       if (blocked) throw new Error(blocked.message);
+      // 返答を送った時点で返答待ちだった ask / approve だけを対象にする（送信の await 中に届いた新しい ask は含めない）
+      const targets = (rec.worker_reports ?? []).filter((w) => w.worker_id === worker_id && isOpenAsk(w));
       const reply = await link.workerReplyOn(peer, { cap_id: rec.remote_id, worker_id, text });
       if (reply.type === "error") throw new Error(reply.message);
-      // この worker の未返答の ask / approve を返答済みにする（返答は worker に 1 つ届く。永続化される）
+      // 返答済みにする（返答は worker に 1 つ届く。永続化される）。送信中に解消された（superseded_at）ものには付けない
       const repliedAt = new Date().toISOString();
-      for (const w of rec.worker_reports ?? []) if (w.worker_id === worker_id && isOpenAsk(w)) w.replied_at = repliedAt;
+      for (const w of targets) if (isOpenAsk(w)) w.replied_at = repliedAt;
       void persist();
       wake();
       log(`remote worker_reply: ${rec.remote_id} worker=${worker_id} server=${rec.serverName}`);

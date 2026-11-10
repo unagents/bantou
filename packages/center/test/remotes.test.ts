@@ -1855,3 +1855,70 @@ test("superseded: 解消で集計が変わる時だけ onSummaryChange（SSE rea
   mgr.onWorkerReport(report("done", "w-1") as never);
   assert.equal(got.length, 3);
 });
+
+// -- 動いている cap の判定を stateOf に揃える・通知漏れ・worker_reply の競合 --
+
+test("summary: pending が空で r.state が done でも、stateOf が running（worker が動いている）なら未返答 ask を数え、その変化（activity）で onSummaryChange が流れる", async () => {
+  const activity = createActivityStore();
+  const calls: string[] = [];
+  const { mgr, kicks } = setup({}, activity, undefined, undefined, { onSummaryChange: (s) => calls.push(s) });
+  const r = await mgr.send({ owner: "pm1", goal: "g" });
+  mgr.onWorkerReport(report("ask") as never);
+  kicks[0].resolve(ok("first", r.task_id));
+  await tick();
+  activity.apply(act("idle"), "id-a");
+  mgr.onActivity(CAP, "id-a"); // 完了: pending が空になる
+  await tick();
+  assert.equal(mgr.list()[0].pending.length, 0);
+  assert.equal(mgr.list()[0].state, "done");
+  assert.deepEqual(mgr.summary("pm1"), { running: 0, waitingReply: 0 }, "止まった cap の未返答は数えない");
+  const before = calls.length;
+  // report 起因の再開: pending は空のまま worker が動き出す（persist を通らない変化）
+  activity.apply(act("idle", "running"), "id-a");
+  mgr.onActivity(CAP, "id-a");
+  assert.equal(mgr.list()[0].state, "running");
+  assert.equal(mgr.list()[0].pending.length, 0);
+  assert.deepEqual(mgr.summary("pm1"), { running: 0, waitingReply: 1 });
+  assert.equal(calls.length, before + 1);
+  // 変化が無ければ流さない
+  mgr.onActivity(CAP, "id-a");
+  assert.equal(calls.length, before + 1);
+  // 全員終われば数えなくなり、その変化も流れる
+  activity.apply(act("idle", "done"), "id-a");
+  mgr.onActivity(CAP, "id-a");
+  assert.deepEqual(mgr.summary("pm1"), { running: 0, waitingReply: 0 });
+  assert.equal(calls.length, before + 2);
+});
+
+test("workerReply: 送信の await 中に届いた同じ worker の新しい ask には replied_at を付けない（送った時点で返答待ちだった分だけ）", async () => {
+  let release: () => void = () => {};
+  const gate = new Promise<void>((r) => (release = r));
+  const { mgr } = setup({
+    workerReplyOn: async (_p: ServerPeer, cmd: { cap_id: string; worker_id: string }) => {
+      await gate;
+      return { bantou: 1, type: "worker_reply_result", ok: true, cap_id: cmd.cap_id, worker_id: cmd.worker_id, accepted: true };
+    },
+  } as never);
+  await mgr.send({ owner: "pm1", goal: "g" });
+  mgr.onWorkerReport(report("ask", "w-1", "q1") as never);
+  const p = mgr.workerReply({ worker_id: "w-1", text: "OK" });
+  await tick();
+  mgr.onWorkerReport(report("ask", "w-1", "q2") as never); // q1 は superseded になり、q2 が返答待ち
+  release();
+  await p;
+  const wr = mgr.list()[0].worker_reports;
+  assert.deepEqual(wr.map((w) => [w.text, w.replied_at !== undefined, w.superseded_at !== undefined]), [["q1", false, true], ["q2", false, false]]);
+  assert.equal(mgr.summary("pm1").waitingReply, 1);
+});
+
+test("restore: 復元で集計が 0 から変わった session は、復元後に onSummaryChange が流れる（restore の前に接続していた受け手が取り直せる）", async () => {
+  const a = setup();
+  await a.mgr.send({ owner: "pm1", goal: "g" });
+  a.mgr.onWorkerReport(report("ask") as never);
+  await sleep(80);
+  const calls: string[] = [];
+  const b = setup({ statusOn: async () => ({ bantou: 1, type: "status_result", ok: true, caps: [{ kind: "cap", id: CAP }], workers: [] }) as never }, undefined, undefined, undefined, { onSummaryChange: (s) => calls.push(s) });
+  await b.mgr.restore();
+  assert.ok(calls.includes("pm1"));
+  assert.equal(calls.filter((c) => c === "pm1").length, 1);
+});

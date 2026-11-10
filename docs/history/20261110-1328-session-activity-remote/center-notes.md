@@ -30,3 +30,10 @@ src/remotes.ts / src/sessions.ts / src/events.ts / src/daemon.ts / README.md / t
 - SSE: 解消で集計が変わる時だけ persist 経由で reason "remote" が 1 回。変わらない時（既に解消済みの後の done など）は流れない。
 - 20 件上限との関係: 古い順に捨てるので、押し出された ask は記録ごと消え数えない(解消の有無に関係なく)。progress が 20 件続くと未返答の ask が押し出される限界は残る(上限のロジックは変えていない)。解消済みの ask が先に押し出される分には集計に影響しない。
 - テスト: test/remotes.test.ts に 4 件追加。
+
+## 追加: review 指摘の反映
+- 「動いている cap」の判定: `r.state === "running"` をやめ、`remote_list` と同じ `stateOf(r) === "running"`（inflight / settling / activityBusy を含む）に揃えた。`pending.length > 0` との OR は残す（running の数え方は pending のまま）。揃えなかった点: `running` は stateOf ではなく pending の有無（session の「預けて待っている」を表す。stateOf は cap の turn が終わった後も worker が動く間 running になるが、その時点で pending が残っていれば同じ。pending が空で stateOf だけ running の場合は running には数えず、waitingReply のみ数える）。
+- 通知漏れ: activity / settling / inflight の変化は persist を通らないため、`wake()`（変化点で呼ばれる）の中でも集計を再評価し、前回通知値と違う session にだけ onSummaryChange を呼ぶ（restore 中は飛ばす）。変化が無ければ流れない。inflight / settling は pending が非空の時にしか立たないので、pending が空のまま stateOf が running になる経路は activity だけ（test はこれ）。
+- worker_reply の競合: 送る前に返答待ちの ask / approve を確定し、成功後はその分だけ replied_at を付ける（送信中に解消された分には付けない）。送信中に届いた新しい ask は返答待ちのまま。
+- restore 時の一斉通知: 直さない。restore は http 起動後に非同期で走り、起動直後に接続済みの受け手は復元前の 0/0 の一覧を持っているので、復元後に集計が 0 から変わった session へ `remote` を 1 回流す方が正しい（基準値を通知済みにすると取り直されず古いまま）。通知は session ごとに 1 回で、test で確認。
+- テスト: typecheck OK、npm test 498 件。ホスト負荷が高い時（load 7 前後）に core SSE の test と remotes の timing 依存の test が落ちることがあるが、変更前（stash）でも core SSE は落ち、負荷が下がった再実行で全件 pass した。
