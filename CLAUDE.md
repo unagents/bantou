@@ -6,6 +6,7 @@
 - `packages/server/`: TypeScript。npm package として npx で起動。desktop からの remote session 起動と remote cap の起動を担う。雛形のみ。
 - `packages/protocol/`: desktop・server・plugin 共通のメッセージ仕様と TS 型。雛形のみ。
 - `docs/`: 共通資料。`concept.md`（概念、設計判断の前提） / `protocol.md` / `handoff.md`。
+- `packages/memory/`: 外部記憶（Nuxt 4 + MCP server、PostgreSQL + pgvector）。設計は `docs/design/external-memory.md` / `memory-design.md`。
 - `packages/plugin/`: work session に配る Claude Code plugin `bantou`。
 - center は desktop に sidecar 同梱（packages/center を bun build --compile、packages/desktop/scripts/build-sidecar.ts）。
 
