@@ -1,10 +1,10 @@
 # 外部記憶（external memory）の接続設計
 
-2026-11-11 決定（設計のみ。実装はまだ）。横断 PM 向け Persistent Memory 基盤（別リポ、以下「memory」）を、bantou に**後付けで**つなぐための bantou 側の形と、memory 側の実装方針。
+2026-11-11 決定。横断 PM 向け Persistent Memory 基盤（`packages/memory`、以下「memory」）を、bantou に**後付けで**つなぐための bantou 側の形と、memory 側の実装方針。
 
 ## 何を決めたか
 
-- memory は bantou の外にある別サービス。記憶の抽出（LLM）・保存（PostgreSQL / Graphiti）・検証・スコープ・昇格はすべて memory 側。bantou は素材を渡し、問い合わせる入口を持つだけ。
+- memory は bantou monorepo の `packages/memory`（bantou と密結合: event の形、session 名 = Agent ID、tool 名）。動くのは 202 の別プロセス。記憶の抽出（LLM）・保存（PostgreSQL / Graphiti）・検証・スコープ・昇格はすべて memory 側。bantou は素材を渡し、問い合わせる入口を持つだけ。
 - bantou から見た memory は **MCP server**（Streamable HTTP）。center の「外部記憶設定」に endpoint を登録すると使える。登録が無ければ今まで通り動く（これが後付け）。
 - 経路は 2 本。**書き込み**（素材を memory に渡す）と**読み込み**（記憶を問い合わせる）。
 
@@ -54,14 +54,14 @@ desktop の設定ダイアログ（共通・歯車・追加）に「外部記憶
 - transcript の読み取り。
 - session の制御（`--continue` をやめて memory から文脈を組み立て直す、compact の代替）。今回の範囲外。別設計にする。
 
-## memory 側の実装方針（別リポ）
+## memory 側の実装方針（`packages/memory`）
 
 - 言語は TypeScript。Python / FastAPI は使わない。
 - 本体は Nuxt 4。MCP server は `@nuxtjs/mcp-toolkit`（0.24 系。`server/mcp/tools/*.ts` に `defineMcpTool` で tool を置く）。読み込み用の recall / context / explain と、書き込み用の event を同じ MCP に出す。認証は Bearer token（bantou の設定の `token`）。
 - 保存は PostgreSQL + pgvector（System of Record、イベント、Outbox）。
 - 抽出 LLM は `claude -p`（サブスク。API / litellm は使わない）。呼び方は上記の別プロジェクト（OpenAI 互換 endpoint）経由で、その中身が `claude -p --output-format json --json-schema <schema> --no-session-persistence --tools ""`。起動コストがあるので event ごとではなく turn の区切りや件数でまとめて 1 回。202 の claude は 2.1.322、claude.ai でログイン済み（Linux なので credentials.json。keychain の問題は無い）。
 - Graphiti は Python 実装しか無い（graphiti-core）ので、Python のまま使う。Graphiti の Python サービス（公式の MCP server）を 202 で常駐させ（docker）、TypeScript の memory から MCP client として呼ぶ（2026-11-11 決定）。memory の Python はこの 1 つだけ。Graphiti は Neo4j に書き、抽出・矛盾判定に LLM、意味検索に embedding を使う（`llm_client` と `embedder` は別部品）。
-  - LLM: Graphiti の OpenAI client は `base_url` を差し替えられるので、OpenAI 互換の `POST /v1/chat/completions` を `claude -p --json-schema` で返す**別プロジェクト**（名前未定。TypeScript / Nitro 単体、202 に常駐）を指す。memory の抽出 worker も同じ endpoint を使い、`claude -p` を直接は呼ばない。API は使わない。memory 固有ではないので memory には入れない（2026-11-11 決定）。
+  - LLM: Graphiti の OpenAI client は `base_url` を差し替えられるので、OpenAI 互換の `POST /v1/chat/completions` を `claude -p --json-schema` で返す**別プロジェクト `unagents/chatp`**（TypeScript / Nitro 単体、202 に常駐）を指す。memory の抽出 worker も同じ endpoint を使い、`claude -p` を直接は呼ばない。API は使わない。memory 固有ではないので memory には入れない（2026-11-11 決定）。
   - embedding: Anthropic に embedding model は無い（Anthropic 用 embedder も無い）。202 の Ollama のローカル model（例 `nomic-embed-text`）を使う。pgvector 側も同じ embedding を使う。
 - 設置は 202（mini10。Linux x86_64、8 core、RAM 16 GB、disk 空き 341 GB、docker あり）。PostgreSQL は mflow-postgres と分けて pgvector 入りの別コンテナ。Neo4j を入れる時は heap 1 GB / page cache 512 MB 程度に上限を切る。MCP は平文 HTTP なので LAN / Tailscale 内に限る。
 
