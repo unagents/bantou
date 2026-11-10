@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import type { BrokerStatus, UpdaterState } from "~/types";
+import { isLocalNetworkDenied, LOCAL_NETWORK_HINT } from "~/utils/localNetwork";
 
-defineProps<{
+const props = defineProps<{
   workspacePath: string | null;
   waitingCount: number;
   broker: BrokerStatus | null;
@@ -18,6 +19,12 @@ defineEmits<{
   checkUpdate: [];
   installUpdate: [];
 }>();
+
+const brokerErrorText = computed(() => {
+  const err = props.broker?.error;
+  if (!err) return "broker を探索中…";
+  return isLocalNetworkDenied(err) ? `${LOCAL_NETWORK_HINT}\n${err}` : err;
+});
 
 function fmt(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -52,10 +59,10 @@ function progressText(downloaded: number, total: number | null): string {
         :text="
           broker?.connected
             ? `${broker.name} @ ${broker.broker_url}`
-            : (broker?.error ?? 'broker を探索中…')
+            : brokerErrorText
         "
       >
-        <span class="flex items-center gap-1 text-xs">
+        <span class="flex items-center gap-1 text-xs" data-testid="messenger-status">
           <span
             class="size-2 rounded-full"
             :class="broker?.connected ? 'bg-green-400' : 'bg-amber-400'"

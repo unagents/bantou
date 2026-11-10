@@ -15,6 +15,8 @@ export interface Seed {
   update?: { version: string; currentVersion?: string; body?: string };
   /** The first this-many `plugin:updater|check` calls fail (offline at launch). */
   updateCheckFailures?: number;
+  /** Merged into the mocked `broker_status` / `broker_connect` result. */
+  broker?: Partial<BrokerStatus>;
   /** Tauri window label reported to the app (default "main"; other labels skip the auto update check). */
   windowLabel?: string;
 }
@@ -110,6 +112,8 @@ export class MockBantou {
   /** `session_login` / `session_login_code` / `rc_stop` / `rc_start` calls, in order. */
   loginCalls: { tool: string; name: string; code?: string; resume?: boolean }[] = [];
   calls: InvokeRecord[] = [];
+  /** Merged into the `broker_status` result (seed.broker). */
+  brokerOverride: Partial<BrokerStatus> = {};
   sent: { to: string; text: string }[] = [];
   /** Terminal: `session_output_start` / `session_output_stop` calls, keystrokes (base64) and size changes sent. */
   outputStarts: { session: string; after: number | null }[] = [];
@@ -138,6 +142,7 @@ export class MockBantou {
       this.centerSessions.push(e);
     }
     this.sessionCache = { sessions: this.centerSessions.map((e) => this.toSession(e)), reachable: true, reason: null, rev: 0 };
+    this.brokerOverride = seed.broker ?? {};
     this.update = seed.update;
     this.updateCheckFailures = seed.updateCheckFailures ?? 0;
     this.windowLabel = seed.windowLabel ?? "main";
@@ -475,6 +480,7 @@ export class MockBantou {
           broker_url: "http://mock:7901",
           name: "bantou-core",
           error: null,
+          ...this.brokerOverride,
         } satisfies BrokerStatus;
       case "list_pings":
         return [...this.pings]
