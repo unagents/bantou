@@ -50,6 +50,7 @@ async function refresh() {
       rc.value = [];
       links.value = [];
       versions.value = null;
+      versionsError.value = null;
       return;
     }
     void loadVersions(true);
@@ -210,10 +211,10 @@ const sourceLabel = { remote: "remote", sidecar: "sidecar" } as const;
               :data-link="linkStateOf(r.link)"
               data-testid="center-server-row"
             >
-              <div class="flex items-center gap-2 text-xs">
-                <span class="w-32 truncate font-medium" data-testid="center-server-host">{{ r.host }}</span>
+              <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
+                <span class="max-w-full min-w-32 truncate font-medium" :title="r.host" data-testid="center-server-host">{{ r.host }}</span>
                 <span v-if="r.serverId ?? r.peerId" class="text-cork-muted" data-testid="center-server-id">{{ r.serverId ?? r.peerId }}</span>
-                <span v-if="sameHost(r) && (r.peer?.user || r.peer?.workspace)" class="text-cork-muted" data-testid="center-server-who">{{ [r.peer?.user, r.peer?.workspace].filter(Boolean).join(" ") }}</span>
+                <span v-if="sameHost(r) && (r.peer?.user || r.peer?.workspace)" class="text-cork-muted" :title="[r.peer?.user, r.peer?.workspace].filter(Boolean).join(' ')" data-testid="center-server-who">{{ [r.peer?.user, r.peer?.workspace].filter(Boolean).join(" ") }}</span>
                 <UBadge
                   v-if="r.peer"
                   :color="versionColor[r.peer.state]"

@@ -529,3 +529,40 @@ test("the remote session list stays and keeps its place above the servers", asyn
   expect(rcBox!.y).toBeLessThan(srvBox!.y);
   await expect(page.getByText("remote session", { exact: true })).toBeVisible();
 });
+
+test("in a narrow window the host name stays readable and first, and the row wraps", async ({ page }) => {
+  await page.setViewportSize({ width: 520, height: 800 });
+  await page.goto("/");
+  await mock(page, { enabled: true });
+  const host = "a-very-long-host-name-of-a-build-machine.example.internal";
+  await seedVersions(page, {
+    pair: { server: "0.3.0", protocol: "1.3.0" },
+    peers: [versionPeer({ key: "a", id: "pa", host, server_id: "srv-1111111111", user: "alice", workspace: "/home/alice/ws" })],
+  });
+  await seedLinks(page, []);
+  await page.getByTestId("open-center").click();
+  const h = page.getByTestId("center-server-host");
+  await expect(h).toBeVisible();
+  await expect(h).toHaveAttribute("title", host);
+  const hb = (await h.boundingBox())!;
+  expect(hb.width).toBeGreaterThanOrEqual(100);
+  const ib = (await page.getByTestId("center-server-id").boundingBox())!;
+  // the server_id is never left of the host name on the first line
+  expect(ib.y > hb.y || ib.x > hb.x).toBe(true);
+  const row = (await page.getByTestId("center-server-row").boundingBox())!;
+  expect(hb.x + hb.width).toBeLessThanOrEqual(row.x + row.width + 1);
+});
+
+test("the server_peers error is cleared when the center goes away", async ({ page }) => {
+  await page.goto("/");
+  await mock(page, { enabled: true });
+  await page.evaluate(() => {
+    (window as unknown as { __BANTOU_MOCK__: { centerVersionsError: string } }).__BANTOU_MOCK__.centerVersionsError = "peers unavailable";
+  });
+  await page.getByTestId("open-center").click();
+  await expect(page.getByTestId("center-versions-error")).toContainText("peers unavailable");
+  await mock(page, { reachable: false });
+  await page.getByTestId("center-refresh").click();
+  await expect(page.getByTestId("center-conn-state")).toHaveText("disconnected");
+  await expect(page.getByTestId("center-versions-error")).toHaveCount(0);
+});

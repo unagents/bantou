@@ -51,3 +51,21 @@ branch: fix/center-dialog-servers
 - `RemoteActivity.vue` の `owner` 未指定（`center-` 接頭辞・全 session 一覧・「共有（旧）」）経路は、dialog から外したため未使用。触らずに残した。
 - `types/index.ts` の `CenterServerStatus` / `CenterAgentState` は未使用になった。触らずに残した。
 - 作業中に誤って空の `/tmp/x` を作った（`cat > /tmp/x`）。rm が拒否されたため残っている。
+
+## review 第1回（HEAD a1629da）の指摘と対応
+
+- [medium] 狭い幅で host が潰れる: server 行を `flex-wrap` にし、host に `min-w-32 max-w-full truncate` を付けた。520px でも host が先頭に読める。e2e に狭い幅のテストを追加（host が visible・幅 100px 以上・server_id が host より左に来ない）。
+- [low] 長い host が切れて title が無い: host と user/workspace に `title` を追加（e2e で host の title を確認）。
+- [low] join の制約: 挙動は変えず README に明記した。
+  - `serverPeer` は直近の送信先 peer id。server 再登録（peer id 変更）後は同じ server が「list のみの行」と「peers のみの行」に分かれて出ることがある。
+  - name 一致は、peer 未発見の link が別 server の peer と一意な name で結合し得る。
+  - center が `server_list` に server_id を返せば解消する（別件）。
+- [low] `CenterServerStatus` / `CenterAgentState` 型と `RemoteActivity` の owner 未指定経路は未使用だが削除しない。
+- [low] `!connected` 分岐で `versionsError` を null に戻すようにした（e2e 追加）。
+
+テスト（第1回対応後）: `nuxt typecheck` exit 0。e2e 全件 148 passed（前回と同じ方法）。
+
+## 残り
+
+- `RemoteActivity.vue` の owner 未指定経路、`CenterServerStatus` / `CenterAgentState` 型は未使用のまま残してある。
+- join の制約（上記）。center が server_id を list に返す案は別件。
