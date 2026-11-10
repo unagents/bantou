@@ -66,3 +66,51 @@ center から server を退役させる手段の追加。branch `feat/retire-ser
 - 印は workspace に固定。workspace を変えて起動し直すと別 server として起動できる（意図どおり）。
 - center / desktop 側の操作（tool・ボタン・確認 dialog）は w-ret-center の節。
 
+
+## center / desktop（w-ret-center）
+
+基点は f735784（HEAD 一致を確認）。
+
+### 設計
+
+- tool `server_retire { server, reason? }`（`packages/center/src/retire.ts`）。`server` は必須（省略で先頭を退役させない）。解決は既存の `selectPeer`（server_id → peer id → host 名 → 名前、同じ段で複数一致はエラー。候補は user / workspace 付き）を再利用。
+- 送る前に `hello` で `protocol_version` を確認し、`supportsRetire` が false（1.8.0 未満・版不明・hello 無応答）なら送らず「この server は退役に未対応（protocol <版>）。host で手動で止める」のエラー。server_id が分からなければ送らない。`retire_server` は server_id 付き。
+- `retire_result` 受信だけを成功とする（timeout 60 秒。server が cap / worker を止めてから返すため `stop_cap` の 30 秒より長く取った）。無返信・別の error は退役済みと見なさず、記録も消さない。`error{retiring:true}` は `state: "already_retiring"`。
+- 受信後: その peer を退役済みにして発見の結果から 5 分外し（messenger の登録が失効するまで `unknown` で残るのを防ぐ）、`RemoteManager.forgetServer` で cap の記録（session × server）を消す。結果に `host_steps` / `service` / `stopped` / `exit_at` / `records_removed` / `sessions` を出す。
+- 記録を消してよい理由: feat/server-identity の prune と同じ方針で、消すのは center の記録だけで server には何も送らない。退役した server は 76 で終了し戻らず、cap はすべて止められているので、記録を残しても到達先が無い。残すと一覧で `unknown` になり続ける。server_id が一致する記録（server_id の無い旧形式は peer id 一致）だけが対象で、別 server の記録は peer id が同じでも消さない。
+- follow: 退役中の server への `update_server` が `retiring:true` で返ったら、再指示せず `unknown`（退役中）として待つ。
+- 同じ host の 2 台: desktop は server_id で指す。host 名指定が 2 台に一致したらエラー（user / workspace 付き）。test あり。
+- session ごとの `servers`（設定 `settings.servers`、center 共通の `center_settings` にも）。除外設定は作らない。検証は addDirs の流儀（50 個以内、host 名か server_id の形式、重複は先勝ちで除く）。
+  - 未設定 = 全部、空配列 = どの server も使わない（保存する。addDirs の空配列＝削除とは違う。使わない session を作れるようにするため）。`null` で削除。
+  - 合成は置き換え（session があれば共通は見ない）。addDirs の和とは違う。共通を狭く置き、特定 session だけ広げるため。
+  - 効く場所: `remote_send` / `remote_delete` / `worker_reply` の server 省略時の既定は範囲内に限り、明示指定が範囲外ならエラー「この session の servers に無い」。owner の無い呼び出し（desktop の center_call）は影響を受けない。起動し直し不要。
+  - `remote_list`（owner 指定）は元から session の cap の記録だけなので変更なし。RemoteActivity も同じ元。
+- desktop: center 設定画面の server 行に「退役」ボタン（確認ダイアログ。server 名 / host / server_id を出し、取り消しが既定フォーカス）。未対応・未発見・server_id 不明の行は無効にし理由を tooltip に出す。結果に host_steps / service / 停止数を表示。プロジェクト設定と共通設定に `servers` 編集欄（「使う server を選ぶ」チェック、発見済み server のチェック、手入力）。Rust は `center_call` が tool 名を素通しするので変更なし。
+
+### 変更点
+
+- center: `retire.ts`（新規）、`remotes.ts`、`server-link.ts`、`server.ts`、`tools.ts`、`project-settings.ts`、`sessions.ts`、`follow.ts`、`daemon.ts`、`server-identity.ts`（1.7.0 → 1.8.0 の記述）。
+- desktop: `types/index.ts`（protocol 版 1.8.0）、`api/*`、`CenterDialog.vue`、`ProjectSettingsFields.vue`、`SettingsDialog.vue`、`composables/serverRetire.ts` / `sessionInstructions.ts`、e2e mock。
+- docs: center README、`docs/design/center-tools.md`、`docs/design/project-settings.md`、desktop README。
+
+### 互換性
+
+- 旧形式の settings（`servers` なし）はそのまま読める（未設定＝全部。test あり）。`servers` が配列でない壊れた値は未設定扱い。
+- protocol 1.8.0 未満の server へは `retire_server` を送らない（無返信を退役済みと解釈しない）。
+- 旧 center は `settings.servers` を未知の項目として保持するだけ（効かない）。
+
+### テスト結果
+
+- center: `tsc --noEmit` 通過、`node --import tsx --test test/*.test.ts` 539 pass / 0 fail。
+- desktop: `nuxt typecheck` 通過（exit 0）。e2e 179 pass / 0 fail（bun が無いため `nuxt generate` の静的ビルドを簡易サーバーで配信し、ms-playwright の chromium を指定した一時 config、`bun build` の代わりに esbuild で mock を bundle。一時物は削除済み）。
+- Rust は変更なし。cargo が host に無く cargo test は未実施。
+- protocol: build + test 38 pass / 0 fail。server: 無変更だが `npm test` は 265 pass / 5 fail（5 file が `Cannot find package '@unagents/messenger-broker'` の ERR_MODULE_NOT_FOUND。この clone の node_modules に依存が無い環境要因。期待の 311 には届かず、w-ret-server の値は再現できていない）。
+
+### 残課題
+
+- 実機（systemd / launchd の host）での退役の通し確認は未実施。
+- 設定画面の server 行に「使っている session」は添えていない（任意項目）。
+
+### center 全体の除外は作らなかった理由（利用者の指示）
+
+利用者の指示で、center 全体で server を除外する `servers.exclude` は作らない。代わりに session ごとの `servers` で範囲を持つ。center 設定画面の server 一覧は center 全体を今までどおり全部出す。

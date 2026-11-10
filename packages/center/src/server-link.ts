@@ -13,6 +13,7 @@ import {
   type KickCapCommand,
   type ServerNotice,
   type ResumeWorkerCommand,
+  type RetireResultReply,
   type ServerCommandType,
   type TaskCommand,
   type TaskResultReply,
@@ -97,7 +98,7 @@ export interface ServerPeer extends ServerIdentity {
 }
 
 /** 版が違っても送る制御メッセージ（server の更新に使う）。protocol の版の門を通さない。 */
-const CONTROL_COMMANDS: readonly ServerCommandType[] = ["hello", "update_server"];
+const CONTROL_COMMANDS: readonly ServerCommandType[] = ["hello", "update_server", "retire_server"];
 
 /** hello / update_server の返信待ち。 */
 export const FOLLOW_TIMEOUT_MS = 10_000;
@@ -110,6 +111,10 @@ export type Gate = (peer: { id: string; version?: string }, command: ServerComma
 
 /** stop_cap の返信待ち（server は kill を待つので、通常の指示より短く切る）。 */
 export const STOP_TIMEOUT_MS = 30_000;
+/** retire_server の返信待ち。server は返信の前に実行中の cap / worker を全部止める（shutdown）ので stop_cap より長く取る。 */
+export const RETIRE_TIMEOUT_MS = 60_000;
+/** retire_result を受けた peer を、発見の結果から外しておく時間。server が止まっても messenger の登録が失効する（約 60 秒）まで一覧に残るため。 */
+export const RETIRED_PEER_TTL_MS = 5 * 60_000;
 
 export interface ServerLink {
   connectAll(): Promise<void>;
@@ -150,6 +155,13 @@ export interface ServerLink {
   /** 指定 peer へ update_server を送り、update_result（または error）を待つ。protocol の版の門は通らない。 */
   updateServer(peer: ServerPeer, version: string): Promise<UpdateResultReply | ErrorReply>;
   /**
+   * 指定 peer へ retire_server を送り、retire_result（または error）を待つ（RETIRE_TIMEOUT_MS）。protocol の版の門は通らない（control）。
+   * 呼び出し側が先に supportsRetire で版を確かめる（旧 server は無返信で、無返信を退役済みと見なさない）。server_id は必ず付ける（全 server が peer 名 bantou-server）。
+   */
+  retireOn(peer: ServerPeer, cmd: { server_id: string; reason?: string }): Promise<RetireResultReply | ErrorReply>;
+  /** peer を退役済みとして印を付け、発見の結果（peers / identifiedPeers / selectPeer）から RETIRED_PEER_TTL_MS の間外す。 */
+  markRetired(peerId: string): void;
+  /**
    * name の名前を持つ messenger peer（owner の session）へ text を push で送る。
    * peer が見つからない・送れない時は ok:false と理由を返す（投げない）。bantou protocol の指示ではないので版の門は通らない。
    */
@@ -161,7 +173,7 @@ export interface ServerLink {
   close(): Promise<void>;
 }
 
-type ReplyKind = "cap_result" | "task_result" | "worker_reply_result" | "worker_result" | "stop_result" | "status_result" | "hello_result" | "update_result";
+type ReplyKind = "cap_result" | "task_result" | "worker_reply_result" | "worker_result" | "stop_result" | "status_result" | "hello_result" | "update_result" | "retire_result";
 
 interface Pending {
   kind: ReplyKind;
@@ -216,6 +228,7 @@ const KIND_COMMAND: Record<ReplyKind, ServerCommandType> = {
   status_result: "status",
   hello_result: "hello",
   update_result: "update_server",
+  retire_result: "retire_server",
 };
 
 /** config.servers に無い、発見ベースの要求に使う内部 slot の名前。list / connectAll には出さない。 */
@@ -346,6 +359,17 @@ export function createServerLink(opts: {
   let liveIds = new Set<string>();
   const identifyTimeoutMs = opts.identifyTimeoutMs ?? IDENTIFY_TIMEOUT_MS;
   const nowMs = opts.now ?? Date.now;
+  /** 退役済みの peer id → 印を付けた時刻（ms）。メモリのみ。 */
+  const retiredAt = new Map<string, number>();
+  const isRetired = (id: string): boolean => {
+    const at = retiredAt.get(id);
+    if (at === undefined) return false;
+    if (nowMs() - at >= RETIRED_PEER_TTL_MS) {
+      retiredAt.delete(id);
+      return false;
+    }
+    return true;
+  };
 
   /** 返信から peer の識別を学ぶ。同じ server_id の別の peer id（再登録前の旧 id）の記録は整理する。 */
   const learnIdentity = (peerId: string, r: ServerIdentity): void => {
@@ -394,7 +418,7 @@ export function createServerLink(opts: {
   const fromServer = (slot: Slot, m: LinkInbound): boolean =>
     (m.from_id !== undefined && m.from_id === slot.serverId) ||
     // hello / update_server は送り先の peer id が key。その peer からの返信は server の返信として受ける
-    (m.from_id !== undefined && slot.pending.some((p) => (p.kind === "hello_result" || p.kind === "update_result") && p.key === m.from_id)) ||
+    (m.from_id !== undefined && slot.pending.some((p) => (p.kind === "hello_result" || p.kind === "update_result" || p.kind === "retire_result") && p.key === m.from_id)) ||
     m.meta?.protocol === MESSENGER_PROTOCOL.protocol ||
     m.from_name === SERVER_NAME ||
     (slot.cfg.peer !== undefined && (m.from_name === slot.cfg.peer || m.from_id === slot.cfg.peer));
@@ -432,10 +456,10 @@ export function createServerLink(opts: {
       target = slot.pending.find((p) => p.kind === "stop_result" && p.key === r.cap_id);
     } else if (r.type === "status_result") {
       target = slot.pending.find((p) => p.kind === "status_result");
-    } else if (r.type === "hello_result" || r.type === "update_result") {
+    } else if (r.type === "hello_result" || r.type === "update_result" || r.type === "retire_result") {
       // 複数 server へ同時に送るので、送り先の peer id（from_id）で照合する
       target = slot.pending.find((p) => p.kind === r.type && (m.from_id === undefined || p.key === m.from_id));
-    } else if (r.command === "hello" || r.command === "update_server") {
+    } else if (r.command === "hello" || r.command === "update_server" || r.command === "retire_server") {
       target = slot.pending.find((p) => p.command === r.command && (m.from_id === undefined || p.key === m.from_id));
     } else if (r.command === "stop_cap" && r.cap_id !== undefined) {
       // stop_cap の error は、同じ cap_id の kick_cap の待ちと取り違えない
@@ -634,7 +658,7 @@ export function createServerLink(opts: {
       throw new Error(`messenger に接続できない: ${(e as Error).message}`);
     }
     if (!client.listPeers) return [];
-    const peers = await client.listPeers("all", { protocol: MESSENGER_PROTOCOL.protocol });
+    const peers = (await client.listPeers("all", { protocol: MESSENGER_PROTOCOL.protocol })).filter((p) => !isRetired(p.id));
     // 発見できなくなった peer（旧 peer id を含む）の識別は捨てる。到達先のキャッシュを残さない
     const listed = new Set(peers.map((p) => p.id));
     liveIds = listed;
@@ -799,6 +823,13 @@ export function createServerLink(opts: {
       request<StatusReply>(discoveryName, "status_result", undefined, opts?.cap_id !== undefined ? { cap_id: opts.cap_id } : {}, { target: peerTarget(peer), timeoutMs: FOLLOW_TIMEOUT_MS }),
     stopCapOn: (peer, cmd) =>
       request<StopResultReply>(discoveryName, "stop_result", cmd.cap_id, cmd, { target: peerTarget(peer), timeoutMs: STOP_TIMEOUT_MS }),
+    retireOn: (peer, cmd) =>
+      request<RetireResultReply>(discoveryName, "retire_result", peer.id, cmd, { target: peerTarget(peer), timeoutMs: RETIRE_TIMEOUT_MS }),
+    markRetired(peerId) {
+      retiredAt.set(peerId, nowMs());
+      identities.delete(peerId);
+      identifyFailedAt.delete(peerId);
+    },
     hello: (peer) =>
       request<HelloResultReply>(discoveryName, "hello_result", peer.id, {}, { target: peerTarget(peer), timeoutMs: FOLLOW_TIMEOUT_MS }),
     updateServer: (peer, version) =>

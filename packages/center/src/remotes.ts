@@ -17,6 +17,7 @@ import { matchServerPeers, type ServerLink, type ServerPeer, type TaskInput } fr
 import { ambiguousServerMessage, describeServer, duplicateServerIdMessage, hostOf, type ServerRef } from "./server-identity.js";
 import type { JsonListStore } from "./store.js";
 import { sessionCapId } from "./center-id.js";
+import { serverAllowed } from "./project-settings.js";
 
 /** remote の呼び出し元（master-cap の session 名）を運ぶ HTTP header。 */
 export const OWNER_HEADER = "x-bantou-session";
@@ -88,7 +89,7 @@ export interface RemoteRecord {
    * server_id が無い旧形式の記録（まだ hello を返す server と突き合わせられていない）は最後に使った peer id。区別は `server_id` の有無。
    */
   server: string;
-  /** server が名乗った server_id（protocol 1.7.0 以降の server）。旧形式の記録・旧 server では無い。 */
+  /** server が名乗った server_id（protocol 1.7.0 で追加され、現行 1.8.0 の server も名乗る）。旧形式の記録・旧 server では無い。 */
   server_id?: string;
   /** 今の到達先（最後に確認できた messenger の peer id）。再登録で変わるので都度更新する。長く確認できない時は消す（server_id は残る）。 */
   peer?: string;
@@ -290,6 +291,11 @@ export interface RemoteManager {
    * 使われている記録（session × server の cap）そのものは消さない。消えるのは remote_delete だけ。
    */
   prune(): Promise<{ duplicates: number; peers: number }>;
+  /**
+   * 退役した server の記録を消す（server_retire が retire_result を受けた後）。server_id が一致する記録、server_id が無い旧形式は到達先（peer id）が一致する記録が対象。
+   * 消すのは center の記録だけで server には何も送らない（server は止まっていく途中で、cap は server が止める）。消した件数と、その session 名を返す。
+   */
+  forgetServer(target: { server_id?: string; peerId?: string }): Promise<{ removed: number; sessions: string[] }>;
   /** owner を渡すと、その session の cap だけ（includeShared で旧共有 cap も）。省くと全件。 */
   list(filter?: { owner?: string; includeShared?: boolean }): RemoteView[];
   /** session の remote 集計。cap が無ければ 0 / 0。 */
@@ -382,6 +388,11 @@ export function createRemoteManager(opts: {
   backup?: () => Promise<void>;
   /** 現在時刻（ms）。テスト用。 */
   now?: () => number;
+  /**
+   * session が使ってよい server の指定（host 名か server_id）。undefined = 全部。remote_send / remote_delete / worker_reply の server 候補をこの範囲に限る。
+   * 省略時は制限なし。呼ぶたびに引くので、設定の更新はすぐ効く。
+   */
+  serversOf?: (owner: string) => string[] | undefined;
   /** session の remote 集計（RemoteSummary）が変わった時に呼ぶ（記録の保存のたびに前回と比べ、変わった session だけ）。desktop への SSE 通知に使う。 */
   onSummaryChange?: (session: string) => void;
   /** 確認できない到達先（peer）を消すまでの時間（既定 PEER_TTL_MS）。 */
@@ -870,12 +881,23 @@ export function createRemoteManager(opts: {
   };
 
   /** remote_id（省略時は全ての記録）と server から記録を 1 件決める。複数あれば server で絞らせる。 */
-  const pick = async (remote_id: string | undefined, server: string | undefined, owner?: string): Promise<RemoteRecord> => {
+  const notInServers = (what: string, allowed: string[], owner: string | undefined): string =>
+    `この session の servers に無い: ${what}（session=${owner ?? "?"}, servers=[${allowed.join(", ")}]${allowed.length === 0 ? "。空 = どの server も使わない" : ""}）`;
+
+  const pick = async (remote_id: string | undefined, server: string | undefined, owner?: string, restrict = false): Promise<RemoteRecord> => {
     // owner あり: その session の cap。旧共有 cap（session 無し）は remote_id で明示した時だけ。他の session の cap は見えない
     const visible = (r: RemoteRecord): boolean =>
       owner === undefined || r.session === owner || (remote_id !== undefined && r.session === undefined && r.remote_id === remote_id);
     let cands = (remote_id === undefined ? [...records] : records.filter((r) => r.remote_id === remote_id)).filter(visible);
     if (cands.length === 0) throw new Error(`未定義の remote: ${remote_id ?? "（remote_id 省略。remote が無い）"}`);
+    // session の servers の範囲（restrict の時だけ。remote_delete / worker_reply）: server 省略時は範囲内の記録だけが候補、明示指定が範囲外ならエラー
+    const allowed = restrict && owner !== undefined ? opts.serversOf?.(owner) : undefined;
+    const inRange = (r: RemoteRecord): boolean => serverAllowed(allowed, { ...(r.server_id !== undefined ? { server_id: r.server_id } : {}), ...(r.serverHost ? { host: r.serverHost } : {}) });
+    if (allowed !== undefined && server === undefined) {
+      const ok = cands.filter(inRange);
+      if (ok.length === 0) throw new Error(notInServers(cands.map((r) => describeServer(refOf(r))).join(" / "), allowed, owner));
+      cands = ok;
+    }
     if (server !== undefined) {
       // 記録に書かれた server_id / peer / host で探す（server が今見えなくても指せる）。無ければ今の発見結果（識別つき）で探す
       let hit = recordsMatching(cands, server);
@@ -885,6 +907,11 @@ export function createRemoteManager(opts: {
         hit = cands.filter((r) => peers.some((p) => sameServer(r, p, live)));
       }
       if (hit.length === 0) throw new Error(`その server に remote ${remote_id ?? ""} は無い: ${server}`);
+      if (allowed !== undefined) {
+        const ok = hit.filter(inRange);
+        if (ok.length === 0) throw new Error(notInServers(`${server}（${hit.map((r) => describeServer(refOf(r))).join(" / ")}）`, allowed, owner));
+        hit = ok;
+      }
       // 同じ指定が複数の server の記録に一致する（同じ host に server が 2 つなど）なら、取り違えない
       const servers = new Map(hit.map((r) => [serverKeyOf(r), r]));
       if (servers.size > 1) throw new Error(ambiguousServerMessage(server, [...servers.values()].map(refOf)));
@@ -899,6 +926,24 @@ export function createRemoteManager(opts: {
       );
     }
     return cands[0];
+  };
+
+  /**
+   * send の server 候補。owner の session に servers の指定があれば、範囲内の server だけ（server 省略時の既定も範囲内の先頭。明示指定が範囲外ならエラー）。
+   * 指定が無ければ従来どおり link.selectPeer。
+   */
+  const selectPeerFor = async (owner: string, sel: string | undefined): Promise<ServerPeer> => {
+    const allowed = opts.serversOf?.(owner);
+    if (allowed === undefined) return link.selectPeer(sel);
+    const inRange = (p: ServerPeer): boolean => serverAllowed(allowed, { ...(p.server_id !== undefined ? { server_id: p.server_id } : {}), ...(hostOf(p) ? { host: hostOf(p) } : {}) });
+    if (sel !== undefined) {
+      const p = await link.selectPeer(sel);
+      if (!inRange(p)) throw new Error(notInServers(describeServer({ ...p, peerId: p.id }), allowed, owner));
+      return p;
+    }
+    const ok = (await livePeers()).filter(inRange);
+    if (ok.length === 0) throw new Error(notInServers("使える server が無い", allowed, owner));
+    return link.selectPeer(ok[0].server_id ?? ok[0].id);
   };
 
   /** 送信のたびに config を読み直した servers[]。読めない・不正な時は直前に読めた値。 */
@@ -1070,7 +1115,7 @@ export function createRemoteManager(opts: {
       if (input.worker_model !== undefined && !MODEL_PATTERN.test(input.worker_model)) throw new Error("worker_model が不正: 英数字と . _ [ ] - のみ（先頭は - 不可）");
       if (input.goal.length === 0 || input.goal.includes("\0")) throw new Error("goal が不正（空・NUL 文字は不可）");
       if (!OWNER_PATTERN.test(input.owner)) throw new Error("owner は英数字と _ - のみ");
-      const peer = await link.selectPeer(input.server);
+      const peer = await selectPeerFor(input.owner, input.server);
       const live = await livePeers().catch(() => [peer]);
       // protocol の版が合わない・更新待ちの server へは、記録を作らず isError で返す（session が後で再送できる）
       const blocked = link.gate?.(peer, "task");
@@ -1185,7 +1230,7 @@ export function createRemoteManager(opts: {
     },
 
     async delete({ remote_id, server, force, owner }) {
-      const rec = await pick(remote_id, server, owner);
+      const rec = await pick(remote_id, server, owner, true);
       let stopped = false;
       let warning: string | undefined;
       try {
@@ -1210,7 +1255,7 @@ export function createRemoteManager(opts: {
     async workerReply({ remote_id, server, worker_id, text, owner }) {
       if (!AGENT_ID_PATTERN.test(worker_id)) throw new Error("worker_id は英数字と _ - のみ");
       if (text.length === 0 || text.includes("\0")) throw new Error("text が不正（空・NUL 文字は不可）");
-      const rec = await pick(remote_id, server, owner);
+      const rec = await pick(remote_id, server, owner, true);
       const peer = await findPeer(rec);
       const blocked = link.gate?.(peer, "worker_reply");
       if (blocked) throw new Error(blocked.message);
@@ -1292,6 +1337,22 @@ export function createRemoteManager(opts: {
         return { duplicates: consolidate(), peers: 0 };
       }
       return { duplicates: consolidate(), peers: clearStalePeers(live) };
+    },
+
+    async forgetServer(target) {
+      const hit = records.filter((r) =>
+        target.server_id !== undefined && r.server_id !== undefined ? r.server_id === target.server_id : r.server_id === undefined && target.peerId !== undefined && peerOfRec(r) === target.peerId,
+      );
+      for (const r of hit) {
+        forgetRecord(r);
+        opts.activity?.forget(r.remote_id, peerOfRec(r) ?? r.server);
+        log(`退役した server の記録を消す: ${r.remote_id} session=${r.session ?? "-"} server=${describeServer(refOf(r))}`);
+      }
+      if (hit.length > 0) {
+        wake();
+        await persist();
+      }
+      return { removed: hit.length, sessions: [...new Set(hit.flatMap((r) => (r.session !== undefined ? [r.session] : [])))] };
     },
 
     summary: summarize,

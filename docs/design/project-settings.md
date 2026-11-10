@@ -25,6 +25,8 @@ master-cap への追加指示（`--append-system-prompt`）を session ごとに
 | 項目 | 型 | 意味 |
 |---|---|---|
 | `instructions` | string（16000 文字以内、空文字 = 無し） | master-cap への追加指示。起動のたびに claude へ `--append-system-prompt <値>`（新規・再起動・`--continue`・復元のすべて）。wrapper 経由の session だけが対象 |
+| `addDirs` | string[]（絶対パス、20 個以内、空配列 = 削除と同じ） | master-cap が参照してよいフォルダ。起動のたびに 1 つずつ `--add-dir <path>`。center 共通の `addDirs` の後ろに付く |
+| `servers` | string[]（host 名か server_id、50 個以内、重複は除く） | この session が `remote_send` / `remote_delete` / `worker_reply` で使ってよい server の範囲。**未設定 = 全部。空配列 = どの server も使わない**（保存する。未設定と区別）。`null` で削除（= center 共通の値に戻る）。session の値があれば center 共通（`center_settings_*`）の値は見ない（置き換え。和ではない）。範囲外の server を明示指定するとエラー「この session の servers に無い」。起動し直し不要で次の呼び出しから効く（他の項目と違い、起動時に claude へ渡さない）。center 全体の除外設定は作らない（利用者の指示） |
 
 ## session のフォルダ（path）
 

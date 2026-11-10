@@ -56,3 +56,31 @@ test("composeInstructions / composeAddDirs: 共通が先。instructions は空�
   assert.deepEqual(composeAddDirs({ addDirs: ["/c1"] }, undefined), ["/c1"]);
   assert.deepEqual(composeAddDirs({}, {}), []);
 });
+
+test("servers: schema は host 名か server_id の配列（50 個以内）か null。形式が違うもの・多すぎるものは不正。merge は重複を除き、空配列は保存（= 使わない）、null で削除。read は壊れた値を未設定にする", async () => {
+  const { composeServers, serverAllowed, SERVERS_MAX } = await import("../src/project-settings.js");
+  assert.equal(projectSettingsPatchSchema.safeParse({ servers: ["lenovo", "mac-200.local", "srv-aaaaaaaaaa"] }).success, true);
+  assert.equal(projectSettingsPatchSchema.safeParse({ servers: null }).success, true);
+  assert.equal(projectSettingsPatchSchema.safeParse({ servers: [] }).success, true);
+  for (const bad of [[""], ["a b"], [".x"], ["host/x"], [1], "lenovo", Array.from({ length: SERVERS_MAX + 1 }, (_, i) => `h${i}`)]) {
+    assert.equal(projectSettingsPatchSchema.safeParse({ servers: bad }).success, false, JSON.stringify(bad).slice(0, 30));
+  }
+  assert.deepEqual(mergeSettings({ instructions: "i" }, { servers: ["a", "b", "a"] }), { instructions: "i", servers: ["a", "b"] });
+  assert.deepEqual(mergeSettings({ servers: ["a"] }, { servers: [] }), { servers: [] }, "空配列は保存する（未設定と区別）");
+  assert.deepEqual(mergeSettings({ servers: ["a"] }, { servers: null }), {});
+  assert.deepEqual(mergeSettings({ servers: ["a"] }, { instructions: "x" }), { servers: ["a"], instructions: "x" });
+  assert.deepEqual(readSettings({ servers: ["a", "", "a", 3] }), { servers: ["a"] });
+  assert.deepEqual(readSettings({ servers: [] }), { servers: [] });
+  assert.deepEqual(readSettings({ servers: "lenovo" }), {}, "壊れた値は未設定（全 server を止めない）");
+  assert.equal(composeServers(undefined, undefined), undefined);
+  assert.deepEqual(composeServers({ servers: ["c"] }, undefined), ["c"]);
+  assert.deepEqual(composeServers({ servers: ["c"] }, { servers: ["s"] }), ["s"]);
+  assert.deepEqual(composeServers({ servers: ["c"] }, { servers: [] }), []);
+  // 範囲の判定: server_id は完全一致、host 名は大文字小文字を区別しない。undefined は全部
+  assert.equal(serverAllowed(undefined, {}), true);
+  assert.equal(serverAllowed([], { server_id: "x", host: "h" }), false);
+  assert.equal(serverAllowed(["LENOVO"], { host: "lenovo", server_id: "srv-a" }), true);
+  assert.equal(serverAllowed(["srv-a"], { host: "lenovo", server_id: "srv-a" }), true);
+  assert.equal(serverAllowed(["srv-a"], { host: "lenovo", server_id: "srv-b" }), false);
+  assert.equal(serverAllowed(["lenovo"], { server_id: "srv-b" }), false, "host が分からない server は host 指定では通らない");
+});

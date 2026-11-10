@@ -119,6 +119,8 @@ export interface ProjectSettings {
   instructions?: string | null;
   /** Folders master-cap may read and edit besides its own (`claude --add-dir`, one per entry; absolute paths on the center's host). */
   addDirs?: string[] | null;
+  /** Servers the session may use (host names or server_ids). Absent / null = all (or the center-wide value); `[]` = none. */
+  servers?: string[] | null;
 }
 
 /** The center's list as last fetched (mirror of `src-tauri/src/session.rs::SessionList`). Memory only. */
@@ -257,7 +259,7 @@ export interface CenterServerPeer {
   id: string;
   name: string;
   hostname?: string;
-  /** Stable id the server reports (protocol 1.7.0). Absent for an older server. */
+  /** Stable id the server reports (protocol 1.7.0, still sent by 1.8.0). Absent for an older server. */
   server_id?: string;
   /** Host name the server reports (shown first), with `user` / `workspace` to tell apart servers on the same host. */
   host?: string;
@@ -271,6 +273,29 @@ export interface CenterServerPeer {
   /** While updating: the target version and how many caps / workers are being waited for. */
   update?: { to: string; running?: { caps: number; workers: number; reports: number } };
   since: string;
+}
+
+/** `server_retire` result (center `RetireOutcome`): what the retired server stopped and what an operator does on the host. */
+export interface CenterRetireResult {
+  ok: true;
+  /** retiring = the server accepted; already_retiring = it was already retiring. */
+  state: "retiring" | "already_retiring";
+  server_id: string;
+  host?: string;
+  user?: string;
+  workspace?: string;
+  peer: string;
+  /** Not present for already_retiring. */
+  stopped?: { caps: number; workers: number };
+  exit_at?: string;
+  exit_code?: number;
+  /** Shell lines for root on the host: remove the service unit, the OS user, the workspace. */
+  host_steps?: string[];
+  service?: { manager: "systemd" | "launchd" | "none"; name?: string; detected?: boolean };
+  /** How many cap records (session x server) the center dropped. */
+  records_removed: number;
+  sessions: string[];
+  message: string;
 }
 
 /** `server_peers` result: the versions paired with this build (npm `bantou` and protocol `bantou`) and each server's state. */

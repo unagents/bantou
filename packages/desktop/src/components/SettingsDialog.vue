@@ -68,7 +68,7 @@ async function loadCommon() {
   try {
     const r = await centerCommonSettingsGet();
     common.value = draftOf(r.settings);
-    commonBaseline.value = { ...common.value, addDirs: [...common.value.addDirs] };
+    commonBaseline.value = { ...common.value, addDirs: [...common.value.addDirs], servers: common.value.servers && [...common.value.servers] };
   } catch (e) {
     commonError.value = String(e);
   }
@@ -77,7 +77,7 @@ async function loadCommon() {
 async function saveCommon() {
   const r = await centerCommonSettingsUpdate(toUpdate(common.value));
   common.value = draftOf(r.settings);
-  commonBaseline.value = { ...common.value, addDirs: [...common.value.addDirs] };
+  commonBaseline.value = { ...common.value, addDirs: [...common.value.addDirs], servers: common.value.servers && [...common.value.servers] };
 }
 
 const POLL_MS = 1000;

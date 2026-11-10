@@ -2,7 +2,7 @@ import { mkdir, rename } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
 import { projectSchema, PERMISSION_MODES, type Config, type ProjectConfig } from "./config.js";
-import { composeAddDirs, composeInstructions, mergeSettings, projectSettingsPatchSchema, readSettings, type ProjectSettings, type ProjectSettingsPatch } from "./project-settings.js";
+import { composeAddDirs, composeInstructions, composeServers, mergeSettings, projectSettingsPatchSchema, readSettings, type ProjectSettings, type ProjectSettingsPatch } from "./project-settings.js";
 import type { Logger } from "./log.js";
 import type { RcStatus, RemoteControlSupervisor } from "./remote-control.js";
 import type { EventHub } from "./events.js";
@@ -56,7 +56,7 @@ export const sessionCreateSchema = {
   name: z.string().regex(SESSION_NAME, "英数字と _ - のみ"),
   path: z.string().min(1).optional().describe("絶対パス。省略時は <workspace>/<name>（無ければ作る）"),
   permissionMode: z.enum(PERMISSION_MODES).optional().describe("省略時 auto"),
-  settings: projectSettingsPatchSchema.optional().describe("プロジェクトごとの設定（{ instructions?: string, addDirs?: string[], … }）。instructions は --append-system-prompt、addDirs（絶対パス）は 1 つずつ --add-dir で渡す（再起動・--continue でも付く）。省略・空は無し"),
+  settings: projectSettingsPatchSchema.optional().describe("プロジェクトごとの設定（{ instructions?: string, addDirs?: string[], servers?: string[], … }）。instructions は --append-system-prompt、addDirs（絶対パス）は 1 つずつ --add-dir で渡す（再起動・--continue でも付く）。servers（host 名か server_id）はこの session が使う server の範囲（未設定 = 全部、空配列 = 使わない）。省略・空は無し"),
 };
 
 export const sessionUpdateSchema = {
@@ -86,6 +86,8 @@ export interface SessionManager {
   updateSettings(name: string, patch: ProjectSettingsPatch): Promise<{ name: string; settings: ProjectSettings }>;
   /** center 共通の設定（全 session に効く。instructions は各 session の追加指示の前に付く）。未設定は `{}`。 */
   getCenterSettings(): { settings: ProjectSettings };
+  /** session が使ってよい server の指定（session の servers、無ければ center 共通の servers）。undefined = 全部。 */
+  serversOf(name: string): string[] | undefined;
   /** center 共通の設定を項目ごとにマージして保存し、全 session の次の起動に反映する。更新後の全体を返す。 */
   updateCenterSettings(patch: ProjectSettingsPatch): Promise<{ settings: ProjectSettings }>;
   /**
@@ -280,6 +282,8 @@ export function createSessionManager(opts: {
       }),
 
     getCenterSettings: () => ({ settings: { ...common } }),
+
+    serversOf: (name) => composeServers(common, saved.get(name)?.settings),
 
     updateCenterSettings: (patch) =>
       serial(async () => {

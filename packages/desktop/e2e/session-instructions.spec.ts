@@ -42,7 +42,7 @@ test.describe("session instructions", () => {
     await expect(page.getByTestId("settings-dialog")).toBeHidden();
     // it went to the center's tool, not to this PC's settings.json
     const sent = await mock(page, (m) => m.calls.filter((c) => c.cmd === "center_call" && (c.args as { name: string }).name === "center_settings_update").map((c) => c.args));
-    expect(sent).toEqual([{ name: "center_settings_update", arguments: { settings: { instructions: MULTI, addDirs: null } } }]);
+    expect(sent).toEqual([{ name: "center_settings_update", arguments: { settings: { instructions: MULTI, addDirs: null, servers: null } } }]);
     expect(await mock(page, (m) => (m as unknown as { centerCommonSettings: Record<string, unknown> }).centerCommonSettings)).toEqual({ instructions: MULTI });
     // only the common part changed: the center config API was not called
     expect(await mock(page, (m) => m.calls.filter((c) => c.cmd === "center_set_settings").length)).toBe(0);

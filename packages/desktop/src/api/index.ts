@@ -18,6 +18,7 @@ export {
   centerSetSettings,
   centerStatus,
   centerTool,
+  serverRetire,
 } from "./center";
 export {
   CENTER_SESSIONS_CHANGED_EVENT,

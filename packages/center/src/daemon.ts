@@ -149,6 +149,8 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     log,
     activity,
     onSummaryChange: (name) => events.publish({ reason: "remote", name }),
+    // session ごとの servers（無ければ center 共通）。sessions は先に作ってあるので直接引く
+    serversOf: (owner) => sessions.serversOf(owner),
     notify: (owner, text) => link.notifyPeer(owner, text),
   });
   applyLateReply = (r, fromId) => void remotes.applyLateReply(r, fromId);
@@ -199,7 +201,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   process.stderr.on("error", () => {});
   process.stdout.on("error", () => {});
 
-  const makeServer = () => createCenterServer({ config, supervisor, link, sessions, remotes, follow, login });
+  const makeServer = () => createCenterServer({ config, supervisor, link, sessions, remotes, follow, login, log });
   if (args.transport === "http") {
     if (!config.token || config.token.length < MIN_TOKEN_LEN) {
       throw new Error(`http transport には config の token（${MIN_TOKEN_LEN} 文字以上）が必要: ${configPath}`);

@@ -234,6 +234,11 @@ export function createFollow(opts: {
       return;
     }
     if (upd.type === "error") {
+      // 退役中の server は update_server を断る（retiring:true）。再指示せず、止まるのを待つ（発見から消えれば一覧からも消える）
+      if (upd.retiring === true) {
+        set(rec, { state: "unknown", detail: "退役中（server は止まっていく途中。更新は指示しない）" });
+        return;
+      }
       if (upd.code === "update_conflict") {
         set(rec, { state: "updating", detail: `別の更新が進行中: ${upd.message}` });
         return;
