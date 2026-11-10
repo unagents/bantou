@@ -10,12 +10,14 @@ import {
   SERVER_NAME,
   parseServerCommand,
   type ServerCommand,
+  type ServerIdentityFields,
   type ServerReply,
 } from "@agent-hand/bantou-protocol";
 import { createActivityTracker } from "./activity";
 import { createAgentManager, type AgentManager, type RunExtras } from "./agents";
 import { createWorkerCleaner } from "./cleanup";
 import { loadConfig } from "./config";
+import { buildIdentity, loadOrCreateServerId } from "./identity";
 import { log } from "./log";
 import { CAP_ID_HEADER, WORKER_ID_HEADER, type McpListener } from "./mcp";
 import { agentDir, runLogDir } from "./paths";
@@ -92,11 +94,16 @@ export function describeCommand(cmd: ServerCommand): string {
   return parts.join(" ");
 }
 
+/** status_result に載せる identity と版。 */
+export type StatusIdentity = ServerIdentityFields & { server_version?: string; protocol_version?: string };
+
 /** 指示を実行して返信内容を作る。失敗は ErrorReply にする。 */
 export async function execute(
   cmd: ServerCommand,
   manager: AgentManager,
   workers?: Pick<WorkerHub, "start">,
+  /** status_result に載せる server の identity と版（protocol 1.7.0）。省略なら載せない（旧形式の返信）。 */
+  identity?: StatusIdentity,
 ): Promise<ServerReply> {
   try {
     if (cmd.type === "kick_cap") {
@@ -132,7 +139,7 @@ export async function execute(
       throw new Error(`${cmd.type} は execute では処理しない`);
     }
     const st = await manager.status();
-    return { bantou: PROTOCOL_VERSION, type: "status_result", ok: true, ...st };
+    return { bantou: PROTOCOL_VERSION, type: "status_result", ok: true, ...(identity ?? {}), ...st };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     log(`エラー: ${cmd.type}: ${message}`);
@@ -206,6 +213,9 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
   log(`設定読込: ${configPath} (workspace=${config.workspace})`);
   const dirs = await prepareWorkspace(config.workspace);
   log(`workspace 準備完了: caps=${dirs.caps} workers=${dirs.workers}`);
+  // 安定した server の id（<workspace>/server.json）。再起動・自己更新でも同じ workspace なら変わらない
+  const identity = buildIdentity(await loadOrCreateServerId(config.workspace, log), config.workspace);
+  log(`server_id=${identity.server_id} host=${identity.host} user=${identity.user}`);
   // /mcp が立つ前は run が起きない（reapOrphans は run しない）。runExtras はその後の値を使う
   let mcpUrl: string | undefined;
   const tracker = createActivityTracker({
@@ -286,6 +296,7 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
   const update = createUpdateController({
     workspace: config.workspace,
     serverVersion,
+    identity,
     specTemplate: config.update.spec,
     running: () => ({ ...manager.activeCount(), reports: hub.pendingCount() }),
     extraBusy: () => kicking,
@@ -354,7 +365,7 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
         // cap を指す他の命令（status・stop_cap・worker_reply）の送信元も通知先にする（center の再起動後に通知先を取り戻す）
         const capId = commandCapId(cmd);
         if (capId !== undefined && cmd.type !== "kick_cap" && cmd.type !== "task") await hub.noteCenter(capId, m.from_id, m.from_name || undefined);
-        reply = await execute(cmd, manager, workerHub);
+        reply = await execute(cmd, manager, workerHub, { ...identity, server_version: serverVersion, protocol_version: MESSENGER_PROTOCOL.version });
       }
       try {
         await client.send(m.from_id, JSON.stringify(reply), "pull", REPLY_META);

@@ -11,7 +11,7 @@ export const SERVER_NAME = "bantou-server";
  * agent-messenger protocol registration (messenger/protocol.json) used in `meta` of send / listPeers.
  * Not the body schema version (`bantou: 1`, PROTOCOL_VERSION). Keep in sync with messenger/protocol.json.
  */
-export const MESSENGER_PROTOCOL = { protocol: "bantou", version: "1.6.0" } as const;
+export const MESSENGER_PROTOCOL = { protocol: "bantou", version: "1.7.0" } as const;
 
 /**
  * hello / update_server (and their replies) exist from this protocol version. A server older than this
@@ -22,6 +22,12 @@ export const FOLLOW_MIN_PROTOCOL = "1.3.0";
 
 /** Version string accepted by update_server (semver; never starts with '-', it ends up in an npx argument). */
 export const SERVER_VERSION_PATTERN = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
+
+/**
+ * Allowed server_id (stable id of one server, generated once per workspace; e.g. `srv-0a1b2c3d4e`).
+ * Same character set as AGENT_ID_PATTERN, at most 64 chars.
+ */
+export const SERVER_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 
 /** Allowed cap / worker ids (also directory names under <workspace>/caps and <workspace>/workers). */
 export const AGENT_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
@@ -250,7 +256,7 @@ export interface UpdateFailure {
 }
 
 /** Reply to hello. */
-export interface HelloResultReply {
+export interface HelloResultReply extends ServerIdentityFields {
   bantou: typeof PROTOCOL_VERSION;
   type: "hello_result";
   ok: true;
@@ -395,10 +401,29 @@ export interface AgentStatus {
   model?: string | null;
 }
 
-export interface StatusReply {
+/**
+ * Who a server is (protocol 1.7.0). All fields optional in a reply: a server older than 1.7.0 sends none of them,
+ * and a center then falls back to the messenger peer id. Carried flat in hello_result and status_result.
+ */
+export interface ServerIdentityFields {
+  /** SERVER_ID_PATTERN. Stable across restarts / self-updates of the same workspace; kept in <workspace>/server.json. */
+  server_id?: string;
+  /** os.hostname() of the machine the server runs on. */
+  host?: string;
+  /** OS user the server runs as. */
+  user?: string;
+  /** Absolute workspace path of the server. */
+  workspace?: string;
+}
+
+export interface StatusReply extends ServerIdentityFields {
   bantou: typeof PROTOCOL_VERSION;
   type: "status_result";
   ok: true;
+  /** npm `bantou` version of the running server (same as hello_result.server_version). Protocol 1.7.0. */
+  server_version?: string;
+  /** Registered messenger protocol version of the running server. Protocol 1.7.0. */
+  protocol_version?: string;
   caps: AgentStatus[];
   workers: AgentStatus[];
 }
@@ -737,6 +762,16 @@ function isRunOutcome(v: Record<string, unknown>): boolean {
   );
 }
 
+/** Optional identity fields of hello_result / status_result: absent (older server) or well-formed. */
+function isServerIdentity(v: Record<string, unknown>): boolean {
+  return (
+    (v.server_id === undefined || (typeof v.server_id === "string" && SERVER_ID_PATTERN.test(v.server_id))) &&
+    optString(v.host) &&
+    optString(v.user) &&
+    optString(v.workspace)
+  );
+}
+
 function isAgentStatus(v: unknown): v is AgentStatus {
   return (
     isRecord(v) &&
@@ -803,6 +838,9 @@ export function isServerReply(v: unknown): v is ServerReply {
     case "status_result":
       return (
         v.ok === true &&
+        isServerIdentity(v) &&
+        optString(v.server_version) &&
+        optString(v.protocol_version) &&
         Array.isArray(v.caps) &&
         v.caps.every(isAgentStatus) &&
         Array.isArray(v.workers) &&
@@ -813,6 +851,7 @@ export function isServerReply(v: unknown): v is ServerReply {
         v.ok === true &&
         typeof v.server_version === "string" &&
         typeof v.protocol_version === "string" &&
+        isServerIdentity(v) &&
         (v.update === null || isUpdateProgress(v.update)) &&
         (v.last_update === null || isUpdateFailure(v.last_update))
       );

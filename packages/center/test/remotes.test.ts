@@ -102,7 +102,7 @@ test("send: task を送る（goal のみなら deliverables {} / verify {} / con
   const { mgr, kicks } = setup({}, undefined, undefined, servers);
   const r = await mgr.send({ owner: "pm1", goal: "go" });
   assert.match(r.task_id, /^[A-Za-z0-9_-]+$/);
-  assert.deepEqual(r, { remote_id: CAP, server: "id-a", serverName: "bantou-server", state: "running", created: true, task_id: r.task_id, worker_model: "haiku" });
+  assert.deepEqual(r, { remote_id: CAP, server: "id-a", peer: "id-a", host: "host-a", serverName: "bantou-server", state: "running", created: true, task_id: r.task_id, worker_model: "haiku" });
   assert.equal(kicks.length, 1);
   assert.equal(kicks[0].peer.id, "id-a");
   assert.deepEqual(kicks[0].cmd, { cap_id: CAP, task_id: r.task_id, goal: "go", deliverables: {}, verify: {}, constraints: [], workers: {}, worker_model: "haiku" });
@@ -365,14 +365,14 @@ test("remote_list の形: server ごとに 1 件。state・最新の result / er
   const { mgr, kicks } = setup();
   await mgr.send({ owner: "pm1", goal: "one" });
   const [r] = mgr.list();
-  assert.deepEqual(Object.keys(r).sort(), ["createdAt", "owners", "pending", "remote_id", "server", "serverHost", "serverName", "session", "state", "worker_reports"]);
+  assert.deepEqual(Object.keys(r).sort(), ["createdAt", "owners", "peer", "peer_seen_at", "pending", "remote_id", "server", "serverHost", "serverName", "server_label", "session", "state", "worker_reports"]);
   assert.deepEqual(r.owners, ["pm1"]);
   kicks[0].resolve(ok("R"));
   await tick();
   mgr.onActivity(CAP);
   await tick();
   const [d] = mgr.list();
-  assert.deepEqual(Object.keys(d).sort(), ["createdAt", "finishedAt", "owners", "pending", "remote_id", "result", "result_at", "server", "serverHost", "serverName", "session", "state", "task_result", "worker_reports"]);
+  assert.deepEqual(Object.keys(d).sort(), ["createdAt", "finishedAt", "owners", "peer", "peer_seen_at", "pending", "remote_id", "result", "result_at", "server", "serverHost", "serverName", "server_label", "session", "state", "task_result", "worker_reports"]);
   assert.deepEqual([d.state, d.result, d.pending], ["done", "R", []]);
 });
 
@@ -1088,7 +1088,7 @@ test("send: worker_model の指定（新規の cap）。指定が config より�
   const servers = cfgServers([{ name: "s1", peer: "bantou-server", model: "opus", workerModel: "haiku" }]);
   const { mgr, kicks } = setup({}, undefined, undefined, servers);
   const r = await mgr.send({ owner: "pm1", goal: "go", worker_model: "claude-haiku-4-5" });
-  assert.deepEqual(r, { remote_id: CAP, server: "id-a", serverName: "bantou-server", state: "running", created: true, task_id: r.task_id, worker_model: "claude-haiku-4-5" });
+  assert.deepEqual(r, { remote_id: CAP, server: "id-a", peer: "id-a", host: "host-a", serverName: "bantou-server", state: "running", created: true, task_id: r.task_id, worker_model: "claude-haiku-4-5" });
   assert.equal(kicks[0].cmd.worker_model, "claude-haiku-4-5");
   assert.equal(mgr.list()[0].worker_model, "claude-haiku-4-5");
 });
@@ -1200,6 +1200,7 @@ test("restore: 同じ server に新形式の記録（center の cap_id）と旧�
   assert.deepEqual(mgr.list().map((r) => [r.remote_id, r.result]), [["r-0a1b2c3d4e", "newer legacy"]]);
   assert.ok(logs.some((l) => new RegExp(`stop_cap が届かない.*${CAP}.*link down`).test(l)));
   assert.deepEqual((JSON.parse(await readFile(join(dir, "remotes.json"), "utf8")) as RemoteRecord[]).map((x) => x.remote_id), ["r-0a1b2c3d4e"]);
+  await tick(); // 1 つ目の manager の announce（保存を伴う）が済んでから、次の内容を書く
   // 新形式の方が新しければ、新形式が残る（center の cap_id のまま）
   await writeFile(join(dir, "remotes.json"), JSON.stringify([{ ...own, createdAt: "2026-11-06T00:00:00.000Z" }, legacyRec("r-0a1b2c3d4e")]));
   const { mgr: m2, stops } = setup({}, undefined, undefined, undefined, { log: () => {} });
@@ -1213,6 +1214,7 @@ test("restore: 残す 1 件は動いている記録（running・unknown・指示
     await writeFile(join(dir, "remotes.json"), JSON.stringify(recs));
     const { mgr, stops } = setup({}, undefined, undefined, undefined, { log: () => {} });
     await mgr.restore();
+    await tick();
     return { kept: mgr.list().map((r) => r.remote_id), stopIds: stops.map((x) => (x.cmd as { cap_id: string }).cap_id).sort() };
   };
   // 旧 running + 新しい done → running を残す（done へだけ stop_cap）

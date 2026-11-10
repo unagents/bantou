@@ -26,6 +26,7 @@ import {
 } from "@agent-hand/bantou-protocol";
 import { DEFAULT_SERVER_TIMEOUT_MS, type Config, type ServerConfig } from "./config.js";
 import type { Logger } from "./log.js";
+import { ambiguousServerMessage, describeServer, duplicateServerIdMessage, hostOf, identityOfReply, type ServerIdentity } from "./server-identity.js";
 
 /** messenger の meta（protocol 名と version）。 */
 export interface LinkMeta {
@@ -84,7 +85,8 @@ export type TaskInput = Omit<TaskCommand, "bantou" | "type">;
 export type WorkerReplyInput = Omit<WorkerReplyCommand, "bantou" | "type">;
 
 /** config.servers に依存せず、messenger の発見（protocol bantou）で選んだ server の peer。 */
-export interface ServerPeer {
+export interface ServerPeer extends ServerIdentity {
+  /** 今の到達先（messenger の peer id。server が再登録すると変わる）。server の識別は server_id（旧 server は無い）。 */
   id: string;
   name: string;
   summary?: string;
@@ -117,8 +119,8 @@ export interface ServerLink {
   /** config.servers を使わず、protocol bantou で発見できる server の一覧。0.9 broker など発見不能なら空。 */
   peers(): Promise<ServerPeer[]>;
   /**
-   * 発見ベースの server 選択。sel があれば peer id、無ければ name が一致するもの、省略時は先頭。
-   * 見つからなければ投げる。
+   * 発見ベースの server 選択。sel は server_id → peer id → host 名 → messenger の名前の順に一致を探す。省略時は先頭。
+   * 見つからない、または同じ段で複数に一致（同じ host に server が 2 つなど）する時は投げる（候補は user と workspace 付き）。
    */
   selectPeer(sel?: string): Promise<ServerPeer>;
   /** 指定 peer へ kick_cap を送り、返信（cap_result / error）まで待つ。 */
@@ -134,6 +136,14 @@ export interface ServerLink {
   statusOn(peer: ServerPeer, opts?: { cap_id?: string }): Promise<StatusReply | ErrorReply>;
   /** 指定 peer へ stop_cap を送り、返信（stop_result / error）まで待つ。 */
   stopCapOn(peer: ServerPeer, cmd: StopCapInput): Promise<StopResultReply | ErrorReply>;
+  /**
+   * peers() に server_id / host / user / workspace を載せたもの。識別が未取得（hello 未確認）の peer へは hello を送って取得する
+   * （旧 server の返信 = 識別なしも「取得済み」とし、再送しない。届かなかった peer は IDENTIFY_RETRY_MS 後に再試行）。
+   * 無い link（テストの偽物）では peers() を使う。
+   */
+  identifiedPeers?(): Promise<ServerPeer[]>;
+  /** 学習済みの識別（hello_result / status_result の返信から）。peer id → 識別。未学習は undefined。 */
+  identityOf?(peerId: string): ServerIdentity | undefined;
   /** 指定 peer へ hello を送り、hello_result（または error）を待つ。protocol の版の門は通らない。 */
   hello(peer: ServerPeer): Promise<HelloResultReply | ErrorReply>;
   /** 指定 peer へ update_server を送り、update_result（または error）を待つ。protocol の版の門は通らない。 */
@@ -205,6 +215,39 @@ const KIND_COMMAND: Record<ReplyKind, ServerCommandType> = {
 /** config.servers に無い、発見ベースの要求に使う内部 slot の名前。list / connectAll には出さない。 */
 const DISCOVERY_SLOT = "(discovery)";
 
+/** 識別を取れなかった peer（hello が届かない）を再試行するまでの間隔。 */
+export const IDENTIFY_RETRY_MS = 60_000;
+/** 同じ server_id を名乗る peer の生存確認（hello）を、同じ顔ぶれに対してやり直す最小の間隔。 */
+export const DUP_RECHECK_MS = 30_000;
+/** 識別の取得（hello）の返信待ち。 */
+export const IDENTIFY_TIMEOUT_MS = 3_000;
+
+/**
+ * sel に一致する peer。server_id → peer id → host 名（server が名乗った host、無ければ messenger の hostname）→ 名前、の順で
+ * 最初に 1 件以上一致した段の全件を返す（複数 = 曖昧）。
+ */
+export function matchServerPeers(peers: ServerPeer[], sel: string): ServerPeer[] {
+  const tiers: Array<(p: ServerPeer) => boolean> = [
+    (p) => p.server_id === sel,
+    (p) => p.id === sel,
+    (p) => hostOf({ host: p.host, hostname: p.hostname })?.toLowerCase() === sel.toLowerCase(),
+    (p) => p.name === sel,
+  ];
+  for (const t of tiers) {
+    const hit = peers.filter(t);
+    if (hit.length > 0) return hit;
+  }
+  return [];
+}
+
+/** peer と同じ server_id を名乗る peer（peer 自身を含む）。server_id が無ければ peer だけ。 */
+const sameServerIdPeers = (peers: ServerPeer[], peer: ServerPeer): ServerPeer[] =>
+  peer.server_id === undefined ? [peer] : peers.filter((p) => p.server_id === peer.server_id);
+
+/** 候補の 1 行（識別があれば host(server_id) user= workspace=、無ければ従来の name(peer id)）。 */
+const peerLabel = (p: ServerPeer): string =>
+  p.server_id !== undefined || p.host !== undefined ? describeServer({ ...p, peerId: p.id }) : `${p.name}(${p.id})`;
+
 /** version 不一致時に messenger が text 先頭へ付ける警告行（JSON を壊すので除く）。 */
 const WARNING_LINE = /^\[agent-messenger warning\][^\n]*\n?/;
 
@@ -256,6 +299,10 @@ export function createServerLink(opts: {
   healthCheck?: (server: ServerConfig) => Promise<boolean>;
   /** peer id の変化を見る間隔（既定 5 秒）。 */
   peerWatchMs?: number;
+  /** identify の hello の返信待ち（既定 IDENTIFY_TIMEOUT_MS）。 */
+  identifyTimeoutMs?: number;
+  /** 現在時刻（ms）。テスト用。 */
+  now?: () => number;
   /** server からの通知（activity）。返信ではないので pending とは照合しない。 */
   onNotice?: (n: ServerNotice, fromId?: string) => void;
   /**
@@ -283,6 +330,31 @@ export function createServerLink(opts: {
     const s = slots.get(name);
     if (!s) throw new Error(`未定義の server: ${name}`);
     return s;
+  };
+
+  /** peer id → 学習済みの識別（メモリのみ）。hello_result / status_result の返信と、identify の hello で埋まる。 */
+  const identities = new Map<string, ServerIdentity>();
+  /** 識別の取得に失敗した時刻（peer id → ms）。IDENTIFY_RETRY_MS の間は再送しない。 */
+  const identifyFailedAt = new Map<string, number>();
+  /** 直近の発見で居た peer id。同じ server_id を名乗る別の peer が今も居る間は、識別を捨てない（捨てると互いに取り直して揺れる）。 */
+  let liveIds = new Set<string>();
+  const identifyTimeoutMs = opts.identifyTimeoutMs ?? IDENTIFY_TIMEOUT_MS;
+  const nowMs = opts.now ?? Date.now;
+
+  /** 返信から peer の識別を学ぶ。同じ server_id の別の peer id（再登録前の旧 id）の記録は整理する。 */
+  const learnIdentity = (peerId: string, r: ServerIdentity): void => {
+    const ident = identityOfReply(r);
+    if (ident.server_id !== undefined) {
+      for (const [other, v] of [...identities]) {
+        if (other !== peerId && v.server_id === ident.server_id && !liveIds.has(other)) {
+          identities.delete(other);
+          log(`旧 peer id の識別を整理: server_id=${ident.server_id} ${other} -> ${peerId}`);
+        }
+      }
+    }
+    // 識別の無い返信（旧 server・一部だけ載せる返信）で、学習済みの識別を消さない
+    if (Object.keys(ident).length > 0 || !identities.has(peerId)) identities.set(peerId, ident);
+    identifyFailedAt.delete(peerId);
   };
 
   /** 発見ベースの要求に使う slot。config.servers があれば先頭の client を共有し、無ければ内部 slot を使う。 */
@@ -336,6 +408,9 @@ export function createServerLink(opts: {
       log(`無視: server=${slot.cfg.name} from=${m.from_name} text=${m.text.replace(/\s+/g, " ").slice(0, 120)}`);
       return;
     }
+    if ((r.type === "hello_result" || r.type === "status_result") && m.from_id !== undefined) learnIdentity(m.from_id, r);
+    // hello を知らない旧 server の error: 識別なしとして扱う（再送しない）
+    else if (r.type === "error" && r.command === "hello" && m.from_id !== undefined) learnIdentity(m.from_id, {});
     let target: Pending | undefined;
     if (r.type === "cap_result") {
       target = slot.pending.find((p) => p.kind === "cap_result" && p.key === r.cap_id);
@@ -449,7 +524,7 @@ export function createServerLink(opts: {
         const peers = await client.listPeers("all", { protocol: MESSENGER_PROTOCOL.protocol });
         const pick = peers.find((p) => p.name === SERVER_NAME) ?? peers[0];
         if (pick) {
-          if (peers.length > 1) log(`bantou server が複数: server=${slot.cfg.name} ${peers.map((p) => `${p.name}(${p.id})`).join(",")} -> ${pick.name}(${pick.id})`);
+          if (peers.length > 1) log(`bantou server が複数: server=${slot.cfg.name} ${peers.map((p) => peerLabel({ id: p.id, name: p.name, ...(identities.get(p.id) ?? {}), ...(p.hostname ? { hostname: p.hostname } : {}) })).join(",")} -> ${pick.name}(${pick.id})`);
           const v = pick.protocols?.find((p) => p.name === MESSENGER_PROTOCOL.protocol)?.version;
           slot.serverId = pick.id;
           slot.serverPeer = pick.id;
@@ -548,6 +623,15 @@ export function createServerLink(opts: {
     }
     if (!client.listPeers) return [];
     const peers = await client.listPeers("all", { protocol: MESSENGER_PROTOCOL.protocol });
+    // 発見できなくなった peer（旧 peer id を含む）の識別は捨てる。到達先のキャッシュを残さない
+    const listed = new Set(peers.map((p) => p.id));
+    liveIds = listed;
+    for (const id of [...identities.keys()]) {
+      if (!listed.has(id)) {
+        identities.delete(id);
+        identifyFailedAt.delete(id);
+      }
+    }
     return peers.map((p) => {
       const version = p.protocols?.find((x) => x.name === MESSENGER_PROTOCOL.protocol)?.version;
       return {
@@ -556,9 +640,71 @@ export function createServerLink(opts: {
         ...(p.summary ? { summary: p.summary } : {}),
         ...(p.hostname ? { hostname: p.hostname } : {}),
         ...(version ? { version } : {}),
+        ...(identities.get(p.id) ?? {}),
       };
     });
   };
+
+  /** 識別が未取得の peer へ hello を送って取得する（並列）。返信は onInbound が学習する。届かない peer は IDENTIFY_RETRY_MS 後に再試行。 */
+  const identify = async (peers: ServerPeer[]): Promise<ServerPeer[]> => {
+    const todo = peers.filter((p) => !identities.has(p.id) && nowMs() - (identifyFailedAt.get(p.id) ?? -Infinity) >= IDENTIFY_RETRY_MS);
+    if (todo.length === 0) return peers;
+    await Promise.all(
+      todo.map(async (p) => {
+        const reply = await request<HelloResultReply>(discoveryName, "hello_result", p.id, {}, { target: peerTarget(p), timeoutMs: identifyTimeoutMs });
+        if (identities.has(p.id)) return; // 返信は onInbound が学習済み（hello_result、または hello を知らない旧 server の error = 識別なし）
+        identifyFailedAt.set(p.id, nowMs());
+        log(`server の識別を取れない（hello が届かない）: ${p.name}(${p.id}) ${reply.type === "error" ? reply.message : ""}`);
+      }),
+    );
+    return peers.map((p) => ({ ...p, ...(identities.get(p.id) ?? {}) }));
+  };
+  /**
+   * 同じ server_id を名乗る peer が複数いる時、その全員へ hello を送り直し、応答した peer だけを残す。
+   * server が再起動・再登録すると、死んだ旧 peer id が発見に残る間（messenger 側の失効待ち）、新旧が同じ server_id を名乗る。
+   * 旧 peer は hello に答えず落ちるので、新 peer だけが残り、重複エラーにならない。全員が応答した時だけ重複（本当のコピー）として残す。
+   * 誰も応答しなければ何も落とさない（生きている peer が分からない）。同じ顔ぶれへの再確認は DUP_RECHECK_MS に 1 回まで、同時実行は 1 つにまとめる。
+   */
+  const dupChecks = new Map<string, { at: number; alive: Set<string> }>();
+  const dupInflight = new Map<string, Promise<Set<string>>>();
+  const aliveOnly = async (peers: ServerPeer[]): Promise<ServerPeer[]> => {
+    const groups = new Map<string, ServerPeer[]>();
+    for (const p of peers) if (p.server_id !== undefined) groups.set(p.server_id, [...(groups.get(p.server_id) ?? []), p]);
+    const drop = new Set<string>();
+    await Promise.all(
+      [...groups.values()].filter((g) => g.length > 1).map(async (g) => {
+        const key = g.map((p) => p.id).sort().join(",");
+        const cached = dupChecks.get(key);
+        let alive: Set<string>;
+        if (cached && nowMs() - cached.at < DUP_RECHECK_MS) alive = cached.alive;
+        else {
+          let pr = dupInflight.get(key);
+          if (!pr) {
+            pr = (async () => {
+              const rs = await Promise.all(
+                g.map(async (p) => {
+                  const r = await request<HelloResultReply>(discoveryName, "hello_result", p.id, {}, { target: peerTarget(p), timeoutMs: identifyTimeoutMs });
+                  return r.type === "hello_result" ? p.id : undefined;
+                }),
+              );
+              const a = new Set(rs.filter((x): x is string => x !== undefined));
+              for (const [k, v] of dupChecks) if (nowMs() - v.at >= DUP_RECHECK_MS * 10) dupChecks.delete(k);
+              // 誰も応答しなかった結果は保持しない（全員が一時的に無応答→復帰した時に、間隔の間エラーが残らない）
+              if (a.size > 0) dupChecks.set(key, { at: nowMs(), alive: a });
+              return a;
+            })().finally(() => dupInflight.delete(key));
+            dupInflight.set(key, pr);
+          }
+          alive = await pr;
+        }
+        if (alive.size === 0) return;
+        for (const p of g) if (!alive.has(p.id)) drop.add(p.id);
+      }),
+    );
+    if (drop.size > 0) log(`hello に答えない peer を除く（同じ server_id の旧 peer id）: ${[...drop].join(",")}`);
+    return drop.size > 0 ? peers.filter((p) => !drop.has(p.id)) : peers;
+  };
+  const identifiedPeers = async (): Promise<ServerPeer[]> => aliveOnly(await identify(await discoverPeers()));
 
   // 再登録などで peer id が変わると、旧 id 宛ての返信は届かない。待ちを即エラーにして作り直す
   const watcher = setInterval(() => {
@@ -598,13 +744,37 @@ export function createServerLink(opts: {
     resumeWorker: (server, cmd) => request<WorkerResultReply>(server, "worker_result", cmd.worker_id, cmd),
     status: (server) => request<StatusReply>(server, "status_result", undefined, {}),
     peers: discoverPeers,
+    identifiedPeers,
+    identityOf: (peerId) => identities.get(peerId),
     async selectPeer(sel) {
-      const peers = await discoverPeers();
+      let peers = await discoverPeers();
       if (peers.length === 0) throw new Error("protocol bantou の server が見つからない（server が起動・protocol 登録済みか、同じ broker につながっているか確認）");
-      if (sel === undefined) return peers[0];
-      const hit = peers.find((p) => p.id === sel) ?? peers.find((p) => p.name === sel);
-      if (!hit) throw new Error(`server が見つからない: ${sel}（候補: ${peers.map((p) => `${p.name}(${p.id})`).join(", ")}）`);
-      return hit;
+      if (sel === undefined) {
+        // 同じ server_id を名乗る peer の検知には識別が要る（2 つ以上居る時だけ取る。取得済みは再送しない）
+        if (peers.length > 1) peers = await aliveOnly(await identify(peers));
+        const dup = sameServerIdPeers(peers, peers[0]);
+        if (dup.length > 1) throw new Error(duplicateServerIdMessage(dup[0].server_id!, dup.map((p) => ({ ...p, peerId: p.id }))));
+        return peers[0];
+      }
+      let hits = matchServerPeers(peers, sel);
+      // 一致しない、または識別が未取得の peer が混ざる時は、識別を取り直して引き直す（server_id での指定は識別が要る）
+      if (hits.length === 0 || peers.some((p) => !identities.has(p.id) && hits.includes(p))) {
+        peers = await identify(peers);
+        hits = matchServerPeers(peers, sel);
+      }
+      // peer id の指定は常に通す（生存確認で除かれる旧 peer も、利用者が明示したなら指せる）
+      const exact = peers.find((p) => p.id === sel);
+      if (exact) return exact;
+      // 同じ server_id を名乗る peer が複数いるなら、応答しない旧 peer を除いてから判定する
+      peers = await aliveOnly(peers);
+      hits = matchServerPeers(peers, sel);
+      if (hits.length === 0) throw new Error(`server が見つからない: ${sel}（候補: ${peers.map(peerLabel).join(", ")}）`);
+      // 同じ server_id を名乗る peer 同士の曖昧さは、見分けが付かない表示にならないよう peer id を添えて断る
+      if (hits.length > 1 && hits[0].server_id !== undefined && hits.every((p) => p.server_id === hits[0].server_id)) {
+        throw new Error(duplicateServerIdMessage(hits[0].server_id, hits.map((p) => ({ ...p, peerId: p.id }))));
+      }
+      if (hits.length > 1) throw new Error(ambiguousServerMessage(sel, hits.map((p) => ({ ...p, peerId: p.id }))));
+      return hits[0];
     },
     kickCapOn: (peer, cmd) =>
       request<CapResultReply>(discoveryName, "cap_result", cmd.cap_id, cmd, { target: peerTarget(peer) }),

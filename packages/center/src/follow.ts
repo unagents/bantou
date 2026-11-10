@@ -9,6 +9,7 @@ import {
 import type { Logger } from "./log.js";
 import type { Pair } from "./pair.js";
 import type { ServerLink, ServerPeer } from "./server-link.js";
+import { describeServer, identityOfReply, type ServerIdentity } from "./server-identity.js";
 
 /**
  * 発見した server の版を確かめ、組の版と違えば protocol `bantou` で更新を指示する。
@@ -23,8 +24,8 @@ import type { ServerLink, ServerPeer } from "./server-link.js";
  */
 export type FollowState = "ok" | "unsupported" | "updating" | "mismatch" | "failed" | "lost" | "unknown";
 
-export interface FollowEntry {
-  /** server を指す key（peer の summary。無ければ peer id）。peer id は再登録で変わる。 */
+export interface FollowEntry extends ServerIdentity {
+  /** server を指す key（peer の summary。無ければ peer id）。peer id は再登録で変わる。server の識別は server_id（旧 server は無い）。host / user / workspace は server が名乗ったもの。 */
   key: string;
   id: string;
   name: string;
@@ -137,7 +138,7 @@ export function createFollow(opts: {
     if (patch.state === "updating") rec.updatingSince ??= now();
     else rec.updatingSince = undefined;
     rec.entry = next;
-    if (changed) log(`server 版: ${next.name}(${next.id}) ${next.state} ${next.detail}`);
+    if (changed) log(`server 版: ${describeServer({ ...next, peerId: next.id })} ${next.state} ${next.detail}`);
   }
 
   const recFor = (p: ServerPeer): Rec => {
@@ -151,6 +152,7 @@ export function createFollow(opts: {
           name: p.name,
           ...(p.hostname ? { hostname: p.hostname } : {}),
           ...(p.summary ? { summary: p.summary } : {}),
+          ...identityOfReply(p),
           state: "unknown",
           detail: "確認中",
           since: new Date(now()).toISOString(),
@@ -160,6 +162,7 @@ export function createFollow(opts: {
     }
     rec.entry.id = p.id;
     rec.entry.name = p.name;
+    Object.assign(rec.entry, identityOfReply(p));
     return rec;
   };
 
@@ -180,6 +183,7 @@ export function createFollow(opts: {
       set(rec, { state: "unknown", detail: `版を確認できない: ${hello.type === "error" ? hello.message : "不明な返信"}` });
       return;
     }
+    Object.assign(rec.entry, identityOfReply(hello));
     rec.entry.server_version = hello.server_version;
     rec.entry.protocol_version = hello.protocol_version;
     const protocolOk = hello.protocol_version === MESSENGER_PROTOCOL.version;

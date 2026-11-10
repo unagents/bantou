@@ -1,4 +1,5 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { copyFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 /** 書込ごとに違う tmp 名にする（同じ pid の同時 save が互いの tmp を rename して ENOENT になるのを防ぐ）。 */
@@ -72,4 +73,19 @@ export function createJsonObjectStore<T extends object>(path: string, log: (m: s
       await rename(tmp, path);
     },
   };
+}
+
+/**
+ * 状態ファイルの退避（path を `<path><suffix>` へコピー）。退避先が既にあれば上書きしない（最初の退避を守る = 何度呼んでも冪等）。
+ * 元のファイルが無ければ何もしない。コピーに失敗したら投げる（呼び出し側が続行するか決める）。コピーしたら true。
+ */
+export async function backupFileOnce(path: string, suffix: string): Promise<boolean> {
+  try {
+    await copyFile(path, `${path}${suffix}`, constants.COPYFILE_EXCL);
+    return true;
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "EEXIST") return false;
+    throw e;
+  }
 }

@@ -533,6 +533,7 @@ function setupNoServers(peers?: LinkPeer[]) {
       clients.push(c);
       return c;
     },
+    identifyTimeoutMs: 30,
   });
   return { link, clients };
 }

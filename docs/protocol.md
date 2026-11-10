@@ -114,7 +114,7 @@ sender peer as one JSON object.
 
 The protocol definition is `packages/protocol/messenger/protocol.json` (JSON
 Schemas of `kick_cap`, `stop_cap`, `status`, `hello`, `update_server`, `task`, `worker_reply`, `cap_result`, `stop_result`, `status_result`, `hello_result`, `update_result`, `task_result`, `worker_reply_result`, `error`, `activity`, `worker_report`)
-and `PROTOCOL.md`. It is the agent-messenger protocol version (`1.6.0`,
+and `PROTOCOL.md`. It is the agent-messenger protocol version (`1.7.0`,
 `MESSENGER_PROTOCOL` in `server.ts`); the body field `bantou: 1` is a separate
 version of the JSON bodies below. Changing the definition needs a new protocol
 `version` (same name and version with other content is `PROTOCOL_CONFLICT`).
@@ -230,8 +230,8 @@ a center sends it after a restart to take its caps' notices back. A server older
 ```
 
 No other fields. Reply: `hello_result`
-`{"bantou":1,"type":"hello_result","ok":true,"server_version":"0.3.0","protocol_version":"1.6.0","update":null,"last_update":null}`.
-`server_version` is the npm `bantou` version of the running server. `update` is
+`{"bantou":1,"type":"hello_result","ok":true,"server_version":"0.3.0","protocol_version":"1.7.0","server_id":"srv-0a1b2c3d4e","host":"lenovo","user":"bantou","workspace":"/home/bantou","update":null,"last_update":null}`.
+`server_version` is the npm `bantou` version of the running server. `server_id`, `host`, `user`, `workspace` are the server identity (1.7.0, all optional, see "Server identity" below). `update` is
 `{"state":"waiting"|"restarting","from","to","running":{"caps","workers","reports"}}` while an update is
 in progress. `last_update` is `{"to","ok":false,"error","at"}` for the last update that failed (kept until the
 next attempt). Servers older than protocol `1.3.0` do not know `hello` and do not answer, so a center
@@ -506,12 +506,26 @@ Typical causes: git failure, agent state `running` / `error`, broken `state.json
 - Text that is not a command (non-JSON, other JSON, pings) is ignored.
 - The CLI `send` has `from_id` `cli`, which is not a peer. It cannot receive replies.
 
+## Server identity (1.7.0)
+
+A messenger peer id changes whenever a server restarts or registers again, and every server is named `bantou-server`. From 1.7.0 `hello_result` and `status_result` therefore carry, all optional:
+
+| field | type | meaning |
+|---|---|---|
+| `server_id` | string, `SERVER_ID_PATTERN` (`^[A-Za-z0-9_-]{1,64}$`) | stable id of the server: `srv-` + 10 hex, generated once per workspace, kept in `<workspace>/server.json` |
+| `host` | string | `os.hostname()` |
+| `user` | string | OS user the server runs as |
+| `workspace` | string | absolute workspace path |
+
+`status_result` also has optional `server_version` (npm `bantou` version, same as `hello_result.server_version`) and `protocol_version`. The fields are optional: a reply from a server older than 1.7.0 has none of them, and a center then identifies that server by its messenger peer id as before. A reply with a malformed `server_id` (or a non-string `host` / `user` / `workspace`) is not a valid reply.
+
 ## bantou-server storage
 
 | path | content |
 |---|---|
 | `<workspace>/caps/<cap_id>/` | cap path = cwd of claude |
 | `<workspace>/workers/<worker_id>/` | worker path, same layout as a cap |
+| `<workspace>/server.json` | server identity (`{"server_id","created_at"}`, 1.7.0; created at the first start and kept) |
 | `<path>/state.json` | agent state (shape below) |
 | `<cap path>/logs/center.json` | center of the cap (`{"center_id":"<last peer id>","center_name":"<peer name>"}`; `center_name` is absent in a record from before 1.6.0) |
 | `<worker path>/logs/owner.json` | cap that owns the worker (`{"cap_id":"..."}`) |

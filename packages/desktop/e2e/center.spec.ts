@@ -395,3 +395,25 @@ test("the server versions section says so when there is no server", async ({ pag
   await expect(page.getByTestId("center-versions-none")).toHaveText("server なし");
   await expect(page.getByTestId("center-pair")).toContainText("server 不明");
 });
+
+test("the server versions section shows the host name first with the server_id, and user / workspace only when servers share a host name", async ({ page }) => {
+  await page.goto("/");
+  await mock(page, { enabled: true });
+  await seedVersions(page, {
+    pair: { server: "0.3.0", protocol: "1.3.0" },
+    peers: [
+      versionPeer({ key: "a", id: "mx1ekubv", host: "lenovo", hostname: "lenovo", server_id: "srv-1111111111", user: "alice", workspace: "/home/alice/ws" }),
+      versionPeer({ key: "b", id: "83caasod", host: "lenovo", hostname: "lenovo", server_id: "srv-2222222222", user: "bob", workspace: "/home/bob/ws" }),
+      versionPeer({ key: "c", id: "zz", host: "mac200", hostname: "mac200", server_id: "srv-3333333333", user: "carol", workspace: "/m" }),
+    ],
+  });
+  await page.getByTestId("open-center").click();
+  const rows = page.getByTestId("center-version-row");
+  await expect(rows).toHaveCount(3);
+  await expect(rows.nth(0)).toContainText("lenovo");
+  await expect(rows.nth(0).getByTestId("center-version-server-id")).toHaveText("srv-1111111111");
+  await expect(rows.nth(0).getByTestId("center-version-who")).toHaveText("alice /home/alice/ws");
+  await expect(rows.nth(1).getByTestId("center-version-who")).toHaveText("bob /home/bob/ws");
+  await expect(rows.nth(2).getByTestId("center-version-server-id")).toHaveText("srv-3333333333");
+  await expect(rows.nth(2).getByTestId("center-version-who")).toHaveCount(0);
+});

@@ -17,7 +17,7 @@ import { createRemoteManager } from "./remotes.js";
 import { createRemoteControlSupervisor } from "./remote-control.js";
 import { createContextUsageTracker } from "./context-usage.js";
 import { createSessionManager } from "./sessions.js";
-import { createJsonListStore, createJsonObjectStore } from "./store.js";
+import { backupFileOnce, createJsonListStore, createJsonObjectStore } from "./store.js";
 import { SYSTEM_INSTRUCTION_PARTS, buildSystemInstructions, partLabel } from "./system-instructions.js";
 import { createCenterServer, createSessionMcpServer } from "./server.js";
 import { createCore } from "./core.js";
@@ -137,6 +137,10 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     servers: config.servers,
     configPath,
     store: createJsonListStore(join(stateDir, "remotes.json"), log),
+    // 旧形式（server_id の無い記録）を読み替える前の退避。remotes.json.pre-server-id.bak（既にあれば上書きしない）
+    backup: async () => {
+      if (await backupFileOnce(join(stateDir, "remotes.json"), ".pre-server-id.bak")) log("remotes.json を退避: remotes.json.pre-server-id.bak");
+    },
     log,
     activity,
     notify: (owner, text) => link.notifyPeer(owner, text),
@@ -228,6 +232,9 @@ export async function runDaemon(args: CliArgs): Promise<void> {
 
   // transport を先に繋いでから、接続と autostart をバックグラウンドで進める
   void link.connectAll().finally(() => follow.start());
+  // 古い記録の整理（同じ server_id の重複・長く確認できない到達先）。記録だけを消し、server には何も送らない
+  const pruneTimer = setInterval(() => void remotes.prune().catch((e: unknown) => log(`remote 記録の整理失敗: ${e instanceof Error ? e.message : String(e)}`)), 10 * 60_000);
+  pruneTimer.unref();
   void remotes.restore().catch((e: unknown) => log(`remote 記録の復元失敗: ${e instanceof Error ? e.message : String(e)}`));
   contextUsage.start();
   void sessions.restore().catch((e: unknown) => log(`session の復帰失敗: ${e instanceof Error ? e.message : String(e)}`));

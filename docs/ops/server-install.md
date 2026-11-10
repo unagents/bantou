@@ -12,6 +12,7 @@ host ごとに server 専用の OS ユーザー（既定名 `bantou`）を 1 つ
 |---|---|
 | config | `$HOME/config.json` |
 | log / lock / ready | `$HOME/server.log` / `server.lock` / `server.ready`（`server.exit`, `update.json` も） |
+| server の安定 id | `$HOME/server.json`（`{"server_id":"srv-...","created_at"}`。初回起動で 1 回生成。再起動・自己更新でも変わらない） |
 | cap 記録・worker 作業 dir | `$HOME/caps/`、`$HOME/workers/` |
 | claude の設定・認証 | `$HOME/.claude`（`CLAUDE_CONFIG_DIR`） |
 | git の身元・credential | `$HOME/.config/git/gitconfig`（`GIT_CONFIG_GLOBAL`）、`credentials` |
@@ -117,6 +118,15 @@ host 再起動後は OS が自動で起動し、server が peer 登録して cen
 ### 多重起動 guard（host lock）
 
 1 host に bantou-server は 1 つだけ。launcher は起動時に host 共通の lock `/tmp/bantou-server.lock`（user をまたぐ固定パス。0666、中身は pid / user / workspace / 起動時刻）を取り、既に別の bantou-server が生きていれば、既存の pid・user・止め方を stderr（`server.log`）に出して **専用の exit code 75** で終了する。symlink・hardlink・通常 file でない・読めない/書けない lock（他 user が置いた不正な file を含む）も、辿らず/触らず同じく 75 で止まり、message に消し方（root が `rm /tmp/bantou-server.lock`）が出る。systemd unit には `RestartPreventExitStatus=75` が入っており、無効にし忘れた 2 つ目の unit は 75 で再起動が止まる（`Restart=always` でも 10 秒ごとに `npx` が走り続けない）。launchd の plist は exit code ごとの再起動除外ができないため同等の設定は無く、2 つ目を無効にし忘れると `ThrottleInterval` の 10 秒ごとに再試行して `server.log` に message が追記され続ける（`sudo launchctl bootout system/com.unagents.bantou` で止める）。test・開発で意図して複数動かす時だけ env `BANTOU_SERVER_ALLOW_MULTI=1` で外せる（取得も解放もしない）。lock は正常終了で消え、SIGKILL・OOM・host 再起動で残った lock は、pid の生存と起動時刻（pid 再利用の判別）で stale と判断して次の起動が取り直すため、手で消す必要はない。`<workspace>/server.lock` は別物で、supervisor の交代・引き継ぎを workspace 内で守るもの（host lock は launcher の寿命の間だけ保持され、自己更新で supervisor が替わっても自分の lock と衝突しない）。既に配置済みの unit には `RestartPreventExitStatus=75` が無いので、`install-service.sh` を再実行して unit を更新する。
+
+## 4.5 server の見分け方（server_id）
+
+- 各 server は workspace ごとに安定した `server_id`（`srv-` + hex 10 桁）を持ち、`hello_result` / `status_result` が `server_id`・`host`・`user`・`workspace`・`server_version` を返す（protocol 1.7.0 以降の server。旧い server は返さず、messenger の peer id で扱う）。
+- 保存先は `$HOME/server.json`（標準形では bantou の HOME）。消すと次の起動で別の `server_id` が振られる（center の記録が旧 id に残る）ので、設置・移行で HOME を作り直す時は `server.json` も引き継ぐ。
+- workspace や VM をコピーして `server.json` ごと複製すると、同じ `server_id` の server が 2 つできる。複製した側は `server.json` を消してから起動する（新しい id が生成される）。
+- 識別情報（`host` / `user` / `workspace` / `server_id`）は、`hello` / `status` を送れる messenger の peer に見える。`server.json` に secret は無く、読み取り可（umask 次第の既定権限）でよい。
+- **同じ host に 2 つ server がある時**（例: 移行中に旧 vagrant 直の server と bantou ユーザーの server が並ぶ）は、`host` が同じでも `user` と `workspace` と `server_id` が違うので、それで見分ける。名前（`bantou-server`）は全部同じで、見分ける材料にならない。
+- 確認: `sudo grep server_id= /home/bantou/server.log | tail -1`（起動行 `server_id=... host=... user=...`）、または `sudo cat /home/bantou/server.json`。
 
 ## 5. トラブル時に見る場所
 

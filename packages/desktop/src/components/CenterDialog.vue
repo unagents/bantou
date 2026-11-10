@@ -5,6 +5,7 @@ import type {
   CenterFollowState,
   CenterRcStatus,
   CenterServerInfo,
+  CenterServerPeer,
   CenterServerPeers,
   CenterServerStatus,
 } from "~/types";
@@ -70,6 +71,12 @@ async function refresh() {
 watch(open, (v) => v && void refresh(), { immediate: true });
 
 const rcColor = { stopped: "neutral", starting: "warning", connected: "success", error: "error" } as const;
+/** Another server shares this host name: show user / workspace so they can be told apart. */
+function sameHost(v: CenterServerPeer): boolean {
+  const h = (v.host ?? v.hostname ?? "").toLowerCase();
+  return h !== "" && (versions.value?.peers ?? []).filter((p) => (p.host ?? p.hostname ?? "").toLowerCase() === h).length > 1;
+}
+
 const versionColor: Record<CenterFollowState, "success" | "warning" | "neutral" | "error"> = {
   ok: "success",
   updating: "warning",
@@ -167,7 +174,9 @@ const sourceLabel = { remote: "remote", sidecar: "sidecar" } as const;
               data-testid="center-version-row"
             >
               <div class="flex items-center gap-2 text-xs">
-                <span class="w-32 truncate font-medium">{{ v.hostname ?? v.name }}</span>
+                <span class="w-32 truncate font-medium">{{ v.host ?? v.hostname ?? v.name }}</span>
+                <span v-if="v.server_id" class="text-cork-muted" data-testid="center-version-server-id">{{ v.server_id }}</span>
+                <span v-if="sameHost(v) && (v.user || v.workspace)" class="text-cork-muted" data-testid="center-version-who">{{ [v.user, v.workspace].filter(Boolean).join(" ") }}</span>
                 <UBadge
                   :color="versionColor[v.state]"
                   variant="subtle"

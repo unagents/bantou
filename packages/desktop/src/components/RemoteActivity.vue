@@ -153,7 +153,7 @@ function elapsed(silentMs: number): string {
     >
       <div class="flex items-center gap-2 text-xs">
         <span class="font-medium">{{ r.remote_id }}</span>
-        <span class="text-cork-muted">{{ r.serverName ?? r.server }}</span>
+        <span class="text-cork-muted">{{ r.server_label ?? r.serverName ?? r.server }}</span>
         <span v-if="props.owner === undefined" class="text-cork-muted" :data-testid="`${tp}remote-session`">{{ r.session ?? "共有（旧）" }}</span>
         <span v-if="r.model" class="text-cork-muted" :data-testid="`${tp}remote-model`">{{ r.model }}</span>
         <UBadge
