@@ -59,9 +59,9 @@ desktop の設定ダイアログ（共通・歯車・追加）に「外部記憶
 - 言語は TypeScript。Python / FastAPI は使わない。
 - 本体は Nuxt 4。MCP server は `@nuxtjs/mcp-toolkit`（0.24 系。`server/mcp/tools/*.ts` に `defineMcpTool` で tool を置く）。読み込み用の recall / context / explain と、書き込み用の event を同じ MCP に出す。認証は Bearer token（bantou の設定の `token`）。
 - 保存は PostgreSQL + pgvector（System of Record、イベント、Outbox）。
-- 抽出 LLM は `claude -p`（サブスク。API / litellm は使わない）。`claude -p --output-format json --json-schema <候補の schema> --no-session-persistence --tools ""` を Nitro の worker から subprocess で呼ぶ。起動コストがあるので event ごとではなく turn の区切りや件数でまとめて 1 回。202 の claude は 2.1.322、claude.ai でログイン済み（Linux なので credentials.json。keychain の問題は無い）。
+- 抽出 LLM は `claude -p`（サブスク。API / litellm は使わない）。呼び方は上記の別プロジェクト（OpenAI 互換 endpoint）経由で、その中身が `claude -p --output-format json --json-schema <schema> --no-session-persistence --tools ""`。起動コストがあるので event ごとではなく turn の区切りや件数でまとめて 1 回。202 の claude は 2.1.322、claude.ai でログイン済み（Linux なので credentials.json。keychain の問題は無い）。
 - Graphiti は Python 実装しか無い（graphiti-core）ので、Python のまま使う。Graphiti の Python サービス（公式の MCP server）を 202 で常駐させ（docker）、TypeScript の memory から MCP client として呼ぶ（2026-11-11 決定）。memory の Python はこの 1 つだけ。Graphiti は Neo4j に書き、抽出・矛盾判定に LLM、意味検索に embedding を使う（`llm_client` と `embedder` は別部品）。
-  - LLM: Graphiti の OpenAI client は `base_url` を差し替えられるので、memory（Nuxt）に OpenAI 互換の `POST /v1/chat/completions` を 1 本作り、中で `claude -p --json-schema` を呼ぶ。API は使わない。
+  - LLM: Graphiti の OpenAI client は `base_url` を差し替えられるので、OpenAI 互換の `POST /v1/chat/completions` を `claude -p --json-schema` で返す**別プロジェクト**（名前未定。TypeScript / Nitro 単体、202 に常駐）を指す。memory の抽出 worker も同じ endpoint を使い、`claude -p` を直接は呼ばない。API は使わない。memory 固有ではないので memory には入れない（2026-11-11 決定）。
   - embedding: Anthropic に embedding model は無い（Anthropic 用 embedder も無い）。202 の Ollama のローカル model（例 `nomic-embed-text`）を使う。pgvector 側も同じ embedding を使う。
 - 設置は 202（mini10。Linux x86_64、8 core、RAM 16 GB、disk 空き 341 GB、docker あり）。PostgreSQL は mflow-postgres と分けて pgvector 入りの別コンテナ。Neo4j を入れる時は heap 1 GB / page cache 512 MB 程度に上限を切る。MCP は平文 HTTP なので LAN / Tailscale 内に限る。
 
