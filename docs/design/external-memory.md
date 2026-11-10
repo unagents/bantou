@@ -60,7 +60,9 @@ desktop の設定ダイアログ（共通・歯車・追加）に「外部記憶
 - 本体は Nuxt 4。MCP server は `@nuxtjs/mcp-toolkit`（0.24 系。`server/mcp/tools/*.ts` に `defineMcpTool` で tool を置く）。読み込み用の recall / context / explain と、書き込み用の event を同じ MCP に出す。認証は Bearer token（bantou の設定の `token`）。
 - 保存は PostgreSQL + pgvector（System of Record、イベント、Outbox）。
 - 抽出 LLM は `claude -p`（サブスク。API / litellm は使わない）。`claude -p --output-format json --json-schema <候補の schema> --no-session-persistence --tools ""` を Nitro の worker から subprocess で呼ぶ。起動コストがあるので event ごとではなく turn の区切りや件数でまとめて 1 回。202 の claude は 2.1.322、claude.ai でログイン済み（Linux なので credentials.json。keychain の問題は無い）。
-- Graphiti は Python 実装しか無い（graphiti-core）ので、Python のまま使う。Graphiti の Python サービス（公式の MCP server / REST）を 202 の別コンテナで動かし、TypeScript の memory から呼ぶ（2026-11-11 決定）。memory の Python はこの 1 つだけ。Graphiti 自身の抽出・embedding は LLM client（API か Ollama）を要する。どちらにするかは memory 側で決める。
+- Graphiti は Python 実装しか無い（graphiti-core）ので、Python のまま使う。Graphiti の Python サービス（公式の MCP server）を 202 で常駐させ（docker）、TypeScript の memory から MCP client として呼ぶ（2026-11-11 決定）。memory の Python はこの 1 つだけ。Graphiti は Neo4j に書き、抽出・矛盾判定に LLM、意味検索に embedding を使う（`llm_client` と `embedder` は別部品）。
+  - LLM: Graphiti の OpenAI client は `base_url` を差し替えられるので、memory（Nuxt）に OpenAI 互換の `POST /v1/chat/completions` を 1 本作り、中で `claude -p --json-schema` を呼ぶ。API は使わない。
+  - embedding: Anthropic に embedding model は無い（Anthropic 用 embedder も無い）。202 の Ollama のローカル model（例 `nomic-embed-text`）を使う。pgvector 側も同じ embedding を使う。
 - 設置は 202（mini10。Linux x86_64、8 core、RAM 16 GB、disk 空き 341 GB、docker あり）。PostgreSQL は mflow-postgres と分けて pgvector 入りの別コンテナ。Neo4j を入れる時は heap 1 GB / page cache 512 MB 程度に上限を切る。MCP は平文 HTTP なので LAN / Tailscale 内に限る。
 
 ## 比較した案
@@ -80,4 +82,4 @@ desktop の設定ダイアログ（共通・歯車・追加）に「外部記憶
 
 - 書き込み tool の名前と event の形（bantou の event の項目は上記）。
 - Agent ID の正。session 名でよいか、固定 ID を設定で渡すか。
-- Graphiti の LLM client（API か Ollama）。
+- Ollama の embedding model の選定（日本語の品質）。
