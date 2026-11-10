@@ -3,6 +3,7 @@ import type { CenterSettings } from "~/types";
 
 /**
  * This desktop runs no sidecar of its own and talks to another host's center: center off with a remote set.
+ * Pass the SAVED settings (what `center_get_settings` returned), not a draft being edited.
  * The one rule for "is the sidecar running here": `enabled` starts the sidecar and picks the target
  * (center_mcp.rs::select_target). Off without a remote (nothing connected yet) is not this case.
  */

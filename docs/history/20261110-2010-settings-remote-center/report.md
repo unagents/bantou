@@ -24,14 +24,15 @@ memory 節: この branch の基点には無い（別 task feat/external-memory-
 
 ## sidecar 判定の根拠
 
-- 判定: `remoteOnly = !settings.enabled && !!settings.remote`（SettingsDialog の draft）。
+- 判定: `remoteOnly = isRemoteOnly(開いた時に読んだ保存済みの settings)` = `!enabled && !!remote`。review 第1回で draft 基準から baseline（保存済み）基準に変更（下記）。
 - 根拠: 接続先を決めるのは `center_mcp.rs::select_target` で、enabled なら sidecar、そうでなければ remote。sidecar を起動する・止めるのも `center.rs::apply` が見る `enabled` だけ。同じ 1 つの値で「どちらに繋ぐか」と「sidecar を動かすか」が決まるので、これを根拠にした。`center_status`（runtime の state）は、保存で enabled=false にすると `apply` が即 stop するため enabled=false かつ running は過渡状態のみで、根拠にすると保存直後にちらつくので使わない。`center_connection` は非同期で取得中がある（`connection` が null の間は未確定）ので使わない。
 - 境界:
   - enabled=false + remote あり: remoteOnly（隠す）。
   - enabled=true + remote あり（保存済み remote は使われない）: 従来どおり sidecar 向けを出す。
   - enabled=false + remote 無し（未接続）: remoteOnly ではない。スイッチが sidecar を起動する唯一の入口のため、スイッチと「状態」を出す（既存 e2e もこの構成を前提にしている）。
   - 未取得: `settings` が null の間はダイアログ本体を描画しない（既存）。settings が載った時点で判定が確定し、`status` の取得を待たないので、ちらつかない。
-  - remoteOnly で「解除」すると draft の remote が外れてスイッチが戻る（sidecar に戻る入口）。貼り付け中に remote が入ると、その時点でスイッチは消える（draft 基準）。
+  - remoteOnly（保存済み OFF + remote）では remote 節の「この PC の center を起動」ボタンが draft の enabled を true にする（remote は保持）。押すとスイッチ・sidecar の設定が出て、スイッチで取り消せる。「解除」は remote を消す導線で、保存後に remote 無しの OFF になりスイッチが戻る。
+  - ダイアログ内の編集（スイッチの切替・貼り付け・解除）では remoteOnly は変わらない。隠れるのは保存して開き直してから。
 - 副作用の無い取りこぼし: remoteOnly でも load() は `center_status` / `center_local_ips` / `center_ip_status` を呼ぶ（値は使わない。変更を最小にするため触っていない）。
 
 ## 変更
@@ -84,3 +85,26 @@ memory 節: この branch の基点には無い（別 task feat/external-memory-
 - 新規（`reference folders: sidecar only`）: 歯車 / 追加 / 共通設定のそれぞれで、sidecar ON は参照フォルダ節が出る、OFF + remote は出ない。OFF + remote で歯車の追加指示だけ保存しても、保存済み addDirs が残る（update の body に addDirs が無い、centerSettings が addDirs + instructions）。共通設定も同様（`center_settings_update` の引数に addDirs が無く、center 側の addDirs が残る）。保存済みの相対パスで保存が止まらない。追加は create_session の settings に addDirs が入らない。共通設定で remote を解除すると節が戻る。
 - 先に書いた spec の「OFF+remote で共通設定 4 節が出る」は、今回の仕様変更で参照フォルダを除く 3 節 + 非表示の検証に直した（自分の spec であり、既存 spec の期待値は緩めていない）。
 - session-instructions.spec.ts の「remote center の typed rows」テストは enabled=true（boardSeed）の構成で、名前に反して sidecar ON のまま typed rows を確認している。触っていない（別 task の担当ファイル）。
+
+## 分類表への追記（review 第1回）
+
+| 項目 | 呼ぶ API | 分類 | 表示条件 |
+|---|---|---|---|
+| 「この PC の center を起動」ボタン（remote 節。draft の enabled を true にするだけで remote は保持。保存で sidecar が起動） | `center_set_settings`（enabled） | sidecar を起動する入口 | 保存済み remoteOnly の時だけ。押した後はスイッチと sidecar の設定が出て、スイッチで取り消せる |
+
+## review 第1回の指摘と対応
+
+- [medium] remoteOnly が draft 基準で、ON + remote 保存済みで「center を起動する」を OFF にした瞬間にスイッチが消え、ダイアログ内で ON に戻せない（戻すには破棄か破壊的な「解除」）。README の「保存値は切り替えても消えない」とも食い違い。
+  - 対応: remoteOnly を load() で読んだ保存済み settings から 1 度だけ判定する baseline 基準に変更（`isRemoteOnly` は保存済み settings を渡す。別の判定は作っていない）。スイッチと「状態」節の表示は `sidecarVisible = !remoteOnly || draft.enabled`（起動ボタンを押した後に取り消せる）。
+  - 参照フォルダの隠し・検証・送信除外（commonProblem / saveCommon）も同じ remoteOnly（baseline）を使う。ダイアログ内の切替で隠れて検証・送信から外れることは無い。歯車・追加の hideAddDirs は元から保存値基準で変更なし。
+  - 保存済み remoteOnly には remote 節に「この PC の center を起動」ボタンを置いた。「解除」は従来どおり remote を消す導線。
+- e2e: settings-remote-center.spec.ts に追加・修正。
+  - ON + remote 保存済み: スイッチを OFF にしてもスイッチと参照フォルダ欄が残り、ON に戻せる。参照フォルダの検証・送信も効く。
+  - 保存済み OFF + remote: スイッチ非表示、起動ボタン表示。押して保存すると `center_set_settings` が enabled=true かつ remote 保持で呼ばれ、開き直すと sidecar 向けが出る。
+  - 「解除」は remote を消す（保存で remote 無しになりスイッチが戻る）。
+  - 自作 spec の旧期待値（「解除でスイッチが即戻る」「共通設定で解除すると参照フォルダが即戻る」）は draft 基準を前提にしていたため仕様変更として直した。既存 spec の期待値は緩めていない。
+
+## 残り（直さない low）
+
+- fix/servers-session-only との merge 衝突: cap が merge 時に解消する。
+- session-instructions.spec の「remote center の typed rows」テストの名前と構成（enabled=true）の食い違い: 別 task。

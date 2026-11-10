@@ -73,15 +73,44 @@ test.describe("settings dialog: sidecar OFF + remote connection", () => {
     await expect(page.getByTestId("center-common-instructions")).toHaveValue("remote 側の共通指示");
   });
 
-  test("clearing the remote brings the on/off switch back (the way to start the sidecar)", async ({ page }) => {
+  test("the start button turns the center on and keeps the remote; the click can be undone with the switch", async ({ page }) => {
     await expect(page.getByTestId("center-enabled")).toHaveCount(0);
-    await page.getByTestId("center-remote-clear").click();
-    await expect(page.getByTestId("center-enabled")).toBeVisible();
-    await expect(page.getByTestId("center-status-section")).toBeVisible();
-    await expect(page.getByTestId("center-state")).toHaveText("stopped");
-    await expect(page.getByTestId("center-remote-only-hint")).toHaveCount(0);
-    await page.getByTestId("center-enabled").click();
+    await expect(page.getByTestId("settings-save")).toBeDisabled();
+    await page.getByTestId("center-start-sidecar").click();
+    // the sidecar's own settings show; the switch shows too (undo), the remote section gives way
     await expect(page.getByTestId("center-port")).toBeVisible();
+    await expect(page.getByTestId("center-enabled")).toBeChecked();
+    await expect(page.getByTestId("settings-save")).toBeEnabled();
+    await page.getByTestId("center-enabled").click();
+    await expect(page.getByTestId("center-start-sidecar")).toBeVisible();
+    await expect(page.getByTestId("center-remote-current")).toContainText("http://mac200:7910/mcp");
+    await expect(page.getByTestId("settings-save")).toBeDisabled();
+    // start and save: enabled is sent and the remote is kept as saved
+    await page.getByTestId("center-start-sidecar").click();
+    await page.getByTestId("settings-save").click();
+    await expect(page.getByTestId("settings-dialog")).toBeHidden();
+    const call = await folderMock(page, (m) => m.calls.filter((c) => c.cmd === "center_set_settings").slice(-1)[0]);
+    expect(call?.args).toMatchObject({ settings: { enabled: true, remote: { url: "http://mac200:7910/mcp", token: "tok-saved-remote-0123" } } });
+    expect(await mock(page, (m) => m.center)).toMatchObject({ enabled: true, remote: { url: "http://mac200:7910/mcp" } });
+    // the saved state is now "on": the sidecar parts show as before
+    await page.getByTestId("open-settings").click();
+    await expect(page.getByTestId("center-enabled")).toBeChecked();
+    await expect(page.getByTestId("center-start-sidecar")).toHaveCount(0);
+  });
+
+  test("clearing the remote removes it (the start button stays until saved; then nothing is connected and the switch is back)", async ({ page }) => {
+    await page.getByTestId("center-remote-clear").click();
+    await expect(page.getByTestId("center-remote-current")).toBeHidden();
+    await expect(page.getByTestId("center-enabled")).toHaveCount(0);
+    await expect(page.getByTestId("center-start-sidecar")).toBeVisible();
+    await expect(page.getByTestId("settings-save")).toBeEnabled();
+    await page.getByTestId("settings-save").click();
+    await expect(page.getByTestId("settings-dialog")).toBeHidden();
+    expect(await mock(page, (m) => m.center)).not.toHaveProperty("remote");
+    await page.getByTestId("open-settings").click();
+    await expect(page.getByTestId("center-enabled")).toBeVisible();
+    await expect(page.getByTestId("center-state")).toHaveText("stopped");
+    await expect(page.getByTestId("center-start-sidecar")).toHaveCount(0);
   });
 
   test("the center dialog shows the connection as remote and the server list of the connected center", async ({ page }) => {
@@ -243,11 +272,39 @@ test.describe("reference folders: sidecar only", () => {
     expect(JSON.stringify(call?.args)).not.toContain("addDirs");
     expect(await folderMock(page, (m) => m.centerCommonSettings)).toEqual({ addDirs: ["/common/ref"], instructions: "remote の共通指示" });
 
-    // clearing the remote (back to the sidecar's side) shows the folders again
+    // the dialog's own edits (start button) do not change what is hidden: the saved state decides
     await page.getByTestId("open-settings").click();
     await expect(page.getByTestId("center-common-instructions")).toHaveValue("remote の共通指示");
-    await page.getByTestId("center-remote-clear").click();
+    await page.getByTestId("center-start-sidecar").click();
+    await expect(page.getByTestId("center-common-section-add-dirs")).toHaveCount(0);
+    // saved as on: reopened, the folders show with their saved value
+    await page.getByTestId("settings-save").click();
+    await expect(page.getByTestId("settings-dialog")).toBeHidden();
+    await page.getByTestId("open-settings").click();
     await expect(page.getByTestId("center-common-section-add-dirs")).toBeVisible();
     await expect(page.getByTestId("center-common-add-dir").first()).toHaveValue("/common/ref");
+  });
+
+  test("center-wide settings, sidecar ON + remote saved: switching off in the dialog keeps the switch and the folders (checked and sent)", async ({ page }) => {
+    await page.goto("/");
+    await folderMock(page, (m) => {
+      m.center.remote = { url: "http://mac200:7910/mcp", token: "tok-saved-remote-0123" };
+      m.centerCommonSettings = { addDirs: ["/common/ref"] };
+    });
+    await page.getByTestId("open-settings").click();
+    await expect(page.getByTestId("center-common-instructions")).toBeEnabled();
+    await expect(page.getByTestId("center-common-section-add-dirs")).toBeVisible();
+    await page.getByTestId("center-enabled").click();
+    // the switch stays (it can be switched on again) and the folders stay in the form
+    await expect(page.getByTestId("center-enabled")).toBeVisible();
+    await expect(page.getByTestId("center-common-section-add-dirs")).toBeVisible();
+    await page.getByTestId("center-common-add-dir").first().fill("rel/path");
+    await expect(page.getByTestId("center-common-problem")).toContainText("参照フォルダは絶対パスで指定する");
+    await page.getByTestId("center-common-add-dir").first().fill("/common/other");
+    await page.getByTestId("center-enabled").click();
+    await expect(page.getByTestId("center-enabled")).toBeChecked();
+    await page.getByTestId("settings-save").click();
+    await expect(page.getByTestId("settings-dialog")).toBeHidden();
+    expect(await folderMock(page, (m) => m.centerCommonSettings)).toEqual({ addDirs: ["/common/other"] });
   });
 });

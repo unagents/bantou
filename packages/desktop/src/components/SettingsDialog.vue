@@ -19,6 +19,8 @@ const open = defineModel<boolean>("open", { required: true });
 const toast = useToast();
 
 const settings = ref<CenterSettings | null>(null);
+// Saved state: off with a remote set (see `sidecarVisible`). Set once per open by load().
+const remoteOnly = ref(false);
 // The settings as loaded (token follows a regenerate, which is stored at once): save is enabled only when the draft differs.
 const baseline = ref<string | null>(null);
 function snapshot(s: CenterSettings): string {
@@ -45,6 +47,7 @@ async function load() {
   try {
     settings.value = await centerGetSettings();
     baseline.value = snapshot(settings.value);
+    remoteOnly.value = isRemoteOnly(settings.value);
     await showSavedRemote(settings.value);
   } catch (e) {
     error.value = String(e);
@@ -279,12 +282,16 @@ function clearRemote() {
   parseSeq++;
 }
 
-// The desktop talks to another host's center and runs no sidecar of its own: center off with a remote set.
-// Judged from the settings draft alone (enabled starts the sidecar and picks the target, see
-// center_mcp.rs::select_target), so it is known as soon as the settings are loaded. The sidecar-only parts
-// (on/off switch, run state, restart count, logs) are not shown then. Off without a remote (nothing
-// connected yet) is not this case: the switch stays, it is the way to start the sidecar.
-const remoteOnly = computed(() => !!settings.value && isRemoteOnly(settings.value));
+// The desktop talks to another host's center and runs no sidecar of its own: center off with a remote set,
+// as SAVED (the settings read when the dialog opened; enabled starts the sidecar and picks the target, see
+// center_mcp.rs::select_target). Edits in the dialog do not change it, so switching the center off or on
+// here never makes the switch vanish. Known as soon as the settings are loaded. The sidecar-only parts
+// (on/off switch, run state, restart count, logs, reference folders) are not shown then; the remote section
+// has a button to start this PC's center instead. Off without a remote (nothing connected yet) is not this case.
+// (`remoteOnly` itself is declared next to `settings`, which `load()` sets it from.)
+// The switch and the run state show unless remoteOnly; after "この PC の center を起動" (draft enabled) they show too,
+// so that the click can be undone.
+const sidecarVisible = computed(() => !remoteOnly.value || !!settings.value?.enabled);
 
 const anyDirty = computed(() => dirty.value || commonDirty.value);
 
@@ -331,7 +338,7 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
 </script>
 
 <template>
-  <UModal v-model:open="open" title="設定" :description="remoteOnly ? '接続先 center の設定' : 'center（sidecar）の起動、token、接続設定'" :ui="{ content: 'max-w-3xl' }">
+  <UModal v-model:open="open" title="設定" :description="!sidecarVisible ? '接続先 center の設定' : 'center（sidecar）の起動、token、接続設定'" :ui="{ content: 'max-w-3xl' }">
     <template #body>
       <div v-if="settings" class="flex flex-col gap-4" data-testid="settings-dialog">
         <div
@@ -374,7 +381,7 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
             {{ newIp }} を選んだ。保存すると接続設定に反映する
           </p>
         </div>
-        <template v-if="!remoteOnly">
+        <template v-if="sidecarVisible">
           <span class="text-sm font-semibold">この PC の center</span>
           <USwitch v-model="settings.enabled" label="center を起動する" data-testid="center-enabled" />
         </template>
@@ -459,9 +466,18 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
           <p class="text-cork-muted text-xs">
             相手の設定画面でコピーした接続設定（mcp.json か claude mcp add）を貼る。保存すると sidecar ではなくこちらに接続する
           </p>
-          <p v-if="remoteOnly" class="text-cork-muted text-xs" data-testid="center-remote-only-hint">
-            この PC の center（sidecar）は起動していない。使う時は「解除」して起動する
-          </p>
+          <div v-if="remoteOnly" class="flex items-center gap-2" data-testid="center-remote-only-hint">
+            <UButton
+              size="xs"
+              variant="outline"
+              color="neutral"
+              icon="i-lucide-play"
+              label="この PC の center を起動"
+              data-testid="center-start-sidecar"
+              @click="settings.enabled = true"
+            />
+            <span class="text-cork-muted text-xs">この PC で center を起動する。接続先の設定は保持される（保存で起動）</span>
+          </div>
           <UTextarea
             :model-value="pasteText"
             :rows="4"
@@ -508,7 +524,7 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
           </p>
         </section>
 
-        <div v-if="!remoteOnly" class="border-cork-border flex flex-col gap-2 border-t pt-3" data-testid="center-status-section">
+        <div v-if="sidecarVisible" class="border-cork-border flex flex-col gap-2 border-t pt-3" data-testid="center-status-section">
           <div class="flex items-center gap-2">
             <span class="text-sm font-medium">状態</span>
             <UBadge
