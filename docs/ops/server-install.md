@@ -123,6 +123,8 @@ host 再起動後は OS が自動で起動し、server が peer 登録して cen
 
 - 各 server は workspace ごとに安定した `server_id`（`srv-` + hex 10 桁）を持ち、`hello_result` / `status_result` が `server_id`・`host`・`user`・`workspace`・`server_version` を返す（protocol 1.7.0 以降の server。旧い server は返さず、messenger の peer id で扱う）。
 - 保存先は `$HOME/server.json`（標準形では bantou の HOME）。消すと次の起動で別の `server_id` が振られる（center の記録が旧 id に残る）ので、設置・移行で HOME を作り直す時は `server.json` も引き継ぐ。
+- workspace や VM をコピーして `server.json` ごと複製すると、同じ `server_id` の server が 2 つできる。複製した側は `server.json` を消してから起動する（新しい id が生成される）。
+- 識別情報（`host` / `user` / `workspace` / `server_id`）は、`hello` / `status` を送れる messenger の peer に見える。`server.json` に secret は無く、読み取り可（umask 次第の既定権限）でよい。
 - **同じ host に 2 つ server がある時**（例: 移行中に旧 vagrant 直の server と bantou ユーザーの server が並ぶ）は、`host` が同じでも `user` と `workspace` と `server_id` が違うので、それで見分ける。名前（`bantou-server`）は全部同じで、見分ける材料にならない。
 - 確認: `sudo grep server_id= /home/bantou/server.log | tail -1`（起動行 `server_id=... host=... user=...`）、または `sudo cat /home/bantou/server.json`。
 

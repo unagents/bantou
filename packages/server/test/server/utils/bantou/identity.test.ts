@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { hostname, userInfo } from "node:os";
 import { mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -49,6 +50,29 @@ test("再起動（再読み込み）: 同じ workspace なら server_id は変�
     assert.equal(await loadOrCreateServerId(ws), first);
     assert.equal(await readFile(serverFile(ws), "utf8"), before);
     assert.deepEqual(logs, []);
+  });
+});
+
+test("並行生成（初回に同時に起動）: 全員が同じ server_id になり、ファイルの id とも一致する", async () => {
+  await withWorkspace(async (ws) => {
+    const ids = await Promise.all(Array.from({ length: 16 }, () => loadOrCreateServerId(ws)));
+    assert.equal(new Set(ids).size, 1);
+    assert.equal((await readJson(serverFile(ws))).server_id, ids[0]);
+    assert.equal(await loadOrCreateServerId(ws), ids[0]);
+  });
+});
+
+test("並行生成: 別プロセス（子プロセス）が同時に生成しても同じ server_id", async () => {
+  await withWorkspace(async (ws) => {
+    const mod = join(process.cwd(), "server/utils/bantou/identity.ts");
+    const code = `import(${JSON.stringify(mod)}).then(async (m) => console.log(await m.loadOrCreateServerId(${JSON.stringify(ws)})))`;
+    const run = () =>
+      new Promise<string>((resolve, reject) => {
+        execFile(process.execPath, ["--import", "tsx", "-e", code], { cwd: process.cwd() }, (err, stdout) => (err ? reject(err) : resolve(stdout.trim())));
+      });
+    const ids = await Promise.all([run(), run(), run(), run()]);
+    assert.equal(new Set(ids).size, 1, ids.join(","));
+    assert.equal((await readJson(serverFile(ws))).server_id, ids[0]);
   });
 });
 

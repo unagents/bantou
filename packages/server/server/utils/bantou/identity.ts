@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { link, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { hostname, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { SERVER_ID_PATTERN, type ServerIdentityFields } from "@agent-hand/bantou-protocol";
@@ -14,16 +14,42 @@ export function generateServerId(): string {
   return `srv-${randomBytes(5).toString("hex")}`;
 }
 
-async function writeAtomic(path: string, value: unknown): Promise<void> {
+/**
+ * tmp に書いてから置く。exclusive=true は link（先勝ち。既にあれば EEXIST、中身が揃ってから見える）、false は rename（上書き）。
+ * server.json は secret を含まない。default の mode（umask 次第で 0644）のままで、読み取り可でよい。
+ */
+async function writeAtomic(path: string, value: unknown, exclusive: boolean): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const tmp = `${path}.${process.pid}.${randomBytes(3).toString("hex")}.tmp`;
   try {
     await writeFile(tmp, JSON.stringify(value, null, 2) + "\n");
-    await rename(tmp, path);
-  } catch (e) {
+    if (exclusive) await link(tmp, path);
+    else await rename(tmp, path);
+  } finally {
     await unlink(tmp).catch(() => {});
-    throw e;
   }
+}
+
+/** server.json の server_id を読む。無い・不正なら undefined と理由・引き継ぐ他のキーを返す。 */
+async function readServerId(path: string): Promise<{ id?: string; base: Record<string, unknown>; reason: string; missing: boolean }> {
+  let raw: string;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return { base: {}, reason: "初回", missing: true };
+    return { base: {}, reason: `読めない (${(e as Error).message})`, missing: false };
+  }
+  let d: unknown;
+  try {
+    d = JSON.parse(raw);
+  } catch {
+    return { base: {}, reason: "JSON として不正", missing: false };
+  }
+  if (typeof d !== "object" || d === null || Array.isArray(d)) return { base: {}, reason: "形が不正", missing: false };
+  const o = d as Record<string, unknown>;
+  if (typeof o.server_id === "string" && SERVER_ID_PATTERN.test(o.server_id)) return { id: o.server_id, base: o, reason: "", missing: false };
+  if (o.server_id === undefined) return { base: o, reason: "server_id が無い（旧形式）", missing: false };
+  return { base: {}, reason: "server_id が不正", missing: false };
 }
 
 /**
@@ -35,35 +61,27 @@ async function writeAtomic(path: string, value: unknown): Promise<void> {
  */
 export async function loadOrCreateServerId(workspace: string, log: (msg: string) => void = () => {}): Promise<string> {
   const path = serverFile(workspace);
-  let base: Record<string, unknown> = {};
-  let reason: string;
-  try {
-    const raw = await readFile(path, "utf8");
-    try {
-      const d: unknown = JSON.parse(raw);
-      if (typeof d !== "object" || d === null || Array.isArray(d)) {
-        reason = "形が不正";
-      } else {
-        const o = d as Record<string, unknown>;
-        if (typeof o.server_id === "string" && SERVER_ID_PATTERN.test(o.server_id)) return o.server_id;
-        if (o.server_id === undefined) {
-          base = o;
-          reason = "server_id が無い（旧形式）";
-        } else {
-          reason = "server_id が不正";
-        }
-      }
-    } catch {
-      reason = "JSON として不正";
-    }
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") reason = "初回";
-    else reason = `読めない (${(e as Error).message})`;
-  }
+  const cur = await readServerId(path);
+  if (cur.id) return cur.id;
   const server_id = generateServerId();
   try {
-    await writeAtomic(path, { ...base, server_id, created_at: new Date().toISOString() });
-    log(`server_id 生成: ${server_id} (${reason}) path=${path}`);
+    // 初回は先勝ち（link）: 並行して起動した別プロセスに負けたら、勝者の id を読み直してそれを使う（再起動後に id が変わらない）
+    if (cur.missing) {
+      try {
+        await writeAtomic(path, { server_id, created_at: new Date().toISOString() }, true);
+        log(`server_id 生成: ${server_id} (${cur.reason}) path=${path}`);
+        return server_id;
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+        const winner = await readServerId(path);
+        if (winner.id) return winner.id;
+        // 勝者のファイルが不正（通常は起きない）なら、下で上書きする
+        cur.reason = winner.reason;
+        cur.base = winner.base;
+      }
+    }
+    await writeAtomic(path, { ...cur.base, server_id, created_at: new Date().toISOString() }, false);
+    log(`server_id 生成: ${server_id} (${cur.reason}) path=${path}`);
   } catch (e) {
     log(`server_id を保存できない（この起動だけの id を使う）: ${server_id} path=${path} ${(e as Error).message}`);
   }

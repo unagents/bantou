@@ -263,6 +263,9 @@ npx bantou --config <path>
 - 保存先は `<workspace>/server.json`（`{"server_id","created_at"}`）。初回起動で 1 回だけ生成する。再起動・自己更新（`update_server`）・workspace の移動（dir ごと移した場合）でも、同じ workspace なら変わらない。別の workspace は別の id。
 - server.json が無い・`server_id` が無い旧形式・壊れている（JSON 不正、形が不正、`server_id` が `^[A-Za-z0-9_-]{1,64}$` でない）・読めない時は、起動を止めずに `server_id` を再生成して書く（旧形式なら他のキーを残す。`server.log` に `server_id 生成: ... (理由)` を出す）。壊れた場合は id が変わる。保存に失敗した時はその起動だけの id で動き、log に残す。
 - 同じ host に server が 2 つある時の見分け方: `hello_result` / `status_result` の `server_id` + `workspace` を見る（`host` と `user` は同じでも `workspace` と `server_id` が違う）。`server.log` の起動行（`server_id=... host=... user=...`）でも確かめられる。
+- 並行して初回起動した場合は先勝ち（先に `server.json` を置いた側の id を全員が使う）。
+- `server.json` に secret は無い。権限は umask 次第の既定（0644 など）で、読み取り可でよい。
+- 識別情報（`host` / `user` / `workspace` / `server_id`）は、`hello` / `status` を送れる messenger の peer 全員に見える（`user` と workspace の絶対パスを含む）。
 - server.json は `logs/` と `state.json` の掃除（cap / worker の dir）の対象外（workspace 直下なので触らない）。
 
 ## state.json

@@ -55,6 +55,17 @@ branch: `feat/server-identity`。この節は worker w-id-server の担当。cen
 - center 側: `server_id` で server を覚える・旧記録（peer id のみ）の引き継ぎ・表示と指定（w-id-center）。
 - 壊れた server.json の退避（`.broken`）は未実装。
 - `server_id` を手で変える/引き継ぐ手段（HOME を作り直す時は `server.json` を移す、と ops docs に記載のみ）。
+- review 第1回 L3: commit 15b64f6 の `Claude-Session` トレーラが指示と違う。push 済み履歴の書き換え（force push）になるため直さない。この commit 以降は正しいトレーラ（`_01TuyNWyRteHWx9rPbch1q8B`）。
+- 上書き（旧形式・壊れた server.json の再生成）は先勝ちにできない（rename 上書き）。壊れた状態で複数 server が同時に初回起動すると id が割れる可能性が残る（通常は起きない）。
+
+### review 第1回の指摘と対応（protocol / server）
+
+- L7(1) [low] 並行起動で同時に生成すると、rename 後勝ちで負けた側がメモリ上に別 id を持つ → 修正。server.json が無い時の生成を先勝ち（tmp に書いて `link`。既にあれば EEXIST）にし、負けたら読み直して勝者の id を使う。`identity.ts` の `writeAtomic(exclusive)` / `readServerId`。test 追加: 同一プロセス 16 並行、子プロセス 4 並行でも全員同じ id でファイルと一致。
+- L7(4) server.json の権限 → 修正（docs）。secret を含まず umask 次第の既定権限（0644 など）で、読み取り可でよいと `identity.ts` のコメントと `packages/server/README.md` に明記。
+- L7(5) user と workspace 絶対パスが peer 全員に見える → 修正（docs）。`packages/server/README.md` と `docs/ops/server-install.md` に「識別情報（host / user / workspace / server_id）は messenger の peer に見える」と明記。
+- L1（docs 部分） → 修正。`docs/ops/server-install.md` に、workspace / VM を `server.json` ごとコピーすると同じ `server_id` の server が 2 つできる、複製側は `server.json` を消してから起動する、を追記。
+- L3 → 上記「残課題」。直さない。
+- 確認: protocol 32 pass / 0 fail、server 292 pass / 0 fail（+2）、server typecheck は develop 時点の 7 error のまま（増減なし）。
 
 ## center / desktop
 
