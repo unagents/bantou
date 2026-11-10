@@ -108,5 +108,5 @@ branch `feat/memory-phase1`（基点 develop d20aac2）。設計は `docs/design
 - dead-letter の運用（再処理手順の tool 化）、既存 inferred の confirmed 昇格。
 
 ## テスト結果（review 第1回の修正後）
-- `npm test`: 45 pass / 0 fail（unit 22 + PGlite 統合 23）+ docker 統合 1 suite が SKIP（docker 無し。理由は test 出力に出る）。`npm run typecheck` 通過。
+- `npm test`: 45 pass / 0 fail（unit 25 + PGlite 統合 20）+ docker 統合 1 suite が SKIP（docker 無し。理由は test 出力に出る）。`npm run typecheck` 通過。
 - 実サーバー smoke（port 17931）: `/` `/index.html` `/api/x` が 404、token 無し・不正・X-Agent-Id 無しが 401、正認証で tools/list が 4 tool。停止後に port 解放、log に token 無し。
