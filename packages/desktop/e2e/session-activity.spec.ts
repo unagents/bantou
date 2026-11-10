@@ -199,6 +199,19 @@ test.describe("session activity", () => {
     await setRemote(page, "agent-messenger", { running: 1, waitingReply: 0 });
     await act(page);
     await expect(mark(page, "careery")).toBeVisible();
+    // Only for the picture: a wider menu so the names are not cut, and wait until every icon's mask is loaded
+    // (icons are fetched lazily; without the wait the picture shows blanks).
+    await page.locator("nav[aria-label=セッション一覧]").evaluate((n) => ((n as HTMLElement).style.width = "360px"));
+    await page.waitForFunction(() => {
+      const icons = [...document.querySelectorAll("nav[aria-label=セッション一覧] [class*='i-lucide']")];
+      return (
+        icons.length >= 6 &&
+        icons.every((e) => {
+          const s = getComputedStyle(e);
+          return (s.maskImage || s.webkitMaskImage || "none") !== "none";
+        })
+      );
+    });
     await page.locator("nav[aria-label=セッション一覧]").screenshot({ path: process.env.SHOT ?? "/tmp/activity-side.png" });
   });
 });
