@@ -42,3 +42,20 @@
 - desktop: `nuxt typecheck` exit 0（vue-tsc 可）。e2e: 201 件 pass（このうち session-instructions.spec.ts は 28 件、新規 4 件「external memory」）。
 - e2e の手順: bun が無いので `nuxt generate` の静的ビルドを node の簡易サーバー（127.0.0.1:14200）で配信、mock の bundle は `bun build` の代わりに esbuild で同じ出力先に作成、chromium は ms-playwright の chrome を自己完結の一時 config で指定。簡易サーバーは停止しポート解放を確認済み。一時物は作業 dir の中のみ。
 - Rust: 変更なし（`cargo test` は未実施）。
+
+## review 第1回（HEAD 81fbbd5）の指摘と対応
+
+1. [medium] url の空白・改行・制御文字: `memoryUrlSchema` に `v === v.trim() && !/[\x00-\x20\x7f]/.test(v)` を追加し拒否。保存値は**正規化しない**（入力のまま）。理由: `u.href` にすると scheme の小文字化のほか、host だけの url に `/` が付くなど利用者の入力と変わる。大文字 scheme（`HTTP://H/mcp`）は有効な URL で claude も解釈でき、接続失敗の原因にならない。desktop の trim は維持し、内部の空白は draftError で止める。test: 前後空白・改行・タブ・内部の空白・NUL・DEL・userinfo（`user@` / `user:pw@`）・非 http（ftp / file / javascript / wss）・`${…}` を拒否、大文字 scheme は通り入力のまま保存されることを確認。
+2. [low] url に秘密や `${…}` を書かない: 検証で `${` を含む url を拒否（center の zod と desktop の draftError。test あり）。docs は project-settings.md の memory 行、center README、desktop の欄の help、tool 説明に追記（query の秘密は ps と log に出る／`${…}` は claude が展開して memory の host へ送る）。
+3. [low] 改名で `X-Agent-Id`（agentId 未設定時）が変わる点と、固定するなら agentId を設定する旨: project-settings.md、center README、tool 説明（session_settings_update）、desktop の欄の help に追記。
+4. [low] 反映は次の起動から（`servers` の起動し直し不要とは違う）: project-settings.md、center README、tool 説明に明記。
+5. [low] memory / `memory@1` は session（wrapper 経由）のみで、config の `projects` の rc 直起動には付かない点と、session で共通の memory を無効にする手段が無い点（session の null = 共通に戻る。別 task の課題）: project-settings.md と center README に明記。
+6. [low] system-instructions.md の部品の段落順を role → availability → memory に直した。
+
+### 残り
+- claude の `--mcp-config` での `${VAR}` 展開は claude の docs に明記が無く未確認。既存の `BANTOU_SESSION_TOKEN` と同じ前提で、実機未検証。
+- session だけ共通の memory を無効にする手段（別 task）。
+
+### テスト（第1回対応後）
+- center: `tsc` OK、`npm test` 556 件 pass。
+- desktop: `nuxt typecheck` exit 0。e2e は session-instructions.spec.ts と session-servers.spec.ts の 34 件 pass（nuxt generate の静的ビルド + node の簡易サーバー 127.0.0.1:14520 + ms-playwright chromium の一時 config）。簡易サーバーは停止し 14520 の解放を確認。

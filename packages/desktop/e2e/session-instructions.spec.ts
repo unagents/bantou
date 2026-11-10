@@ -622,6 +622,12 @@ test.describe("external memory", () => {
     await url.fill("http://user:pw@mem.local/mcp");
     await expect(save).toBeDisabled();
     await expect(page.getByText("user:pass@ は書けない")).toBeVisible();
+    await url.fill("http://h/m cp");
+    await expect(save).toBeDisabled();
+    await expect(page.getByText("外部記憶の URL に空白・改行は使えない")).toBeVisible();
+    await url.fill("http://h/mcp?k=${BANTOU_SESSION_TOKEN}");
+    await expect(save).toBeDisabled();
+    await expect(page.getByText("外部記憶の URL に ${…} は書けない")).toBeVisible();
     await url.fill(URL_);
     await expect(save).toBeEnabled();
     await page.getByTestId("center-common-memory-token").fill("a b");

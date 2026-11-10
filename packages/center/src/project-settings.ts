@@ -73,6 +73,10 @@ const addDirSchema = z.string().min(1).refine((p) => isAbsolute(p), { message: "
 const memoryUrlSchema = z
   .string()
   .max(MEMORY_URL_MAX, `url は ${MEMORY_URL_MAX} 文字以内`)
+  // 空白・改行・タブ・制御文字は不可（new URL() は前後の空白や途中の改行を剥がして通すため、先に弾く。保存値は入力のまま）
+  .refine((v) => v === v.trim() && !/[\x00-\x20\x7f]/.test(v), { message: "url に空白・改行・制御文字は使えない" })
+  // ${…} は claude が --mcp-config の中で環境変数として展開する（BANTOU_SESSION_TOKEN などが memory の host へ送られる）ので不可
+  .refine((v) => !v.includes("${"), { message: "url に ${…} は書けない（環境変数が展開される。token は token に書く）" })
   .refine(
     (v) => {
       try {

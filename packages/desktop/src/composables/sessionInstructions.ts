@@ -132,6 +132,8 @@ export const draftError = (d: SettingsDraft): string | null => {
     const url = m.url.trim();
     if (!url) return "外部記憶の URL を入れる（token / agent ID だけでは保存できない）";
     if ([...url].length > MEMORY_URL_MAX) return `外部記憶の URL は ${MEMORY_URL_MAX} 文字以内`;
+    if (/[\x00-\x20\x7f]/.test(url)) return "外部記憶の URL に空白・改行は使えない";
+    if (url.includes("${")) return "外部記憶の URL に ${…} は書けない（環境変数が展開される。token は token 欄に入れる）";
     let u: URL | null = null;
     try {
       u = new URL(url);

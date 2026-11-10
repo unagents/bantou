@@ -118,6 +118,18 @@ test("memory 検証: url は http/https の絶対 URL（user:pass@ 不可・2048
     { url: "file:///etc/passwd" },
     { url: "javascript:alert(1)" },
     { url: "http://user:pw@mem.local/mcp" },
+    { url: "https://user@mem.local/mcp" },
+    { url: " http://h/mcp" },
+    { url: "http://h/mcp " },
+    { url: "http://h/mcp\n" },
+    { url: "http://h/m\ncp" },
+    { url: "http://h/m\tcp" },
+    { url: "http://h/m cp" },
+    { url: "http://h/m\x00cp" },
+    { url: "http://h/m\x7fcp" },
+    { url: "http://h/mcp?k=${BANTOU_SESSION_TOKEN}" },
+    { url: "http://${HOST}/mcp" },
+    { url: "wss://h/mcp" },
     { url: "http://" + "a".repeat(2048) + ".example/" },
     { url: "http://m/mcp", token: "a b" },
     { url: "http://m/mcp", token: "a\nb" },
@@ -131,6 +143,10 @@ test("memory 検証: url は http/https の絶対 URL（user:pass@ 不可・2048
     "http://m/mcp",
   ]) assert.equal(ok(bad), false, JSON.stringify(bad).slice(0, 80));
   assert.equal(ok({ url: "http://m/mcp", token: "t".repeat(4096), agentId: "a".repeat(64) }), true);
+  // 大文字 scheme は通り、保存値は入力のまま（正規化しない）
+  assert.equal(ok({ url: "HTTP://H/mcp" }), true);
+  assert.deepEqual(mergeSettings(undefined, projectSettingsPatchSchema.parse({ memory: { url: "HTTP://H/mcp" } })), { memory: { url: "HTTP://H/mcp" } });
+  assert.equal(ok({ url: "http://h/mcp?a=1%24%7BX%7D" }), true); // エンコード済みは展開されない
 });
 
 test("memory merge: object ごと置き換え。token 省略は引き継ぎ、空文字で消す。agentId の空文字は消す。null で削除。memory 無しの項目に影響しない", () => {

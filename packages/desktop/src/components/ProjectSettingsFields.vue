@@ -193,7 +193,7 @@ async function pickAdd() {
     <section class="flex flex-col gap-1" :data-testid="`${idPrefix}-section-memory`">
       <h3 class="text-sm font-semibold">外部記憶</h3>
       <p class="text-cork-muted text-xs">
-        外部記憶（memory）の MCP endpoint。設定すると master-cap の起動時に MCP として足され、記憶の問い合わせ（context / recall）ができる。session の値があれば共通の値は使わない。URL が空なら使わない
+        外部記憶（memory）の MCP endpoint。設定すると master-cap の起動時に MCP として足され、記憶の問い合わせ（context / recall）ができる。session の値があれば共通の値は使わない。URL が空なら使わない。URL に秘密や ${…} は書かない（query の秘密は ps と log に出る。${…} は claude が展開して memory の host へ送る）。秘密は token 欄に入れる。agent ID が空なら session 名を使うので、session を改名すると変わる（固定するなら agent ID を入れる）
       </p>
       <UInput
         :model-value="draft.memory.url"

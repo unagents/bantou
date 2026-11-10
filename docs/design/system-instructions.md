@@ -8,9 +8,9 @@ center が master-cap（session の対話型 `claude --remote-control`）を起�
 
 最初の部品は `master-cap-role`: master-cap は自分では実装・修正・長い調査をせず、remote-cap（server 上のオーケストレーター）に `remote_send` で指示を出し、report と `task_result` で結果を確かめ、利用者に報告する、という運用の案内（remote-cap 側の決まりは `docs/design/cap-orchestration.md`）。
 
-3 つ目の部品は `memory`（2026-11-11）: 外部記憶（`settings.memory`）がある session だけに付く。起動時と判断の前に `mcp__memory__` の context / recall を呼ぶ運用の案内。書き込みは bantou が自動で渡すので自分では呼ばない（設計は `docs/design/external-memory.md`）。memory の設定が無い session では部品も label も出ず、出力は従来と同じ。
-
 2 つ目の部品は `master-cap-availability`: master-cap は常に利用者の指示をいつでも受けられる状態で働く。ビルド・テスト・release・長い待ちで自分の turn を塞がず、時間のかかる作業は remote-cap に預ける。この Mac のローカルでしかできない作業（release の署名ビルド・publish など）は、ローカルのサブエージェント（Agent tool）か background 実行（`run_in_background`）に任せる（`master-cap-role` の「自分ではしない」の例外）。待つ時は turn を終えて通知で受け、並行の指示には普通に応える。
+
+3 つ目の部品は `memory`（2026-11-11）: 外部記憶（`settings.memory`）がある session だけに付く。起動時と判断の前に `mcp__memory__` の context / recall を呼ぶ運用の案内。書き込みは bantou が自動で渡すので自分では呼ばない（設計は `docs/design/external-memory.md`）。memory の設定が無い session では部品も label も出ず、出力は従来と同じ。
 
 ## 並び
 
