@@ -594,3 +594,17 @@ test("list: activity / activityAt は取得元の値、無ければ unknown / nu
   assert.equal(r.activity, "unknown");
   assert.equal(r.activityAt, null);
 });
+
+test("list: remote は取得元の値、無ければ { running: 0, waitingReply: 0 }", async () => {
+  const fs2 = fakeSupervisor([project("cfg", "/tmp/cfg")]);
+  const store = createJsonListStore<SavedSession>(join(dir, "sessions.json"), () => {});
+  const mgr = createSessionManager({
+    config, supervisor: fs2.sup, store, log: () => {}, waitMs: 0,
+    remote: (n) => (n === "pm1" ? { running: 2, waitingReply: 1 } : { running: 0, waitingReply: 0 }),
+  });
+  await mgr.create({ name: "pm1" });
+  const by = Object.fromEntries(mgr.list().map((s) => [s.name, s.remote]));
+  assert.deepEqual(by, { cfg: { running: 0, waitingReply: 0 }, pm1: { running: 2, waitingReply: 1 } });
+  const plain = setup();
+  assert.deepEqual((await plain.mgr.create({ name: "x" })).remote, { running: 0, waitingReply: 0 });
+});

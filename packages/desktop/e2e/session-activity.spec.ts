@@ -29,6 +29,15 @@ const setActivity = (page: Page, name: string, activity: string | null, state = 
     },
     { name, activity, state },
   );
+const setRemote = (page: Page, name: string, remote: { running: number; waitingReply: number } | null) =>
+  withMock(
+    page,
+    (m, a) => {
+      const s = m.centerSessions.find((x) => x.name === a.name);
+      if (s) s.remote = a.remote;
+    },
+    { name, remote },
+  );
 /** Any click in the window re-reads the center first. */
 const act = (page: Page) => page.locator("header h1").click();
 const mark = (page: Page, name: string) => sideRow(page, name).getByTestId("session-activity");
@@ -105,13 +114,104 @@ test.describe("session activity", () => {
     await expect(sideRow(page, "careery")).toBeVisible();
   });
 
+  test("remote running shows 'remote 作業中' when claude is idle, counts as 作業中 and is kept by its filter", async ({ page }) => {
+    await page.goto("/");
+    await pickSession(page, "stroke-board");
+    await setActivity(page, "stroke-board", "idle");
+    await setRemote(page, "stroke-board", { running: 2, waitingReply: 0 });
+    await setActivity(page, "agent-messenger", "idle");
+    await act(page);
+    await expect(mark(page, "stroke-board")).toHaveAttribute("data-activity", "remote-working");
+    await expect(mark(page, "stroke-board")).toHaveText("remote 作業中");
+    await expect(mark(page, "agent-messenger")).toHaveAttribute("data-activity", "idle");
+    // summary: remote-working is a 作業中 (no extra chip)
+    await expect(count(page, "working")).toHaveAttribute("data-count", "1");
+    await expect(count(page, "idle")).toHaveAttribute("data-count", "1");
+    await expect(page.getByTestId("session-activity-summary").locator("button")).toHaveCount(3);
+    await count(page, "working").click();
+    await expect(sideRow(page, "stroke-board")).toBeVisible();
+    await expect(sideRow(page, "agent-messenger")).toHaveCount(0);
+  });
+
+  test("remote waitingReply shows 判断待ち with the unanswered count in the tooltip", async ({ page }) => {
+    await page.goto("/");
+    await pickSession(page, "careery");
+    await setActivity(page, "stroke-board", "idle");
+    await setRemote(page, "stroke-board", { running: 1, waitingReply: 3 });
+    await act(page);
+    await expect(mark(page, "stroke-board")).toHaveAttribute("data-activity", "needs-input");
+    await expect(mark(page, "stroke-board")).toHaveAttribute("title", /worker の質問に未返答 3 件/);
+    // careery (thread waiting) + stroke-board (remote ask) = 2 sessions
+    await expect(count(page, "needs-input")).toHaveAttribute("data-count", "2");
+    await expect(count(page, "working")).toHaveAttribute("data-count", "0");
+  });
+
+  test("priority: claude needs-input > remote waitingReply > claude working > remote running > idle; stopped keeps its own display", async ({ page }) => {
+    await page.goto("/");
+    await pickSession(page, "careery");
+    await setRemote(page, "stroke-board", { running: 1, waitingReply: 0 });
+    await setActivity(page, "stroke-board", "working");
+    await act(page);
+    await expect(mark(page, "stroke-board")).toHaveAttribute("data-activity", "working");
+    await setActivity(page, "stroke-board", "needs-input");
+    await setRemote(page, "stroke-board", { running: 1, waitingReply: 2 });
+    await act(page);
+    await expect(mark(page, "stroke-board")).toHaveAttribute("data-activity", "needs-input");
+    await expect(mark(page, "stroke-board")).toHaveAttribute("title", /未返答 2 件/);
+    await setActivity(page, "stroke-board", "working");
+    await act(page);
+    await expect(mark(page, "stroke-board")).toHaveAttribute("data-activity", "needs-input");
+    await setRemote(page, "stroke-board", { running: 1, waitingReply: 0 });
+    await setActivity(page, "stroke-board", "unknown");
+    await act(page);
+    await expect(mark(page, "stroke-board")).toHaveAttribute("data-activity", "remote-working");
+    // not connected: remote running is not shown, an unanswered ask still is
+    await setActivity(page, "stroke-board", "idle", "stopped");
+    await act(page);
+    await expect(mark(page, "stroke-board")).toHaveCount(0);
+    await setRemote(page, "stroke-board", { running: 1, waitingReply: 1 });
+    await act(page);
+    await expect(mark(page, "stroke-board")).toHaveAttribute("data-activity", "needs-input");
+    // an older center sends no remote
+    await setRemote(page, "stroke-board", null);
+    await setActivity(page, "stroke-board", "idle");
+    await act(page);
+    await expect(mark(page, "stroke-board")).toHaveAttribute("data-activity", "idle");
+  });
+
+  test("a remote SSE event re-reads the list (no polling)", async ({ page }) => {
+    await page.goto("/");
+    await pickSession(page, "careery");
+    await setActivity(page, "stroke-board", "idle");
+    await act(page);
+    await expect(mark(page, "stroke-board")).toHaveAttribute("data-activity", "idle");
+    await setRemote(page, "stroke-board", { running: 1, waitingReply: 0 });
+    // no click: only the event
+    await withMock(page, (m) => m.centerSessionsChanged("remote", "stroke-board"));
+    await expect(mark(page, "stroke-board")).toHaveAttribute("data-activity", "remote-working");
+  });
+
   test("screenshot", async ({ page }) => {
     await page.goto("/");
     await pickSession(page, "stroke-board");
     await setActivity(page, "stroke-board", "working");
     await setActivity(page, "agent-messenger", "idle");
+    await setRemote(page, "agent-messenger", { running: 1, waitingReply: 0 });
     await act(page);
     await expect(mark(page, "careery")).toBeVisible();
+    // Only for the picture: a wider menu so the names are not cut, and wait until every icon's mask is loaded
+    // (icons are fetched lazily; without the wait the picture shows blanks).
+    await page.locator("nav[aria-label=セッション一覧]").evaluate((n) => ((n as HTMLElement).style.width = "360px"));
+    await page.waitForFunction(() => {
+      const icons = [...document.querySelectorAll("nav[aria-label=セッション一覧] [class*='i-lucide']")];
+      return (
+        icons.length >= 6 &&
+        icons.every((e) => {
+          const s = getComputedStyle(e);
+          return (s.maskImage || s.webkitMaskImage || "none") !== "none";
+        })
+      );
+    });
     await page.locator("nav[aria-label=セッション一覧]").screenshot({ path: process.env.SHOT ?? "/tmp/activity-side.png" });
   });
 });

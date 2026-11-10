@@ -371,6 +371,20 @@ session（`session_create` で作った wrapper 経由の claude。config 由来
 - 限界（実機の対話モードでは未確認。公式 docs の記述からの整理）: 利用者が Esc で turn を中断した時、または permission の確認を利用者が拒否した時に発火する hook は、公式 docs（https://code.claude.com/docs/en/hooks、2026-11-10 確認）に見当たらない。`PermissionDenied` は auto mode が拒否した時だけで「手動で permission ダイアログを拒否した時は動かない」と書かれ、`PostToolUseFailure` は「permission denial では発火しない」「実行中 tool のキャンセルでは発火しない」と書かれ、`Stop` は「Claude が応答を終えた時」で Esc で発火するかは書かれていない。このため出口の hook は足していない（推測で足さない）。結果として、PermissionRequest 由来の **needs-input（判断待ち）が、利用者が拒否・中断した後も残り**、画面に「判断待ち」が出続けうる（実際は判断待ちでない）。working も Esc 中断で残りうる。次の hook（UserPromptSubmit など）か idle_prompt（約 1 分の入力待ち通知）が来れば戻る想定だが、これも未確認。時間切れで消す仕組みも足していない。
 - 他の未確認: background task（subagent・バックグラウンド実行）が Stop の後に動き続けて hook が来ると working に戻りうる。発火時刻が同一ミリ秒の event は到着順になる。PreToolUse / PostToolUse ごとに hook サブコマンドが 1 回起動する負荷は未計測。
 
+### remote の反映（`remote`）
+
+master-cap が server の remote-cap に仕事を預けて待っている間も、session の状態に反映できるよう、`session_list` の各 session に remote の集計を載せる（`remotes.ts` の `summary(session)`）。
+
+- `"remote": { "running": number, "waitingReply": number }`。cap が無ければ `{ "running": 0, "waitingReply": 0 }`。`activity`（hook 由来）とは独立で、合成は desktop 側。
+  - `running` = その session の cap（remotes の記録で `session` が一致）で、未完了の指示（`pending`）がある **server の数**（session × server で記録が 1 件なので、記録の数）。task の数ではない。
+  - `waitingReply` = その session の cap の worker_report（kind `ask` / `approve`）で、worker_reply がまだ返っていない数。**動いている cap（pending あり、または `remote_list` と同じ見え方 `stateOf` が running = 返信待ち・判定待ち・cap / worker が動いている）のものだけ**数える（止まった cap の未返答が残って「判断待ち」が消えなくなるのを避ける）。
+- 返答済みの印: worker_reply が server に受理されると、その cap の記録の中で、同じ `worker_id` の未返答の ask / approve の `worker_reports[].replied_at`（ISO）に時刻を入れる。`remotes.json` に保存されるので center 再起動後も保たれる。送れなかった（error）時は付けない。`remote_list` の `worker_reports` にも `replied_at` が出る。
+- 解消: 同じ cap の同じ `worker_id` から、未返答の ask / approve より後に progress 以外の report（done・新しい ask / approve。protocol に failed は無いが progress 以外なら同様）が来たら、前の未返答は返答なしで解消と見なし `worker_reports[].superseded_at`（ISO）を付けて `waitingReply` に数えない（保存される。`remote_list` にも出る）。progress・別 worker・別 cap の report では解消しない。
+- 通知漏れ対策: activity の通知・判定待ち（settling）・返信待ち（inflight）の変化は記録の保存を通らないことがあるので、変化点（waiters を起こす所 = wake）でも集計を再評価する。変わった時だけ流す。
+- worker_reply が付ける `replied_at` は、返答を送った**時点**で返答待ちだった ask / approve だけ（送信の await 中に届いた新しい ask は返答待ちのまま）。
+- 変わった時だけ `GET /events` に `reason: "remote"`（`name` = session 名）を流す（受け手は `session_list` を取り直す）。記録の保存のたびに前回通知した集計と比べるので、task 送信・task_result・worker_report・worker_reply・完了判定・remote_delete のどれで変わっても 1 回だけ流れる。progress / done の report のように集計が変わらないものでは流さない。polling は増やしていない。
+- 限界: worker_reports は 1 つの cap で最新 20 件までなので、古い未返答の ask が progress 等で押し出されると数えなくなる。実際の server・desktop を繋いだ確認はしていない（unit test のみ）。
+
 ## 未決
 
 - B の owner を master-cap の接続に自動で載せる仕組み（上記「今は」の限界）。center が master-cap を起動する時に MCP 設定を渡せる手段が `claude remote-control` に無い。

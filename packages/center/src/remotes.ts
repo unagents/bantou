@@ -45,6 +45,23 @@ export const SETTLE_GRACE_MS = 15_000;
 /** status で追従する間隔（ms）。unknown の再試行・再起動後や cap 再開中の追従。 */
 export const PROBE_POLL_MS = 15_000;
 
+/**
+ * 記録に保存する worker_report。replied_at = ask / approve に worker_reply を送った時刻（ISO。無ければ未返答）。
+ * superseded_at = 返答なしで、同じ cap の同じ worker から progress 以外の後続の report が来て解消と見なした時刻（ISO）。
+ */
+export type StoredWorkerReport = WorkerReportNotice & { replied_at?: string; superseded_at?: string };
+
+/** 返答待ちの ask / approve（返答済みでも解消済みでもない）。 */
+const isOpenAsk = (w: StoredWorkerReport): boolean => (w.kind === "ask" || w.kind === "approve") && w.replied_at === undefined && w.superseded_at === undefined;
+
+/** session ごとの remote の集計（session_list の `remote`）。 */
+export interface RemoteSummary {
+  /** その session の cap で、未完了の指示（pending）がある server の数。 */
+  running: number;
+  /** その session の cap の ask / approve で、worker_reply がまだ返っていない数（動いている cap のものだけ）。 */
+  waitingReply: number;
+}
+
 /** 未完了の指示（完了したら消す）。通知先 = owner の session。 */
 export interface PendingInstruction {
   /** 指示を送った時刻。 */
@@ -94,7 +111,7 @@ export interface RemoteRecord {
   /** 最新の task_result 本体。 */
   task_result?: TaskResultReply;
   /** 直近の worker_report（最大 WORKER_REPORTS_MAX 件、到着順）。 */
-  worker_reports?: WorkerReportNotice[];
+  worker_reports?: StoredWorkerReport[];
   /** 最新の task_result（または cap_result）を受けた時刻。 */
   result_at?: string;
   /** 最新の失敗。成功の結果で消える。 */
@@ -108,7 +125,7 @@ export interface RemoteRecord {
 /** remote_list が返す 1 件。通知がまだ無ければ activity は無い。 */
 export type RemoteView = Omit<RemoteRecord, "worker_reports"> & {
   owners: string[];
-  worker_reports: WorkerReportNotice[];
+  worker_reports: StoredWorkerReport[];
   activity?: RemoteActivity;
   /** 表示用の server。host 名を主にして server_id（無ければ peer id）を添える。同じ host 名の server が複数ある時は user と workspace も付く。 */
   server_label: string;
@@ -275,6 +292,8 @@ export interface RemoteManager {
   prune(): Promise<{ duplicates: number; peers: number }>;
   /** owner を渡すと、その session の cap だけ（includeShared で旧共有 cap も）。省くと全件。 */
   list(filter?: { owner?: string; includeShared?: boolean }): RemoteView[];
+  /** session の remote 集計。cap が無ければ 0 / 0。 */
+  summary(session: string): RemoteSummary;
   /**
    * session 名 name が remote の記録と衝突するか。衝突すれば理由、無ければ null。
    * 別の session の記録と衝突する時だけ拒否する。
@@ -363,6 +382,8 @@ export function createRemoteManager(opts: {
   backup?: () => Promise<void>;
   /** 現在時刻（ms）。テスト用。 */
   now?: () => number;
+  /** session の remote 集計（RemoteSummary）が変わった時に呼ぶ（記録の保存のたびに前回と比べ、変わった session だけ）。desktop への SSE 通知に使う。 */
+  onSummaryChange?: (session: string) => void;
   /** 確認できない到達先（peer）を消すまでの時間（既定 PEER_TTL_MS）。 */
   peerTtlMs?: number;
   /** 完了通知の送り先。owner の session へ text を送る。省けば通知しない。 */
@@ -393,10 +414,40 @@ export function createRemoteManager(opts: {
 
   /** restore 中は保存しない（records が揃う前に保存して、読んだ記録を失わない。最後に restore が 1 回保存する）。 */
   let restoring = false;
-  const persist = (): Promise<void> =>
-    restoring ? Promise.resolve() : store.save(records).catch((e: unknown) => log(`remotes 保存失敗: ${e instanceof Error ? e.message : String(e)}`));
+  const persist = (): Promise<void> => {
+    if (!restoring) emitSummaryChanges();
+    return restoring ? Promise.resolve() : store.save(records).catch((e: unknown) => log(`remotes 保存失敗: ${e instanceof Error ? e.message : String(e)}`));
+  };
 
   const has = (r: RemoteRecord): boolean => records.includes(r);
+
+  /** 動いている cap（未完了の指示がある、または remote_list と同じ見え方 stateOf が running = 返信待ち・判定待ち・cap / worker が動いている）。止まった cap の未返答 ask は数えない（残り続けて「判断待ち」が消えなくなるのを避ける）。 */
+  const summarize = (session: string): RemoteSummary => {
+    let running = 0;
+    let waitingReply = 0;
+    for (const r of records) {
+      if (r.session !== session) continue;
+      if (r.pending.length > 0) running++;
+      if (r.pending.length > 0 || stateOf(r) === "running") {
+        waitingReply += (r.worker_reports ?? []).filter(isOpenAsk).length;
+      }
+    }
+    return { running, waitingReply };
+  };
+  /** 通知済みの集計（メモリのみ。session → "running/waitingReply"）。 */
+  const notified = new Map<string, string>();
+  const emitSummaryChanges = (): void => {
+    const sessions = new Set<string>(notified.keys());
+    for (const r of records) if (r.session !== undefined) sessions.add(r.session);
+    for (const s of sessions) {
+      const v = summarize(s);
+      const key = `${v.running}/${v.waitingReply}`;
+      const prev = notified.get(s) ?? "0/0";
+      if (key === "0/0") notified.delete(s);
+      else notified.set(s, key);
+      if (key !== prev) opts.onSummaryChange?.(s);
+    }
+  };
 
   /**
    * server に status（cap_id 付き）を送り、この center を cap の通知先として取り戻す（center の再起動で server が持つ通知先が古くなるため）。
@@ -476,6 +527,8 @@ export function createRemoteManager(opts: {
   };
 
   const wake = (): void => {
+    // activity / settling / inflight の変化は persist を通らないことがある。変化点（wake を呼ぶ所）で集計を再評価し、変わった時だけ通知する
+    if (!restoring) emitSummaryChanges();
     for (const w of [...waiters]) w();
   };
 
@@ -1161,8 +1214,15 @@ export function createRemoteManager(opts: {
       const peer = await findPeer(rec);
       const blocked = link.gate?.(peer, "worker_reply");
       if (blocked) throw new Error(blocked.message);
+      // 返答を送った時点で返答待ちだった ask / approve だけを対象にする（送信の await 中に届いた新しい ask は含めない）
+      const targets = (rec.worker_reports ?? []).filter((w) => w.worker_id === worker_id && isOpenAsk(w));
       const reply = await link.workerReplyOn(peer, { cap_id: rec.remote_id, worker_id, text });
       if (reply.type === "error") throw new Error(reply.message);
+      // 返答済みにする（返答は worker に 1 つ届く。永続化される）。送信中に解消された（superseded_at）ものには付けない
+      const repliedAt = new Date().toISOString();
+      for (const w of targets) if (isOpenAsk(w)) w.replied_at = repliedAt;
+      void persist();
+      wake();
       log(`remote worker_reply: ${rec.remote_id} worker=${worker_id} server=${rec.serverName}`);
       return { remote_id: rec.remote_id, server: peer.server_id ?? peer.id, worker_id: reply.worker_id, accepted: true as const };
     },
@@ -1172,6 +1232,11 @@ export function createRemoteManager(opts: {
       if (!r) {
         log(`worker_report を捨てる（記録が無い）: cap_id=${report.cap_id} worker=${report.worker_id} kind=${report.kind}`);
         return;
+      }
+      // 返答なしで同じ worker が先へ進んだ（progress 以外の後続の report）なら、前の未返答の ask / approve は解消。別 worker・別 cap（resolveRecord で別の記録）は対象外
+      if (report.kind !== "progress") {
+        const at = new Date().toISOString();
+        for (const w of r.worker_reports ?? []) if (w.worker_id === report.worker_id && isOpenAsk(w)) w.superseded_at = at;
       }
       (r.worker_reports ??= []).push(report);
       if (r.worker_reports.length > WORKER_REPORTS_MAX) r.worker_reports.splice(0, r.worker_reports.length - WORKER_REPORTS_MAX);
@@ -1228,6 +1293,8 @@ export function createRemoteManager(opts: {
       }
       return { duplicates: consolidate(), peers: clearStalePeers(live) };
     },
+
+    summary: summarize,
 
     list: (filter) =>
       records

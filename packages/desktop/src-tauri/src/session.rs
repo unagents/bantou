@@ -154,6 +154,19 @@ pub struct Session {
     /// When `activity` last changed (ISO string); None when unknown.
     #[serde(default)]
     pub activity_at: Option<String>,
+    /// Work the session left on remote-caps (`running` servers with pending work, `waitingReply` unanswered worker asks). None when the center is older than this field.
+    #[serde(default)]
+    pub remote: Option<SessionRemote>,
+}
+
+/// Mirror of the center's `session_list[].remote`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionRemote {
+    #[serde(default)]
+    pub running: u32,
+    #[serde(default)]
+    pub waiting_reply: u32,
 }
 
 /// What the side menu shows: the center's list as last fetched, and whether the latest read worked.
@@ -355,6 +368,7 @@ mod tests {
             instructions: false,
             activity: None,
             activity_at: None,
+            remote: None,
         }
     }
 
@@ -435,6 +449,17 @@ mod tests {
         assert!(!off.instructions);
         let old: Session = serde_json::from_str(r#"{"name":"a"}"#).unwrap();
         assert!(!old.instructions);
+    }
+
+    #[test]
+    fn remote_is_read_when_the_center_sends_it_and_none_otherwise() {
+        let s: Session = serde_json::from_str(r#"{"name":"a","remote":{"running":2,"waitingReply":1}}"#).unwrap();
+        assert_eq!(s.remote, Some(SessionRemote { running: 2, waiting_reply: 1 }));
+        assert_eq!(serde_json::to_value(&s).unwrap()["remote"]["waitingReply"], 1);
+        let old: Session = serde_json::from_str(r#"{"name":"a"}"#).unwrap();
+        assert_eq!(old.remote, None);
+        let part: Session = serde_json::from_str(r#"{"name":"a","remote":{"running":1}}"#).unwrap();
+        assert_eq!(part.remote, Some(SessionRemote { running: 1, waiting_reply: 0 }));
     }
 
     #[test]
