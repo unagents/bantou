@@ -25,6 +25,13 @@ import { hookCommand, hookUrl, statusLineCommand, statusLineSettingsJson, status
 
 export type RcState = "stopped" | "starting" | "connected" | "error";
 
+/**
+ * claude の認証状態（wrapper 経由の pty 出力から判定）。
+ * ok = 問題なし / login_required = `Please run /login` が出た（OAuth token 切れ等）/
+ * keychain_locked = ログイン保存に失敗（`Couldn't save your login`。macOS の keychain がロックされている時）。
+ */
+export type AuthState = "ok" | "login_required" | "keychain_locked";
+
 export interface RcStatus {
   project: string;
   path: string;
@@ -43,6 +50,12 @@ export interface RcStatus {
   systemInstructions?: string[];
   /** 起動に使う claude 実行ファイルとその決定元。 */
   claude: ResolvedClaude;
+  /** 認証状態。起動ごとに ok へ戻る。 */
+  auth: AuthState;
+  /** `/login` が表示した認証 URL（表示されてから `Login successful` か次の起動まで）。 */
+  loginUrl: string | null;
+  /** `/login` の失敗理由（`Invalid code` / `Couldn't save your login`）。resetLogin か成功で消える。 */
+  loginError: string | null;
 }
 
 /** supervisor が子プロセスに要求する最小の形（テストで偽物に差し替える）。 */
@@ -111,6 +124,8 @@ export interface RemoteControlSupervisor {
   stop(project: string): Promise<RcStatus>;
   status(project: string): RcStatus;
   list(): RcStatus[];
+  /** `/login` を始める前に loginUrl / loginError を消す（auth は変えない）。 */
+  resetLogin(project: string): void;
   shutdown(): Promise<void>;
   /** 生きている子全てへ同期で signal を送る（exit handler / 強制終了タイマー用。待たない）。 */
   killAllSync(signal: NodeJS.Signals): void;
@@ -161,6 +176,86 @@ export function extractUrls(text: string): { sessionUrl?: string; environmentUrl
 /** 接続完了の行か。 */
 export function detectConnected(line: string): boolean {
   return /\bConnected\b/.test(line);
+}
+
+// claude（2.1.319 で実在確認）の認証まわりの表示文言
+/** API が 401 等を返し、再ログインが要る。 */
+export const LOGIN_REQUIRED_TEXT = "Please run /login";
+/** `/login` のコード投入後、保存に失敗（macOS の keychain ロック時）。 */
+export const LOGIN_SAVE_FAILED_TEXT = "Couldn't save your login";
+/** `/login` 成功。 */
+export const LOGIN_SUCCESS_TEXT = "Login successful";
+/** `/login` のコードが不正。 */
+export const LOGIN_INVALID_CODE_TEXT = "Invalid code";
+/** 認証文言の照合に残す直近の text（文字数）。文言はチャンクを跨ぎ得る。 */
+export const AUTH_TAIL = 400;
+/** 認証 URL の照合に残す直近の text（文字数）。URL は 500 文字前後で、TUI の折返しで複数チャンクに分かれる。 */
+export const LOGIN_URL_TAIL = 2048;
+
+// URL に使われる文字。TUI は端末幅で折り返す（単独の改行を挟む）ので、照合前に単独の改行を除く
+const LOGIN_URL_CHARS = "A-Za-z0-9%&=_.+\\-?:/";
+const LOGIN_URL_RE = new RegExp(`https://claude\\.com/cai/oauth/authorize\\?[${LOGIN_URL_CHARS}]+(?=[^${LOGIN_URL_CHARS}])`);
+
+/**
+ * text から `/login` の認証 URL を拾う。折返しの単独改行は除き、URL の直後に URL 以外の文字（空行等）が続くものだけ
+ * （チャンクの末尾で切れた途中の URL は採らない）。
+ */
+export function findLoginUrl(text: string): string | undefined {
+  return LOGIN_URL_RE.exec(text.replace(/(?<!\n)\n(?!\n)/g, ""))?.[0];
+}
+
+export type AuthEvent =
+  | { kind: "login_required" }
+  | { kind: "save_failed" }
+  | { kind: "success" }
+  | { kind: "invalid_code" };
+
+/**
+ * 字抜けを許す照合。wrapper の text は TUI の差分描画のせいで空白が無く、文字も一部落ちる
+ * （実測: `Couldn't save your login. If your Mac's keychain is locked` が `Could't ave yo login.IfyourMac'skeyhainislocked`）。
+ * 空白を除いた needle を、hay の連続した文字列に対して、needle 側の文字を maxDrops 個まで飛ばして順に合わせる
+ * （hay 側への挿入は許さない）。見つかれば hay 上の位置、無ければ -1。
+ */
+export function fuzzyIndexOf(hay: string, needle: string, maxDrops: number): number {
+  const n = needle.replace(/\s+/g, "");
+  if (n.length === 0) return -1;
+  for (let start = 0; start < hay.length; start++) {
+    let drops = 0;
+    let k = start;
+    let j = 0;
+    while (j < n.length) {
+      if (k < hay.length && hay[k] === n[j]) {
+        k++;
+        j++;
+      } else if (++drops > maxDrops) {
+        break;
+      } else {
+        j++;
+      }
+    }
+    if (j === n.length && drops <= maxDrops) return start;
+  }
+  return -1;
+}
+
+/** 文言ごとに許す字抜けの数（文言の長さの 2 割程度。短い文言は誤検知を避けて少なく）。 */
+const AUTH_PATTERNS: { kind: AuthEvent["kind"]; text: string; drops: number }[] = [
+  { kind: "success", text: LOGIN_SUCCESS_TEXT, drops: 2 },
+  { kind: "save_failed", text: LOGIN_SAVE_FAILED_TEXT, drops: 4 },
+  { kind: "invalid_code", text: LOGIN_INVALID_CODE_TEXT, drops: 1 },
+  { kind: "login_required", text: LOGIN_REQUIRED_TEXT, drops: 1 },
+];
+
+/**
+ * text（ANSI 除去済み）に認証まわりの文言があれば、その種類を返す。空白は無視し、字抜けを少し許す。
+ * 複数あれば success > save_failed > invalid_code > login_required。
+ */
+export function detectAuthEvent(text: string): AuthEvent | undefined {
+  const hay = text.replace(/\s+/g, "");
+  for (const p of AUTH_PATTERNS) {
+    if (fuzzyIndexOf(hay, p.text, p.drops) >= 0) return { kind: p.kind };
+  }
+  return undefined;
 }
 
 // eslint-disable-next-line no-control-regex
@@ -248,6 +343,8 @@ export function createRemoteControlSupervisor(opts: {
    * （利用者の追加指示は空行を挟んでその後ろ）。省略時は付けない。
    */
   systemInstructions?: { build: (ctx: { session: string }) => string; labels: string[] };
+  /** 認証状態（auth / loginUrl / loginError）が変わった時の通知。 */
+  onAuthChange?: (project: string, status: RcStatus) => void;
 }): RemoteControlSupervisor {
   const { config, log } = opts;
   const spawnImpl: SpawnImpl = opts.spawnImpl ?? ((c, a, o) => nodeSpawn(c, a, o) as unknown as ChildLike);
@@ -275,6 +372,9 @@ export function createRemoteControlSupervisor(opts: {
         args: null,
         instructions: false,
         claude,
+        auth: "ok",
+        loginUrl: null,
+        loginError: null,
       },
       child: null,
       timer: null,
@@ -310,6 +410,19 @@ export function createRemoteControlSupervisor(opts: {
       log(`config の読み直しに失敗。直前の値で起動: project=${project} ${(err as Error).message}`);
     }
     return lastGoodRc;
+  };
+
+  /** 認証まわりの項目を変え、どれかが変わった時だけ通知する。 */
+  const setAuth = (e: Entry, next: Partial<Pick<RcStatus, "auth" | "loginUrl" | "loginError">>): boolean => {
+    const s = e.status;
+    const changed =
+      (next.auth !== undefined && next.auth !== s.auth) ||
+      (next.loginUrl !== undefined && next.loginUrl !== s.loginUrl) ||
+      (next.loginError !== undefined && next.loginError !== s.loginError);
+    if (!changed) return false;
+    Object.assign(s, next);
+    opts.onAuthChange?.(e.project.name, snapshot(e));
+    return true;
   };
 
   /** 子プロセスを 1 本起動して監視を付ける。 */
@@ -368,6 +481,7 @@ export function createRemoteControlSupervisor(opts: {
       ...(e.wrapper && opts.systemInstructions ? { systemInstructions: [...opts.systemInstructions.labels] } : {}),
     };
     delete e.status.lastError;
+    setAuth(e, { auth: "ok", loginUrl: null, loginError: null });
 
     const logStream = createWriteStream(join(config.logDir, `${name}.log`), { flags: "a" });
     logStream.on("error", (err) => log(`ログ書込失敗: project=${name} ${err.message}`));
@@ -447,10 +561,34 @@ export function createRemoteControlSupervisor(opts: {
       let buf = "";
       let win = "";
       let wconsent = false;
+      // 認証文言・認証 URL の照合窓。一致したら捨てる（TUI の再描画で同じ文言が繰り返し流れても一度だけ反応する）
+      let authTail = "";
+      let urlTail = "";
+      const watchAuth = (text: string): void => {
+        // 照合は「残していた尾 + 今回の text」全体に対して行う（text が窓より大きい時に先頭を落とさない）
+        const ev = detectAuthEvent(authTail + text);
+        authTail = (authTail + text).slice(-AUTH_TAIL);
+        if (ev) {
+          authTail = "";
+          let changed: boolean;
+          if (ev.kind === "login_required") changed = setAuth(e, { auth: "login_required" });
+          else if (ev.kind === "save_failed") changed = setAuth(e, { auth: "keychain_locked", loginError: LOGIN_SAVE_FAILED_TEXT });
+          else if (ev.kind === "invalid_code") changed = setAuth(e, { loginError: LOGIN_INVALID_CODE_TEXT });
+          else changed = setAuth(e, { auth: "ok", loginUrl: null, loginError: null });
+          if (changed) log(`remote-control 認証: project=${name} ${ev.kind}`);
+        }
+        const url = findLoginUrl(urlTail + text);
+        urlTail = (urlTail + text).slice(-LOGIN_URL_TAIL);
+        if (url) {
+          urlTail = "";
+          setAuth(e, { loginUrl: url });
+        }
+      };
       const onText = (text: string): void => {
         if (!logStream.writableEnded) logStream.write(text);
         const tail = text.split("\n").map((l) => l.trim()).filter(Boolean).pop();
         if (tail) lastLine = tail.slice(0, 300);
+        watchAuth(text);
         win = (win + text).slice(-TEXT_WINDOW);
         if (rc.autoConsent && !wconsent && win.includes(CONSENT_PROMPT)) {
           wconsent = true;
@@ -703,6 +841,7 @@ export function createRemoteControlSupervisor(opts: {
     stop,
     status: (name) => snapshot(get(name)),
     list: () => [...entries.values()].map(snapshot),
+    resetLogin: (name) => setAuth(get(name), { loginUrl: null, loginError: null }),
     shutdown: async () => {
       closing = true;
       await Promise.all([...entries.keys()].map((n) => stop(n)));

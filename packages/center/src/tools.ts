@@ -4,6 +4,7 @@ import { z } from "zod";
 import { OWNER_HEADER, OWNER_PATTERN, OWNER_QUERY, remoteSendSchema, remoteWaitSchema, workerReplySchema, WAIT_DEFAULT_SEC, type RemoteManager, type RemoteSendInput } from "./remotes.js";
 import type { RemoteControlSupervisor } from "./remote-control.js";
 import { projectSettingsPatchSchema } from "./project-settings.js";
+import { LOGIN_CODE, type LoginFlow } from "./login.js";
 import { sessionCreateSchema, sessionUpdateSchema, SESSION_NAME, type SessionManager } from "./sessions.js";
 import type { Follow } from "./follow.js";
 import type { ServerLink } from "./server-link.js";
@@ -74,11 +75,13 @@ export function registerTools(
     remotes: RemoteManager;
     follow?: Follow;
     workspace?: string;
+    /** session の再ログイン（pty 入力が要るので wrapper 経由の起動がある時だけ）。 */
+    login?: LoginFlow;
     /** master-cap の起動時に付けるシステム埋め込み指示の一覧（center_info 用）。省略時は []。 */
     systemInstructions?: { id: string; version: number; title: string }[];
   },
 ): void {
-  const { supervisor, link, sessions, remotes, follow, workspace } = deps;
+  const { supervisor, link, sessions, remotes, follow, workspace, login } = deps;
   const systemInstructions = deps.systemInstructions ?? [];
 
   // -- A. center 上の session（番頭が使う） --
@@ -158,6 +161,36 @@ export function registerTools(
     },
     () => guard(() => json(sessions.list())),
   );
+  const sessionName = z.string().regex(SESSION_NAME, "英数字と _ - のみ");
+  server.registerTool(
+    "session_login",
+    {
+      title: "session 再ログイン開始",
+      description:
+        "session の claude に `/login` を打ち込み（Claude account with subscription）、認証 URL が出るまで待って返す。session_list の auth が login_required / keychain_locked の時に使う。URL をブラウザで開いて得たコードを session_login_code に渡す",
+      inputSchema: { name: sessionName },
+    },
+    ({ name }) =>
+      guard(async () => {
+        if (!login) throw new Error("再ログインは使えない（pty 入力が無い）");
+        return json(await login.start(name));
+      }),
+  );
+  server.registerTool(
+    "session_login_code",
+    {
+      title: "session 再ログインのコード投入",
+      description:
+        "session_login の後、ブラウザで得た認証コードを claude に投入して結果を待つ。ok: false の error は `Invalid code`（コード不正）か `Couldn't save your login`（ホストの keychain がロック。解錠して session_login からやり直す）",
+      inputSchema: { name: sessionName, code: z.string().regex(LOGIN_CODE, "英数字と # _ - のみ（512 文字まで）") },
+    },
+    ({ name, code }) =>
+      guard(async () => {
+        if (!login) throw new Error("再ログインは使えない（pty 入力が無い）");
+        const r = await login.code(name, code);
+        return json(r, !r.ok);
+      }),
+  );
 
   server.registerTool(
     "center_info",
@@ -222,10 +255,10 @@ export function registerTools(
     "rc_start",
     {
       title: "remote-control 起動",
-      description: "project の claude remote-control を起動する（起動済みなら現状を返す）",
-      inputSchema: { project: projectName },
+      description: "project の claude remote-control を起動する（起動済みなら現状を返す）。resume: true で前回の会話に復帰（--continue。復帰できなければ素の起動）",
+      inputSchema: { project: projectName, resume: z.boolean().optional() },
     },
-    ({ project }) => guard(async () => json(await supervisor.start(project))),
+    ({ project, resume }) => guard(async () => json(await supervisor.start(project, resume ? { resume: true } : {}))),
   );
   server.registerTool(
     "rc_stop",

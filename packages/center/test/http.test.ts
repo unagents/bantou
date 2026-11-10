@@ -24,7 +24,7 @@ const AUTH_WITH = (name: string): Record<string, string> => ({ ...AUTH, "x-banto
 
 const TOOLS = [
   "center_info", "center_settings_get", "center_settings_update", "rc_list", "rc_start", "rc_status", "rc_stop", "remote_list", "remote_wait",
-  "server_list", "server_peers", "server_status", "session_create", "session_delete", "session_list", "session_settings_get", "session_settings_update", "session_update", "worker_reply", "worker_resume",
+  "server_list", "server_peers", "server_status", "session_create", "session_delete", "session_list", "session_login", "session_login_code", "session_settings_get", "session_settings_update", "session_update", "worker_reply", "worker_resume",
 ];
 
 async function boot(

@@ -13,8 +13,14 @@ import {
   type AttachOutcome,
 } from "~/api";
 import { encodeBase64 } from "~/composables/terminalBuffer";
+import type { CenterAuthState } from "~/types";
 
-const props = defineProps<{ session: string }>();
+const props = defineProps<{
+  session: string;
+  /** The claude's auth state as the center reports it (null / `ok`: nothing to show). */
+  auth?: CenterAuthState | null;
+}>();
+const emit = defineEmits<{ relogin: [] }>();
 
 const { attach, detach, status } = useTerminalStore();
 
@@ -238,6 +244,22 @@ const link = computed(() => status[props.session]);
         label="接続できない"
         data-testid="terminal-rejected"
       />
+      <!-- The center read `Please run /login` (or a failed save) from the pty: the user re-logs in from here. -->
+      <UTooltip
+        v-if="auth === 'login_required' || auth === 'keychain_locked'"
+        :text="auth === 'keychain_locked' ? 'ログインを保存できなかった。ホストの keychain を解錠してから再ログイン' : 'claude の認証が切れた。再ログインが要る'"
+      >
+        <UButton
+          size="xs"
+          :color="auth === 'keychain_locked' ? 'error' : 'warning'"
+          variant="subtle"
+          icon="i-lucide-key-round"
+          :label="auth === 'keychain_locked' ? 'keychain ロック中' : '要再ログイン'"
+          data-testid="terminal-auth"
+          :data-auth="auth"
+          @click="emit('relogin')"
+        />
+      </UTooltip>
       <span v-if="sending > 0" class="text-cork-muted ml-auto truncate" data-testid="terminal-sending">画像を送信中… {{ sending }} 枚</span>
       <span v-if="error" class="text-cork-danger-text truncate" :class="{ 'ml-auto': sending === 0 }" data-testid="terminal-error">{{ error }}</span>
       <UButton

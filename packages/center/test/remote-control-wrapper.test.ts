@@ -644,3 +644,112 @@ test("buildWrapperArgs: --no-chrome は付けない", () => {
   const a = buildWrapperArgs({ claudePath: "c", name: "n", permissionMode: "auto", mcpConfig: "{}", resume: false });
   assert.ok(!a.includes("--no-chrome"));
 });
+
+// -- 認証状態の検知（/login まわり） --
+
+import { detectAuthEvent, findLoginUrl, type RcStatus } from "../src/remote-control.js";
+
+const LOGIN_URL =
+  "https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile&code_challenge=H_c6f4h2EM5AQOoZSnvA2SGVeg6HqnMePgq24CVI3ZM&code_challenge_method=S256&state=e62kJfVlI11dSfkwBwbnSOCrymD9OoiBr_FYy2NODus";
+
+test("findLoginUrl: TUI の折返し（単独の改行）を跨いだ URL を 1 本にし、空行で終わる。途中で切れた URL は採らない", () => {
+  const wrapped = `${LOGIN_URL.slice(0, 160)}\n${LOGIN_URL.slice(160, 320)}\n${LOGIN_URL.slice(320)}\n\n\nPaste code here if prompted >`;
+  assert.equal(findLoginUrl(`Browser didn't open? Use the url below to sign in (c to copy)\n${wrapped}`), LOGIN_URL);
+  assert.equal(findLoginUrl(LOGIN_URL.slice(0, 300)), undefined);
+  assert.equal(findLoginUrl(`${LOGIN_URL} `), LOGIN_URL);
+  assert.equal(findLoginUrl("https://claude.ai/code/session_x\n\n"), undefined);
+});
+
+test("detectAuthEvent: 文言ごとの種類。成功が最優先", () => {
+  assert.deepEqual(detectAuthEvent("⏺ Please run /login · APIError: 401 OAuth access token has expired."), { kind: "login_required" });
+  assert.deepEqual(detectAuthEvent("OAuth error: Couldn't save your login. If your Mac's keychain is locked, unlock it and login again."), { kind: "save_failed" });
+  assert.deepEqual(detectAuthEvent("Invalid code. Please make sure the full code was copied"), { kind: "invalid_code" });
+  assert.deepEqual(detectAuthEvent("Login successful. Press Enter to continue… Please run /login"), { kind: "success" });
+  assert.equal(detectAuthEvent("❯ Checking for updates"), undefined);
+});
+
+test("wrapper 起動: pty の text から認証状態を拾い、変わった時だけ onAuthChange。起動で ok に戻る", async () => {
+  const core = createCore();
+  const tokens = createSessionTokens();
+  const changes: [string, RcStatus["auth"], string | null, string | null][] = [];
+  const sup = createRemoteControlSupervisor({
+    config: cfg,
+    log: () => {},
+    spawnImpl,
+    wrapper: { core, tokens, path: "/fake/bantou-pty-wrapper", mcpUrl: () => null },
+    onAuthChange: (p, s) => changes.push([p, s.auth, s.loginUrl, s.loginError]),
+  });
+  sup.add(project, { wrapper: true });
+  await sup.start("pm1");
+  const w = launches[0].child;
+  assert.equal(sup.status("pm1").auth, "ok");
+
+  // 401: 文言がチャンクを跨いでも拾う。再描画で同じ文言が繰り返されても通知は 1 回
+  w.text("⏺ Please run /lo");
+  w.text("gin · APIError: 401 OAuth access token has expired.\n");
+  await until(() => sup.status("pm1").auth === "login_required");
+  w.text("⏺ Please run /login · APIError: 401 OAuth access token has expired.\n");
+  w.text("⏺ Please run /login · APIError: 401 OAuth access token has expired.\n");
+  await sleep(30);
+  assert.deepEqual(changes, [["pm1", "login_required", null, null]]);
+
+  // /login の URL（折返し・複数チャンク）
+  w.text(`Browser didn't open? Use the url below to sign in (c to copy)\n${LOGIN_URL.slice(0, 200)}\n`);
+  w.text(`${LOGIN_URL.slice(200)}\n\n\nPaste code here if prompted >\n`);
+  await until(() => sup.status("pm1").loginUrl === LOGIN_URL);
+  assert.equal(sup.status("pm1").auth, "login_required");
+
+  // keychain ロックで保存失敗
+  w.text("OAuth error: Couldn't save your login. If your Mac's keychain is locked, unlock it and login again.  Press Enter to retry.\n");
+  await until(() => sup.status("pm1").auth === "keychain_locked");
+  assert.equal(sup.status("pm1").loginError, "Couldn't save your login");
+  assert.equal(sup.status("pm1").loginUrl, LOGIN_URL);
+
+  // resetLogin は URL と失敗理由だけ消す
+  sup.resetLogin("pm1");
+  assert.deepEqual([sup.status("pm1").auth, sup.status("pm1").loginUrl, sup.status("pm1").loginError], ["keychain_locked", null, null]);
+
+  // コード不正
+  w.text("Invalid code. Please make sure the full code was copied\n");
+  await until(() => sup.status("pm1").loginError === "Invalid code");
+
+  // 成功で ok、URL と失敗理由は消える
+  w.text("Login successful. Press Enter to continue…\n");
+  await until(() => sup.status("pm1").auth === "ok");
+  assert.deepEqual([sup.status("pm1").loginUrl, sup.status("pm1").loginError], [null, null]);
+  assert.deepEqual(changes.map((c) => c.slice(1)), [
+    ["login_required", null, null],
+    ["login_required", LOGIN_URL, null],
+    ["keychain_locked", LOGIN_URL, "Couldn't save your login"],
+    ["keychain_locked", null, null],
+    ["keychain_locked", null, "Invalid code"],
+    ["ok", null, null],
+  ]);
+
+  // 再起動（exit → 再 launch）で ok に戻る（login_required のまま終了した場合）
+  w.text("⏺ Please run /login\n");
+  await until(() => sup.status("pm1").auth === "login_required");
+  w.finish(1, null);
+  await until(() => launches.length === 2 && sup.status("pm1").pid !== null);
+  assert.equal(sup.status("pm1").auth, "ok");
+  await sup.stop("pm1");
+});
+
+import { fuzzyIndexOf } from "../src/remote-control.js";
+
+test("fuzzyIndexOf / detectAuthEvent: TUI の差分描画で空白と一部の文字が落ちた実出力も拾う。無関係な文はを拾わない", () => {
+  // mac200 の bantou.log（wrapper の text）そのまま
+  const real = "Esctocancel\nOAuth error: Could't ave yo login.IfyourMac'skeyhainislocked,unlockitandloginagain.  Press Enter to retry.Esctocancel\n";
+  assert.deepEqual(detectAuthEvent(real), { kind: "save_failed" });
+  assert.deepEqual(detectAuthEvent("⏺Pleaserun/login·APIError:401OAuthaccesstokenhasexpired.Re-authenticatetocontinue."), { kind: "login_required" });
+  assert.deepEqual(detectAuthEvent("Loginsuccesful.PressEntertocontinue"), { kind: "success" });
+  assert.deepEqual(detectAuthEvent("Invalidcode.Pleasemakesurethefullcodewascopied"), { kind: "invalid_code" });
+  // 字抜けが多すぎる・別の文
+  assert.equal(detectAuthEvent("Cold sve yor lgin"), undefined);
+  assert.equal(detectAuthEvent("Please run /logout"), undefined);
+  assert.equal(detectAuthEvent("Login failed: invalid grant"), undefined);
+  assert.equal(detectAuthEvent("The code is valid. Paste code here if prompted >"), undefined);
+  assert.equal(fuzzyIndexOf("xxCould'taveyologinyy", "Couldn't save your login", 4), 2);
+  assert.equal(fuzzyIndexOf("xxCould'taveyologinyy", "Couldn't save your login", 3), -1);
+  assert.equal(fuzzyIndexOf("abc", "", 1), -1);
+});

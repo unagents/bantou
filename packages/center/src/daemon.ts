@@ -16,6 +16,7 @@ import { resolvePair } from "./pair.js";
 import { createRemoteManager } from "./remotes.js";
 import { createRemoteControlSupervisor } from "./remote-control.js";
 import { createContextUsageTracker } from "./context-usage.js";
+import { createLoginFlow } from "./login.js";
 import { createSessionManager } from "./sessions.js";
 import { backupFileOnce, createJsonListStore, createJsonObjectStore } from "./store.js";
 import { SYSTEM_INSTRUCTION_PARTS, buildSystemInstructions, partLabel } from "./system-instructions.js";
@@ -64,6 +65,8 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     const host = b === "" || b === "0.0.0.0" || b === "::" || b === "localhost" ? "127.0.0.1" : b.includes(":") && !b.startsWith("[") ? `[${b}]` : b;
     return `http://${host}:${httpPort}${SESSION_MCP_PATH}`;
   };
+  // session の増減・認証状態の変化を desktop へ知らせる（GET /events）
+  const events = createEventHub();
   const supervisor = createRemoteControlSupervisor({
     systemInstructions: { build: (ctx) => buildSystemInstructions(ctx), labels: SYSTEM_INSTRUCTION_PARTS.map(partLabel) },
     config,
@@ -71,7 +74,9 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     log,
     claude,
     wrapper: { core, tokens: sessionTokens, mcpUrl: sessionMcpUrl },
+    onAuthChange: (name) => events.publish({ reason: "changed", name }),
   });
+  const login = createLoginFlow({ supervisor, core, log });
   const activity = createActivityStore();
   // 通知は 5 秒ごとに来るので、状態の組が変わった時だけログに出す
   const lastStates = new Map<string, string>();
@@ -104,7 +109,6 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   link.setGate((peer, command) => follow.gate(peer, command));
   // session / remote の保存先は config と同じ dir（config の projects には書かない）
   const stateDir = dirname(resolve(configPath));
-  const events = createEventHub();
   const contextUsage = createContextUsageTracker({
     targets: () =>
       sessions
@@ -195,7 +199,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   process.stderr.on("error", () => {});
   process.stdout.on("error", () => {});
 
-  const makeServer = () => createCenterServer({ config, supervisor, link, sessions, remotes, follow });
+  const makeServer = () => createCenterServer({ config, supervisor, link, sessions, remotes, follow, login });
   if (args.transport === "http") {
     if (!config.token || config.token.length < MIN_TOKEN_LEN) {
       throw new Error(`http transport には config の token（${MIN_TOKEN_LEN} 文字以上）が必要: ${configPath}`);

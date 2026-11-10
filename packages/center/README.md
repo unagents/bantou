@@ -129,6 +129,8 @@ center は wrapper 経由の session（master-cap）を起動するたび（新�
 | `center_settings_update` | `settings`（項目ごとにマージ。`null` で項目を削除） | `{ settings }`（更新後の全体。全 session の次の起動から効く） |
 | `session_delete` | `name` | `{ name, deleted }` |
 | `session_list` | なし | `SessionInfo[]` |
+| `session_login` | `name` | `{ name, loginUrl }`。session の claude に `/login` を打ち、認証 URL が出るまで待つ（上限 15 秒）。下記「再ログイン」 |
+| `session_login_code` | `name`, `code` | `{ name, ok, auth, error }`。認証コードを投入して結果を待つ（上限 30 秒）。`ok: false` は `isError` |
 | `center_info` | なし | `{ workspace: string \| null, systemInstructions: [{ id, version, title }] }`（`workspace` は config の `workspace`。未設定は `null`。desktop の追加ダイアログがフォルダ欄の既定 `<workspace>/<name>` を出すのに使う。`systemInstructions` は master-cap の起動時に付けるシステム埋め込み指示の部品。項目は今後増える） |
 | `remote_send`（session 向けのみ） | `goal`, `deliverables?`, `verify?`, `constraints?`, `workers?`, `worker_model?`, `repo?`, `branch?`, `server?` | `{ remote_id, server, server_id?, peer, host?, serverName, state, created, task_id, worker_model? }`（返信を待たない。`server` は server_id、旧 server は peer id。`peer` は今の到達先、`host` は host 名）。呼び出し元 session の remote-cap（server ごとに 1 つ。cap_id = `c-<center-id>-<session 名>`）へ `task` を送る。owner は header の session 名。他の session の cap には届かない。`goal` だけなら `deliverables: {}` / `verify: {}` / `constraints: []` / `workers: {}`（items 無し = implement + review の最低 2 体）。`task_id` は center が採番。`worker_model` は新規の cap なら「引数 ?? config `servers[].workerModel`」、既存の cap は引数があった時だけ載せる（server が cap の既定として記憶する）。protocol の版が合わない server へは送らず isError |
 | `remote_create`（session 向けのみ） | 同上 | `remote_send` の互換の別名（同じ処理） |
@@ -137,7 +139,7 @@ center は wrapper 経由の session（master-cap）を起動するたび（新�
 | `remote_list` | `owner?`（外向け。無ければ全件）。session 向けは `include_shared?`（旧共有 cap も含める）で、自分の session の cap だけ | `RemoteView[]`（server の cap 単位。`RemoteRecord` + `owners` + `worker_reports` + `activity?`、下記。`task_result?`（最新の `task_result` 本体）、`server_label`（host 名を主に server_id を添えた表示）を含む） |
 | `remote_wait` | `remote_id?`, `server?`, `timeout_sec?`（既定 600、上限 1800）, `owner?`（外向けのみ） | 終わった `RemoteView`。timeout なら `state: "running"` のまま。下記「完了通知」 |
 | `rc_list` | なし | `RcStatus[]` |
-| `rc_start` | `project` | `RcStatus`（起動済みなら現状を返す） |
+| `rc_start` | `project`, `resume?` | `RcStatus`（起動済みなら現状を返す。`resume: true` で `--continue`、復帰できなければ素の起動） |
 | `rc_stop` | `project` | `RcStatus` |
 | `rc_status` | `project` | `RcStatus` |
 | `server_peers` | `refresh?` | `{ pair: { server, protocol }, peers: FollowEntry[] }`。下記「server の版合わせ」 |
@@ -164,6 +166,11 @@ center は wrapper 経由の session（master-cap）を起動するたび（新�
 | `lastError` | `error` 状態の理由。接続前に終了した時は `接続前に終了: <直近の出力 1 行>` |
 | `startedAt` / `args` | 直近の起動時刻と引数 |
 | `claude` | 起動に使う実行ファイル `{ path, source }`。`source` は `config` / `login-shell` / `fallback-path` / `PATH` |
+| `auth` | claude の認証状態（wrapper 経由の session のみ変わる）。`ok` / `login_required`（`Please run /login` が出た。OAuth token 切れ）/ `keychain_locked`（`/login` の保存に失敗 `Couldn't save your login`。macOS の keychain がロック）。起動ごとに `ok` に戻る |
+| `loginUrl` | `/login` が表示した認証 URL。`Login successful` か次の起動まで残る |
+| `loginError` | `/login` の失敗理由（`Invalid code` / `Couldn't save your login`）。`session_login` / `session_login_code` の開始と成功で消える |
+
+`SessionInfo` は `RcStatus` の `project`（`name` として）/ `path` / `state` / `pid` / `sessionUrl` / `startedAt` / `lastError?` / `auth` / `loginUrl` / `loginError` に `source`（`config` / `session`）を足したもの。
 
 ### session（A）
 
@@ -182,6 +189,14 @@ center は wrapper 経由の session（master-cap）を起動するたび（新�
 - 保存: config と同じ dir の `sessions.json`（`name`, `path`, `permissionMode`, `settings`（あれば）, `createdAt`）。config の projects には書かない。center 起動時に復元して `--continue` で起動する。`--continue` で接続前に 30 秒以内に終了した場合（約 4 時間以内の記録が無い、など）は、素の起動へ fallback する（再起動回数は増やさない）。
 - 新規 path の trust: **trust プロンプトは出ず、remote-control が `Error: Workspace not trusted. Please run `claude` in <path> first ...` で即 exit 1 する**（claude 2.1.312 で実測）。親 dir が trust 済みなら配下は通る（実測: trust 済みの repo 配下の dir で `connected`）。そのため、未 trust の path では `session_create` は `state: starting` と `lastError`（`接続前に終了: Error: Workspace not trusted...`）を返し、supervisor は再起動を繰り返して上限で `error` になる。対処は、workspace（または path の親）で一度 `claude` を起動して trust を承認しておくこと。center が claude の設定ファイルを書き換えて trust を付けることはしない（今は）。
 - 同じ folder を別の `claude remote-control` が直前まで握っていると、`This folder is already served by a terminal \`claude remote-control\` on this device. Stop it first.` で約 1 分待たされて終了する（実測、直前の center を強制終了した後など）。
+
+### 再ログイン（session の claude の認証切れ）
+
+- 背景（2026-11-08 mac200 で実測）: claude は OAuth token を macOS の login keychain に保存・更新する。keychain がロックされると refresh を保存できず、token 切れ（約 8 時間）で全 session が `⏺ Please run /login · APIError: 401 OAuth access token has expired` になる。`claude auth status` は `loggedIn: true` のままで気付けない。
+- 検知: supervisor は wrapper の text（ANSI 除去済み）を見て `RcStatus.auth` / `loginUrl` / `loginError` を更新する（`remote-control.ts` の `detectAuthEvent` / `findLoginUrl`）。文言は claude 2.1.319 のバイナリで確認: `Please run /login` → `login_required`、`Couldn't save your login` → `keychain_locked`、`Login successful` → `ok`、`Invalid code` → `loginError`。TUI の差分描画で text は空白が無く文字も一部落ちる（実測: `Could't ave yo login.IfyourMac'skeyhainislocked`）ので、空白を無視し字抜けを少し許して照合する（`fuzzyIndexOf`）。認証 URL は折返しの改行を除いて拾う。照合窓は直近 400 文字（URL は 2048 文字）で、一致したら捨てる（再描画で同じ文言が繰り返されても状態は一度だけ変わる）。
+- 通知: `auth` / `loginUrl` / `loginError` が変わると `GET /events` に `{"reason":"changed","name"}` を流す。desktop はそれで `session_list` を取り直し、該当 session に「要再ログイン」/「keychain ロック中」を出す。
+- `session_login`: Esc → `/login` → Enter（ログイン方法の先頭 = Claude account with subscription）を pty に打ち、`loginUrl` が付くまで待つ。`session_login_code`: コードを打ち、Enter は 300 ms 後に別送する（同じチャンクだと貼り付け扱いで Enter が落ちる。実測）。結果は `Login successful`（`ok: true`）/ `Invalid code` / `Couldn't save your login`（keychain ロック。ホストで解錠してから `session_login` からやり直す）。入力の間隔と待ち上限は `login.ts` の `DEFAULT_LOGIN_TIMINGS`。
+- 認証は同じホストの全 session で共有だが、他の session が新しい token を拾い直すかは未確認。desktop の再ログイン画面から `rc_stop` → `rc_start { resume: true }` で session を再起動できる。
 
 `SessionInfo`: `name`, `path`, `state`（`stopped` / `starting` / `connected` / `error`）, `pid`, `sessionUrl`, `startedAt`, `source`, `lastError?`。
 
@@ -418,7 +433,7 @@ center プロセス内のモジュール（`src/core.ts`）。session ごとの�
 - `POST /sessions/<name>/input` `{"data":"<base64>"}` → 204（実行中でなければ 409）。
 - `POST /sessions/<name>/resize` `{"cols":N,"rows":N}` → 204。最後に送った側のサイズを覚え、次の wrapper 起動の初期値にする。
 
-- `GET /events`: SSE（外向け token、イベント ID・再送なし）。接続時に `event: sessions` `data: {}`、session の追加・削除・起動時復帰・名前 / path の変更ごとに `event: sessions` `data: {"reason":"created"|"deleted"|"restored"|"updated"|"context","name":"<name>"}`。15 秒ごとに `: ka`。受け取った側は `session_list` を取り直す。
+- `GET /events`: SSE（外向け token、イベント ID・再送なし）。接続時に `event: sessions` `data: {}`、session の追加・削除・起動時復帰・名前 / path の変更・認証状態の変化ごとに `event: sessions` `data: {"reason":"created"|"deleted"|"restored"|"updated"|"context"|"changed","name":"<name>"}`。15 秒ごとに `: ka`。`changed` = `auth` / `loginUrl` / `loginError` が変わった。受け取った側は `session_list` を取り直す。
 
 ## 添付画像
 

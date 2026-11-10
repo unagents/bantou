@@ -46,6 +46,10 @@ export interface SessionInfo {
   remote: RemoteSummary;
   /** 起動時に追加指示（instructions）を付けたか。本文は出さない。 */
   instructions: boolean;
+  /** claude の認証状態（RcStatus と同じ）。 */
+  auth: RcStatus["auth"];
+  loginUrl: string | null;
+  loginError: string | null;
 }
 
 export const sessionCreateSchema = {
@@ -147,6 +151,9 @@ export function createSessionManager(opts: {
     ...(opts.activity?.(s.project, s.startedAt, s.state === "starting" || s.state === "connected") ?? { activity: "unknown" as const, activityAt: null }),
     remote: opts.remote?.(s.project) ?? { running: 0, waitingReply: 0 },
     instructions: s.instructions,
+    auth: s.auth,
+    loginUrl: s.loginUrl,
+    loginError: s.loginError,
   });
 
   const toProject = (s: SavedSession): ProjectConfig =>

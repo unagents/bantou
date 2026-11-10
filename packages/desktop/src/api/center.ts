@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { CenterConnection, CenterConnectSnippets, CenterIpStatus, CenterParsedConnect, CenterSettings, CenterStatus, McpToolResult, ProjectSettings } from "~/types";
+import type { CenterConnection, CenterConnectSnippets, CenterIpStatus, CenterLoginCode, CenterLoginStart, CenterParsedConnect, CenterSettings, CenterStatus, McpToolResult, ProjectSettings } from "~/types";
 
 export const centerGetSettings = () => invoke<CenterSettings>("center_get_settings");
 
@@ -41,4 +41,43 @@ export async function centerTool<T>(name: string, args?: Record<string, unknown>
   const r = await centerCall(name, args);
   const text = r.content.map((c) => c.text ?? "").join("");
   return JSON.parse(text) as T;
+}
+
+/** Call a center tool; a result flagged `isError` (`{ error }` or a failed result) rejects with its text. */
+export async function centerToolStrict<T>(name: string, args?: Record<string, unknown>): Promise<T> {
+  const r = await centerCall(name, args);
+  const text = r.content.map((c) => c.text ?? "").join("");
+  if (r.isError) {
+    let message = text;
+    try {
+      const v = JSON.parse(text) as { error?: string };
+      if (typeof v.error === "string") message = v.error;
+    } catch {
+      // not JSON: keep the text
+    }
+    throw new Error(message || `${name} failed`);
+  }
+  return JSON.parse(text) as T;
+}
+
+/** Start `/login` in the session's claude (`session_login`): resolves with the URL to open in a browser. */
+export const sessionLogin = (name: string) => centerToolStrict<CenterLoginStart>("session_login", { name });
+
+/**
+ * Feed the code from the browser to the session's claude (`session_login_code`). Resolves with the result also when
+ * the login failed (`ok: false`, `error` says why); rejects only when the call itself failed (timeout, no pty).
+ */
+export async function sessionLoginCode(name: string, code: string): Promise<CenterLoginCode> {
+  const r = await centerCall("session_login_code", { name, code });
+  const text = r.content.map((c) => c.text ?? "").join("");
+  // A failed login still has `ok: false`; a failed call (timeout, no pty) has only `error`.
+  const v = JSON.parse(text) as Partial<CenterLoginCode> & { error?: string | null };
+  if (typeof v.ok !== "boolean") throw new Error(v.error ?? `session_login_code: ${text}`);
+  return v as CenterLoginCode;
+}
+
+/** Stop the session's claude and start it again with `--continue` (`rc_stop` + `rc_start resume`). */
+export async function sessionRestart(name: string): Promise<void> {
+  await centerToolStrict("rc_stop", { project: name });
+  await centerToolStrict("rc_start", { project: name, resume: true });
 }

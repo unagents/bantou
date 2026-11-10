@@ -10,7 +10,7 @@ import {
   SESSIONS_CHANGED_EVENT,
   THREADS_CHANGED_EVENT,
 } from "~/api";
-import type { ContextUsage, Ping, SessionActivity, SessionList, Task, Thread } from "~/types";
+import type { CenterAuthState, ContextUsage, Ping, SessionActivity, SessionList, Task, Thread } from "~/types";
 
 /** How often the remaining time of the ping timers is re-evaluated. */
 const PING_TICK_MS = 5000;
@@ -33,6 +33,10 @@ export interface SessionGroup {
   activity: SessionActivity | null;
   /** Unanswered worker asks / approvals on this session's remote-caps (already counted in a "needs-input" activity). */
   remoteWaiting: number;
+  /** The claude's auth state as the center reports it (null: not reported). */
+  auth: CenterAuthState | null;
+  /** Why the last `/login` failed (center's `loginError`). */
+  loginError: string | null;
   /** In-progress tasks (statuses between the first and the last). */
   working: Task[];
   /** Queued tasks (the first status, Cork's "Todo"). */
@@ -135,6 +139,8 @@ export function useBoard(dir: Ref<string | null>) {
           instructions: centerList.value.sessions.find((r) => r.name === name)?.instructions ?? false,
           activity: centerActivity(name),
           remoteWaiting: remoteWaiting(name),
+          auth: null,
+          loginError: null,
           working: [],
           queued: [],
           done: [],
@@ -144,7 +150,11 @@ export function useBoard(dir: Ref<string | null>) {
       return g;
     };
     // The center's sessions are listed even without tasks.
-    for (const r of centerList.value.sessions) group(r.name);
+    for (const r of centerList.value.sessions) {
+      const g = group(r.name);
+      g.auth = r.auth ?? null;
+      g.loginError = r.loginError ?? null;
+    }
     const reg = new Set(centerList.value.sessions.map((r) => r.name));
     // Only the center's sessions are rows; tags of other tasks are not sessions.
     for (const t of tasks.value) {

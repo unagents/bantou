@@ -19,7 +19,9 @@
 | `session_update` | `name`、`newName?`、`path?`（絶対パス）、`move?`（`path` 指定時のみ。true で今のフォルダを新しい `path` へ rename で移動、省略・false は新しい `path` を作るだけ） | `SessionInfo`（`session_create` と同じ） | session_create で作ったものの名前と path を変える。停止 → フォルダの移動 / 作成 → 記録の更新 → 新しい名前で resume 起動（path を変えると `--continue` が効かず素の起動）。settings は引き継ぎ、remote の記録は新しい名前へ付け替え（cap_id は変わらない）。別の session の remote 記録と衝突する名前は拒否。失敗時は元に戻す |
 | `session_settings_get` | `name` | `{name, settings}` | session のプロジェクト設定を返す（未設定・config 由来は `settings: {}`） |
 | `session_settings_update` | `name`、`settings`（項目ごとにマージ。`null` で項目を削除） | `{name, settings}` | プロジェクト設定を更新して `sessions.json` に保存。次の起動から効く。config 由来の project は拒否 |
-| `session_list` | なし | 同上の配列 | config の project と session の全部（`source` で区別） |
+| `session_list` | なし | 同上の配列（`auth`, `loginUrl`, `loginError` 付き） | config の project と session の全部（`source` で区別） |
+| `session_login` | `name` | `{name, loginUrl}` | session の claude に `/login` を打ち、認証 URL が出るまで待つ |
+| `session_login_code` | `name`、`code` | `{name, ok, auth, error}` | 認証コードを投入し、`Login successful` / `Invalid code` / `Couldn't save your login` を待つ |
 | `center_info` | なし | `{ workspace: string \| null }` | center の情報。`workspace` は config の `workspace`（未設定は `null`）。`session_create` が `path` 省略時に使う `<workspace>/<name>` の親を、desktop の追加ダイアログが既定表示に使う。object のまま将来の項目を足す |
 
 決めた点（今は）:
@@ -71,9 +73,13 @@
 | `session_update` | `name`、`newName?`、`path?`（絶対パス）、`move?`（`path` 指定時のみ。true で今のフォルダを新しい `path` へ rename で移動、省略・false は新しい `path` を作るだけ） | `SessionInfo`（`session_create` と同じ） | session_create で作ったものの名前と path を変える。停止 → フォルダの移動 / 作成 → 記録の更新 → 新しい名前で resume 起動（path を変えると `--continue` が効かず素の起動）。settings は引き継ぎ、remote の記録は新しい名前へ付け替え（cap_id は変わらない）。別の session の remote 記録と衝突する名前は拒否。失敗時は元に戻す |
 | `session_settings_get` | `name` | `{name, settings}` | session のプロジェクト設定を返す（未設定・config 由来は `settings: {}`） |
 | `session_settings_update` | `name`、`settings`（項目ごとにマージ。`null` で項目を削除） | `{name, settings}` | プロジェクト設定を更新して `sessions.json` に保存。次の起動から効く。config 由来の project は拒否 |
-| `session_list` | なし | 同上の配列 | config の project と session の全部（`source` で区別） |
+| `session_list` | なし | 同上の配列（`auth`, `loginUrl`, `loginError` 付き） | config の project と session の全部（`source` で区別） |
+| `session_login` | `name` | `{name, loginUrl}` | session の claude に `/login` を打ち、認証 URL が出るまで待つ |
+| `session_login_code` | `name`、`code` | `{name, ok, auth, error}` | 認証コードを投入し、`Login successful` / `Invalid code` / `Couldn't save your login` を待つ |
 
 決めた点（今は）:
+
+- 認証切れ（2026-11-08 mac200: keychain ロックで OAuth token の refresh が保存できず、全 session が `Please run /login`）への対応は、ホスト側の負荷削減は現実的でないとのユーザー判断で、bantou 側の検知と復旧 UI だけにした。supervisor が wrapper の text から `auth`（`ok` / `login_required` / `keychain_locked`）を判定し、`GET /events` の `reason: "changed"` で desktop に知らせる。desktop は session に badge を出し、再ログイン画面（URL 表示・コード入力・再起動）から上の 2 tool と `rc_stop` / `rc_start { resume: true }` を呼ぶ。詳細は `packages/center/README.md` の「再ログイン」。
 
 - 実体は supervisor（`remote-control.ts`）の entry。構築時固定だった entry を `add` / `remove` で動的に足し引きできるようにした。`remove` できるのは `add` したものだけ（config 由来は不可）。
 - 保存は center 自前の状態ファイル（config と同じ dir の `sessions.json`）。config の projects には書かない。center 起動時に復元し、`--continue` で起動する。`--continue` が接続前（30 秒以内）に終了したら、素の起動へ fallback する（claude は約 4 時間以内の記録が無いと `--continue` で error exit する。実測: `No recent session found in this directory or its worktrees`）。
@@ -132,7 +138,7 @@
 | 既存 | A / B との関係 |
 |---|---|
 | `rc_list` | `session_list` と同じ情報（`session_list` は `source` 付き、`RcStatus` の全項目ではない） |
-| `rc_start` / `rc_stop` | config の project（`workspace` など）を起動・停止する。session は `session_create` / `session_delete`（`rc_stop` は session の entry も止められるが外さない） |
+| `rc_start` / `rc_stop` | config の project（`workspace` など）を起動・停止する。session は `session_create` / `session_delete`（`rc_stop` は session の entry も止められるが外さない）。desktop の再ログイン画面の「再起動」は session に対して `rc_stop` → `rc_start { resume: true }` を使う |
 | `rc_status` | `session_list` の 1 件分（`RcStatus` の全項目 `args` `claude` `restarts` `environmentUrl` を含む） |
 | `server_list` | `config.servers` ベース。B の発見ベースの選択とは別系統（B 用の一覧 tool は無い） |
 | `cap_kick` | `remote_send` の同期版（返信まで待つ）。B は center の session ごとの cap_id（`c-<center-id>-<session>`）の cap への指示、`cap_kick` は呼び手が cap_id を指定。外向けからは外している |
