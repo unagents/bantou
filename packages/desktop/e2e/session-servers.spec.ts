@@ -163,7 +163,7 @@ test("center-wide settings have no 使う server field: nothing is sent for it, 
   await page.getByTestId("settings-save").click();
   await expect(page.getByTestId("settings-dialog")).toBeHidden();
   const sent = await mock(page, (m) => m.calls.filter((c) => c.cmd === "center_call" && (c.args as { name: string }).name === "center_settings_update").map((c) => c.args));
-  expect(sent).toEqual([{ name: "center_settings_update", arguments: { settings: { instructions: "共通 2", addDirs: null, outputStyle: null } } }]);
+  expect(sent).toEqual([{ name: "center_settings_update", arguments: { settings: { instructions: "共通 2", addDirs: null, outputStyle: null, memory: null } } }]);
 });
 
 test("add session: 使う server is a checkbox list of the discovered servers (typing is the fallback); the picks go to session_create settings", async ({ page }) => {

@@ -16,12 +16,14 @@ import {
   encodeStop,
   findSessionUrl,
   mcpConfigJson,
+  MEMORY_TOKEN_ENV,
   parseWrapperLine,
   resolveWrapperPath,
   TEXT_WINDOW,
   windowConnected,
 } from "./wrapper.js";
 import { OUTPUT_STYLE_NAME, syncOutputStyleSync } from "./output-style.js";
+import type { MemorySetting } from "./project-settings.js";
 import { hookCommand, hookUrl, statusLineCommand, statusLineSettings, statusLineUrl } from "./status-line.js";
 
 export type RcState = "stopped" | "starting" | "connected" | "error";
@@ -115,7 +117,7 @@ export interface RemoteControlSupervisor {
    * 実行中に project を足す（起動はしない）。同名は拒否。remove で外せるのはこの add で足したものだけ。
    * wrapper: true なら pty wrapper 経由の対話型（`claude --remote-control`）で起動する。省略は従来の `claude remote-control`。
    */
-  add(project: ProjectConfig, opts?: { wrapper?: boolean; instructions?: string; addDirs?: string[]; outputStyle?: string }): void;
+  add(project: ProjectConfig, opts?: { wrapper?: boolean; instructions?: string; addDirs?: string[]; outputStyle?: string; memory?: MemorySetting }): void;
   /** add で足した project を停止して外す。config 由来の project は外せない。 */
   remove(name: string): Promise<void>;
   /** 追加指示（`--append-system-prompt` の値）を差し替える。次の起動から効く（動いている session は起動し直さない）。空で無し。 */
@@ -124,6 +126,8 @@ export interface RemoteControlSupervisor {
   setAddDirs(name: string, addDirs: string[]): void;
   /** 出力スタイルの本文を差し替える（次の起動から効く。空で解除）。 */
   setOutputStyle(name: string, outputStyle: string): void;
+  /** 外部記憶を差し替える（次の起動から効く。undefined で無し）。 */
+  setMemory(name: string, memory: MemorySetting | undefined): void;
   stop(project: string): Promise<RcStatus>;
   status(project: string): RcStatus;
   list(): RcStatus[];
@@ -294,6 +298,8 @@ interface Entry {
   addDirs: string[];
   /** 出力スタイルの本文。起動のたびに project の `.claude/output-styles/bantou.md` に書き `--settings` で選ぶ。空なら書かず、古いファイルは消す。 */
   outputStyle: string;
+  /** 外部記憶（共通 + session の合成後）。あれば起動のたびに --mcp-config に memory を足し、token は env BANTOU_MEMORY_TOKEN で渡す。 */
+  memory: MemorySetting | null;
 }
 
 /** wrapper 経由の起動に必要なもの。 */
@@ -347,7 +353,11 @@ export function createRemoteControlSupervisor(opts: {
    * システム埋め込み指示（wrapper 起動のみ）。起動のたびに session 名で文面を作り、`--append-system-prompt` の先頭に付ける
    * （利用者の追加指示は空行を挟んでその後ろ）。省略時は付けない。
    */
-  systemInstructions?: { build: (ctx: { session: string }) => string; labels: string[] };
+  systemInstructions?: {
+    build: (ctx: { session: string; memory?: boolean }) => string;
+    /** 付けた部品の `<id>@<version>`。関数なら起動ごとの文脈（memory の有無）で決める。 */
+    labels: string[] | ((ctx: { session: string; memory?: boolean }) => string[]);
+  };
   /** 認証状態（auth / loginUrl / loginError）が変わった時の通知。 */
   onAuthChange?: (project: string, status: RcStatus) => void;
 }): RemoteControlSupervisor {
@@ -362,7 +372,7 @@ export function createRemoteControlSupervisor(opts: {
   const entries = new Map<string, Entry>();
   /** add() で足した project の名前（remove できるのはこれだけ）。 */
   const dynamic = new Set<string>();
-  const newEntry = (p: ProjectConfig, wrapper = false, instructions = "", addDirs: string[] = [], outputStyle = ""): Entry => ({
+  const newEntry = (p: ProjectConfig, wrapper = false, instructions = "", addDirs: string[] = [], outputStyle = "", memory: MemorySetting | null = null): Entry => ({
       project: p,
       status: {
         project: p.name,
@@ -392,6 +402,7 @@ export function createRemoteControlSupervisor(opts: {
       instructions,
       addDirs,
       outputStyle,
+      memory,
   });
   for (const p of config.projects) entries.set(p.name, newEntry(p));
 
@@ -448,7 +459,8 @@ export function createRemoteControlSupervisor(opts: {
       wd.core.register(name);
       const mcpUrl = wd.mcpUrl();
       if (!mcpUrl) log(`session 向け MCP 窓口が無いので bantou の MCP を付けない（messenger のみ）: project=${name}`);
-      const system = opts.systemInstructions?.build({ session: name }) ?? "";
+      const sysCtx = { session: name, memory: e.memory !== null };
+      const system = opts.systemInstructions?.build(sysCtx) ?? "";
       const appendSystemPrompt = [system, e.instructions].filter((t) => t !== "").join("\n\n");
       // 出力スタイルは project の .claude/output-styles/ に書いて名前で選ぶ。書けなくても起動は止めない（style 無しで起動）
       let outputStyle = false;
@@ -467,7 +479,7 @@ export function createRemoteControlSupervisor(opts: {
         claudePath: claude.path,
         name,
         permissionMode: e.project.permissionMode,
-        mcpConfig: mcpConfigJson(mcpUrl, name),
+        mcpConfig: mcpConfigJson(mcpUrl, name, e.memory ?? undefined),
         settings: Object.keys(settings).length ? JSON.stringify(settings) : null,
         resume: useContinue,
         ...(rc.model ? { model: rc.model } : {}),
@@ -477,6 +489,9 @@ export function createRemoteControlSupervisor(opts: {
       });
       command = wd.path ?? resolveWrapperPath();
       env = { ...env, BANTOU_SESSION_TOKEN: wd.tokens.issue(name) };
+      // 外部記憶の token は env だけで渡す（argv・--mcp-config・log・status には出さない）。token が無ければ継承分も消す
+      if (e.memory?.token) env[MEMORY_TOKEN_ENV] = e.memory.token;
+      else delete env[MEMORY_TOKEN_ENV];
     } else {
       args = buildRcArgs(e.project, rc, { continue: useContinue });
     }
@@ -493,7 +508,9 @@ export function createRemoteControlSupervisor(opts: {
       startedAt: new Date().toISOString(),
       args: shownArgs,
       instructions: e.wrapper && !!e.instructions,
-      ...(e.wrapper && opts.systemInstructions ? { systemInstructions: [...opts.systemInstructions.labels] } : {}),
+      ...(e.wrapper && opts.systemInstructions
+        ? { systemInstructions: typeof opts.systemInstructions.labels === "function" ? opts.systemInstructions.labels({ session: name, memory: e.memory !== null }) : [...opts.systemInstructions.labels] }
+        : {}),
     };
     delete e.status.lastError;
     setAuth(e, { auth: "ok", loginUrl: null, loginError: null });
@@ -819,10 +836,10 @@ export function createRemoteControlSupervisor(opts: {
     return snapshot(e);
   };
 
-  const add = (project: ProjectConfig, addOpts: { wrapper?: boolean; instructions?: string; addDirs?: string[]; outputStyle?: string } = {}): void => {
+  const add = (project: ProjectConfig, addOpts: { wrapper?: boolean; instructions?: string; addDirs?: string[]; outputStyle?: string; memory?: MemorySetting } = {}): void => {
     if (entries.has(project.name)) throw new Error(`project が既に存在: ${project.name}`);
     if (addOpts.wrapper && !opts.wrapper) throw new Error("wrapper の設定が無いので wrapper 起動の project は足せない");
-    entries.set(project.name, newEntry(project, addOpts.wrapper === true, addOpts.instructions, addOpts.addDirs, addOpts.outputStyle));
+    entries.set(project.name, newEntry(project, addOpts.wrapper === true, addOpts.instructions, addOpts.addDirs, addOpts.outputStyle, addOpts.memory ?? null));
     if (addOpts.wrapper) opts.wrapper?.core.register(project.name);
     dynamic.add(project.name);
   };
@@ -836,6 +853,9 @@ export function createRemoteControlSupervisor(opts: {
   };
   const setOutputStyle = (name: string, outputStyle: string): void => {
     get(name).outputStyle = outputStyle;
+  };
+  const setMemory = (name: string, memory: MemorySetting | undefined): void => {
+    get(name).memory = memory ? { ...memory } : null;
   };
 
   const remove = async (name: string): Promise<void> => {
@@ -857,6 +877,7 @@ export function createRemoteControlSupervisor(opts: {
     setInstructions,
     setAddDirs,
     setOutputStyle,
+    setMemory,
     stop,
     status: (name) => snapshot(get(name)),
     list: () => [...entries.values()].map(snapshot),

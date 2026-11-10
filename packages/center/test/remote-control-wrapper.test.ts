@@ -9,6 +9,7 @@ import { parseConfig, type Config, type ProjectConfig } from "../src/config.js";
 import { createCore, type CoreEvent } from "../src/core.js";
 import { createRemoteControlSupervisor, type ChildLike, type SpawnImpl } from "../src/remote-control.js";
 import { createSessionTokens } from "../src/session-auth.js";
+import { applicableParts, buildSystemInstructions, partLabel } from "../src/system-instructions.js";
 import { buildWrapperArgs, findSessionUrl, mcpConfigJson, parseWrapperLine, resolveWrapperPath, windowConnected } from "../src/wrapper.js";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -95,7 +96,7 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-function make(opts: { mcpUrl?: string | null; configPath?: string; logs?: string[]; instructions?: string; addDirs?: string[]; outputStyle?: string; path?: string; system?: string } = {}) {
+function make(opts: { mcpUrl?: string | null; configPath?: string; logs?: string[]; instructions?: string; addDirs?: string[]; outputStyle?: string; path?: string; system?: string; memory?: { url: string; token?: string; agentId?: string }; realSystem?: boolean } = {}) {
   const core = createCore();
   const tokens = createSessionTokens();
   const url = opts.mcpUrl === undefined ? "http://127.0.0.1:4567/mcp/session" : opts.mcpUrl;
@@ -105,6 +106,7 @@ function make(opts: { mcpUrl?: string | null; configPath?: string; logs?: string
     log: (m) => void opts.logs?.push(m),
     spawnImpl,
     wrapper: { core, tokens, path: "/fake/bantou-pty-wrapper", mcpUrl: () => url, statusLineSelf: ["/fake/bantou-center"] },
+    ...(opts.realSystem ? { systemInstructions: { build: (ctx: { session: string; memory?: boolean }) => buildSystemInstructions(ctx), labels: (ctx: { session: string; memory?: boolean }) => applicableParts(ctx).map(partLabel) } } : {}),
     ...(opts.system !== undefined ? { systemInstructions: { build: ({ session }: { session: string }) => opts.system!.replace("{session}", session), labels: ["t@1"] } } : {}),
   });
   sup.add(
@@ -114,6 +116,7 @@ function make(opts: { mcpUrl?: string | null; configPath?: string; logs?: string
       ...(opts.instructions !== undefined ? { instructions: opts.instructions } : {}),
       ...(opts.addDirs ? { addDirs: opts.addDirs } : {}),
       ...(opts.outputStyle !== undefined ? { outputStyle: opts.outputStyle } : {}),
+      ...(opts.memory ? { memory: opts.memory } : {}),
     },
   );
   return { sup, core, tokens };
@@ -566,6 +569,16 @@ test("wrapper.ts: 引数組み立て / プロトコル行の解釈 / 窓の照�
   assert.equal(JSON.parse(mcpConfigJson("http://h/mcp/session", "n")).mcpServers.bantou.headers["X-Bantou-Session"], "n");
   assert.equal(JSON.parse(mcpConfigJson("http://h/mcp/session", "n")).mcpServers["bantou-messenger"].env.AGENT_MESSENGER_NAME, "n");
   assert.equal(JSON.parse(mcpConfigJson(null, "n")).mcpServers.bantou, undefined);
+  // memory: 無ければ従来どおり（キーが増えない）。あれば type http、token がある時だけ Authorization（${BANTOU_MEMORY_TOKEN} のまま）、X-Agent-Id は agentId か session 名
+  assert.deepEqual(Object.keys(JSON.parse(mcpConfigJson("http://h/mcp/session", "n")).mcpServers), ["bantou-messenger", "bantou"]);
+  assert.equal(mcpConfigJson("http://h/mcp/session", "n", undefined), mcpConfigJson("http://h/mcp/session", "n"));
+  assert.deepEqual(JSON.parse(mcpConfigJson("http://h/mcp/session", "n", { url: "http://m/mcp", token: "SECRET" })).mcpServers.memory, {
+    type: "http",
+    url: "http://m/mcp",
+    headers: { Authorization: "Bearer ${BANTOU_MEMORY_TOKEN}", "X-Agent-Id": "n" },
+  });
+  assert.deepEqual(JSON.parse(mcpConfigJson(null, "n", { url: "http://m/mcp", agentId: "pm" })).mcpServers.memory.headers, { "X-Agent-Id": "pm" });
+  assert.ok(!mcpConfigJson("http://h/mcp/session", "n", { url: "http://m/mcp", token: "SECRET" }).includes("SECRET"));
   assert.deepEqual(parseWrapperLine('{"t":"started","pid":5}'), { t: "started", pid: 5 });
   assert.deepEqual(parseWrapperLine('{"t":"exit","code":null,"signal":"SIGTERM"}'), { t: "exit", code: null, signal: "SIGTERM" });
   assert.deepEqual(parseWrapperLine(`{"t":"output","data":"${Buffer.from("é").toString("base64")}"}`), { t: "output", data: Buffer.from("é") });
@@ -805,4 +818,73 @@ test("fuzzyIndexOf / detectAuthEvent: TUI の差分描画で空白と一部の�
   assert.equal(fuzzyIndexOf("xxCould'taveyologinyy", "Couldn't save your login", 4), 2);
   assert.equal(fuzzyIndexOf("xxCould'taveyologinyy", "Couldn't save your login", 3), -1);
   assert.equal(fuzzyIndexOf("abc", "", 1), -1);
+});
+
+const mcpOf = (args: string[]) => JSON.parse(valueOf(args, "--mcp-config")!) as { mcpServers: Record<string, { type?: string; url?: string; headers?: Record<string, string> }> };
+
+test("memory: --mcp-config に memory（type http、Authorization は ${BANTOU_MEMORY_TOKEN}、X-Agent-Id は agentId か session 名）を足し、token は子の env だけで渡す。argv・mcp-config・status・log に token の実値は出ない。再起動・--continue でも同じ", async () => {
+  const SECRET = "tok-SECRET-0123456789";
+  const logs: string[] = [];
+  const { sup } = make({ memory: { url: "http://mem.local:3000/mcp", token: SECRET }, logs });
+  const st = await sup.start("pm1");
+  const l = launches[0];
+  const mem = mcpOf(l.args).mcpServers.memory;
+  assert.deepEqual(mem, { type: "http", url: "http://mem.local:3000/mcp", headers: { Authorization: "Bearer ${BANTOU_MEMORY_TOKEN}", "X-Agent-Id": "pm1" } });
+  assert.equal(l.env.BANTOU_MEMORY_TOKEN, SECRET);
+  assert.ok(l.env.BANTOU_SESSION_TOKEN); // session token と並ぶ
+  // token を探す: argv（mcp-config 含む）・status・list・log・wrapper への入力行
+  const hay = JSON.stringify([l.args, st, sup.status("pm1"), sup.list(), logs, l.child.lines]);
+  assert.ok(!hay.includes(SECRET));
+  assert.ok(hay.includes("BANTOU_MEMORY_TOKEN")); // placeholder は残る
+  await sup.stop("pm1");
+  await sup.start("pm1", { resume: true });
+  assert.equal(launches[1].env.BANTOU_MEMORY_TOKEN, SECRET);
+  assert.deepEqual(mcpOf(launches[1].args).mcpServers.memory, mem);
+  assert.ok(launches[1].args.includes("--continue"));
+  // 差し替え: agentId 指定・token 無しなら Authorization を付けず env も渡さない（process の同名 env を継承しない）
+  const prev = process.env.BANTOU_MEMORY_TOKEN;
+  process.env.BANTOU_MEMORY_TOKEN = "INHERITED-SECRET";
+  try {
+    await sup.stop("pm1");
+    sup.setMemory("pm1", { url: "https://m2.example/mcp", agentId: "agent-9" });
+    await sup.start("pm1");
+    const l2 = launches[2];
+    assert.deepEqual(mcpOf(l2.args).mcpServers.memory, { type: "http", url: "https://m2.example/mcp", headers: { "X-Agent-Id": "agent-9" } });
+    assert.equal(l2.env.BANTOU_MEMORY_TOKEN, undefined);
+    assert.ok(!JSON.stringify([l2.args, sup.status("pm1")]).includes("INHERITED-SECRET"));
+    // memory を外す: mcp-config に memory が無い
+    await sup.stop("pm1");
+    sup.setMemory("pm1", undefined);
+    await sup.start("pm1");
+    assert.equal(mcpOf(launches[3].args).mcpServers.memory, undefined);
+    assert.equal(launches[3].env.BANTOU_MEMORY_TOKEN, undefined);
+  } finally {
+    if (prev === undefined) delete process.env.BANTOU_MEMORY_TOKEN;
+    else process.env.BANTOU_MEMORY_TOKEN = prev;
+  }
+  assert.throws(() => sup.setMemory("nope", undefined), /未定義の project/);
+  await sup.shutdown();
+});
+
+test("memory 無しの session は従来どおり: mcp-config は bantou-messenger と bantou だけ、env に BANTOU_MEMORY_TOKEN が無く、system-instructions は role + availability のみ（memory@1 は label にも文面にも出ない）", async () => {
+  const { sup } = make({ realSystem: true });
+  const st = await sup.start("pm1");
+  const l = launches[0];
+  assert.deepEqual(Object.keys(mcpOf(l.args).mcpServers), ["bantou-messenger", "bantou"]);
+  assert.equal(valueOf(l.args, "--mcp-config"), mcpConfigJson("http://127.0.0.1:4567/mcp/session", "pm1"));
+  assert.equal(l.env.BANTOU_MEMORY_TOKEN, undefined);
+  assert.deepEqual(st.systemInstructions, ["master-cap-role@1", "master-cap-availability@1"]);
+  assert.equal(valueOf(l.args, "--append-system-prompt"), buildSystemInstructions({ session: "pm1" }));
+  assert.ok(!valueOf(l.args, "--append-system-prompt")!.includes("mcp__memory__"));
+  await sup.shutdown();
+});
+
+test("memory あり: system-instructions に memory@1 が付く（文面は --append-system-prompt の先頭の部品群の末尾、label は status に出る）。利用者の指示はその後ろ", async () => {
+  const { sup } = make({ realSystem: true, instructions: "利用者の指示", memory: { url: "http://m/mcp" } });
+  const st = await sup.start("pm1");
+  assert.deepEqual(st.systemInstructions, ["master-cap-role@1", "master-cap-availability@1", "memory@1"]);
+  const v = valueOf(launches[0].args, "--append-system-prompt")!;
+  assert.equal(v, `${buildSystemInstructions({ session: "pm1", memory: true })}\n\n利用者の指示`);
+  assert.equal(st.instructions, true); // 利用者の指示だけを数える
+  await sup.shutdown();
 });
