@@ -16,6 +16,7 @@ function fakeSupervisor(initial: ProjectConfig[]) {
   const mk = (p: ProjectConfig): RcStatus => ({
     project: p.name, path: p.path, state: "stopped", pid: null, sessionUrl: null, environmentUrl: null,
     restarts: 0, lastExit: null, startedAt: null, args: null, claude: { path: "claude", source: "PATH" },
+    auth: "ok", loginUrl: null, loginError: null,
   });
   for (const p of initial) map.set(p.name, mk(p));
   const sup = {
@@ -38,7 +39,7 @@ function fakeSupervisor(initial: ProjectConfig[]) {
     status: (n: string) => ({ ...map.get(n)! }),
     list: () => [...map.values()].map((s) => ({ ...s })),
   } as unknown as RemoteControlSupervisor;
-  return { sup, calls };
+  return { sup, calls, map };
 }
 
 let dir: string;
@@ -182,4 +183,17 @@ test("events: create / delete / restore で通知する。失敗した create �
   ]);
   await mgr.restore();
   assert.deepEqual(seen.slice(2), [{ reason: "restored", name: "pm4" }]);
+});
+
+test("list: 認証状態（auth / loginUrl / loginError）を supervisor の値のまま返す", async () => {
+  const { mgr, map } = setup();
+  await mgr.create({ name: "pm1" });
+  const before = mgr.list().find((s) => s.name === "pm1")!;
+  assert.deepEqual([before.auth, before.loginUrl, before.loginError], ["ok", null, null]);
+  const st = map.get("pm1")!;
+  st.auth = "login_required";
+  st.loginUrl = "https://claude.com/cai/oauth/authorize?x";
+  st.loginError = "Invalid code";
+  const after = mgr.list().find((s) => s.name === "pm1")!;
+  assert.deepEqual([after.auth, after.loginUrl, after.loginError], ["login_required", "https://claude.com/cai/oauth/authorize?x", "Invalid code"]);
 });

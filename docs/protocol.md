@@ -459,7 +459,7 @@ Tool outputs are JSON text. A failure sets `isError`.
 | tool | input | output |
 |---|---|---|
 | `rc_list` | none | list of remote-control records |
-| `rc_start` | `project` | remote-control record |
+| `rc_start` | `project`, `resume?` (`true`: `--continue`, plain start when it cannot resume) | remote-control record |
 | `rc_stop` | `project` | remote-control record |
 | `rc_status` | `project` | remote-control record |
 | `server_list` | none | `[{ name, connected, reachable, peerId, serverPeer }]` |
@@ -482,6 +482,13 @@ Remote-control record:
 | `lastError` | last error. Optional |
 | `startedAt` | start time |
 | `args` | arguments of the process |
+| `auth` | the claude's auth state read from the pty (wrapper sessions): `ok`, `login_required` (`Please run /login` shown), `keychain_locked` (`/login` could not be saved). Back to `ok` at each start |
+| `loginUrl` | the `/login` URL while a login is in progress, else null |
+| `loginError` | why the last `/login` failed (`Invalid code`, `Couldn't save your login`), else null |
+
+Session login (`session_login` `{ name }` → `{ name, loginUrl }`, `session_login_code` `{ name, code }` → `{ name, ok, auth, error }`)
+types `/login` into the session's pty and waits for the URL, then for the result; see `packages/center/README.md`.
+The center's `GET /events` reports `{"reason":"changed","name"}` when `auth` / `loginUrl` / `loginError` change.
 
 `server` is a server name from `center.json`. `cap_kick`, `worker_resume` and
 `server_status` fields match the `kick_cap` and `status` commands.

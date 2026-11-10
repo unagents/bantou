@@ -16,9 +16,13 @@
 |---|---|---|---|
 | `session_create` | `name`（英数 `_-`）、`path?`、`permissionMode?`（既定 `auto`） | `{name, path, state, pid, sessionUrl, startedAt, source, lastError?}` | `claude remote-control --name <name>` を path で起動し、監視対象に加える |
 | `session_delete` | `name` | `{name, deleted}` | remote-control を停止し、監視と保存から外す。path は消さない |
-| `session_list` | なし | 同上の配列 | config の project と session の全部（`source` で区別） |
+| `session_list` | なし | 同上の配列（`auth`, `loginUrl`, `loginError` 付き） | config の project と session の全部（`source` で区別） |
+| `session_login` | `name` | `{name, loginUrl}` | session の claude に `/login` を打ち、認証 URL が出るまで待つ |
+| `session_login_code` | `name`、`code` | `{name, ok, auth, error}` | 認証コードを投入し、`Login successful` / `Invalid code` / `Couldn't save your login` を待つ |
 
 決めた点（今は）:
+
+- 認証切れ（2026-11-08 mac200: keychain ロックで OAuth token の refresh が保存できず、全 session が `Please run /login`）への対応は、ホスト側の負荷削減は現実的でないとのユーザー判断で、bantou 側の検知と復旧 UI だけにした。supervisor が wrapper の text から `auth`（`ok` / `login_required` / `keychain_locked`）を判定し、`GET /events` の `reason: "changed"` で desktop に知らせる。desktop は session に badge を出し、再ログイン画面（URL 表示・コード入力・再起動）から上の 2 tool と `rc_stop` / `rc_start { resume: true }` を呼ぶ。詳細は `packages/center/README.md` の「再ログイン」。
 
 - 実体は supervisor（`remote-control.ts`）の entry。構築時固定だった entry を `add` / `remove` で動的に足し引きできるようにした。`remove` できるのは `add` したものだけ（config 由来は不可）。
 - 保存は center 自前の状態ファイル（config と同じ dir の `sessions.json`）。config の projects には書かない。center 起動時に復元し、`--continue` で起動する。`--continue` が接続前（30 秒以内）に終了したら、素の起動へ fallback する（claude は約 4 時間以内の記録が無いと `--continue` で error exit する。実測: `No recent session found in this directory or its worktrees`）。
@@ -60,7 +64,7 @@
 | 既存 | A / B との関係 |
 |---|---|
 | `rc_list` | `session_list` と同じ情報（`session_list` は `source` 付き、`RcStatus` の全項目ではない） |
-| `rc_start` / `rc_stop` | config の project（`workspace` など）を起動・停止する。session は `session_create` / `session_delete`（`rc_stop` は session の entry も止められるが外さない） |
+| `rc_start` / `rc_stop` | config の project（`workspace` など）を起動・停止する。session は `session_create` / `session_delete`（`rc_stop` は session の entry も止められるが外さない）。desktop の再ログイン画面の「再起動」は session に対して `rc_stop` → `rc_start { resume: true }` を使う |
 | `rc_status` | `session_list` の 1 件分（`RcStatus` の全項目 `args` `claude` `restarts` `environmentUrl` を含む） |
 | `server_list` | `config.servers` ベース。B の発見ベースの選択とは別系統（B 用の一覧 tool は無い） |
 | `cap_kick` | `remote_create` の同期版（返信まで待つ）。B は center が cap_id を採番、`cap_kick` は呼び手が指定。既存 cap への追加指示は B に無い |

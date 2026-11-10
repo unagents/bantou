@@ -2,6 +2,10 @@
 // `~/api` and never call `invoke` directly.
 export {
   centerCall,
+  centerToolStrict,
+  sessionLogin,
+  sessionLoginCode,
+  sessionRestart,
   centerConnection,
   centerIpStatus,
   centerLocalIps,

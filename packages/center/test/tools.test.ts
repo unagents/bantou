@@ -10,14 +10,19 @@ import type { SessionManager } from "../src/sessions.js";
 import { resolveOwner } from "../src/tools.js";
 import type { ServerLink } from "../src/server-link.js";
 import type { Follow } from "../src/follow.js";
+import type { LoginFlow } from "../src/login.js";
 
 const rc = (project: string): RcStatus => ({
   project, path: "/p", state: "connected", pid: 1, sessionUrl: null, environmentUrl: null,
   restarts: 0, lastExit: null, startedAt: null, args: null,
   claude: { path: "claude", source: "PATH" },
+  auth: "ok", loginUrl: null, loginError: null,
 });
 
-async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partial<SessionManager>; remotes?: Partial<RemoteManager>; follow?: Follow } = {}) {
+async function connect(
+  link: Partial<ServerLink> = {},
+  mgrs: { sessions?: Partial<SessionManager>; remotes?: Partial<RemoteManager>; follow?: Follow; login?: LoginFlow } = {},
+) {
   const calls: unknown[] = [];
   const supervisor: RemoteControlSupervisor = {
     start: async (p) => rc(p),
@@ -50,7 +55,9 @@ async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partia
     list: (f: unknown) => (calls.push({ remoteList: f }), []),
     ...mgrs.remotes,
   } as unknown as RemoteManager;
-  const server = createCenterServer({ config: parseConfig({}, "/x/c.json"), supervisor, link: fullLink, sessions, remotes, follow: mgrs.follow });
+  const server = createCenterServer({
+    config: parseConfig({}, "/x/c.json"), supervisor, link: fullLink, sessions, remotes, follow: mgrs.follow, login: mgrs.login,
+  });
   const [ct, st] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "t", version: "0" });
   await Promise.all([server.connect(st), client.connect(ct)]);
@@ -67,12 +74,13 @@ async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partia
 
 const text = (r: unknown): string => (r as { content: { text: string }[] }).content[0].text;
 
-test("外向けの tool は 13 個。remote_create / remote_delete / cap_kick は無い", async () => {
+test("外向けの tool は 15 個。remote_create / remote_delete / cap_kick は無い", async () => {
   const { client, close } = await connect();
   const names = (await client.listTools()).tools.map((t) => t.name).sort();
   assert.deepEqual(names, [
     "rc_list", "rc_start", "rc_status", "rc_stop", "remote_list", "remote_wait",
-    "server_list", "server_peers", "server_status", "session_create", "session_delete", "session_list", "worker_resume",
+    "server_list", "server_peers", "server_status", "session_create", "session_delete", "session_list",
+    "session_login", "session_login_code", "worker_resume",
   ]);
   for (const gone of ["remote_create", "remote_delete", "cap_kick"]) assert.ok(!names.includes(gone), gone);
   await close();
@@ -268,4 +276,61 @@ test("remote_wait: session 向けは自分の owner で待ち、引数を渡す�
   assert.equal(bad.isError, true);
   await c.close();
   await close();
+});
+
+test("session_login / session_login_code は LoginFlow に委譲。ok: false は isError、LoginFlow が無ければ isError", async () => {
+  const calls: unknown[] = [];
+  const login: LoginFlow = {
+    start: async (name) => (calls.push(["start", name]), { name, loginUrl: "https://claude.com/cai/oauth/authorize?x=1" }),
+    code: async (name, code) =>
+      code === "bad#s"
+        ? { name, ok: false, auth: "login_required", error: "Invalid code" }
+        : (calls.push(["code", name, code]), { name, ok: true, auth: "ok", error: null }),
+  };
+  const { client, close } = await connect({}, { login });
+  const started = await client.callTool({ name: "session_login", arguments: { name: "pm1" } });
+  assert.equal(started.isError, undefined);
+  assert.deepEqual(JSON.parse(text(started)), { name: "pm1", loginUrl: "https://claude.com/cai/oauth/authorize?x=1" });
+  const ok = await client.callTool({ name: "session_login_code", arguments: { name: "pm1", code: "AbC123#state_-" } });
+  assert.equal(ok.isError, undefined);
+  assert.deepEqual(JSON.parse(text(ok)), { name: "pm1", ok: true, auth: "ok", error: null });
+  const bad = await client.callTool({ name: "session_login_code", arguments: { name: "pm1", code: "bad#s" } });
+  assert.equal(bad.isError, true);
+  assert.deepEqual(JSON.parse(text(bad)), { name: "pm1", ok: false, auth: "login_required", error: "Invalid code" });
+  // code の形式違い（空白）は schema で弾かれる
+  const malformed = await client.callTool({ name: "session_login_code", arguments: { name: "pm1", code: "a b" } }).catch((e: unknown) => e);
+  assert.ok(malformed instanceof Error || (malformed as { isError?: boolean }).isError === true);
+  assert.deepEqual(calls, [["start", "pm1"], ["code", "pm1", "AbC123#state_-"]]);
+  await close();
+
+  const none = await connect();
+  const r = await none.client.callTool({ name: "session_login", arguments: { name: "pm1" } });
+  assert.equal(r.isError, true);
+  assert.deepEqual(JSON.parse(text(r)), { error: "再ログインは使えない（pty 入力が無い）" });
+  await none.close();
+});
+
+test("rc_start: resume: true は supervisor.start に resume を渡し、無ければ渡さない", async () => {
+  const seen: unknown[] = [];
+  const { client, close } = await connect({}, {});
+  // connect の supervisor は固定なので、呼び出しの引数は別の server で確かめる
+  await close();
+  const supervisor = {
+    start: async (p: string, o?: { resume?: boolean }) => (seen.push([p, o]), rc(p)),
+    stop: async (p: string) => rc(p),
+    status: (p: string) => rc(p),
+    list: () => [],
+    shutdown: async () => {},
+  } as unknown as RemoteControlSupervisor;
+  const server = createCenterServer({
+    config: parseConfig({}, "/x/c.json"), supervisor, link: {} as ServerLink, sessions: {} as SessionManager, remotes: {} as RemoteManager,
+  });
+  const [ct, st] = InMemoryTransport.createLinkedPair();
+  const c = new Client({ name: "t", version: "0" });
+  await Promise.all([server.connect(st), c.connect(ct)]);
+  await c.callTool({ name: "rc_start", arguments: { project: "p" } });
+  await c.callTool({ name: "rc_start", arguments: { project: "p", resume: true } });
+  await c.callTool({ name: "rc_start", arguments: { project: "p", resume: false } });
+  assert.deepEqual(seen, [["p", {}], ["p", { resume: true }], ["p", {}]]);
+  await c.close();
 });

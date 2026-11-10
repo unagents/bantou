@@ -36,6 +36,15 @@ pub struct Session {
     /// Center's `lastError` of the session.
     #[serde(default)]
     pub last_error: Option<String>,
+    /// Center's `auth` of the session's claude (`ok`, `login_required`, `keychain_locked`).
+    #[serde(default)]
+    pub auth: Option<String>,
+    /// Center's `loginUrl` (the `/login` URL while a login is in progress).
+    #[serde(default)]
+    pub login_url: Option<String>,
+    /// Center's `loginError` (why the last `/login` failed).
+    #[serde(default)]
+    pub login_error: Option<String>,
 }
 
 /// What the side menu shows: the center's list as last fetched, and whether the latest read worked.
@@ -170,6 +179,9 @@ mod tests {
             session_url: Some(format!("https://claude.ai/code/{name}")),
             source: Some("session".into()),
             last_error: None,
+            auth: Some("ok".into()),
+            login_url: None,
+            login_error: None,
         }
     }
 
@@ -248,13 +260,18 @@ mod tests {
     #[test]
     fn session_reads_the_center_json() {
         let e: Session = serde_json::from_str(
-            r#"{"name":"pm-a","path":"/p","state":"connected","pid":1,"sessionUrl":"https://u","startedAt":null,"source":"session","lastError":"x"}"#,
+            r#"{"name":"pm-a","path":"/p","state":"connected","pid":1,"sessionUrl":"https://u","startedAt":null,"source":"session","lastError":"x","auth":"login_required","loginUrl":"https://claude.com/cai/oauth/authorize?x","loginError":"Invalid code"}"#,
         )
         .unwrap();
         assert_eq!(e.session_url.as_deref(), Some("https://u"));
         assert_eq!(e.last_error.as_deref(), Some("x"));
+        assert_eq!(e.auth.as_deref(), Some("login_required"));
+        assert_eq!(e.login_url.as_deref(), Some("https://claude.com/cai/oauth/authorize?x"));
+        assert_eq!(e.login_error.as_deref(), Some("Invalid code"));
         let bare: Session = serde_json::from_str(r#"{"name":"a"}"#).unwrap();
         assert_eq!(bare.state, None);
+        assert_eq!(bare.auth, None);
+        assert_eq!(bare.login_url, None);
     }
 
     #[test]

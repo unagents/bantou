@@ -71,6 +71,10 @@ export interface Session {
   sessionUrl: string | null;
   source: CenterSession["source"] | null;
   lastError: string | null;
+  /** The claude's auth state (null: an older center that does not report it). */
+  auth: CenterAuthState | null;
+  loginUrl: string | null;
+  loginError: string | null;
 }
 
 /** The center's list as last fetched (mirror of `src-tauri/src/session.rs::SessionList`). Memory only. */
@@ -275,6 +279,13 @@ export type UpdaterState =
   | { kind: "installing"; version: string }
   | { kind: "error"; message: string; version: string | null };
 
+/**
+ * The claude's auth state as the center reads it from the pty (`packages/center` `AuthState`):
+ * `login_required` = `Please run /login` was shown (OAuth token expired), `keychain_locked` = the login could not be
+ * saved (`Couldn't save your login`, the host's keychain is locked).
+ */
+export type CenterAuthState = "ok" | "login_required" | "keychain_locked";
+
 /** `session_list` / `session_create` entry (`packages/center` `SessionInfo`, the part shown). */
 export interface CenterSession {
   name: string;
@@ -282,4 +293,21 @@ export interface CenterSession {
   sessionUrl: string | null;
   source: "config" | "session";
   lastError?: string;
+  auth: CenterAuthState;
+  loginUrl: string | null;
+  loginError: string | null;
+}
+
+/** `session_login` result: the URL the user opens in a browser to get the code. */
+export interface CenterLoginStart {
+  name: string;
+  loginUrl: string;
+}
+
+/** `session_login_code` result. `error`: `Invalid code` or `Couldn't save your login` (keychain locked). */
+export interface CenterLoginCode {
+  name: string;
+  ok: boolean;
+  auth: CenterAuthState;
+  error: string | null;
 }

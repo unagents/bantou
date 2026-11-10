@@ -27,6 +27,10 @@ export interface SessionInfo {
   /** config = config の projects、session = session_create で作ったもの。 */
   source: "config" | "session";
   lastError?: string;
+  /** claude の認証状態（RcStatus と同じ）。 */
+  auth: RcStatus["auth"];
+  loginUrl: string | null;
+  loginError: string | null;
 }
 
 export const sessionCreateSchema = {
@@ -79,6 +83,9 @@ export function createSessionManager(opts: {
     startedAt: s.startedAt,
     source: saved.has(s.project) ? "session" : "config",
     ...(s.lastError ? { lastError: s.lastError } : {}),
+    auth: s.auth,
+    loginUrl: s.loginUrl,
+    loginError: s.loginError,
   });
 
   const toProject = (s: SavedSession): ProjectConfig =>

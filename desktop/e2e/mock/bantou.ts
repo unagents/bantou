@@ -74,6 +74,12 @@ export class MockBantou {
   centerSetSettingsError: string | null = null;
   /** sessionUrl `session_create` returns (null: not connected yet). */
   centerSessionUrl: string | null = "https://claude.ai/code/session_mock";
+  /** URL `session_login` reports (what claude's `/login` printed). */
+  centerLoginUrl = "https://claude.com/cai/oauth/authorize?code=true&client_id=mock&state=mock-state";
+  /** What `session_login_code` answers (center `LoginCodeResult` without `name`); `ok: false` is an isError result. */
+  centerLoginCodeResult: { ok: boolean; auth: string; error: string | null } = { ok: true, auth: "ok", error: null };
+  /** `session_login` / `session_login_code` / `rc_stop` / `rc_start` calls, in order. */
+  loginCalls: { tool: string; name: string; code?: string; resume?: boolean }[] = [];
   calls: InvokeRecord[] = [];
   sent: { to: string; text: string }[] = [];
   /** Terminal: `session_output_start` / `session_output_stop` calls, keystrokes (base64) and size changes sent. */
@@ -149,7 +155,17 @@ export class MockBantou {
       sessionUrl: (e.sessionUrl as string | null) ?? null,
       source: e.source as Session["source"],
       lastError: (e.lastError as string | undefined) ?? null,
+      auth: (e.auth as Session["auth"] | undefined) ?? null,
+      loginUrl: (e.loginUrl as string | undefined) ?? null,
+      loginError: (e.loginError as string | undefined) ?? null,
     };
+  }
+
+  /** The center read an auth change from the session's pty: set it and report it like `GET /events` does. */
+  centerAuth(name: string, auth: string, loginError: string | null = null) {
+    const s = this.centerSessions.find((e) => e.name === name);
+    if (s) Object.assign(s, { auth, loginError, ...(auth === "ok" ? { loginUrl: null } : {}) });
+    this.centerSessionsChanged("changed", name);
   }
 
   /** The center no longer lists session `name` (it was stopped / removed there). */
@@ -398,6 +414,36 @@ export class MockBantou {
             return text(this.fetchCenterList());
           case "session_create":
             return text(this.createCenterSession((args.arguments as { name: string }).name));
+          case "session_login": {
+            const { name } = args.arguments as { name: string };
+            this.loginCalls.push({ tool: "session_login", name });
+            const s = this.centerSessions.find((e) => e.name === name);
+            if (!s) return { ...text({ error: `未定義の project: ${name}` }), isError: true };
+            Object.assign(s, { loginUrl: this.centerLoginUrl, loginError: null });
+            this.centerSessionsChanged("changed", name);
+            return text({ name, loginUrl: this.centerLoginUrl });
+          }
+          case "session_login_code": {
+            const { name, code } = args.arguments as { name: string; code: string };
+            this.loginCalls.push({ tool: "session_login_code", name, code });
+            const r = this.centerLoginCodeResult;
+            const s = this.centerSessions.find((e) => e.name === name);
+            if (s) Object.assign(s, r.ok ? { auth: "ok", loginUrl: null, loginError: null } : { auth: r.auth, loginError: r.error });
+            this.centerSessionsChanged("changed", name);
+            return { ...text({ name, ...r }), ...(r.ok ? {} : { isError: true }) };
+          }
+          case "rc_stop":
+          case "rc_start": {
+            const { project, resume } = args.arguments as { project: string; resume?: boolean };
+            this.loginCalls.push({ tool: args.name, name: project, ...(resume !== undefined ? { resume } : {}) });
+            const s = this.centerSessions.find((e) => e.name === project);
+            if (!s) return { ...text({ error: `未定義の project: ${project}` }), isError: true };
+            if (args.name === "rc_start") {
+              Object.assign(s, { auth: "ok", loginUrl: null, loginError: null });
+              this.centerSessionsChanged("changed", project);
+            }
+            return text({ project, path: s.path, state: args.name === "rc_stop" ? "stopped" : "starting", pid: null, sessionUrl: null, restarts: 0 });
+          }
           case "server_list":
             return text(this.centerServers);
           case "server_peers":

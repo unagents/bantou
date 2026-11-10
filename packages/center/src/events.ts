@@ -1,6 +1,6 @@
-/** center のセッション増減の通知（GET /events の SSE に流す）。 */
+/** center のセッション増減・状態変化の通知（GET /events の SSE に流す）。changed = 認証状態（auth / loginUrl / loginError）が変わった。 */
 export interface SessionsEvent {
-  reason: "created" | "deleted" | "restored";
+  reason: "created" | "deleted" | "restored" | "changed";
   name: string;
 }
 

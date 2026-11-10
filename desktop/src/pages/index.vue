@@ -94,6 +94,14 @@ function onSessionCreated(name: string) {
   toast.add({ title: `${name} を作成`, color: "success" });
 }
 
+// --- re-login of the selected session's claude (the center read `Please run /login` from its pty) ---
+
+const loginOpen = ref(false);
+function onLoggedIn(name: string) {
+  toast.add({ title: `${name} に再ログインした`, color: "success" });
+  void refreshSessions();
+}
+
 </script>
 
 <template>
@@ -149,6 +157,15 @@ function onSessionCreated(name: string) {
               >
                 <UIcon name="i-lucide-terminal-square" class="text-cork-accent size-4 shrink-0" />
                 <span class="truncate">{{ g.name }}</span>
+                <UIcon
+                  v-if="g.auth === 'login_required' || g.auth === 'keychain_locked'"
+                  name="i-lucide-key-round"
+                  class="size-4 shrink-0"
+                  :class="g.auth === 'keychain_locked' ? 'text-cork-danger-text' : 'text-warning'"
+                  :title="g.auth === 'keychain_locked' ? 'keychain ロック中' : '要再ログイン'"
+                  data-testid="side-auth"
+                  :data-auth="g.auth"
+                />
                 <span class="text-cork-muted ml-auto shrink-0 text-xs font-normal" data-testid="side-count">
                   {{ g.working.length }} / {{ g.queued.length }}
                 </span>
@@ -177,7 +194,7 @@ function onSessionCreated(name: string) {
             class="min-h-0 min-w-0 overflow-hidden"
             data-testid="right-col"
           >
-            <TerminalView :session="selectedGroup.name" />
+            <TerminalView :session="selectedGroup.name" :auth="selectedGroup.auth" @relogin="loginOpen = true" />
           </div>
         </main>
         <main v-else class="min-h-0 min-w-0 flex-1 overflow-y-auto p-6">
@@ -209,6 +226,14 @@ function onSessionCreated(name: string) {
       v-model:open="addSessionOpen"
       :existing="centerList.sessions.map((s) => s.name)"
       @done="onSessionCreated"
+    />
+    <LoginDialog
+      v-if="loginOpen && selectedGroup"
+      v-model:open="loginOpen"
+      :session="selectedGroup.name"
+      :auth="selectedGroup.auth"
+      :login-error="selectedGroup.loginError"
+      @done="onLoggedIn"
     />
     <SettingsDialog v-if="settingsOpen" v-model:open="settingsOpen" />
     <CenterDialog v-if="centerOpen" v-model:open="centerOpen" />

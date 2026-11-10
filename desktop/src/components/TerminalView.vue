@@ -4,8 +4,14 @@ import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { logWebview, sessionInput, sessionResize } from "~/api";
 import { encodeBase64 } from "~/composables/terminalBuffer";
+import type { CenterAuthState } from "~/types";
 
-const props = defineProps<{ session: string }>();
+const props = defineProps<{
+  session: string;
+  /** The claude's auth state as the center reports it (null / `ok`: nothing to show). */
+  auth?: CenterAuthState | null;
+}>();
+const emit = defineEmits<{ relogin: [] }>();
 
 const { attach, detach, status } = useTerminalStore();
 
@@ -157,6 +163,22 @@ const link = computed(() => status[props.session]);
         label="接続できない"
         data-testid="terminal-rejected"
       />
+      <!-- The center read `Please run /login` (or a failed save) from the pty: the user re-logs in from here. -->
+      <UTooltip
+        v-if="auth === 'login_required' || auth === 'keychain_locked'"
+        :text="auth === 'keychain_locked' ? 'ログインを保存できなかった。ホストの keychain を解錠してから再ログイン' : 'claude の認証が切れた。再ログインが要る'"
+      >
+        <UButton
+          size="xs"
+          :color="auth === 'keychain_locked' ? 'error' : 'warning'"
+          variant="subtle"
+          icon="i-lucide-key-round"
+          :label="auth === 'keychain_locked' ? 'keychain ロック中' : '要再ログイン'"
+          data-testid="terminal-auth"
+          :data-auth="auth"
+          @click="emit('relogin')"
+        />
+      </UTooltip>
       <span v-if="error" class="text-cork-danger-text ml-auto truncate" data-testid="terminal-error">{{ error }}</span>
     </div>
     <div ref="host" class="min-h-0 flex-1 overflow-hidden bg-[#020617] p-2" data-testid="terminal" />
