@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { getSessionSettings, sessionPathHints, updateSession, updateSessionSettings } from "~/api";
+import { getSessionSettings, sessionPathHints, sessionRestart, updateSession, updateSessionSettings } from "~/api";
 import { draftError, draftOf, emptyDraft, toUpdate, type SettingsDraft } from "~/composables/sessionInstructions";
 
 const open = defineModel<boolean>("open", { required: true });
@@ -12,6 +12,8 @@ const draft = ref<SettingsDraft>(emptyDraft());
 const saved = ref<SettingsDraft>(emptyDraft());
 const loaded = ref(false);
 const busy = ref(false);
+/** The restart button is the one running (the save button shows no spinner then). */
+const restarting = ref(false);
 const actionError = ref<string | null>(null);
 /** This PC's folder dialog applies to the folder rows (own sidecar center on macOS / Windows). */
 const canPick = ref(false);
@@ -56,19 +58,50 @@ const nameError = computed(() => {
 });
 const problem = computed(() => draftError(draft.value));
 
+/** Save what changed. Returns the session's name afterwards (a rename changes it), or null when nothing was saved. */
+async function saveChanges(): Promise<{ name: string; restarted: boolean }> {
+  if (settingsDirty.value) await updateSessionSettings(props.name, toUpdate(draft.value));
+  if (nameChanged.value || pathChanged.value) {
+    await updateSession(props.name, {
+      newName: nameChanged.value ? newName.value : undefined,
+      path: pathChanged.value ? newPath.value : undefined,
+      move: pathChanged.value ? moveDir.value : undefined,
+    });
+    if (nameChanged.value) emit("renamed", props.name, newName.value);
+    emit("updated");
+    // a rename / move restarts the session on the center already
+    return { name: nameChanged.value ? newName.value : props.name, restarted: true };
+  }
+  return { name: props.name, restarted: false };
+}
+
 async function save() {
   if (busy.value) return;
   busy.value = true;
   actionError.value = null;
   try {
-    if (settingsDirty.value) await updateSessionSettings(props.name, toUpdate(draft.value));
-    if (nameChanged.value || pathChanged.value) {
-      await updateSession(props.name, {
-        newName: nameChanged.value ? newName.value : undefined,
-        path: pathChanged.value ? newPath.value : undefined,
-        move: pathChanged.value ? moveDir.value : undefined,
-      });
-      if (nameChanged.value) emit("renamed", props.name, newName.value);
+    await saveChanges();
+    open.value = false;
+  } catch (e) {
+    actionError.value = String(e);
+  } finally {
+    busy.value = false;
+  }
+}
+
+/**
+ * The settings (instructions, folders, output style) take effect on the next start only: save what changed, then
+ * stop and start the session with --continue (the conversation goes on). A rename / move restarted it already.
+ */
+async function saveAndRestart() {
+  if (busy.value) return;
+  busy.value = true;
+  restarting.value = true;
+  actionError.value = null;
+  try {
+    const r = await saveChanges();
+    if (!r.restarted) {
+      await sessionRestart(r.name);
       emit("updated");
     }
     open.value = false;
@@ -76,6 +109,7 @@ async function save() {
     actionError.value = String(e);
   } finally {
     busy.value = false;
+    restarting.value = false;
   }
 }
 </script>
@@ -109,14 +143,26 @@ async function save() {
         />
         <ProjectSettingsFields v-model="draft" id-prefix="settings" :can-pick="canPick" @error="actionError = $event" />
         <p v-if="problem" class="text-cork-danger-text text-xs" data-testid="settings-problem">{{ problem }}</p>
-        <UButton
-          class="self-end"
-          label="保存"
-          :loading="busy"
-          :disabled="!loaded || !dirty || !!problem || !!nameError"
-          data-testid="settings-save"
-          @click="save"
-        />
+        <div class="flex items-center justify-end gap-2">
+          <p class="text-cork-muted mr-auto text-xs">追加指示・参照フォルダ・出力スタイルは次の起動から効く。「再起動」で会話を保ったまま（--continue）すぐ効かせる</p>
+          <UButton
+            color="neutral"
+            variant="subtle"
+            icon="i-lucide-rotate-cw"
+            :label="dirty ? '保存して再起動' : '再起動'"
+            :loading="restarting"
+            :disabled="!loaded || busy || !!problem || !!nameError"
+            data-testid="settings-restart"
+            @click="saveAndRestart"
+          />
+          <UButton
+            label="保存"
+            :loading="busy && !restarting"
+            :disabled="!loaded || !dirty || !!problem || !!nameError || busy"
+            data-testid="settings-save"
+            @click="save"
+          />
+        </div>
         <p v-if="actionError" class="text-cork-danger-text text-xs whitespace-pre-wrap" data-testid="settings-error">
           {{ actionError }}
         </p>
