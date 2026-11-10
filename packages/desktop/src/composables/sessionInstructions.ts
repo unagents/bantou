@@ -1,4 +1,4 @@
-import type { ProjectSettings } from "~/types";
+import type { CenterCommonSettings, ProjectSettings } from "~/types";
 
 /** Note shown next to every project-settings form. */
 export const INSTRUCTIONS_NOTE = "保存後に起動する session から効く。動いている session には効かない";
@@ -67,6 +67,12 @@ export const toUpdate = (d: SettingsDraft): ProjectSettings => {
     // null (not set) removes the item; an empty list is kept and means "no server"
     servers: d.servers === null ? null : cleanServers(d.servers),
   };
+};
+
+/** The form values as an update body for the center-wide settings: no `servers` (the center rejects it; it is a per-session setting). */
+export const toCenterUpdate = (d: SettingsDraft): CenterCommonSettings => {
+  const { servers: _servers, ...rest } = toUpdate(d);
+  return rest;
 };
 
 /** The form values for `session_create`: only the items that are set (a `null` item means none, so it is left out). */

@@ -143,27 +143,45 @@ test("project settings: when the server list cannot be read, the reason is shown
   expect(await mock(page, (m) => m.centerSettings)).toEqual({ careery: { servers: ["srv-typed-1"] } });
 });
 
-test("center-wide settings: the same 使う server field is saved to center_settings_update and shown again; off sends null", async ({ page }) => {
+test("center-wide settings have no 使う server field: nothing is sent for it, and a leftover servers value from an older center is neither shown nor sent back", async ({ page }) => {
   await page.goto("/");
   await seedPeers(page);
+  await mock(page, (m) => {
+    m.centerCommonSettings = { instructions: "共通", servers: ["legacy-host"] };
+  });
   await page.getByTestId("open-settings").click();
-  await expect(page.getByTestId("center-common-instructions")).toBeEnabled();
   const section = page.getByTestId("center-common-section");
-  await expect(section.getByTestId("center-common-section-servers")).toBeVisible();
-  await section.getByTestId("center-common-servers-limit").click();
-  await section.getByTestId("center-common-server-option").nth(2).getByRole("checkbox").click();
+  await expect(page.getByTestId("center-common-instructions")).toHaveValue("共通");
+  // the section is not there at all (the other sections are)
+  await expect(section.getByTestId("center-common-section-add-dirs")).toBeVisible();
+  await expect(section.getByTestId("center-common-section-servers")).toHaveCount(0);
+  await expect(section.getByTestId("center-common-servers-limit")).toHaveCount(0);
+  await expect(section.getByTestId("center-common-server-input")).toHaveCount(0);
+  // the common form does not ask the center for the discovered servers (they are only a choice list for a session)
+  expect(await mock(page, (m) => m.calls.filter((c) => c.cmd === "center_call" && (c.args as { name: string }).name === "server_peers").length)).toBe(0);
+  await page.getByTestId("center-common-instructions").fill("共通 2");
   await page.getByTestId("settings-save").click();
   await expect(page.getByTestId("settings-dialog")).toBeHidden();
   const sent = await mock(page, (m) => m.calls.filter((c) => c.cmd === "center_call" && (c.args as { name: string }).name === "center_settings_update").map((c) => c.args));
-  expect(sent).toEqual([{ name: "center_settings_update", arguments: { settings: { instructions: null, addDirs: null, outputStyle: null, servers: ["srv-mac"] } } }]);
-  expect(await mock(page, (m) => m.centerCommonSettings)).toEqual({ servers: ["srv-mac"] });
-  await page.getByTestId("open-settings").click();
-  await expect(section.getByTestId("center-common-servers-limit")).toBeChecked();
-  await expect(section.getByTestId("center-common-server-option").nth(2).getByRole("checkbox")).toBeChecked();
-  await section.getByTestId("center-common-servers-limit").click();
-  await page.getByTestId("settings-save").click();
-  await expect(page.getByTestId("settings-dialog")).toBeHidden();
-  expect(await mock(page, (m) => m.centerCommonSettings)).toEqual({});
+  expect(sent).toEqual([{ name: "center_settings_update", arguments: { settings: { instructions: "共通 2", addDirs: null, outputStyle: null } } }]);
+});
+
+test("add session: 使う server is a checkbox list of the discovered servers (typing is the fallback); the picks go to session_create settings", async ({ page }) => {
+  await page.goto("/");
+  await seedPeers(page);
+  await page.getByTestId("open-add-session").click();
+  const dlg = page.getByTestId("add-dialog");
+  await expect(dlg.getByTestId("add-section-servers")).toBeVisible();
+  await expect(dlg.getByTestId("add-servers-limit")).not.toBeChecked();
+  await dlg.getByTestId("add-servers-limit").click();
+  await expect(dlg.getByTestId("add-server-option")).toHaveCount(3);
+  await expect(dlg.getByTestId("add-server-input")).toBeVisible();
+  await dlg.getByTestId("add-server-option").nth(2).getByRole("checkbox").click();
+  await dlg.getByTestId("add-name").fill("pm-srv");
+  await dlg.getByTestId("add-create").click();
+  await expect(dlg).toBeHidden();
+  const call = await mock(page, (m) => m.calls.filter((c) => c.cmd === "create_session").at(-1));
+  expect(call?.args).toEqual({ name: "pm-srv", path: null, settings: { servers: ["srv-mac"] } });
 });
 
 test("a session whose saved settings have no servers item (old format) opens with the field off and nothing to save until changed", async ({ page }) => {

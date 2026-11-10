@@ -645,7 +645,7 @@ test("list: 認証状態（auth / loginUrl / loginError）を supervisor の値�
   assert.deepEqual([after.auth, after.loginUrl, after.loginError], ["login_required", "https://claude.com/cai/oauth/authorize?x", "Invalid code"]);
 });
 
-test("servers: session の servers は共通の servers を置き換える（和ではない）。session 未設定なら共通、どちらも無ければ undefined（全部）。空配列は「使わない」で保存され、null で戻る。旧形式（servers 無し）の settings は壊れない", async () => {
+test("servers: session の servers だけで決まる（共通設定には無い）。未設定は undefined（全部）。空配列は「使わない」で保存され、null で戻る。旧形式（servers 無し）の settings は壊れない", async () => {
   await writeFile(join(dir, "sessions.json"), JSON.stringify([{ name: "old", path: join(dir, "old"), permissionMode: "auto", settings: { instructions: "旧形式" } }]));
   const { mgr } = setup();
   await mgr.restore();
@@ -655,18 +655,29 @@ test("servers: session の servers は共通の servers を置き換える（和
   await mgr.create({ name: "b", settings: { servers: ["lenovo", "srv-bbbbbbbbbb", "lenovo"] } });
   assert.equal(mgr.serversOf("a"), undefined);
   assert.deepEqual(mgr.serversOf("b"), ["lenovo", "srv-bbbbbbbbbb"], "重複は除く");
-  await mgr.updateCenterSettings({ servers: ["mac200"] });
-  assert.deepEqual(mgr.serversOf("a"), ["mac200"], "session 未設定は共通");
-  assert.deepEqual(mgr.serversOf("b"), ["lenovo", "srv-bbbbbbbbbb"], "session があれば共通は見ない（置き換え）");
-  assert.deepEqual(mgr.serversOf("old"), ["mac200"]);
   await mgr.updateSettings("a", { servers: [] });
-  assert.deepEqual(mgr.serversOf("a"), [], "空配列 = どの server も使わない（共通より優先）");
+  assert.deepEqual(mgr.serversOf("a"), [], "空配列 = どの server も使わない");
   assert.deepEqual(mgr.getSettings("a").settings, { servers: [] });
   await mgr.updateSettings("a", { servers: null });
-  assert.deepEqual(mgr.serversOf("a"), ["mac200"], "null で session の指定を消すと共通に戻る");
-  await mgr.updateCenterSettings({ servers: null });
-  assert.equal(mgr.serversOf("a"), undefined);
+  assert.equal(mgr.serversOf("a"), undefined, "null で session の指定を消すと全部に戻る");
   assert.equal(mgr.serversOf("nope"), undefined);
   const saved = JSON.parse(await readFile(join(dir, "sessions.json"), "utf8")) as SavedSession[];
   assert.deepEqual(saved.find((x) => x.name === "b")!.settings, { servers: ["lenovo", "srv-bbbbbbbbbb"] });
+});
+
+test("center 共通の設定は servers を受け付けない: null 以外は error で保存されず、session の servers に影響しない。null は無害。保存済みの servers は読み捨てる", async () => {
+  await writeFile(join(dir, "center-settings.json"), JSON.stringify({ instructions: "共通", servers: ["old-host"] }));
+  const { mgr } = setup();
+  await mgr.restore();
+  assert.deepEqual(mgr.getCenterSettings(), { settings: { instructions: "共通" } }, "残っている servers は読み捨てる");
+  await mgr.create({ name: "a" });
+  await mgr.create({ name: "b", settings: { servers: ["lenovo"] } });
+  assert.equal(mgr.serversOf("a"), undefined, "共通の servers は session に効かない");
+  assert.deepEqual(mgr.serversOf("b"), ["lenovo"]);
+  await assert.rejects(mgr.updateCenterSettings({ servers: ["mac200"] } as never), /session の設定/);
+  await assert.rejects(mgr.updateCenterSettings({ instructions: "x", servers: [] } as never), /session の設定/);
+  assert.deepEqual(mgr.getCenterSettings(), { settings: { instructions: "共通" } }, "error の時は他の項目も保存しない");
+  assert.equal(mgr.serversOf("a"), undefined);
+  assert.deepEqual(await mgr.updateCenterSettings({ servers: null } as never), { settings: { instructions: "共通" } }, "null は無害");
+  assert.deepEqual(JSON.parse(await readFile(join(dir, "center-settings.json"), "utf8")), { instructions: "共通" }, "保存し直すと servers は消える");
 });

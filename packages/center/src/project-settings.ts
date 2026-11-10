@@ -29,7 +29,7 @@ export interface ProjectSettings {
   outputStyle?: string;
   /**
    * この session が使ってよい server（host 名か server_id）。未設定 = 全部。空配列 = どの server も使わない。
-   * session に無ければ center 共通の値を使う（合成は置き換え。和ではない）。
+   * session の設定だけで持つ（center 共通の設定には無い）。
    */
   servers?: string[];
   [key: string]: unknown;
@@ -52,6 +52,23 @@ export const projectSettingsPatchSchema = z
   .passthrough();
 
 export type ProjectSettingsPatch = z.infer<typeof projectSettingsPatchSchema>;
+
+/**
+ * center 共通の設定の更新の入力。session の設定から `servers` を除いたもの（servers は session ごとの設定だけで持つ）。
+ * `servers` の指定は null（削除。無害）以外は受け付けない（updateCenterSettings がエラーにする）。
+ */
+export const centerSettingsPatchSchema = projectSettingsPatchSchema.omit({ servers: true }).passthrough();
+export type CenterSettingsPatch = z.infer<typeof centerSettingsPatchSchema>;
+
+/** center 共通の設定に `servers` を入れようとした時のエラー文。 */
+export const CENTER_SERVERS_ERROR = "servers は center 共通の設定では持てない。session の設定（session_settings_update / session_create の settings）で指定する";
+
+/** 保存済みの center 共通の設定（center-settings.json 由来）。残っている `servers` は読み捨てる（次の保存で消える）。 */
+export function readCenterSettings(raw: unknown): ProjectSettings {
+  const out = readSettings(raw);
+  delete out.servers;
+  return out;
+}
 
 /**
  * patch を current に重ねた新しい settings を返す（current は変えない）。
@@ -121,11 +138,11 @@ export function composeOutputStyle(common: ProjectSettings | undefined, own: Pro
 }
 
 /**
- * session が使ってよい server の指定（host 名か server_id）。session の `servers` があればそれ（共通は見ない）、
- * 無ければ center 共通の `servers`、どちらも無ければ undefined（= 全部）。空配列は「どの server も使わない」。
+ * session が使ってよい server の指定（host 名か server_id）。session の `servers` だけを見る（center 共通の設定は見ない）。
+ * 無ければ undefined（= 全部）。空配列は「どの server も使わない」。
  */
-export function composeServers(common: ProjectSettings | undefined, own: ProjectSettings | undefined): string[] | undefined {
-  return readSettings(own).servers ?? readSettings(common).servers;
+export function composeServers(own: ProjectSettings | undefined): string[] | undefined {
+  return readSettings(own).servers;
 }
 
 /** server（server_id と host 名）が `servers` の指定に入っているか。server_id は完全一致、host 名は大文字小文字を区別しない。 */
