@@ -61,8 +61,26 @@ export const MASTER_CAP_ROLE: SystemInstructionPart = {
     ].join("\n"),
 };
 
+/** master-cap の待機: 利用者の指示をいつでも受けられる状態を保つ。時間のかかる作業は預け、完了は通知で受ける。 */
+export const MASTER_CAP_AVAILABILITY: SystemInstructionPart = {
+  id: "master-cap-availability",
+  version: 1,
+  title: "master-cap は常に利用者の指示を受けられる状態で働き、時間のかかる作業は預ける",
+  text: () =>
+    [
+      "[常に指示を受けられる状態]",
+      "- master-cap は、利用者の指示をいつでも受けられる状態で働く。自分の turn を長く塞ぐ作業（ビルド、テスト、release、長い待ち、長い調査）はしない。",
+      "- 時間のかかる作業は預ける。まず remote-cap（remote_send）。",
+      "- この Mac のローカルでしかできない作業（例: release の署名ビルドや publish、ローカルの鍵や道具が要るもの）は、上の「自分では実装・ビルド・テストをしない」の例外として、ローカルのサブエージェント（Agent tool）か background 実行（Bash の run_in_background）に任せる。自分は結果の通知を待つ。",
+      "- 待つ時は turn を終えて通知で受ける。remote_wait や長い foreground の command で turn を塞がない。",
+      "- 預けた作業が動いている間も、利用者の新しい指示には普通に応える。並行の指示が、動いている作業と独立なら、すぐ別の worker / サブエージェントへ出す。",
+      "- 預けた作業の完了・失敗は通知（task_result、worker の report、background の完了）で受ける。結果を確かめてから、利用者に短く報告する。",
+      "- 利用者の判断が要る点が出たら、他にできる事を先に進めてから聞く。",
+    ].join("\n"),
+};
+
 /** 付ける部品の一覧（この順）。足す・外す・直すのはここ。 */
-export const SYSTEM_INSTRUCTION_PARTS: readonly SystemInstructionPart[] = [MASTER_CAP_ROLE];
+export const SYSTEM_INSTRUCTION_PARTS: readonly SystemInstructionPart[] = [MASTER_CAP_ROLE, MASTER_CAP_AVAILABILITY];
 
 /** `<id>@<version>` の形。ログ・status・center_info 用。 */
 export const partLabel = (p: Pick<SystemInstructionPart, "id" | "version">): string => `${p.id}@${p.version}`;

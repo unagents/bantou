@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  MASTER_CAP_AVAILABILITY,
   MASTER_CAP_ROLE,
   SYSTEM_INSTRUCTION_PARTS,
   buildSystemInstructions,
@@ -25,6 +26,28 @@ test("master-cap-role: session 名が入り、作業は remote-cap に回す旨�
   assert.ok(t.includes("自分では実装"));
   for (const tool of ["remote_send", "remote_wait", "remote_list", "worker_reply", "remote_delete"]) assert.ok(t.includes(tool), tool);
   assert.ok(t.includes("repo / branch の引数は使わず"));
+});
+
+test("master-cap-availability: 2 つ目に並び、いつでも受けられる・remote_send・background・turn を塞がない旨がある。label は master-cap-availability@1", () => {
+  assert.equal(SYSTEM_INSTRUCTION_PARTS.length, 2);
+  assert.equal(SYSTEM_INSTRUCTION_PARTS[0], MASTER_CAP_ROLE);
+  assert.equal(SYSTEM_INSTRUCTION_PARTS[1], MASTER_CAP_AVAILABILITY);
+  assert.equal(partLabel(MASTER_CAP_AVAILABILITY), "master-cap-availability@1");
+  assert.ok(!MASTER_CAP_AVAILABILITY.title.includes("\n"));
+  const t = MASTER_CAP_AVAILABILITY.text({ session: "s" });
+  for (const w of ["いつでも受けられる", "remote_send", "background", "turn を塞がない", "Agent tool", "run_in_background", "例外"]) assert.ok(t.includes(w), w);
+});
+
+test("buildSystemInstructions: 出力で master-cap-availability の文面が master-cap-role の後に空行区切りで並ぶ", () => {
+  const out = buildSystemInstructions({ session: "s" });
+  const role = MASTER_CAP_ROLE.text({ session: "s" }).trim();
+  const avail = MASTER_CAP_AVAILABILITY.text({ session: "s" }).trim();
+  assert.equal(out, `${role}\n\n${avail}`);
+  assert.ok(out.indexOf(role) < out.indexOf(avail));
+});
+
+test("describeSystemInstructions: 既定は 2 件（role, availability の順）", () => {
+  assert.deepEqual(describeSystemInstructions().map((d) => `${d.id}@${d.version}`), ["master-cap-role@1", "master-cap-availability@1"]);
 });
 
 test("buildSystemInstructions: 部品を順に空行で結合。空の部品は飛ばす。describe と partLabel", () => {
