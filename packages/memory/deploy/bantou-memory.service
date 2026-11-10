@@ -1,0 +1,16 @@
+# systemd user unit。~/.config/systemd/user/bantou-memory.service に置く
+# 環境変数は ~/.config/bantou-memory/env（chmod 600）に書く。token を unit に直接書かない
+[Unit]
+Description=bantou memory (MCP server)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/bantou/packages/memory
+EnvironmentFile=%h/.config/bantou-memory/env
+ExecStart=/usr/bin/node bin/memory.mjs
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

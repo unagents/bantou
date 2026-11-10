@@ -1,0 +1,36 @@
+{
+  "name": "@unagents/bantou-memory",
+  "version": "0.0.0",
+  "private": true,
+  "description": "bantou external memory (MCP server)",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "nuxt build",
+    "dev": "nuxt dev",
+    "migrate": "node-pg-migrate -m migrations --migrations-table pgmigrations",
+    "test": "node --import tsx --test \"test/**/*.test.ts\"",
+    "typecheck": "nuxt prepare && tsc --noEmit -p tsconfig.json"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@nuxtjs/mcp-toolkit": "~0.24.3",
+    "node-pg-migrate": "^9.0.0",
+    "nuxt": "~4.5.2",
+    "pg": "^8.23.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.16",
+    "@electric-sql/pglite-pgvector": "^0.0.17",
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.23.1",
+    "tsx": "^4.19.0",
+    "typescript": "~5.9.0"
+  },
+  "bin": {
+    "bantou-memory": "bin/memory.mjs"
+  }
+}
