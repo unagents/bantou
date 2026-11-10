@@ -9,6 +9,12 @@ if (process.argv[2] === "status-line") {
   process.exit(await runStatusLine(process.argv.slice(3)));
 }
 
+if (process.argv[2] === "hook") {
+  // claude の hooks から呼ばれるサブコマンド（stdin の JSON を center に POST する）。daemon は読み込まない
+  const { runHook } = await import("./status-line.js");
+  process.exit(await runHook(process.argv.slice(3)));
+}
+
 let args: CliArgs;
 try {
   args = parseArgs(process.argv.slice(2));

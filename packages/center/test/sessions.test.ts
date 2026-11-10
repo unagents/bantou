@@ -575,3 +575,22 @@ test("update: move: true で今のフォルダの配下へは移動できない�
   const r = await mgr.update({ name: "pm1", path: join(sibling, "child") });
   assert.equal(r.path, join(sibling, "child"));
 });
+
+test("list: activity / activityAt は取得元の値、無ければ unknown / null。取得元には startedAt と running が渡る", async () => {
+  const fs2 = fakeSupervisor([project("cfg", "/tmp/cfg")]);
+  const store = createJsonListStore<SavedSession>(join(dir, "sessions.json"), () => {});
+  const asked: [string, string | null, boolean][] = [];
+  const mgr = createSessionManager({
+    config, supervisor: fs2.sup, store, log: () => {}, waitMs: 0,
+    activity: (n, startedAt, running) => (asked.push([n, startedAt, running]), n === "pm1" ? { activity: "needs-input", activityAt: "2026-11-09T00:00:00.000Z" } : { activity: "unknown", activityAt: null }),
+  });
+  await mgr.create({ name: "pm1" });
+  const by = Object.fromEntries(mgr.list().map((s) => [s.name, [s.activity, s.activityAt]]));
+  assert.deepEqual(by, { cfg: ["unknown", null], pm1: ["needs-input", "2026-11-09T00:00:00.000Z"] });
+  assert.ok(asked.some(([n, , running]) => n === "pm1" && running), "connected は running");
+  assert.ok(asked.some(([n, , running]) => n === "cfg" && !running), "stopped は running でない");
+  const plain = setup();
+  const r = await plain.mgr.create({ name: "x" });
+  assert.equal(r.activity, "unknown");
+  assert.equal(r.activityAt, null);
+});

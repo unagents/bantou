@@ -191,6 +191,8 @@ export class MockBantou {
       lastError: (e.lastError as string | undefined) ?? null,
       contextUsage: (e.contextUsage as Session["contextUsage"] | undefined) ?? null,
       instructions: (e.instructions as boolean | undefined) ?? false,
+      activity: (e.activity as Session["activity"] | undefined) ?? null,
+      activityAt: (e.activityAt as string | undefined) ?? null,
     };
   }
 

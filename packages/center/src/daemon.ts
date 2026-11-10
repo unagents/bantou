@@ -23,6 +23,7 @@ import { createCenterServer, createSessionMcpServer } from "./server.js";
 import { createCore } from "./core.js";
 import { createEventHub } from "./events.js";
 import { createSessionTokens } from "./session-auth.js";
+import { createSessionActivityTracker } from "./session-activity.js";
 import { createServerLink } from "./server-link.js";
 
 /** 強制終了の猶予に足す余裕（stop は SIGTERM 待ち stopGraceMs の後、SIGKILL 待ちで最大 5 秒）。 */
@@ -114,9 +115,11 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     ...(config.remoteControl.model ? { model: config.remoteControl.model } : {}),
     log,
   });
+  const activityTracker = createSessionActivityTracker();
   const sessions = createSessionManager({
     config,
     events,
+    activity: (name, startedAt, running) => activityTracker.get(name, startedAt, running),
     contextUsage: (name) => contextUsage.get(name),
     supervisor,
     store: createJsonListStore(join(stateDir, "sessions.json"), log),
@@ -198,6 +201,10 @@ export async function runDaemon(args: CliArgs): Promise<void> {
       onStatusLine: (name, payload) => {
         const s = sessions.list().find((x) => x.name === name);
         if (s && (s.state === "starting" || s.state === "connected")) contextUsage.applyStatusLine(name, payload, s.startedAt);
+      },
+      onHook: (name, payload) => {
+        const s = sessions.list().find((x) => x.name === name);
+        if (s && (s.state === "starting" || s.state === "connected") && activityTracker.apply(name, payload, s.startedAt)) events.publish({ reason: "activity", name });
       },
       core,
       events,

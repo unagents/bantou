@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { useIntervalFn } from "@vueuse/core";
 import { brokerConnect, brokerStatus, centerGetSettings } from "~/api";
-import type { BrokerStatus, Task } from "~/types";
+import type { BrokerStatus, SessionActivity, Task } from "~/types";
 
 const { dir, loaded, load, pickAndOpen } = useWorkspace();
 const { refreshNow: refreshSessions } = useSessionRefresh();
-const { threads, centerList, sessions, waitingCount, running, refresh } = useBoard(dir);
+const { threads, centerList, sessions, activityCounts, waitingCount, running, refresh } = useBoard(dir);
 const toast = useToast();
 const { state: updaterState, checkManually, installAndRestart } = useUpdater();
 
@@ -80,6 +80,25 @@ watch(
     if (!list.some((g) => g.name === selectedName.value)) selectedName.value = list[0]?.name ?? null;
   },
   { immediate: true },
+);
+// --- work state summary / filter (side menu) ---------------------------------
+
+const ACTIVITY_CHIPS: { key: SessionActivity; label: string; icon: string }[] = [
+  { key: "working", label: "作業中", icon: "i-lucide-loader-circle" },
+  { key: "needs-input", label: "判断待ち", icon: "i-lucide-message-circle-question" },
+  { key: "idle", label: "待機", icon: "i-lucide-circle-check" },
+];
+/** Narrow the rows to one work state (click again to release). Memory only. */
+const activityFilter = ref<SessionActivity | null>(null);
+function toggleFilter(k: SessionActivity) {
+  activityFilter.value = activityFilter.value === k ? null : k;
+}
+// The filter releases itself when no session is in that state any more (otherwise the list would stay empty).
+watch(activityCounts, (c) => {
+  if (activityFilter.value && c[activityFilter.value] === 0) activityFilter.value = null;
+});
+const sideRows = computed(() =>
+  activityFilter.value ? sessions.value.filter((g) => g.activity === activityFilter.value) : sessions.value,
 );
 const selectedGroup = computed(() => sessions.value.find((g) => g.name === selectedName.value));
 
@@ -160,8 +179,32 @@ function onSessionCreated(name: string) {
               data-testid="side-unreachable"
             />
           </UTooltip>
+          <div
+            v-if="sessions.length"
+            class="border-cork-border flex flex-wrap items-center gap-1 border-b px-2 py-1.5 text-xs"
+            data-testid="session-activity-summary"
+            title="session ごとの作業状態（押すと絞り込み）。ヘッダーの「返答待ち」は thread の件数"
+          >
+            <button
+              v-for="c in ACTIVITY_CHIPS"
+              :key="c.key"
+              type="button"
+              class="flex items-center gap-1 rounded px-1.5 py-0.5 hover:bg-cork-elevated"
+              :class="[
+                activityFilter === c.key ? 'bg-cork-elevated ring-1 ring-current' : '',
+                c.key === 'needs-input' && activityCounts[c.key] > 0 ? 'text-warning font-semibold' : 'text-cork-muted',
+              ]"
+              :aria-pressed="activityFilter === c.key"
+              :data-testid="`session-activity-summary-${c.key}`"
+              :data-count="activityCounts[c.key]"
+              @click="toggleFilter(c.key)"
+            >
+              <UIcon :name="c.icon" class="size-3.5" />
+              {{ c.label }} {{ activityCounts[c.key] }}
+            </button>
+          </div>
           <ul class="flex flex-col">
-            <li v-for="g in sessions" :key="g.name" class="border-cork-border relative flex items-stretch border-b">
+            <li v-for="g in sideRows" :key="g.name" class="border-cork-border relative flex items-stretch border-b">
               <button
                 type="button"
                 data-testid="side-row"
@@ -181,7 +224,8 @@ function onSessionCreated(name: string) {
                   data-testid="session-instructions-mark"
                   data-scope="side"
                 />
-                <ContextUsage :usage="g.contextUsage" percent-only class="ml-auto" data-scope="side" />
+                <SessionActivityMark v-if="g.activity" :activity="g.activity" class="ml-auto" />
+                <ContextUsage :usage="g.contextUsage" percent-only :class="g.activity ? '' : 'ml-auto'" data-scope="side" />
               </button>
               <UButton
                 class="rounded-none"

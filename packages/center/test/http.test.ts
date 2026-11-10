@@ -28,7 +28,7 @@ const TOOLS = [
 ];
 
 async function boot(
-  extra: { sessionIdleTtlMs?: number; sweepIntervalMs?: number; maxSessions?: number; bind?: string; token?: string; keepAliveMs?: number; workspace?: string; log?: (msg: string) => void; onStatusLine?: (name: string, payload: unknown) => void } = {},
+  extra: { sessionIdleTtlMs?: number; sweepIntervalMs?: number; maxSessions?: number; bind?: string; token?: string; keepAliveMs?: number; workspace?: string; log?: (msg: string) => void; onStatusLine?: (name: string, payload: unknown) => void; onHook?: (name: string, payload: unknown) => void } = {},
 ) {
   const config = parseConfig({}, "/tmp/c.json");
   const supervisor = {
@@ -759,6 +759,42 @@ test("status-line の route は onStatusLine が無い center では 404", async
   try {
     const t = tokens.issue("a");
     const r = await fetch(`${base}/sessions/a/status-line`, { method: "POST", headers: { authorization: `Bearer ${t}` }, body: "{}" });
+    assert.equal(r.status, 404);
+  } finally {
+    await h.close();
+  }
+});
+
+test("POST /sessions/<name>/hook: session token で JSON を受け取り 204。他 session・外向け token・token 無し・不正 token は 401 で onHook に渡らない。GET は 405", async () => {
+  const got: { name: string; payload: unknown }[] = [];
+  const { h, base, tokens } = await boot({ onHook: (name, payload) => got.push({ name, payload }) });
+  try {
+    const ta = tokens.issue("a");
+    tokens.issue("b");
+    const post = (n: string, headers: Record<string, string>, body: string) =>
+      fetch(`${base}/sessions/${n}/hook`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body });
+    const body = JSON.stringify({ hook_event_name: "Stop" });
+    assert.equal((await post("a", { authorization: `Bearer ${ta}` }, body)).status, 204);
+    assert.deepEqual(got, [{ name: "a", payload: JSON.parse(body) }]);
+    for (const headers of [{ authorization: `Bearer ${ta}` }, AUTH, {}, { authorization: "Bearer nope" }]) {
+      assert.equal((await post("b", headers, body)).status, 401);
+    }
+    assert.equal((await post("zzz", { authorization: `Bearer ${ta}` }, body)).status, 401);
+    assert.equal(got.length, 1, "401 は反映しない");
+    assert.equal((await fetch(`${base}/sessions/a/hook`, { method: "GET", headers: { authorization: `Bearer ${ta}` } })).status, 405);
+    assert.equal((await post("a", { authorization: `Bearer ${ta}` }, "{oops")).status, 400);
+    assert.equal((await post("a", { authorization: `Bearer ${ta}` }, "[]")).status, 400);
+    assert.equal(got.length, 1);
+  } finally {
+    await h.close();
+  }
+});
+
+test("hook の route は onHook が無い center では 404", async () => {
+  const { h, base, tokens } = await boot();
+  try {
+    const t = tokens.issue("a");
+    const r = await fetch(`${base}/sessions/a/hook`, { method: "POST", headers: { authorization: `Bearer ${t}` }, body: "{}" });
     assert.equal(r.status, 404);
   } finally {
     await h.close();

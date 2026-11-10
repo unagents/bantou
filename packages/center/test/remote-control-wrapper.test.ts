@@ -245,7 +245,7 @@ test("wrapper 起動: instructions と statusLine の --settings が両方付く
   assert.equal(valueOf(args, "--append-system-prompt"), "追加指示");
   assert.equal(args.filter((a) => a === "--settings").length, 1);
   const settings = JSON.parse(valueOf(args, "--settings")!) as Record<string, unknown>;
-  assert.deepEqual(Object.keys(settings), ["statusLine"]);
+  assert.deepEqual(Object.keys(settings).sort(), ["hooks", "statusLine"]);
   assert.ok(args.indexOf("--append-system-prompt") < args.indexOf("--mcp-config"));
   assert.ok(args.indexOf("--mcp-config") < args.indexOf("--settings"));
   await sup.stop("pm1");
@@ -265,9 +265,13 @@ test("wrapper 起動: wrapper -- claude --remote-control の引数、env の tok
   assert.equal(l.args.length, 14); // 初回は --continue 無し
   // statusLine は center のサブコマンド。--settings は statusLine のキーだけ。token は argv に載せない
   const settings = JSON.parse(l.args[13]) as Record<string, { type: string; command: string }>;
-  assert.deepEqual(Object.keys(settings), ["statusLine"]);
+  assert.deepEqual(Object.keys(settings).sort(), ["hooks", "statusLine"]);
   assert.equal(settings.statusLine.type, "command");
   assert.equal(settings.statusLine.command, "'/fake/bantou-center' 'status-line' '--url' 'http://127.0.0.1:4567/sessions/pm1/status-line'");
+  const hooks = (settings as unknown as { hooks: Record<string, { hooks: { command: string; async: boolean }[] }[]> }).hooks;
+  assert.equal(hooks.Stop[0].hooks[0].command, "'/fake/bantou-center' 'hook' '--url' 'http://127.0.0.1:4567/sessions/pm1/hook'");
+  assert.equal(hooks.Stop[0].hooks[0].async, undefined, "Stop は同期");
+  assert.equal(hooks.PreToolUse[0].hooks[0].async, true);
   const json = JSON.parse(l.args[11]) as { mcpServers: { bantou: Record<string, unknown>; "bantou-messenger": Record<string, unknown> } };
   // session 名が messenger の peer 名になる（名前は MCP の env だけ。claude 子プロセスの env には入れない）
   assert.deepEqual(json.mcpServers["bantou-messenger"], {

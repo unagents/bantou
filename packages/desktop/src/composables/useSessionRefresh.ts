@@ -18,7 +18,7 @@ export const STARTUP_RETRY_CAP_MS = 60_000;
  *
  * The list is read again (Rust keeps the last list; unreachable is reported with it):
  * - before the user does anything in the window (pointer or key, capture phase, every time),
- * - when the center reports a session created / deleted / restored (`center-sessions-changed`),
+ * - when the center reports a session change (`center-sessions-changed`; reason created / deleted / restored / updated / context / activity, not filtered),
  * - when the OS reports a wake from sleep (and once more shortly after) or a network change,
  * - when the own sidecar center is started (`bantou://center-running`),
  * - when `refreshNow()` is called by the owner (target changed: settings, pasted connection),
