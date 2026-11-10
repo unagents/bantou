@@ -30,6 +30,6 @@
 
 ## 残課題・未確認
 - 実 server・実 center 常駐・実 Tauri アプリとの結合は未確認（mock の e2e のみ）。
-- center 側の限界を引き継ぐ: worker_reports 20 件上限で古い未返答 ask は数えなくなる、返答せず worker が進んだ場合は未返答のまま残る。
+- center 側の限界を引き継ぐ: worker_reports 20 件上限で古い未返答 ask は数えなくなる。返答せず worker が先へ進んだ ask は center が解消（superseded_at、55e4aa5）して waitingReply に数えなくなった（center-notes 参照。desktop の変更は不要）。
 - 前 task から継続: 拒否・Esc 中断で needs-input/working が残りうる（hook に出口が無い。実機未確認）、対話モードの needs-input 未確認。
 - 停止中 session の未返答の質問を「判断待ち」に出す判断は、実運用で古い記録が残った場合に誤表示になりうる（center が停止時に止まった cap の未返答を数えない前提）。
