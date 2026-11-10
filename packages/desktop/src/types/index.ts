@@ -242,9 +242,16 @@ export type CenterFollowState = "ok" | "unsupported" | "updating" | "mismatch" |
 /** One server of `server_peers` (center `FollowEntry`): its version against the one paired with this build. */
 export interface CenterServerPeer {
   key: string;
+  /** Current messenger peer id (changes when the server re-registers). The stable identity is `server_id`. */
   id: string;
   name: string;
   hostname?: string;
+  /** Stable id the server reports (protocol 1.7.0). Absent for an older server. */
+  server_id?: string;
+  /** Host name the server reports (shown first), with `user` / `workspace` to tell apart servers on the same host. */
+  host?: string;
+  user?: string;
+  workspace?: string;
   server_version?: string;
   protocol_version?: string;
   state: CenterFollowState;
@@ -351,8 +358,17 @@ export interface CenterRemoteRecord {
   session?: string;
   /** Sessions with a pending instruction on this cap (oldest first). */
   owners: string[];
+  /** `server_id` (an old record whose server_id is unknown keeps the peer id). */
   server: string;
+  server_id?: string;
+  /** Current reachable peer id; absent after the server was not seen for a long time. */
+  peer?: string;
   serverName?: string;
+  serverHost?: string;
+  serverUser?: string;
+  serverWorkspace?: string;
+  /** Display label: host name first with the server_id (plus user and workspace when several servers share the host name). */
+  server_label?: string;
   state: "running" | "done" | "failed" | "unknown";
   /** Model given when the cap was created (absent = none). */
   model?: string;

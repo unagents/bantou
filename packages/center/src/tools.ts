@@ -175,7 +175,7 @@ export function registerTools(
     {
       title: "remote 一覧",
       description:
-        "center が保持する remote（session × server の cap 単位。remote_id = cap_id = c-<center-id>-<session>, session, server, state, owners, 時刻, 最新の結果, 未完了の指示 pending）の一覧。owner が分かれば（header / query / 引数）その session の cap だけ、分からなければ全件（session の無い記録 = 旧共有 cap を含む）。" +
+        "center が保持する remote（session × server の cap 単位。remote_id = cap_id = c-<center-id>-<session>, session, server（server_id。旧形式で server_id 不明なら peer id）, server_id, peer（今の到達先）, serverHost / serverUser / serverWorkspace, server_label（host 名を主に server_id を添えた表示。同じ host 名が複数なら user と workspace 付き）, state, owners, 時刻, 最新の結果, 未完了の指示 pending）の一覧。owner が分かれば（header / query / 引数）その session の cap だけ、分からなければ全件（session の無い記録 = 旧共有 cap を含む）。" +
         "最新の task_result（task_result 本体）と直近の worker_reports（WorkerReportNotice の配列、最大 20 件、到着順）も含む。server から通知を受けた remote には activity が付く: agents（cap → worker。state は running / stalled / idle / done / failed / lost、task、last_activity、last_output_at、silent_ms = 最後の出力からの経過 ms）、received_ms_ago（最後の通知から）、stale（running の agent がいるのに通知が途絶えた）",
       inputSchema: { owner: ownerArg },
     },
@@ -258,7 +258,7 @@ export function registerTools(
     {
       title: "server の版の状態",
       description:
-        "protocol bantou で発見した server ごとの版の状態。pair = この center と組になる版（server = npm bantou の版、protocol）。peers[].state は ok（一致）/ updating（更新中。update.running = 待っている cap/worker の件数）/ mismatch・unsupported（版違い）/ failed（更新失敗。detail に理由）/ lost / unknown。版が違う server へは center が自動で更新を指示する。refresh: true で今すぐ確認してから返す",
+        "protocol bantou で発見した server ごとの版の状態。pair = この center と組になる版（server = npm bantou の版、protocol）。peers[] は server が名乗った server_id / host / user / workspace も持つ（旧 server は無い）。peers[].state は ok（一致）/ updating（更新中。update.running = 待っている cap/worker の件数）/ mismatch・unsupported（版違い）/ failed（更新失敗。detail に理由）/ lost / unknown。版が違う server へは center が自動で更新を指示する。refresh: true で今すぐ確認してから返す",
       inputSchema: { refresh: z.boolean().optional() },
     },
     ({ refresh }) =>
@@ -331,7 +331,7 @@ export function registerSessionTools(server: McpServer, deps: { remotes: RemoteM
     {
       title: "remote-cap へ指示",
       description:
-        "server の remote-cap に task を送る（cap は session × server に 1 つ。cap_id = c-<center-id>-<session 名>。無ければ server が作る。他の session の cap には届かない）。goal（必須）だけでも動く（deliverables / verify / constraints / workers は省略時 {} / {} / [] / {}。workers.items 無し = implement + review の最低 2 体）。task_id は center が採番して返す。cap が実行中なら server 側で順番に待たされる。完了を待たず {remote_id, state:\"running\", created, task_id} を返す。完了は通知（push）か remote_wait / remote_list（task_result）で確認する。worker の report（progress / ask / approve / done）は push で届く（progress は同じ worker から 60 秒に 1 回まで）。ask / approve への返答は worker_reply。server は protocol bantou で発見した先頭、server 引数で peer id か名前を指定できる。worker_model の既定は center の設定 servers[]（新規の cap のみ）。state は running / done / failed / unknown（server に届かない・status も取れず不明。取れたら戻る）。protocol の版が合わない server へは送らず error",
+        "server の remote-cap に task を送る（cap は session × server に 1 つ。cap_id = c-<center-id>-<session 名>。無ければ server が作る。他の session の cap には届かない）。goal（必須）だけでも動く（deliverables / verify / constraints / workers は省略時 {} / {} / [] / {}。workers.items 無し = implement + review の最低 2 体）。task_id は center が採番して返す。cap が実行中なら server 側で順番に待たされる。完了を待たず {remote_id, state:\"running\", created, task_id} を返す。完了は通知（push）か remote_wait / remote_list（task_result）で確認する。worker の report（progress / ask / approve / done）は push で届く（progress は同じ worker から 60 秒に 1 回まで）。ask / approve への返答は worker_reply。server は protocol bantou で発見した先頭。server 引数は server_id（server が再起動・再登録しても変わらない）、host 名、peer id のどれでも指せる（host 名が複数の server に一致する時は error。候補を user と workspace 付きで返すので server_id で指し直す）。返り値の server は server_id（旧 server は peer id）、peer は今の到達先、host は host 名。worker_model の既定は center の設定 servers[]（新規の cap のみ）。state は running / done / failed / unknown（server に届かない・status も取れず不明。取れたら戻る）。protocol の版が合わない server へは送らず error",
       inputSchema: remoteSendSchema,
     },
     sendHandler,
@@ -360,8 +360,12 @@ export function registerSessionTools(server: McpServer, deps: { remotes: RemoteM
     {
       title: "remote 削除",
       description:
-        "この session の remote-cap の実行を止め（server へ stop_cap）、center の記録から外す。止められない時は error（force: true で記録だけ消す）。他の session の cap は対象外。remote_id 省略時はこの session の cap（server が複数あれば server で絞る）。旧共有 cap（session 無し。remote_list の include_shared: true で見える。remote_id = c-<center-id>）は remote_id で明示して消す。複数の server に同じ remote_id がある時は server で指定する",
-      inputSchema: { remote_id: agentId.optional(), server: z.string().min(1).optional(), force: z.boolean().optional() },
+        "この session の remote-cap の実行を止め（server へ stop_cap）、center の記録から外す。止められない時は error（force: true で記録だけ消す）。他の session の cap は対象外。remote_id 省略時はこの session の cap（server が複数あれば server で絞る）。旧共有 cap（session 無し。remote_list の include_shared: true で見える。remote_id = c-<center-id>）は remote_id で明示して消す。複数の server に同じ remote_id がある時は server（server_id / host 名 / peer id）で指定する",
+      inputSchema: {
+        remote_id: agentId.optional(),
+        server: z.string().min(1).optional().describe("server_id、host 名、peer id のどれでも指せる。host 名が複数の server に一致する時は error（候補を user と workspace 付きで返す）"),
+        force: z.boolean().optional(),
+      },
     },
     ({ remote_id, server: srv, force }) =>
       guard(async () => json(await remotes.delete({ owner, ...(remote_id ? { remote_id } : {}), ...(srv ? { server: srv } : {}), ...(force !== undefined ? { force } : {}) }))),
@@ -370,7 +374,7 @@ export function registerSessionTools(server: McpServer, deps: { remotes: RemoteM
     "remote_list",
     {
       title: "remote 一覧",
-      description: "この session の remote-cap（server ごとに 1 つ。remote_id = cap_id, session, server, state, 時刻, 最新の結果, 最新の task_result, 直近の worker_reports（最大 20 件、到着順）, 未完了の指示 pending、通知を受けたものは activity 付き）の一覧。include_shared: true で旧共有 cap（session 無し。新しい指示は送らない。remote_delete で消せる）も含める",
+      description: "この session の remote-cap（server ごとに 1 つ。remote_id = cap_id, session, server（server_id。旧形式の記録で server_id が分からないものは peer id）, server_id, peer（今の到達先。長く確認できないと消える）, serverHost / serverUser / serverWorkspace, server_label（host 名を主に server_id を添えた表示。同じ host 名の server が複数ある時は user と workspace 付き）, state, 時刻, 最新の結果, 最新の task_result, 直近の worker_reports（最大 20 件、到着順）, 未完了の指示 pending、通知を受けたものは activity 付き）の一覧。include_shared: true で旧共有 cap（session 無し。新しい指示は送らない。remote_delete で消せる）も含める",
       inputSchema: { include_shared: z.boolean().optional() },
     },
     ({ include_shared }) => guard(() => json(remotes.list({ owner, ...(include_shared ? { includeShared: true } : {}) }))),

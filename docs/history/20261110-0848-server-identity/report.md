@@ -55,3 +55,55 @@ branch: `feat/server-identity`。この節は worker w-id-server の担当。cen
 - center 側: `server_id` で server を覚える・旧記録（peer id のみ）の引き継ぎ・表示と指定（w-id-center）。
 - 壊れた server.json の退避（`.broken`）は未実装。
 - `server_id` を手で変える/引き継ぐ手段（HOME を作り直す時は `server.json` を移す、と ops docs に記載のみ）。
+
+## center / desktop
+
+担当: worker w-id-center。基点 commit 15b64f6（protocol / server）の上に積んだ。
+
+### 設計
+
+- 識別: center は server を `server_id` で覚え、peer id は「今の到達先」として都度更新する。`server_id` は server が hello_result / status_result で名乗る（protocol 1.7.0）。無い server（旧 server）は従来どおり peer id で扱う。
+- `RemoteRecord`（remotes.json）: `server`（server_id。旧形式で server_id 不明なら peer id）、`server_id?`、`peer?`（今の到達先）、`peer_seen_at?`、`serverHost?`（host 名）、`serverUser?`、`serverWorkspace?`。server_id の有無で新旧を区別する。
+- 識別の取得: `ServerLink` が返信（hello_result / status_result）から peer id → 識別を学ぶ。未取得の peer へは hello を送って取る（旧 server の返信は「識別なし」として取得済み扱い。届かない peer は 60 秒後に再試行）。同じ server_id で peer id だけ違う旧 id の識別は捨てる。
+- server 指定（remote_send / remote_delete / worker_reply の `server`）: `server_id` → peer id → host 名（大文字小文字を区別しない）→ messenger の名前、の順で、最初に 1 件以上一致した段を採る。同じ段で複数一致（同じ host に 2 つなど）は error。候補を `host(server_id) user= workspace=` で列挙し、誤送信しない。remote_delete は server が今見えなくても記録の server_id / peer / host で指せる。
+- 表示: host 名を主に server_id を添える（`server_label`）。同じ host 名の server が複数ある時だけ user と workspace を付ける。center の log も `describeServer`（host(server_id) user= workspace=）。desktop の server 一覧は host 名 + server_id、同じ host 名が複数なら user / workspace。RemoteActivity は `server_label`。
+
+### 旧形式の記録の移行
+
+- 対象: server_id の無い記録（server = peer id）。起動時（`restore`）に remotes.json を `remotes.json.pre-server-id.bak` へ退避する（既にあれば上書きしない = 冪等。失敗しても起動は止めない。log に残す）。
+- 対応する server が今 hello を返す（peer id 一致、または名前 + host 一致で同名の peer が 1 つだけ）なら、記録を server_id に寄せる。同じ host に同名の server が 2 つあって peer id が一致しない記録は、取り違えを避けて引き継がない。
+- 対応する server が見えない・識別を返さない旧記録は peer id のまま保持する（"unknown" を悪化させない）。その server が後で hello を返した時に `findPeer` / 通知の送信元解決で server_id へ引き継ぐ。
+- 壊れた / 空の remotes.json、退避失敗、発見失敗でも `restore` は投げない。
+
+### 古い記録の整理（`prune`、起動後 10 分ごと）
+
+- 消すのは center の記録だけ。server には何も送らない（stop_cap などを出さない）。
+- 消す: (1) 同じ server_id・同じ remote_id の重複（再登録前の旧 peer id のエントリ）。動いている記録を優先、同順位なら最新を残す。(2) 長く確認できない到達先 `peer`（`peer_seen_at` から 6 時間 = `PEER_TTL_MS` 超過、かつ今の発見にも居ない）。消すのは `peer` と `peer_seen_at` だけで、server_id・host・user・workspace は残す。
+- 消さない: remote cap の記録そのもの（session × server の対応）。消えるのは `remote_delete` だけ。旧形式（server_id なし）の記録は server が peer id なので消さない。発見に失敗している間は到達先を消さない（server 側の障害か broker 側かを区別できないため）。
+- `peer_seen_at` の保存は 10 分に 1 回まで（確認のたびに書かない）。
+
+### 変更点
+
+- center: `src/server-identity.ts`（新規。ServerIdentity / describeServer / ambiguousServerMessage）、`src/server-link.ts`（識別の学習・identify・`matchServerPeers`・`selectPeer`）、`src/remotes.ts`（記録・移行・prune・指定・表示）、`src/store.ts`（`backupFileOnce`）、`src/follow.ts`（FollowEntry に識別、log）、`src/daemon.ts`（退避・prune タイマー）、`src/tools.ts`（remote_send / remote_list / remote_delete / server_peers の説明と schema）、README。
+- desktop（最小限）: `types/index.ts`（CenterServerPeer / CenterRemoteRecord に識別）、`CenterDialog.vue`（host 名 + server_id、同 host 名なら user / workspace）、`RemoteActivity.vue`（server_label）、`e2e/center.spec.ts`（1 件追加）。
+- version bump は触っていない。
+
+### 互換性
+
+- 旧 server（識別なしの hello_result）+ 新 center: 識別なしの peer として動く。hello は再送しない。記録は peer id のまま、従来の挙動。
+- 新 server + 旧 center: 追加は全て optional の flat フィールド。旧 center の検証（未知フィールドを許す）を通る。center 側の旧形式の解釈は変えていない。
+- 旧形式の remotes.json は上記の移行で読み替える。新形式の remotes.json を旧 center が読むと `server` が server_id になり旧 peer id と一致しないので、server は名前 / host でしか探せない（downgrade は非推奨。退避ファイルで戻せる）。
+- `remote_send` の返り値に `peer` と `host` を追加（`server` は server_id。旧 server は peer id）。`remote_list` に `server_id` / `peer` / `serverHost` / `serverUser` / `serverWorkspace` / `server_label` を追加。既存キーは残る。
+
+### テスト結果
+
+- center `npm run typecheck`: error なし。`npm test`: 477 pass / 0 fail（新規 `test/server-identity.test.ts` ほか）。
+- protocol `npm run build && npm test`: 32 pass / 0 fail。server `npm test`: 290 pass / 0 fail、`npm run typecheck`: 7 error（develop と同数）。
+- desktop `nuxt typecheck`: exit 0。e2e: 静的ビルド + 簡易サーバー + ms-playwright chromium の一時 config で全件実行: 142 pass / 0 fail（新規 1 件含む）。
+- 示した事（`test/server-identity.test.ts`）: 旧 server の hello / error 返信で壊れない、新旧の返信が parseServerReply を通る、peer id 変更を同じ server として扱い cap が引き継がれる、server 引数が server_id / host / peer id で通り曖昧な host はエラー、通知元の peer id が変わっても届く（別 server_id は取り違えない）、旧形式の移行（退避・冪等・見えない記録を保持・同名 2 server で取り違えない・退避/発見失敗でも起動継続）、prune（server に何も送らない・TTL・発見失敗中は消さない）。
+
+### 残課題
+
+- `PEER_TTL_MS`（6 時間）と prune 間隔（10 分）は経験則でなく仮の値。運用で調整が要る。
+- 新形式から旧 center への downgrade は想定しない（退避ファイルで手動復旧）。
+- hello が来ない server の「記録」自体（session × server の cap）は消さない方針のため、廃止された server の cap は remote_delete まで残る。

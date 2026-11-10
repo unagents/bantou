@@ -13,7 +13,8 @@ import {
 import type { ActivityStore, RemoteActivity } from "./activity.js";
 import { loadConfigSync, type ServerConfig } from "./config.js";
 import type { Logger } from "./log.js";
-import type { ServerLink, ServerPeer, TaskInput } from "./server-link.js";
+import { matchServerPeers, type ServerLink, type ServerPeer, type TaskInput } from "./server-link.js";
+import { ambiguousServerMessage, describeServer, hostOf, type ServerRef } from "./server-identity.js";
 import type { JsonListStore } from "./store.js";
 import { sessionCapId } from "./center-id.js";
 
@@ -65,10 +66,22 @@ export interface RemoteRecord {
   remote_id: string;
   /** この cap を持つ session（master-cap）の名前。無い = 引き継いだ旧共有 cap。 */
   session?: string;
-  /** 最後に使った server の peer id（peer id は再登録で変わるので、server は serverName / serverHost でも探す）。 */
+  /**
+   * server の識別。server_id が分かっていればそれ（server が再登録して peer id が変わっても同じ server と分かる）。
+   * server_id が無い旧形式の記録（まだ hello を返す server と突き合わせられていない）は最後に使った peer id。区別は `server_id` の有無。
+   */
   server: string;
+  /** server が名乗った server_id（protocol 1.7.0 以降の server）。旧形式の記録・旧 server では無い。 */
+  server_id?: string;
+  /** 今の到達先（最後に確認できた messenger の peer id）。再登録で変わるので都度更新する。長く確認できない時は消す（server_id は残る）。 */
+  peer?: string;
+  /** peer を最後に確認した時刻（ISO 8601）。 */
+  peer_seen_at?: string;
   serverName: string;
+  /** server が名乗った host 名（旧 server は messenger の hostname）。表示の主。 */
   serverHost?: string;
+  serverUser?: string;
+  serverWorkspace?: string;
   state: RemoteState;
   /** cap を作った時（最初の kick_cap）に渡したモデル。渡していなければ無い。 */
   model?: string;
@@ -93,7 +106,13 @@ export interface RemoteRecord {
 }
 
 /** remote_list が返す 1 件。通知がまだ無ければ activity は無い。 */
-export type RemoteView = Omit<RemoteRecord, "worker_reports"> & { owners: string[]; worker_reports: WorkerReportNotice[]; activity?: RemoteActivity };
+export type RemoteView = Omit<RemoteRecord, "worker_reports"> & {
+  owners: string[];
+  worker_reports: WorkerReportNotice[];
+  activity?: RemoteActivity;
+  /** 表示用の server。host 名を主にして server_id（無ければ peer id）を添える。同じ host 名の server が複数ある時は user と workspace も付く。 */
+  server_label: string;
+};
 
 /** 通知に載せる result の先頭の長さ。 */
 export const NOTIFY_RESULT_MAX = 500;
@@ -101,7 +120,11 @@ export const NOTIFY_RESULT_MAX = 500;
 export const WAIT_DEFAULT_SEC = 600;
 export const WAIT_MAX_SEC = 1800;
 
-const serverArg = z.string().min(1).optional().describe("server の peer id（一致しなければ名前）。省略時は protocol bantou で発見した先頭");
+const serverArg = z
+  .string()
+  .min(1)
+  .optional()
+  .describe("server の指定。server_id、host 名、peer id のどれでもよい（server_id → peer id → host 名 → messenger の名前の順に探す）。host 名が複数の server に一致する時は error（候補を user と workspace 付きで返す。server_id で指定し直す）。省略時は protocol bantou で発見した先頭");
 
 export const remoteWaitSchema = {
   remote_id: z.string().regex(AGENT_ID_PATTERN, "英数字と _ - のみ").optional().describe("待つ cap。省略時は owner（session）の cap のうち未完了の指示があるもののどれか（最初に終わったもの）"),
@@ -186,7 +209,13 @@ export const remoteCreateSchema = remoteSendSchema;
 
 export interface RemoteSendResult {
   remote_id: string;
+  /** server の識別（server_id。無い旧 server は peer id）。 */
   server: string;
+  server_id?: string;
+  /** 今の到達先（peer id）。 */
+  peer: string;
+  /** host 名（server が名乗ったもの、無ければ messenger の hostname）。 */
+  host?: string;
   serverName: string;
   state: RemoteState;
   /** この指示で cap を作った（server に cap が無かった。最初の task で server が作る）。 */
@@ -237,6 +266,13 @@ export interface RemoteManager {
    * fromId = 送ってきた server の peer id（同じ cap_id が複数 server にある時の取り違え防止）。
    */
   applyLateReply(reply: CapResultReply | TaskResultReply | ErrorReply, fromId?: string): boolean;
+  /**
+   * 古くなった記録の整理。消すのは center の記録だけで、server には何も送らない。
+   * (1) 同じ server_id・同じ remote_id の重複（再登録前の旧 peer id の記録）は 1 件にまとめる（動いている記録、同順位なら最新を残す）。
+   * (2) 長く確認できない到達先（peer）は消す（peer_seen_at から peerTtlMs 経過し、今の発見にも居ない）。server_id・host・cap の記録（session × server の対応）は残す。
+   * 使われている記録（session × server の cap）そのものは消さない。消えるのは remote_delete だけ。
+   */
+  prune(): Promise<{ duplicates: number; peers: number }>;
   /** owner を渡すと、その session の cap だけ（includeShared で旧共有 cap も）。省くと全件。 */
   list(filter?: { owner?: string; includeShared?: boolean }): RemoteView[];
   /**
@@ -272,6 +308,26 @@ const lastAt = (r: RemoteRecord): string =>
 /** 動いている記録（running・unknown・未完了の指示あり）。復元時に status で追従する対象で、旧形式の引き継ぎでも残す側を優先する。 */
 const isActiveRec = (r: RemoteRecord): boolean => r.state === "running" || r.state === "unknown" || r.pending.length > 0;
 
+/** 到達先（peer id）を最後に確認してから、これを超えて確認できず、発見にも居ない時に消す。 */
+export const PEER_TTL_MS = 6 * 60 * 60_000;
+/** peer_seen_at を保存し直す最小の間隔（確認のたびに書き込まない）。 */
+const SEEN_PERSIST_MS = 10 * 60_000;
+
+/** 記録の今の到達先（server_id の記録は peer、旧形式は server = 最後に使った peer id）。 */
+export const peerOfRec = (r: RemoteRecord): string | undefined => (r.server_id !== undefined ? r.peer : (r.peer ?? r.server));
+
+/** 記録が指す server を 1 つに決める key（server_id、無ければ到達先）。 */
+const serverKeyOf = (r: RemoteRecord): string => r.server_id ?? peerOfRec(r) ?? r.server;
+
+const refOf = (r: RemoteRecord): ServerRef => ({
+  ...(r.server_id !== undefined ? { server_id: r.server_id } : {}),
+  ...(peerOfRec(r) !== undefined ? { peerId: peerOfRec(r) } : {}),
+  ...(r.serverHost ? { host: r.serverHost } : {}),
+  ...(r.serverUser ? { user: r.serverUser } : {}),
+  ...(r.serverWorkspace ? { workspace: r.serverWorkspace } : {}),
+  name: r.serverName,
+});
+
 /** 通知先を server へ伝える status（cap_id 付き）の再試行の回数。pollMs ごと。 */
 const ANNOUNCE_RETRIES = 20;
 
@@ -300,10 +356,21 @@ export function createRemoteManager(opts: {
   pollMs?: number;
   /** server からの activity 通知の保持。省けば list に activity は付かない。 */
   activity?: ActivityStore;
+  /**
+   * 旧形式（server_id の無い記録）を読み替える前に、元の remotes.json を退避する（既にあれば上書きしない。失敗しても起動は止めない）。
+   * 省けば退避しない。
+   */
+  backup?: () => Promise<void>;
+  /** 現在時刻（ms）。テスト用。 */
+  now?: () => number;
+  /** 確認できない到達先（peer）を消すまでの時間（既定 PEER_TTL_MS）。 */
+  peerTtlMs?: number;
   /** 完了通知の送り先。owner の session へ text を送る。省けば通知しない。 */
   notify?: (owner: string, text: string) => Promise<{ ok: true } | { ok: false; reason: string }>;
 }): RemoteManager {
   const { link, store, log, capId } = opts;
+  const nowMs = opts.now ?? Date.now;
+  const peerTtlMs = opts.peerTtlMs ?? PEER_TTL_MS;
   const graceMs = opts.graceMs ?? SETTLE_GRACE_MS;
   const pollMs = opts.pollMs ?? PROBE_POLL_MS;
   let lastGoodServers = opts.servers;
@@ -324,8 +391,10 @@ export function createRemoteManager(opts: {
   /** server（peer id）ごとの送信の直列化（status の確認 → 記録 → kick_cap の投入）。 */
   const locks = new Map<string, Promise<unknown>>();
 
+  /** restore 中は保存しない（records が揃う前に保存して、読んだ記録を失わない。最後に restore が 1 回保存する）。 */
+  let restoring = false;
   const persist = (): Promise<void> =>
-    store.save(records).catch((e: unknown) => log(`remotes 保存失敗: ${e instanceof Error ? e.message : String(e)}`));
+    restoring ? Promise.resolve() : store.save(records).catch((e: unknown) => log(`remotes 保存失敗: ${e instanceof Error ? e.message : String(e)}`));
 
   const has = (r: RemoteRecord): boolean => records.includes(r);
 
@@ -339,12 +408,11 @@ export function createRemoteManager(opts: {
       const peer = await findPeer(r);
       const reply = await link.statusOn(peer, { cap_id: r.remote_id });
       if (reply.type === "error") throw new Error(reply.message);
-      await adoptPeer(r, peer);
-      log(`通知先を server へ伝えた（status cap_id）: ${r.remote_id} server=${r.serverName}`);
+      log(`通知先を server へ伝えた（status cap_id）: ${r.remote_id} server=${describeServer(refOf(r))}`);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (attempt >= ANNOUNCE_RETRIES) {
-        log(`通知先を server へ伝えられない（諦める。次の指示で伝わる）: ${r.remote_id} server=${r.serverName} ${msg}`);
+        log(`通知先を server へ伝えられない（諦める。次の指示で伝わる）: ${r.remote_id} server=${describeServer(refOf(r))} ${msg}`);
         return;
       }
       const t = setTimeout(() => void announce(r, attempt + 1), pollMs);
@@ -353,7 +421,7 @@ export function createRemoteManager(opts: {
   };
 
   const activityOf = (r: RemoteRecord): RemoteActivity | undefined =>
-    opts.activity?.get(r.remote_id, r.server) ?? opts.activity?.get(r.remote_id, "");
+    opts.activity?.get(r.remote_id, peerOfRec(r) ?? r.server) ?? opts.activity?.get(r.remote_id, "");
 
   const activityBusy = (r: RemoteRecord): boolean => {
     const a = activityOf(r);
@@ -391,9 +459,17 @@ export function createRemoteManager(opts: {
     probes.set(r, t);
   };
 
+  /** 表示用の server。host 名を主に server_id を添える。同じ host 名の別の server の記録がある時は user と workspace も付ける。 */
+  const labelOf = (r: RemoteRecord): string => {
+    const ref = refOf(r);
+    const host = hostOf(ref)?.toLowerCase();
+    const twin = host !== undefined && records.some((x) => serverKeyOf(x) !== serverKeyOf(r) && hostOf(refOf(x))?.toLowerCase() === host);
+    return twin ? describeServer(ref) : describeServer({ ...ref, user: undefined, workspace: undefined });
+  };
+
   const viewOf = (r: RemoteRecord): RemoteView => {
     const state = stateOf(r);
-    const base: RemoteView = { ...r, pending: r.pending.map((p) => ({ ...p })), owners: ownersOf(r), worker_reports: (r.worker_reports ?? []).map((w) => ({ ...w })), state };
+    const base: RemoteView = { ...r, server_label: labelOf(r), pending: r.pending.map((p) => ({ ...p })), owners: ownersOf(r), worker_reports: (r.worker_reports ?? []).map((w) => ({ ...w })), state };
     if (state === "running") delete base.finishedAt;
     const activity = activityOf(r);
     return { ...base, ...(activity ? { activity } : {}) };
@@ -499,7 +575,6 @@ export function createRemoteManager(opts: {
       const reply = await link.statusOn(peer, { cap_id: r.remote_id });
       if (reply.type === "error") throw new Error(reply.message);
       st = reply;
-      await adoptPeer(r, peer);
     } catch (e) {
       if (!has(r) || (inflight.get(r) ?? 0) > 0) return;
       const msg = e instanceof Error ? e.message : String(e);
@@ -555,61 +630,174 @@ export function createRemoteManager(opts: {
         ? { ok: reply.ok, text: reply.result_text, ...(reply.ok ? {} : { error: reply.error ?? "失敗" }) }
         : { ok: false, text: "", error: reply.message };
 
-  /**
-   * 記録がこの peer の server か。peer id 一致、または名前 + host 一致。host の無い記録（serverHost を持つ前の旧形式）は名前だけで一致する
-   * （同名の server が複数あっても host が埋まるまでは区別できない）。
-   */
-  const sameServer = (r: RemoteRecord, peer: ServerPeer): boolean =>
-    r.server === peer.id || (r.serverName === peer.name && (r.serverHost === undefined || r.serverHost === peer.hostname));
+  /** 発見した peer の一覧（識別つき）。識別が未取得なら hello で取る。取れなければ素の発見結果。 */
+  const livePeers = (): Promise<ServerPeer[]> => (link.identifiedPeers ? link.identifiedPeers() : link.peers());
 
-  /** server の peer から session の記録を探す（id 一致 → 名前 + host 一致）。session × server ごとに 1 件。 */
-  const findRecord = (peer: ServerPeer, session: string): RemoteRecord | undefined => {
-    const mine = records.filter((r) => r.session === session);
-    return mine.find((r) => r.server === peer.id) ?? mine.find((r) => sameServer(r, peer));
+  /** host が一致するか（大文字小文字を区別しない）。 */
+  const sameHost = (a: string | undefined, b: string | undefined): boolean => a !== undefined && b !== undefined && a.toLowerCase() === b.toLowerCase();
+
+  /**
+   * server_id の無い旧形式の記録が、この peer の server か。peer id が一致するか、名前 + host が一致し、
+   * かつ同じ名前 + host の peer が live に 1 つだけ（同じ host に同名の server が 2 つある時は取り違えない）。
+   * host の無い記録（serverHost を持つ前の旧形式）は名前だけで一致するが、同名の peer が 1 つだけの時に限る。
+   */
+  const legacyMatches = (r: RemoteRecord, peer: ServerPeer, live: ServerPeer[]): boolean => {
+    if (r.server_id !== undefined) return false;
+    if (r.server === peer.id || r.peer === peer.id) return true;
+    if (r.serverName !== peer.name) return false;
+    const twins = live.filter((p) => p.name === r.serverName && (r.serverHost === undefined || sameHost(r.serverHost, hostOf(p))));
+    return twins.length === 1 && twins[0].id === peer.id;
   };
 
-  /**
-   * host の無い記録（旧形式）の server が status で確かめられたら、今の peer id と host を記録に入れる（以後は名前 + host で区別できる）。
-   * 同名の peer が複数いて、どれがこの記録の server か決められない時は何もしない。
-   */
-  const adoptPeer = async (r: RemoteRecord, peer: ServerPeer): Promise<void> => {
-    if (r.serverHost !== undefined || !peer.hostname) return;
-    try {
-      const same = (await link.peers()).filter((p) => p.name === r.serverName);
-      if (same.length !== 1 || same[0].id !== peer.id) return;
-    } catch {
-      return;
+  /** 記録がこの peer の server か（server_id 同士 → 到達先の peer id → 旧形式の突き合わせ）。 */
+  const sameServer = (r: RemoteRecord, peer: ServerPeer, live: ServerPeer[]): boolean => {
+    if (r.server_id !== undefined) {
+      if (peer.server_id !== undefined) return r.server_id === peer.server_id;
+      return r.peer === peer.id; // peer の識別が未取得: 到達先が同じ時だけ同じとみなす
     }
-    r.server = peer.id;
-    r.serverHost = peer.hostname;
-    void persist();
+    return legacyMatches(r, peer, live);
   };
 
-  /** 通知・遅れた返信の送信元から記録を決める。同じ cap_id が 1 件だけなら、peer id が変わっていてもそれ。 */
+  /** server の peer から session の記録を探す。session × server ごとに 1 件。 */
+  const findRecord = (peer: ServerPeer, session: string, live: ServerPeer[]): RemoteRecord | undefined =>
+    records.filter((r) => r.session === session).find((r) => sameServer(r, peer, live));
+
+  /** 記録を消す（メモリ上の状態も片付ける）。server には何も送らない。 */
+  const forgetRecord = (rec: RemoteRecord): void => {
+    const i = records.indexOf(rec);
+    if (i >= 0) records.splice(i, 1);
+    inflight.delete(rec);
+    inflightTasks.delete(rec);
+    settling.delete(rec);
+    statusIdleAt.delete(rec);
+    unschedule(rec);
+  };
+
+  /**
+   * 記録に peer（今の到達先と識別）を反映する。server_id が分かれば記録の server を server_id に寄せる（旧形式の引き継ぎ）。
+   * 変わったら保存する（到達先の確認時刻だけの更新は SEEN_PERSIST_MS ごと）。変更があれば true。
+   */
+  const syncRecord = (r: RemoteRecord, peer: ServerPeer): boolean => {
+    let changed = false;
+    const set = <K extends keyof RemoteRecord>(k: K, v: RemoteRecord[K] | undefined): void => {
+      if (v === undefined || r[k] === v) return;
+      r[k] = v;
+      changed = true;
+    };
+    if (peer.server_id !== undefined) {
+      if (r.server_id === undefined) log(`旧形式の記録を server_id へ引き継ぐ: ${r.remote_id} peer=${r.server} -> server_id=${peer.server_id}`);
+      set("server_id", peer.server_id);
+      set("server", peer.server_id);
+    } else if (r.server_id === undefined) {
+      set("server", peer.id);
+    }
+    set("peer", peer.id);
+    set("serverName", peer.name);
+    set("serverHost", hostOf(peer));
+    set("serverUser", peer.user);
+    set("serverWorkspace", peer.workspace);
+    const stale = r.peer_seen_at === undefined || nowMs() - Date.parse(r.peer_seen_at) >= SEEN_PERSIST_MS;
+    r.peer_seen_at = new Date(nowMs()).toISOString();
+    if (changed || stale) void persist();
+    return changed;
+  };
+
+  /**
+   * 同じ server_id・同じ remote_id の記録が複数ある（再登録前の旧 peer id の記録が残った）時、1 件にまとめる。
+   * 動いている記録を最優先、同順位なら最新を残す。消すのは center の記録だけ（server には何も送らない）。まとめた余分の件数を返す。
+   */
+  const consolidate = (): number => {
+    let removed = 0;
+    const groups = new Map<string, RemoteRecord[]>();
+    for (const r of records) {
+      if (r.server_id === undefined) continue;
+      const key = `${r.server_id}\u0000${r.remote_id}\u0000${r.session ?? ""}`;
+      groups.set(key, [...(groups.get(key) ?? []), r]);
+    }
+    for (const g of groups.values()) {
+      if (g.length < 2) continue;
+      const keep = [...g].sort((x, y) => Number(isActiveRec(y)) - Number(isActiveRec(x)) || lastAt(y).localeCompare(lastAt(x)))[0]!;
+      for (const r of g) {
+        if (r === keep) continue;
+        forgetRecord(r);
+        removed++;
+        log(`同じ server_id の旧記録を整理: ${r.remote_id} server_id=${r.server_id} peer=${r.peer ?? "-"}（残す: peer=${keep.peer ?? "-"}）`);
+      }
+    }
+    if (removed > 0) void persist();
+    return removed;
+  };
+
+  /**
+   * 長く確認できない到達先（peer）を記録から消す。peer_seen_at から peerTtlMs を超え、今の発見（live）にも居ない peer が対象。
+   * 消すのは到達先のキャッシュだけ。server_id・host・user・workspace・cap の記録（session × server の対応）は残す。
+   * 旧形式の記録（server_id が無い）は server が peer id なので消さない。消した件数を返す。
+   */
+  const clearStalePeers = (live: ServerPeer[]): number => {
+    let n = 0;
+    for (const r of records) {
+      if (r.server_id === undefined || r.peer === undefined) continue;
+      const seen = r.peer_seen_at === undefined ? NaN : Date.parse(r.peer_seen_at);
+      if (!Number.isNaN(seen) && nowMs() - seen < peerTtlMs) continue;
+      if (live.some((p) => p.id === r.peer)) continue;
+      log(`確認できない到達先を消す: ${r.remote_id} server=${describeServer(refOf(r))} peer=${r.peer}（最後に確認: ${r.peer_seen_at ?? "不明"}）`);
+      delete r.peer;
+      delete r.peer_seen_at;
+      n++;
+    }
+    if (n > 0) void persist();
+    return n;
+  };
+
+  /** 通知・遅れた返信の送信元から記録を決める。同じ cap_id が 1 件だけなら、peer id が変わっていてもそれ（別の server_id と分かっていればそれは除く）。 */
   const resolveRecord = (id: string, fromId?: string): RemoteRecord | undefined => {
     const cands = records.filter((r) => r.remote_id === id);
     if (cands.length === 0) return undefined;
-    if (fromId !== undefined) {
-      const hit = cands.find((r) => r.server === fromId);
-      if (hit) return hit;
+    if (fromId === undefined) return cands.length === 1 ? cands[0] : undefined;
+    const ident = link.identityOf?.(fromId);
+    const hit =
+      cands.find((r) => peerOfRec(r) === fromId) ??
+      (ident?.server_id !== undefined ? cands.find((r) => r.server_id === ident.server_id) : undefined);
+    const rec = hit ?? (cands.length === 1 ? cands[0] : undefined);
+    if (!rec) return undefined;
+    // 別の server_id と分かっている server からは取り違えない
+    if (ident?.server_id !== undefined && rec.server_id !== undefined && rec.server_id !== ident.server_id) return undefined;
+    if (peerOfRec(rec) !== fromId || (ident?.server_id !== undefined && rec.server_id === undefined)) {
+      const known: ServerPeer = { id: fromId, name: rec.serverName, ...(ident ?? {}) };
+      if (known.host === undefined && rec.serverHost !== undefined) known.hostname = rec.serverHost;
+      syncRecord(rec, known);
+      consolidate();
     }
-    if (cands.length > 1) return undefined;
-    if (fromId !== undefined && cands[0].server !== fromId) {
-      cands[0].server = fromId;
-      void persist();
-    }
-    return cands[0];
+    return rec;
   };
 
-  /** 記録の server を今の peer から探す（id 一致 → 名前 + host 一致 → 名前のみ）。 */
+  /** 記録の server を今の peer から探す。見つけたら記録へ反映する（旧 peer id の記録は server_id へ引き継ぐ）。 */
   const findPeer = async (r: RemoteRecord): Promise<ServerPeer> => {
-    const peers = await link.peers();
-    const hit =
-      peers.find((p) => p.id === r.server) ??
-      peers.find((p) => p.name === r.serverName && p.hostname === r.serverHost) ??
-      peers.find((p) => p.name === r.serverName);
-    if (!hit) throw new Error(`server が見つからない: ${r.serverName}(${r.server})`);
+    const peers = await livePeers();
+    let hit: ServerPeer | undefined;
+    if (r.server_id !== undefined) {
+      hit = peers.find((p) => p.server_id === r.server_id) ?? peers.find((p) => p.server_id === undefined && r.peer !== undefined && p.id === r.peer);
+    } else {
+      hit = peers.find((p) => p.id === r.server) ?? peers.find((p) => legacyMatches(r, p, peers));
+    }
+    if (!hit) throw new Error(`server が見つからない: ${describeServer(refOf(r))}`);
+    if (syncRecord(r, hit)) consolidate();
     return hit;
+  };
+
+  /** 指定が records の server に一致する段（server_id → peer id → host 名 → 名前）。最初に 1 件以上一致した段の記録を返す。 */
+  const recordsMatching = (cands: RemoteRecord[], sel: string): RemoteRecord[] => {
+    const tiers: Array<(r: RemoteRecord) => boolean> = [
+      (r) => r.server_id === sel,
+      (r) => peerOfRec(r) === sel || r.server === sel,
+      (r) => sameHost(r.serverHost, sel),
+      (r) => r.serverName === sel,
+    ];
+    for (const t of tiers) {
+      const hit = cands.filter(t);
+      if (hit.length > 0) return hit;
+    }
+    return [];
   };
 
   /** remote_id（省略時は全ての記録）と server から記録を 1 件決める。複数あれば server で絞らせる。 */
@@ -620,16 +808,25 @@ export function createRemoteManager(opts: {
     let cands = (remote_id === undefined ? [...records] : records.filter((r) => r.remote_id === remote_id)).filter(visible);
     if (cands.length === 0) throw new Error(`未定義の remote: ${remote_id ?? "（remote_id 省略。remote が無い）"}`);
     if (server !== undefined) {
-      const peer = await link.selectPeer(server);
-      cands = cands.filter((r) => sameServer(r, peer));
-      if (cands.length === 0) throw new Error(`その server に remote ${remote_id ?? ""} は無い: ${server}`);
+      // 記録に書かれた server_id / peer / host で探す（server が今見えなくても指せる）。無ければ今の発見結果（識別つき）で探す
+      let hit = recordsMatching(cands, server);
+      if (hit.length === 0) {
+        const live = await livePeers().catch(() => [] as ServerPeer[]);
+        const peers = matchServerPeers(live, server);
+        hit = cands.filter((r) => peers.some((p) => sameServer(r, p, live)));
+      }
+      if (hit.length === 0) throw new Error(`その server に remote ${remote_id ?? ""} は無い: ${server}`);
+      // 同じ指定が複数の server の記録に一致する（同じ host に server が 2 つなど）なら、取り違えない
+      const servers = new Map(hit.map((r) => [serverKeyOf(r), r]));
+      if (servers.size > 1) throw new Error(ambiguousServerMessage(server, [...servers.values()].map(refOf)));
+      cands = hit;
     }
     if (cands.length > 1) {
       const distinctIds = new Set(cands.map((r) => r.remote_id)).size > 1;
       throw new Error(
         distinctIds
           ? `remote_id 省略では 1 件に決まらない（remote_id で指定: ${cands.map((r) => r.remote_id).join(", ")}）`
-          : `remote ${remote_id ?? "（remote_id 省略）"} は複数の server にある（server で指定: ${cands.map((r) => `${r.serverName}(${r.server})`).join(", ")}）`,
+          : `remote ${remote_id ?? "（remote_id 省略）"} は複数の server にある（server で指定: ${cands.map((r) => describeServer(refOf(r))).join(" / ")}）`,
       );
     }
     return cands[0];
@@ -665,8 +862,7 @@ export function createRemoteManager(opts: {
     return next;
   };
 
-  return {
-    async restore() {
+  const restoreInner = async (): Promise<void> => {
       const loaded: RemoteRecord[] = [];
       /** session の cap（session × server ごとに 1 件。そのまま復元する）。 */
       const sessioned: RemoteRecord[] = [];
@@ -690,28 +886,55 @@ export function createRemoteManager(opts: {
         if (r.session !== undefined) sessioned.push(r);
         else loaded.push(r);
       }
+      // 旧形式（server_id の無い記録）を server_id へ読み替える。元の remotes.json は先に退避する（既にあれば上書きしない）。
+      // 対応する server が今見えない・識別を返さない記録は、peer id のまま残す（"unknown" を悪化させない。その server が hello を返した時に findPeer / resolveRecord が引き継ぐ）。
+      // 失敗しても起動は止めない。
+      const all = [...sessioned, ...loaded];
+      let live: ServerPeer[] = [];
+      try {
+        if (all.some((r) => r.server_id === undefined)) await opts.backup?.();
+      } catch (e) {
+        log(`remotes.json の退避に失敗（続行）: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      try {
+        live = await livePeers();
+      } catch (e) {
+        log(`server の発見に失敗（旧形式の読み替えは後で）: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      let upgraded = 0;
+      for (const r of all) {
+        try {
+          const p = live.find((x) => (r.server_id !== undefined ? x.server_id === r.server_id : x.server_id !== undefined && legacyMatches(r, x, live)));
+          if (!p) continue;
+          const wasLegacy = r.server_id === undefined;
+          syncRecord(r, p);
+          if (wasLegacy) upgraded++;
+        } catch (e) {
+          log(`記録の読み替えに失敗（そのまま残す）: ${r.remote_id} ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
       // server ごとに 1 件にする。同じ server に複数ある（作業ごとの cap の名残）時は、動いている記録を最優先、同順位なら最新の 1 件を残し、他は stop_cap を送って消す（1 回限りの後始末）。
       // 同じ server = peer id が同じ、または名前 + host が同じ。host の無い旧記録は、今の peer で同名の server が 1 つだけと確かめられた時だけ、その host の server とみなす。
       // 確かめられない（peer が引けない・同名の peer が複数）host 無しの記録は、どの記録とも一緒にせず、stop_cap も送らずにそのまま残す（次の status 成功時に host が埋まる）
-      let livePeers: ServerPeer[] = [];
-      try {
-        livePeers = await link.peers();
-      } catch {
-        // peer が引けない
-      }
-      const hostOf = (r: RemoteRecord): string | undefined => {
+      const hostOfRec = (r: RemoteRecord): string | undefined => {
         if (r.serverHost !== undefined) return r.serverHost;
-        const same = livePeers.filter((p) => p.name === r.serverName);
+        const same = live.filter((p) => p.name === r.serverName);
         return same.length === 1 ? same[0].hostname : undefined;
       };
       const surplus: RemoteRecord[] = [];
       const groups: RemoteRecord[][] = [];
       for (const r of loaded) {
-        const h = hostOf(r);
+        const h = hostOfRec(r);
         const g =
           h === undefined && r.serverHost === undefined
             ? undefined
-            : groups.find((m) => m.some((x) => x.server === r.server || (x.serverName === r.serverName && hostOf(x) !== undefined && hostOf(x) === h)));
+            : groups.find((m) =>
+                m.some((x) =>
+                  x.server === r.server ||
+                  // 両方 server_id が分かっていて違うなら別の server（同じ host に同名の server が 2 つあっても取り違えない）
+                  (!(x.server_id !== undefined && r.server_id !== undefined) && x.serverName === r.serverName && hostOfRec(x) !== undefined && hostOfRec(x) === h),
+                ),
+              );
         if (g) g.push(r);
         else groups.push([r]);
       }
@@ -741,8 +964,11 @@ export function createRemoteManager(opts: {
           void announce(r);
         }
       }
+      const merged = consolidate();
+      const peersCleared = clearStalePeers(live);
+      restoring = false;
       if (records.length > 0 || surplus.length > 0) await persist();
-      log(`remote 記録を読込: ${records.length} 件${migrated > 0 ? `（旧形式から引き継ぎ ${migrated} 件）` : ""}${surplus.length > 0 ? `（同じ server の余分な旧形式 ${surplus.length} 件は stop_cap を送って記録を消す）` : ""}`);
+      log(`remote 記録を読込: ${records.length} 件${upgraded > 0 ? `（server_id へ引き継ぎ ${upgraded} 件）` : ""}${merged > 0 ? `（同じ server_id の重複 ${merged} 件を整理）` : ""}${peersCleared > 0 ? `（古い到達先 ${peersCleared} 件を消した）` : ""}${migrated > 0 ? `（旧形式から引き継ぎ ${migrated} 件）` : ""}${surplus.length > 0 ? `（同じ server の余分な旧形式 ${surplus.length} 件は stop_cap を送って記録を消す）` : ""}`);
       // 余分な旧形式: server に stop_cap を送る（届かなくても記録は消す。結果は center.log）
       await Promise.all(
         surplus.map(async (r) => {
@@ -756,6 +982,16 @@ export function createRemoteManager(opts: {
           }
         }),
       );
+  };
+
+  return {
+    async restore() {
+      restoring = true;
+      try {
+        await restoreInner();
+      } finally {
+        restoring = false;
+      }
     },
 
     async send(input) {
@@ -763,13 +999,14 @@ export function createRemoteManager(opts: {
       if (input.goal.length === 0 || input.goal.includes("\0")) throw new Error("goal が不正（空・NUL 文字は不可）");
       if (!OWNER_PATTERN.test(input.owner)) throw new Error("owner は英数字と _ - のみ");
       const peer = await link.selectPeer(input.server);
+      const live = await livePeers().catch(() => [peer]);
       // protocol の版が合わない・更新待ちの server へは、記録を作らず isError で返す（session が後で再送できる）
       const blocked = link.gate?.(peer, "task");
       if (blocked) throw new Error(blocked.message);
-      return serial(peer.id, async () => {
+      return serial(peer.server_id ?? peer.id, async () => {
         // cap は session × server に 1 つ。cap_id は center-id と session 名から決まる。無ければ記録を作り、cap は server が最初の task で作る
         // 既存の記録があればその remote_id（session の改名後も cap_id は変えない）
-        let rec = findRecord(peer, input.owner);
+        let rec = findRecord(peer, input.owner, live);
         const cid = rec?.remote_id ?? sessionCapId(capId, input.owner);
         const st = await link.statusOn(peer, { cap_id: cid });
         if (st.type === "error") throw new Error(`server の cap を確かめられない: ${st.message}`);
@@ -780,12 +1017,11 @@ export function createRemoteManager(opts: {
         const taskId = newTaskId();
         const now = new Date().toISOString();
         if (!rec) {
-          rec = { remote_id: cid, session: input.owner, server: peer.id, serverName: peer.name, ...(peer.hostname ? { serverHost: peer.hostname } : {}), state: "running", createdAt: now, pending: [] };
+          rec = { remote_id: cid, session: input.owner, server: peer.server_id ?? peer.id, serverName: peer.name, state: "running", createdAt: now, pending: [] };
           records.push(rec);
         }
-        rec.server = peer.id;
-        rec.serverName = peer.name;
-        if (peer.hostname) rec.serverHost = peer.hostname;
+        syncRecord(rec, peer);
+        consolidate();
         // cap を作る時は、記録も作った時の値にする
         if (!exists && !workerModel) delete rec.worker_model;
         if (workerModel) rec.worker_model = workerModel;
@@ -799,7 +1035,7 @@ export function createRemoteManager(opts: {
         inflight.set(target, (inflight.get(target) ?? 0) + 1);
         inflightTasks.set(target, (inflightTasks.get(target) ?? new Set<string>()).add(taskId));
         await persist();
-        log(`remote 指示: ${cid} task_id=${taskId} owner=${input.owner} server=${peer.name}(${peer.id}) ${exists ? "既存の cap へ" : "cap を作成（最初の task）"}`);
+        log(`remote 指示: ${cid} task_id=${taskId} owner=${input.owner} server=${describeServer({ ...peer, peerId: peer.id })} ${exists ? "既存の cap へ" : "cap を作成（最初の task）"}`);
         const settle = (res: { ok: boolean; text: string; error?: string }, kind: "cap_result" | "error" | "transport", taskResult?: TaskResultReply): void => {
           inflight.set(target, Math.max(0, (inflight.get(target) ?? 1) - 1));
           inflightTasks.get(target)?.delete(taskId);
@@ -824,7 +1060,10 @@ export function createRemoteManager(opts: {
         );
         return {
           remote_id: cid,
-          server: peer.id,
+          server: peer.server_id ?? peer.id,
+          ...(peer.server_id ? { server_id: peer.server_id } : {}),
+          peer: peer.id,
+          ...(hostOf(peer) ? { host: hostOf(peer) } : {}),
           serverName: peer.name,
           state: "running" as const,
           created: !exists,
@@ -888,17 +1127,11 @@ export function createRemoteManager(opts: {
         if (stateOf(rec) === "running" && !force) throw new Error(`remote を止められない: ${msg}（force: true で記録だけ消せる）`);
         warning = `server へ stop_cap を送れなかった: ${msg}`;
       }
-      const i = records.indexOf(rec);
-      if (i >= 0) records.splice(i, 1);
-      inflight.delete(rec);
-      inflightTasks.delete(rec);
-      settling.delete(rec);
-      statusIdleAt.delete(rec);
-      unschedule(rec);
-      opts.activity?.forget(rec.remote_id, rec.server);
+      forgetRecord(rec);
+      opts.activity?.forget(rec.remote_id, peerOfRec(rec) ?? rec.server);
       wake();
       await persist();
-      log(`remote 削除: ${rec.remote_id} server=${rec.serverName} stopped=${stopped}${warning ? ` warning=${warning}` : ""}`);
+      log(`remote 削除: ${rec.remote_id} server=${describeServer(refOf(rec))} stopped=${stopped}${warning ? ` warning=${warning}` : ""}`);
       return { remote_id: rec.remote_id, deleted: true, stopped, ...(warning ? { warning } : {}) };
     },
 
@@ -912,7 +1145,7 @@ export function createRemoteManager(opts: {
       const reply = await link.workerReplyOn(peer, { cap_id: rec.remote_id, worker_id, text });
       if (reply.type === "error") throw new Error(reply.message);
       log(`remote worker_reply: ${rec.remote_id} worker=${worker_id} server=${rec.serverName}`);
-      return { remote_id: rec.remote_id, server: peer.id, worker_id: reply.worker_id, accepted: true as const };
+      return { remote_id: rec.remote_id, server: peer.server_id ?? peer.id, worker_id: reply.worker_id, accepted: true as const };
     },
 
     onWorkerReport(report, fromId) {
@@ -963,6 +1196,18 @@ export function createRemoteManager(opts: {
       applyResult(rec, resultOf(reply), reply.type === "error" ? "error" : "cap_result", reply.type === "task_result" ? reply : undefined);
       log(`remote 結果を更新: ${rec.remote_id} state=${stateOf(rec)}`);
       return true;
+    },
+
+    async prune() {
+      let live: ServerPeer[] = [];
+      try {
+        live = await livePeers();
+      } catch (e) {
+        // 発見できない間は到達先を消さない（server が落ちているのか broker が落ちているのか区別できない）
+        log(`整理: server の発見に失敗（到達先は消さない）: ${e instanceof Error ? e.message : String(e)}`);
+        return { duplicates: consolidate(), peers: 0 };
+      }
+      return { duplicates: consolidate(), peers: clearStalePeers(live) };
     },
 
     list: (filter) =>
