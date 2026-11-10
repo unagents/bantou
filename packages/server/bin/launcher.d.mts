@@ -6,4 +6,5 @@ export interface LauncherOptions {
   env?: Record<string, string | undefined>;
   log?: (msg: string) => void;
 }
+export function workspaceOf(configPath: string): string;
 export function runLauncher(opts: LauncherOptions): Promise<number>;

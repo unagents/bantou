@@ -3,6 +3,7 @@ import { describeSystemInstructions } from "./system-instructions.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Config } from "./config.js";
 import type { Follow } from "./follow.js";
+import type { Logger } from "./log.js";
 import type { LoginFlow } from "./login.js";
 import type { RemoteManager } from "./remotes.js";
 import type { RemoteControlSupervisor } from "./remote-control.js";
@@ -32,9 +33,11 @@ export function createCenterServer(deps: {
   systemInstructions?: { id: string; version: number; title: string }[];
   /** session の再ログイン（pty 入力が要るので wrapper 経由の起動がある時だけ）。 */
   login?: LoginFlow;
+  /** server_retire のログ。 */
+  log?: Logger;
 }): McpServer {
   const server = new McpServer({ name: "bantou-center", version: packageVersion() });
-  registerTools(server, { systemInstructions: deps.systemInstructions ?? describeSystemInstructions(), supervisor: deps.supervisor, link: deps.link, sessions: deps.sessions, remotes: deps.remotes, follow: deps.follow, login: deps.login, workspace: deps.config.workspace });
+  registerTools(server, { systemInstructions: deps.systemInstructions ?? describeSystemInstructions(), supervisor: deps.supervisor, link: deps.link, sessions: deps.sessions, remotes: deps.remotes, follow: deps.follow, login: deps.login, workspace: deps.config.workspace, ...(deps.log ? { log: deps.log } : {}) });
   return server;
 }
 

@@ -9,6 +9,7 @@ import {
   isHelloCommand, isUpdateServerCommand, isValidServerVersion, isErrorCode, ERROR_CODES,
   FOLLOW_MIN_PROTOCOL, SERVER_VERSION_PATTERN, SERVER_ID_PATTERN, MODEL_PATTERN, isValidModel,
   isTaskCommand, isWorkerReplyCommand, isWorkerRole, isWorkerReportKind,
+  isRetireServerCommand, supportsRetire, RETIRE_MIN_PROTOCOL, RETIRE_EXIT_CODE,
 } from "../dist/index.js";
 
 const activityAgent = {
@@ -195,7 +196,7 @@ test("messenger/protocol.json matches MESSENGER_PROTOCOL and the message set", (
   assert.equal(manifest.version, MESSENGER_PROTOCOL.version);
   assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
   assert.equal(typeof manifest.description, "string");
-  assert.deepEqual(Object.keys(manifest.messages).sort(), ["activity", "cap_result", "error", "hello", "hello_result", "kick_cap", "status", "status_result", "stop_cap", "stop_result", "task", "task_result", "update_result", "update_server", "worker_reply", "worker_reply_result", "worker_report"]);
+  assert.deepEqual(Object.keys(manifest.messages).sort(), ["activity", "cap_result", "error", "hello", "hello_result", "kick_cap", "retire_result", "retire_server", "status", "status_result", "stop_cap", "stop_result", "task", "task_result", "update_result", "update_server", "worker_reply", "worker_reply_result", "worker_report"]);
   for (const [k, schema] of Object.entries(manifest.messages)) {
     assert.equal(schema.type, "object", k);
     assert.equal(schema.properties.type.const, k, k);
@@ -228,8 +229,8 @@ test("stop_cap / stop_result", () => {
   assert.equal(isServerReply({ ...stopResult, ok: false }), false);
   assert.equal(isServerReply({ ...stopResult, cap_id: "a b" }), false);
   assert.ok(isServerReply({ bantou: 1, type: "error", ok: false, message: "x", command: "stop_cap", cap_id: "c1" }));
-  assert.deepEqual(manifest.messages.error.properties.command.enum, ["kick_cap", "resume_worker", "stop_cap", "status", "hello", "update_server", "task", "worker_reply"]);
-  assert.equal(MESSENGER_PROTOCOL.version, "1.7.0");
+  assert.deepEqual(manifest.messages.error.properties.command.enum, ["kick_cap", "resume_worker", "stop_cap", "status", "hello", "update_server", "task", "worker_reply", "retire_server"]);
+  assert.equal(MESSENGER_PROTOCOL.version, "1.8.0");
 });
 
 test("model: kick_cap の model / worker_model は省略可、形式を検証、知らない版は無視できる", () => {
@@ -318,9 +319,9 @@ test("error code / retryable", () => {
   assert.ok(isServerReply({ bantou: 1, type: "error", ok: false, message: "x" }));
 });
 
-test("protocol version 1.7.0 (server identity; 1.6.0 added status cap_id)", () => {
-  assert.equal(MESSENGER_PROTOCOL.version, "1.7.0");
-  assert.equal(manifest.version, "1.7.0");
+test("protocol version 1.8.0 (retire_server; 1.7.0 added server identity, 1.6.0 status cap_id)", () => {
+  assert.equal(MESSENGER_PROTOCOL.version, "1.8.0");
+  assert.equal(manifest.version, "1.8.0");
 });
 
 test("status accepts an optional cap_id (1.6.0)", () => {
@@ -433,4 +434,70 @@ test("server identity (1.7.0): malformed identity fields are rejected", () => {
     assert.equal(isServerReply({ ...statusReply, [f]: 1 }), false, "status " + f);
   }
   for (const f of ["host", "user", "workspace"]) assert.equal(isServerReply({ ...helloResult, [f]: 1 }), false, "hello " + f);
+});
+
+// -- retire_server / retire_result (1.8.0) ---------------------------------------
+
+const retireOk = {
+  bantou: 1, type: "retire_result", ok: true, state: "retiring", stopped: { caps: 1, workers: 2 },
+  exit_at: "2026-11-10T08:00:03.000Z", exit_code: 76,
+  host_steps: ["sudo systemctl disable --now bantou-server.service && sudo rm /etc/systemd/system/bantou-server.service && sudo systemctl daemon-reload", "sudo userdel -r 'bantou'"],
+};
+
+test("retire_server: server_id と reason は省略可。形式の違うものと未知の型は拒否", () => {
+  assert.ok(isRetireServerCommand({ bantou: 1, type: "retire_server" }));
+  assert.ok(isRetireServerCommand({ bantou: 1, type: "retire_server", server_id: "srv-0a1b2c3d4e", reason: "lenovo の残り" }));
+  assert.deepEqual(parseServerCommand(JSON.stringify({ bantou: 1, type: "retire_server" })), { bantou: 1, type: "retire_server" });
+  for (const id of ["", "a b", "../x", "x".repeat(65), 1, null]) assert.equal(isServerCommand({ bantou: 1, type: "retire_server", server_id: id }), false, String(id));
+  for (const r of [1, null, "a\0b"]) assert.equal(isServerCommand({ bantou: 1, type: "retire_server", reason: r }), false, String(r));
+  assert.equal(isServerCommand({ bantou: 2, type: "retire_server" }), false);
+  assert.equal(isServerCommand({ bantou: 1, type: "retire_servers" }), false);
+  // 余計な field は許す（前方互換）
+  assert.ok(isServerCommand({ bantou: 1, type: "retire_server", future: 1 }));
+});
+
+test("retire_result: 必須 field と 1..3 行の host_steps を検証。identity と service は省略可", () => {
+  assert.ok(isServerReply(retireOk));
+  assert.deepEqual(parseServerReply(JSON.stringify(retireOk)), retireOk);
+  const full = { ...retireOk, server_id: "srv-1", host: "lenovo", user: "bantou", workspace: "/home/bantou", service: { manager: "systemd", name: "bantou-server.service", detected: true } };
+  assert.ok(isServerReply(full));
+  assert.ok(isServerReply({ ...retireOk, service: { manager: "none" } }));
+  for (const bad of [
+    { ok: false }, { state: "retired" }, { stopped: { caps: -1, workers: 0 } }, { stopped: { caps: 1.5, workers: 0 } }, { stopped: { caps: 1 } }, { stopped: null },
+    { exit_at: 1 }, { exit_code: "76" }, { exit_code: 7.5 }, { host_steps: [] }, { host_steps: ["a", "b", "c", "d"] }, { host_steps: [""] }, { host_steps: [1] }, { host_steps: "x" },
+    { service: { manager: "docker" } }, { service: { manager: "systemd", detected: "yes" } }, { server_id: "a b" },
+  ]) assert.equal(isServerReply({ ...retireOk, ...bad }), false, JSON.stringify(bad));
+  for (const k of ["stopped", "exit_at", "exit_code", "host_steps", "state"]) {
+    const { [k]: _omit, ...rest } = retireOk;
+    assert.equal(isServerReply(rest), false, k);
+  }
+});
+
+test("error: command に retire_server、retiring:true を載せられる。旧形式（retiring 無し）も受理。retiring は true だけ", () => {
+  assert.ok(isServerReply({ bantou: 1, type: "error", ok: false, message: "x", command: "retire_server" }));
+  assert.ok(isServerReply({ bantou: 1, type: "error", ok: false, message: "退役中", command: "task", cap_id: "c1", task_id: "t1", retryable: false, retiring: true }));
+  assert.equal(isServerReply({ bantou: 1, type: "error", ok: false, message: "x", retiring: false }), false);
+  assert.equal(isServerReply({ bantou: 1, type: "error", ok: false, message: "x", retiring: "yes" }), false);
+  assert.ok(isServerReply({ bantou: 1, type: "error", ok: false, message: "x" }));
+});
+
+test("retire: 1.8.0 未満の server には送らない（supportsRetire）。版が不明・不正は false", () => {
+  assert.equal(RETIRE_MIN_PROTOCOL, "1.8.0");
+  assert.equal(RETIRE_EXIT_CODE, 76);
+  for (const v of ["1.8.0", "1.8.1", "1.9.0", "2.0.0", "1.10.0", "1.8.0-rc1"]) assert.equal(supportsRetire(v), true, v);
+  for (const v of ["1.7.0", "1.7.9", "1.3.0", "0.9.0", "1.0.0"]) assert.equal(supportsRetire(v), false, v);
+  for (const v of [undefined, "", "abc", "1.8", "v1.8.0"]) assert.equal(supportsRetire(v), false, String(v));
+  assert.equal(supportsRetire(MESSENGER_PROTOCOL.version), true);
+});
+
+test("retire: manifest に retire_server / retire_result があり、error.command の enum と一致する", () => {
+  assert.ok(manifest.messages.retire_server);
+  assert.ok(manifest.messages.retire_result);
+  assert.ok("retiring" in manifest.messages.error.properties);
+  assert.deepEqual(manifest.messages.retire_result.required.slice().sort(), ["bantou", "type", "ok", "state", "stopped", "exit_at", "exit_code", "host_steps"].sort());
+});
+
+test("retire: 旧 server の hello_result / status_result など既存の返信形式は変わらず受理される", () => {
+  assert.ok(isServerReply({ bantou: 1, type: "hello_result", ok: true, server_version: "0.6.2", protocol_version: "1.7.0", update: null, last_update: null }));
+  assert.ok(isServerReply({ bantou: 1, type: "status_result", ok: true, caps: [], workers: [] }));
 });

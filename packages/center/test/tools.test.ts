@@ -71,12 +71,12 @@ async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partia
 
 const text = (r: unknown): string => (r as { content: { text: string }[] }).content[0].text;
 
-test("外向けの tool は 22 個。remote_create / remote_delete / remote_send / cap_kick は無い", async () => {
+test("外向けの tool は 23 個。remote_create / remote_delete / remote_send / cap_kick は無い", async () => {
   const { client, close } = await connect();
   const names = (await client.listTools()).tools.map((t) => t.name).sort();
   assert.deepEqual(names, [
     "center_info", "center_settings_get", "center_settings_update", "rc_list", "rc_start", "rc_status", "rc_stop", "remote_list", "remote_wait",
-    "server_list", "server_peers", "server_status", "session_create", "session_delete", "session_list", "session_login", "session_login_code", "session_settings_get", "session_settings_update", "session_update", "worker_reply", "worker_resume",
+    "server_list", "server_peers", "server_retire", "server_status", "session_create", "session_delete", "session_list", "session_login", "session_login_code", "session_settings_get", "session_settings_update", "session_update", "worker_reply", "worker_resume",
   ]);
   for (const gone of ["remote_create", "remote_send", "remote_delete", "cap_kick"]) assert.ok(!names.includes(gone), gone);
   await close();

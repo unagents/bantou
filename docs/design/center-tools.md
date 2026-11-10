@@ -127,6 +127,15 @@
   - 移行先: center が master-cap に道具を持たせる手段（remote-control 以外の起動、または master-cap 向けの MCP 設定を渡せる起動）が取れたら、session 名入りの header を center が付けて引数 `owner` は不要にする。
   - owner は自己申告で認証しない。
 
+## C. server の運用（退役）
+
+| tool | 引数 | 返り値 | 動作 |
+|---|---|---|---|
+| `server_retire` | `server`（server_id / host 名 / peer id。省略不可）、`reason?` | `{ok, state: retiring \| already_retiring, server_id, host?, user?, workspace?, peer, stopped?: {caps, workers}, exit_at?, exit_code?, host_steps?, service?, records_removed, sessions, message}` | server を退役させる（取り消せない）。`server` を既存の selectPeer で 1 つに決め（曖昧ならエラー）、hello の `protocol_version` が 1.8.0 以上か確かめ（未対応・版不明は送らずエラー）、server_id を付けて `retire_server` を送り `retire_result` を待つ（60 秒）。受信後にその server の cap の記録を消し、発見から外す。無返信は退役と見なさない |
+
+- （確定: 2026-11-10）運用は protocol と center の tool で行い、master-cap は ssh しない。server を止める・外す手段が無かったため追加した。詳細は `packages/center/README.md` の「server の退役」。
+- （確定: 2026-11-10、利用者の指示）center 全体の除外設定（servers.exclude）は作らない。代わりに session ごとの使う server の範囲（プロジェクト設定の `servers`、`docs/design/project-settings.md`）。`remote_send` / `remote_delete` / `worker_reply` の `server` 候補はその範囲の中だけ（範囲外はエラー「この session の servers に無い」）。
+
 ## server 側（`stop_cap`）
 
 - protocol `bantou` を 1.0.0 → 1.1.0（`stop_cap` / `stop_result` 追加、error の `command` enum に `stop_cap`）。

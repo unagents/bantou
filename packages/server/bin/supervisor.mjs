@@ -7,13 +7,17 @@
 // BANTOU_HANDOFF_TOKEN、`--serve` / `--supervise` / `--handoff-protocol`）は、版をまたぐので変えるなら後方互換を保つ。
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 
 export const LOCK_FILE = "server.lock";
 export const READY_FILE = "server.ready";
 export const UPDATE_FILE = "update.json";
 export const EXIT_FILE = "server.exit";
+/** 退役の印（daemon の retire.ts RETIRED_FILE、bin/bantou.mjs と同じ名前）。在れば更新の再起動をしない。 */
+export const RETIRED_FILE = "server.retired";
+/** 退役した子の終了コード（retire.ts EXIT_RETIRED、protocol の RETIRE_EXIT_CODE）。 */
+export const EXIT_RETIRED = 76;
 /** 更新後の子が ready になるまでの猶予。超えたら直前の版へ巻き戻す。 */
 export const READY_TIMEOUT_MS = 120_000;
 /** 引き継ぎ先の取得・起動にかかる分の上乗せ（S2 が S3 を待つ上限 = READY_TIMEOUT_MS + これ）。 */
@@ -566,6 +570,15 @@ export async function runSupervisor(opts) {
       const ex = await run.exited;
       log(`子が終了 code=${ex.code} signal=${ex.signal}`);
       const upd = readJson(updatePath);
+      // 退役の印が在れば、update.json が残っていても次の版を起動しない（retire_server が更新の再起動と重なった時の多層防御）。
+      // 印の有無は --serve / --supervise の経路が見ないので、ここで止める。launcher へは server.exit 経由で 76 が伝わる
+      if (!stopping && upd && upd.state === "restart" && existsSync(join(workspace, RETIRED_FILE))) {
+        log("退役済み（server.retired）のため更新の再起動をしない");
+        tryUnlink(updatePath);
+        await clearOld();
+        result = EXIT_RETIRED;
+        break;
+      }
       if (!stopping && upd && upd.state === "restart" && typeof upd.spec === "string") {
         await clearOld();
         const to = typeof upd.to === "string" ? upd.to : null;

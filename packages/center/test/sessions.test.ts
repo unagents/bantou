@@ -644,3 +644,29 @@ test("list: 認証状態（auth / loginUrl / loginError）を supervisor の値�
   const after = mgr.list().find((s) => s.name === "pm1")!;
   assert.deepEqual([after.auth, after.loginUrl, after.loginError], ["login_required", "https://claude.com/cai/oauth/authorize?x", "Invalid code"]);
 });
+
+test("servers: session の servers は共通の servers を置き換える（和ではない）。session 未設定なら共通、どちらも無ければ undefined（全部）。空配列は「使わない」で保存され、null で戻る。旧形式（servers 無し）の settings は壊れない", async () => {
+  await writeFile(join(dir, "sessions.json"), JSON.stringify([{ name: "old", path: join(dir, "old"), permissionMode: "auto", settings: { instructions: "旧形式" } }]));
+  const { mgr } = setup();
+  await mgr.restore();
+  assert.equal(mgr.serversOf("old"), undefined, "旧形式（servers なし）は全部");
+  assert.deepEqual(mgr.getSettings("old").settings, { instructions: "旧形式" });
+  await mgr.create({ name: "a" });
+  await mgr.create({ name: "b", settings: { servers: ["lenovo", "srv-bbbbbbbbbb", "lenovo"] } });
+  assert.equal(mgr.serversOf("a"), undefined);
+  assert.deepEqual(mgr.serversOf("b"), ["lenovo", "srv-bbbbbbbbbb"], "重複は除く");
+  await mgr.updateCenterSettings({ servers: ["mac200"] });
+  assert.deepEqual(mgr.serversOf("a"), ["mac200"], "session 未設定は共通");
+  assert.deepEqual(mgr.serversOf("b"), ["lenovo", "srv-bbbbbbbbbb"], "session があれば共通は見ない（置き換え）");
+  assert.deepEqual(mgr.serversOf("old"), ["mac200"]);
+  await mgr.updateSettings("a", { servers: [] });
+  assert.deepEqual(mgr.serversOf("a"), [], "空配列 = どの server も使わない（共通より優先）");
+  assert.deepEqual(mgr.getSettings("a").settings, { servers: [] });
+  await mgr.updateSettings("a", { servers: null });
+  assert.deepEqual(mgr.serversOf("a"), ["mac200"], "null で session の指定を消すと共通に戻る");
+  await mgr.updateCenterSettings({ servers: null });
+  assert.equal(mgr.serversOf("a"), undefined);
+  assert.equal(mgr.serversOf("nope"), undefined);
+  const saved = JSON.parse(await readFile(join(dir, "sessions.json"), "utf8")) as SavedSession[];
+  assert.deepEqual(saved.find((x) => x.name === "b")!.settings, { servers: ["lenovo", "srv-bbbbbbbbbb"] });
+});

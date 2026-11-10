@@ -216,6 +216,19 @@ test("supervisor: update.json の restart で子だけ入れ替える（前の�
   });
 });
 
+test("supervisor: update.json の restart が残っていても、退役の印（server.retired）が在れば次の版を起動せず 76 で終わる", async () => {
+  await withWs(async (ws, configPath) => {
+    await mkdir(ws, { recursive: true });
+    await writeFile(join(ws, "server.retired"), "{}");
+    // 子は ready 後に update.json{restart} を書いて exit 0（退役が更新の再起動と重なった窓の再現）
+    const code = await run(ws, configPath, ["update:specB", "serve"]);
+    assert.equal(code, 76);
+    assert.equal((await starts(ws)).length, 1, "次の版の子を起動しない");
+    assert.equal(await stat(join(ws, "update.json")).then(() => true, () => false), false, "update.json は消す");
+    assert.equal(await stat(join(ws, "server.lock")).then(() => true, () => false), false);
+  });
+});
+
 test("supervisor: 更新後の子が ready 前に終了したら直前の版へ巻き戻し、update.json に failed を書く", async () => {
   await withWs(async (ws, configPath) => {
     const p = run(ws, configPath, ["update:bad", "crash", "serve"]);

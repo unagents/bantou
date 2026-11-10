@@ -67,6 +67,23 @@ export class MockBantou {
   };
   /** When set, `server_peers` fails with this message. */
   centerVersionsError: string | null = null;
+  /** `server_retire` calls received (arguments as sent). */
+  centerRetireCalls: unknown[] = [];
+  /** When set, `server_retire` fails with this message (isError result: not supported, no reply, ...). */
+  centerRetireError: string | null = null;
+  /** The `server_retire` answer (center `RetireOutcome`) for the server_id asked; the peer then leaves `server_peers`, like the center drops a retired peer. */
+  centerRetireResult: Record<string, unknown> = {
+    ok: true,
+    state: "retiring",
+    stopped: { caps: 2, workers: 3 },
+    exit_at: "2026-11-10T09:00:03.000Z",
+    exit_code: 76,
+    host_steps: ["systemctl disable --now bantou-server.service", "userdel bantou-srv", "rm -rf /home/bantou-srv/ws"],
+    service: { manager: "systemd", name: "bantou-server.service", detected: true },
+    records_removed: 2,
+    sessions: ["alpha"],
+    message: "mock",
+  };
   /** `remote_list` result (center `RemoteView[]`): one remote-cap per server (`remote_id` = cap_id, `owners`, `pending`, latest `result`; no history). */
   centerRemotes: unknown[] = [];
   /** `worker_reply` calls received (arguments as sent). */
@@ -623,6 +640,15 @@ export class MockBantou {
               this.centerSessionsChanged("changed", project);
             }
             return text({ project, path: s.path, state: args.name === "rc_stop" ? "stopped" : "starting", pid: null, sessionUrl: null, restarts: 0 });
+          }
+          case "server_retire": {
+            this.centerRetireCalls.push(args.arguments);
+            if (this.centerRetireError) return { ...text({ error: this.centerRetireError }), isError: true };
+            const id = (args.arguments as { server: string }).server;
+            const v = this.centerVersions as { peers: Record<string, unknown>[] };
+            const peer = v.peers.find((p) => p.server_id === id);
+            v.peers = v.peers.filter((p) => p.server_id !== id);
+            return text({ ...this.centerRetireResult, server_id: id, host: peer?.host, user: peer?.user, workspace: peer?.workspace, peer: peer?.id });
           }
           case "server_list":
             return text(this.centerServers);

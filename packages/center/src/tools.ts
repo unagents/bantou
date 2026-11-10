@@ -8,6 +8,8 @@ import { LOGIN_CODE, type LoginFlow } from "./login.js";
 import { sessionCreateSchema, sessionUpdateSchema, SESSION_NAME, type SessionManager } from "./sessions.js";
 import type { Follow } from "./follow.js";
 import type { ServerLink } from "./server-link.js";
+import { retireServer } from "./retire.js";
+import type { Logger } from "./log.js";
 
 type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean };
 
@@ -75,6 +77,8 @@ export function registerTools(
     remotes: RemoteManager;
     follow?: Follow;
     workspace?: string;
+    /** server_retire のログ。省略時は出さない。 */
+    log?: Logger;
     /** session の再ログイン（pty 入力が要るので wrapper 経由の起動がある時だけ）。 */
     login?: LoginFlow;
     /** master-cap の起動時に付けるシステム埋め込み指示の一覧（center_info 用）。省略時は []。 */
@@ -82,6 +86,7 @@ export function registerTools(
   },
 ): void {
   const { supervisor, link, sessions, remotes, follow, workspace, login } = deps;
+  const log: Logger = deps.log ?? (() => {});
   const systemInstructions = deps.systemInstructions ?? [];
 
   // -- A. center 上の session（番頭が使う） --
@@ -119,7 +124,7 @@ export function registerTools(
     {
       title: "session の設定を取得",
       description:
-        "session のプロジェクト設定 { name, settings } を返す。settings は { instructions?: string（--append-system-prompt に渡す追加指示）, addDirs?: string[]（--add-dir で渡す参照フォルダ。絶対パス）, outputStyle?: string（claude の output style の markdown 本文。session のフォルダの .claude/output-styles/bantou.md に書いて --settings {\"outputStyle\":\"bantou\"} で選ぶ）, …将来の項目 }。未設定は {}。config 由来の project も {}",
+        "session のプロジェクト設定 { name, settings } を返す。settings は { instructions?: string（--append-system-prompt に渡す追加指示）, addDirs?: string[]（--add-dir で渡す参照フォルダ。絶対パス）, outputStyle?: string（claude の output style の markdown 本文。session のフォルダの .claude/output-styles/bantou.md に書いて --settings {\"outputStyle\":\"bantou\"} で選ぶ）, servers?: string[]（この session が remote_send / remote_delete / worker_reply で使える server＝host 名か server_id。未設定は center 共通の値、それも無ければ全部。空配列は使わない）, …将来の項目 }。未設定は {}。config 由来の project も {}",
       inputSchema: { name: z.string().regex(SESSION_NAME, "英数字と _ - のみ") },
     },
     ({ name }) => guard(async () => json(sessions.getSettings(name))),
@@ -129,7 +134,7 @@ export function registerTools(
     {
       title: "session の設定を更新",
       description:
-        "session のプロジェクト設定を項目ごとにマージ更新し、更新後の { name, settings } を返す。settings に書いた項目だけ変わる（省略した項目はそのまま）。null はその項目を削除。instructions は 16000 文字以内で、空文字は削除と同じ。addDirs は絶対パスの配列（20 個以内。空配列は削除と同じ。center 共通の addDirs と合わせて --add-dir に 1 つずつ付く）。outputStyle は 32000 文字以内で、空文字は削除と同じ（session の値があれば center 共通の outputStyle は使わない）。未知の項目は保持する。session_create で作った session のみ。動いている session には効かず、次の起動（再起動・--continue 含む）から効く",
+        "session のプロジェクト設定を項目ごとにマージ更新し、更新後の { name, settings } を返す。settings に書いた項目だけ変わる（省略した項目はそのまま）。null はその項目を削除。instructions は 16000 文字以内で、空文字は削除と同じ。addDirs は絶対パスの配列（20 個以内。空配列は削除と同じ。center 共通の addDirs と合わせて --add-dir に 1 つずつ付く）。outputStyle は 32000 文字以内で、空文字は削除と同じ（session の値があれば center 共通の outputStyle は使わない）。servers は host 名か server_id の配列（50 個以内。重複は除く。空配列は「どの server も使わない」として保存し、未設定＝全部と区別する。null で削除＝center 共通の値に戻る。session の servers があれば center 共通の servers は見ない＝置き換え）。servers は次の呼び出しからすぐ効く（起動し直し不要）。未知の項目は保持する。session_create で作った session のみ。動いている session には効かず、次の起動（再起動・--continue 含む）から効く",
       inputSchema: { name: z.string().regex(SESSION_NAME, "英数字と _ - のみ"), settings: projectSettingsPatchSchema },
     },
     ({ name, settings }) => guard(async () => json(await sessions.updateSettings(name, settings))),
@@ -139,7 +144,7 @@ export function registerTools(
     {
       title: "center 共通の設定を取得",
       description:
-        "center 共通の設定 { settings } を返す。settings は { instructions?: string（全 session の --append-system-prompt の先頭に付く共通の追加指示。session の追加指示は空行を挟んでその後ろ）, addDirs?: string[]（全 session に --add-dir で付く参照フォルダ。絶対パス。session の addDirs はその後ろ）, outputStyle?: string（全 session の claude の output style の markdown 本文。session に outputStyle があればそちらを使う）, …将来の項目 }。未設定は {}",
+        "center 共通の設定 { settings } を返す。settings は { instructions?: string（全 session の --append-system-prompt の先頭に付く共通の追加指示。session の追加指示は空行を挟んでその後ろ）, addDirs?: string[]（全 session に --add-dir で付く参照フォルダ。絶対パス。session の addDirs はその後ろ）, outputStyle?: string（全 session の claude の output style の markdown 本文。session に outputStyle があればそちらを使う）, servers?: string[]（host 名か server_id。session に servers が無い時に使う、session が使える server の範囲。未設定＝全部）, …将来の項目 }。未設定は {}",
     },
     () => guard(async () => json(sessions.getCenterSettings())),
   );
@@ -148,7 +153,7 @@ export function registerTools(
     {
       title: "center 共通の設定を更新",
       description:
-        "center 共通の設定を項目ごとにマージ更新し、更新後の { settings } を返す。settings に書いた項目だけ変わる。null はその項目を削除。instructions は 16000 文字以内で、空文字は削除と同じ。addDirs は絶対パスの配列（20 個以内。空配列は削除と同じ）。outputStyle は 32000 文字以内で、空文字は削除と同じ。全 session の次の起動（再起動・--continue 含む）から効く。動いている session には効かない",
+        "center 共通の設定を項目ごとにマージ更新し、更新後の { settings } を返す。settings に書いた項目だけ変わる。null はその項目を削除。instructions は 16000 文字以内で、空文字は削除と同じ。addDirs は絶対パスの配列（20 個以内。空配列は削除と同じ）。outputStyle は 32000 文字以内で、空文字は削除と同じ。servers は host 名か server_id の配列（50 個以内。空配列は「どの server も使わない」。null で削除＝全部。session 側に servers があればそちらが優先）で、次の呼び出しからすぐ効く。全 session の次の起動（再起動・--continue 含む）から効く。動いている session には効かない",
       inputSchema: { settings: projectSettingsPatchSchema },
     },
     ({ settings }) => guard(async () => json(await sessions.updateCenterSettings(settings))),
@@ -300,6 +305,20 @@ export function registerTools(
         if (refresh) await follow.check();
         return json(follow.snapshot());
       }),
+  );
+  server.registerTool(
+    "server_retire",
+    {
+      title: "server を退役させる",
+      description:
+        "server を退役させる（取り消せない）。server は新しい作業を断り、実行中の cap / worker を全部止め、messenger から外れて終了する（exit 76。systemd / launchd は戻さない）。server 引数は server_id / host 名 / peer id（host 名が複数の server に一致する時は error。候補を user と workspace 付きで返すので server_id で指し直す）。送る前に hello で protocol の版を確かめ、退役に未対応（protocol 1.8.0 未満・版不明）なら送らず error（host で手動で止める）。retire_result を受けたら、その server の cap の記録（session × server）を center から消し、発見からも外す（server には何も送らない）。返り値 { ok, state: retiring | already_retiring, server_id, host, user, workspace, peer, stopped: {caps, workers}, exit_at, exit_code, host_steps（host で root が行う unit 削除 → user 削除 → workspace 削除。server 自身は権限が無く行えない）, service, records_removed, sessions, message }。返信が無い・timeout（60 秒）は退役したとは見なさず error（記録も消さない）。既に退役中なら state=already_retiring",
+      inputSchema: {
+        server: z.string().min(1).describe("退役させる server の server_id、host 名、peer id（server_peers / server_list で確認）。省略不可（先頭を退役させない）"),
+        reason: z.string().max(500).refine(noNul, noNulMsg).optional().describe("退役の理由（server の log と server.retired に残る）"),
+      },
+    },
+    ({ server: sel, reason }) =>
+      guard(async () => json(await retireServer({ link, remotes, log }, { server: sel, ...(reason ? { reason } : {}) }))),
   );
   server.registerTool(
     "worker_resume",

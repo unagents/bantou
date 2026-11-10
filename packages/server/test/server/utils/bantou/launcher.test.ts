@@ -89,6 +89,16 @@ test("launcher: supervisor の終了コードが server.exit 経由で launcher 
   });
 });
 
+test("launcher: 退役した子の exit 76 は launcher の終了コード 76 になり、再起動されない（子は 1 回だけ起動、lock は解放）", async () => {
+  await withWs(async (ws, configPath) => {
+    const code = await launch(ws, configPath, ["exit:76", "serve"]);
+    assert.equal(code, 76);
+    assert.equal((await starts(ws)).length, 1);
+    assert.deepEqual(JSON.parse(await readFile(join(ws, "server.exit"), "utf8")), { launcher: process.pid, code: 76 });
+    assert.equal(readLock(ws), undefined);
+  });
+});
+
 test("launcher: supervisor が引き継いで入れ替わっても残り、系列が消えてから server.exit の code で終わる。信号は新 supervisor に中継される", async () => {
   await withWs(async (ws, configPath) => {
     try {

@@ -1,6 +1,6 @@
 import { SERVER_ID_PATTERN } from "@agent-hand/bantou-protocol";
 
-/** server が hello_result / status_result で名乗る識別（protocol 1.7.0。全て無いことがある = 旧 server）。 */
+/** server が hello_result / status_result で名乗る識別（protocol 1.7.0 で追加、現行 1.8.0 も名乗る。全て無いことがある = 旧 server）。 */
 export interface ServerIdentity {
   server_id?: string;
   host?: string;

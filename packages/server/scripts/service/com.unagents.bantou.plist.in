@@ -23,7 +23,14 @@
     <key>PATH</key><string>@HOME@/.local/bin:@HOME@/.bun/bin:@NODE_BIN@:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
   </dict>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
+  <!-- 退役（retire_server）した server は <workspace>/server.retired を書いて終わる。その file がある間は再起動しない（PathState）。無ければ従来どおり常に起動し直す。workspace = HOME の構成（install-service.sh の既定）が前提 -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>PathState</key>
+    <dict>
+      <key>@HOME@/server.retired</key><false/>
+    </dict>
+  </dict>
   <key>ThrottleInterval</key><integer>10</integer>
   <key>StandardOutPath</key><string>@HOME@/server.log</string>
   <key>StandardErrorPath</key><string>@HOME@/server.log</string>

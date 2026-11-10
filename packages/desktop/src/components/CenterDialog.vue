@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { centerConnection, centerTool } from "~/api";
+import { centerConnection, centerTool, serverRetire } from "~/api";
+import { retireBlockedReason } from "~/composables/serverRetire";
 import type {
+  CenterRetireResult,
   CenterConnection,
   CenterFollowState,
   CenterRcStatus,
@@ -138,6 +140,45 @@ const versionLabel: Record<CenterFollowState, string> = {
   lost: "更新失敗",
 };
 const sourceLabel = { remote: "remote", sidecar: "sidecar" } as const;
+
+// -- retire (irreversible): a button per server row, a confirm dialog (cancel is the default), then the host steps --
+const retireBlocked = (r: ServerRow) =>
+  retireBlockedReason({ known: !!r.peer, protocolVersion: r.peer?.protocol_version, serverId: r.serverId });
+const retireTarget = ref<ServerRow | null>(null);
+const retireOpen = ref(false);
+const retireBusy = ref(false);
+const retireError = ref<string | null>(null);
+const cancelBtn = ref<{ $el: HTMLElement } | null>(null);
+// The safe button gets the focus when the dialog opens (the default of the dialog is to cancel, not to retire).
+const retireContent = {
+  onOpenAutoFocus: (e: Event) => {
+    e.preventDefault();
+    cancelBtn.value?.$el.focus();
+  },
+};
+const retireResult = ref<CenterRetireResult | null>(null);
+function askRetire(r: ServerRow) {
+  retireTarget.value = r;
+  retireError.value = null;
+  retireResult.value = null;
+  retireOpen.value = true;
+}
+async function doRetire() {
+  const r = retireTarget.value;
+  if (!r?.serverId || retireBusy.value) return;
+  retireBusy.value = true;
+  retireError.value = null;
+  try {
+    retireResult.value = await serverRetire(r.serverId);
+    void refresh();
+  } catch (e) {
+    retireError.value = errorOf(e);
+  } finally {
+    retireBusy.value = false;
+  }
+}
+const serviceLabel = (s: NonNullable<CenterRetireResult["service"]>) =>
+  s.manager === "none" ? "手で起動（service 管理なし）" : `${s.manager}${s.name ? ` ${s.name}` : ""}${s.detected === false ? "（既定名。未確認）" : ""}`;
 </script>
 
 <template>
@@ -234,6 +275,18 @@ const sourceLabel = { remote: "remote", sidecar: "sidecar" } as const;
                   :label="linkLabel[linkStateOf(r.link)]"
                   data-testid="center-server-link-badge"
                 />
+                <UButton
+                  class="ml-auto"
+                  size="xs"
+                  color="error"
+                  variant="outline"
+                  icon="i-lucide-power-off"
+                  label="退役"
+                  :disabled="!!retireBlocked(r)"
+                  :title="retireBlocked(r) ?? 'この server を退役させる（取り消せない）'"
+                  data-testid="center-server-retire"
+                  @click="askRetire(r)"
+                />
                 <span
                   v-if="r.peer?.state === 'updating' && r.peer.update?.running"
                   class="text-cork-muted"
@@ -251,6 +304,62 @@ const sourceLabel = { remote: "remote", sidecar: "sidecar" } as const;
               </p>
             </div>
             <p v-if="!rows.length" class="text-cork-muted text-xs" data-testid="center-versions-none">server なし</p>
+          </div>
+        </template>
+      </div>
+    </template>
+  </UModal>
+
+  <UModal
+    v-model:open="retireOpen"
+    title="server を退役させる"
+    :description="retireResult ? '退役を受け付けた' : '取り消せない操作'"
+    :dismissible="!retireBusy"
+    :content="retireContent"
+    :ui="{ content: 'max-w-2xl' }"
+  >
+    <template #body>
+      <div v-if="retireTarget" class="flex flex-col gap-3" data-testid="retire-dialog">
+        <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs" data-testid="retire-target">
+          <dt class="text-cork-muted">host</dt>
+          <dd class="font-medium" data-testid="retire-host">{{ retireTarget.host }}</dd>
+          <dt class="text-cork-muted">server_id</dt>
+          <dd class="font-mono" data-testid="retire-server-id">{{ retireTarget.serverId }}</dd>
+          <template v-if="retireTarget.peer?.user || retireTarget.peer?.workspace">
+            <dt class="text-cork-muted">user / workspace</dt>
+            <dd data-testid="retire-who">{{ [retireTarget.peer?.user, retireTarget.peer?.workspace].filter(Boolean).join(" ") }}</dd>
+          </template>
+          <dt class="text-cork-muted">peer</dt>
+          <dd class="font-mono">{{ retireTarget.peerId }}</dd>
+        </dl>
+
+        <template v-if="!retireResult">
+          <p class="text-cork-danger-text text-xs" data-testid="retire-warning">
+            この server が実行中の cap / worker を全部止めて終了させる。再起動しない（systemd / launchd も戻さない）。取り消せない。center にある、この server の cap の記録（session × server）は消える。host に残る unit・user・workspace の削除は、退役後に表示する手順を root で行う
+          </p>
+          <p v-if="retireError" class="text-cork-danger-text text-xs whitespace-pre-wrap" data-testid="retire-error">{{ retireError }}</p>
+          <div class="flex justify-end gap-2">
+            <UButton ref="cancelBtn" label="取り消し" color="neutral" variant="soft" :disabled="retireBusy" data-testid="retire-cancel" @click="retireOpen = false" />
+            <UButton label="退役する" color="error" :loading="retireBusy" data-testid="retire-confirm" @click="doRetire" />
+          </div>
+        </template>
+
+        <template v-else>
+          <p class="text-xs" data-testid="retire-state">
+            {{ retireResult.state === "already_retiring" ? "既に退役中（server は止まっていく途中）" : "退役を受け付けた。server は終了する" }}
+          </p>
+          <p v-if="retireResult.stopped" class="text-xs" data-testid="retire-stopped">
+            止めた cap {{ retireResult.stopped.caps }} / worker {{ retireResult.stopped.workers }}<span v-if="retireResult.exit_at">（終了予定 {{ retireResult.exit_at }}）</span>
+          </p>
+          <p v-if="retireResult.service" class="text-xs" data-testid="retire-service">service: {{ serviceLabel(retireResult.service) }}</p>
+          <p class="text-cork-muted text-xs" data-testid="retire-records">center の記録 {{ retireResult.records_removed }} 件を消した<span v-if="retireResult.sessions.length">（session: {{ retireResult.sessions.join(", ") }}）</span></p>
+          <div v-if="retireResult.host_steps?.length" class="flex flex-col gap-1">
+            <span class="text-xs font-medium">host で消す手順（root で上から順に）</span>
+            <pre class="bg-cork-elevated overflow-x-auto rounded p-2 text-xs" data-testid="retire-host-steps">{{ retireResult.host_steps.join("\n") }}</pre>
+          </div>
+          <p v-else class="text-cork-muted text-xs" data-testid="retire-no-steps">host の手順は最初の退役の結果にだけ出る。server が止まった後は、host の unit・user・workspace を root で消す</p>
+          <div class="flex justify-end">
+            <UButton label="閉じる" color="neutral" data-testid="retire-close" @click="retireOpen = false" />
           </div>
         </template>
       </div>

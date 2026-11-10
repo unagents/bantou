@@ -1,9 +1,14 @@
 import { isAbsolute } from "node:path";
 import { z } from "zod";
+import { SERVER_ID_PATTERN } from "@agent-hand/bantou-protocol";
 import { SESSION_INSTRUCTIONS_MAX } from "./config.js";
 
 /** 参照フォルダ（`--add-dir`）の最大数（1 つの設定あたり）。 */
 export const ADD_DIRS_MAX = 20;
+/** session が使う server の指定（`servers`）の最大数（1 つの設定あたり）。 */
+export const SERVERS_MAX = 50;
+/** host 名の形式（英数字で始まり、英数字と . _ - のみ。253 文字以内）。server_id は SERVER_ID_PATTERN。 */
+export const HOST_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$/;
 
 /** 出力スタイル本文の最大文字数。 */
 export const OUTPUT_STYLE_MAX = 32_000;
@@ -22,8 +27,17 @@ export interface ProjectSettings {
    * `--settings {"outputStyle":"bantou"}` で選ぶ。session の値があれば共通の値は使わない（連結しない）。
    */
   outputStyle?: string;
+  /**
+   * この session が使ってよい server（host 名か server_id）。未設定 = 全部。空配列 = どの server も使わない。
+   * session に無ければ center 共通の値を使う（合成は置き換え。和ではない）。
+   */
+  servers?: string[];
   [key: string]: unknown;
 }
+
+const serverRefSchema = z
+  .string()
+  .refine((v) => SERVER_ID_PATTERN.test(v) || HOST_NAME_PATTERN.test(v), { message: "server の指定は host 名か server_id（英数字と . _ - のみ）" });
 
 const addDirSchema = z.string().min(1).refine((p) => isAbsolute(p), { message: "参照フォルダは絶対パスで指定する" });
 
@@ -33,6 +47,7 @@ export const projectSettingsPatchSchema = z
     instructions: z.string().max(SESSION_INSTRUCTIONS_MAX, `${SESSION_INSTRUCTIONS_MAX} 文字以内`).nullable().optional(),
     addDirs: z.array(addDirSchema).max(ADD_DIRS_MAX, `参照フォルダは ${ADD_DIRS_MAX} 個以内`).nullable().optional(),
     outputStyle: z.string().max(OUTPUT_STYLE_MAX, `出力スタイルは ${OUTPUT_STYLE_MAX} 文字以内`).nullable().optional(),
+    servers: z.array(serverRefSchema).max(SERVERS_MAX, `servers は ${SERVERS_MAX} 個以内`).nullable().optional(),
   })
   .passthrough();
 
@@ -43,6 +58,7 @@ export type ProjectSettingsPatch = z.infer<typeof projectSettingsPatchSchema>;
  * - patch に無い（undefined）項目は変えない。
  * - null はその項目を削除する。`instructions` / `outputStyle` の空文字・`addDirs` の空配列も削除と同じ（保存しない）。
  * - `addDirs` は重複を除く（先勝ち）。
+ * - `servers` は重複を除く（先勝ち）。空配列は保存する（= どの server も使わない。未設定と区別する）。削除は null。
  * - 未知の項目は値をそのまま入れる。
  */
 export function mergeSettings(current: ProjectSettings | undefined, patch: ProjectSettingsPatch): ProjectSettings {
@@ -54,7 +70,8 @@ export function mergeSettings(current: ProjectSettings | undefined, patch: Proje
       const dirs = uniqueDirs(v);
       if (dirs.length) out.addDirs = dirs;
       else delete out.addDirs;
-    } else out[k] = v;
+    } else if (k === "servers") out.servers = uniqueDirs(v);
+    else out[k] = v;
   }
   return out;
 }
@@ -76,6 +93,9 @@ export function readSettings(raw: unknown): ProjectSettings {
   const dirs = uniqueDirs(out.addDirs);
   if (dirs.length) out.addDirs = dirs;
   else delete out.addDirs;
+  // servers: 配列なら（空でも）残す。配列でなければ未設定（壊れた値で全 server を止めない）
+  if (Array.isArray(out.servers)) out.servers = uniqueDirs(out.servers);
+  else delete out.servers;
   return out;
 }
 
@@ -98,4 +118,18 @@ export function composeInstructions(common: ProjectSettings | undefined, own: Pr
  */
 export function composeOutputStyle(common: ProjectSettings | undefined, own: ProjectSettings | undefined): string {
   return readSettings(own).outputStyle ?? readSettings(common).outputStyle ?? "";
+}
+
+/**
+ * session が使ってよい server の指定（host 名か server_id）。session の `servers` があればそれ（共通は見ない）、
+ * 無ければ center 共通の `servers`、どちらも無ければ undefined（= 全部）。空配列は「どの server も使わない」。
+ */
+export function composeServers(common: ProjectSettings | undefined, own: ProjectSettings | undefined): string[] | undefined {
+  return readSettings(own).servers ?? readSettings(common).servers;
+}
+
+/** server（server_id と host 名）が `servers` の指定に入っているか。server_id は完全一致、host 名は大文字小文字を区別しない。 */
+export function serverAllowed(servers: string[] | undefined, s: { server_id?: string; host?: string }): boolean {
+  if (servers === undefined) return true;
+  return servers.some((e) => (s.server_id !== undefined && e === s.server_id) || (s.host !== undefined && e.toLowerCase() === s.host.toLowerCase()));
 }
