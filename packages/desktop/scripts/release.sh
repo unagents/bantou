@@ -8,6 +8,7 @@
 #       → develop を push・main を早送り → gh release → cask → cask の commit を push → 後始末 → npm に tarball が出るのを待つ → mac200 の入れ替え
 # 前提（mac200 claude-cli）: gh が GitHub に認証済み、~/.tauri/bantou-updater.key、bun・cargo・jq・/opt/homebrew/bin/brew。
 #   server の publish が要る時は npm にもログイン済み（desktop は packages/server/package.json の版を対の版として埋め込むため、先に公開する）。
+# 署名 identity は ~/.config/bantou/signing-identity（1 行）があれば APPLE_SIGNING_IDENTITY として渡す（無ければ ad-hoc）。
 # commit の末尾に足す行があれば ~/.config/bantou/release-trailer に置く（無ければ足さない）。
 set -euo pipefail
 
@@ -32,6 +33,8 @@ VERSION="${1:-}"
 export PATH="/opt/homebrew/bin:$HOME/.bun/bin:$HOME/.cargo/bin:$PATH"
 KEY="$HOME/.tauri/bantou-updater.key"
 TRAILER_FILE="$HOME/.config/bantou/release-trailer"
+# 署名 identity（codesign の証明書名。docs/ops/desktop-signing.md）。無ければ tauri.conf.json の ad-hoc（"-"）のまま
+IDENTITY_FILE="$HOME/.config/bantou/signing-identity"
 REPO_URL="https://github.com/unagents/bantou.git"
 WORK="/tmp/bantou-rel-$VERSION"
 OUT="/tmp/bantou-rel-$VERSION-out"
@@ -117,9 +120,23 @@ commit "bantou $VERSION" -a
 SHA="$(git rev-parse HEAD)"
 
 step "signed build"
+if [[ -s "$IDENTITY_FILE" ]]; then
+  APPLE_SIGNING_IDENTITY="$(head -n 1 "$IDENTITY_FILE")"
+  export APPLE_SIGNING_IDENTITY
+  echo "signing identity: $APPLE_SIGNING_IDENTITY"
+else
+  echo "signing identity: ${APPLE_SIGNING_IDENTITY:-ad-hoc (no $IDENTITY_FILE)}"
+fi
 (cd packages/desktop && TAURI_SIGNING_PRIVATE_KEY="$(cat "$KEY")" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" CI=true bun run tauri build)
 BUNDLE="packages/desktop/src-tauri/target/release/bundle"
 DMG="$BUNDLE/dmg/bantou_${VERSION}_aarch64.dmg"
+APP_DR="$(codesign -d -r- "$BUNDLE/macos/bantou.app" 2>&1 | grep '^designated' || true)"
+echo "designated requirement: $APP_DR"
+# identity を指定したのに DR が cdhash（ad-hoc）のままなら、許可が更新で外れる署名になっている
+if [[ -n "${APPLE_SIGNING_IDENTITY:-}" && "$APP_DR" == *cdhash* ]]; then
+  echo "error: APPLE_SIGNING_IDENTITY is set but the app is still ad-hoc signed (DR uses cdhash)" >&2
+  exit 1
+fi
 for f in "$DMG" "$BUNDLE/macos/bantou.app.tar.gz" "$BUNDLE/macos/bantou.app.tar.gz.sig"; do
   [[ -s "$f" ]] || { echo "error: build output missing: $f" >&2; exit 1; }
   cp "$f" "$OUT/"

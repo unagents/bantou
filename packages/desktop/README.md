@@ -38,6 +38,13 @@ brew install --cask bantou
 - 更新物は署名必須。ビルド時に Mac の `~/.tauri/bantou-updater.key`（パスワード無し）を `TAURI_SIGNING_PRIVATE_KEY` で渡し、`bantou.app.tar.gz` と `.sig` を作る。`scripts/make-latest-json.sh <version> <sig-file>` で `latest.json`（`darwin-aarch64`）を作り、release に `.app.tar.gz` / `.sig` / `latest.json` を添付する。手順は `CLAUDE.md` の Release。
 - e2e は updater の command をモックしている（seed の `update` に version を入れると「更新あり」になる。`e2e/updater.spec.ts`）。
 
+## ローカルネットワーク許可が更新で外れる時（macOS）
+
+- 症状: 更新直後から、bantou.app 配下のプロセス（center・session の messenger MCP）だけ LAN（192.168.x.x）宛ての TCP が `EHOSTUNREACH`（No route to host）。internet・127.0.0.1・Terminal の `curl` / `ping` は通る。header の messenger 表示にカーソルを載せると「ローカルネットワークの許可を確認」と出る。
+- 直し方: System 設定 > プライバシーとセキュリティ > ローカルネットワーク で bantou を OFF→ON し、bantou.app を再起動する。
+- 原因: ad-hoc 署名（`signingIdentity: "-"`）は版ごとに code identity が変わり、許可が引き継がれない（Apple TN3179 / TN3127）。
+- 根本対策: 自己署名の code signing 証明書で署名する。手順・根拠・未確認点は [`docs/ops/desktop-signing.md`](../../docs/ops/desktop-signing.md)。証明書が無い環境は今までどおり ad-hoc で build できる。
+
 ## Dev
 
 ```sh

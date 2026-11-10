@@ -78,12 +78,59 @@ fn config_brokers(port: u16) -> Vec<String> {
     list.iter().filter_map(|x| x.as_str()).filter_map(|s| normalize_url(s, port)).collect()
 }
 
+/// Text of `e` and all its sources. reqwest's own `Display` stops at "error sending request for url",
+/// hiding the OS error underneath (e.g. "No route to host (os error 65)").
+fn error_chain(e: &dyn std::error::Error) -> String {
+    let mut out = e.to_string();
+    let mut cur = e.source();
+    while let Some(s) = cur {
+        out.push_str(": ");
+        out.push_str(&s.to_string());
+        cur = s.source();
+    }
+    out
+}
+
+/// macOS refuses LAN connections of an app without the Local Network privilege with EHOSTUNREACH (os error 65).
+fn is_host_unreachable(chain: &str) -> bool {
+    chain.contains("No route to host") || chain.contains("os error 65")
+}
+
+/// Marker the desktop UI looks for (`src/utils/localNetwork.ts`).
+const LAN_UNREACHABLE_MARK: &str = "EHOSTUNREACH";
+
+/// Set when the last broker probe or call failed with EHOSTUNREACH; cleared when one works.
+static LAN_UNREACHABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn note_lan_unreachable(chain: &str) {
+    LAN_UNREACHABLE.store(is_host_unreachable(chain), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The error shown in the header. Adds the marker when a broker probe hit EHOSTUNREACH, even if the poller
+/// then fell back to 127.0.0.1 and failed with a plain "connection refused".
+fn status_error(e: String) -> String {
+    if is_host_unreachable(&e) || LAN_UNREACHABLE.load(std::sync::atomic::Ordering::Relaxed) {
+        format!("{e} [{LAN_UNREACHABLE_MARK}]")
+    } else {
+        e
+    }
+}
+
 async fn healthy(url: &str) -> bool {
     crate::ensure_crypto_provider();
     let Ok(c) = reqwest::Client::builder().timeout(Duration::from_millis(1500)).build() else {
         return false;
     };
-    matches!(c.get(format!("{url}/health")).send().await, Ok(r) if r.status().is_success())
+    match c.get(format!("{url}/health")).send().await {
+        Ok(r) => {
+            note_lan_unreachable("");
+            r.status().is_success()
+        }
+        Err(e) => {
+            note_lan_unreachable(&error_chain(&e));
+            false
+        }
+    }
 }
 
 /// Broadcast targets: 255.255.255.255 plus each IPv4 interface's directed broadcast.
@@ -501,8 +548,8 @@ pub(crate) async fn post<T: serde::de::DeserializeOwned>(
     body: serde_json::Value,
 ) -> Result<T, String> {
     let url = format!("{}{}", base.trim_end_matches('/'), route);
-    let res = client().post(&url).json(&body).send().await.map_err(|e| e.to_string())?;
-    res.json::<T>().await.map_err(|e| e.to_string())
+    let res = client().post(&url).json(&body).send().await.map_err(|e| error_chain(&e))?;
+    res.json::<T>().await.map_err(|e| error_chain(&e))
 }
 
 /// The broker replaces an existing peer with the same pid + hostname on
@@ -654,7 +701,7 @@ pub(crate) fn start_poller<R: tauri::Runtime>(app: tauri::AppHandle<R>, ws: Path
                     }
                     Err(e) => {
                         note_broker(&mut last_error, &ws, &format!("register at {url}"), Err(&e));
-                        brokers.set(&ws, BrokerStatus { error: Some(e), ..base.clone() });
+                        brokers.set(&ws, BrokerStatus { error: Some(status_error(e)), ..base.clone() });
                         tokio::time::sleep(Duration::from_secs(10)).await;
                         continue;
                     }
@@ -671,7 +718,7 @@ pub(crate) fn start_poller<R: tauri::Runtime>(app: tauri::AppHandle<R>, ws: Path
                     Err(e) => {
                         // Broker gone: resolve again on the next round.
                         note_broker(&mut last_error, &ws, "heartbeat", Err(&e));
-                        brokers.set(&ws, BrokerStatus { error: Some(e), ..base.clone() });
+                        brokers.set(&ws, BrokerStatus { error: Some(status_error(e)), ..base.clone() });
                         peer = None;
                         tokio::time::sleep(Duration::from_secs(10)).await;
                         continue;
@@ -722,7 +769,7 @@ pub(crate) fn start_poller<R: tauri::Runtime>(app: tauri::AppHandle<R>, ws: Path
                 }
                 Err(e) => {
                     note_broker(&mut last_error, &ws, "poll", Err(&e));
-                    brokers.set(&ws, BrokerStatus { peer_id: Some(id.clone()), error: Some(e), ..base.clone() });
+                    brokers.set(&ws, BrokerStatus { peer_id: Some(id.clone()), error: Some(status_error(e)), ..base.clone() });
                 }
             }
             tokio::time::sleep(POLL_INTERVAL).await;
@@ -770,6 +817,39 @@ pub fn list_pings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug)]
+    struct Outer(std::io::Error);
+    impl std::fmt::Display for Outer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "error sending request for url (http://192.168.1.10:7901/register)")
+        }
+    }
+    impl std::error::Error for Outer {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    #[test]
+    fn error_chain_includes_sources() {
+        let e = Outer(std::io::Error::from_raw_os_error(65));
+        let chain = error_chain(&e);
+        assert!(chain.starts_with("error sending request for url"), "{chain}");
+        assert!(chain.contains("os error 65"), "{chain}");
+    }
+
+    #[test]
+    fn host_unreachable_is_marked() {
+        LAN_UNREACHABLE.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(status_error("x: No route to host (os error 65)".into()).ends_with("[EHOSTUNREACH]"));
+        assert_eq!(status_error("x: Connection refused (os error 61)".into()), "x: Connection refused (os error 61)");
+        // A probe that hit EHOSTUNREACH marks later errors too (fallback to 127.0.0.1).
+        note_lan_unreachable("tcp connect error: No route to host (os error 65)");
+        assert!(status_error("x: Connection refused (os error 61)".into()).ends_with("[EHOSTUNREACH]"));
+        note_lan_unreachable("");
+        assert!(!status_error("x".into()).contains("EHOSTUNREACH"));
+    }
 
     fn msg(text: &str) -> Message {
         Message {
