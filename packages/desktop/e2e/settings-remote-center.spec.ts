@@ -36,7 +36,7 @@ const CONNECTED_CENTER = [
   "center-common-section",
   "center-common-section-instructions",
   "center-common-section-output-style",
-  "center-common-section-servers",
+  "center-common-section-memory",
 ];
 
 test.describe("settings dialog: sidecar OFF + remote connection", () => {
