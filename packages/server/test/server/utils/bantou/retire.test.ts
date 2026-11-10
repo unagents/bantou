@@ -30,6 +30,7 @@ function setup(over: Partial<RetireDeps> = {}) {
     identity,
     count: () => (calls.push("count"), { caps: 1, workers: 2 }),
     cancelUpdate: () => void calls.push("cancelUpdate"),
+    clearUpdateFile: async () => void calls.push("clearUpdate"),
     refuse: () => void calls.push("refuse"),
     stopAll: async () => {
       calls.push("stopAll");
@@ -50,7 +51,7 @@ function setup(over: Partial<RetireDeps> = {}) {
 test("retire: 順序は 印 → 受付停止（更新取消）→ 数える → 停止 → 返信 → 猶予 → finish。猶予の間は finish しない", async () => {
   const { calls, ctl } = setup();
   const reply = await ctl.request(cmd, "center(p1)");
-  assert.deepEqual(calls, ["marker", "cancelUpdate", "refuse", "count", "stopAll"]);
+  assert.deepEqual(calls, ["marker", "cancelUpdate", "refuse", "clearUpdate", "count", "stopAll", "clearUpdate"]);
   assert.ok(isServerReply(reply));
   assert.equal(reply.type, "retire_result");
   if (reply.type !== "retire_result") return;
@@ -128,6 +129,23 @@ test("retire: 停止・受付停止が失敗しても返信と finish まで進�
   ctl.replied();
   await sleep(100);
   assert.ok(calls.includes("finish"));
+});
+
+test("retire: update.json{restart} が書かれた状態で受けると消す（実ファイル）。消せなくても退役は進む", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "bantou-retire-upd-"));
+  try {
+    const { writeFile } = await import("node:fs/promises");
+    const { removeUpdateFile } = await import("../../../../server/utils/bantou/update");
+    await writeFile(join(dir, "update.json"), JSON.stringify({ state: "restart", to: "0.7.0", spec: "bantou@0.7.0" }));
+    const { ctl } = setup({ clearUpdateFile: () => removeUpdateFile(dir) });
+    const r = await ctl.request(cmd, "c");
+    assert.equal(r.type, "retire_result");
+    assert.equal(await stat(join(dir, "update.json")).then(() => true, () => false), false);
+    const f = setup({ clearUpdateFile: async () => { throw new Error("EPERM"); } });
+    assert.equal((await f.ctl.request(cmd, "c")).type, "retire_result");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("retire: 返信を送り終えられなくても deadline で finish する（居座らない）", async () => {

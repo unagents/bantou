@@ -19,7 +19,14 @@ const cfg = JSON.parse(readFileSync(process.env.NUXT_BANTOU_CONFIG_PATH, "utf8")
 const ws = cfg.workspace;
 appendFileSync(join(ws, "starts.log"), process.pid + "\\n");
 writeFileSync(join(ws, "server.ready"), JSON.stringify({ pid: process.pid, version: "fake" }));
-if (process.env.FAKE_MODE === "retire") {
+if (process.env.FAKE_MODE === "retire-with-update") {
+  // 更新の再起動（update.json{restart}）と退役が重なった窓: 合図が残ったまま exit 76
+  setTimeout(() => {
+    writeFileSync(join(ws, "update.json"), JSON.stringify({ state: "restart", to: "9.9.9", spec: "bantou@9.9.9" }));
+    writeFileSync(join(ws, "server.retired"), "{}");
+    process.exit(76);
+  }, 300);
+} else if (process.env.FAKE_MODE === "retire") {
   // 本物の daemon と同じ順序: 印 → (停止) → exit 76
   setTimeout(() => {
     writeFileSync(join(ws, "server.retired"), "{}");
@@ -81,6 +88,17 @@ test("退役: 子の exit 76 が supervisor → server.exit → launcher を通�
     const back = run("retire");
     assert.equal(back.status, 76, `${back.stdout}\n${back.stderr}`);
     assert.equal(await starts(), 2);
+  });
+});
+
+test("退役: update.json{restart} が残ったまま子が exit 76 しても、supervisor は次の版を起動せず launcher は 76 で終わる", async () => {
+  await withInstall(async ({ run, ws, hostLock, starts }) => {
+    const r = run("retire-with-update");
+    assert.equal(r.status, 76, `${r.stdout}\n${r.stderr}`);
+    assert.equal(await starts(), 1, "次の版（npx）の子を起動しない");
+    assert.ok(!(await exists(join(ws, "update.json"))));
+    assert.ok(!(await exists(join(ws, "server.lock"))));
+    assert.ok(!(await exists(hostLock)));
   });
 });
 

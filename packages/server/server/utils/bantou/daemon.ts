@@ -28,6 +28,7 @@ import { cliRunner } from "./runner";
 import {
   createUpdateController,
   removeReadyFile,
+  removeUpdateFile,
   UpdateError,
   writeReadyFile,
   type UpdateController,
@@ -332,6 +333,7 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
     identity,
     count: () => manager.activeCount(),
     cancelUpdate: () => update.close(),
+    clearUpdateFile: () => removeUpdateFile(config.workspace),
     refuse: () => {
       // worker_start / report は /mcp 側の handler で断る（実行中の cap / worker は stopAll が止める）
       setWorkerHandler({

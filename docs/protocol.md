@@ -288,7 +288,7 @@ with `error` `{"retiring":true,"retryable":false}`, refuse MCP `worker_start` an
 served. 4. count and stop every running cap and worker (the same path as shutdown; interrupted `kick_cap`s still get
 their `cap_result` with `ok:false`). 5. reply `retire_result`. 6. after a grace of 3 seconds (the reply is pulled by the
 center's poll, 1 s interval) unregister from the messenger, close the broker and exit with code **76**.
-If the reply cannot be sent, step 6 still runs at the latest 15 seconds after 2.
+If the reply cannot be sent, step 6 still runs at the latest 10 seconds after 2, and the forced exit after that takes at most 5 more seconds (about 15 seconds in the worst case). A pending update is cancelled and `update.json` (the restart mark) is removed, so an update cannot restart the retired server.
 
 Reply `retire_result`:
 

@@ -21,7 +21,7 @@ center から server を退役させる手段の追加。branch `feat/retire-ser
 3. 受付停止: 更新予約の取消（`update.close()`。取消さないと停止後の idle で update が再起動を始める）、新規 `kick_cap` / `task` / `worker_reply` / `update_server` を `error(retiring:true)` で拒否、MCP `worker_start` / `report` を拒否。`hello` / `status` / `stop_cap` / 再度の `retire_server` は通す。
 4. 実行中の cap / worker の数を数え、`manager.shutdown()`（既存の停止経路）で全部止める。
 5. `retire_result` を返信（2 回目の `retire_server` は同じ返信）。
-6. 返信後 3 秒（messenger client の poll 間隔 1 秒 ×2 を見込む猶予）待ち、`stop()`（protocol 登録解除 → client 解除 → mcp / broker 停止）→ **exit 76**。返信が送れなくても、受付から最長 15 秒で 6 へ進む（居座らない）。plugin の 5 秒 hard timeout も exit 76 で抜ける。
+6. 返信後 3 秒（messenger client の poll 間隔 1 秒 ×2 を見込む猶予）待ち、`stop()`（protocol 登録解除 → client 解除 → mcp / broker 停止）→ **exit 76**。返信が送れなくても、受付から最長 10 秒で 6 へ進む（居座らない）。plugin の 5 秒 hard timeout も exit 76 で抜ける（最悪でも約 15 秒）。
 
 **launcher への伝え方 / exit code**
 
@@ -57,7 +57,7 @@ center から server を退役させる手段の追加。branch `feat/retire-ser
 
 - exit code は専用 76 とし、起動拒否は 75 に分けた（旧 unit の救済のため）。
 - `ErrorCode` を増やさず `retiring` flag にした（旧 center の parse を壊さない）。
-- 返信の到達確認 API は messenger に無い（`send` は broker 受理まで、受信側は 1 秒 poll）ため、固定の猶予 3 秒 + 最長 15 秒の deadline とした。**center が server の内蔵 broker 経由でなく別 broker を使う構成では、この猶予は不要だが害も無い。**
+- 返信の到達確認 API は messenger に無い（`send` は broker 受理まで、受信側は 1 秒 poll）ため、固定の猶予 3 秒 + 最長 10 秒の deadline（review 第1回で 15 秒から短縮）とした。**center が server の内蔵 broker 経由でなく別 broker を使う構成では、この猶予は不要だが害も無い。**
 
 ### 残課題
 
@@ -66,6 +66,16 @@ center から server を退役させる手段の追加。branch `feat/retire-ser
 - 印は workspace に固定。workspace を変えて起動し直すと別 server として起動できる（意図どおり）。
 - center / desktop 側の操作（tool・ボタン・確認 dialog）は w-ret-center の節。
 
+
+### review 第1回（HEAD c13864a）の指摘と対応
+
+1. [medium] 更新の再起動（`update.json{state:restart}`）と退役が重なると、supervisor が次の版を `--serve` で起動し退役が破られる窓 → **直した**。
+   - `retire.ts`: 印を書いた後に `update.json` を消す（受付停止の直後と、cap / worker 停止の後の 2 回。取消の直前に書込中だったものが停止中に着地しても消す。失敗は log して続行）。
+   - `bin/supervisor.mjs`（多層防御）: restart 分岐に入る前に `server.retired` を確認し、在れば `update.json` を消して次の版を起動せず 76 で終わる（`server.exit` 経由で launcher も 76）。supervisor.mjs は凍結物ではない（凍結は launcher.mjs のみ。supervisor の冒頭コメントは「版をまたぐ取り決めは変えるなら後方互換を保つ」）。今回の変更は取り決め（lock / ready / exit / update.json、env、引数）を変えない追加の分岐で、印が無ければ従来どおり。ただし効くのは、この変更を含む版の supervisor になってから（旧 supervisor は 1 つ目の対策 = update.json の削除のみ）。
+   - test: `supervisor.test.ts`（印が在れば restart が残っていても次の版を起動せず 76）、`retire.test.ts`（実ファイルの update.json が消える、消せなくても退役が進む、呼び出し順）、`retire-chain.test.ts`（本物の bin のコピーで、update.json が残ったまま子が exit 76 しても launcher が 76 で終わり子が 1 回だけ）。
+2. [low] 最悪時間 → **deadline を 15 秒から 10 秒に短縮**。deadline 10 秒 + 強制終了 5 秒 = 約 15 秒で、README / protocol.md / この report の記述を揃えた。
+3. [low] typecheck → `launcher.d.mts` に `workspaceOf` の宣言を追加（launcher.mjs は無変更）。develop 時点の server typecheck は error 7 件（`default-config.test.ts` 6 + `launcher.test.ts` の `workspaceOf` TS2305 1）で、本 branch は 6 件（`default-config.test.ts` の 6 件のみ、develop から残る既知。触っていない）。本 branch の差分で増えたものは無い。
+- 結果: protocol 38 pass / 0 fail。server 314 pass / 0 fail（311 → 314）。
 
 ## center / desktop（w-ret-center）
 

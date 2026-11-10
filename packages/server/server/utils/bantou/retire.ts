@@ -25,7 +25,7 @@ export const EXIT_RETIRED = RETIRE_EXIT_CODE;
 export const REPLY_GRACE_MS = 3000;
 
 /** 受付停止の直後から、返信の有無によらず終了へ進める上限。返信の送信が詰まっても server が居座らない。 */
-export const FINISH_DEADLINE_MS = 15_000;
+export const FINISH_DEADLINE_MS = 10_000;
 
 /** shell 用の単一引用符 quote。 */
 export function shQuote(s: string): string {
@@ -127,6 +127,8 @@ export interface RetireDeps {
   count: () => { caps: number; workers: number };
   /** 更新の予約を取り消す（更新待機が退役後の idle で再起動を始めないように）。 */
   cancelUpdate: () => void;
+  /** update.json（restart の合図）を消す。書かれていると supervisor が次の版を起動する。失敗は呼び出し側で log して続行。 */
+  clearUpdateFile?: () => Promise<void>;
   /** 新しい task / worker_start / report を断る状態にする。 */
   refuse: () => void;
   /** 実行中の cap / worker を全部止める（既存の shutdown 経路）。 */
@@ -227,6 +229,14 @@ export function createRetireController(deps: RetireDeps): RetireController {
     } catch (e) {
       log(`受付停止でエラー（続行）: ${e instanceof Error ? e.message : String(e)}`);
     }
+    const clearUpdate = async (): Promise<void> => {
+      try {
+        await deps.clearUpdateFile?.();
+      } catch (e) {
+        log(`update.json を消せない（続行。supervisor も印を見て再起動しない）: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    };
+    await clearUpdate();
     // 返信の有無によらず終了へ進める（途中の失敗で居座らない）
     deadlineTimer = setTimeout(() => {
       log("退役の期限に達したため終了へ進む");
@@ -244,6 +254,8 @@ export function createRetireController(deps: RetireDeps): RetireController {
     } catch (e) {
       log(`cap / worker の停止でエラー（続行）: ${e instanceof Error ? e.message : String(e)}`);
     }
+    // 取消の直前に書き込み中だった update.json が停止中に着地した場合に備え、もう一度消す
+    await clearUpdate();
     const service = deps.service();
     const platform = deps.platform ?? process.platform;
     reply = {
