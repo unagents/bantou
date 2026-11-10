@@ -43,7 +43,10 @@ branch `feat/memory-phase1`（基点 develop d20aac2）。設計は `docs/design
 
 - `npm test`: 33 pass / 0 fail（unit 21 = 認証 6 + その他 15、統合 12。内訳は下）。
 - `npm run typecheck`: 通過。
-- 統合は docker 無し（`docker ps`: docker.sock 無し、DOCKER_HOST 未設定）のため **PGlite 0.5.16 + `@electric-sql/pglite-pgvector`**（WASM の本物の PostgreSQL + pgvector）。migration の SQL をそのまま流し、非 superuser role（`memory_app`）に `SET ROLE` して RLS を効かせている。**実 PostgreSQL（docker）では未実行**。
+- 統合 test は同じ筋書き（`test/helpers/suite.ts`）を 2 つの DB で回す作り。
+  - **docker の実 PostgreSQL**（`test/integration.pg.test.ts`、`pgvector/pgvector:pg17`、container 名 `w-mem1-impl-pg-*`、非 superuser role で接続、終了時に `docker rm -f -v`）。この host は docker 無し（docker.sock 無し、DOCKER_HOST 未設定）のため **skip**。skip の理由は test 出力に出る（`# SKIP docker unavailable: … /var/run/docker.sock: no such file or directory`）。docker 経路のコード（起動・migration・role・後始末）はこの host では**一度も動かしていない**。
+  - **PGlite 0.5.16 + `@electric-sql/pglite-pgvector`**（`test/integration.test.ts`、WASM の PostgreSQL + pgvector）。**task 指示に無い追加**。docker が無い host でも統合の筋書きを検証するために入れた。migration の SQL をそのまま流し、非 superuser role（`memory_app`）に `SET ROLE` して RLS を効かせる。残すか外すかは cap の判断。
+- 結果: PGlite 統合 12 pass、docker 統合は skip（上記）。以下の 12 本は PGlite で実行した内容。
   - A 過去の指示の再現 / B 決定の履歴 / D 推測と確定の分離 / H 検索の根拠
   - event の冪等（outbox も 1 件）と入力検証
   - 検証規則（出典なし・存在しない出典・他 agent の event 盗用・重複の却下）
@@ -63,4 +66,4 @@ branch `feat/memory-phase1`（基点 develop d20aac2）。設計は `docs/design
 - `nuxt.config.ts` の `scheduledTasks`（毎分）が Nitro の node-server preset で実際に起動することは未確認（task 本体は test 済みだが、スケジューラの起動は未検証）。
 - 抽出 prompt の品質（実 chatp / claude -p での候補の質）は未評価。
 - Ollama の embedding model の日本語品質（external-memory.md の要確認項目）は未評価。
-- 作業中に誤って `/tmp/x`（空ファイル）を作った。権限で削除できず残っている（空、無害）。
+- 作業中に誤って `/tmp/x`（空ファイル）を作った（19:57）。後で確認すると 319 byte に更新されており、別の処理が使っているため削除していない。

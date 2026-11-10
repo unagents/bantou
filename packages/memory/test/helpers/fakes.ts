@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
 import { vector } from "@electric-sql/pglite-pgvector";
-import type { Db } from "../../server/utils/db.ts";
+import type { Db, Queryable } from "../../server/utils/db.ts";
 import type { Embedder } from "../../server/utils/embed.ts";
 import type { ChatClient } from "../../server/utils/extract.ts";
 
@@ -48,19 +48,22 @@ export function fakeChat(script: ChatScript): ChatClient & { requests: { system:
 
 export interface TestDb {
   db: Db;
-  /** RLS を受けない superuser として実行する（検証用） */
-  asSuper<T>(fn: () => Promise<T>): Promise<T>;
-  raw: PGlite;
+  /** RLS を受けない superuser の接続で実行する（検証用） */
+  asSuper<T>(fn: (sq: Queryable) => Promise<T>): Promise<T>;
   close(): Promise<void>;
+}
+
+/** migration の Up 部分（PGlite と実 PostgreSQL で共通） */
+export function readUpMigration(): string {
+  const sql = readFileSync(fileURLToPath(new URL("../../migrations/001_init.sql", import.meta.url)), "utf8");
+  return sql.split("-- Up Migration")[1]!.split("-- Down Migration")[0]!;
 }
 
 /** PGlite（WASM の本物の PostgreSQL + pgvector）に migration を当て、非 superuser role で接続する（RLS を効かせるため） */
 export async function createTestDb(): Promise<TestDb> {
   const raw = new PGlite({ extensions: { vector } });
-  const sql = readFileSync(fileURLToPath(new URL("../../migrations/001_init.sql", import.meta.url)), "utf8");
-  const up = sql.split("-- Up Migration")[1]!.split("-- Down Migration")[0]!;
   await raw.exec("CREATE EXTENSION IF NOT EXISTS vector");
-  await raw.exec(up);
+  await raw.exec(readUpMigration());
   await raw.exec("CREATE ROLE memory_app NOLOGIN");
   await raw.exec("GRANT ALL ON ALL TABLES IN SCHEMA public TO memory_app");
   await raw.exec("GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO memory_app");
@@ -76,11 +79,10 @@ export async function createTestDb(): Promise<TestDb> {
   };
   return {
     db,
-    raw,
     asSuper: async (fn) => {
       await raw.exec("RESET ROLE");
       try {
-        return await fn();
+        return await fn({ query: (sql, params) => raw.query(sql, params as unknown[]) as never });
       } finally {
         await raw.exec("SET ROLE memory_app");
       }

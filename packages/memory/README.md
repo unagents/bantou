@@ -113,8 +113,9 @@ npm run typecheck
 ```
 
 - unit: 認証（token 無し / 不正 / X-Agent-Id 無し）、検証規則（confirmed → inferred の降格など）、入力検証、chatp / Ollama client（`node:http` の fake server）、SQL パラメータ化の検査。
-- 統合（設計書 §17 の A / B / D / H ほか）: PostgreSQL が必要。docker 無しでも回るように、PGlite（WASM の PostgreSQL + pgvector）を使い、migration の SQL をそのまま流して非 superuser role で接続する（RLS が効く）。chatp と埋め込みは決定論的な fake。
-- 実 PostgreSQL（docker）での統合 test は未整備。docker がある host では、`deploy/compose.yaml` の postgres に `npm run migrate` を当てて手で確認する（PGlite と本物の差異: 拡張・role・権限の細部）。
+- 統合（設計書 §17 の A / B / D / H ほか）: 同じ筋書き（`test/helpers/suite.ts`）を 2 つの PostgreSQL で回す。chatp と埋め込みは決定論的な fake。
+  - `test/integration.pg.test.ts`: docker の実 PostgreSQL（`pgvector/pgvector:pg17`）。docker が使える host では `npm test` が自動で container（名前 `w-mem1-impl-pg-<pid>-<乱数>`）を起動し、migration を当て、非 superuser role（README の GRANT と同じ権限）で接続して回し、終了時に `docker rm -f -v` する。docker が使えなければ skip し、理由（例: `docker unavailable: … /var/run/docker.sock …`）を出力する。image は `MEMORY_TEST_PG_IMAGE` で変えられる。docker ありでの回し方: `docker info` が通る host で `cd packages/memory && npm test`（初回は image の pull に時間がかかる）。
+  - `test/integration.test.ts`: PGlite（WASM の PostgreSQL + pgvector）。docker 不要。migration の SQL をそのまま流し、非 superuser role に `SET ROLE` して RLS を効かせる。docker が無い host でも統合の筋書きを確かめるために置いている。
 
 ## 既知の範囲外（Phase 2 以降）
 
