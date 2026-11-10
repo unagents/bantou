@@ -27,7 +27,8 @@ header の「返答待ち N」は thread 件数、集計の「判断待ち N」�
 ## テスト
 - `cd packages/desktop && npx nuxt typecheck`（bun 無し→script 中身を直接実行）: 通過。
 - `npx playwright test e2e/session-activity.spec.ts --project=chrome`（bun 無し。`bun build` を esbuild に置換する shim を PATH に置いて実行）: 5/5 通過（3 状態の印、集計、unknown/停止は印なし、waiting thread 合成、SSE activity、絞り込みと自動解除、screenshot）。
-- 既存 spec の回帰（board / context-usage / attachment）: 下記「確認できなかった項目」参照。
+- 全 e2e（`npx playwright test --project=chrome --retries=0`、bun 無しのため shim 経由）: **134/134 通過**（17 分、背景実行）。
+- 切り分け: 途中の実行で attachment.spec が 5 件落ちたが、playwright を複数同時に走らせて負荷が高かった時の timeout（1 件 25 秒）。変更なし baseline（f95de5a の worktree）でも単独実行で 8/8 通過、変更後も単独で 8/8 通過、全件実行でも通過。この変更に起因しない。
 - `cargo test`: この環境に cargo が無く **未実施**。`session.rs` に追加したテスト（`activity_is_read_when_the_center_sends_it_and_none_otherwise`）は未実行。
 - center: typecheck / test は impl-center が通過済み（center-notes 参照）。この worker では再実行していない。
 
