@@ -54,14 +54,8 @@ export class MockBantou {
     { project: "alpha", path: "/ws/alpha", state: "connected", pid: 4301, sessionUrl: "https://claude.ai/code/session_mock", restarts: 0 },
     { project: "beta", path: "/ws/beta", state: "stopped", pid: null, sessionUrl: null, restarts: 2 },
   ];
-  centerServers = [{ name: "srv1", connected: true, reachable: true, peerId: "p1", serverPeer: "p2" }];
-  centerAgents: Record<string, unknown> = {
-    srv1: {
-      ok: true,
-      caps: [{ kind: "cap", id: "cap-a", state: "idle" }],
-      workers: [{ kind: "worker", id: "w1", state: "running" }],
-    },
-  };
+  /** `server_list` result (center `ServerInfo[]`): the configured links. `serverPeer` is the peer id the center last sent to (or a plain name), matched with `server_peers[].id`. */
+  centerServers: Record<string, unknown>[] = [{ name: "srv1", connected: true, reachable: true, peerId: "p1", serverPeer: "p2" }];
   /** `server_peers` result (center `Follow.snapshot()`). */
   centerVersions: unknown = {
     pair: { server: "0.3.0", protocol: "1.3.0" },
@@ -69,6 +63,8 @@ export class MockBantou {
       { key: "mac200 /ws", id: "p2", name: "bantou-server", hostname: "mac200", server_version: "0.3.0", protocol_version: "1.3.0", state: "ok", detail: "版が一致", since: "2026-10-31T00:00:00.000Z" },
     ],
   };
+  /** When set, `server_peers` fails with this message. */
+  centerVersionsError: string | null = null;
   /** `remote_list` result (center `RemoteView[]`): one remote-cap per server (`remote_id` = cap_id, `owners`, `pending`, latest `result`; no history). */
   centerRemotes: unknown[] = [];
   /** `worker_reply` calls received (arguments as sent). */
@@ -578,11 +574,8 @@ export class MockBantou {
           case "server_list":
             return text(this.centerServers);
           case "server_peers":
+            if (this.centerVersionsError) throw new Error(this.centerVersionsError);
             return text(this.centerVersions);
-          case "server_status": {
-            const name = (args.arguments as { server: string }).server;
-            return text(this.centerAgents[name] ?? { ok: true, caps: [], workers: [] });
-          }
           default:
             throw new Error(`unknown tool: ${String(args.name)}`);
         }

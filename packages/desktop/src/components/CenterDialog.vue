@@ -7,20 +7,23 @@ import type {
   CenterServerInfo,
   CenterServerPeer,
   CenterServerPeers,
-  CenterServerStatus,
 } from "~/types";
 
 const open = defineModel<boolean>("open", { required: true });
 
-interface ServerView {
-  info: CenterServerInfo;
-  status?: CenterServerStatus;
-  error?: string;
+/** One server row: the discovered peer (`server_peers`: version) and the configured link (`server_list`: connection). Either may be missing. */
+interface ServerRow {
+  key: string;
+  host: string;
+  serverId?: string;
+  peerId?: string;
+  peer?: CenterServerPeer;
+  link?: CenterServerInfo;
 }
 
 const connection = ref<CenterConnection | null>(null);
 const rc = ref<CenterRcStatus[]>([]);
-const servers = ref<ServerView[]>([]);
+const links = ref<CenterServerInfo[]>([]);
 const versions = ref<CenterServerPeers | null>(null);
 const versionsError = ref<string | null>(null);
 const error = ref<string | null>(null);
@@ -45,22 +48,13 @@ async function refresh() {
     connection.value = await centerConnection();
     if (!connection.value.connected) {
       rc.value = [];
-      servers.value = [];
+      links.value = [];
       versions.value = null;
       return;
     }
     void loadVersions(true);
     rc.value = await centerTool<CenterRcStatus[]>("rc_list");
-    const infos = await centerTool<CenterServerInfo[]>("server_list");
-    servers.value = await Promise.all(
-      infos.map(async (info): Promise<ServerView> => {
-        try {
-          return { info, status: await centerTool<CenterServerStatus>("server_status", { server: info.name }) };
-        } catch (e) {
-          return { info, error: errorOf(e) };
-        }
-      }),
-    );
+    links.value = await centerTool<CenterServerInfo[]>("server_list");
   } catch (e) {
     error.value = errorOf(e);
   } finally {
@@ -71,11 +65,53 @@ async function refresh() {
 watch(open, (v) => v && void refresh(), { immediate: true });
 
 const rcColor = { stopped: "neutral", starting: "warning", connected: "success", error: "error" } as const;
-/** Another server shares this host name: show user / workspace so they can be told apart. */
-function sameHost(v: CenterServerPeer): boolean {
-  const h = (v.host ?? v.hostname ?? "").toLowerCase();
-  return h !== "" && (versions.value?.peers ?? []).filter((p) => (p.host ?? p.hostname ?? "").toLowerCase() === h).length > 1;
+const hostOf = (p: CenterServerPeer) => p.host ?? p.hostname ?? p.name;
+
+/**
+ * Join between the two tools: `server_list[].serverPeer` is the peer id the center last sent to (or the plain name
+ * "bantou-server" when it found no peer); `server_peers[].id` is that peer id. A name matches only when exactly one peer has it.
+ */
+function peerOfLink(l: CenterServerInfo, peers: CenterServerPeer[]): CenterServerPeer | undefined {
+  if (!l.serverPeer) return undefined;
+  const byId = peers.find((p) => p.id === l.serverPeer);
+  if (byId) return byId;
+  const byName = peers.filter((p) => p.name === l.serverPeer);
+  return byName.length === 1 ? byName[0] : undefined;
 }
+
+/** One row per server. A server in only one of the two lists still gets a row. */
+const rows = computed<ServerRow[]>(() => {
+  const peers = versions.value?.peers ?? [];
+  const out: ServerRow[] = [];
+  const used = new Set<string>();
+  const linkOf = new Map<string, CenterServerInfo>();
+  for (const l of links.value) {
+    const p = peerOfLink(l, peers);
+    if (p && !linkOf.has(p.key)) {
+      linkOf.set(p.key, l);
+      used.add(l.name);
+    }
+  }
+  for (const p of peers) {
+    out.push({ key: `peer:${p.key}`, host: hostOf(p), serverId: p.server_id, peerId: p.id, peer: p, link: linkOf.get(p.key) });
+  }
+  for (const l of links.value) {
+    if (!used.has(l.name)) out.push({ key: `link:${l.name}`, host: l.name, peerId: l.serverPeer ?? undefined, link: l });
+  }
+  return out;
+});
+
+/** Another server shares this host name: show user / workspace so they can be told apart. */
+function sameHost(r: ServerRow): boolean {
+  const h = r.host.toLowerCase();
+  return rows.value.filter((x) => x.host.toLowerCase() === h).length > 1;
+}
+
+type LinkState = "reachable" | "disconnected" | "unreachable" | "unknown";
+const linkStateOf = (l?: CenterServerInfo): LinkState =>
+  !l ? "unknown" : !l.reachable ? "unreachable" : l.connected ? "reachable" : "disconnected";
+const linkColor = { reachable: "success", disconnected: "neutral", unreachable: "warning", unknown: "neutral" } as const;
+const linkLabel = { reachable: "到達可", disconnected: "未接続", unreachable: "到達不可", unknown: "不明" } as const;
 
 const versionColor: Record<CenterFollowState, "success" | "warning" | "neutral" | "error"> = {
   ok: "success",
@@ -139,7 +175,7 @@ const sourceLabel = { remote: "remote", sidecar: "sidecar" } as const;
 
         <template v-if="connection?.connected">
           <div class="flex flex-col gap-2">
-            <span class="text-sm font-medium">remote-control</span>
+            <span class="text-sm font-medium">remote session</span>
             <div
               v-for="r in rc"
               :key="r.project"
@@ -156,10 +192,8 @@ const sourceLabel = { remote: "remote", sidecar: "sidecar" } as const;
             <p v-if="!rc.length" class="text-cork-muted text-xs">project 未登録</p>
           </div>
 
-          <RemoteActivity />
-
-          <div class="flex flex-col gap-2" data-testid="center-versions">
-            <span class="text-sm font-medium">server の版</span>
+          <div class="flex flex-col gap-2" data-testid="center-servers">
+            <span class="text-sm font-medium">server</span>
             <p v-if="versions" class="text-cork-muted text-xs" data-testid="center-pair">
               この desktop と組の版: server {{ versions.pair.server ?? "不明" }} / protocol {{ versions.pair.protocol }}
             </p>
@@ -167,72 +201,50 @@ const sourceLabel = { remote: "remote", sidecar: "sidecar" } as const;
               {{ versionsError }}
             </p>
             <div
-              v-for="v in versions?.peers ?? []"
-              :key="v.key"
+              v-for="r in rows"
+              :key="r.key"
               class="flex flex-col gap-0.5"
-              :data-state="v.state"
-              data-testid="center-version-row"
+              :data-host="r.host"
+              :data-server-id="r.serverId ?? r.peerId ?? ''"
+              :data-state="r.peer?.state ?? 'none'"
+              :data-link="linkStateOf(r.link)"
+              data-testid="center-server-row"
             >
               <div class="flex items-center gap-2 text-xs">
-                <span class="w-32 truncate font-medium">{{ v.host ?? v.hostname ?? v.name }}</span>
-                <span v-if="v.server_id" class="text-cork-muted" data-testid="center-version-server-id">{{ v.server_id }}</span>
-                <span v-if="sameHost(v) && (v.user || v.workspace)" class="text-cork-muted" data-testid="center-version-who">{{ [v.user, v.workspace].filter(Boolean).join(" ") }}</span>
+                <span class="w-32 truncate font-medium" data-testid="center-server-host">{{ r.host }}</span>
+                <span v-if="r.serverId ?? r.peerId" class="text-cork-muted" data-testid="center-server-id">{{ r.serverId ?? r.peerId }}</span>
+                <span v-if="sameHost(r) && (r.peer?.user || r.peer?.workspace)" class="text-cork-muted" data-testid="center-server-who">{{ [r.peer?.user, r.peer?.workspace].filter(Boolean).join(" ") }}</span>
                 <UBadge
-                  :color="versionColor[v.state]"
+                  v-if="r.peer"
+                  :color="versionColor[r.peer.state]"
                   variant="subtle"
-                  :label="versionLabel[v.state]"
-                  data-testid="center-version-badge"
+                  :label="versionLabel[r.peer.state]"
+                  data-testid="center-server-version-badge"
                 />
-                <span class="text-cork-muted">server {{ v.server_version ?? "?" }} / protocol {{ v.protocol_version ?? "?" }}</span>
+                <span v-if="r.peer" class="text-cork-muted" data-testid="center-server-version">server {{ r.peer.server_version ?? "?" }}</span>
+                <UBadge
+                  :color="linkColor[linkStateOf(r.link)]"
+                  variant="subtle"
+                  :label="linkLabel[linkStateOf(r.link)]"
+                  data-testid="center-server-link-badge"
+                />
                 <span
-                  v-if="v.state === 'updating' && v.update?.running"
+                  v-if="r.peer?.state === 'updating' && r.peer.update?.running"
                   class="text-cork-muted"
-                  data-testid="center-version-running"
+                  data-testid="center-server-running"
                 >
-                  待機 cap {{ v.update.running.caps }} / worker {{ v.update.running.workers }}
+                  待機 cap {{ r.peer.update.running.caps }} / worker {{ r.peer.update.running.workers }}
                 </span>
               </div>
-              <p class="text-cork-muted pl-2 text-xs" data-testid="center-version-detail">{{ v.detail }}</p>
+              <p
+                v-if="r.peer && r.peer.state !== 'ok' && r.peer.detail"
+                class="text-cork-muted pl-2 text-xs"
+                data-testid="center-server-detail"
+              >
+                {{ r.peer.detail }}
+              </p>
             </div>
-            <p v-if="versions && !versions.peers.length" class="text-cork-muted text-xs" data-testid="center-versions-none">
-              server なし
-            </p>
-          </div>
-
-          <div class="flex flex-col gap-3">
-            <span class="text-sm font-medium">servers</span>
-            <div v-for="s in servers" :key="s.info.name" class="flex flex-col gap-1" data-testid="center-server-row">
-              <div class="flex items-center gap-2 text-xs">
-                <span class="w-32 truncate font-medium">{{ s.info.name }}</span>
-                <UBadge
-                  :color="s.info.connected ? 'success' : 'neutral'"
-                  variant="subtle"
-                  :label="s.info.connected ? 'connected' : 'not connected'"
-                />
-                <UBadge
-                  :color="s.info.reachable ? 'success' : 'warning'"
-                  variant="subtle"
-                  :label="s.info.reachable ? 'reachable' : 'unreachable'"
-                />
-              </div>
-              <p v-if="s.error" class="text-cork-danger-text pl-2 text-xs whitespace-pre-wrap">{{ s.error }}</p>
-              <template v-if="s.status">
-                <div
-                  v-for="a in [...s.status.caps, ...s.status.workers]"
-                  :key="`${a.kind}:${a.id}`"
-                  class="text-cork-muted flex items-center gap-2 pl-2 text-xs"
-                  data-testid="center-agent"
-                >
-                  <span class="w-12">{{ a.kind }}</span>
-                  <span class="w-40 truncate">{{ a.id }}</span>
-                  <span>{{ a.state }}</span>
-                </div>
-                <p v-if="!s.status.caps.length && !s.status.workers.length" class="text-cork-muted pl-2 text-xs">
-                  cap / worker なし
-                </p>
-              </template>
-            </div>
-            <p v-if="!servers.length" class="text-cork-muted text-xs">server 未登録</p>
+            <p v-if="!rows.length" class="text-cork-muted text-xs" data-testid="center-versions-none">server なし</p>
           </div>
         </template>
       </div>
