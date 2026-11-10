@@ -577,7 +577,7 @@ test.describe("external memory", () => {
     await page.getByTestId("settings-save").click();
     await expect(page.getByTestId("settings-dialog")).toBeHidden();
     const sent = await mock(page, (m) => m.calls.filter((c) => c.cmd === "center_call" && (c.args as { name: string }).name === "center_settings_update").map((c) => c.args));
-    expect(sent).toEqual([{ name: "center_settings_update", arguments: { settings: { instructions: null, addDirs: null, outputStyle: null, servers: null, memory: { url: URL_, token: "SECRET-TOKEN-1", agentId: "pm_1" } } } }]);
+    expect(sent).toEqual([{ name: "center_settings_update", arguments: { settings: { instructions: null, addDirs: null, outputStyle: null, memory: { url: URL_, token: "SECRET-TOKEN-1", agentId: "pm_1" } } } }]);
     expect(await common(page)).toEqual({ memory: { url: URL_, token: "SECRET-TOKEN-1", agentId: "pm_1" } });
     // reopened: url / agent ID shown, the token is not (only "set")
     await page.getByTestId("open-settings").click();
