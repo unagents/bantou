@@ -69,10 +69,15 @@ const rcColor = { stopped: "neutral", starting: "warning", connected: "success",
 const hostOf = (p: CenterServerPeer) => p.host ?? p.hostname ?? p.name;
 
 /**
- * Join between the two tools: `server_list[].serverPeer` is the peer id the center last sent to (or the plain name
- * "bantou-server" when it found no peer); `server_peers[].id` is that peer id. A name matches only when exactly one peer has it.
+ * Join between the two tools, in this order: (1) `server_list[].server_id` = `server_peers[].server_id` (stable across a re-registration;
+ * only when exactly one peer has it), (2) `server_list[].serverPeer` = `server_peers[].id` (the peer id the center last sent to),
+ * (3) `serverPeer` as a name ("bantou-server" when the center found no peer) when exactly one peer has that name.
  */
 function peerOfLink(l: CenterServerInfo, peers: CenterServerPeer[]): CenterServerPeer | undefined {
+  if (l.server_id) {
+    const byServerId = peers.filter((p) => p.server_id === l.server_id);
+    if (byServerId.length === 1) return byServerId[0];
+  }
   if (!l.serverPeer) return undefined;
   const byId = peers.find((p) => p.id === l.serverPeer);
   if (byId) return byId;
@@ -97,7 +102,7 @@ const rows = computed<ServerRow[]>(() => {
     out.push({ key: `peer:${p.key}`, host: hostOf(p), serverId: p.server_id, peerId: p.id, peer: p, link: linkOf.get(p.key) });
   }
   for (const l of links.value) {
-    if (!used.has(l.name)) out.push({ key: `link:${l.name}`, host: l.name, peerId: l.serverPeer ?? undefined, link: l });
+    if (!used.has(l.name)) out.push({ key: `link:${l.name}`, host: l.host ?? l.name, serverId: l.server_id, peerId: l.serverPeer ?? undefined, link: l });
   }
   return out;
 });

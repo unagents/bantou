@@ -1057,3 +1057,47 @@ test("通知: worker_report は onNotice に渡り、task の待ちを消さな�
   assert.equal(((await p) as { result_text: string }).result_text, "done");
   await link.close();
 });
+
+// -- server_list に載せる識別 ------------------------------------------------------
+
+test("list: 識別を学習した link の要素に server_id / host / user / workspace が載る", async () => {
+  const { link, clients } = setupDiscovery({}, [peerOf("id-1", "bantou-server")]);
+  const p = link.status("s1");
+  await sleep(20);
+  clients[0].reply({ ...statusResult(1), server_id: "srv-a", host: "lenovo", user: "bob", workspace: "/w/a" }, "bantou-server", { from_id: "id-1" });
+  await p;
+  assert.deepEqual(await link.list(), [
+    { name: "s1", connected: true, reachable: true, peerId: "peer-1", serverPeer: "id-1", server_id: "srv-a", host: "lenovo", user: "bob", workspace: "/w/a" },
+  ]);
+  await link.close();
+});
+
+test("list: 識別を学習していない link（旧 server の返信）には server_id / host が出ない", async () => {
+  const { link, clients } = setupDiscovery({}, [peerOf("id-1", "bantou-server")]);
+  const p = link.status("s1");
+  await sleep(20);
+  clients[0].reply(statusResult(1), "bantou-server", { from_id: "id-1" });
+  await p;
+  const [e] = await link.list();
+  assert.equal(e.serverPeer, "id-1");
+  assert.ok(!("server_id" in e) && !("host" in e) && !("user" in e) && !("workspace" in e));
+  await link.close();
+});
+
+test("list: 再登録で peer id が変わっても、新 peer id で学習した server_id が載る", async () => {
+  const { link, clients } = setupDiscovery({}, [peerOf("id-1", "bantou-server")]);
+  const p1 = link.status("s1");
+  await sleep(20);
+  clients[0].reply({ ...statusResult(1), server_id: "srv-a", host: "lenovo" }, "bantou-server", { from_id: "id-1" });
+  await p1;
+  clients[0].peers = [peerOf("id-2", "bantou-server")];
+  const p2 = link.status("s1");
+  await sleep(20);
+  clients[0].reply({ ...statusResult(2), server_id: "srv-a", host: "lenovo" }, "bantou-server", { from_id: "id-2" });
+  await p2;
+  const [e] = await link.list();
+  assert.equal(e.serverPeer, "id-2");
+  assert.equal(e.server_id, "srv-a");
+  assert.equal(e.host, "lenovo");
+  await link.close();
+});

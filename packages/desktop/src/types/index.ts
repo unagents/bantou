@@ -220,6 +220,11 @@ export interface CenterServerInfo {
   reachable: boolean;
   peerId: string | null;
   serverPeer: string | null;
+  /** What the link last heard from its server (hello_result / status_result). Absent when not learned yet or an old server. */
+  server_id?: string;
+  host?: string;
+  user?: string;
+  workspace?: string;
 }
 
 export interface CenterAgentState {

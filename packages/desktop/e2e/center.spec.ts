@@ -506,6 +506,30 @@ test("a server only in server_list, and one only in server_peers, both get a row
   await expect(only.getByTestId("center-server-link-badge")).toHaveText("到達不可");
 });
 
+test("a link joins its peer by server_id even when the peer id changed; without server_id it falls back to the peer id", async ({ page }) => {
+  await page.goto("/");
+  await mock(page, { enabled: true });
+  await seedVersions(page, {
+    pair: { server: "0.3.0", protocol: "1.3.0" },
+    peers: [
+      // re-registered: the link still points at the old id "old-id"
+      versionPeer({ key: "r", id: "new-id", host: "host-rereg", server_id: "srv-r" }),
+      versionPeer({ key: "o", id: "pold", host: "host-legacy" }),
+    ],
+  });
+  await seedLinks(page, [
+    link({ name: "r", serverPeer: "old-id", server_id: "srv-r", host: "host-rereg" }),
+    link({ name: "legacy", serverPeer: "pold" }),
+  ]);
+  await page.getByTestId("open-center").click();
+  await expect(page.getByTestId("center-server-row")).toHaveCount(2);
+  await expect(rowOf(page, "host-rereg")).toHaveCount(1);
+  await expect(rowOf(page, "host-rereg").getByTestId("center-server-version-badge")).toHaveText("一致");
+  await expect(rowOf(page, "host-rereg")).toHaveAttribute("data-link", "reachable");
+  // an old-format entry (no server_id) still joins by peer id
+  await expect(rowOf(page, "host-legacy")).toHaveAttribute("data-link", "reachable");
+});
+
 test("a failed server_peers still lists the servers of server_list, with the error", async ({ page }) => {
   await page.goto("/");
   await mock(page, { enabled: true });

@@ -54,7 +54,7 @@ export class MockBantou {
     { project: "alpha", path: "/ws/alpha", state: "connected", pid: 4301, sessionUrl: "https://claude.ai/code/session_mock", restarts: 0 },
     { project: "beta", path: "/ws/beta", state: "stopped", pid: null, sessionUrl: null, restarts: 2 },
   ];
-  /** `server_list` result (center `ServerInfo[]`): the configured links. `serverPeer` is the peer id the center last sent to (or a plain name), matched with `server_peers[].id`. */
+  /** `server_list` result (center `ServerInfo[]`): the configured links. `serverPeer` is the peer id the center last sent to (or a plain name), matched with `server_peers[].server_id` first when the entry has `server_id` (optional, with `host` / `user` / `workspace`), else with `server_peers[].id`. */
   centerServers: Record<string, unknown>[] = [{ name: "srv1", connected: true, reachable: true, peerId: "p1", serverPeer: "p2" }];
   /** `server_peers` result (center `Follow.snapshot()`). */
   centerVersions: unknown = {

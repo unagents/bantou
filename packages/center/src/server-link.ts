@@ -68,7 +68,7 @@ export interface LinkClient {
   peer?: { id: string | null };
 }
 
-export interface ServerInfo {
+export interface ServerInfo extends ServerIdentity {
   name: string;
   connected: boolean;
   reachable: boolean;
@@ -76,6 +76,7 @@ export interface ServerInfo {
   peerId: string | null;
   /** 直近に解決した server の送信先（peer id または名前）。未解決は null。 */
   serverPeer: string | null;
+  /** serverPeer の識別（server_id / host / user / workspace）。その peer から hello_result / status_result で学んだものだけ（未学習・旧 server は無い）。 */
 }
 
 export type KickCapInput = Omit<KickCapCommand, "bantou" | "type">;
@@ -737,6 +738,7 @@ export function createServerLink(opts: {
           reachable: await healthCheck(slot.cfg).catch(() => false),
           peerId: slot.connected ? (slot.client?.peer?.id ?? null) : null,
           serverPeer: slot.serverPeer,
+          ...(slot.serverPeer !== null ? (identities.get(slot.serverPeer) ?? {}) : {}),
         })),
       );
     },
