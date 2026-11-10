@@ -59,3 +59,4 @@
 ### テスト（第1回対応後）
 - center: `tsc` OK、`npm test` 556 件 pass。
 - desktop: `nuxt typecheck` exit 0。e2e は session-instructions.spec.ts と session-servers.spec.ts の 34 件 pass（nuxt generate の静的ビルド + node の簡易サーバー 127.0.0.1:14520 + ms-playwright chromium の一時 config）。簡易サーバーは停止し 14520 の解放を確認。
+- center の再確認: `cd packages/center && npm run typecheck && env -u BANTOU_SESSION_TOKEN npm test`（BANTOU_SESSION_TOKEN が環境に入ると結果に影響する test があるため、外して実行）。typecheck OK、556 件中 556 件 pass（HEAD 13bfba1 時点）。この環境では BANTOU_SESSION_TOKEN は元々未設定。
