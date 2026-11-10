@@ -10,6 +10,8 @@ center が master-cap（session の対話型 `claude --remote-control`）を起�
 
 2 つ目の部品は `master-cap-availability`: master-cap は常に利用者の指示をいつでも受けられる状態で働く。ビルド・テスト・release・長い待ちで自分の turn を塞がず、時間のかかる作業は remote-cap に預ける。この Mac のローカルでしかできない作業（release の署名ビルド・publish など）は、ローカルのサブエージェント（Agent tool）か background 実行（`run_in_background`）に任せる（`master-cap-role` の「自分ではしない」の例外）。待つ時は turn を終えて通知で受け、並行の指示には普通に応える。
 
+3 つ目の部品は `memory`（2026-11-11）: 外部記憶（`settings.memory`）がある session だけに付く。起動時と判断の前に `mcp__memory__` の context / recall を呼ぶ運用の案内。書き込みは bantou が自動で渡すので自分では呼ばない（設計は `docs/design/external-memory.md`）。memory の設定が無い session では部品も label も出ず、出力は従来と同じ。
+
 ## 並び
 
 ```
@@ -32,25 +34,26 @@ interface SystemInstructionPart {
   id: string;        // 英数字と -。固定
   version: number;   // 文面を変えたら上げる
   title: string;     // 1 行の説明（ログ・center_info 用）
-  text: (ctx: { session: string }) => string;
+  when?: (ctx) => boolean;  // 省略 = 常に付ける。false の文脈では文面も label も出ない
+  text: (ctx: { session: string; memory?: boolean }) => string;
 }
-export const SYSTEM_INSTRUCTION_PARTS = [MASTER_CAP_ROLE, MASTER_CAP_AVAILABILITY];
+export const SYSTEM_INSTRUCTION_PARTS = [MASTER_CAP_ROLE, MASTER_CAP_AVAILABILITY, MEMORY_USAGE];
 ```
 
 - 文面は center の package の中に TypeScript の文字列として持つ。ファイル・config・環境変数からは読まない。理由: (1) center の版と一緒に配り、版で内容が決まる。(2) bun で 1 本に compile するので外部ファイルの同梱より単純。(3) テストで文面の要点（道具名、役割）を検証できる。
-- 部品が見てよい文脈は `ctx` だけ（今は session 名）。将来 center id や permissionMode を足す時も `ctx` に足す。
+- 部品が見てよい文脈は `ctx` だけ（今は session 名と、memory の設定があるか `memory?: boolean`）。将来 center id や permissionMode を足す時も `ctx` に足す。
 - 変更の手順: 文面を直す → `version` を上げる → `test/system-instructions.test.ts` の要点を更新する → 必要なら `docs/design` を直す。部品の追加は配列に足すだけ。
-- 見える化: 起動した session の status に `systemInstructions: ["master-cap-role@1", …]`、`center_info` に `systemInstructions: [{ id, version, title }]`。本文は status にも log にも出さない（`--append-system-prompt` の値は長さだけに伏せる）。
+- 見える化: 起動した session の status に `systemInstructions: ["master-cap-role@1", …]`、`center_info` に `systemInstructions: [{ id, version, title }]`（条件付きの部品も全部出る。`memory@1` の title に「設定がある session だけ」と書く）。本文は status にも log にも出さない（`--append-system-prompt` の値は長さだけに伏せる）。
 
 ## 配線
 
-- `daemon.ts` が supervisor に `systemInstructions: { build(ctx), labels }` を渡す。supervisor は起動のたびに `build({ session })` で文面を作り、利用者の指示と結合して `buildWrapperArgs` に渡す（`remote-control.ts`）。
+- `daemon.ts` が supervisor に `systemInstructions: { build(ctx), labels(ctx) }` を渡す（`labels` は `applicableParts(ctx)` の label。配列でも渡せる）。supervisor は起動のたびに `build({ session, memory })` で文面を作り、利用者の指示と結合して `buildWrapperArgs` に渡す（`remote-control.ts`）。
 - `server.ts`（MCP）は `center_info` に `describeSystemInstructions()` を出す。テストでは差し替えられる。
 
 ## 将来の拡張（設計だけ。未実装）
 
 1. **部品の有効・無効**: center 共通・session の `settings.systemInstructions.disabled: ["<id>"]` で外せるようにする。合成は `sessions.ts` の `composeInstructions` と同じ場所で、`build(ctx, { disabled })` に渡す。既定は全部有効。
-2. **適用条件**: 部品に `when?: (ctx) => boolean` を持たせ、permissionMode や wrapper の有無、server の有無で出し分ける。
+2. **適用条件**: 部品に `when?: (ctx) => boolean` を持たせる仕組みは 2026-11-11 に実装した（`memory@1` が使う。`applicableParts(ctx)`）。permissionMode や wrapper の有無、server の有無で出し分けるのは未実装（`ctx` に足す）。
 3. **文面の差し替え（上級者向け）**: config の `remoteControl.systemInstructionsOverride: { "<id>": "<文面>" }` で部品単位に差し替える。版の追跡が効かなくなるので、ログに `override` と出す。
 4. **remote-cap / worker 側との共有**: server の `CAP_GUIDE` / `WORKER_GUIDE` は server package にある。共通化するなら protocol package に「文面の部品」を置き、center と server が同じ版を参照する。今は役割が違う（master-cap は指示を出す側、cap は worker を回す側）ので分けたままにする。
 

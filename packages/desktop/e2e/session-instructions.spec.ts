@@ -43,7 +43,7 @@ test.describe("session instructions", () => {
     await expect(page.getByTestId("settings-dialog")).toBeHidden();
     // it went to the center's tool, not to this PC's settings.json
     const sent = await mock(page, (m) => m.calls.filter((c) => c.cmd === "center_call" && (c.args as { name: string }).name === "center_settings_update").map((c) => c.args));
-    expect(sent).toEqual([{ name: "center_settings_update", arguments: { settings: { instructions: MULTI, addDirs: null, outputStyle: null } } }]);
+    expect(sent).toEqual([{ name: "center_settings_update", arguments: { settings: { instructions: MULTI, addDirs: null, outputStyle: null, memory: null } } }]);
     expect(await mock(page, (m) => (m as unknown as { centerCommonSettings: Record<string, unknown> }).centerCommonSettings)).toEqual({ instructions: MULTI });
     // only the common part changed: the center config API was not called
     expect(await mock(page, (m) => m.calls.filter((c) => c.cmd === "center_set_settings").length)).toBe(0);
@@ -556,5 +556,135 @@ test.describe("restart from the gear", () => {
     await expect(dlg).toBeHidden();
     await expect(page.locator("[data-testid=session-settings-open][data-name=career-2]")).toBeVisible();
     expect(await mock(page, (m) => m.loginCalls)).toEqual([]);
+  });
+});
+
+test.describe("external memory", () => {
+  test.use({ seed: boardSeed });
+  const URL_ = "http://mem.local:3000/mcp";
+  const common = (page: Page) => mock(page, (m) => (m as unknown as { centerCommonSettings: Record<string, unknown> }).centerCommonSettings);
+
+  test("the center-wide memory: saved with the one save button; the token is a password field, sent once, never shown again", async ({ page }) => {
+    await page.goto("/");
+    await page.getByTestId("open-settings").click();
+    await expect(page.getByTestId("center-common-section-memory")).toBeVisible();
+    await expect(page.getByTestId("center-common-memory-token")).toHaveAttribute("type", "password");
+    await expect(page.getByTestId("center-common-memory-note")).toHaveText(NOTE);
+    await expect(page.getByTestId("center-common-memory-token-set")).toHaveCount(0);
+    await page.getByTestId("center-common-memory-url").fill(URL_);
+    await page.getByTestId("center-common-memory-token").fill("SECRET-TOKEN-1");
+    await page.getByTestId("center-common-memory-agent-id").fill("pm_1");
+    await page.getByTestId("settings-save").click();
+    await expect(page.getByTestId("settings-dialog")).toBeHidden();
+    const sent = await mock(page, (m) => m.calls.filter((c) => c.cmd === "center_call" && (c.args as { name: string }).name === "center_settings_update").map((c) => c.args));
+    expect(sent).toEqual([{ name: "center_settings_update", arguments: { settings: { instructions: null, addDirs: null, outputStyle: null, servers: null, memory: { url: URL_, token: "SECRET-TOKEN-1", agentId: "pm_1" } } } }]);
+    expect(await common(page)).toEqual({ memory: { url: URL_, token: "SECRET-TOKEN-1", agentId: "pm_1" } });
+    // reopened: url / agent ID shown, the token is not (only "set")
+    await page.getByTestId("open-settings").click();
+    await expect(page.getByTestId("center-common-memory-url")).toHaveValue(URL_);
+    await expect(page.getByTestId("center-common-memory-agent-id")).toHaveValue("pm_1");
+    await expect(page.getByTestId("center-common-memory-token")).toHaveValue("");
+    await expect(page.getByTestId("center-common-memory-token-set")).toBeVisible();
+    expect(await page.locator("body").innerText()).not.toContain("SECRET-TOKEN-1");
+    expect(await page.getByTestId("settings-dialog").innerHTML()).not.toContain("SECRET-TOKEN-1");
+    await expect(page.getByTestId("settings-save")).toBeDisabled();
+    // change only the url: the token is not sent (the center keeps it)
+    await page.getByTestId("center-common-memory-url").fill("https://mem2.example/mcp");
+    await page.getByTestId("settings-save").click();
+    await expect(page.getByTestId("settings-dialog")).toBeHidden();
+    expect(await common(page)).toEqual({ memory: { url: "https://mem2.example/mcp", token: "SECRET-TOKEN-1", agentId: "pm_1" } });
+    // the token can be removed on its own
+    await page.getByTestId("open-settings").click();
+    await page.getByTestId("center-common-memory-token-clear").click();
+    await page.getByTestId("settings-save").click();
+    await expect(page.getByTestId("settings-dialog")).toBeHidden();
+    expect(await common(page)).toEqual({ memory: { url: "https://mem2.example/mcp", agentId: "pm_1" } });
+    // a blank url removes the item (null)
+    await page.getByTestId("open-settings").click();
+    await expect(page.getByTestId("center-common-memory-token-set")).toHaveCount(0);
+    await page.getByTestId("center-common-memory-url").fill("");
+    await page.getByTestId("center-common-memory-agent-id").fill("");
+    await page.getByTestId("settings-save").click();
+    await expect(page.getByTestId("settings-dialog")).toBeHidden();
+    expect(await common(page)).toEqual({});
+  });
+
+  test("a bad url / token / agent ID is refused before saving (http(s) absolute url, no user:pass@, no spaces in the token, agent ID [A-Za-z0-9_-])", async ({ page }) => {
+    await page.goto("/");
+    await page.getByTestId("open-settings").click();
+    const save = page.getByTestId("settings-save");
+    const url = page.getByTestId("center-common-memory-url");
+    await url.fill("mem.local/mcp");
+    await expect(save).toBeDisabled();
+    await expect(page.getByText("外部記憶の URL は http / https の絶対 URL")).toBeVisible();
+    await url.fill("ftp://mem.local/mcp");
+    await expect(save).toBeDisabled();
+    await url.fill("http://user:pw@mem.local/mcp");
+    await expect(save).toBeDisabled();
+    await expect(page.getByText("user:pass@ は書けない")).toBeVisible();
+    await url.fill("http://h/m cp");
+    await expect(save).toBeDisabled();
+    await expect(page.getByText("外部記憶の URL に空白・改行は使えない")).toBeVisible();
+    await url.fill("http://h/mcp?k=${BANTOU_SESSION_TOKEN}");
+    await expect(save).toBeDisabled();
+    await expect(page.getByText("外部記憶の URL に ${…} は書けない")).toBeVisible();
+    await url.fill(URL_);
+    await expect(save).toBeEnabled();
+    await page.getByTestId("center-common-memory-token").fill("a b");
+    await expect(save).toBeDisabled();
+    await expect(page.getByText("外部記憶の token に空白・制御文字・日本語は使えない")).toBeVisible();
+    await page.getByTestId("center-common-memory-token").fill("");
+    await page.getByTestId("center-common-memory-agent-id").fill("a b");
+    await expect(save).toBeDisabled();
+    await expect(page.getByText("外部記憶の agent ID は英数字と _ - のみ")).toBeVisible();
+    await page.getByTestId("center-common-memory-agent-id").fill("a".repeat(65));
+    await expect(save).toBeDisabled();
+    await page.getByTestId("center-common-memory-agent-id").fill("ok-1");
+    await expect(save).toBeEnabled();
+    // a token / agent ID without a url cannot be saved
+    await url.fill("");
+    await expect(save).toBeDisabled();
+    await expect(page.getByText("外部記憶の URL を入れる")).toBeVisible();
+  });
+
+  test("a session's memory is kept per session on the center and replaces the common one; the token is not returned", async ({ page }) => {
+    await page.goto("/");
+    const gear = (name: string) => page.locator(`[data-testid=session-settings-open][data-name="${name}"]`);
+    await gear("careery").click();
+    const dlg = page.getByTestId("settings-dialog");
+    await expect(dlg.getByTestId("settings-section-memory")).toBeVisible();
+    await expect(dlg.getByTestId("settings-memory-url")).toHaveValue("");
+    await expect(dlg.getByTestId("settings-memory-token")).toHaveAttribute("type", "password");
+    await dlg.getByTestId("settings-memory-url").fill(URL_);
+    await dlg.getByTestId("settings-memory-token").fill("SESSION-SECRET");
+    await dlg.getByTestId("settings-save").click();
+    await expect(dlg).toBeHidden();
+    expect(await mock(page, (m) => m.centerSettings)).toEqual({ careery: { memory: { url: URL_, token: "SESSION-SECRET" } } });
+    await gear("stroke-board").click();
+    await expect(page.getByTestId("settings-memory-url")).toHaveValue("");
+    await page.keyboard.press("Escape");
+    await gear("careery").click();
+    await expect(page.getByTestId("settings-memory-url")).toHaveValue(URL_);
+    await expect(page.getByTestId("settings-memory-token")).toHaveValue("");
+    await expect(page.getByTestId("settings-memory-token-set")).toBeVisible();
+    expect(await page.getByTestId("settings-dialog").innerHTML()).not.toContain("SESSION-SECRET");
+  });
+
+  test("the add dialog sends the memory with session_create (and nothing when it is blank)", async ({ page }) => {
+    await page.goto("/");
+    await page.getByTestId("open-add-session").click();
+    await page.getByTestId("add-name").fill("pm-mem");
+    await page.getByTestId("add-memory-url").fill(URL_);
+    await page.getByTestId("add-memory-token").fill("ADD-SECRET");
+    await page.getByTestId("add-create").click();
+    await expect(page.getByTestId("add-dialog")).toBeHidden();
+    const call = await mock(page, (m) => m.calls.find((c) => c.cmd === "create_session"));
+    expect(call?.args).toEqual({ name: "pm-mem", path: null, settings: { memory: { url: URL_, token: "ADD-SECRET" } } });
+    await page.getByTestId("open-add-session").click();
+    await page.getByTestId("add-name").fill("pm-plain");
+    await page.getByTestId("add-create").click();
+    await expect(page.getByTestId("add-dialog")).toBeHidden();
+    const calls = await mock(page, (m) => m.calls.filter((c) => c.cmd === "create_session").map((c) => c.args));
+    expect(calls[1]).toEqual({ name: "pm-plain", path: null, settings: {} });
   });
 });

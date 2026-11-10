@@ -2,7 +2,7 @@ import { mkdir, rename } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
 import { projectSchema, PERMISSION_MODES, type Config, type ProjectConfig } from "./config.js";
-import { CENTER_SERVERS_ERROR, composeAddDirs, composeInstructions, composeOutputStyle, composeServers, mergeSettings, projectSettingsPatchSchema, readCenterSettings, readSettings, type CenterSettingsPatch, type ProjectSettings, type ProjectSettingsPatch } from "./project-settings.js";
+import { CENTER_SERVERS_ERROR, composeAddDirs, composeInstructions, composeMemory, composeOutputStyle, composeServers, redactSettings, mergeSettings, projectSettingsPatchSchema, readCenterSettings, readSettings, type CenterSettingsPatch, type MemorySetting, type ProjectSettings, type ProjectSettingsPatch } from "./project-settings.js";
 import type { Logger } from "./log.js";
 import type { RcStatus, RemoteControlSupervisor } from "./remote-control.js";
 import type { EventHub } from "./events.js";
@@ -56,7 +56,7 @@ export const sessionCreateSchema = {
   name: z.string().regex(SESSION_NAME, "英数字と _ - のみ"),
   path: z.string().min(1).optional().describe("絶対パス。省略時は <workspace>/<name>（無ければ作る）"),
   permissionMode: z.enum(PERMISSION_MODES).optional().describe("省略時 auto"),
-  settings: projectSettingsPatchSchema.optional().describe("プロジェクトごとの設定（{ instructions?: string, addDirs?: string[], outputStyle?: string, servers?: string[], … }）。instructions は --append-system-prompt、addDirs（絶対パス）は 1 つずつ --add-dir で渡す、outputStyle（claude の output style の markdown 本文）は session のフォルダの .claude/output-styles/bantou.md に書いて --settings で選ぶ（再起動・--continue でも付く）。servers（host 名か server_id）はこの session が使う server の範囲（未設定 = 全部、空配列 = 使わない）。省略・空は無し"),
+  settings: projectSettingsPatchSchema.optional().describe("プロジェクトごとの設定（{ instructions?: string, addDirs?: string[], outputStyle?: string, servers?: string[], … }）。instructions は --append-system-prompt、addDirs（絶対パス）は 1 つずつ --add-dir で渡す、outputStyle（claude の output style の markdown 本文）は session のフォルダの .claude/output-styles/bantou.md に書いて --settings で選ぶ（再起動・--continue でも付く）。servers（host 名か server_id）はこの session が使う server の範囲（未設定 = 全部、空配列 = 使わない）。memory（{ url, token?, agentId? }）は外部記憶の MCP endpoint（url は http/https の絶対 URL、token は Bearer、agentId は X-Agent-Id で省略時は session 名）。省略・空は無し"),
 };
 
 export const sessionUpdateSchema = {
@@ -162,11 +162,12 @@ export function createSessionManager(opts: {
     projectSchema.parse({ name: s.name, path: s.path, permissionMode: s.permissionMode });
 
   /** 共通 + session の settings から supervisor に渡す instructions / addDirs / outputStyle（あれば）。 */
-  const instrOpt = (s: ProjectSettings | undefined): { instructions?: string; addDirs?: string[]; outputStyle?: string } => {
+  const instrOpt = (s: ProjectSettings | undefined): { instructions?: string; addDirs?: string[]; outputStyle?: string; memory?: MemorySetting } => {
     const i = composeInstructions(common, s);
+    const m = composeMemory(common, s);
     const d = composeAddDirs(common, s);
     const o = composeOutputStyle(common, s);
-    return { ...(i ? { instructions: i } : {}), ...(d.length ? { addDirs: d } : {}), ...(o ? { outputStyle: o } : {}) };
+    return { ...(i ? { instructions: i } : {}), ...(d.length ? { addDirs: d } : {}), ...(o ? { outputStyle: o } : {}), ...(m ? { memory: m } : {}) };
   };
 
   /** 接続（URL 取得）か失敗までを少し待つ。待ちきれなければ starting のまま返す。 */
@@ -255,7 +256,7 @@ export function createSessionManager(opts: {
     getSettings: (name) => {
       const known = supervisor.list().some((p) => p.project === name);
       if (!known) throw new Error(`未定義の session: ${name}`);
-      return { name, settings: readSettings(saved.get(name)?.settings) };
+      return { name, settings: redactSettings(readSettings(saved.get(name)?.settings)) };
     },
 
     updateSettings: (name, patch) =>
@@ -279,11 +280,12 @@ export function createSessionManager(opts: {
         supervisor.setInstructions(name, composeInstructions(common, next));
         supervisor.setAddDirs(name, composeAddDirs(common, next));
         supervisor.setOutputStyle(name, composeOutputStyle(common, next));
+        supervisor.setMemory(name, composeMemory(common, next));
         log(`session の設定を更新: ${name} (項目: ${Object.keys(next).join(",") || "なし"})`);
-        return { name, settings: next };
+        return { name, settings: redactSettings(next) };
       }),
 
-    getCenterSettings: () => ({ settings: { ...common } }),
+    getCenterSettings: () => ({ settings: redactSettings({ ...common }) }),
 
     serversOf: (name) => composeServers(saved.get(name)?.settings),
 
@@ -306,9 +308,10 @@ export function createSessionManager(opts: {
           supervisor.setInstructions(rec.name, composeInstructions(common, rec.settings));
           supervisor.setAddDirs(rec.name, composeAddDirs(common, rec.settings));
           supervisor.setOutputStyle(rec.name, composeOutputStyle(common, rec.settings));
+          supervisor.setMemory(rec.name, composeMemory(common, rec.settings));
         }
         log(`center 共通の設定を更新 (項目: ${Object.keys(next).join(",") || "なし"})`);
-        return { settings: next };
+        return { settings: redactSettings(next) };
       }),
 
     update: (input) =>

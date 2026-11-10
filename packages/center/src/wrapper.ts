@@ -52,13 +52,21 @@ export const MESSENGER_VERSION = "0.12.2";
 /** --mcp-config 内の agent-messenger の entry 名（user scope の `agent-messenger` と衝突させない別名）。 */
 export const MESSENGER_SERVER_KEY = "bantou-messenger";
 
+/** --mcp-config 内の外部記憶の entry 名（tool は mcp__memory__*）。 */
+export const MEMORY_SERVER_KEY = "memory";
+
+/** 外部記憶の token を claude の env に渡す変数名（--mcp-config の headers が ${…} で参照する）。 */
+export const MEMORY_TOKEN_ENV = "BANTOU_MEMORY_TOKEN";
+
 /**
  * --mcp-config に渡す JSON 文字列。
  * - messenger: session 名を peer 名（AGENT_MESSENGER_NAME）にした agent-messenger の stdio MCP。常に付ける。
  *   broker は client が自分で解決する（env → config → UDP 発見）ので指名しない。
  * - bantou: token は ${BANTOU_SESSION_TOKEN} のまま（claude が環境変数から展開する）。url が無い時は付けない。
+ * - memory: 外部記憶の設定がある時だけ付ける（type: "http"）。X-Agent-Id は agentId、無ければ session 名。
+ *   token がある時だけ Authorization: Bearer ${BANTOU_MEMORY_TOKEN}（実値はファイル・argv に書かず、env で渡す）。
  */
-export function mcpConfigJson(url: string | null, session: string): string {
+export function mcpConfigJson(url: string | null, session: string, memory?: { url: string; token?: string; agentId?: string }): string {
   const mcpServers: Record<string, unknown> = {
     [MESSENGER_SERVER_KEY]: {
       type: "stdio",
@@ -72,6 +80,16 @@ export function mcpConfigJson(url: string | null, session: string): string {
       type: "http",
       url,
       headers: { Authorization: "Bearer ${BANTOU_SESSION_TOKEN}", "X-Bantou-Session": session },
+    };
+  }
+  if (memory) {
+    mcpServers[MEMORY_SERVER_KEY] = {
+      type: "http",
+      url: memory.url,
+      headers: {
+        ...(memory.token ? { Authorization: "Bearer ${" + MEMORY_TOKEN_ENV + "}" } : {}),
+        "X-Agent-Id": memory.agentId || session,
+      },
     };
   }
   return JSON.stringify({ mcpServers });
