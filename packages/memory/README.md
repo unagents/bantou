@@ -43,9 +43,15 @@ context は LLM を使わず保存済みの情報から作る: `policies` = conf
 
 ### 抽出の失敗と排他
 
-- 取得した event には `claimed_at`（lease、15 分）を付ける。別 process・手動実行が同じ event を同時に処理しない（`FOR UPDATE SKIP LOCKED`）。process が落ちても 15 分後に再取得される。
-- chatp の応答が壊れている（不正 JSON / schema 違反）または timeout の時は、batch を二分して再試行し、1 件まで絞れたらその event の `attempts` を加算する（`last_error` を記録）。`attempts` が 5 に達した event は `failed_at` を立てて dead-letter にし、以後の batch に入れない。正常な event は poison に巻き込まれずに処理される。dead-letter は `SELECT * FROM memory_events WHERE failed_at IS NOT NULL` で見る（再処理は `failed_at` / `attempts` を戻す）。
-- chatp に繋がらない・HTTP エラーは障害とみなし、`attempts` を加算せずに claim を解いて次回再試行する（障害中に dead-letter が増えない）。
+- 取得した event には `claimed_at`（lease、15 分）を付ける。別 process・手動実行が同じ event を同時に処理しない（`FOR UPDATE SKIP LOCKED`）。さらに適用時に、対象 event が全て未処理であることを再確認し、他の run が先に処理していたら（lease 切れ後の二重実行など）その batch は何も書かない。run の最後に、処理済みでない event の claim を全て解く（他が一部を先に処理した場合も、残りは次の run がすぐ取り直せる）。process が落ちたら 15 分後に再取得される。
+- **失敗の分類**。chatp が返す失敗を、event の内容が原因のもの（poison）と chatp 側の障害に分ける。
+  - 内容起因: 応答が壊れている（不正 JSON / schema 違反）、timeout、HTTP 400 / 413 / 422（`claude -p` を包む chatp が特定の入力で返す）。batch を二分して再試行し、1 件まで絞れた event を「失敗候補」にする。
+  - 障害: 接続失敗、HTTP 5xx、429 など。`attempts` を加算せずに claim を解き、throw して次回再試行する（障害中に dead-letter は増えない）。
+- **失敗候補の扱い（run の終わりに決める）**。その run で**通った batch が 1 つでもあれば**（= chatp は動いている）、失敗候補の `attempts` を加算し（`last_error` を記録）、5 に達した event は `failed_at` を立てて dead-letter にして以後の batch に入れない。正常な event は poison に巻き込まれずに処理される。**通った batch が 1 つも無い（全滅）**時は chatp 側の系統障害とみなし、`attempts` を加算せず claim を解いて次の run で再試行する。
+  - 限界: poison が**単独**で残っている（他に未処理 event が無い）と、全滅と区別できないので加算しない。他の event が来て同じ batch に入った run で特定され、加算される。単独の poison は 1 run あたり LLM 1 回の再試行が続くだけで、害は小さい。
+- **budget**。1 run（1 agent）の LLM 呼び出しは最大 20 回、経過時間は最大 10 分（lease 15 分より短い）。超えたら残りの claim を解いて打ち切る（`attempts` は加算しない）。50 件の batch に poison が 1 件ある時の二分は、計算上 13 回前後（実測ではない）。
+- dead-letter は `SELECT * FROM memory_events WHERE failed_at IS NOT NULL` で見る（再処理は `failed_at` / `attempts` を戻す）。
+- **排他の検証範囲**: `FOR UPDATE SKIP LOCKED` と適用時の再確認のうち、再確認は PGlite の test で検出できる（lease 切れ後の二重実行）。`SKIP LOCKED` は真の並行 transaction が要り、PGlite（単一接続）では**未検証**。docker 版の test（`test/integration.pg.test.ts` の「並行」。6 並列で同じ event を二重に取らないことを検査）で検証する想定で、この host（docker 無し）では未実行。
 
 ## DB スキーマと migration
 

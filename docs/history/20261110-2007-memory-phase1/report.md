@@ -110,3 +110,22 @@ branch `feat/memory-phase1`（基点 develop d20aac2）。設計は `docs/design
 ## テスト結果（review 第1回の修正後）
 - `npm test`: 45 pass / 0 fail（unit 25 + PGlite 統合 20）+ docker 統合 1 suite が SKIP（docker 無し。理由は test 出力に出る）。`npm run typecheck` 通過。
 - 実サーバー smoke（port 17931）: `/` `/index.html` `/api/x` が 404、token 無し・不正・X-Agent-Id 無しが 401、正認証で tools/list が 4 tool。停止後に port 解放、log に token 無し。
+
+## review 第2回（HEAD cc06e19）の指摘と対応
+
+1. [medium] poison の分類（`server/utils/extract.ts`）
+   - (3) HTTP 400 / 413 / 422 は内容起因（`ChatContentError`）にした。5xx・429・接続失敗は障害のまま（attempts を加算せず claim を解いて throw）。
+   - (1) 失敗候補は run の終わりまで確定しない。**その run で通った batch が 1 つでもあれば**失敗候補の attempts を加算（5 回で dead-letter）、**1 つも無ければ**系統障害として加算しない（`summary.systemic`）。
+   - (2) 1 run（1 agent）の budget: LLM 呼び出し最大 20 回（`DEFAULT_MAX_LLM_CALLS`）、経過時間最大 10 分（`DEFAULT_MAX_RUN_MS`）。超えたら残りを打ち切り claim を解く（`summary.aborted`、attempts は加算しない）。`deps.budget` で上書き可（test 用）。
+   - 判断: **poison が単独で残っている時は、全滅と区別できないので加算しない**。他の event が同じ batch に入った run で特定される。単独の場合は 1 run あたり LLM 1 回の再試行が続くだけ。README に限界として明記。旧 test（poison の dead-letter）は、実運用に合わせて「毎 run 正常な event が来る」形に直した。
+   - test: 系統障害（全 batch が壊れた応答で 7 run 繰り返しても attempts 0・dead-letter 無し、直れば全て処理）／1 件だけ poison で他が通る時は poison だけ dead-letter／budget（呼び出し回数・経過時間）で打ち切り・claim 解除・attempts 加算なし／本物の chatp client + fake HTTP server で 400 は poison だけ加算・503 と 429 は加算せず throw・claim 解除。
+   - README の dead-letter の記述を、実装（失敗の分類・run の終わりの判定・budget・限界）に合わせて書き直した。
+2. [low] 排他の test の穴: 変異テストで確認した（下記）。「適用時の再確認を外す」は PGlite で検出できる test を足した（lease 切れ後に別 run が処理済みなら、遅れて戻った run は何も書かない）。**「SKIP LOCKED を外す」は PGlite（単一接続）では検出不能**で、docker 版（`test/integration.pg.test.ts`）に 6 並列 `extractForAgent` が同じ event を二重に取らない test を足した。**この host は docker 無しのため未実行**（typecheck は通過）。README に「SKIP LOCKED は PGlite では未検証、docker 版の test で検証」と明記。
+3. [low] Skip 時の claim 解除: 一部だけ他が先に処理した場合、batch を諦めた後に自分の claim を解く。run の最後に処理済みでない全 event の claim を解く実装にまとめた（Skip 内の個別解除は冗長だったので置かない。変異で確認）。test: 他が -1 だけ先に処理 → 自分の -2 の claim が解かれ、次の run が lease 切れを待たずに取れる。
+
+変異テスト（実装を壊して test が落ちるかを確認し、元に戻した）:
+- 適用時の再確認（`locked.rows.length !== events.length` → Skip）を外す: 排他の 2 本が失敗（検出）。
+- 系統障害の判定（`passed === 0`）を外す: 系統障害の test が失敗（検出）。
+- Skip 時の個別 claim 解除を外す: 検出されず。最後の一括解除が兼ねているため冗長と判断し、個別解除を削除した。
+
+テスト結果: `npm test` 52 pass / 0 fail（unit 25 + PGlite 統合 27）+ docker 統合 1 suite SKIP（docker 無し。docker 版には並行 test が 1 本増えたが未実行）。`npm run typecheck` 通過。

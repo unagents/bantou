@@ -37,7 +37,11 @@ export function createChatClient(opts: { url: string; token: string; model: stri
         if (e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError")) throw new ChatTimeoutError("chatp timeout");
         throw e;
       }
-      if (!res.ok) throw new Error(`chatp failed: HTTP ${res.status}`);
+      if (!res.ok) {
+        // 400 / 413 / 422 は入力（内容）起因とみなす。5xx・429 などは障害（呼び出し側は attempts を加算しない）
+        if (CONTENT_HTTP_STATUS.has(res.status)) throw new ChatContentError(`chatp rejected the input: HTTP ${res.status}`);
+        throw new Error(`chatp failed: HTTP ${res.status}`);
+      }
       let content: unknown;
       try {
         const j = (await res.json()) as { choices?: { message?: { content?: string } }[] };
@@ -54,6 +58,9 @@ export function createChatClient(opts: { url: string; token: string; model: stri
     },
   };
 }
+
+/** 入力の内容が原因とみなす HTTP status（claude -p を包む chatp が特定の入力で返す） */
+const CONTENT_HTTP_STATUS = new Set([400, 413, 422]);
 
 export const EXTRACT_TYPES = ["semantic", "episodic", "relational", "procedural"] as const;
 
@@ -188,9 +195,16 @@ export function decideCandidate(
   };
 }
 
+/** 1 run（1 agent）の LLM 呼び出し回数の既定上限。二分の最悪ケース（2N-1 回）で lease を超えないための budget */
+export const DEFAULT_MAX_LLM_CALLS = 20;
+/** 1 run の経過時間の既定上限（ミリ秒）。lease（15 分）より十分短くする */
+export const DEFAULT_MAX_RUN_MS = 10 * 60 * 1000;
+
 export interface ExtractDeps {
   chat: ChatClient;
   batchSize: number;
+  /** 1 run の budget（省略時は既定） */
+  budget?: { maxCalls?: number; maxMs?: number };
 }
 
 export interface ExtractSummary {
@@ -203,6 +217,10 @@ export interface ExtractSummary {
   retried: number;
   /** 上限に達して dead-letter（failed_at）にした event 数 */
   failed: number;
+  /** 通った batch が 1 つも無く全滅した（chatp 側の系統障害とみなし、attempts を加算しなかった）event 数 */
+  systemic: number;
+  /** budget 超過で打ち切り、claim を解いて次の run に回した event 数 */
+  aborted: number;
 }
 
 class Skip extends Error {}
@@ -210,9 +228,14 @@ class Skip extends Error {}
 /**
  * 1 agent 分。
  *  - 未処理 event を lease（claimed_at）付きで取る（複数 process / 手動実行の二重処理を防ぐ。FOR UPDATE SKIP LOCKED）
- *  - chatp の応答が壊れている / timeout の時は batch を二分して再試行し、1 件まで絞れたらその event の attempts を加算する。
- *    attempts が MAX_ATTEMPTS に達した event は failed_at を立て、以後の batch から外す
- *  - chatp への接続失敗・HTTP エラーは障害とみなし、attempts を加算せず claim を解いて throw する（次回再試行）
+ *  - chatp の応答が壊れている / timeout / 内容起因の HTTP エラー（400 / 413 / 422）の時は batch を二分して再試行し、
+ *    1 件まで絞れた event を「失敗候補」にする
+ *  - run の終わりに、1 つでも通った batch があれば（= chatp は動いている）失敗候補の attempts を加算する。
+ *    attempts が MAX_ATTEMPTS に達した event は failed_at を立て、以後の batch から外す（dead-letter）
+ *  - 通った batch が 1 つも無い（全滅）なら chatp 側の系統障害とみなし、attempts を加算しない
+ *    （1 件だけの batch が失敗した場合も区別できないので加算しない。他の event と同じ batch に入れば特定できる）
+ *  - 接続失敗・5xx・429 などは障害とみなし、attempts を加算せず claim を解いて throw する（次回再試行）
+ *  - budget（LLM 呼び出し回数 / 経過時間）を超えたら残りの claim を解いて打ち切る
  */
 export async function extractForAgent(db: Db, deps: ExtractDeps, agentId: string): Promise<ExtractSummary> {
   const rows = await db.withAgent(agentId, async (q) =>
@@ -228,14 +251,36 @@ export async function extractForAgent(db: Db, deps: ExtractDeps, agentId: string
     )).rows,
   );
   const events = [...rows].sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime() || a.event_id.localeCompare(b.event_id));
-  const summary: ExtractSummary = { agentId, events: events.length, accepted: 0, rejected: 0, downgraded: 0, retried: 0, failed: 0 };
+  const summary: ExtractSummary = { agentId, events: events.length, accepted: 0, rejected: 0, downgraded: 0, retried: 0, failed: 0, systemic: 0, aborted: 0 };
   if (events.length === 0) return summary;
 
+  const maxCalls = deps.budget?.maxCalls ?? DEFAULT_MAX_LLM_CALLS;
+  const deadline = Date.now() + (deps.budget?.maxMs ?? DEFAULT_MAX_RUN_MS);
+  let calls = 0;
+  let passed = 0;
+  const suspects: { event: EventRow; error: string }[] = [];
+  const unattempted: EventRow[] = [];
+
+  const releaseClaims = (ids: string[]) =>
+    db.withAgent(agentId, (q) =>
+      q.query("UPDATE memory_events SET claimed_at = NULL WHERE agent_id = $1 AND event_id = ANY($2::text[]) AND processed_at IS NULL", [agentId, ids]),
+    );
+
   const processBatch = async (batch: EventRow[]): Promise<void> => {
+    if (calls >= maxCalls || Date.now() >= deadline) {
+      unattempted.push(...batch);
+      return;
+    }
+    calls++;
     try {
       await extractBatch(db, deps, agentId, batch, summary);
+      passed++;
     } catch (e) {
-      if (e instanceof Skip) return;
+      if (e instanceof Skip) {
+        // 他の process が一部だけ先に処理した。この batch は諦める。自分の claim は run の最後にまとめて解く（残りをすぐ次の run で取れる）
+        passed++;
+        return;
+      }
       if (!(e instanceof ChatContentError || e instanceof ChatTimeoutError)) throw e;
       if (batch.length > 1) {
         const mid = Math.floor(batch.length / 2);
@@ -243,32 +288,40 @@ export async function extractForAgent(db: Db, deps: ExtractDeps, agentId: string
         await processBatch(batch.slice(mid));
         return;
       }
-      const failedNow = await db.withAgent(agentId, async (q) =>
-        (await q.query<{ failed_at: Date | null }>(
-          `UPDATE memory_events SET attempts = attempts + 1, last_error = $3, claimed_at = NULL,
-                  failed_at = CASE WHEN attempts + 1 >= $4 THEN now() ELSE NULL END
-            WHERE agent_id = $1 AND event_id = $2 AND processed_at IS NULL
-            RETURNING failed_at`,
-          [agentId, batch[0]!.event_id, e.message.slice(0, 300), MAX_ATTEMPTS],
-        )).rows[0]?.failed_at,
-      );
-      if (failedNow) summary.failed++;
-      else summary.retried++;
+      suspects.push({ event: batch[0]!, error: e.message.slice(0, 300) });
     }
   };
 
   try {
     await processBatch(events);
   } catch (e) {
-    // 障害: 取った分の claim を解いて次回に回す（処理済みは対象外）
-    await db.withAgent(agentId, (q) =>
-      q.query("UPDATE memory_events SET claimed_at = NULL WHERE agent_id = $1 AND event_id = ANY($2::text[]) AND processed_at IS NULL", [
-        agentId,
-        events.map((x) => x.event_id),
-      ]),
-    );
+    // 障害: 取った分の claim を解いて次回に回す（処理済みは対象外）。失敗候補の attempts は加算しない
+    await releaseClaims(events.map((x) => x.event_id));
     throw e;
   }
+
+  if (suspects.length > 0) {
+    if (passed === 0) {
+      summary.systemic = suspects.length;
+    } else {
+      for (const s of suspects) {
+        const failedAt = await db.withAgent(agentId, async (q) =>
+          (await q.query<{ failed_at: Date | null }>(
+            `UPDATE memory_events SET attempts = attempts + 1, last_error = $3,
+                    failed_at = CASE WHEN attempts + 1 >= $4 THEN now() ELSE NULL END
+              WHERE agent_id = $1 AND event_id = $2 AND processed_at IS NULL
+              RETURNING failed_at`,
+            [agentId, s.event.event_id, s.error, MAX_ATTEMPTS],
+          )).rows[0]?.failed_at,
+        );
+        if (failedAt) summary.failed++;
+        else summary.retried++;
+      }
+    }
+  }
+  summary.aborted = unattempted.length;
+  // 加算しなかった・打ち切った event の claim を解く（次の run で取り直す）
+  await releaseClaims(events.map((x) => x.event_id));
   return summary;
 }
 

@@ -8,10 +8,13 @@ import { extractAll, extractForAgent } from "../../server/utils/extract.ts";
 import { embedPending } from "../../server/utils/embed.ts";
 import { buildContext, explain, ForbiddenError, NotFoundError, recall, supersede } from "../../server/utils/recall.ts";
 import { assertRlsEnforced, checkEmbeddingDim } from "../../server/utils/runtime.ts";
-import { MAX_ATTEMPTS, MAX_CANDIDATES } from "../../server/utils/extract.ts";
+import { MAX_ATTEMPTS, MAX_CANDIDATES, createChatClient } from "../../server/utils/extract.ts";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import type { Db } from "../../server/utils/db.ts";
 
-export function defineIntegration(make: () => Promise<TestDb>): void {
+/** extra: この DB 固有の test を同じ describe の中で足す（docker 版の並行 test など） */
+export function defineIntegration(make: () => Promise<TestDb>, extra?: (db: () => TestDb) => void): void {
 let t!: TestDb;
 const emb = fakeEmbedder();
 
@@ -362,7 +365,11 @@ test("poison batch: 壊れた応答を返す event を二分で特定し、他�
   await recordEvent(t.db, a, ev({ eventId: `${a}-4`, body: "後から来た事実 4", at: "2026-11-01T00:00:04Z" }));
   const s2 = await extractForAgent(t.db, deps, a);
   assert.equal(s2.accepted, 1);
-  for (let i = 2; i < MAX_ATTEMPTS; i++) await extractForAgent(t.db, deps, a);
+  // poison は他の正常な event と同じ batch に入る限り特定され、attempts が増える（単独だと系統障害と区別できず加算しない）
+  for (let i = 2; i < MAX_ATTEMPTS; i++) {
+    await recordEvent(t.db, a, ev({ eventId: `${a}-g${i}`, body: `追加の事実 ${i}`, at: `2026-11-01T00:01:0${i}Z` }));
+    await extractForAgent(t.db, deps, a);
+  }
   rows = await st();
   assert.equal(rows[1]!.attempts, MAX_ATTEMPTS);
   assert.equal(rows[1]!.failed, true, "上限で dead-letter");
@@ -464,4 +471,160 @@ test("event: 同じ eventId で本文が違う再送は duplicate（先の本文
   const body = await t.asSuper(async (sq) => (await sq.query<{ body: string }>("SELECT body FROM memory_events WHERE agent_id = $1", [a])).rows[0]!.body);
   assert.equal(body, "最初の本文");
 });
+
+// ---- review 第2回: 失敗の分類・budget・排他 ----
+
+const evState = (a: string) =>
+  t.asSuper(async (sq) =>
+    (await sq.query<{ event_id: string; attempts: number; processed: boolean; failed: boolean; claimed: boolean }>(
+      "SELECT event_id, attempts, processed_at IS NOT NULL AS processed, failed_at IS NOT NULL AS failed, claimed_at IS NOT NULL AS claimed FROM memory_events WHERE agent_id = $1 ORDER BY event_id", [a])).rows,
+  );
+
+test("系統障害: 通った batch が 1 つも無い（全滅）なら attempts を加算せず、何度繰り返しても dead-letter にならない", async () => {
+  const a = newAgent();
+  for (let i = 1; i <= 4; i++) await recordEvent(t.db, a, ev({ eventId: `${a}-${i}`, body: `事実 ${i}`, at: `2026-11-01T00:00:0${i}Z` }));
+  const broken = fakeChat(() => ({ not: "the schema" }));
+  for (let run = 0; run < MAX_ATTEMPTS + 2; run++) {
+    const s = await extractForAgent(t.db, { chat: broken, batchSize: 50 }, a);
+    assert.deepEqual([s.systemic, s.retried, s.failed, s.accepted], [4, 0, 0, 0]);
+  }
+  for (const r of await evState(a)) assert.deepEqual([r.attempts, r.failed, r.processed, r.claimed], [0, false, false, false]);
+  // 直ったら全て処理される
+  const ok = fakeChat((req) => cands(...parseEvents(req.user).map((e) => ({ memoryType: "semantic", content: `抽出: ${e.body}`, status: "inferred", sourceEventIds: [e.id] }))));
+  assert.equal((await extractForAgent(t.db, { chat: ok, batchSize: 50 }, a)).accepted, 4);
+});
+
+test("1 件だけが poison で他が通る時は、poison だけが dead-letter になる", async () => {
+  const a = newAgent();
+  for (let i = 1; i <= 4; i++) await recordEvent(t.db, a, ev({ eventId: `${a}-${i}`, body: i === 3 ? "POISON" : `事実 ${i}`, at: `2026-11-01T00:00:0${i}Z` }));
+  const chat = fakeChat((req) => {
+    const events = parseEvents(req.user);
+    if (events.some((e) => e.body === "POISON")) return { not: "the schema" };
+    return cands(...events.map((e) => ({ memoryType: "semantic", content: `抽出: ${e.body}`, status: "inferred", sourceEventIds: [e.id] })));
+  });
+  for (let run = 0; run < MAX_ATTEMPTS; run++) {
+    if (run > 0) await recordEvent(t.db, a, ev({ eventId: `${a}-g${run}`, body: `追加の事実 ${run}`, at: `2026-11-01T00:01:0${run}Z` }));
+    await extractForAgent(t.db, { chat, batchSize: 50 }, a);
+  }
+  const rows = await evState(a);
+  const poison = rows.find((r) => r.event_id === `${a}-3`)!;
+  assert.deepEqual([poison.processed, poison.failed, poison.attempts], [false, true, MAX_ATTEMPTS]);
+  assert.ok(rows.filter((r) => r.event_id !== `${a}-3`).every((r) => r.processed && !r.failed), "poison 以外は全て処理済み");
+});
+
+test("budget: LLM 呼び出し回数の上限で打ち切り、残りの claim を解く（attempts は加算しない）", async () => {
+  const a = newAgent();
+  for (let i = 1; i <= 8; i++) await recordEvent(t.db, a, ev({ eventId: `${a}-${i}`, body: `事実 ${i}`, at: `2026-11-01T00:00:0${i}Z` }));
+  const broken = fakeChat(() => ({ not: "the schema" }));
+  const s = await extractForAgent(t.db, { chat: broken, batchSize: 50, budget: { maxCalls: 3 } }, a);
+  assert.equal(broken.requests.length, 3, "呼び出しは budget まで");
+  assert.ok(s.aborted > 0);
+  for (const r of await evState(a)) assert.deepEqual([r.attempts, r.failed, r.claimed], [0, false, false]);
+});
+
+test("budget: 経過時間の上限でも打ち切る", async () => {
+  const a = newAgent();
+  for (let i = 1; i <= 4; i++) await recordEvent(t.db, a, ev({ eventId: `${a}-${i}`, body: `事実 ${i}`, at: `2026-11-01T00:00:0${i}Z` }));
+  const broken = fakeChat(() => ({ not: "the schema" }));
+  const s = await extractForAgent(t.db, { chat: broken, batchSize: 50, budget: { maxMs: 0 } }, a);
+  assert.equal(broken.requests.length, 0);
+  assert.equal(s.aborted, 4);
+  for (const r of await evState(a)) assert.equal(r.claimed, false);
+});
+
+/** 本物の chatp client が叩く fake HTTP server。POISON を含む入力には poisonStatus を返し、それ以外は候補を返す。mode=all なら全て allStatus */
+async function startFakeChatp(opts: { poisonStatus?: number; allStatus?: number }): Promise<{ url: string; server: Server }> {
+  const server = createServer((req, res) => {
+    let b = "";
+    req.on("data", (c) => (b += c));
+    req.on("end", () => {
+      const user = (JSON.parse(b) as { messages: { content: string }[] }).messages[1]!.content;
+      const events = parseEvents(user);
+      const status = opts.allStatus ?? (events.some((e) => e.body === "POISON") ? opts.poisonStatus : undefined);
+      if (status) {
+        res.statusCode = status;
+        return res.end("error");
+      }
+      const out = { candidates: events.map((e) => ({ memoryType: "semantic", content: `抽出: ${e.body}`, status: "inferred", sourceEventIds: [e.id], validFrom: null })) };
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(out) } }] }));
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, server };
+}
+
+test("HTTP status の分類: 400 は内容起因（poison だけ attempts 加算）、503 は障害（加算せず throw、claim を解く）", async () => {
+  const a = newAgent();
+  for (let i = 1; i <= 3; i++) await recordEvent(t.db, a, ev({ eventId: `${a}-${i}`, body: i === 2 ? "POISON" : `事実 ${i}`, at: `2026-11-01T00:00:0${i}Z` }));
+  const p400 = await startFakeChatp({ poisonStatus: 400 });
+  try {
+    const chat = createChatClient({ url: p400.url, token: "", model: "m", timeoutMs: 5000 });
+    const s = await extractForAgent(t.db, { chat, batchSize: 50 }, a);
+    assert.deepEqual([s.accepted, s.retried, s.systemic], [2, 1, 0]);
+    assert.deepEqual((await evState(a)).map((r) => [r.processed, r.attempts]), [[true, 0], [false, 1], [true, 0]]);
+  } finally {
+    p400.server.close();
+  }
+  const b = newAgent();
+  for (let i = 1; i <= 3; i++) await recordEvent(t.db, b, ev({ eventId: `${b}-${i}`, body: `事実 ${i}`, at: `2026-11-01T00:00:0${i}Z` }));
+  for (const status of [503, 429]) {
+    const down = await startFakeChatp({ allStatus: status });
+    try {
+      const chat = createChatClient({ url: down.url, token: "", model: "m", timeoutMs: 5000 });
+      for (let run = 0; run < MAX_ATTEMPTS + 1; run++) await assert.rejects(extractForAgent(t.db, { chat, batchSize: 50 }, b), new RegExp(`HTTP ${status}`));
+    } finally {
+      down.server.close();
+    }
+  }
+  for (const r of await evState(b)) assert.deepEqual([r.attempts, r.failed, r.claimed], [0, false, false]);
+});
+
+test("排他: 一部の event だけ他が先に処理した時は batch を諦めるが、自分の claim は解いて残りをすぐ取り直せる", async () => {
+  const a = newAgent();
+  await recordEvent(t.db, a, ev({ eventId: `${a}-1`, body: "一つ目", at: "2026-11-01T00:00:01Z" }));
+  await recordEvent(t.db, a, ev({ eventId: `${a}-2`, body: "二つ目", at: "2026-11-01T00:00:02Z" }));
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const slow = fakeChat(async () => {
+    await gate;
+    return cands();
+  });
+  const first = extractForAgent(t.db, { chat: slow, batchSize: 50 }, a);
+  for (let i = 0; i < 100 && slow.requests.length === 0; i++) await new Promise((r) => setTimeout(r, 20));
+  assert.equal(slow.requests.length, 1);
+  // 別の process が -1 だけ処理した
+  await t.asSuper(async (sq) => sq.query("UPDATE memory_events SET processed_at = now() WHERE agent_id = $1 AND event_id = $2", [a, `${a}-1`]));
+  release();
+  await first;
+  const second = (await evState(a))[1]!;
+  assert.deepEqual([second.processed, second.claimed], [false, false]);
+  const again = fakeChat(() => cands());
+  assert.equal((await extractForAgent(t.db, { chat: again, batchSize: 50 }, a)).events, 1, "claim が解かれているので lease 切れを待たずに取れる");
+});
+
+test("排他: lease が切れて別の run が同じ event を処理済みなら、遅れて戻った run は何も書かない", async () => {
+  const a = newAgent();
+  await recordEvent(t.db, a, ev({ eventId: `${a}-1`, body: "同じ事実" }));
+  const cand1 = { memoryType: "semantic", content: "同じ事実の抽出", status: "inferred", sourceEventIds: [`${a}-1`] };
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const slowA = fakeChat(async () => {
+    await gate;
+    return cands(cand1);
+  });
+  const first = extractForAgent(t.db, { chat: slowA, batchSize: 50 }, a);
+  for (let i = 0; i < 100 && slowA.requests.length === 0; i++) await new Promise((r) => setTimeout(r, 20));
+  // A の lease が切れた
+  await t.asSuper(async (sq) => sq.query("UPDATE memory_events SET claimed_at = now() - interval '1 hour' WHERE agent_id = $1", [a]));
+  const sB = await extractForAgent(t.db, { chat: fakeChat(() => cands(cand1)), batchSize: 50 }, a);
+  assert.equal(sB.accepted, 1);
+  release();
+  const sA = await first;
+  assert.deepEqual([sA.accepted, sA.rejected], [0, 0]);
+  const n = await t.asSuper(async (sq) => (await sq.query<{ c: string }>("SELECT count(*)::text AS c FROM memory_candidates WHERE agent_id = $1", [a])).rows[0]!.c);
+  assert.equal(n, "1", "遅れた run の candidates（duplicate 却下）が書かれていない");
+});
+
+extra?.(() => t);
 }
