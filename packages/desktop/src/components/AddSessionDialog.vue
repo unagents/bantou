@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { createSession, sessionPathHints } from "~/api";
+import { useHideAddDirs } from "~/composables/centerRole";
 import { draftError, emptyDraft, toCreate } from "~/composables/sessionInstructions";
 
 const open = defineModel<boolean>("open", { required: true });
@@ -13,6 +14,8 @@ const folder = ref("");
 const workspace = ref<string | null>(null);
 const canPick = ref(false);
 const draft = ref(emptyDraft());
+/** Reference folders are left out when this desktop runs no sidecar (they are paths on another host). */
+const { hideAddDirs, refresh: refreshHideAddDirs } = useHideAddDirs();
 const problem = computed(() => draftError(draft.value));
 const busy = ref(false);
 const actionError = ref<string | null>(null);
@@ -34,6 +37,7 @@ const folderPlaceholder = computed(() => {
 });
 
 onMounted(async () => {
+  void refreshHideAddDirs();
   try {
     const h = await sessionPathHints();
     workspace.value = h.workspace;
@@ -76,7 +80,7 @@ async function create() {
         >
           <PathField v-model="folder" :can-pick="canPick" :placeholder="folderPlaceholder" testid="add-folder" @enter="create" @error="actionError = $event" />
         </UFormField>
-        <ProjectSettingsFields v-model="draft" id-prefix="add" :rows="4" :can-pick="canPick" @error="actionError = $event" />
+        <ProjectSettingsFields v-model="draft" id-prefix="add" :rows="4" :can-pick="canPick" :hide-add-dirs="hideAddDirs" @error="actionError = $event" />
         <p v-if="problem" class="text-cork-danger-text text-xs" data-testid="add-problem">{{ problem }}</p>
         <UButton
           class="self-end"

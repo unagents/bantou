@@ -50,3 +50,37 @@ memory 節: この branch の基点には無い（別 task feat/external-memory-
   - sidecar ON（remote 保存済みでも）: 従来どおり全部出て remote 節は出ない。
   - OFF + remote 無し: スイッチ・状態・貼り付け欄が出る。
 - 簡易サーバーは停止し port 14200 の解放を確認。
+
+## 追加: 参照フォルダ（addDirs）を sidecar 専用にする
+
+指摘: 「参照フォルダが出てるのはおかしい」。
+
+### 分類表への追記
+
+| 項目 | 呼ぶ API | 分類 | 表示条件（変更後） |
+|---|---|---|---|
+| 参照フォルダ（addDirs）: プロジェクト設定（歯車）/ 追加ダイアログ / 全 session 共通の設定 | `session_settings_update` / `session_create` / `center_settings_update`（addDirs）、フォルダ選択は `pick_directory`（この PC の dialog） | sidecar 専用 | remoteOnly 以外（sidecar ON、または OFF で remote も無い時）。remoteOnly の間は節ごと出さない |
+
+理由: addDirs は center のホスト上の path で、選ぶ dialog はこの Mac のフォルダ dialog。別ホストの center には意味を成さない。追加指示・出力スタイル・使う server は center 側の設定なので、今までどおり出す。
+
+### 判定
+
+先と同じ根拠（`enabled` = sidecar を起動し接続先を決める値）。`composables/centerRole.ts` の `isRemoteOnly(settings)` に切り出して SettingsDialog も同じ関数を使う（別の判定は作っていない）。
+- SettingsDialog（共通設定）: 設定の draft から確定（取得待ちなし）。
+- ProjectSettingsDialog / AddSessionDialog: 開く時に `center_get_settings` を読む。読めるまで隠し、読めたら判定。読めなかった時は従来どおり出す（誤って隠して機能を失うより、従来挙動へ戻す方を選んだ）。ちらつきは「隠した状態から出る」方向だけにした（remoteOnly で一瞬出る事は無い）。
+
+### 保存時に既存値を消さない
+
+`toUpdate` は空の `addDirs` を `null`（= center で項目削除）にする。draft は center から読んだ値を持ったままなので、そのまま送れば同じ値の送り直しになり消えはしないが、読み込み前の保存や draft が空の時に `null` が出る余地がある。そこで隠している間は親で body から `addDirs` を外す（`delete body.addDirs`）。center の `*_settings_update` は書いた項目だけ変わる（merge）ので、外した項目は更新されない。`sessionInstructions.ts` は触っていない。入力検証も隠している間は `addDirs` を空として扱い、保存済みの相対パスなどで保存が止まらない。`session_create` は draft の `addDirs` が空のため送られない（e2e で確認）。
+
+### ProjectSettingsFields.vue の差分
+
++3/-1 行（prop `hideAddDirs?: boolean` の 1 項目と型コメント、参照フォルダ節の開始タグに `v-if="!hideAddDirs"`）。既存行の並べ替え・整形なし。prop 名を `hide...` にしたのは、Vue の boolean prop は未指定が false になるため、`withDefaults` を足さずに既定=表示にするため。
+
+### テスト
+
+- `nuxt typecheck` exit 0。
+- 全 208 件 pass（retries 0。既存 spec は無変更で pass、新規は settings-remote-center.spec.ts に計 11 件）。
+- 新規（`reference folders: sidecar only`）: 歯車 / 追加 / 共通設定のそれぞれで、sidecar ON は参照フォルダ節が出る、OFF + remote は出ない。OFF + remote で歯車の追加指示だけ保存しても、保存済み addDirs が残る（update の body に addDirs が無い、centerSettings が addDirs + instructions）。共通設定も同様（`center_settings_update` の引数に addDirs が無く、center 側の addDirs が残る）。保存済みの相対パスで保存が止まらない。追加は create_session の settings に addDirs が入らない。共通設定で remote を解除すると節が戻る。
+- 先に書いた spec の「OFF+remote で共通設定 4 節が出る」は、今回の仕様変更で参照フォルダを除く 3 節 + 非表示の検証に直した（自分の spec であり、既存 spec の期待値は緩めていない）。
+- session-instructions.spec.ts の「remote center の typed rows」テストは enabled=true（boardSeed）の構成で、名前に反して sidecar ON のまま typed rows を確認している。触っていない（別 task の担当ファイル）。

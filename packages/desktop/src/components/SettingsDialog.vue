@@ -11,6 +11,7 @@ import {
   centerSetSettings,
   centerStatus,
 } from "~/api";
+import { isRemoteOnly } from "~/composables/centerRole";
 import { draftError, draftOf, emptyDraft, toUpdate, type SettingsDraft } from "~/composables/sessionInstructions";
 import type { CenterConnectSnippets, CenterIpStatus, CenterParsedConnect, CenterSettings, CenterStatus } from "~/types";
 
@@ -59,7 +60,8 @@ const common = ref<SettingsDraft>(emptyDraft());
 const commonBaseline = ref<SettingsDraft | null>(null);
 const commonError = ref<string | null>(null);
 const commonDirty = computed(() => commonBaseline.value !== null && JSON.stringify(common.value) !== JSON.stringify(commonBaseline.value));
-const commonProblem = computed(() => draftError(common.value));
+// The reference folders are left out of the form (and the update) while remoteOnly: a value in the draft is neither checked nor sent.
+const commonProblem = computed(() => draftError(remoteOnly.value ? { ...common.value, addDirs: [] } : common.value));
 // The folder dialog picks on this PC: right for the own sidecar, not for a pasted remote center.
 const commonCanPick = computed(() => !!settings.value?.enabled);
 async function loadCommon() {
@@ -75,7 +77,10 @@ async function loadCommon() {
 }
 // Throws on failure (save() names which part failed).
 async function saveCommon() {
-  const r = await centerCommonSettingsUpdate(toUpdate(common.value));
+  const body = toUpdate(common.value);
+  // Not sent while hidden: an item left out is unchanged on the center (null would remove it).
+  if (remoteOnly.value) delete body.addDirs;
+  const r = await centerCommonSettingsUpdate(body);
   common.value = draftOf(r.settings);
   commonBaseline.value = { ...common.value, addDirs: [...common.value.addDirs], servers: common.value.servers && [...common.value.servers] };
 }
@@ -279,7 +284,7 @@ function clearRemote() {
 // center_mcp.rs::select_target), so it is known as soon as the settings are loaded. The sidecar-only parts
 // (on/off switch, run state, restart count, logs) are not shown then. Off without a remote (nothing
 // connected yet) is not this case: the switch stays, it is the way to start the sidecar.
-const remoteOnly = computed(() => !!settings.value && !settings.value.enabled && !!settings.value.remote);
+const remoteOnly = computed(() => !!settings.value && isRemoteOnly(settings.value));
 
 const anyDirty = computed(() => dirty.value || commonDirty.value);
 
@@ -495,7 +500,7 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
             つないでいる center が起動する全 session に効く。追加指示は各 session の追加指示の前に、参照フォルダは各 session のものと合わせて渡す。center に保存する
           </p>
           <fieldset :disabled="commonBaseline === null" class="min-w-0">
-            <ProjectSettingsFields v-model="common" id-prefix="center-common" :rows="4" :can-pick="commonCanPick" @error="commonError = $event" />
+            <ProjectSettingsFields v-model="common" id-prefix="center-common" :rows="4" :can-pick="commonCanPick" :hide-add-dirs="remoteOnly" @error="commonError = $event" />
           </fieldset>
           <p v-if="commonProblem" class="text-cork-danger-text text-xs" data-testid="center-common-problem">{{ commonProblem }}</p>
           <p v-if="commonError" class="text-cork-danger-text text-xs whitespace-pre-wrap" data-testid="center-common-error">
