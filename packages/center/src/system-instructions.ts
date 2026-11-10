@@ -15,6 +15,8 @@
 export interface SystemInstructionContext {
   /** session 名（master-cap の名前）。 */
   session: string;
+  /** 外部記憶（settings.memory）がある session か。省略 = false。 */
+  memory?: boolean;
 }
 
 export interface SystemInstructionPart {
@@ -24,6 +26,8 @@ export interface SystemInstructionPart {
   version: number;
   /** 部品の説明（ログ・画面用、1 行）。 */
   title: string;
+  /** 付ける条件。省略 = 常に付ける。false を返す文脈では文面もログ・status の label も出ない。 */
+  when?: (ctx: SystemInstructionContext) => boolean;
   /** 文面。末尾の改行は不要。 */
   text: (ctx: SystemInstructionContext) => string;
 }
@@ -79,15 +83,37 @@ export const MASTER_CAP_AVAILABILITY: SystemInstructionPart = {
     ].join("\n"),
 };
 
-/** 付ける部品の一覧（この順）。足す・外す・直すのはここ。 */
-export const SYSTEM_INSTRUCTION_PARTS: readonly SystemInstructionPart[] = [MASTER_CAP_ROLE, MASTER_CAP_AVAILABILITY];
+/**
+ * 外部記憶（memory）の使い方: 起動時と判断の前に context / recall を呼ぶ。書き込みは bantou が自動で渡すので自分では呼ばない。
+ * 設計は docs/design/external-memory.md。memory の設定がある session だけに付く。
+ */
+export const MEMORY_USAGE: SystemInstructionPart = {
+  id: "memory",
+  version: 1,
+  title: "外部記憶（memory）の設定がある session だけ: 起動時と判断の前に context / recall を呼ぶ",
+  when: (ctx) => ctx.memory === true,
+  text: () =>
+    [
+      "[外部記憶（memory）]",
+      "- この session には外部記憶の MCP（mcp__memory__*）が付いている。",
+      "- 起動した時と、判断する前に、mcp__memory__ の context / recall を呼んで、過去の経緯・決定・好みを確かめる。",
+      "- 記憶への書き込みは bantou が会話と cap 間の往復から自動で渡す。自分では書き込みの tool を呼ばない。",
+    ].join("\n"),
+};
+
+/** 付ける部品の一覧（この順）。足す・外す・直すのはここ。`when` を持つ部品は文脈に合う session だけに付く。 */
+export const SYSTEM_INSTRUCTION_PARTS: readonly SystemInstructionPart[] = [MASTER_CAP_ROLE, MASTER_CAP_AVAILABILITY, MEMORY_USAGE];
+
+/** 文脈に合う部品（`when` が無いか true を返すもの）。順は元のまま。 */
+export const applicableParts = (ctx: SystemInstructionContext, parts: readonly SystemInstructionPart[] = SYSTEM_INSTRUCTION_PARTS): SystemInstructionPart[] =>
+  parts.filter((p) => p.when === undefined || p.when(ctx));
 
 /** `<id>@<version>` の形。ログ・status・center_info 用。 */
 export const partLabel = (p: Pick<SystemInstructionPart, "id" | "version">): string => `${p.id}@${p.version}`;
 
 /** 部品を順に結合した文面（空行区切り）。部品が無ければ空文字。 */
 export function buildSystemInstructions(ctx: SystemInstructionContext, parts: readonly SystemInstructionPart[] = SYSTEM_INSTRUCTION_PARTS): string {
-  return parts.map((p) => p.text(ctx).trim()).filter((t) => t !== "").join("\n\n");
+  return applicableParts(ctx, parts).map((p) => p.text(ctx).trim()).filter((t) => t !== "").join("\n\n");
 }
 
 /** center_info / status に出す一覧。 */

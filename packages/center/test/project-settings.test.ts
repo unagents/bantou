@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { composeAddDirs, composeInstructions, composeOutputStyle, mergeSettings, projectSettingsPatchSchema, readSettings } from "../src/project-settings.js";
+import { composeAddDirs, composeInstructions, composeMemory, composeOutputStyle, mergeSettings, projectSettingsPatchSchema, readSettings, redactSettings } from "../src/project-settings.js";
 
 test("mergeSettings: 省略は変えない・値は上書き・null は削除・instructions の空文字は削除・未知項目は保持。元は変えない", () => {
   const cur = { instructions: "a", x: 1, y: { z: 2 } };
@@ -101,4 +101,61 @@ test("servers: schema は host 名か server_id の配列（50 個以内）か n
   assert.equal(serverAllowed(["srv-a"], { host: "lenovo", server_id: "srv-a" }), true);
   assert.equal(serverAllowed(["srv-a"], { host: "lenovo", server_id: "srv-b" }), false);
   assert.equal(serverAllowed(["lenovo"], { server_id: "srv-b" }), false, "host が分からない server は host 指定では通らない");
+});
+
+test("memory 検証: url は http/https の絶対 URL（user:pass@ 不可・2048 文字以内）、token は header 安全な ASCII（4096 文字以内）、agentId は英数字と _ - （64 文字以内）。null は削除", () => {
+  const ok = (memory: unknown) => projectSettingsPatchSchema.safeParse({ memory }).success;
+  assert.equal(ok({ url: "http://mem.local:3000/mcp" }), true);
+  assert.equal(ok({ url: "https://mem.example/mcp", token: "abc.DEF-123_~+/=", agentId: "pm_1-x" }), true);
+  assert.equal(ok(null), true);
+  assert.equal(ok({ url: "https://mem.example/mcp", token: "", agentId: "" }), true); // 空は「無し」
+  for (const bad of [
+    {},
+    { url: "" },
+    { url: "mem.local/mcp" },
+    { url: "/mcp" },
+    { url: "ftp://mem.local/mcp" },
+    { url: "file:///etc/passwd" },
+    { url: "javascript:alert(1)" },
+    { url: "http://user:pw@mem.local/mcp" },
+    { url: "http://" + "a".repeat(2048) + ".example/" },
+    { url: "http://m/mcp", token: "a b" },
+    { url: "http://m/mcp", token: "a\nb" },
+    { url: "http://m/mcp", token: "あ" },
+    { url: "http://m/mcp", token: "t".repeat(4097) },
+    { url: "http://m/mcp", agentId: "a b" },
+    { url: "http://m/mcp", agentId: "日本語" },
+    { url: "http://m/mcp", agentId: "a".repeat(65) },
+    { url: "http://m/mcp", token: 1 },
+    { url: "http://m/mcp", extra: 1 },
+    "http://m/mcp",
+  ]) assert.equal(ok(bad), false, JSON.stringify(bad).slice(0, 80));
+  assert.equal(ok({ url: "http://m/mcp", token: "t".repeat(4096), agentId: "a".repeat(64) }), true);
+});
+
+test("memory merge: object ごと置き換え。token 省略は引き継ぎ、空文字で消す。agentId の空文字は消す。null で削除。memory 無しの項目に影響しない", () => {
+  const cur = { instructions: "i", memory: { url: "http://a/mcp", token: "T", agentId: "x" } };
+  assert.deepEqual(mergeSettings(cur, {}), cur);
+  assert.deepEqual(mergeSettings(cur, { memory: { url: "http://b/mcp" } }), { instructions: "i", memory: { url: "http://b/mcp", token: "T" } }); // agentId は置き換わって消え、token は引き継ぐ
+  assert.deepEqual(mergeSettings(cur, { memory: { url: "http://b/mcp", token: "", agentId: "" } }), { instructions: "i", memory: { url: "http://b/mcp" } });
+  assert.deepEqual(mergeSettings(cur, { memory: { url: "http://b/mcp", token: "N" } }), { instructions: "i", memory: { url: "http://b/mcp", token: "N" } });
+  assert.deepEqual(mergeSettings(cur, { memory: null }), { instructions: "i" });
+  assert.deepEqual(mergeSettings(undefined, { memory: { url: "http://b/mcp", token: "" } }), { memory: { url: "http://b/mcp" } });
+  assert.deepEqual(cur.memory, { url: "http://a/mcp", token: "T", agentId: "x" }); // 元は変えない
+});
+
+test("memory read / compose / redact: 壊れた値は落とす。session の memory があれば共通は使わない。redact は token の値を出さず tokenSet を付ける", () => {
+  assert.deepEqual(readSettings({ memory: "x" }), {});
+  assert.deepEqual(readSettings({ memory: { token: "T" } }), {});
+  assert.deepEqual(readSettings({ memory: { url: "http://a/mcp", token: "", agentId: 3, k: 1 } }), { memory: { url: "http://a/mcp" } });
+  const c = { memory: { url: "http://c/mcp", token: "CT", agentId: "c" } };
+  const o = { memory: { url: "http://o/mcp" } };
+  assert.deepEqual(composeMemory(c, o), { url: "http://o/mcp" });
+  assert.deepEqual(composeMemory(c, {}), c.memory);
+  assert.deepEqual(composeMemory(undefined, undefined), undefined);
+  assert.deepEqual(composeMemory({}, o), o.memory);
+  assert.deepEqual(redactSettings({ a: 1, ...c }), { a: 1, memory: { url: "http://c/mcp", agentId: "c", tokenSet: true } });
+  assert.deepEqual(redactSettings(o), { memory: { url: "http://o/mcp", tokenSet: false } });
+  assert.ok(!JSON.stringify(redactSettings(c)).includes("CT"));
+  assert.deepEqual(redactSettings({ a: 1 }), { a: 1 });
 });

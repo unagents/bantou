@@ -19,7 +19,7 @@ import { createContextUsageTracker } from "./context-usage.js";
 import { createLoginFlow } from "./login.js";
 import { createSessionManager } from "./sessions.js";
 import { backupFileOnce, createJsonListStore, createJsonObjectStore } from "./store.js";
-import { SYSTEM_INSTRUCTION_PARTS, buildSystemInstructions, partLabel } from "./system-instructions.js";
+import { applicableParts, buildSystemInstructions, partLabel } from "./system-instructions.js";
 import { createCenterServer, createSessionMcpServer } from "./server.js";
 import { createCore } from "./core.js";
 import { createEventHub } from "./events.js";
@@ -68,7 +68,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   // session の増減・認証状態の変化を desktop へ知らせる（GET /events）
   const events = createEventHub();
   const supervisor = createRemoteControlSupervisor({
-    systemInstructions: { build: (ctx) => buildSystemInstructions(ctx), labels: SYSTEM_INSTRUCTION_PARTS.map(partLabel) },
+    systemInstructions: { build: (ctx) => buildSystemInstructions(ctx), labels: (ctx) => applicableParts(ctx).map(partLabel) },
     config,
     configPath,
     log,

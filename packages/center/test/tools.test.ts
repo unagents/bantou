@@ -383,6 +383,30 @@ test("session_settings_get / session_settings_update は SessionManager に委�
   await close();
 });
 
+test("session_settings_update / center_settings_update: memory は検証して通し、不正な url / agentId / token は拒否。tool の説明に memory と BANTOU_MEMORY_TOKEN がある", async () => {
+  const { client, close } = await connect({}, { sessions: { updateCenterSettings: async (p) => ({ settings: p as never }) } });
+  const good = { name: "pm1", settings: { memory: { url: "https://mem.example/mcp", token: "tk", agentId: "pm-1" } } };
+  const u = await client.callTool({ name: "session_settings_update", arguments: good });
+  assert.deepEqual(JSON.parse(text(u)), { called: "update", n: "pm1", p: good.settings });
+  const c = await client.callTool({ name: "center_settings_update", arguments: { settings: { memory: null } } });
+  assert.notEqual(c.isError, true);
+  for (const tool of ["session_settings_update", "center_settings_update"]) {
+    for (const memory of [{ url: "mem.local" }, { url: "ftp://m/x" }, { url: "http://u:p@m/x" }, { url: "http://m/x", agentId: "a b" }, { url: "http://m/x", token: "a b" }, { url: "http://m/x", agentId: "a".repeat(65) }]) {
+      const args = tool === "session_settings_update" ? { name: "pm1", settings: { memory } } : { settings: { memory } };
+      const r = await client.callTool({ name: tool, arguments: args }).catch((e: unknown) => e);
+      assert.ok(r instanceof Error || (r as { isError?: boolean }).isError === true, tool + JSON.stringify(memory));
+    }
+  }
+  const tools = (await client.listTools()).tools;
+  for (const n of ["session_settings_get", "session_settings_update", "center_settings_get", "center_settings_update"]) {
+    const d = tools.find((t) => t.name === n)?.description ?? "";
+    assert.ok(d.includes("memory"), n);
+  }
+  assert.ok(tools.find((t) => t.name === "session_settings_update")!.description!.includes("BANTOU_MEMORY_TOKEN"));
+  assert.ok(tools.find((t) => t.name === "session_settings_get")!.description!.includes("tokenSet"));
+  await close();
+});
+
 test("session_login / session_login_code は LoginFlow に委譲。ok: false は isError、LoginFlow が無ければ isError", async () => {
   const calls: unknown[] = [];
   const login: LoginFlow = {

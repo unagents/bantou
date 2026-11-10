@@ -16,7 +16,7 @@ function fakeSupervisor(initial: ProjectConfig[]) {
   const calls: string[] = [];
   /** start が投げる名前。 */
   const failStart = new Set<string>();
-  const opts: { add: Record<string, unknown>; start: Record<string, unknown>; setInstr: Record<string, string>; setDirs: Record<string, string[]>; setStyle: Record<string, string> } = { add: {}, start: {}, setInstr: {}, setDirs: {}, setStyle: {} };
+  const opts: { add: Record<string, unknown>; start: Record<string, unknown>; setInstr: Record<string, string>; setDirs: Record<string, string[]>; setStyle: Record<string, string>; setMem: Record<string, unknown> } = { add: {}, start: {}, setInstr: {}, setDirs: {}, setStyle: {}, setMem: {} };
   const mk = (p: ProjectConfig): RcStatus => ({
     project: p.name, path: p.path, state: "stopped", pid: null, sessionUrl: null, environmentUrl: null,
     restarts: 0, lastExit: null, startedAt: null, args: null, instructions: false, claude: { path: "claude", source: "PATH" },
@@ -51,6 +51,9 @@ function fakeSupervisor(initial: ProjectConfig[]) {
     },
     setOutputStyle: (n: string, v: string) => {
       opts.setStyle[n] = v;
+    },
+    setMemory: (n: string, v: unknown) => {
+      opts.setMem[n] = v;
     },
     status: (n: string) => ({ ...map.get(n)! }),
     list: () => [...map.values()].map((s) => ({ ...s })),
@@ -669,4 +672,39 @@ test("servers: session の servers は共通の servers を置き換える（和
   assert.equal(mgr.serversOf("nope"), undefined);
   const saved = JSON.parse(await readFile(join(dir, "sessions.json"), "utf8")) as SavedSession[];
   assert.deepEqual(saved.find((x) => x.name === "b")!.settings, { servers: ["lenovo", "srv-bbbbbbbbbb"] });
+});
+
+test("memory: session の値があれば共通は使わない（項目ごとにも合成しない）。supervisor には token つきで渡し、get / update の応答と log には token を出さない。保存には入る", async () => {
+  const logs: string[] = [];
+  const { mgr, opts, calls } = setup({ log: (m: string) => void logs.push(m) });
+  await mgr.restore();
+  const common = await mgr.updateCenterSettings({ memory: { url: "http://mem.local:3000/mcp", token: "COMMON-SECRET", agentId: "shared" } });
+  assert.deepEqual(common, { settings: { memory: { url: "http://mem.local:3000/mcp", agentId: "shared", tokenSet: true } } });
+  assert.deepEqual(mgr.getCenterSettings(), common);
+  await mgr.create({ name: "a", settings: { memory: { url: "https://own.example/mcp", token: "OWN-SECRET" } } });
+  await mgr.create({ name: "b" });
+  assert.deepEqual(opts.add.a, { wrapper: true, memory: { url: "https://own.example/mcp", token: "OWN-SECRET" } }); // 共通の agentId / token は混ざらない
+  assert.deepEqual(opts.add.b, { wrapper: true, memory: { url: "http://mem.local:3000/mcp", token: "COMMON-SECRET", agentId: "shared" } });
+  // get: token の値は返さず tokenSet だけ
+  assert.deepEqual(mgr.getSettings("a"), { name: "a", settings: { memory: { url: "https://own.example/mcp", tokenSet: true } } });
+  // update: token 省略は今の token を引き継ぐ。空文字で消す。応答に token は無い
+  const u1 = await mgr.updateSettings("a", { memory: { url: "https://own2.example/mcp", agentId: "pm" } });
+  assert.deepEqual(u1.settings, { memory: { url: "https://own2.example/mcp", agentId: "pm", tokenSet: true } });
+  assert.deepEqual(opts.setMem.a, { url: "https://own2.example/mcp", token: "OWN-SECRET", agentId: "pm" });
+  const u2 = await mgr.updateSettings("a", { memory: { url: "https://own2.example/mcp", token: "" } });
+  assert.deepEqual(u2.settings, { memory: { url: "https://own2.example/mcp", tokenSet: false } });
+  assert.deepEqual(opts.setMem.a, { url: "https://own2.example/mcp" });
+  // null で session の値を消すと共通に戻る。共通も消すと undefined
+  await mgr.updateSettings("a", { memory: null });
+  assert.deepEqual(opts.setMem.a, { url: "http://mem.local:3000/mcp", token: "COMMON-SECRET", agentId: "shared" });
+  await mgr.updateCenterSettings({ memory: null });
+  assert.equal(opts.setMem.a, undefined);
+  assert.equal(opts.setMem.b, undefined);
+  assert.deepEqual(mgr.getCenterSettings(), { settings: {} });
+  assert.equal(calls.filter((c) => c.startsWith("start:")).length, 2); // 更新で起動し直さない
+  // 保存（sessions.json）には token が入る（起動に要る）。log には入らない
+  await mgr.updateSettings("b", { memory: { url: "http://x.local/mcp", token: "B-SECRET" } });
+  assert.ok((await readFile(join(dir, "sessions.json"), "utf8")).includes("B-SECRET"));
+  for (const l of logs) assert.ok(!/SECRET/.test(l), l);
+  assert.ok(!JSON.stringify(mgr.list()).includes("SECRET")); // session_list
 });

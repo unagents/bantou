@@ -124,7 +124,7 @@ export function registerTools(
     {
       title: "session の設定を取得",
       description:
-        "session のプロジェクト設定 { name, settings } を返す。settings は { instructions?: string（--append-system-prompt に渡す追加指示）, addDirs?: string[]（--add-dir で渡す参照フォルダ。絶対パス）, outputStyle?: string（claude の output style の markdown 本文。session のフォルダの .claude/output-styles/bantou.md に書いて --settings {\"outputStyle\":\"bantou\"} で選ぶ）, servers?: string[]（この session が remote_send / remote_delete / worker_reply で使える server＝host 名か server_id。未設定は center 共通の値、それも無ければ全部。空配列は使わない）, …将来の項目 }。未設定は {}。config 由来の project も {}",
+        "session のプロジェクト設定 { name, settings } を返す。settings は { instructions?: string（--append-system-prompt に渡す追加指示）, addDirs?: string[]（--add-dir で渡す参照フォルダ。絶対パス）, outputStyle?: string（claude の output style の markdown 本文。session のフォルダの .claude/output-styles/bantou.md に書いて --settings {\"outputStyle\":\"bantou\"} で選ぶ）, servers?: string[]（この session が remote_send / remote_delete / worker_reply で使える server＝host 名か server_id。未設定は center 共通の値、それも無ければ全部。空配列は使わない）, memory?: { url: string, agentId?: string, tokenSet: boolean }（外部記憶の MCP endpoint。起動のたびに --mcp-config に memory を足す。token の値は返さず、設定済みかを tokenSet で返す。session に memory があれば center 共通の memory は使わない）, …将来の項目 }。未設定は {}。config 由来の project も {}",
       inputSchema: { name: z.string().regex(SESSION_NAME, "英数字と _ - のみ") },
     },
     ({ name }) => guard(async () => json(sessions.getSettings(name))),
@@ -134,7 +134,7 @@ export function registerTools(
     {
       title: "session の設定を更新",
       description:
-        "session のプロジェクト設定を項目ごとにマージ更新し、更新後の { name, settings } を返す。settings に書いた項目だけ変わる（省略した項目はそのまま）。null はその項目を削除。instructions は 16000 文字以内で、空文字は削除と同じ。addDirs は絶対パスの配列（20 個以内。空配列は削除と同じ。center 共通の addDirs と合わせて --add-dir に 1 つずつ付く）。outputStyle は 32000 文字以内で、空文字は削除と同じ（session の値があれば center 共通の outputStyle は使わない）。servers は host 名か server_id の配列（50 個以内。重複は除く。空配列は「どの server も使わない」として保存し、未設定＝全部と区別する。null で削除＝center 共通の値に戻る。session の servers があれば center 共通の servers は見ない＝置き換え）。servers は次の呼び出しからすぐ効く（起動し直し不要）。未知の項目は保持する。session_create で作った session のみ。動いている session には効かず、次の起動（再起動・--continue 含む）から効く",
+        "session のプロジェクト設定を項目ごとにマージ更新し、更新後の { name, settings } を返す。settings に書いた項目だけ変わる（省略した項目はそのまま）。null はその項目を削除。instructions は 16000 文字以内で、空文字は削除と同じ。addDirs は絶対パスの配列（20 個以内。空配列は削除と同じ。center 共通の addDirs と合わせて --add-dir に 1 つずつ付く）。outputStyle は 32000 文字以内で、空文字は削除と同じ（session の値があれば center 共通の outputStyle は使わない）。servers は host 名か server_id の配列（50 個以内。重複は除く。空配列は「どの server も使わない」として保存し、未設定＝全部と区別する。null で削除＝center 共通の値に戻る。session の servers があれば center 共通の servers は見ない＝置き換え）。servers は次の呼び出しからすぐ効く（起動し直し不要）。memory は { url, token?, agentId? }（url は http/https の絶対 URL で 2048 文字以内、user:pass@ は不可。token は 4096 文字以内で空白・制御文字・非 ASCII 不可、環境変数 BANTOU_MEMORY_TOKEN で渡す。agentId は英数字と _ - のみ 64 文字以内で、省略時は session 名＝X-Agent-Id）。object ごと置き換え、token を省略すると今の token を引き継ぎ、空文字で token を消す。null で削除（center 共通の値に戻る）。session の memory があれば center 共通の memory は使わない。応答に token の値は含まれない（tokenSet のみ）。未知の項目は保持する。session_create で作った session のみ。動いている session には効かず、次の起動（再起動・--continue 含む）から効く",
       inputSchema: { name: z.string().regex(SESSION_NAME, "英数字と _ - のみ"), settings: projectSettingsPatchSchema },
     },
     ({ name, settings }) => guard(async () => json(await sessions.updateSettings(name, settings))),
@@ -144,7 +144,7 @@ export function registerTools(
     {
       title: "center 共通の設定を取得",
       description:
-        "center 共通の設定 { settings } を返す。settings は { instructions?: string（全 session の --append-system-prompt の先頭に付く共通の追加指示。session の追加指示は空行を挟んでその後ろ）, addDirs?: string[]（全 session に --add-dir で付く参照フォルダ。絶対パス。session の addDirs はその後ろ）, outputStyle?: string（全 session の claude の output style の markdown 本文。session に outputStyle があればそちらを使う）, servers?: string[]（host 名か server_id。session に servers が無い時に使う、session が使える server の範囲。未設定＝全部）, …将来の項目 }。未設定は {}",
+        "center 共通の設定 { settings } を返す。settings は { instructions?: string（全 session の --append-system-prompt の先頭に付く共通の追加指示。session の追加指示は空行を挟んでその後ろ）, addDirs?: string[]（全 session に --add-dir で付く参照フォルダ。絶対パス。session の addDirs はその後ろ）, outputStyle?: string（全 session の claude の output style の markdown 本文。session に outputStyle があればそちらを使う）, servers?: string[]（host 名か server_id。session に servers が無い時に使う、session が使える server の範囲。未設定＝全部）, memory?: { url: string, agentId?: string, tokenSet: boolean }（外部記憶の MCP endpoint。起動のたびに --mcp-config に memory を足す。token の値は返さず、設定済みかを tokenSet で返す。session に memory が無い時に全 session へ使う共通の値）, …将来の項目 }。未設定は {}",
     },
     () => guard(async () => json(sessions.getCenterSettings())),
   );
@@ -153,7 +153,7 @@ export function registerTools(
     {
       title: "center 共通の設定を更新",
       description:
-        "center 共通の設定を項目ごとにマージ更新し、更新後の { settings } を返す。settings に書いた項目だけ変わる。null はその項目を削除。instructions は 16000 文字以内で、空文字は削除と同じ。addDirs は絶対パスの配列（20 個以内。空配列は削除と同じ）。outputStyle は 32000 文字以内で、空文字は削除と同じ。servers は host 名か server_id の配列（50 個以内。空配列は「どの server も使わない」。null で削除＝全部。session 側に servers があればそちらが優先）で、次の呼び出しからすぐ効く。全 session の次の起動（再起動・--continue 含む）から効く。動いている session には効かない",
+        "center 共通の設定を項目ごとにマージ更新し、更新後の { settings } を返す。settings に書いた項目だけ変わる。null はその項目を削除。instructions は 16000 文字以内で、空文字は削除と同じ。addDirs は絶対パスの配列（20 個以内。空配列は削除と同じ）。outputStyle は 32000 文字以内で、空文字は削除と同じ。servers は host 名か server_id の配列（50 個以内。空配列は「どの server も使わない」。null で削除＝全部。session 側に servers があればそちらが優先）で、次の呼び出しからすぐ効く。memory は { url, token?, agentId? }（session の update と同じ検証。object ごと置き換え、token 省略で今の token を引き継ぎ、空文字で消す。null で削除。session 側に memory があればそちらが優先。応答に token の値は含まれない）。全 session の次の起動（再起動・--continue 含む）から効く。動いている session には効かない",
       inputSchema: { settings: projectSettingsPatchSchema },
     },
     ({ settings }) => guard(async () => json(await sessions.updateCenterSettings(settings))),
