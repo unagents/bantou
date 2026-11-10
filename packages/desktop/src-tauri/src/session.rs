@@ -176,6 +176,26 @@ pub struct SessionRemote {
     pub running: u32,
     #[serde(default)]
     pub waiting_reply: u32,
+    /// Caps whose server does not answer (center's `remote.unreachable`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unreachable: Vec<SessionRemoteIssue>,
+    /// Caps the server reported lost (center's `remote.lost`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lost: Vec<SessionRemoteIssue>,
+}
+
+/// One remote-cap in trouble: `last_ok_at` is the last answer of the unreachable server (ISO; None: none yet), `at` when the cap was reported lost.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionRemoteIssue {
+    #[serde(default)]
+    pub server: String,
+    #[serde(default)]
+    pub remote_id: String,
+    #[serde(default)]
+    pub last_ok_at: Option<String>,
+    #[serde(default)]
+    pub at: Option<String>,
 }
 
 /// What the side menu shows: the center's list as last fetched, and whether the latest read worked.
@@ -466,12 +486,17 @@ mod tests {
     #[test]
     fn remote_is_read_when_the_center_sends_it_and_none_otherwise() {
         let s: Session = serde_json::from_str(r#"{"name":"a","remote":{"running":2,"waitingReply":1}}"#).unwrap();
-        assert_eq!(s.remote, Some(SessionRemote { running: 2, waiting_reply: 1 }));
+        assert_eq!(s.remote, Some(SessionRemote { running: 2, waiting_reply: 1, ..Default::default() }));
         assert_eq!(serde_json::to_value(&s).unwrap()["remote"]["waitingReply"], 1);
         let old: Session = serde_json::from_str(r#"{"name":"a"}"#).unwrap();
         assert_eq!(old.remote, None);
+        let bad: Session = serde_json::from_str(r#"{"name":"a","remote":{"running":0,"waitingReply":0,"unreachable":[{"server":"host-a","remoteId":"c-1-a","lastOkAt":"2026-11-10T20:57:00.000Z"}],"lost":[{"server":"host-b","remoteId":"c-1-b","at":"2026-11-10T21:26:00.000Z"}]}}"#).unwrap();
+        let r = bad.remote.unwrap();
+        assert_eq!(r.unreachable[0].server, "host-a");
+        assert_eq!(r.unreachable[0].last_ok_at.as_deref(), Some("2026-11-10T20:57:00.000Z"));
+        assert_eq!(r.lost[0].remote_id, "c-1-b");
         let part: Session = serde_json::from_str(r#"{"name":"a","remote":{"running":1}}"#).unwrap();
-        assert_eq!(part.remote, Some(SessionRemote { running: 1, waiting_reply: 0 }));
+        assert_eq!(part.remote, Some(SessionRemote { running: 1, waiting_reply: 0, ..Default::default() }));
     }
 
     #[test]

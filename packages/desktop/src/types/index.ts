@@ -91,7 +91,7 @@ export interface Session {
   /** When `activity` last changed (ISO string). null: none. */
   activityAt: string | null;
   /** Work left on remote-caps (`session_list` `remote`). null: the center sent none (older center). */
-  remote: { running: number; waitingReply: number } | null;
+  remote: SessionRemote | null;
   /** The claude's auth state (null: an older center that does not report it). */
   auth: CenterAuthState | null;
   loginUrl: string | null;
@@ -99,7 +99,25 @@ export interface Session {
 }
 
 /** The work state shown on the side menu (`unknown` is not shown). */
-export type SessionActivity = "working" | "needs-input" | "idle" | "remote-working";
+export type SessionActivity = "working" | "needs-input" | "idle" | "remote-working" | "remote-unreachable" | "remote-lost";
+
+/** A remote-cap whose server does not answer (`lastOkAt`: the last answer, ISO; null: none yet) or that the server reported lost (`at`: when, ISO). `server` is the center's label for the server. */
+export interface RemoteIssue {
+  server: string;
+  remoteId: string;
+  lastOkAt?: string | null;
+  at?: string;
+}
+
+/** The center's `session_list[].remote`. */
+export interface SessionRemote {
+  running: number;
+  waitingReply: number;
+  /** Caps whose server does not answer (absent: none). */
+  unreachable?: RemoteIssue[];
+  /** Caps the server reported lost (absent: none). */
+  lost?: RemoteIssue[];
+}
 
 /** What the add dialog needs for the folder field (mirror of `session.rs::PathHints`). */
 export interface SessionPathHints {

@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { AGENT_ID_PATTERN } from "@agent-hand/bantou-protocol";
 import { z } from "zod";
-import { OWNER_HEADER, OWNER_PATTERN, OWNER_QUERY, remoteSendSchema, remoteWaitSchema, workerReplySchema, WAIT_DEFAULT_SEC, type RemoteManager, type RemoteSendInput } from "./remotes.js";
+import { ACK_TIMEOUT_MS, OWNER_HEADER, OWNER_PATTERN, OWNER_QUERY, remoteSendSchema, remoteWaitSchema, workerReplySchema, WAIT_DEFAULT_SEC, type RemoteManager, type RemoteSendInput } from "./remotes.js";
 import type { RemoteControlSupervisor } from "./remote-control.js";
 import { centerSettingsPatchSchema, projectSettingsPatchSchema } from "./project-settings.js";
 import { LOGIN_CODE, type LoginFlow } from "./login.js";
@@ -214,7 +214,8 @@ export function registerTools(
       title: "remote 一覧",
       description:
         "center が保持する remote（session × server の cap 単位。remote_id = cap_id = c-<center-id>-<session>, session, server（server_id。旧形式で server_id 不明なら peer id）, server_id, peer（今の到達先）, serverHost / serverUser / serverWorkspace, server_label（host 名を主に server_id を添えた表示。同じ host 名が複数なら user と workspace 付き）, state, owners, 時刻, 最新の結果, 未完了の指示 pending）の一覧。owner が分かれば（header / query / 引数）その session の cap だけ、分からなければ全件（session の無い記録 = 旧共有 cap を含む）。" +
-        "最新の task_result（task_result 本体）と直近の worker_reports（WorkerReportNotice の配列、最大 20 件、到着順）も含む。server から通知を受けた remote には activity が付く: agents（cap → worker。state は running / stalled / idle / done / failed / lost、task、last_activity、last_output_at、silent_ms = 最後の出力からの経過 ms）、received_ms_ago（最後の通知から）、stale（running の agent がいるのに通知が途絶えた）",
+        "最新の task_result（task_result 本体）と直近の worker_reports（WorkerReportNotice の配列、最大 20 件、到着順）も含む。server から通知を受けた remote には activity が付く: agents（cap → worker。state は running / stalled / idle / done / failed / lost、task、last_activity、last_output_at、silent_ms = 最後の出力からの経過 ms）、received_ms_ago（最後の通知から）、stale（running の agent がいるのに通知が途絶えた）。" +
+        "各 remote には server の到達性 reachability { reachable, last_ok_at（最後に status / 通知が返った時刻。center の再起動後は最初の応答まで null）, failures（連続失敗回数）, last_error } と、cap の server 側の状態 cap_state（running / idle / lost / unknown）が付く。server に連続 2 回応答が無い（または発見から消えた）間は、作業中の cap の state は unknown、cap_state も unknown になり、応答が戻れば元に戻る。server が cap を lost と通知した cap は state=failed、cap_state=lost。pending の各要素には送達状態 delivery（unsent = 未送信 / sent = 送信済で受付は未確認 / accepted = server が受け付けた）、sent_at、accepted_at が付く",
       inputSchema: { owner: ownerArg },
     },
     ({ owner }, extra) =>
@@ -363,27 +364,28 @@ export function registerSessionTools(server: McpServer, deps: { remotes: RemoteM
   const { remotes, owner } = deps;
 
   const sendHandler = (args: Omit<RemoteSendInput, "owner">): Promise<ToolResult> =>
-    guard(async () =>
-      json(
-        await remotes.send({
-          owner,
-          goal: args.goal,
-          ...(args.server ? { server: args.server } : {}),
-          ...(args.repo ? { repo: args.repo } : {}),
-          ...(args.branch ? { branch: args.branch } : {}),
-          ...(args.deliverables ? { deliverables: args.deliverables } : {}),
-          ...(args.verify ? { verify: args.verify } : {}),
-          ...(args.constraints ? { constraints: args.constraints } : {}),
-          ...(args.workers ? { workers: args.workers } : {}),
-          ...(args.worker_model ? { worker_model: args.worker_model } : {}),
-        }),
-      ));
+    guard(async () => {
+      const r = await remotes.send({
+        owner,
+        goal: args.goal,
+        ...(args.server ? { server: args.server } : {}),
+        ...(args.repo ? { repo: args.repo } : {}),
+        ...(args.branch ? { branch: args.branch } : {}),
+        ...(args.deliverables ? { deliverables: args.deliverables } : {}),
+        ...(args.verify ? { verify: args.verify } : {}),
+        ...(args.constraints ? { constraints: args.constraints } : {}),
+        ...(args.workers ? { workers: args.workers } : {}),
+        ...(args.worker_model ? { worker_model: args.worker_model } : {}),
+      });
+      // server の受付を確かめられなかった: isError。結果（delivered:false, task_id, delivery, error）はそのまま返す
+      return json(r, !r.delivered);
+    });
   server.registerTool(
     "remote_send",
     {
       title: "remote-cap へ指示",
       description:
-        "server の remote-cap に task を送る（cap は session × server に 1 つ。cap_id = c-<center-id>-<session 名>。無ければ server が作る。他の session の cap には届かない）。goal（必須）だけでも動く（deliverables / verify / constraints / workers は省略時 {} / {} / [] / {}。workers.items 無し = implement + review の最低 2 体）。task_id は center が採番して返す。cap が実行中なら server 側で順番に待たされる。完了を待たず {remote_id, state:\"running\", created, task_id} を返す。完了は通知（push）か remote_wait / remote_list（task_result）で確認する。worker の report（progress / ask / approve / done）は push で届く（progress は同じ worker から 60 秒に 1 回まで）。ask / approve への返答は worker_reply。server は protocol bantou で発見した先頭。server 引数は server_id（server が再起動・再登録しても変わらない）、host 名、peer id のどれでも指せる（host 名が複数の server に一致する時は error。候補を user と workspace 付きで返すので server_id で指し直す）。返り値の server は server_id（旧 server は peer id）、peer は今の到達先、host は host 名。worker_model の既定は center の設定 servers[]（新規の cap のみ）。state は running / done / failed / unknown（server に届かない・status も取れず不明。取れたら戻る）。protocol の版が合わない server へは送らず error",
+        `server の remote-cap に task を送る（cap は session × server に 1 つ。cap_id = c-<center-id>-<session 名>。無ければ server が作る。他の session の cap には届かない）。goal（必須）だけでも動く（deliverables / verify / constraints / workers は省略時 {} / {} / [] / {}。workers.items 無し = implement + review の最低 2 体）。task_id は center が採番して返す。cap が実行中なら server 側で順番に待たされる。cap の完了は待たないが、server が task を受け付けた（status の cap が送る前から変わった）ことは最大 ${ACK_TIMEOUT_MS / 1000} 秒（環境変数 BANTOU_REMOTE_ACK_TIMEOUT_MS）確かめてから返す。受け付けを確認できた時は {remote_id, state:\"running\", created, task_id, delivered:true, delivery:\"accepted\", delivered_at} を返す。確認できなかった（server が落ちている・届いていない）時は isError で {delivered:false, delivery:\"sent\"|\"unsent\", task_id, error, …} を返す。この task は pending に送信済（または未送信）として残り、後で受け付けが分かれば remote_list の delivery が accepted になる。同じ指示を再び remote_send しても、受け付けが未確認の間は再送せず確認だけやり直す（server は task_id の重複を除かない）。完了は通知（push）か remote_wait / remote_list（task_result）で確認する。worker の report（progress / ask / approve / done）は push で届く（progress は同じ worker から 60 秒に 1 回まで）。ask / approve への返答は worker_reply。server は protocol bantou で発見した先頭。server 引数は server_id（server が再起動・再登録しても変わらない）、host 名、peer id のどれでも指せる（host 名が複数の server に一致する時は error。候補を user と workspace 付きで返すので server_id で指し直す）。返り値の server は server_id（旧 server は peer id）、peer は今の到達先、host は host 名。worker_model の既定は center の設定 servers[]（新規の cap のみ）。state は running / done / failed / unknown（server に届かない・status も取れず不明。取れたら戻る）。protocol の版が合わない server へは送らず error`,
       inputSchema: remoteSendSchema,
     },
     sendHandler,
@@ -426,7 +428,7 @@ export function registerSessionTools(server: McpServer, deps: { remotes: RemoteM
     "remote_list",
     {
       title: "remote 一覧",
-      description: "この session の remote-cap（server ごとに 1 つ。remote_id = cap_id, session, server（server_id。旧形式の記録で server_id が分からないものは peer id）, server_id, peer（今の到達先。長く確認できないと消える）, serverHost / serverUser / serverWorkspace, server_label（host 名を主に server_id を添えた表示。同じ host 名の server が複数ある時は user と workspace 付き）, state, 時刻, 最新の結果, 最新の task_result, 直近の worker_reports（最大 20 件、到着順）, 未完了の指示 pending、通知を受けたものは activity 付き）の一覧。include_shared: true で旧共有 cap（session 無し。新しい指示は送らない。remote_delete で消せる）も含める",
+      description: "この session の remote-cap（server ごとに 1 つ。remote_id = cap_id, session, server（server_id。旧形式の記録で server_id が分からないものは peer id）, server_id, peer（今の到達先。長く確認できないと消える）, serverHost / serverUser / serverWorkspace, server_label（host 名を主に server_id を添えた表示。同じ host 名の server が複数ある時は user と workspace 付き）, state, 時刻, 最新の結果, 最新の task_result, 直近の worker_reports（最大 20 件、到着順）, 未完了の指示 pending（各要素に送達状態 delivery: unsent / sent / accepted）、server の到達性 reachability { reachable, last_ok_at, failures }、cap の server 側の状態 cap_state（running / idle / lost / unknown）、通知を受けたものは activity 付き）の一覧。server に届かない間、作業中の cap の state は unknown。include_shared: true で旧共有 cap（session 無し。新しい指示は送らない。remote_delete で消せる）も含める",
       inputSchema: { include_shared: z.boolean().optional() },
     },
     ({ include_shared }) => guard(() => json(remotes.list({ owner, ...(include_shared ? { includeShared: true } : {}) }))),
