@@ -406,3 +406,69 @@ test("backupFileOnce: 元が無ければ何もしない。あれば退避し、2
   assert.equal(await readFile(`${p}.bak`, "utf8"), "one");
   assert.ok((await stat(`${p}.bak`)).isFile());
 });
+
+// -- review 第1回 --
+
+test("review M1: 同じ peer id に別の server_id が現れても、識別が一致する新しい記録に遅延返信が届く。旧記録の peer は外れる", async () => {
+  const { mgr, setPeers } = setup([newA("p-1")]);
+  await mgr.send({ owner: "pm1", goal: "a" });
+  // 同じ peer id が別の server_id を名乗る（workspace の作り直し）
+  const SID_D = "srv-dddddddddd";
+  setPeers([peerOf("p-1", { server_id: SID_D, host: "lenovo", user: "alice", workspace: "/home/alice/ws2" })]);
+  const r = await mgr.send({ owner: "pm1", goal: "b" });
+  assert.equal(r.server, SID_D);
+  const recs = await readRecords();
+  assert.equal(recs.length, 2, "別の server_id なので別の記録");
+  const oldRec = recs.find((x) => x.server_id === SID_A)!;
+  const newRec = recs.find((x) => x.server_id === SID_D)!;
+  assert.equal(oldRec.peer, undefined, "旧記録に peer を残さない");
+  assert.equal(newRec.peer, "p-1");
+  // 遅延返信は識別が一致する新しい記録へ（peer id 一致の旧記録に当たって弾かれない）
+  // 過去の task の遅れた error（待ち中の task_id と違う）は反映される。新しい記録だけに付く
+  const late = mgr.applyLateReply({ bantou: 1, type: "error", ok: false, message: "late-boom", task_id: "t-old", cap_id: CAP } as never, "p-1");
+  assert.equal(late, true, "遅延返信を新しい記録で受ける");
+  assert.match(mgr.list().find((x) => x.server_id === SID_D)?.error ?? mgr.list().find((x) => x.server_id === SID_D)?.result ?? "", /late-boom/);
+  assert.doesNotMatch(String(mgr.list().find((x) => x.server_id === SID_A)?.error ?? ""), /late-boom/);
+});
+
+test("review L1: 同じ server_id を名乗る peer が live に 2 つなら、selectPeer（省略・server_id・host）は peer id 付きのエラーで送らない。peer id なら通る。識別は揺れない", async () => {
+  const c = new FakeClient();
+  c.peers = [lp("c-1", "lenovo"), lp("c-2", "lenovo")];
+  c.helloReplies.set("c-1", hello(idOf("srv-eeeeeeeeee", "lenovo", "alice", "/home/alice/ws")));
+  c.helloReplies.set("c-2", hello(idOf("srv-eeeeeeeeee", "lenovo", "alice", "/mnt/copy/ws")));
+  const link = linkWith(c);
+  const msg = (e: Error) => /同じ server_id srv-eeeeeeeeee/.test(e.message) && /c-1=/.test(e.message) && /c-2=/.test(e.message) && /\/mnt\/copy\/ws/.test(e.message);
+  await assert.rejects(link.selectPeer(), msg);
+  await assert.rejects(link.selectPeer("srv-eeeeeeeeee"), msg);
+  await assert.rejects(link.selectPeer("lenovo"), msg);
+  assert.equal((await link.selectPeer("c-2")).workspace, "/mnt/copy/ws");
+  // 互いの識別を捨てて hello を取り直し続けない
+  const hellos = c.sent.filter((s) => s.msg.type === "hello").length;
+  await link.identifiedPeers!();
+  await link.selectPeer("c-1");
+  assert.equal(c.sent.filter((s) => s.msg.type === "hello").length, hellos, "hello を再送しない");
+  assert.equal(link.identityOf!("c-1")?.workspace, "/home/alice/ws");
+  assert.equal(link.identityOf!("c-2")?.workspace, "/mnt/copy/ws");
+  await link.close();
+});
+
+test("review L1: 記録の server_id を名乗る peer が live に複数いる時、findPeer（remote_delete）はエラーで stop_cap を送らない", async () => {
+  const { mgr, setPeers, calls } = setup([newA("pa-1")]);
+  await mgr.send({ owner: "pm1", goal: "a" });
+  setPeers([newA("pa-1"), peerOf("pa-copy", { server_id: SID_A, host: "lenovo", user: "alice", workspace: "/mnt/copy" })]);
+  await assert.rejects(mgr.delete({ owner: "pm1", remote_id: CAP, server: SID_A }), (e: Error) => /同じ server_id/.test(e.message) && /pa-copy=/.test(e.message));
+  assert.equal(calls.filter((x) => x.kind === "stop_cap").length, 0);
+});
+
+test("review L2: restore で発見に失敗した時は、古い到達先（peer）を消さない", async () => {
+  await writeFile(join(dir, "remotes.json"), JSON.stringify([{
+    remote_id: CAP, session: "pm1", server: SID_A, server_id: SID_A, peer: "pa-1", peer_seen_at: "2020-01-01T00:00:00.000Z",
+    serverName: "bantou-server", serverHost: "lenovo", state: "done", createdAt: "2026-11-03T00:00:00.000Z", pending: [],
+  }]));
+  const { mgr, setFail } = setup([newA("pa-1")], { peerTtlMs: 1000 });
+  setFail(true);
+  await mgr.restore();
+  await tick();
+  assert.equal((await readRecords())[0].peer, "pa-1", "発見失敗では消さない");
+  assert.equal(mgr.list().length, 1);
+});

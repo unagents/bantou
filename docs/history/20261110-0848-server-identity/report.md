@@ -88,7 +88,7 @@ branch: `feat/server-identity`。この節は worker w-id-server の担当。cen
 
 ### 古い記録の整理（`prune`、起動後 10 分ごと）
 
-- 消すのは center の記録だけ。server には何も送らない（stop_cap などを出さない）。
+- 消すのは center の記録だけ。記録を消すために server へ stop_cap などは送らない。ただし発見した peer のうち識別が未取得のものへは、読み取りだけの hello を送り得る（prune 自体は発見 + identify のみ）。
 - 消す: (1) 同じ server_id・同じ remote_id の重複（再登録前の旧 peer id のエントリ）。動いている記録を優先、同順位なら最新を残す。(2) 長く確認できない到達先 `peer`（`peer_seen_at` から 6 時間 = `PEER_TTL_MS` 超過、かつ今の発見にも居ない）。消すのは `peer` と `peer_seen_at` だけで、server_id・host・user・workspace は残す。
 - 消さない: remote cap の記録そのもの（session × server の対応）。消えるのは `remote_delete` だけ。旧形式（server_id なし）の記録は server が peer id なので消さない。発見に失敗している間は到達先を消さない（server 側の障害か broker 側かを区別できないため）。
 - `peer_seen_at` の保存は 10 分に 1 回まで（確認のたびに書かない）。
@@ -101,8 +101,8 @@ branch: `feat/server-identity`。この節は worker w-id-server の担当。cen
 
 ### 互換性
 
-- 旧 server（識別なしの hello_result）+ 新 center: 識別なしの peer として動く。hello は再送しない。記録は peer id のまま、従来の挙動。
-- 新 server + 旧 center: 追加は全て optional の flat フィールド。旧 center の検証（未知フィールドを許す）を通る。center 側の旧形式の解釈は変えていない。
+- 旧 server（識別なしの hello_result）+ 新 center: 識別は「なし」として扱い（hello は再送しない）、記録は peer id のまま。ただし center は protocol 版が完全一致する server にしか task / status を送らない（`gateOf`）ので、旧 server（1.6.0）には hello / update_server だけが通り、task / status は版違いエラーになる。移行は server を 1.7.0 へ更新（follow が自動に指示）してから。
+- 新 server + 旧 center: 追加は全て optional の flat フィールドで、旧 center の返信検証は通る。ただし旧 center も版が完全一致でないと task / status を断り、旧 center の follow は update_server で server を旧 pair の版へ戻す（巻き戻される）。旧 center に新 server を当てない。center 側の旧形式の解釈は変えていない。
 - 旧形式の remotes.json は上記の移行で読み替える。新形式の remotes.json を旧 center が読むと `server` が server_id になり旧 peer id と一致しないので、server は名前 / host でしか探せない（downgrade は非推奨。退避ファイルで戻せる）。
 - `remote_send` の返り値に `peer` と `host` を追加（`server` は server_id。旧 server は peer id）。`remote_list` に `server_id` / `peer` / `serverHost` / `serverUser` / `serverWorkspace` / `server_label` を追加。既存キーは残る。
 
@@ -118,3 +118,25 @@ branch: `feat/server-identity`。この節は worker w-id-server の担当。cen
 - `PEER_TTL_MS`（6 時間）と prune 間隔（10 分）は経験則でなく仮の値。運用で調整が要る。
 - 新形式から旧 center への downgrade は想定しない（退避ファイルで手動復旧）。
 - hello が来ない server の「記録」自体（session × server の cap）は消さない方針のため、廃止された server の cap は remote_delete まで残る。
+
+### review 第1回（HEAD 705e9c6）の指摘と対応
+
+- M1 [medium] 直した: `resolveRecord` が peer id 一致を識別より先に見て、同じ peer id に別 server_id が現れると新しい記録に届かなかった。識別（server_id）があれば先に server_id 一致で探し、server_id を持たない旧形式だけ peer id で探す。あわせて `syncRecord` が、その peer id を別の server_id の記録に残さない（旧記録の `peer` / `peer_seen_at` を外す）。再現 test 追加（遅延返信が新しい記録に届き、旧記録の peer が外れる）。補足: 二つの修正のどちらか一方でも再現 test は通る（外す方が堅い）。
+- L1 [low] 直した: 同じ server_id を名乗る peer が live に複数いる時、`selectPeer`（server 指定なし・server_id・host 名で複数一致）と `findPeer`（記録の server_id）は peer id・user・workspace 付きのエラーで送らない。peer id 指定は通る。`learnIdentity` は、旧 peer id が発見に居る間は同じ server_id の識別を捨てない（揺れ・hello 再送を防ぐ）。注意: server 再登録直後は旧 peer id が失効するまで（約 60 秒）このエラーになり得る。test 追加（2 peer、識別が揺れない、hello 再送なし、remote_delete は stop_cap を送らない）。
+- L2 [low] 直した: `restoreInner` は発見に失敗した時 `clearStalePeers` を呼ばない（prune と同じ）。test 追加。
+- L4 [low] 直した: README と本 report の互換の記述を、版完全一致の門（旧 server に task / status は通らない、旧 center に新 server を当てると巻き戻される、移行は server を 1.7.0 へ更新してから）に合わせた。
+- L5 [low] 直した: README の移行節に downgrade（非推奨、`remotes.json.pre-server-id.bak` を戻す、退避は最初の 1 回で上書きしないので移行後の新規 cap は失われる）を追記。
+- L6 [low] 直した（明記のみ）: 名前 + host で旧記録を引き継ぐ場合、元の server が廃止され別 server が稼働していると別の workspace / user に紐づき得る。厳密化はしない。README に制約として記載。
+- L8 [low] 直した（言い回し）: 「server に何も送らない」は記録を消すための送信（stop_cap 等）に限る。識別が未取得の peer へ read-only の hello を送り得る旨を README / 本 report に書いた。
+
+#### 残り（直していない）
+
+- L3: commit 15b64f6 の Claude-Session トレーラが他と違う件。push 済み履歴の書き換え（force push）になるので直さない。
+- L8: host 名の FQDN 差（`lenovo` と `lenovo.local`）は別の host 名として扱う。今回は直さない。
+- `server_label` の「同じ host 名が複数」の判定は記録の範囲。live の同 host の別 server は考慮しない。
+- 余分な旧形式の記録の掃除（surplus）は、同じ server の判定を旧形式の name + host に頼る。server_id が分かる記録との同一視は今回は直さない。
+- 既存の「残課題」（PEER_TTL_MS 6 時間・prune 間隔の仮値、廃止 server の cap は remote_delete まで残る）は変わらない。
+
+#### review 第1回後のテスト結果
+
+- center: typecheck エラー無し、test 481 pass / 0 fail（+4）。

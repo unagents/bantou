@@ -47,6 +47,11 @@ export function ambiguousServerMessage(sel: string, cands: ServerRef[]): string 
   return `server の指定が曖昧: ${sel} は ${cands.length} 件の server に一致する（誤送信を避けるため送らない）。server_id で指定: ${cands.map(describeServer).join(" / ")}`;
 }
 
+/** 同じ server_id を名乗る peer が live に複数いる時のエラー本文。候補は peer id・user・workspace 付き（peer id で指し直せる）。 */
+export function duplicateServerIdMessage(serverId: string, cands: ServerRef[]): string {
+  return `同じ server_id ${serverId} を名乗る peer が ${cands.length} 件いる（workspace / VM のコピー、または再登録直後の旧 peer id が失効前＝約 60 秒、の疑い）。誤送信を避けるため送らない。peer id で指定: ${cands.map((c) => `${c.peerId ?? "?"}=${describeServer(c)}`).join(" / ")}`;
+}
+
 /** 同じ server か（server_id があれば server_id 同士、無ければ peer id）。 */
 export function sameServerRef(a: ServerRef, b: ServerRef): boolean {
   if (a.server_id !== undefined && b.server_id !== undefined) return a.server_id === b.server_id;

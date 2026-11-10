@@ -222,16 +222,19 @@ center は wrapper 経由の session（master-cap）を起動するたび（新�
 ## server の識別（server_id）
 
 - **問題**: messenger の peer id は server が再起動・再登録するたびに変わり、名前は全 server が `bantou-server`。peer id で server を覚えると、remote の記録が旧 id に残って `unknown` になり、同じ host に 2 つ server がいても区別できなかった。
-- **識別の取得**: server は `hello_result` / `status_result` に `server_id`（再起動・自己更新で不変）と `host` / `user` / `workspace` を載せる（protocol 1.7.0、全て任意）。center は返信から peer id → 識別を学習する（link のメモリ）。識別が未取得の peer へは `hello` を 1 回送って取る（`identifiedPeers`）。旧 server の識別なしの返信、`hello` を知らない旧 server の error は「識別なし」として扱い再送しない。届かない peer は 60 秒後に再試行する。同じ server_id の別の peer id が現れたら旧 peer id の識別は整理する。
-- **記録**: `remotes.json` の `server` は server_id にする。`peer` は今の到達先で、確認できるたびに更新する（peer id が変わっても同じ server・同じ cap の記録のまま）。`serverHost`（host 名）/ `serverUser` / `serverWorkspace` も持つ。server_id が分からない記録（旧 server・旧形式）は従来どおり `server` が peer id。見分けは `server_id` の有無。
+- **識別の取得**: server は `hello_result` / `status_result` に `server_id`（再起動・自己更新で不変）と `host` / `user` / `workspace` を載せる（protocol 1.7.0、全て任意）。center は返信から peer id → 識別を学習する（link のメモリ）。識別が未取得の peer へは `hello` を 1 回送って取る（`identifiedPeers`）。旧 server の識別なしの返信、`hello` を知らない旧 server の error は「識別なし」として扱い再送しない。届かない peer は 60 秒後に再試行する。同じ server_id の別の peer id が現れたら、旧 peer id が発見から消えていれば識別を整理する。**同じ server_id を名乗る peer が live に複数いる**（workspace / VM のコピー、または再登録直後で旧 peer id の失効前＝約 60 秒）時は、互いの識別を捨てず（取り直しで揺れない）、server 指定なしの `remote_send`・server_id / host 名での指定・記録からの検索を**エラー**にして送らない。エラーには候補の peer id・user・workspace を並べる。peer id で指せば通る。
+- **記録**: `remotes.json` の `server` は server_id にする。`peer` は今の到達先で、確認できるたびに更新する（peer id が変わっても同じ server・同じ cap の記録のまま）。`serverHost`（host 名）/ `serverUser` / `serverWorkspace` も持つ。server_id が分からない記録（旧形式。旧 server の記録を含む）は `server` が peer id のまま。見分けは `server_id` の有無。
 - **server の指定**（`remote_send` / `remote_delete` / `remote_wait` / `worker_reply` の `server`）: server_id → peer id → host 名（大文字小文字を区別しない）→ messenger の名前、の順に探し、最初に一致した段の全件を候補にする。候補が複数の server に及ぶ時（同じ host に server が 2 つなど）は**送らずにエラー**にして、候補を `host(server_id) user=… workspace=…` で並べる（server_id で指し直す）。`remote_delete` / `remote_wait` / `worker_reply` は記録（server_id / peer / host）で指せるので、server が今見えなくても指せる。
 - **表示**: `remote_list` の `server_label`、`server_peers` の各 server、center.log は host 名を主にして server_id を添える。同じ host 名の server が複数ある時は user と workspace も付く。
 - **旧形式の移行**（起動時の `restore`）:
   1. `server_id` の無い記録があれば、先に `remotes.json` を `remotes.json.pre-server-id.bak` へ退避する（既にあれば上書きしない。失敗しても続行）。
   2. 発見できる server に識別があり、記録の peer id が一致する（または名前 + host が一致し、かつ同じ名前 + host の peer が 1 つだけ）なら、記録を server_id に読み替える。同じ host に同名の server が 2 つある時は、名前 + host だけでは引き継がない（取り違え防止）。
   3. 対応する server が見えない・識別を返さない記録は peer id のまま残す（`unknown` を悪化させない）。その server が後で `hello` / `status` を返し、peer id 等が一致した時に引き継ぐ。
-  4. 冪等（読み替え済みは何も変えない）。読み替え中は保存せず、最後に 1 回だけ保存する。発見に失敗しても起動は止めない。
-- **古い記録の整理**（`prune`。起動時と 10 分ごと。**消すのは center の記録だけで、server には何も送らない**）:
+  4. 制約（厳密化はしない）: 名前 + host だけで引き継ぐ場合（同じ host・同名の live が 1 つだけ）、元の server が廃止されて別の server が動いていると、その別の workspace / user に紐づき得る。peer id が一致する場合と、server_id が分かる記録は取り違えない。
+  5. 冪等（読み替え済みは何も変えない）。読み替え中は保存せず、最後に 1 回だけ保存する。発見に失敗しても起動は止めない（発見に失敗した起動では、古い到達先の整理もしない）。
+- **互換と更新の順序**: center は protocol の版が**完全一致**する server にしか `task` / `status` を送らない（`gateOf`）。旧 server（protocol 1.6.0）は `hello` / `update_server` だけ通り、`task` / `status` は版違いエラーになる。旧 server の記録は peer id のまま残るだけで、新しい指示は送れない。移行は **server を 1.7.0 へ更新（follow が `update_server` で自動に指示）してから**。旧 center に新 server（1.7.0）を当てると、旧 center の follow が server を旧 pair の版へ戻す（巻き戻される）。
+- **downgrade**: 非推奨。必要なら `remotes.json.pre-server-id.bak` を `remotes.json` に戻す。退避は**最初の 1 回だけ**で上書きしない（最初の退避を守る）ので、移行後に新しく作った cap の記録は失われる。
+- **古い記録の整理**（`prune`。起動時と 10 分ごと。**消すのは center の記録だけ**。記録を消すために server へ stop_cap などは送らない。ただし発見した peer のうち識別が未取得のものへは、読み取りだけの `hello` を送り得る）:
   - 消す: (a) 同じ server_id・同じ cap の旧 peer id の重複記録（動いている記録、同順位なら最新を 1 件残す）。(b) `peer_seen_at` から 6 時間確認できず、今の発見にも居ない到達先（`peer` と `peer_seen_at` だけ消す）。
   - 消さない: session × server の cap の記録そのもの（`remote_delete` だけが消す）、server_id / host / user / workspace、未完了の指示、旧形式の記録。発見に失敗している間は (b) をしない。
 

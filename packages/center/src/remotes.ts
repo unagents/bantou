@@ -14,7 +14,7 @@ import type { ActivityStore, RemoteActivity } from "./activity.js";
 import { loadConfigSync, type ServerConfig } from "./config.js";
 import type { Logger } from "./log.js";
 import { matchServerPeers, type ServerLink, type ServerPeer, type TaskInput } from "./server-link.js";
-import { ambiguousServerMessage, describeServer, hostOf, type ServerRef } from "./server-identity.js";
+import { ambiguousServerMessage, describeServer, duplicateServerIdMessage, hostOf, type ServerRef } from "./server-identity.js";
 import type { JsonListStore } from "./store.js";
 import { sessionCapId } from "./center-id.js";
 
@@ -692,6 +692,17 @@ export function createRemoteManager(opts: {
       set("server", peer.id);
     }
     set("peer", peer.id);
+    // この peer id が別の server_id になった（workspace の作り直しなど）: 旧 server_id の記録に peer を残さない
+    if (peer.server_id !== undefined) {
+      for (const o of records) {
+        if (o !== r && o.server_id !== undefined && o.server_id !== peer.server_id && o.peer === peer.id) {
+          log(`peer id が別の server_id になった: ${peer.id} ${o.server_id} -> ${peer.server_id}（旧記録 ${o.remote_id} の到達先を外す）`);
+          delete o.peer;
+          delete o.peer_seen_at;
+          changed = true;
+        }
+      }
+    }
     set("serverName", peer.name);
     set("serverHost", hostOf(peer));
     set("serverUser", peer.user);
@@ -755,9 +766,12 @@ export function createRemoteManager(opts: {
     if (cands.length === 0) return undefined;
     if (fromId === undefined) return cands.length === 1 ? cands[0] : undefined;
     const ident = link.identityOf?.(fromId);
+    // 識別（server_id）が分かれば、それで先に探す。peer id 一致を先にすると、同じ peer id に別の server_id が現れた時
+    // （workspace の作り直しなど）旧 server_id の記録に当たって弾かれ、新しい記録に届かない。server_id を持たない旧形式だけ peer id で探す
     const hit =
-      cands.find((r) => peerOfRec(r) === fromId) ??
-      (ident?.server_id !== undefined ? cands.find((r) => r.server_id === ident.server_id) : undefined);
+      ident?.server_id !== undefined
+        ? (cands.find((r) => r.server_id === ident.server_id) ?? cands.find((r) => r.server_id === undefined && peerOfRec(r) === fromId))
+        : cands.find((r) => peerOfRec(r) === fromId);
     const rec = hit ?? (cands.length === 1 ? cands[0] : undefined);
     if (!rec) return undefined;
     // 別の server_id と分かっている server からは取り違えない
@@ -776,6 +790,8 @@ export function createRemoteManager(opts: {
     const peers = await livePeers();
     let hit: ServerPeer | undefined;
     if (r.server_id !== undefined) {
+      const same = peers.filter((p) => p.server_id === r.server_id);
+      if (same.length > 1) throw new Error(duplicateServerIdMessage(r.server_id, same.map((p) => ({ ...p, peerId: p.id }))));
       hit = peers.find((p) => p.server_id === r.server_id) ?? peers.find((p) => p.server_id === undefined && r.peer !== undefined && p.id === r.peer);
     } else {
       hit = peers.find((p) => p.id === r.server) ?? peers.find((p) => legacyMatches(r, p, peers));
@@ -891,6 +907,7 @@ export function createRemoteManager(opts: {
       // 失敗しても起動は止めない。
       const all = [...sessioned, ...loaded];
       let live: ServerPeer[] = [];
+      let discovered = false;
       try {
         if (all.some((r) => r.server_id === undefined)) await opts.backup?.();
       } catch (e) {
@@ -898,6 +915,7 @@ export function createRemoteManager(opts: {
       }
       try {
         live = await livePeers();
+        discovered = true;
       } catch (e) {
         log(`server の発見に失敗（旧形式の読み替えは後で）: ${e instanceof Error ? e.message : String(e)}`);
       }
@@ -965,7 +983,8 @@ export function createRemoteManager(opts: {
         }
       }
       const merged = consolidate();
-      const peersCleared = clearStalePeers(live);
+      // 発見に失敗した時は到達先を消さない（prune と同じ。live が空なのは「居ない」でなく「分からない」）
+      const peersCleared = discovered ? clearStalePeers(live) : 0;
       restoring = false;
       if (records.length > 0 || surplus.length > 0) await persist();
       log(`remote 記録を読込: ${records.length} 件${upgraded > 0 ? `（server_id へ引き継ぎ ${upgraded} 件）` : ""}${merged > 0 ? `（同じ server_id の重複 ${merged} 件を整理）` : ""}${peersCleared > 0 ? `（古い到達先 ${peersCleared} 件を消した）` : ""}${migrated > 0 ? `（旧形式から引き継ぎ ${migrated} 件）` : ""}${surplus.length > 0 ? `（同じ server の余分な旧形式 ${surplus.length} 件は stop_cap を送って記録を消す）` : ""}`);

@@ -26,7 +26,7 @@ import {
 } from "@agent-hand/bantou-protocol";
 import { DEFAULT_SERVER_TIMEOUT_MS, type Config, type ServerConfig } from "./config.js";
 import type { Logger } from "./log.js";
-import { ambiguousServerMessage, describeServer, hostOf, identityOfReply, type ServerIdentity } from "./server-identity.js";
+import { ambiguousServerMessage, describeServer, duplicateServerIdMessage, hostOf, identityOfReply, type ServerIdentity } from "./server-identity.js";
 
 /** messenger の meta（protocol 名と version）。 */
 export interface LinkMeta {
@@ -238,6 +238,10 @@ export function matchServerPeers(peers: ServerPeer[], sel: string): ServerPeer[]
   return [];
 }
 
+/** peer と同じ server_id を名乗る peer（peer 自身を含む）。server_id が無ければ peer だけ。 */
+const sameServerIdPeers = (peers: ServerPeer[], peer: ServerPeer): ServerPeer[] =>
+  peer.server_id === undefined ? [peer] : peers.filter((p) => p.server_id === peer.server_id);
+
 /** 候補の 1 行（識別があれば host(server_id) user= workspace=、無ければ従来の name(peer id)）。 */
 const peerLabel = (p: ServerPeer): string =>
   p.server_id !== undefined || p.host !== undefined ? describeServer({ ...p, peerId: p.id }) : `${p.name}(${p.id})`;
@@ -330,6 +334,8 @@ export function createServerLink(opts: {
   const identities = new Map<string, ServerIdentity>();
   /** 識別の取得に失敗した時刻（peer id → ms）。IDENTIFY_RETRY_MS の間は再送しない。 */
   const identifyFailedAt = new Map<string, number>();
+  /** 直近の発見で居た peer id。同じ server_id を名乗る別の peer が今も居る間は、識別を捨てない（捨てると互いに取り直して揺れる）。 */
+  let liveIds = new Set<string>();
   const identifyTimeoutMs = opts.identifyTimeoutMs ?? IDENTIFY_TIMEOUT_MS;
   const nowMs = opts.now ?? Date.now;
 
@@ -338,7 +344,7 @@ export function createServerLink(opts: {
     const ident = identityOfReply(r);
     if (ident.server_id !== undefined) {
       for (const [other, v] of [...identities]) {
-        if (other !== peerId && v.server_id === ident.server_id) {
+        if (other !== peerId && v.server_id === ident.server_id && !liveIds.has(other)) {
           identities.delete(other);
           log(`旧 peer id の識別を整理: server_id=${ident.server_id} ${other} -> ${peerId}`);
         }
@@ -617,6 +623,7 @@ export function createServerLink(opts: {
     const peers = await client.listPeers("all", { protocol: MESSENGER_PROTOCOL.protocol });
     // 発見できなくなった peer（旧 peer id を含む）の識別は捨てる。到達先のキャッシュを残さない
     const listed = new Set(peers.map((p) => p.id));
+    liveIds = listed;
     for (const id of [...identities.keys()]) {
       if (!listed.has(id)) {
         identities.delete(id);
@@ -695,7 +702,13 @@ export function createServerLink(opts: {
     async selectPeer(sel) {
       let peers = await discoverPeers();
       if (peers.length === 0) throw new Error("protocol bantou の server が見つからない（server が起動・protocol 登録済みか、同じ broker につながっているか確認）");
-      if (sel === undefined) return peers[0];
+      if (sel === undefined) {
+        // 同じ server_id を名乗る peer の検知には識別が要る（2 つ以上居る時だけ取る。取得済みは再送しない）
+        if (peers.length > 1) peers = await identify(peers);
+        const dup = sameServerIdPeers(peers, peers[0]);
+        if (dup.length > 1) throw new Error(duplicateServerIdMessage(dup[0].server_id!, dup.map((p) => ({ ...p, peerId: p.id }))));
+        return peers[0];
+      }
       let hits = matchServerPeers(peers, sel);
       // 一致しない、または識別が未取得の peer が混ざる時は、識別を取り直して引き直す（server_id での指定は識別が要る）
       if (hits.length === 0 || peers.some((p) => !identities.has(p.id) && hits.includes(p))) {
@@ -703,6 +716,10 @@ export function createServerLink(opts: {
         hits = matchServerPeers(peers, sel);
       }
       if (hits.length === 0) throw new Error(`server が見つからない: ${sel}（候補: ${peers.map(peerLabel).join(", ")}）`);
+      // 同じ server_id を名乗る peer 同士の曖昧さは、見分けが付かない表示にならないよう peer id を添えて断る
+      if (hits.length > 1 && hits[0].server_id !== undefined && hits.every((p) => p.server_id === hits[0].server_id)) {
+        throw new Error(duplicateServerIdMessage(hits[0].server_id, hits.map((p) => ({ ...p, peerId: p.id }))));
+      }
       if (hits.length > 1) throw new Error(ambiguousServerMessage(sel, hits.map((p) => ({ ...p, peerId: p.id }))));
       return hits[0];
     },
