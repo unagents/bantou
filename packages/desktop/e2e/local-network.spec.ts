@@ -39,3 +39,24 @@ test.describe("other broker errors", () => {
     await expect(tip(page)).not.toContainText("ローカルネットワーク");
   });
 });
+
+test.describe("only the marker (a probe hit EHOSTUNREACH, the poller then fell back to 127.0.0.1)", () => {
+  test.use({
+    seed: {
+      ...defaultSeed,
+      broker: {
+        connected: false,
+        peer_id: null,
+        // No "No route to host" / "os error 65": only the marker `broker.rs` appends.
+        error: "error sending request for url (http://127.0.0.1:7901/register): tcp connect error: Connection refused (os error 61) [EHOSTUNREACH]",
+      },
+    },
+  });
+
+  test("the marker alone triggers the permission hint", async ({ page }) => {
+    await page.goto("/");
+    await page.getByTestId("messenger-status").hover();
+    await expect(tip(page)).toContainText("ローカルネットワークの許可を確認");
+    await expect(tip(page)).toContainText("Connection refused");
+  });
+});

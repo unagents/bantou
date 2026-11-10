@@ -96,20 +96,42 @@ fn is_host_unreachable(chain: &str) -> bool {
     chain.contains("No route to host") || chain.contains("os error 65")
 }
 
+/// EHOSTUNREACH as an OS error code: 65 on macOS, 113 on Linux. `ErrorKind::HostUnreachable` is not used because
+/// the toolchain is not pinned (it needs a recent Rust); the raw code works everywhere.
+fn is_host_unreachable_io(e: &std::io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(65) | Some(113))
+}
+
 /// Marker the desktop UI looks for (`src/utils/localNetwork.ts`).
 const LAN_UNREACHABLE_MARK: &str = "EHOSTUNREACH";
 
-/// Set when the last broker probe or call failed with EHOSTUNREACH; cleared when one works.
+/// Set when any broker probe of the current `resolve_broker` round (health probe or UDP discovery send) failed
+/// with EHOSTUNREACH. It only latches to true inside a round (a later probe that works or is refused does not
+/// clear it); `resolve_broker` clears it at the start of each round. Process-wide, shared by all pollers.
 static LAN_UNREACHABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+fn latch(flag: &std::sync::atomic::AtomicBool, hit: bool) {
+    if hit {
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 fn note_lan_unreachable(chain: &str) {
-    LAN_UNREACHABLE.store(is_host_unreachable(chain), std::sync::atomic::Ordering::Relaxed);
+    latch(&LAN_UNREACHABLE, is_host_unreachable(chain));
+}
+
+fn reset_lan_unreachable() {
+    LAN_UNREACHABLE.store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// The error shown in the header. Adds the marker when a broker probe hit EHOSTUNREACH, even if the poller
 /// then fell back to 127.0.0.1 and failed with a plain "connection refused".
 fn status_error(e: String) -> String {
-    if is_host_unreachable(&e) || LAN_UNREACHABLE.load(std::sync::atomic::Ordering::Relaxed) {
+    status_error_with(e, LAN_UNREACHABLE.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+fn status_error_with(e: String, latched: bool) -> String {
+    if latched || is_host_unreachable(&e) {
         format!("{e} [{LAN_UNREACHABLE_MARK}]")
     } else {
         e
@@ -122,10 +144,7 @@ async fn healthy(url: &str) -> bool {
         return false;
     };
     match c.get(format!("{url}/health")).send().await {
-        Ok(r) => {
-            note_lan_unreachable("");
-            r.status().is_success()
-        }
+        Ok(r) => r.status().is_success(),
         Err(e) => {
             note_lan_unreachable(&error_chain(&e));
             false
@@ -153,14 +172,28 @@ fn probe_targets() -> Vec<std::net::Ipv4Addr> {
     out
 }
 
+/// Send the probe to each target; true when any send failed with EHOSTUNREACH. Other send errors are ignored
+/// (the broker may simply not be there).
+fn send_probes<F>(targets: &[std::net::Ipv4Addr], mut send: F) -> bool
+where
+    F: FnMut(std::net::Ipv4Addr) -> std::io::Result<usize>,
+{
+    let mut hit = false;
+    for t in targets {
+        if let Err(e) = send(*t) {
+            hit |= is_host_unreachable_io(&e);
+        }
+    }
+    hit
+}
+
 fn discover() -> Option<String> {
     let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
     sock.set_broadcast(true).ok()?;
     sock.set_read_timeout(Some(DISCOVERY_TIMEOUT)).ok()?;
     let probe = br#"{"agent-messenger":"probe"}"#;
-    for t in probe_targets() {
-        let _ = sock.send_to(probe, (t, DISCOVERY_PORT));
-    }
+    let targets = probe_targets();
+    latch(&LAN_UNREACHABLE, send_probes(&targets, |t| sock.send_to(probe, (t, DISCOVERY_PORT))));
     let deadline = std::time::Instant::now() + DISCOVERY_TIMEOUT;
     let mut buf = [0u8; 2048];
     while std::time::Instant::now() < deadline {
@@ -178,6 +211,7 @@ fn discover() -> Option<String> {
 
 /// Find the broker in agent-messenger's order.
 pub async fn resolve_broker() -> String {
+    reset_lan_unreachable();
     let port = env_port();
     if let Ok(host) = std::env::var("AGENT_MESSENGER_HOST") {
         if !host.trim().is_empty() {
@@ -840,15 +874,60 @@ mod tests {
     }
 
     #[test]
-    fn host_unreachable_is_marked() {
-        LAN_UNREACHABLE.store(false, std::sync::atomic::Ordering::Relaxed);
-        assert!(status_error("x: No route to host (os error 65)".into()).ends_with("[EHOSTUNREACH]"));
-        assert_eq!(status_error("x: Connection refused (os error 61)".into()), "x: Connection refused (os error 61)");
+    fn status_error_marks_host_unreachable() {
+        assert!(status_error_with("x: No route to host (os error 65)".into(), false).ends_with("[EHOSTUNREACH]"));
+        assert_eq!(
+            status_error_with("x: Connection refused (os error 61)".into(), false),
+            "x: Connection refused (os error 61)"
+        );
         // A probe that hit EHOSTUNREACH marks later errors too (fallback to 127.0.0.1).
+        assert!(status_error_with("x: Connection refused (os error 61)".into(), true).ends_with("[EHOSTUNREACH]"));
+    }
+
+    #[test]
+    fn latch_only_sets() {
+        let flag = std::sync::atomic::AtomicBool::new(false);
+        latch(&flag, false);
+        assert!(!flag.load(std::sync::atomic::Ordering::Relaxed));
+        latch(&flag, true);
+        latch(&flag, false); // a later probe that is merely refused does not clear it
+        assert!(flag.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn send_probes_reports_host_unreachable_from_any_target() {
+        let targets = [
+            std::net::Ipv4Addr::BROADCAST,
+            std::net::Ipv4Addr::new(192, 168, 1, 255),
+            std::net::Ipv4Addr::new(10, 0, 0, 255),
+        ];
+        let mut n = 0;
+        let hit = send_probes(&targets, |t| {
+            n += 1;
+            if t.octets()[0] == 192 {
+                Err(std::io::Error::from_raw_os_error(65))
+            } else if t.octets()[0] == 10 {
+                Err(std::io::Error::from_raw_os_error(61)) // another error after the hit: does not clear it
+            } else {
+                Ok(1)
+            }
+        });
+        assert!(hit);
+        assert_eq!(n, 3, "every target is tried");
+        assert!(!send_probes(&targets, |_| Err(std::io::Error::from_raw_os_error(61))));
+        assert!(!send_probes(&targets, |_| Ok(1)));
+        assert!(is_host_unreachable_io(&std::io::Error::from_raw_os_error(113)));
+    }
+
+    #[test]
+    fn resolve_round_clears_the_latch() {
+        // The only test that touches the process-wide flag.
         note_lan_unreachable("tcp connect error: No route to host (os error 65)");
-        assert!(status_error("x: Connection refused (os error 61)".into()).ends_with("[EHOSTUNREACH]"));
-        note_lan_unreachable("");
-        assert!(!status_error("x".into()).contains("EHOSTUNREACH"));
+        assert!(LAN_UNREACHABLE.load(std::sync::atomic::Ordering::Relaxed));
+        reset_lan_unreachable();
+        assert!(!LAN_UNREACHABLE.load(std::sync::atomic::Ordering::Relaxed));
+        note_lan_unreachable("Connection refused (os error 61)");
+        assert!(!LAN_UNREACHABLE.load(std::sync::atomic::Ordering::Relaxed));
     }
 
     fn msg(text: &str) -> Message {

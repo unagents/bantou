@@ -23,6 +23,7 @@
 
 - **自己署名の code signing 証明書を 1 回作り、release の署名に使う**（Developer ID が無い前提）。証明書は版をまたいで同じなので、DR が版をまたいで一定になる。
 - 未確認: 自己署名 identity で、Local Network の許可が更新をまたいで**実際に保たれるか**。Apple の文書は「Apple-issued」を勧めており、自己署名の場合の保証は書いていない。最初の更新（例 0.1.45→0.1.46）で実機確認する。保たれなければ Apple Developer Program の Developer ID が必要。
+- 未確認（署名以外の要因）: TN3179 は「Local network privacy uses your main executable UUID as part of its implementation. If your main executable has no UUID, or shares a UUID with other programs, local network privacy may behave weirdly.」とも、「People might see unexpected behavior in System Settings > Privacy & Security if they have multiple versions of the same app installed (FB15568200).」とも書く。許可の外れに、署名以外（実行ファイルの UUID、複数版の同居）が効く可能性は未確認で、**自己署名にすれば直る保証は無い**。実機で外れた時は、署名の確認（§6-4）に加えて `dwarfdump --uuid /Applications/bantou.app/Contents/MacOS/bantou` が版ごとに変わるか、古い bantou.app が他の場所に残っていないかも見る（見る場所は TN3179 の記述からの想定で、これで原因が分かるかは未確認）。
 - 参考: TN3179 は macOS 15.5 以降の `AllowedWiFiLocalNetworkAddresses` / `AllowedEthernetLocalNetworkAddresses`（`com.apple.network.local-network`、`sudo defaults write`、再起動要）で、特定の LAN を「許可制の対象外」にできると書く。app の署名によらない別の手段。これは host 全体の設定変更なので、この手順では使わない。
 
 ## 4. 証明書を作る（mac200 の koube、1 回）
@@ -49,29 +50,30 @@ Tauri は環境変数 `APPLE_SIGNING_IDENTITY` を読み、`tauri.conf.json` の
 - Tauri docs（環境変数）: 「APPLE_SIGNING_IDENTITY: The identity used to code sign. Overwrites `tauri.conf.json > bundle > macOS > signingIdentity`.」 https://v2.tauri.app/reference/environment-variables/
 - 実装: tauri-cli `interface/rust.rs` が `std::env::var_os("APPLE_SIGNING_IDENTITY")` を先に見て、無ければ `config.macos.signing_identity` を使う。https://github.com/tauri-apps/tauri/blob/dev/crates/tauri-cli/src/interface/rust.rs
 - よって **`tauri.conf.json` は変えない**（`"-"` のまま＝証明書が無い環境は今までどおり ad-hoc で build できる）。
-- `tauri.conf.json` に `${VAR}` のような環境変数の置換は使えない（Tauri v2 の docs 〔config reference・環境変数〕に、config 内の環境変数展開の記述は見つからなかった）。上書きは上の環境変数で行う。
+- `tauri.conf.json` 内で `${VAR}` のような環境変数の展開が使えるかは、Tauri v2 の docs（config reference・環境変数）に記述が見つからず未確認。使わず、上の環境変数による上書きで行う。
+- 未確認: Tauri が identity 付きで codesign する時の timestamp（`--timestamp`）の有無と hardened runtime（`--options runtime`、`hardenedRuntime` 既定 true）の挙動。tauri-macos-sign のソースは `codesign --force -s <identity> [--options runtime]` を呼ぶが、自己署名 identity で実際に署名が通り app が起動するか（sidecar の bun 製 center を含む）は mac で未確認。
 
-`release.sh` は、`~/.config/bantou/signing-identity`（1 行、証明書の名前。例 `bantou dev signing`）があれば、その値を `APPLE_SIGNING_IDENTITY` として `tauri build` に渡す。無ければ従来どおり ad-hoc。
+`release.sh` は、`~/.config/bantou/signing-identity`（証明書の名前。例 `bantou dev signing`）があれば、最初の「空でも `#` 始まりでもない行」（CRLF・前後の空白は除く）を `APPLE_SIGNING_IDENTITY` として `tauri build` に渡す。有効な行が無ければ中断する。ファイルが無ければ従来どおり ad-hoc（環境に `APPLE_SIGNING_IDENTITY` があればそれを使う）。
 
 ```
 mkdir -p ~/.config/bantou
 printf '%s\n' 'bantou dev signing' > ~/.config/bantou/signing-identity
 ```
 
-release.sh は署名ビルドの後に `codesign -dr -` で app の DR を表示する。identity を指定したのに DR が `cdhash` のまま（＝ ad-hoc のまま）なら止まる。
+release.sh は署名ビルドの後に `codesign -d -r-` で app の DR を表示する。identity を指定した（`-` 以外）のに DR が読めない、または `cdhash` のまま（＝ ad-hoc のまま）なら止まる。identity 無し・`-` は検査しない（従来どおり）。
 
 ## 6. 更新後の確認（初回は実機確認が必要）
 
 1. 証明書で署名した版 A を入れ、ローカルネットワークを許可して、center が LAN の broker に繋がることを確認。
 2. 次の版 B に更新する（B も同じ証明書）。
 3. 許可を触らずに center が broker に繋がれば成功。外れたら 1. の「直し方」で復旧し、結果を docs/history に残して Developer ID を検討する。
-4. 署名の確認: `codesign -dvv /Applications/bantou.app` の Authority が `bantou dev signing`、`codesign -dr - /Applications/bantou.app` が証明書 leaf を指す（`cdhash` ではない）こと。
+4. 署名の確認: `codesign -dvv /Applications/bantou.app` の Authority が `bantou dev signing`、`codesign -dr - /Applications/bantou.app` の DR が `cdhash` ではなく証明書を指すこと。自己署名の DR の中身（`certificate leaf = H"…"` のような形になる、という**想定**）は Apple の文書で確認できていない＝未確認。実機で出た DR を docs/history に残す。
 
 ## 7. updater との関係
 
 - アプリ更新の検証（tauri-plugin-updater）は minisign の鍵（`TAURI_SIGNING_PRIVATE_KEY` / `tauri.conf.json` の `plugins.updater.pubkey`）で行い、macOS の code signing identity とは別。Tauri docs「Tauri's updater needs a signature to verify that the update is from a trusted source. This cannot be disabled.」https://v2.tauri.app/plugin/updater/
 - docs は両者が独立と明記してはいない（未確認）。ただし bantou の build は署名 identity と updater 鍵を別の入力（`APPLE_SIGNING_IDENTITY` / `TAURI_SIGNING_PRIVATE_KEY`）で渡しており、identity を変えても updater の鍵・pubkey は変わらない。
-- 旧版（ad-hoc）から自己署名版への最初の更新は、updater の検証（minisign）は通る。許可は、ad-hoc 版には引き継がれる元が無いので、**最初の 1 回だけ**許可の操作（OFF→ON）が要る。
+- 旧版（ad-hoc）から自己署名版への最初の更新は、updater の検証（minisign）は通る。許可は、ad-hoc 版には引き継がれる元が無いので、**最初の 1 回だけ**許可の操作（OFF→ON）が要る、と**推論**している（Apple の文書に自己署名への切り替え時の挙動は無く、未確認）。
 
 ## 8. notarization・Developer ID
 

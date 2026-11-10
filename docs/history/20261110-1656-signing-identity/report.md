@@ -65,3 +65,29 @@
 - `broker.rs` のコンパイル・unit test（mac200 の cargo test）。
 - 自己署名証明書が `security find-identity -v` に出るための信頼設定、ssh 経由での keychain unlock の要否（未確認）。
 - 別 task（fix/relogin-local-browser）が触る `e2e/mock/bantou.ts` の Seed に 1 項目足したので、merge 時に衝突し得る（小さい）。
+
+## review 第1回（HEAD d9ce8f3）への対応
+
+1. [medium] broker.rs の検知漏れ — 修正。
+   - `LAN_UNREACHABLE` を OR ラッチに変更（`latch()`: true にするだけ）。`resolve_broker` の頭で `reset_lan_unreachable()` し、周回内で health probe（`healthy()`、成功・refused では clear しない）か UDP discovery の `send_to` が EHOSTUNREACH なら true を保持する。(a) config に brokers が無く discover だけの経路、(b) 複数 broker の last-wins、(c) 周回をまたぐ持ち越し、の 3 点を解消。
+   - `discover()` の送信を `send_probes()`（クロージャ注入）に切り出し、`send_to` のエラーが EHOSTUNREACH（`raw_os_error` が 65=macOS / 113=Linux）なら hit。`ErrorKind::HostUnreachable` は使っていない（toolchain 非固定で、新しい Rust が要るため。raw コードで足りる）。
+   - unit test（ネットワーク不使用）: `status_error_marks_host_unreachable`、`latch_only_sets`、`send_probes_reports_host_unreachable_from_any_target`（hit の後に別エラーが来ても hit のまま・全 target に送る・hit 無しは false）、`resolve_round_clears_the_latch`（static に触る唯一の test）。
+   - 残る限界: static はプロセス全体共有で、複数 workspace の poller が同時に resolve すると、互いの周回でクリアし合い得る（表示のヒントが一時的に出入りするだけ）。`AGENT_MESSENGER_HOST` 指定時は probe 無しで、接続エラー自体の chain（"No route to host"）で判定する。
+   - cargo は host に無く**未コンパイル・未実行**。型・借用は読みで確認（`send_probes` のクロージャは `sock` を共有参照で借用、テストの `n` は FnMut で可変借用し呼び出し後に読む）。
+2. [low] release.sh の identity 読み取り — 修正。先頭の非空・非 `#` 行を取り、`\r` と前後の空白を除去（bash 3.2 でも動くパラメータ展開）。有効行が無いファイルは中断。
+3. [low] release.sh の DR 判定 — 修正。identity が空または `-` なら判定しない（ad-hoc 既定は従来と同一）。`-` 以外で DR が空なら中断、`cdhash` でも中断。
+4. [low] docs の断定 — 修正（desktop-signing.md）。(a) TN3179 の UUID・複数版の記述を §3 に「未確認（署名以外の要因）」として追記、自己署名で直る保証は無いと明記。(b) §6-4 の DR を「想定、未確認」に。(c) §7 を「推論」と明記。(d) Tauri の timestamp / hardened runtime の挙動を未確認と明記（併せて `${VAR}` 展開の「使えない」を「記述が見つからず未確認」に和らげた）。
+5. [low] e2e のマーカー依存 — 修正。マーカーだけを含む error（"No route to host" / "os error 65" 無し）で案内が出るケースを追加（local-network.spec 3 件目）。
+
+### review 対応後の確認
+
+- typecheck（nuxt typecheck）: pass。
+- release.sh: `bash -n` pass。identity 読み取りと DR 判定のブロックを release.sh から抽出し、stub の入力で実行（HOME は変えず、tauri / cargo / codesign は実行していない）。CRLF+空白+コメント付き・末尾改行無し・コメントのみ（中断）・identity+cdhash（中断）・identity+DR 空（中断）・env `-`+cdhash（通る）・env `-`+DR 空（通る）・identity 無し+DR 空（通る）・env identity+cdhash（中断）が期待どおり。ファイル内容が `-` のケースだけ、ハーネスの printf の書き方の不具合で未実行（env `-` のケースで同じ分岐を通っている）。
+- e2e / cargo の結果は下の「最終結果」。
+
+### 最終結果（review 対応後）
+
+- typecheck（nuxt typecheck）: pass。
+- e2e: **171 passed**（前回 170 + マーカーのみのケース 1、前回と同じ方法、retries=1、2.5m）。
+- cargo test: **未実施**（host に cargo が無い）。broker.rs の変更と unit test は未コンパイル。
+- bun.lock 変更なし、version bump なし。fix/relogin-local-browser・feat/retire-server の対象は未接触。
