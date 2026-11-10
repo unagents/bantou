@@ -86,7 +86,14 @@ export interface Session {
   contextUsage: ContextUsage | null;
   /** The session was started with the session instructions (the text itself is not sent). */
   instructions: boolean;
+  /** The center's work state (`unknown`/null: show nothing). Mirror of `session_list` `activity`. */
+  activity: "working" | "needs-input" | "idle" | "unknown" | null;
+  /** When `activity` last changed (ISO string). null: none. */
+  activityAt: string | null;
 }
+
+/** The work state shown on the side menu (`unknown` is not shown). */
+export type SessionActivity = "working" | "needs-input" | "idle";
 
 /** What the add dialog needs for the folder field (mirror of `session.rs::PathHints`). */
 export interface SessionPathHints {

@@ -148,6 +148,12 @@ pub struct Session {
     /// Whether the session was started with instructions (`--append-system-prompt`). false when the center says no or is older than this field.
     #[serde(default)]
     pub instructions: bool,
+    /// Center's work state (`working` / `needs-input` / `idle` / `unknown`). None when the center is older than this field.
+    #[serde(default)]
+    pub activity: Option<String>,
+    /// When `activity` last changed (ISO string); None when unknown.
+    #[serde(default)]
+    pub activity_at: Option<String>,
 }
 
 /// What the side menu shows: the center's list as last fetched, and whether the latest read worked.
@@ -347,6 +353,8 @@ mod tests {
             last_error: None,
             context_usage: None,
             instructions: false,
+            activity: None,
+            activity_at: None,
         }
     }
 
@@ -427,6 +435,20 @@ mod tests {
         assert!(!off.instructions);
         let old: Session = serde_json::from_str(r#"{"name":"a"}"#).unwrap();
         assert!(!old.instructions);
+    }
+
+    #[test]
+    fn activity_is_read_when_the_center_sends_it_and_none_otherwise() {
+        let s: Session =
+            serde_json::from_str(r#"{"name":"a","activity":"needs-input","activityAt":"2026-11-09T00:00:00.000Z"}"#).unwrap();
+        assert_eq!(s.activity.as_deref(), Some("needs-input"));
+        assert_eq!(s.activity_at.as_deref(), Some("2026-11-09T00:00:00.000Z"));
+        let old: Session = serde_json::from_str(r#"{"name":"a"}"#).unwrap();
+        assert_eq!((old.activity, old.activity_at), (None, None));
+        let null: Session = serde_json::from_str(r#"{"name":"a","activity":"unknown","activityAt":null}"#).unwrap();
+        assert_eq!((null.activity.as_deref(), null.activity_at), (Some("unknown"), None));
+        // the camelCase names are what the webview reads
+        assert_eq!(serde_json::to_value(&s).unwrap()["activityAt"], "2026-11-09T00:00:00.000Z");
     }
 
     #[test]

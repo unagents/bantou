@@ -10,7 +10,7 @@ import {
   SESSIONS_CHANGED_EVENT,
   THREADS_CHANGED_EVENT,
 } from "~/api";
-import type { ContextUsage, Ping, SessionList, Task, Thread } from "~/types";
+import type { ContextUsage, Ping, SessionActivity, SessionList, Task, Thread } from "~/types";
 
 /** How often the remaining time of the ping timers is re-evaluated. */
 const PING_TICK_MS = 5000;
@@ -25,6 +25,12 @@ export interface SessionGroup {
   contextUsage: ContextUsage | null;
   /** The session was started with the center's session instructions. */
   instructions: boolean;
+  /**
+   * Work state shown on the side row (null: show nothing). A waiting thread on one of the session's tasks
+   * is always "needs-input"; otherwise the center's `activity` (unknown → null), and only while the center
+   * could be asked and the session is connected (stopped / starting / error keep their own display).
+   */
+  activity: SessionActivity | null;
   /** In-progress tasks (statuses between the first and the last). */
   working: Task[];
   /** Queued tasks (the first status, Cork's "Todo"). */
@@ -95,6 +101,12 @@ export function useBoard(dir: Ref<string | null>) {
     const first = statuses.value[0];
     const last = statuses.value[statuses.value.length - 1];
     const map = new Map<string, SessionGroup>();
+    const centerActivity = (name: string): SessionActivity | null => {
+      if (!centerList.value.reachable) return null;
+      const r = centerList.value.sessions.find((x) => x.name === name);
+      if (!r || r.state !== "connected") return null;
+      return r.activity === "working" || r.activity === "needs-input" || r.activity === "idle" ? r.activity : null;
+    };
     const group = (name: string) => {
       let g = map.get(name);
       if (!g) {
@@ -104,6 +116,7 @@ export function useBoard(dir: Ref<string | null>) {
           reason: centerList.value.reason,
           contextUsage: centerList.value.sessions.find((r) => r.name === name)?.contextUsage ?? null,
           instructions: centerList.value.sessions.find((r) => r.name === name)?.instructions ?? false,
+          activity: centerActivity(name),
           working: [],
           queued: [],
           done: [],
@@ -120,12 +133,21 @@ export function useBoard(dir: Ref<string | null>) {
       for (const n of t.tags) {
         if (!reg.has(n)) continue;
         const g = group(n);
+        // The thread ask (waiting) is not known to the center: it makes the session "needs-input" whatever the center says.
+        if (threads.value[t.id]?.status === "waiting") g.activity = "needs-input";
         if (t.status === last && statuses.value.length > 1) g.done.push(t);
         else if (t.status === first) g.queued.push(t);
         else g.working.push(t);
       }
     }
     return [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
+  });
+
+  /** Sessions per work state (the side menu summary). */
+  const activityCounts = computed<Record<SessionActivity, number>>(() => {
+    const c = { working: 0, "needs-input": 0, idle: 0 };
+    for (const g of sessions.value) if (g.activity) c[g.activity]++;
+    return c;
   });
 
   const waitingCount = computed(
@@ -154,5 +176,5 @@ export function useBoard(dir: Ref<string | null>) {
     unlistenSessions?.();
   });
 
-  return { tasks, statuses, threads, centerList, sessions, waitingCount, running, refresh };
+  return { tasks, statuses, threads, centerList, sessions, activityCounts, waitingCount, running, refresh };
 }
