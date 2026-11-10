@@ -11,7 +11,7 @@ import {
   centerSetSettings,
   centerStatus,
 } from "~/api";
-import { draftError, draftOf, emptyDraft, toUpdate, type SettingsDraft } from "~/composables/sessionInstructions";
+import { draftError, draftOf, emptyDraft, toCenterUpdate, type SettingsDraft } from "~/composables/sessionInstructions";
 import type { CenterConnectSnippets, CenterIpStatus, CenterParsedConnect, CenterSettings, CenterStatus } from "~/types";
 
 const open = defineModel<boolean>("open", { required: true });
@@ -75,7 +75,7 @@ async function loadCommon() {
 }
 // Throws on failure (save() names which part failed).
 async function saveCommon() {
-  const r = await centerCommonSettingsUpdate(toUpdate(common.value));
+  const r = await centerCommonSettingsUpdate(toCenterUpdate(common.value));
   common.value = draftOf(r.settings);
   commonBaseline.value = { ...common.value, addDirs: [...common.value.addDirs], servers: common.value.servers && [...common.value.servers] };
 }
@@ -483,7 +483,7 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
             つないでいる center が起動する全 session に効く。追加指示は各 session の追加指示の前に、参照フォルダは各 session のものと合わせて渡す。center に保存する
           </p>
           <fieldset :disabled="commonBaseline === null" class="min-w-0">
-            <ProjectSettingsFields v-model="common" id-prefix="center-common" :rows="4" :can-pick="commonCanPick" @error="commonError = $event" />
+            <ProjectSettingsFields v-model="common" id-prefix="center-common" :rows="4" no-servers :can-pick="commonCanPick" @error="commonError = $event" />
           </fieldset>
           <p v-if="commonProblem" class="text-cork-danger-text text-xs" data-testid="center-common-problem">{{ commonProblem }}</p>
           <p v-if="commonError" class="text-cork-danger-text text-xs whitespace-pre-wrap" data-testid="center-common-error">

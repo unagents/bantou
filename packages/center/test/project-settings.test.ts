@@ -90,10 +90,15 @@ test("servers: schema は host 名か server_id の配列（50 個以内）か n
   assert.deepEqual(readSettings({ servers: ["a", "", "a", 3] }), { servers: ["a"] });
   assert.deepEqual(readSettings({ servers: [] }), { servers: [] });
   assert.deepEqual(readSettings({ servers: "lenovo" }), {}, "壊れた値は未設定（全 server を止めない）");
-  assert.equal(composeServers(undefined, undefined), undefined);
-  assert.deepEqual(composeServers({ servers: ["c"] }, undefined), ["c"]);
-  assert.deepEqual(composeServers({ servers: ["c"] }, { servers: ["s"] }), ["s"]);
-  assert.deepEqual(composeServers({ servers: ["c"] }, { servers: [] }), []);
+  // composeServers は session の値だけを見る（共通は引数にも無い）
+  assert.equal(composeServers(undefined), undefined);
+  assert.equal(composeServers({}), undefined);
+  assert.deepEqual(composeServers({ servers: ["s"] }), ["s"]);
+  assert.deepEqual(composeServers({ servers: [] }), []);
+  // 共通設定: schema に servers は無い。保存済みに残っていても読み捨てる
+  const { centerSettingsPatchSchema, readCenterSettings } = await import("../src/project-settings.js");
+  assert.equal("servers" in centerSettingsPatchSchema.shape, false);
+  assert.deepEqual(readCenterSettings({ instructions: "i", servers: ["a"] }), { instructions: "i" });
   // 範囲の判定: server_id は完全一致、host 名は大文字小文字を区別しない。undefined は全部
   assert.equal(serverAllowed(undefined, {}), true);
   assert.equal(serverAllowed([], { server_id: "x", host: "h" }), false);

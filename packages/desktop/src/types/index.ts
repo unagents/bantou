@@ -125,6 +125,9 @@ export interface ProjectSettings {
   servers?: string[] | null;
 }
 
+/** The center-wide settings (`center_settings_get`): a session's project settings without `servers` (the servers a session uses are set per session only). */
+export type CenterCommonSettings = Omit<ProjectSettings, "servers">;
+
 /** The center's list as last fetched (mirror of `src-tauri/src/session.rs::SessionList`). Memory only. */
 export interface SessionList {
   sessions: Session[];

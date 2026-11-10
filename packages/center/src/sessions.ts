@@ -2,7 +2,7 @@ import { mkdir, rename } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
 import { projectSchema, PERMISSION_MODES, type Config, type ProjectConfig } from "./config.js";
-import { composeAddDirs, composeInstructions, composeOutputStyle, composeServers, mergeSettings, projectSettingsPatchSchema, readSettings, type ProjectSettings, type ProjectSettingsPatch } from "./project-settings.js";
+import { CENTER_SERVERS_ERROR, composeAddDirs, composeInstructions, composeOutputStyle, composeServers, mergeSettings, projectSettingsPatchSchema, readCenterSettings, readSettings, type CenterSettingsPatch, type ProjectSettings, type ProjectSettingsPatch } from "./project-settings.js";
 import type { Logger } from "./log.js";
 import type { RcStatus, RemoteControlSupervisor } from "./remote-control.js";
 import type { EventHub } from "./events.js";
@@ -86,10 +86,10 @@ export interface SessionManager {
   updateSettings(name: string, patch: ProjectSettingsPatch): Promise<{ name: string; settings: ProjectSettings }>;
   /** center 共通の設定（全 session に効く。instructions は各 session の追加指示の前に付く）。未設定は `{}`。 */
   getCenterSettings(): { settings: ProjectSettings };
-  /** session が使ってよい server の指定（session の servers、無ければ center 共通の servers）。undefined = 全部。 */
+  /** session が使ってよい server の指定（session の servers だけ。center 共通の設定には無い）。undefined = 全部。 */
   serversOf(name: string): string[] | undefined;
-  /** center 共通の設定を項目ごとにマージして保存し、全 session の次の起動に反映する。更新後の全体を返す。 */
-  updateCenterSettings(patch: ProjectSettingsPatch): Promise<{ settings: ProjectSettings }>;
+  /** center 共通の設定を項目ごとにマージして保存し、全 session の次の起動に反映する。更新後の全体を返す。servers（null 以外）は error。 */
+  updateCenterSettings(patch: CenterSettingsPatch): Promise<{ settings: ProjectSettings }>;
   /**
    * session の名前（newName）と path を変える（session_create で作ったものだけ）。停止 → フォルダの移動 / 作成 → 記録の更新 → 新しい名前で起動し直す（resume）。
    * path を変えた時は --continue が「会話が無い」で落ち、素の起動へ fallback する。cap_id は変えない。失敗時は記録と名前を元に戻して起動し直す（best effort）。
@@ -193,7 +193,7 @@ export function createSessionManager(opts: {
   return {
     async restore() {
       if (opts.centerStore) {
-        common = readSettings(await opts.centerStore.load());
+        common = readCenterSettings(await opts.centerStore.load());
         if (Object.keys(common).length) log(`center 共通の設定を読んだ (項目: ${Object.keys(common).join(",")})`);
       }
       for (const s of await store.load()) {
@@ -285,12 +285,14 @@ export function createSessionManager(opts: {
 
     getCenterSettings: () => ({ settings: { ...common } }),
 
-    serversOf: (name) => composeServers(common, saved.get(name)?.settings),
+    serversOf: (name) => composeServers(saved.get(name)?.settings),
 
     updateCenterSettings: (patch) =>
       serial(async () => {
+        // servers は session の設定だけ。null（削除）は無害なので通し、それ以外は黙って捨てずに error にする
+        if (patch.servers !== undefined && patch.servers !== null) throw new Error(CENTER_SERVERS_ERROR);
         const prev = common;
-        const next = mergeSettings(prev, patch);
+        const next = readCenterSettings(mergeSettings(prev, patch as ProjectSettingsPatch));
         if (opts.centerStore) {
           try {
             await opts.centerStore.save(next);

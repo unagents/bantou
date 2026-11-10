@@ -10,6 +10,8 @@ const props = defineProps<{
   rows?: number;
   /** This PC's folder dialog applies to the folder rows (the center runs here): rows are read-only, picked by dialog. Otherwise typed. */
   canPick?: boolean;
+  /** Hide the 使う server section: the center-wide settings have none (it is set per session only). */
+  noServers?: boolean;
 }>();
 const emit = defineEmits<{ error: [message: string] }>();
 
@@ -50,7 +52,9 @@ async function loadChoices() {
     choicesError.value = String(e);
   }
 }
-onMounted(() => void loadChoices());
+onMounted(() => {
+  if (!props.noServers) void loadChoices();
+});
 const limited = computed(() => draft.value.servers !== null);
 function setLimited(on: boolean) {
   draft.value = { ...draft.value, servers: on ? [] : null };
@@ -156,10 +160,10 @@ async function pickAdd() {
       />
       <p class="text-cork-muted text-xs" :data-testid="`${idPrefix}-output-style-note`">{{ INSTRUCTIONS_NOTE }}</p>
     </section>
-    <section class="flex flex-col gap-1" :data-testid="`${idPrefix}-section-servers`">
+    <section v-if="!noServers" class="flex flex-col gap-1" :data-testid="`${idPrefix}-section-servers`">
       <h3 class="text-sm font-semibold">使う server</h3>
       <p class="text-cork-muted text-xs">
-        master-cap が remote-cap を送る server の範囲。オフなら全部の server（session の設定が無ければ全 session 共通の設定に従う）。オンで 1 つも選ばないと、どの server も使わない
+        master-cap が remote-cap を送る server の範囲。オフなら全部の server。この設定は session ごとにここだけで持つ（全 session 共通の設定には無い）。オンで 1 つも選ばないと、どの server も使わない
       </p>
       <UCheckbox
         :model-value="limited"
