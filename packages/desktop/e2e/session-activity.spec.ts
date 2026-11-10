@@ -55,16 +55,33 @@ test.describe("session activity", () => {
     await setActivity(page, "careery", "unknown");
     await act(page);
     await expect(mark(page, "stroke-board")).toHaveAttribute("data-activity", "working");
-    await expect(mark(page, "stroke-board")).toHaveText("作業中");
+    await expect(mark(page, "stroke-board")).toHaveText("");
+    await expect(mark(page, "stroke-board")).toHaveAttribute("title", /^作業中: /);
+    await expect(mark(page, "stroke-board")).toHaveAttribute("aria-label", /^作業中: /);
     await expect(mark(page, "agent-messenger")).toHaveAttribute("data-activity", "idle");
-    await expect(mark(page, "agent-messenger")).toHaveText("待機");
+    await expect(mark(page, "agent-messenger")).toHaveText("");
+    await expect(mark(page, "agent-messenger")).toHaveAttribute("title", /^待機: /);
+    await expect(mark(page, "agent-messenger")).toHaveAttribute("aria-label", /^待機: /);
     // careery: center says unknown, but its task has a waiting thread → needs-input
     await expect(mark(page, "careery")).toHaveAttribute("data-activity", "needs-input");
-    await expect(mark(page, "careery")).toHaveText("判断待ち");
+    await expect(mark(page, "careery")).toHaveText("");
+    await expect(mark(page, "careery")).toHaveAttribute("title", /^判断待ち: /);
+    await expect(mark(page, "careery")).toHaveAttribute("aria-label", /^判断待ち: /);
     await expect(page.getByTestId("session-activity-summary")).toBeVisible();
-    await expect(count(page, "working")).toHaveText("作業中 1");
-    await expect(count(page, "needs-input")).toHaveText("判断待ち 1");
-    await expect(count(page, "idle")).toHaveText("待機 1");
+    // chips: icon + count only; the label is in title / aria-label
+    await expect(count(page, "working")).toHaveText("1");
+    await expect(count(page, "working")).toHaveAttribute("data-count", "1");
+    await expect(count(page, "working")).toHaveAttribute("title", "作業中");
+    await expect(count(page, "working")).toHaveAttribute("aria-label", "作業中 1");
+    await expect(count(page, "needs-input")).toHaveText("1");
+    await expect(count(page, "needs-input")).toHaveAttribute("data-count", "1");
+    await expect(count(page, "needs-input")).toHaveAttribute("title", "判断待ち");
+    await expect(count(page, "needs-input")).toHaveClass(/text-warning/);
+    await expect(count(page, "idle")).toHaveText("1");
+    await expect(count(page, "idle")).toHaveAttribute("data-count", "1");
+    await expect(count(page, "idle")).toHaveAttribute("title", "待機");
+    // no label text anywhere in the summary or on the rows' marks
+    await expect(page.getByTestId("session-activity-summary")).not.toContainText(/作業中|判断待ち|待機/);
     // header counts threads, not sessions
     await expect(page.locator("header")).toContainText("返答待ち 1");
   });
@@ -114,7 +131,7 @@ test.describe("session activity", () => {
     await expect(sideRow(page, "careery")).toBeVisible();
   });
 
-  test("remote running shows 'remote 作業中' when claude is idle, counts as 作業中 and is kept by its filter", async ({ page }) => {
+  test("remote running shows the remote-working icon when claude is idle, counts as 作業中 and is kept by its filter", async ({ page }) => {
     await page.goto("/");
     await pickSession(page, "stroke-board");
     await setActivity(page, "stroke-board", "idle");
@@ -122,7 +139,9 @@ test.describe("session activity", () => {
     await setActivity(page, "agent-messenger", "idle");
     await act(page);
     await expect(mark(page, "stroke-board")).toHaveAttribute("data-activity", "remote-working");
-    await expect(mark(page, "stroke-board")).toHaveText("remote 作業中");
+    await expect(mark(page, "stroke-board")).toHaveText("");
+    await expect(mark(page, "stroke-board")).toHaveAttribute("title", /^remote 作業中: /);
+    await expect(mark(page, "stroke-board")).toHaveAttribute("aria-label", /^remote 作業中: /);
     await expect(mark(page, "agent-messenger")).toHaveAttribute("data-activity", "idle");
     // summary: remote-working is a 作業中 (no extra chip)
     await expect(count(page, "working")).toHaveAttribute("data-count", "1");

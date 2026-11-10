@@ -199,12 +199,14 @@ function onSessionCreated(name: string) {
                 c.key === 'needs-input' && activityCounts[c.key] > 0 ? 'text-warning font-semibold' : 'text-cork-muted',
               ]"
               :aria-pressed="activityFilter === c.key"
+              :title="c.label"
+              :aria-label="`${c.label} ${activityCounts[c.key]}`"
               :data-testid="`session-activity-summary-${c.key}`"
               :data-count="activityCounts[c.key]"
               @click="toggleFilter(c.key)"
             >
-              <UIcon :name="c.icon" class="size-3.5" />
-              {{ c.label }} {{ activityCounts[c.key] }}
+              <UIcon :name="c.icon" class="size-3.5" aria-hidden="true" />
+              {{ activityCounts[c.key] }}
             </button>
           </div>
           <ul class="flex flex-col">
