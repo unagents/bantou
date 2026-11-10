@@ -8,6 +8,8 @@ center が master-cap（session の対話型 `claude --remote-control`）を起�
 
 最初の部品は `master-cap-role`: master-cap は自分では実装・修正・長い調査をせず、remote-cap（server 上のオーケストレーター）に `remote_send` で指示を出し、report と `task_result` で結果を確かめ、利用者に報告する、という運用の案内（remote-cap 側の決まりは `docs/design/cap-orchestration.md`）。
 
+2 つ目の部品は `master-cap-availability`: master-cap は常に利用者の指示をいつでも受けられる状態で働く。ビルド・テスト・release・長い待ちで自分の turn を塞がず、時間のかかる作業は remote-cap に預ける。この Mac のローカルでしかできない作業（release の署名ビルド・publish など）は、ローカルのサブエージェント（Agent tool）か background 実行（`run_in_background`）に任せる（`master-cap-role` の「自分ではしない」の例外）。待つ時は turn を終えて通知で受け、並行の指示には普通に応える。
+
 ## 並び
 
 ```
@@ -32,7 +34,7 @@ interface SystemInstructionPart {
   title: string;     // 1 行の説明（ログ・center_info 用）
   text: (ctx: { session: string }) => string;
 }
-export const SYSTEM_INSTRUCTION_PARTS = [MASTER_CAP_ROLE];
+export const SYSTEM_INSTRUCTION_PARTS = [MASTER_CAP_ROLE, MASTER_CAP_AVAILABILITY];
 ```
 
 - 文面は center の package の中に TypeScript の文字列として持つ。ファイル・config・環境変数からは読まない。理由: (1) center の版と一緒に配り、版で内容が決まる。(2) bun で 1 本に compile するので外部ファイルの同梱より単純。(3) テストで文面の要点（道具名、役割）を検証できる。
