@@ -50,14 +50,18 @@ test("TMPDIR: cap / worker の起動 env に自分の path の tmp/ が入り、
   });
 });
 
-test("TMPDIR: resume でも毎回作る（消えていたら作り直し、在れば mode を保つ）", async () => {
+test("TMPDIR: resume でも毎回作る（消えていたら作り直し、緩い mode は 700 に戻し、厳しい mode は保つ）", async () => {
   await withFx(async (ws, calls, invoke) => {
     await invoke("worker", "w1");
     const tmp = join(ws, "workers", "w1", "tmp");
     await chmod(tmp, 0o750);
     await invoke("worker", "w1");
     assert.equal(calls[1]!.mode, "resume");
-    assert.equal((await lstat(tmp)).mode & 0o777, 0o750); // 在れば何もしない
+    assert.equal((await lstat(tmp)).mode & 0o777, 0o700); // 緩い mode は 700 に戻す
+    await chmod(tmp, 0o500);
+    await invoke("worker", "w1");
+    assert.equal((await lstat(tmp)).mode & 0o777, 0o500); // 700 以下の厳しい mode は触らない
+    await chmod(tmp, 0o700);
     await rm(tmp, { recursive: true });
     await invoke("worker", "w1");
     assert.equal(calls[2]!.mode, "resume");

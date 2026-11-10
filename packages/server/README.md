@@ -189,7 +189,8 @@ center から server を外す指示（protocol 1.8.0、`docs/protocol.md` の `
   - 範囲: 呼び出し元の自分の path 配下だけ（worker は `workers/<worker_id>/`、cap は `caps/<cap_id>/` と、`logs/owner.json` の `cap_id` が自分の worker は `worker:<id>/<path>` で指す）。`paths` は自分の path からの相対。
   - 拒否: 絶対パス・`~`・`..`・バックスラッシュ・NUL、path そのもの（`.` や空）、`state.json` と `logs/`（`./`・末尾 `/`・大文字小文字違いも。symlink を解決した後も判定）、realpath が範囲外のもの、他の cap の worker、worker から `worker:` 接頭辞。
   - symlink は辿らず link 自体を消す。親が範囲外を指す symlink は拒否。dir は `recursive: true` の時だけ消し、再帰削除でも symlink は辿らない。削除の直前に lstat と親の realpath を取り直す（検査の後で変わっていたら消さない）。
-  - `TMPDIR`: 起動のたび（resume でも）に `<path>/tmp` を無ければ mode 700 で作り（symlink・file なら消して作り直す）、claude の env `TMPDIR` に渡す（`session.env` では上書きできない）。`tmp` は `bash` の `rm` の範囲内。
+  - 前提（認証）: 呼び出し元は header `x-bantou-cap-id` / `x-bantou-worker-id` だけで識別し、認証は無い（MCP の認証は全体で後回し。`worker_start` / `worker_stop` も同じ前提）。127.0.0.1 の `/mcp` に curl できる worker が `cap_id` を偽ると、その cap の path と配下 worker の path を `bash` の `rm` で消せる。偽装でも `logs/` と `state.json` は消せない（範囲の判定で常に拒否）。将来 MCP に起動ごとの token を入れる時は `bash` も対象にする。
+  - `TMPDIR`: 起動のたび（resume でも）に `<path>/tmp` を無ければ mode 700 で作り（在って group / other に権限があれば自分の所有の時だけ 700 に戻す。symlink・file なら消して作り直す）、claude の env `TMPDIR` に渡す（`session.env` では上書きできない）。`tmp` は `bash` の `rm` の範囲内。
 - worker の timeout・retry・sandbox 設定は cap と同じ `config.session`。
 - cap への案内（`CAP_GUIDE`）は claude の `--system-prompt-snapshot`（既定 on）により session の初回に固定される。変更前に作った cap session は resume しても新しい案内を受けない（新しい cap から効く）。
 

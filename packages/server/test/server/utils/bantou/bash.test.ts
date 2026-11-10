@@ -322,3 +322,40 @@ test("mcp bash: cap / worker の両方に載り、返り値・isError の規則�
     await l.close();
   }
 });
+
+// -- review 追補 -----------------------------------------------------------------
+
+test("rm: prefix 兄弟 dir（w-1 と w-10 / c-1 と c-10）を指す symlink 経由は範囲外で拒否", async () => {
+  await fresh();
+  for (const [kind, a, b, caller] of [
+    ["workers", "w-1", "w-10", { kind: "worker", capId: "capA", workerId: "w-1" }],
+    ["caps", "c-1", "c-10", { kind: "cap", capId: "c-1" }],
+  ] as const) {
+    for (const id of [a, b]) {
+      await mkdir(join(ws, kind, id, "logs"), { recursive: true });
+      await writeFile(join(ws, kind, id, "state.json"), "{}");
+    }
+    await put(join(ws, kind, b, "victim.txt"));
+    await symlink(join(ws, kind, b), join(ws, kind, a, "sib"));
+    const r = await rmPaths(caller, ["sib/victim.txt"], true);
+    assert.deepEqual(r.removed, []);
+    assert.match(r.skipped[0]!.reason, /範囲外/);
+    assert.ok(await exists(join(ws, kind, b, "victim.txt")));
+    // link 自体は消せる
+    assert.deepEqual((await rmPaths(caller, ["sib"])).removed, ["sib"]);
+  }
+});
+
+test("rm: LOGS / Logs/x / STATE.JSON は大文字小文字違いでも保護の文言で拒否", async () => {
+  await fresh();
+  const r = await rmPaths(w1, ["LOGS", "Logs/x", "STATE.JSON", "State.json"], true);
+  assert.deepEqual(r.removed, []);
+  assert.deepEqual(reasons(r), Array(4).fill("logs/ と state.json は server の記録なので消せない"));
+});
+
+test("rm: NUL・バックスラッシュ・~ は reason つきで拒否", async () => {
+  await fresh();
+  const r = await rmPaths(w1, ["a\0b", "a\\b", "~/x", "~"]);
+  assert.deepEqual(r.removed, []);
+  assert.deepEqual(reasons(r), ["NUL 文字は不可", "バックスラッシュは不可", "~ は不可", "~ は不可"]);
+});

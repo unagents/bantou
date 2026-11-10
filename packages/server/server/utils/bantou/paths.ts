@@ -41,14 +41,19 @@ export function tmpDir(dir: string): string {
 }
 
 /**
- * tmp/ を無ければ mode 700 で作る（在れば何もしない。mode は保つ）。
+ * tmp/ を無ければ mode 700 で作る。在れば何も作らないが、自分の所有で 700 より緩い（group / other に権限がある）時は 700 に戻す。
  * tmp が dir でない（symlink・file）時は TMPDIR が自分の path の外を指しうるので、それ自体を消して作り直す。
  * 返り値は tmp/ の path。
  */
 export async function ensureTmpDir(dir: string): Promise<string> {
   const tmp = tmpDir(dir);
   try {
-    if ((await lstat(tmp)).isDirectory()) return tmp;
+    const st = await lstat(tmp);
+    if (st.isDirectory()) {
+      // 所有者が自分で、group / other に権限が付いている時だけ 700 に戻す
+      if (st.uid === process.getuid?.() && (st.mode & 0o077) !== 0) await chmod(tmp, 0o700);
+      return tmp;
+    }
     await unlink(tmp);
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;

@@ -37,7 +37,7 @@ worker / cap の Bash の `rm -rf` が permission 分類器に止められる問
 ### TMPDIR
 
 - `agents.ts` の実行ループで、`runExtras`（clone などの準備）の後、`runner.run` の直前に毎回 `ensureTmpDir(dir)`。new でも resume でも、再試行でも作る。
-- 無ければ mode 700 で作る（chmod で umask に左右されない）。在れば何もしない（mode を保つ）。symlink・file だった場合は外を指しうるので、それ自体を消して dir を作り直す。
+- 無ければ mode 700 で作る（chmod で umask に左右されない）。在れば、自分の所有で group / other に権限がある時だけ 700 に戻す（review 対応。緩い mode のまま TMPDIR を使わせない。厳しい mode は触らない）。symlink・file だった場合は外を指しうるので、それ自体を消して dir を作り直す。
 - env は `{...process.env, ...session.env, TMPDIR}` の順。`session.env` で上書きできない。
 - `tmp/` は `bash` の rm の範囲内（protected は `logs` と `state.json` のみ）。`tmp` 自体の削除は `recursive: true` で許可、無しの dir は拒否。
 - worker の掃除（`removeNonKept`）は logs/ と state.json 以外を消すので、`tmp/` も消える（コード変更なし。test で固定）。
@@ -61,5 +61,15 @@ worker / cap の Bash の `rm -rf` が permission 分類器に止められる問
 
 - 7 と 8 の間の差し替え（上記 TOCTOU）は残る。
 - 既存の clone の `.git/info/exclude` に `tmp/` は入らない（新規 clone のみ）。
-- header（`x-bantou-cap-id` / `x-bantou-worker-id`）で呼び出し元を判定する既存方式のまま（認証は全体で後回し）。header を偽れる相手は他の cap / worker の path を指せる。
+- 呼び出し元の識別は unauthenticated な header（`x-bantou-cap-id` / `x-bantou-worker-id`）のみ（MCP の認証は全体で後回し。`worker_start` / `worker_stop` も同じ前提）。127.0.0.1 の `/mcp` に curl できる worker が `cap_id` を偽ると、その cap の path と配下 worker の path を `bash` の `rm` で消せる。偽装でも `logs/` と `state.json` は消せない。将来 MCP に起動ごとの token を入れる時に `bash` も対象にする。
 - 実機の claude での `mcp__bantou__bash` の許可・`TMPDIR` の効きは未確認（unit test と MCP 経由 test まで）。
+
+## review 対応（HEAD f93d0a7、verdict ok）
+
+- test: prefix 兄弟 dir（w-1 と w-10、c-1 と c-10）を指す symlink 経由の拒否を追加。`isInside` の `root + sep` を `root` に変異させると落ちることを確認（戻した）。
+- test: `LOGS` / `Logs/x` / `STATE.JSON` が保護の文言で拒否されることを追加。`toLowerCase` を外す変異で落ちることを確認（戻した）。
+- test: NUL / バックスラッシュ / `~` は reason 文字列まで assert。
+- `ensureTmpDir`: 既存 tmp が自分の所有で 700 より緩い時は 700 に戻す。理由: 以前の実行・外部操作で緩んだ mode のまま TMPDIR に使うと、他ユーザーに一時物が見える。tmpdir.test.ts の「既存なら mode 保持」は、緩い mode → 700、厳しい mode（500）は保持、に直した。
+- `WORKER_GUIDE` に「tmp/ は commit しない（git add に含めない）」を追加。
+- docs: 認証の前提を README の bash 節と上の「残課題」に明記（コード変更なし）。
+- テスト: npm test 340 pass / 0 fail。typecheck は develop 時点と同じ 6 error。
