@@ -10,7 +10,7 @@ import { createCore, type CoreEvent } from "../src/core.js";
 import { createRemoteControlSupervisor, type ChildLike, type SpawnImpl } from "../src/remote-control.js";
 import { createSessionTokens } from "../src/session-auth.js";
 import { applicableParts, buildSystemInstructions, partLabel } from "../src/system-instructions.js";
-import { buildWrapperArgs, findSessionUrl, mcpConfigJson, parseWrapperLine, resolveWrapperPath, windowConnected } from "../src/wrapper.js";
+import { bantouAllowRules, buildWrapperArgs, findSessionUrl, mcpConfigJson, parseWrapperLine, resolveWrapperPath, windowConnected } from "../src/wrapper.js";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 async function until(fn: () => boolean, ms = 3000): Promise<void> {
@@ -272,7 +272,7 @@ test("wrapper 起動: outputStyle だけ（MCP 窓口が無い stdio）でも --
   await mkdir(path, { recursive: true });
   const { sup } = make({ outputStyle: "Be brief.", path, mcpUrl: null });
   await sup.start("pm1");
-  assert.deepEqual(JSON.parse(valueOf(launches[0].args, "--settings")!), { outputStyle: "bantou" });
+  assert.deepEqual(JSON.parse(valueOf(launches[0].args, "--settings")!), { outputStyle: "bantou", permissions: { allow: ["mcp__bantou-messenger__*"] } });
   await sup.shutdown();
   // path が普通のファイル: .claude/ を作れない
   const blocked = join(dir, "blocked");
@@ -301,7 +301,7 @@ test("wrapper 起動: instructions と statusLine の --settings が両方付く
   assert.equal(valueOf(args, "--append-system-prompt"), "追加指示");
   assert.equal(args.filter((a) => a === "--settings").length, 1);
   const settings = JSON.parse(valueOf(args, "--settings")!) as Record<string, unknown>;
-  assert.deepEqual(Object.keys(settings).sort(), ["hooks", "statusLine"]);
+  assert.deepEqual(Object.keys(settings).sort(), ["hooks", "permissions", "statusLine"]);
   assert.ok(args.indexOf("--append-system-prompt") < args.indexOf("--mcp-config"));
   assert.ok(args.indexOf("--mcp-config") < args.indexOf("--settings"));
   await sup.stop("pm1");
@@ -321,7 +321,7 @@ test("wrapper 起動: wrapper -- claude --remote-control の引数、env の tok
   assert.equal(l.args.length, 14); // 初回は --continue 無し
   // statusLine は center のサブコマンド。--settings は statusLine のキーだけ。token は argv に載せない
   const settings = JSON.parse(l.args[13]) as Record<string, { type: string; command: string }>;
-  assert.deepEqual(Object.keys(settings).sort(), ["hooks", "statusLine"]);
+  assert.deepEqual(Object.keys(settings).sort(), ["hooks", "permissions", "statusLine"]);
   assert.equal(settings.statusLine.type, "command");
   assert.equal(settings.statusLine.command, "'/fake/bantou-center' 'status-line' '--url' 'http://127.0.0.1:4567/sessions/pm1/status-line'");
   const hooks = (settings as unknown as { hooks: Record<string, { hooks: { command: string; async: boolean }[] }[]> }).hooks;
@@ -357,7 +357,7 @@ test("http 窓口が無い（mcpUrl が null）時も --mcp-config を付け、m
   assert.ok(i >= 0);
   const json = JSON.parse(launches[0].args[i + 1]) as { mcpServers: Record<string, { env?: Record<string, string> }> };
   assert.deepEqual(Object.keys(json.mcpServers), ["bantou-messenger"]);
-  assert.ok(!launches[0].args.includes("--settings"), "窓口が無い時は statusLine も付けない");
+  assert.deepEqual(JSON.parse(valueOf(launches[0].args, "--settings")!), { permissions: { allow: ["mcp__bantou-messenger__*"] } }, "窓口が無い時は statusLine / hooks も mcp__bantou も付けない");
   assert.equal(json.mcpServers["bantou-messenger"].env?.AGENT_MESSENGER_NAME, "pm1");
   await sup.shutdown();
 });
@@ -887,4 +887,34 @@ test("memory あり: system-instructions に memory@1 が付く（文面は --ap
   assert.equal(v, `${buildSystemInstructions({ session: "pm1", memory: true })}\n\n利用者の指示`);
   assert.equal(st.instructions, true); // 利用者の指示だけを数える
   await sup.shutdown();
+});
+
+test("permissions.allow: 窓口あり = messenger + bantou（docs の mcp__<server>__* 形）。memory 無しなら mcp__memory は入らない。hooks / statusLine / outputStyle は不変", async () => {
+  const path = join(dir, "pm1");
+  await mkdir(path, { recursive: true });
+  const { sup } = make({ outputStyle: "Be brief.", path });
+  await sup.start("pm1");
+  const s = JSON.parse(valueOf(launches[0].args, "--settings")!) as Record<string, unknown>;
+  assert.deepEqual(s.permissions, { allow: ["mcp__bantou-messenger__*", "mcp__bantou__*"] });
+  assert.equal(s.outputStyle, "bantou");
+  assert.deepEqual(Object.keys(s).sort(), ["hooks", "outputStyle", "permissions", "statusLine"]);
+  // 許可する server 名は --mcp-config の entry 名と一致する
+  const servers = Object.keys(mcpOf(launches[0].args).mcpServers);
+  for (const r of (s.permissions as { allow: string[] }).allow) assert.ok(servers.includes(r.replace(/^mcp__/, "").replace(/__\*$/, "")));
+  assert.ok(!JSON.stringify(s.permissions).includes("memory"));
+  await sup.shutdown();
+});
+
+test("permissions.allow: memory あり = mcp__memory__* も入る。deny は一切書かない", async () => {
+  const { sup } = make({ memory: { url: "http://m/mcp" } });
+  await sup.start("pm1");
+  const s = JSON.parse(valueOf(launches[0].args, "--settings")!) as { permissions: Record<string, string[]> };
+  assert.deepEqual(s.permissions, { allow: ["mcp__bantou-messenger__*", "mcp__bantou__*", "mcp__memory__*"] });
+  assert.equal(s.permissions.deny, undefined);
+  await sup.shutdown();
+});
+
+test("permissions.allow: bantouAllowRules の組み合わせ", () => {
+  assert.deepEqual(bantouAllowRules({ bantou: false, memory: false }), ["mcp__bantou-messenger__*"]);
+  assert.deepEqual(bantouAllowRules({ bantou: true, memory: true }), ["mcp__bantou-messenger__*", "mcp__bantou__*", "mcp__memory__*"]);
 });

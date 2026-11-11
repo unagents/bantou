@@ -76,7 +76,7 @@ export function mcpConfigJson(url: string | null, session: string, memory?: { ur
     },
   };
   if (url) {
-    mcpServers.bantou = {
+    mcpServers[BANTOU_SERVER_KEY] = {
       type: "http",
       url,
       headers: { Authorization: "Bearer ${BANTOU_SESSION_TOKEN}", "X-Bantou-Session": session },
@@ -93,6 +93,24 @@ export function mcpConfigJson(url: string | null, session: string, memory?: { ur
     };
   }
   return JSON.stringify({ mcpServers });
+}
+
+/** --mcp-config 内の bantou 窓口の entry 名（tool は mcp__bantou__*）。 */
+export const BANTOU_SERVER_KEY = "bantou";
+
+/**
+ * --settings の permissions.allow に入れる、bantou 自身の MCP tool の許可。書式は公式 docs（permissions の MCP 節）の
+ * `mcp__<server>__*`（server の全 tool）。server 名は --mcp-config の entry 名と同じ。
+ * - bantou-messenger: 常に付ける（mcpConfigJson が常に付ける）
+ * - bantou: 窓口がある時だけ（mcpConfigJson が url 無しで付けない時は入れない）
+ * - memory: 外部記憶がある時だけ
+ */
+export function bantouAllowRules(opts: { bantou: boolean; memory: boolean }): string[] {
+  return [
+    `mcp__${MESSENGER_SERVER_KEY}__*`,
+    ...(opts.bantou ? [`mcp__${BANTOU_SERVER_KEY}__*`] : []),
+    ...(opts.memory ? [`mcp__${MEMORY_SERVER_KEY}__*`] : []),
+  ];
 }
 
 export const DEFAULT_COLS = 120;

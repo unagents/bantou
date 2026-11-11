@@ -654,3 +654,9 @@ test("接続後の終了は lastError を付けない", async () => {
   assert.equal(sup.status("p1").lastError, undefined);
   await sup.shutdown();
 });
+
+test("rc 直起動（buildRcArgs）は --settings / --mcp-config を渡さない = bantou の MCP が無いので permissions.allow も付けない", () => {
+  const args = buildRcArgs(cfg.projects[0], cfg.remoteControl, { continue: false });
+  assert.ok(!args.includes("--settings"));
+  assert.ok(!args.includes("--mcp-config"));
+});

@@ -455,6 +455,10 @@ master-cap が server の remote-cap に仕事を預けて待っている間も�
 
 - `session_create` の session は `bantou-pty-wrapper --cols N --rows N -- claude --remote-control <name> --permission-mode <m> --mcp-config '<JSON>' [--continue]` で起動する。wrapper は `dirname(process.execPath)/bantou-pty-wrapper`、env `BANTOU_PTY_WRAPPER` で上書き。config の `projects`（`rc_*`）は従来の `claude remote-control` のまま。supervisor は 1 つで、entry ごとに起動方式を選ぶ（再起動・`--continue`・素の起動への fallback・ログ・有効化確認への自動応答は共通）。
 - `--mcp-config` の JSON には `bantou`（http、`/mcp/session`。窓口が無い時は付けない）と `bantou-messenger`（stdio、agent-messenger）が入る。`bantou-messenger` は `npx -y @unagents/messenger@0.12.2 mcp` を env `AGENT_MESSENGER_NAME=<session 名>` で起動し、session 名を messenger の peer 名にする。受信は Claude Code の inbox socket 経由で会話に現れる（pty への書き込みではない）。broker は client が env → config → UDP 発見で解決する（center は指名しない）。再起動・`--continue` でも同じ名前で登録し直す。center の子プロセスの PATH に `npx` が要る（center が起動時に PATH を補う。「PATH の補完」参照）。
+- **permission（bantou 自身の MCP tool の許可）**: center は `--settings` に `permissions.allow` を足し、auto mode の分類器に止められないようにする。入れる rule は `mcp__bantou-messenger__*`（常に）、`mcp__bantou__*`（窓口がある時だけ）、`mcp__memory__*`（外部記憶がある session だけ）。書式は公式 docs（permissions の MCP 節）の `mcp__<server>__*`（server の全 tool）で、server 名は `--mcp-config` の entry 名と同じ。
+  - 利用者の設定との関係: `permissions.allow` は他の scope の設定と**連結**される（公式 docs「Lists merge instead of overriding」）。利用者の allow は消えない。deny は全 scope の allow より先に評価される（公式 docs）ので、利用者が `mcp__bantou__remote_delete` などを deny していればそれが勝つ。center は deny を書かない。
+  - config 由来の project（`claude remote-control` 直起動）は `--settings` も `--mcp-config` も渡さず bantou の MCP が付かないので、allow も付けない。
+  - 実機で session に permission の確認が出なくなるかは未検証。
 - wrapper との間は 1 行 1 JSON（wrapper の stdout: `started` / `output`（base64）/ `text`（制御文字を除いた文字列）/ `exit`、stdin: `input` / `resize` / `stop`）。session URL と接続状態は `text` の直近 16 KiB の窓に対して照合する（行単位ではない）。有効化確認への自動応答は `input`（`y\r`）。
 - `--settings` で center の statusLine を渡す（引数の順は `--mcp-config` の後、`--continue` の前）。利用者の statusLine 設定より center のものが優先される（「context 使用量」の「statusLine 方式」）。
 - 停止は wrapper へ `stop` を送って待ち、`stopGraceMs` 内に終わらなければ SIGKILL。
