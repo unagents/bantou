@@ -1987,25 +1987,23 @@ test("restore: 復元で集計が 0 から変わった session は、復元後�
   assert.equal(calls.filter((c) => c === "pm1").length, 1);
 });
 
-// -- 外部記憶（center が master-cap の記憶へ書く / server へ task に memory を添える）--
+// -- 外部記憶（center が master-cap の記憶へ書く）--
 
 import { createCenterMemoryEvents } from "../src/memory-events.js";
-import type { MemoryEvent, MemorySink, MemoryTarget } from "@agent-hand/bantou-protocol";
+import type { MemoryEvent, MemorySink, MemoryTarget } from "../src/memory.js";
 
-function memorySetup(opts: { version?: string; memory?: boolean } = {}) {
+function memorySetup(opts: { memory?: boolean } = {}) {
   const sent: { target: MemoryTarget; event: MemoryEvent }[] = [];
   const sink: MemorySink = { send: async (target, event) => void sent.push({ target, event }) };
   const memoryEvents = createCenterMemoryEvents({ memoryOf: (s) => (opts.memory === false ? undefined : { url: "http://mem/mcp", token: "TKN", ...(s === "pm2" ? { agentId: "agent-2" } : {}) }), log: () => {}, sink });
-  const s = setup(replyOk, undefined, undefined, undefined, { memoryEvents, memoryOf: (s) => (opts.memory === false ? undefined : { url: "http://mem/mcp", token: "TKN", ...(s === "pm2" ? { agentId: "agent-2" } : {}) }) });
-  s.setPeers([{ ...peerA, version: opts.version ?? "1.9.0" }, peerB]);
+  const s = setup(replyOk, undefined, undefined, undefined, { memoryEvents });
   const flush = async (): Promise<void> => { await memoryEvents.drain(1000); };
   return { ...s, sent, flush, memoryEvents };
 }
 
-test("memory: 1.9.0 以上の server への task に memory（url / token / agent_id=cap_id / session）を添え、task event を session の記憶へ積む", async () => {
-  const { mgr, kicks, sent, flush, memoryEvents } = memorySetup();
+test("memory: task の送信で task event を session の記憶へ積む", async () => {
+  const { mgr, sent, flush, memoryEvents } = memorySetup();
   const r = await mgr.send({ owner: "pm1", goal: "g", constraints: ["c"] });
-  assert.deepEqual(kicks[0].cmd.memory, { url: "http://mem/mcp", token: "TKN", agent_id: CAP, session: "pm1" });
   await flush();
   assert.equal(sent.length, 1);
   assert.equal(sent[0].event.kind, "task");
@@ -2015,22 +2013,9 @@ test("memory: 1.9.0 以上の server への task に memory（url / token / agen
   memoryEvents.close();
 });
 
-test("memory: 古い server（1.9.0 未満・版不明）の task には memory を添えない（task は今までどおり送れる）。記録の task event は積む", async () => {
-  const peers: ServerPeer[] = [{ ...peerA, version: "1.8.0" }, { id: "id-a", name: "bantou-server", hostname: "host-a" }];
-  for (const p of peers) {
-    const { mgr, kicks, sent, flush, setPeers } = memorySetup();
-    setPeers([p, peerB]);
-    await mgr.send({ owner: "pm1", goal: "g" });
-    assert.ok(!("memory" in kicks[0].cmd), String(p.version));
-    await flush();
-    assert.equal(sent.length, 1);
-  }
-});
-
-test("memory: 設定が無い session では task に memory を添えず、event も積まない", async () => {
-  const { mgr, kicks, sent, flush } = memorySetup({ memory: false });
+test("memory: 設定が無い session では event を積まない", async () => {
+  const { mgr, sent, flush } = memorySetup({ memory: false });
   await mgr.send({ owner: "pm1", goal: "g" });
-  assert.ok(!("memory" in kicks[0].cmd));
   await flush();
   assert.equal(sent.length, 0);
 });
@@ -2068,8 +2053,7 @@ test("memory: worker_report の受信（kind: report）と worker_reply の送�
 
 test("memory: 記録が壊れても remote は動く（sink が投げ続けても send / report / reply は成功する）", async () => {
   const memoryEvents = createCenterMemoryEvents({ memoryOf: () => ({ url: "http://mem/mcp" }), log: () => {}, sink: { send: async () => { throw new Error("down"); } } });
-  const s = setup(replyOk, undefined, undefined, undefined, { memoryEvents, memoryOf: () => ({ url: "http://mem/mcp" }) });
-  s.setPeers([{ ...peerA, version: "1.9.0" }, peerB]);
+  const s = setup(replyOk, undefined, undefined, undefined, { memoryEvents });
   await s.mgr.send({ owner: "pm1", goal: "g" });
   s.mgr.onWorkerReport(report("ask", "w-1", "q") as never);
   await s.mgr.workerReply({ worker_id: "w-1", text: "OK" });
@@ -2078,8 +2062,7 @@ test("memory: 記録が壊れても remote は動く（sink が投げ続けて�
 
 test("memory: hang する memory でも remote_send / worker_report / worker_reply は即戻る（実時間 100ms 以内）", async () => {
   const memoryEvents = createCenterMemoryEvents({ memoryOf: () => ({ url: "http://127.0.0.1:9/mcp" }), log: () => {}, sink: { send: () => new Promise<void>(() => {}) } });
-  const s = setup(replyOk, undefined, undefined, undefined, { memoryEvents, memoryOf: () => ({ url: "http://127.0.0.1:9/mcp" }) });
-  s.setPeers([{ ...peerA, version: "1.9.0" }, peerB]);
+  const s = setup(replyOk, undefined, undefined, undefined, { memoryEvents });
   const timed = async <T>(f: () => T | Promise<T>): Promise<number> => {
     const t = performance.now();
     await f();
@@ -2092,13 +2075,11 @@ test("memory: hang する memory でも remote_send / worker_report / worker_rep
   memoryEvents.close();
 });
 
-test("memory: remotes.json に memory の token は書かれない（task には載り、記録には載らない）", async () => {
+test("memory: remotes.json に memory の token は書かれない", async () => {
   const SECRET = "REMOTES-JSON-SECRET-TOKEN";
   const memoryEvents = createCenterMemoryEvents({ memoryOf: () => ({ url: "http://mem/mcp", token: SECRET }), log: () => {}, sink: { send: async () => {} } });
-  const s = setup(replyOk, undefined, undefined, undefined, { memoryEvents, memoryOf: () => ({ url: "http://mem/mcp", token: SECRET }) });
-  s.setPeers([{ ...peerA, version: "1.9.0" }, peerB]);
+  const s = setup(replyOk, undefined, undefined, undefined, { memoryEvents });
   const r = await s.mgr.send({ owner: "pm1", goal: "g" });
-  assert.equal((s.kicks[0].cmd.memory as { token?: string }).token, SECRET); // 意味のある test にするため: task には載っている
   s.kicks[0].resolve(ok("done", r.task_id));
   s.mgr.onWorkerReport(report("ask", "w-1", "q") as never);
   await s.mgr.workerReply({ worker_id: "w-1", text: "OK" });

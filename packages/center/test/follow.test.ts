@@ -124,7 +124,7 @@ test("protocol 1.3.0 未満・版不明は unsupported（hello も送らない�
 
 test("server の版は同じで protocol の版が違えば mismatch（更新しない）", async () => {
   const f = fake();
-  f.helloReply = () => hello({ server_version: "0.3.1", protocol_version: "1.99.0" });
+  f.helloReply = () => hello({ server_version: "0.3.1", protocol_version: "1.9.0" });
   const fl = mk(f);
   await fl.check();
   assert.equal(only(fl).state, "mismatch");
@@ -269,7 +269,7 @@ test("組の server 版が不明なら版合わせはせず、protocol の版だ
   assert.equal(only(fl).state, "ok");
   assert.deepEqual(f.updates, []);
   assert.equal(fl.snapshot().pair.server, null);
-  f.helloReply = () => hello({ protocol_version: "1.99.0" });
+  f.helloReply = () => hello({ protocol_version: "1.9.0" });
   await fl.check();
   assert.equal(only(fl).state, "mismatch");
 });

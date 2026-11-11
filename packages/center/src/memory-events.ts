@@ -1,8 +1,8 @@
 /**
  * 外部記憶への書き込み（center 側）。設計は docs/design/external-memory.md の「書き込み」。
  * center が記録するのは master-cap の記憶（agent = session の agentId か session 名）: 利用者の発言・master-cap の応答・
- * remote の往復（task / result / report / reply）。cap 側の記憶（agent = cap_id）は server が書く。eventId の名前空間は "c1"（server は "s1"）。
- * 送信は非同期のキュー（packages/protocol の memory.ts）。ここの関数は同期で戻り、投げない。
+ * remote の往復（task / result / report / reply）。cap 側の記憶（agent = cap_id）は書かない。eventId の名前空間は "c1"。
+ * 送信は非同期のキュー（./memory.ts）。ここの関数は同期で戻り、投げない。
  */
 import { createHash } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -18,15 +18,13 @@ import {
   formatTaskResultBody,
   makeEventId as makeEventIdWith,
   digest8 as digest8With,
-  type CapResultReply,
   type MemoryEvent,
   type MemoryQueue,
   type MemorySink,
   type McpSdkLike,
   type MemoryTarget,
-  type TaskResultReply,
-  type WorkerReportNotice,
-} from "@agent-hand/bantou-protocol";
+} from "./memory.js";
+import type { CapResultReply, TaskResultReply, WorkerReportNotice } from "@agent-hand/bantou-protocol";
 import { HOOK_TS_FIELD } from "./session-activity.js";
 import type { MemorySetting } from "./project-settings.js";
 import type { Logger } from "./log.js";

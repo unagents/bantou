@@ -47,11 +47,6 @@ export interface ReportHubDeps {
    */
   resolvePeers?: (name: string) => Promise<ReadonlyArray<{ id: string; registered_at?: string }>>;
   log: (msg: string) => void;
-  /** 外部記憶への書き込み（worker の report を受けた時 / report 起因の結果を center へ返す時）。省略時は何もしない。投げない前提。 */
-  memory?: {
-    onReport(capId: string, workerId: string, kind: string, text: string, at: string, taskId?: string): void;
-    onResult(reply: { type: string; cap_id?: string }): void;
-  };
 }
 
 export interface ReportHub {
@@ -197,8 +192,6 @@ export function createReportHub(deps: ReportHubDeps): ReportHub {
   const noteCenter = (capId: string, centerId: string, centerName?: string): Promise<void> => writeCenter(capId, centerId, centerName, false);
 
   async function route(capId: string, reply: ServerReply): Promise<void> {
-    // cap の記憶には、center が分からなくても書く
-    deps.memory?.onResult(reply);
     const to = await centerOf(capId);
     if (!to) {
       log(`返信先 center が不明: cap_id=${capId} type=${reply.type}`);
@@ -240,7 +233,6 @@ export function createReportHub(deps: ReportHubDeps): ReportHub {
 
     // center へは cap の再開と並行して送る（worker_report 通知。失敗しても再開は止めない）
     const taskId = await taskOf(capId);
-    deps.memory?.onReport(capId, workerId, kind, text, at, taskId);
     const notice: WorkerReportNotice = {
       bantou: PROTOCOL_VERSION,
       type: "worker_report",

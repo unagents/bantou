@@ -1,30 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  MEMORY_BODY_MAX, MEMORY_TRUNCATED_MARK, MEMORY_MIN_PROTOCOL, supportsMemory, readTaskMemory, sanitizeBody, eventAt,
-  buildEvent, createMemoryQueue, PermanentMemoryError, redactReason, createMcpEventSink, digest8 as digest8With, makeEventId as makeEventIdWith, MESSENGER_PROTOCOL,
-} from "../dist/index.js";
+  MEMORY_BODY_MAX, MEMORY_TRUNCATED_MARK, sanitizeBody, eventAt,
+  buildEvent, createMemoryQueue, PermanentMemoryError, redactReason, createMcpEventSink, digest8 as digest8With, makeEventId as makeEventIdWith,
+} from "../src/memory.js";
 
-// 決定的な fake の digest（protocol は node:crypto を持たない）。FNV 系の 2 本を hex にして 64 桁に伸ばす
+// 決定的な fake の digest（memory.ts は node:crypto を持たない）。FNV 系の 2 本を hex にして 64 桁に伸ばす
 const fakeDigest = (s) => { let a = 0x811c9dc5, b = 0x1234567; for (let i = 0; i < s.length; i++) { a = Math.imul(a ^ s.charCodeAt(i), 16777619) >>> 0; b = Math.imul(b + s.charCodeAt(i), 2654435761) >>> 0; } return (a.toString(16).padStart(8, "0") + b.toString(16).padStart(8, "0")).repeat(4); };
 const digest8 = (s) => digest8With(fakeDigest, s);
 const makeEventId = (ns, ...p) => makeEventIdWith(fakeDigest, ns, ...p);
 const ev = (id) => ({ eventId: id, sender: { session: "s" }, kind: "task", body: "b", at: "2026-11-11T00:00:00.000Z" });
 const tgt = { url: "http://m/mcp", token: "SECRET-TOKEN", agentId: "a" };
-
-test("supportsMemory: 1.9.0 以上だけ true。MESSENGER_PROTOCOL は門を満たす", () => {
-  assert.equal(MEMORY_MIN_PROTOCOL, "1.9.0");
-  for (const v of ["1.9.0", "1.9.1", "1.10.0", "2.0.0"]) assert.equal(supportsMemory(v), true, v);
-  for (const v of ["1.8.0", "1.8.9", undefined, "", "x", "1.9"]) assert.equal(supportsMemory(v), false, String(v));
-  assert.equal(supportsMemory(MESSENGER_PROTOCOL.version), true);
-});
-
-test("readTaskMemory: 壊れた値は捨てる（例外にしない）。userinfo / 非 http は不可", () => {
-  assert.deepEqual(readTaskMemory({ url: "http://m/mcp", token: "tk", agent_id: "cap-1", session: "s1" }), { url: "http://m/mcp", token: "tk", agent_id: "cap-1", session: "s1" });
-  assert.deepEqual(readTaskMemory({ url: "https://m/mcp" }), { url: "https://m/mcp" });
-  for (const v of [undefined, null, "x", [], {}, { url: "" }, { url: "ftp://m" }, { url: "http://u:p@m/" }, { url: "not a url" }, { url: 1 }]) assert.equal(readTaskMemory(v), undefined, JSON.stringify(v));
-  assert.deepEqual(readTaskMemory({ url: "http://m/", token: "has space", agent_id: "bad id", session: 3 }), { url: "http://m/" });
-});
 
 test("sanitizeBody: NUL を除き、65536 で切って末尾に印。空は undefined。サロゲートを割らない", () => {
   assert.equal(sanitizeBody("a\u0000b"), "ab");

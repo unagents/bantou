@@ -3,7 +3,6 @@
  * One JSON object goes in the messenger `send_message` text, `to = "bantou-server"`.
  */
 import { PROTOCOL_VERSION } from "./envelope.js";
-import type { TaskMemory } from "./memory.js";
 
 /** Messenger peer name of bantou-server. */
 export const SERVER_NAME = "bantou-server";
@@ -12,7 +11,7 @@ export const SERVER_NAME = "bantou-server";
  * agent-messenger protocol registration (messenger/protocol.json) used in `meta` of send / listPeers.
  * Not the body schema version (`bantou: 1`, PROTOCOL_VERSION). Keep in sync with messenger/protocol.json.
  */
-export const MESSENGER_PROTOCOL = { protocol: "bantou", version: "1.9.0" } as const;
+export const MESSENGER_PROTOCOL = { protocol: "bantou", version: "1.8.0" } as const;
 
 /**
  * retire_server / retire_result exist from this protocol version. A server older than this ignores retire_server
@@ -222,12 +221,6 @@ export interface TaskCommand extends ServerCommandBase {
   workers: TaskWorkers;
   /** MODEL_PATTERN. Default model of the workers (same as kick_cap `worker_model`). */
   worker_model?: string;
-  /**
-   * External memory the server writes this cap's events to (protocol 1.9.0, see TaskMemory / docs/design/external-memory.md).
-   * Replaced by every task; absent = the server stops writing for the cap. Not validated by the guard (a broken value is
-   * dropped by readTaskMemory, never fails the task). A server older than 1.9.0 ignores it.
-   */
-  memory?: TaskMemory;
 }
 
 /**

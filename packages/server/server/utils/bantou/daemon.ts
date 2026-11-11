@@ -24,7 +24,6 @@ import { setBashWorkspace } from "./bash";
 import { agentDir, runLogDir } from "./paths";
 import { CAP_GUIDE, WORKER_GUIDE, buildTaskPrompt, buildTaskResult } from "./prompts";
 import { createReportHub, setReportHandler } from "./reports";
-import { createServerMemory } from "./memory";
 import { EXIT_RETIRED, allowedWhileRetiring, createRetireController, detectService, retiringError } from "./retire";
 import { cliRunner } from "./runner";
 import {
@@ -51,8 +50,7 @@ export function classifyMeta(meta: { protocol?: unknown; version?: unknown } | n
 
 /** 無視ログ用に本文を 1 行・最大 120 文字へ整形する。 */
 export function ignoreText(text: string): string {
-  // task の memory.token が log に出ない（無視した指示の先頭 120 文字に入りうる）
-  return text.replace(/"token"\s*:\s*"[^"]*"/g, '"token":"***"').replace(/\s+/g, " ").trim().slice(0, 120);
+  return text.replace(/\s+/g, " ").trim().slice(0, 120);
 }
 
 /** 自分の broker へ接続する URL。全 IF bind の時は loopback。 */
@@ -317,10 +315,7 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
   await update.loadLastFailure();
   let client!: MessengerClient;
   let protocolSet = false;
-  // 外部記憶（cap の記憶。task で center から endpoint を受けた cap だけ）。届かなくても cap / worker は止まらない
-  const memory = createServerMemory({ log });
   const hub = createReportHub({
-    memory,
     workspace: config.workspace,
     invoke: (capId, input) => manager.invoke("cap", capId, input),
     send: async (to, reply) => {
@@ -411,17 +406,12 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
           // 以降この cap の結果（report 起因の resume を含む）はこの center へ返す。名前で覚える（peer id は center の再起動で変わる）
           await hub.rememberCenter(cmd.cap_id, m.from_id, m.from_name || undefined);
           // 以降の worker_report と report 起因の task_result はこの task_id を付ける
-          if (cmd.type === "task") {
-            await hub.rememberTask(cmd.cap_id, cmd.task_id);
-            memory.onTask(cmd);
-          }
+          if (cmd.type === "task") await hub.rememberTask(cmd.cap_id, cmd.task_id);
         }
         // cap を指す他の命令（status・stop_cap・worker_reply）の送信元も通知先にする（center の再起動後に通知先を取り戻す）
         const capId = commandCapId(cmd);
         if (capId !== undefined && cmd.type !== "kick_cap" && cmd.type !== "task") await hub.noteCenter(capId, m.from_id, m.from_name || undefined);
         reply = await execute(cmd, manager, workerHub, { ...identity, server_version: serverVersion, protocol_version: MESSENGER_PROTOCOL.version });
-        if (cmd.type === "worker_reply" && reply.type === "worker_reply_result") memory.onWorkerReply(cmd.cap_id, cmd.worker_id, cmd.text);
-        else if (cmd.type === "task" || cmd.type === "kick_cap") memory.onResult(reply);
       }
       try {
         await client.send(m.from_id, JSON.stringify(reply), "pull", REPLY_META);
@@ -497,9 +487,6 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
         Promise.allSettled([...inflight, hub.drain()]),
         new Promise((r) => setTimeout(r, 2500)),
       ]);
-      // 外部記憶の送信キュー: 少しだけ空になるのを待ち、残りは捨てる（記憶に届かなくても停止は遅らせない）
-      await memory.drain(1000);
-      memory.close();
       await cleaner.close();
       tracker.close();
       update.close();
