@@ -3,7 +3,6 @@ import { z } from "zod";
 import {
   AGENT_ID_PATTERN,
   MODEL_PATTERN,
-  supportsMemory,
   type AgentStatus,
   type CapResultReply,
   type ErrorReply,
@@ -19,7 +18,7 @@ import { isTransportError, matchServerPeers, type ServerLink, type ServerPeer, t
 import { ambiguousServerMessage, describeServer, duplicateServerIdMessage, hostOf, type ServerRef } from "./server-identity.js";
 import type { JsonListStore } from "./store.js";
 import { sessionCapId } from "./center-id.js";
-import { serverAllowed, type MemorySetting } from "./project-settings.js";
+import { serverAllowed } from "./project-settings.js";
 import type { CenterMemoryEvents } from "./memory-events.js";
 
 /** remote の呼び出し元（master-cap の session 名）を運ぶ HTTP header。 */
@@ -506,8 +505,6 @@ export function createRemoteManager(opts: {
    * 省略時は制限なし。呼ぶたびに引くので、設定の更新はすぐ効く。
    */
   serversOf?: (owner: string) => string[] | undefined;
-  /** session の外部記憶（共通 + session の合成後）。あれば task に memory（server が cap の記憶を書く先）を添える。 */
-  memoryOf?: (owner: string) => MemorySetting | undefined;
   /** 外部記憶への書き込み（task 送信・result 受信・report 受信・reply 送信）。省略時は何もしない。 */
   memoryEvents?: CenterMemoryEvents;
   /** session の remote 集計（RemoteSummary）が変わった時に呼ぶ（記録の保存のたびに前回と比べ、変わった session だけ）。desktop への SSE 通知に使う。 */
@@ -1002,17 +999,6 @@ export function createRemoteManager(opts: {
     void persist();
     completeIfIdle(r);
     wake();
-  };
-
-  /**
-   * task に添える memory（server が cap の記憶を書く先）。session の外部記憶があり、server が protocol 1.9.0 以上を宣言している時だけ。
-   * agent_id は cap_id（cap の記憶は session の記憶と別の agent）。token を含むので log に出さない。
-   */
-  const taskMemoryOf = (owner: string, cid: string, peer: ServerPeer): { memory?: NonNullable<TaskInput["memory"]> } => {
-    if (!supportsMemory(peer.version)) return {};
-    const m = opts.memoryOf?.(owner);
-    if (!m) return {};
-    return { memory: { url: m.url, ...(m.token ? { token: m.token } : {}), agent_id: cid, session: owner } };
   };
 
   const resultOf = (reply: CapResultReply | TaskResultReply | ErrorReply): { ok: boolean; text: string; error?: string } =>
@@ -1717,7 +1703,6 @@ export function createRemoteManager(opts: {
           constraints: input.constraints ?? [],
           workers: input.workers ?? {},
           ...(workerModel ? { worker_model: workerModel } : {}),
-          ...taskMemoryOf(input.owner, cid, peer),
         };
         opts.memoryEvents?.task(input.owner, { capId: cid, taskId, goal: input.goal, ...(input.repo ? { repo: input.repo } : {}), ...(input.branch ? { branch: input.branch } : {}), ...(input.constraints?.length ? { constraints: input.constraints } : {}) });
         const onSent = (): void => {

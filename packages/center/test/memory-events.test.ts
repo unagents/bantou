@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer as createNetServer } from "node:net";
 import { afterEach, beforeEach, test } from "node:test";
-import { createMemoryQueue, MEMORY_BODY_MAX, MEMORY_TRUNCATED_MARK, type MemorySink } from "@agent-hand/bantou-protocol";
+import { createMemoryQueue, MEMORY_BODY_MAX, MEMORY_TRUNCATED_MARK, type MemorySink } from "../src/memory.js";
 import { createCenterMemoryEvents, createCenterMemorySink, type CenterMemoryEvents } from "../src/memory-events.js";
 import type { MemorySetting } from "../src/project-settings.js";
 import { startFakeMemory, type FakeMemory } from "./helpers/fake-memory.js";

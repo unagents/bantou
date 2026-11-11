@@ -230,7 +230,7 @@ test("stop_cap / stop_result", () => {
   assert.equal(isServerReply({ ...stopResult, cap_id: "a b" }), false);
   assert.ok(isServerReply({ bantou: 1, type: "error", ok: false, message: "x", command: "stop_cap", cap_id: "c1" }));
   assert.deepEqual(manifest.messages.error.properties.command.enum, ["kick_cap", "resume_worker", "stop_cap", "status", "hello", "update_server", "task", "worker_reply", "retire_server"]);
-  assert.equal(MESSENGER_PROTOCOL.version, "1.9.0");
+  assert.equal(MESSENGER_PROTOCOL.version, "1.8.0");
 });
 
 test("model: kick_cap の model / worker_model は省略可、形式を検証、知らない版は無視できる", () => {
@@ -319,9 +319,9 @@ test("error code / retryable", () => {
   assert.ok(isServerReply({ bantou: 1, type: "error", ok: false, message: "x" }));
 });
 
-test("protocol version 1.9.0 (task memory; 1.8.0 retire_server; 1.7.0 added server identity, 1.6.0 status cap_id)", () => {
-  assert.equal(MESSENGER_PROTOCOL.version, "1.9.0");
-  assert.equal(manifest.version, "1.9.0");
+test("protocol version 1.8.0 (retire_server; 1.7.0 added server identity, 1.6.0 status cap_id)", () => {
+  assert.equal(MESSENGER_PROTOCOL.version, "1.8.0");
+  assert.equal(manifest.version, "1.8.0");
 });
 
 test("status accepts an optional cap_id (1.6.0)", () => {

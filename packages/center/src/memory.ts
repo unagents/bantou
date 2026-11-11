@@ -1,64 +1,14 @@
 /**
- * External memory (write side): shared by bantou-center and bantou-server. Design: docs/design/external-memory.md.
+ * External memory (write side) of bantou-center. Design: docs/design/external-memory.md.
  *
- * Free of Node and of the MCP SDK on purpose: this package is built without @types/node and is also used by desktop.
- * Everything Node specific is injected: the digest (`HexDigest`, a sha256 hex from node:crypto in center / server) and the
- * MCP client classes (`createMcpEventSink` takes the caller's @modelcontextprotocol/sdk `Client` / transport).
+ * Free of Node and of the MCP SDK on purpose (moved from packages/protocol, which is built without @types/node).
+ * Everything Node specific is injected by memory-events.ts: the digest (`HexDigest`, a sha256 hex from node:crypto) and the
+ * MCP client classes (`createMcpEventSink` takes center's @modelcontextprotocol/sdk `Client` / transport).
  * Nothing here logs or returns a token.
  */
 
-/** Hex digest of a string (sha256 hex in center / server). Injected so this module needs no node:crypto. */
+/** Hex digest of a string (sha256 hex in center). Injected so this module needs no node:crypto. */
 export type HexDigest = (s: string) => string;
-
-/** `memory` field of the `task` command (protocol 1.9.0). Names the memory the server writes the cap's events to. */
-export interface TaskMemory {
-  /** http / https URL of the memory MCP endpoint. */
-  url: string;
-  /** Sent as `Authorization: Bearer`. Never logged. Absent = no Authorization header. */
-  token?: string;
-  /** X-Agent-Id the server uses for the cap's events. The center sets the cap_id here. Absent = the cap_id. */
-  agent_id?: string;
-  /** Session (master-cap) that gave the task: the counterpart of the cap in its events. */
-  session?: string;
-}
-
-/** Protocol version from which the `task` command carries `memory`. */
-export const MEMORY_MIN_PROTOCOL = "1.9.0";
-
-/** Does a server that declares protocol `version` read `memory` of `task`? Unknown / malformed version = false. */
-export function supportsMemory(version: string | undefined): boolean {
-  if (typeof version !== "string") return false;
-  const m = /^(\d+)\.(\d+)\.(\d+)/.exec(version);
-  const min = /^(\d+)\.(\d+)\.(\d+)/.exec(MEMORY_MIN_PROTOCOL);
-  if (!m || !min) return false;
-  for (let i = 1; i <= 3; i++) {
-    const d = Number(m[i]) - Number(min[i]);
-    if (d !== 0) return d > 0;
-  }
-  return true;
-}
-
-const AGENT_PATTERN = /^[A-Za-z0-9_-]+$/;
-
-/**
- * Read a `memory` field leniently: a broken value is dropped (undefined), never an error, so a malformed memory
- * never stops a task. Only http / https URLs without userinfo; token is a single-line printable string.
- */
-export function readTaskMemory(v: unknown): TaskMemory | undefined {
-  if (typeof v !== "object" || v === null || Array.isArray(v)) return undefined;
-  const o = v as Record<string, unknown>;
-  if (typeof o.url !== "string" || o.url.length === 0 || o.url.length > 2048) return undefined;
-  try {
-    const u = new URL(o.url);
-    if ((u.protocol !== "http:" && u.protocol !== "https:") || u.username !== "" || u.password !== "") return undefined;
-  } catch {
-    return undefined;
-  }
-  const token = typeof o.token === "string" && o.token.length > 0 && o.token.length <= 4096 && /^[\x21-\x7e]+$/.test(o.token) ? o.token : undefined;
-  const agent = typeof o.agent_id === "string" && o.agent_id.length <= 64 && AGENT_PATTERN.test(o.agent_id) ? o.agent_id : undefined;
-  const session = typeof o.session === "string" && o.session.length <= 128 && AGENT_PATTERN.test(o.session) ? o.session : undefined;
-  return { url: o.url, ...(token ? { token } : {}), ...(agent ? { agent_id: agent } : {}), ...(session ? { session } : {}) };
-}
 
 // -- event ---------------------------------------------------------------------------------------------------------
 
@@ -111,7 +61,7 @@ export const digest8 = (digest: HexDigest, s: string): string => digest(s).slice
 const clean = (s: string): string => s.replace(/[^A-Za-z0-9_.-]/g, "_");
 
 /**
- * Event id: `<ns>:<part>:<part>...` (ns = "c1" center / "s1" server: the two sides never share an id space).
+ * Event id: `<ns>:<part>:<part>...` (ns = "c1" center).
  * Same parts = same id (a resend dedupes in memory); a different message gets different parts. Over 128 chars
  * (a long session name) the tail is replaced by a digest (first 32 hex chars of `digest(whole id)`).
  */
@@ -136,7 +86,7 @@ export function buildEvent(e: Omit<MemoryEvent, "body"> & { body: string }): Mem
   return { ...e, body };
 }
 
-// -- body text (shared so center and server write the same words) --------------------------------------------------
+// -- body text (event text) --------------------------------------------------
 
 /** Body of a `task` event: the goal, then repo / branch / constraints when given. */
 export function formatTaskBody(t: { goal: string; repo?: string; branch?: string; constraints?: string[] }): string {
@@ -350,7 +300,7 @@ export function createMemoryQueue(opts: MemoryQueueOptions): MemoryQueue {
 
 // -- MCP sink ------------------------------------------------------------------------------------------------------
 
-/** The part of an MCP client this module uses (structural, so the protocol package needs no SDK). */
+/** The part of an MCP client this module uses (structural, so this module needs no SDK types). */
 export interface McpClientLike {
   connect(transport: unknown): Promise<void>;
   callTool(params: { name: string; arguments: Record<string, unknown> }, resultSchema?: undefined, options?: { timeout?: number }): Promise<unknown>;

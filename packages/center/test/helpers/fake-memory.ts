@@ -1,7 +1,7 @@
 /**
  * memory 本体の fake（MCP Streamable HTTP の最小実装。packages/memory の本物は起動しない）。
  * tool `event` だけを持ち、memory の入力検証（eventId 1..128・kind・body 1..65536・NUL 不可・at は +1 日まで）と
- * (X-Agent-Id, eventId) の冪等（2 回目は duplicate）を再現する。packages/server/test/helpers/fake-memory.ts と同じ内容。
+ * (X-Agent-Id, eventId) の冪等（2 回目は duplicate）を再現する。
  */
 import { createServer, type IncomingMessage, type Server as HttpServer } from "node:http";
 import type { AddressInfo } from "node:net";

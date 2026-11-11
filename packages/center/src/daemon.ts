@@ -155,7 +155,6 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     onSummaryChange: (name) => events.publish({ reason: "remote", name }),
     // session ごとの servers（無ければ center 共通）。sessions は先に作ってあるので直接引く
     serversOf: (owner) => sessions.serversOf(owner),
-    memoryOf: (owner) => sessions.memoryOf(owner),
     memoryEvents,
     notify: (owner, text) => link.notifyPeer(owner, text),
   });
