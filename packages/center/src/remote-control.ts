@@ -15,6 +15,7 @@ import {
   encodeResize,
   encodeStop,
   findSessionUrl,
+  bantouAllowRules,
   mcpConfigJson,
   MEMORY_TOKEN_ENV,
   parseWrapperLine,
@@ -474,6 +475,8 @@ export function createRemoteControlSupervisor(opts: {
         // hooks（作業状態の通知）も同じ --settings で渡す。利用者の hooks は置き換わらず足し合わされる
         ...(mcpUrl ? statusLineSettings(statusLineCommand(statusLineUrl(mcpUrl, name), wd.statusLineSelf), hookCommand(hookUrl(mcpUrl, name), wd.statusLineSelf)) : {}),
         ...(outputStyle ? { outputStyle: OUTPUT_STYLE_NAME } : {}),
+        // bantou 自身の MCP tool を許可（allow は利用者の allow と連結され、利用者の deny が優先される）
+        permissions: { allow: bantouAllowRules({ bantou: !!mcpUrl, memory: e.memory !== null }) },
       };
       args = buildWrapperArgs({
         claudePath: claude.path,

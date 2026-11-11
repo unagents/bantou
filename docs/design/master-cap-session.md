@@ -145,6 +145,9 @@ master-cap への追加指示を、center が起動する master-cap に渡す�
     - 値: `usedTokens` = `total_input_tokens`（output を含まない。claude の `used_percentage` と同じ式）、`percent` は出し直した小数 1 桁。statusLine の値が来るまで、および `used_percentage` が `null` の間は transcript 方式を予備にする（窓だけ statusLine で補う）。詳細は `packages/center/README.md` の「statusLine 方式」。
     - 利用者から見える副作用: statusLine を設定していなかった利用者でも、master-cap の端末では footer の hint（`esc to interrupt` など）が消える（custom statusLine を設定した時の claude の仕様。docs 記載）。Windows での実行は未検証。
     - desktop の表示は変えない（1M は「1M」）。
+18. 追記（2026-11-11）: wrapper 起動の `--settings` に `permissions.allow`（`mcp__bantou-messenger__*` / `mcp__bantou__*` / memory がある時だけ `mcp__memory__*`）を足し、bantou 自身の MCP tool が auto mode の分類器に止められないようにする。
+    - 比較した案: (A) `--settings` の `permissions.allow`、(B) `--allowedTools` の追加引数、(C) project の `.claude/settings.json` に書く。公式 docs で list は scope をまたいで連結され、deny が allow より先に評価されるため、(A) でも利用者の allow は消えず利用者の deny が勝つ。(C) は利用者のファイルを書き換えるので採らない。(A) を採用。
+    - 書式は docs の `mcp__<server>__*`。bare の `mcp__bantou` は `mcp__bantou-messenger` との前方一致の誤読を避けるため使わない。直起動の rc には付けない（MCP が付かない）。実機での確認は未検証。詳細は `packages/center/README.md`。
 
 ## 別件（同日の観測）
 
