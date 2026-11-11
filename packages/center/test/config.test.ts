@@ -18,7 +18,14 @@ test("最小 config に既定値が入る", () => {
     stopGraceMs: 5000,
   });
   assert.deepEqual(c.servers, []);
+  assert.deepEqual(c.remotes, { pushProgress: false });
   assert.equal(c.logDir, "/etc/bantou/center-logs");
+});
+
+test("remotes.pushProgress: 既定 false、true を指定できる。真偽値以外は不正", () => {
+  assert.equal(parseConfig({ remotes: {} }, "/x/c.json").remotes.pushProgress, false);
+  assert.equal(parseConfig({ remotes: { pushProgress: true } }, "/x/c.json").remotes.pushProgress, true);
+  assert.throws(() => parseConfig({ remotes: { pushProgress: "yes" } }, "/x/c.json"), /remotes\.pushProgress/);
 });
 
 test("空オブジェクトでも通る", () => {

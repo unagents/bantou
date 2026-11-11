@@ -80,11 +80,17 @@ const serverSchema = z.object({
   workerModel: z.string().regex(MODEL_PATTERN, "英数字と . _ [ ] - のみ（先頭は - 不可）").optional(),
 });
 
+const remotesSchema = z.object({
+  /** server の worker_report（kind=progress）を session へ push するか。既定 false（記録＝remote_list の worker_reports には常に積む）。ask / approve / done は常に push する。 */
+  pushProgress: z.boolean().default(false),
+});
+
 export const configSchema = z
   .object({
     projects: z.array(projectSchema).default([]),
     remoteControl: remoteControlSchema.default(() => remoteControlSchema.parse({})),
     servers: z.array(serverSchema).default([]),
+    remotes: remotesSchema.default(() => remotesSchema.parse({})),
     logDir: absPath.optional(),
     /** session_create で path を省いた時の置き場所の親（<workspace>/<name>）。起動時の session は立てない。 */
     workspace: absPath.optional(),
@@ -106,11 +112,14 @@ export const configSchema = z
 export type ProjectConfig = z.infer<typeof projectSchema>;
 export type RemoteControlConfig = z.infer<typeof remoteControlSchema>;
 export type ServerConfig = z.infer<typeof serverSchema>;
+export type RemotesConfig = z.infer<typeof remotesSchema>;
 
 export interface Config {
   projects: ProjectConfig[];
   remoteControl: RemoteControlConfig;
   servers: ServerConfig[];
+  /** remote（worker_report の push など）の設定。 */
+  remotes: RemotesConfig;
   /** remote-control の出力ログ置き場（絶対パス）。 */
   logDir: string;
   /** session_create で path 省略時の親 dir（未設定なら undefined。その時 path は必須）。 */

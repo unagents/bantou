@@ -140,6 +140,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     link,
     capId,
     servers: config.servers,
+    pushProgress: config.remotes.pushProgress,
     configPath,
     store: createJsonListStore(join(stateDir, "remotes.json"), log),
     // 旧形式（server_id の無い記録）を読み替える前の退避。remotes.json.pre-server-id.bak（既にあれば上書きしない）
