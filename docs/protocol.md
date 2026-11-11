@@ -114,7 +114,7 @@ sender peer as one JSON object.
 
 The protocol definition is `packages/protocol/messenger/protocol.json` (JSON
 Schemas of `kick_cap`, `stop_cap`, `status`, `hello`, `update_server`, `task`, `worker_reply`, `retire_server`, `cap_result`, `stop_result`, `status_result`, `hello_result`, `update_result`, `task_result`, `worker_reply_result`, `retire_result`, `error`, `activity`, `worker_report`)
-and `PROTOCOL.md`. It is the agent-messenger protocol version (`1.8.0`,
+and `PROTOCOL.md`. It is the agent-messenger protocol version (`1.9.0`,
 `MESSENGER_PROTOCOL` in `server.ts`); the body field `bantou: 1` is a separate
 version of the JSON bodies below. Changing the definition needs a new protocol
 `version` (same name and version with other content is `PROTOCOL_CONFLICT`).
@@ -178,12 +178,15 @@ Not the work-session `task` envelope above (that one is a message to a work sess
 | `constraints` | yes | `string[]`, one constraint per entry. May be `[]` |
 | `workers` | yes | `{items?: TaskWorkerItem[]}`. No `items` = the default: at least 2 workers, one `implement` and one `review`. May be `{}` |
 | `worker_model` | no | default `--model` of the workers (same as `kick_cap` `worker_model`, same format) |
+| `memory` | no | (1.9.0) `{url, token?, agent_id?, session?}`: the external memory the server writes this cap's events (task / report / reply / result) to. `url` is http / https without userinfo; `agent_id` is the `X-Agent-Id` of the cap's events (the center sends the cap_id); `session` is the master-cap session. Every `task` replaces it; a `task` without `memory` stops the writing for that cap. A broken `memory` is dropped (the task still runs). The token is a secret: never logged. A server older than 1.9.0 ignores the field. Design: `docs/design/external-memory.md` |
 
 `TaskWorkerItem`: `role` (required: `implement` | `review` | `docs` | `test` | `other`), `scope` (required, what the worker covers), `id` (optional name, `[A-Za-z0-9_-]+`), `model` (optional, `--model` of this worker), `depends_on` (optional `id[]`: items that must finish first).
 
 The server builds the cap's first instruction from the fields (text: `docs/design/cap-orchestration.md`, source of truth: `prompts.ts`) and runs it like `kick_cap`. Reply: `task_result` when the run finishes, or `error` (`command: "task"`, `cap_id`, `task_id`). While the server waits to update, `task` is refused like `kick_cap` (`error` `code:"updating"`, `command:"task"`, `retryable:true`).
 
 `task` and `worker_reply` exist from protocol 1.5.0. A server older than that does not know them, and a center does not send commands to a server whose protocol version differs (see below), so the server is updated first.
+
+`memory` (1.9.0) is optional and additive: an older server ignores it and still runs the task. Because the center compares the declared protocol version exactly (any bump), a 1.8.x server is refused until it is updated to 1.9.x like for every bump; the center adds `memory` only when the peer declares `supportsMemory` (`MEMORY_MIN_PROTOCOL = "1.9.0"`), so it is never sent to a server that would ignore it.
 
 ### `worker_reply` — answer a worker (1.5.0)
 

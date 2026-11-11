@@ -26,6 +26,7 @@ import { createEventHub } from "./events.js";
 import { createSessionTokens } from "./session-auth.js";
 import { createSessionActivityTracker } from "./session-activity.js";
 import { createServerLink } from "./server-link.js";
+import { createCenterMemoryEvents } from "./memory-events.js";
 
 /** 強制終了の猶予に足す余裕（stop は SIGTERM 待ち stopGraceMs の後、SIGKILL 待ちで最大 5 秒）。 */
 const HARD_EXIT_MARGIN_MS = 5_000;
@@ -134,6 +135,8 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     remoteNameConflict: (name, mode, oldName) => remotes.conflictsWith(name, mode, oldName),
     log,
   });
+  // 外部記憶への書き込み（設定がある session だけ。非同期キュー。失敗しても session・hook・remote は止まらない）
+  const memoryEvents = createCenterMemoryEvents({ memoryOf: (name) => sessions.memoryOf(name), log });
   const capId = await loadCapId(stateDir, log);
   log(`remote-cap の cap_id 接頭: ${capId}（center ごとに固定。session の cap_id は ${capId}-<session 名>）`);
   const remotes = createRemoteManager({
@@ -152,6 +155,8 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     onSummaryChange: (name) => events.publish({ reason: "remote", name }),
     // session ごとの servers（無ければ center 共通）。sessions は先に作ってあるので直接引く
     serversOf: (owner) => sessions.serversOf(owner),
+    memoryOf: (owner) => sessions.memoryOf(owner),
+    memoryEvents,
     notify: (owner, text) => link.notifyPeer(owner, text),
   });
   applyLateReply = (r, fromId) => void remotes.applyLateReply(r, fromId);
@@ -174,6 +179,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
       // 子の停止を最優先にする（http.close が長引いても子に signal が届くように）
       follow.stop();
       contextUsage.stop();
+      memoryEvents.close();
       const results = await Promise.allSettled([supervisor.shutdown(), http?.close(), link.close()]);
       for (const r of results) {
         if (r.status === "rejected") throw r.reason;
@@ -218,6 +224,8 @@ export async function runDaemon(args: CliArgs): Promise<void> {
       onHook: (name, payload) => {
         const s = sessions.list().find((x) => x.name === name);
         if (s && (s.state === "starting" || s.state === "connected") && activityTracker.apply(name, payload, s.startedAt)) events.publish({ reason: "activity", name });
+        // 外部記憶へ（応答を待たない。キューに積むだけ）
+        if (s && (s.state === "starting" || s.state === "connected")) memoryEvents.onHook(name, payload);
       },
       core,
       events,

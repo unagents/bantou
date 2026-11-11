@@ -1,6 +1,6 @@
 {
   "name": "bantou",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "description": "bantou-server commands (kick_cap, stop_cap, status, hello, update_server, task, worker_reply, retire_server), replies (cap_result, stop_result, status_result, hello_result, update_result, task_result, worker_reply_result, retire_result, error) and notices (activity, worker_report). Message body is one JSON object in the text; `bantou: 1` is the body schema version.",
   "messages": {
     "hello": {
@@ -261,7 +261,19 @@
           },
           "additionalProperties": true
         },
-        "worker_model": { "type": "string", "pattern": "^[A-Za-z0-9._\\[\\]][A-Za-z0-9._\\[\\]-]*$", "description": "Default model of the workers (same as kick_cap worker_model)." }
+        "worker_model": { "type": "string", "pattern": "^[A-Za-z0-9._\\[\\]][A-Za-z0-9._\\[\\]-]*$", "description": "Default model of the workers (same as kick_cap worker_model)." },
+        "memory": {
+          "type": "object",
+          "description": "External memory the server writes this cap's events to (kinds task / report / reply / result). Optional; absent = clear (the server stops writing for this cap). Replaced by every task. A server older than 1.9.0 ignores it. The token is a secret: never logged. Since 1.9.0.",
+          "required": ["url"],
+          "properties": {
+            "url": { "type": "string", "minLength": 1, "description": "http / https URL of the memory MCP endpoint (no userinfo)." },
+            "token": { "type": "string", "description": "Sent as Authorization: Bearer." },
+            "agent_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$", "description": "X-Agent-Id for the cap's events. The center sends the cap_id. Absent = cap_id." },
+            "session": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$", "description": "The master-cap session that gave the task (counterpart in the events)." }
+          },
+          "additionalProperties": true
+        }
       },
       "additionalProperties": true
     },

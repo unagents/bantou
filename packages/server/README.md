@@ -330,6 +330,12 @@ center から server を外す指示（protocol 1.8.0、`docs/protocol.md` の `
 - 指示でないメッセージ（非 JSON、他の JSON）は無視し、ログに `無視:` を出す。ping も無視する。
 - 指示は受信ごとに処理を始め、完了したら返信する。同一 id の指示は順番待ち、別 id は並行。`status` は実行中でも即答する。
 
+## 外部記憶への書き込み（cap の記憶）
+
+- center が `task` に載せた `memory`（`{ url, token?, agent_id?, session? }`、protocol 1.9.0。`agent_id` は center が cap_id にする）を、cap ごとにメモリだけで持つ（ファイルに書かない）。task ごとに置き換わり、`memory` 無しの task はその cap の書き込みを止める。壊れた `memory` は捨てるだけで task は動く。1.9.0 未満の server は `memory` を無視する（何も書かない）。
+- memory の `event` tool を MCP client（Streamable HTTP、`Authorization: Bearer`、`X-Agent-Id: <agent_id>`）で呼ぶ。**cap の記憶**に書くもの: cap が受けた `task`（`task` の受付時。更新待ちで断った時は書かない）、worker の `report`（`/mcp` の report 受信時）、`worker_reply` を worker に渡せた時の `reply`、center へ返す `cap_result` / `task_result` の `result`（`task` / `kick_cap` の返信と report 起因の返信の両方。`error` は書かない）。center が書く master-cap の記憶とは agent が別（担当表: `docs/design/external-memory.md`）。eventId は `s1:<cap_id>:<種別>:<部品…>`（center は `c1:`）。
+- 送信は center と同じ共有モジュール（`packages/protocol/src/memory.ts`）の非同期キュー: 順序保持、失敗は 1s から倍々で最大 60s の backoff、1000 件超で古い分から捨てて log。memory に届かなくても cap / worker の動作は止まらない。終了時はキューが空になるのを最大 1 秒だけ待ち、残りは捨てる。log は `eventId` と理由のみ。token は log に出ない（`describeCommand` は memory を含めず、無視した指示の log では `"token"` の値を伏せる）。token は center から messenger で届く（平文。LAN / Tailscale 内前提）。
+
 ## ログ
 
 標準出力に 1 行 1 件。
