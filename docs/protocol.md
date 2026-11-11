@@ -114,10 +114,12 @@ sender peer as one JSON object.
 
 The protocol definition is `packages/protocol/messenger/protocol.json` (JSON
 Schemas of `kick_cap`, `stop_cap`, `status`, `hello`, `update_server`, `task`, `worker_reply`, `retire_server`, `cap_result`, `stop_result`, `status_result`, `hello_result`, `update_result`, `task_result`, `worker_reply_result`, `retire_result`, `error`, `activity`, `worker_report`)
-and `PROTOCOL.md`. It is the agent-messenger protocol version (`1.8.0`,
+and `PROTOCOL.md`. It is the agent-messenger protocol version (`1.8.1`,
 `MESSENGER_PROTOCOL` in `server.ts`); the body field `bantou: 1` is a separate
 version of the JSON bodies below. Changing the definition needs a new protocol
 `version` (same name and version with other content is `PROTOCOL_CONFLICT`).
+
+**Version rule.** The registered definition is `messenger/protocol.json` (compared after parsing, so whitespace does not count) plus `messenger/PROTOCOL.md` (every byte counts). The hash is `sha256(canonicalJSON({manifest, doc}))`, the same as the broker computes. Any change to either file, even an optional field or a wording fix, changes the hash: raise `version` in `protocol.json` and `MESSENGER_PROTOCOL.version` (`src/server.ts`) and add one `"<version>": "<hash>"` line to `messenger/versions.json`. `packages/protocol/test/versions.test.mjs` fails when the current definition does not match the hash recorded for the current version. A change that touches neither file (types, guards, this document) needs no new version. Raising `version` makes the center (exact version match) refuse `task` / `status` to servers on the old version, so release the server first (`packages/desktop/CLAUDE.md`, Release step 1). Why: on 2026-11-11 two servers registered `bantou@1.8.0` with different hashes and the broker refused the later one (`PROTOCOL_CONFLICT`), which then dropped out of discovery.
 
 - Registration: on start the server calls `setProtocol(<dir>)` with the
   `protocol/` directory shipped in the npm package, and `unsetProtocol` on exit.
@@ -415,7 +417,7 @@ the cap and all its workers. Messages carry the same `meta` as replies.
 | `started_at` / `finished_at` | ISO 8601, or `null` |
 | `error` | why the agent is `failed` / `lost` (at most 200 chars) |
 | `model` | model given with `--model`, or `null` when none was given. Absent from servers older than `1.4.0` |
-| `conversation` | optional `ConversationInfo` (below): size and health of the current claude session. Additive; absent from a server that does not send it (no version bump) |
+| `conversation` | optional `ConversationInfo` (below): size and health of the current claude session. Additive; absent from a server that does not send it (in the definition since 1.8.1) |
 
 `ConversationInfo` (all read from claude's own output; unreadable = `null`): `started_at` (ISO 8601, when the session started), `tasks` (runs in this session), `context_tokens` (input + cache creation + cache read of the last answer that reported usage; output excluded), `context_window` (claude's `contextWindow` of the main model), `context_percent` (`context_tokens / context_window`, one decimal), `usage_at` (ISO 8601), `last_error_text` (error text from claude's output of the last failed run, e.g. `Prompt is too long`; absent otherwise). A new session (after `stop_cap`, or a first run) starts with `tasks` 0 and no usage.
 

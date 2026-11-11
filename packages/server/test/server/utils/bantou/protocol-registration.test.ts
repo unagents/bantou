@@ -1,4 +1,5 @@
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -34,6 +35,9 @@ test("setProtocol で登録でき、listPeers(protocol) で発見され、meta �
     const info = await server.setProtocol(protocolDir);
     assert.equal(info.name, MESSENGER_PROTOCOL.protocol);
     assert.equal(info.version, MESSENGER_PROTOCOL.version);
+    // 実 client / broker が登録した hash が、protocol の versions.json に記録した hash と一致する（記録の計算が登録と同じことの確認）
+    const recorded = JSON.parse(readFileSync(join(protocolDir, "versions.json"), "utf8")) as Record<string, string>;
+    assert.equal(info.hash, recorded[info.version]);
 
     const found = await center.listPeers("all", { protocol: "bantou" });
     assert.deepEqual(found.map((p) => p.name), ["bantou-server"]);

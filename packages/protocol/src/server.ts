@@ -11,7 +11,7 @@ export const SERVER_NAME = "bantou-server";
  * agent-messenger protocol registration (messenger/protocol.json) used in `meta` of send / listPeers.
  * Not the body schema version (`bantou: 1`, PROTOCOL_VERSION). Keep in sync with messenger/protocol.json.
  */
-export const MESSENGER_PROTOCOL = { protocol: "bantou", version: "1.8.0" } as const;
+export const MESSENGER_PROTOCOL = { protocol: "bantou", version: "1.8.1" } as const;
 
 /**
  * retire_server / retire_result exist from this protocol version. A server older than this ignores retire_server
