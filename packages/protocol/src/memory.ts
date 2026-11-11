@@ -1,11 +1,14 @@
 /**
  * External memory (write side): shared by bantou-center and bantou-server. Design: docs/design/external-memory.md.
  *
- * Dependency free on purpose (no MCP SDK): the transport is injected. Both sides create the Streamable HTTP client
- * from their own @modelcontextprotocol/sdk and pass the classes to `createMcpEventSink`.
+ * Free of Node and of the MCP SDK on purpose: this package is built without @types/node and is also used by desktop.
+ * Everything Node specific is injected: the digest (`HexDigest`, a sha256 hex from node:crypto in center / server) and the
+ * MCP client classes (`createMcpEventSink` takes the caller's @modelcontextprotocol/sdk `Client` / transport).
  * Nothing here logs or returns a token.
  */
-import { createHash } from "node:crypto";
+
+/** Hex digest of a string (sha256 hex in center / server). Injected so this module needs no node:crypto. */
+export type HexDigest = (s: string) => string;
 
 /** `memory` field of the `task` command (protocol 1.9.0). Names the memory the server writes the cap's events to. */
 export interface TaskMemory {
@@ -102,20 +105,20 @@ export function sanitizeBody(raw: string): string | undefined {
   return s.slice(0, cut) + MEMORY_TRUNCATED_MARK;
 }
 
-/** Short stable digest of a text (event ids tell apart two different messages sent in the same millisecond). */
-export const digest8 = (s: string): string => createHash("sha256").update(s).digest("hex").slice(0, 8);
+/** First 8 hex chars of `digest(s)`: tells apart two different messages sent in the same millisecond. */
+export const digest8 = (digest: HexDigest, s: string): string => digest(s).slice(0, 8);
 
 const clean = (s: string): string => s.replace(/[^A-Za-z0-9_.-]/g, "_");
 
 /**
  * Event id: `<ns>:<part>:<part>...` (ns = "c1" center / "s1" server: the two sides never share an id space).
  * Same parts = same id (a resend dedupes in memory); a different message gets different parts. Over 128 chars
- * (a long session name) the tail is replaced by a digest of the whole.
+ * (a long session name) the tail is replaced by a digest (first 32 hex chars of `digest(whole id)`).
  */
-export function makeEventId(ns: string, ...parts: Array<string | number>): string {
+export function makeEventId(digest: HexDigest, ns: string, ...parts: Array<string | number>): string {
   const id = [ns, ...parts.map((p) => clean(String(p)))].join(":");
   if (id.length <= EVENT_ID_MAX) return id;
-  const h = createHash("sha256").update(id).digest("hex").slice(0, 32);
+  const h = digest(id).slice(0, 32);
   return `${id.slice(0, EVENT_ID_MAX - 33)}:${h}`;
 }
 
@@ -254,7 +257,8 @@ export function createMemoryQueue(opts: MemoryQueueOptions): MemoryQueue {
     new Promise((resolve) => {
       lane.wake = resolve;
       lane.timer = setTimeout(resolve, ms);
-      lane.timer.unref?.();
+      // Node's timer has unref (don't keep the process alive); other runtimes may not
+      (lane.timer as unknown as { unref?: () => void }).unref?.();
     });
 
   async function run(key: string, lane: Lane): Promise<void> {

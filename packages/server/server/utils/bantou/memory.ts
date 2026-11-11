@@ -6,19 +6,20 @@
  * メモリだけで持つ（ファイルに書かない・log に出さない）。task ごとに置き換わり、memory 無しの task は消す。
  * 送信は非同期のキュー（packages/protocol の memory.ts）。ここの関数は同期で戻り、投げない。
  */
+import { createHash } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
   buildEvent,
   createMcpEventSink,
   createMemoryQueue,
-  digest8,
   eventAt,
   formatCapResultBody,
   formatReportBody,
   formatTaskBody,
   formatTaskResultBody,
-  makeEventId,
+  makeEventId as makeEventIdWith,
+  digest8 as digest8With,
   readTaskMemory,
   type CapResultReply,
   type McpSdkLike,
@@ -31,6 +32,11 @@ import {
 } from "@agent-hand/bantou-protocol";
 
 export const SERVER_EVENT_NS = "s1";
+
+/** sha256 hex（protocol の共有モジュールは node:crypto を持たないので、ここで注入する）。 */
+const sha256 = (s: string): string => createHash("sha256").update(s).digest("hex");
+const makeEventId = (ns: string, ...parts: Array<string | number>): string => makeEventIdWith(sha256, ns, ...parts);
+const digest8 = (s: string): string => digest8With(sha256, s);
 
 export function createServerMemorySink(): MemorySink {
   return createMcpEventSink({ Client, StreamableHTTPClientTransport } as unknown as McpSdkLike, { clientName: "bantou-server" });

@@ -36,7 +36,7 @@ desktop の設定ダイアログ（共通・歯車・追加）に「外部記憶
 
 ## 書き込み（bantou → memory）
 
-素材は 2 種類。どちらも memory の `event` tool を、center / server が **MCP client として**（Streamable HTTP、`Authorization: Bearer`、`X-Agent-Id`）呼ぶ。LLM での抽出・要約は bantou ではしない。実装は共有モジュール `packages/protocol/src/memory.ts`（eventId・body 整形・キュー・MCP sink。MCP SDK には依存せず、center / server が自分の SDK の `Client` / `StreamableHTTPClientTransport` を渡す）。
+素材は 2 種類。どちらも memory の `event` tool を、center / server が **MCP client として**（Streamable HTTP、`Authorization: Bearer`、`X-Agent-Id`）呼ぶ。LLM での抽出・要約は bantou ではしない。実装は共有モジュール `packages/protocol/src/memory.ts`（eventId の組み立て・body 整形・NUL 除去・切り詰め・キューの状態機械・MCP sink）。protocol は @types/node 無しで build され desktop も使うため、**Node 固有の処理は protocol に置かず注入**する: digest は `HexDigest`（center / server が `node:crypto` の sha256 で実装して `makeEventId` / `digest8` に渡す）、MCP の `Client` / `StreamableHTTPClientTransport` は center / server が自分の `@modelcontextprotocol/sdk` のものを `createMcpEventSink` に渡す、timer は `setTimeout` の返り値に `unref` があれば呼ぶ（型安全に）。
 
 ### 担当表（誰が・どの記憶へ・何を書くか）
 

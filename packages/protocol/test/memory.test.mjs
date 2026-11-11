@@ -1,10 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  MEMORY_BODY_MAX, MEMORY_TRUNCATED_MARK, MEMORY_MIN_PROTOCOL, supportsMemory, readTaskMemory, sanitizeBody, makeEventId, eventAt,
-  buildEvent, createMemoryQueue, PermanentMemoryError, redactReason, createMcpEventSink, digest8, MESSENGER_PROTOCOL,
+  MEMORY_BODY_MAX, MEMORY_TRUNCATED_MARK, MEMORY_MIN_PROTOCOL, supportsMemory, readTaskMemory, sanitizeBody, eventAt,
+  buildEvent, createMemoryQueue, PermanentMemoryError, redactReason, createMcpEventSink, digest8 as digest8With, makeEventId as makeEventIdWith, MESSENGER_PROTOCOL,
 } from "../dist/index.js";
 
+// 決定的な fake の digest（protocol は node:crypto を持たない）。FNV 系の 2 本を hex にして 64 桁に伸ばす
+const fakeDigest = (s) => { let a = 0x811c9dc5, b = 0x1234567; for (let i = 0; i < s.length; i++) { a = Math.imul(a ^ s.charCodeAt(i), 16777619) >>> 0; b = Math.imul(b + s.charCodeAt(i), 2654435761) >>> 0; } return (a.toString(16).padStart(8, "0") + b.toString(16).padStart(8, "0")).repeat(4); };
+const digest8 = (s) => digest8With(fakeDigest, s);
+const makeEventId = (ns, ...p) => makeEventIdWith(fakeDigest, ns, ...p);
 const ev = (id) => ({ eventId: id, sender: { session: "s" }, kind: "task", body: "b", at: "2026-11-11T00:00:00.000Z" });
 const tgt = { url: "http://m/mcp", token: "SECRET-TOKEN", agentId: "a" };
 

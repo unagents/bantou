@@ -4,19 +4,20 @@
  * remote の往復（task / result / report / reply）。cap 側の記憶（agent = cap_id）は server が書く。eventId の名前空間は "c1"（server は "s1"）。
  * 送信は非同期のキュー（packages/protocol の memory.ts）。ここの関数は同期で戻り、投げない。
  */
+import { createHash } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
   buildEvent,
   createMcpEventSink,
   createMemoryQueue,
-  digest8,
   eventAt,
   formatCapResultBody,
   formatReportBody,
   formatTaskBody,
   formatTaskResultBody,
-  makeEventId,
+  makeEventId as makeEventIdWith,
+  digest8 as digest8With,
   type CapResultReply,
   type MemoryEvent,
   type MemoryQueue,
@@ -31,6 +32,11 @@ import type { MemorySetting } from "./project-settings.js";
 import type { Logger } from "./log.js";
 
 export const CENTER_EVENT_NS = "c1";
+
+/** sha256 hex（protocol の共有モジュールは node:crypto を持たないので、ここで注入する）。 */
+const sha256 = (s: string): string => createHash("sha256").update(s).digest("hex");
+const makeEventId = (ns: string, ...parts: Array<string | number>): string => makeEventIdWith(sha256, ns, ...parts);
+const digest8 = (s: string): string => digest8With(sha256, s);
 
 /** 実 MCP client（Streamable HTTP）の sink。 */
 export function createCenterMemorySink(): MemorySink {

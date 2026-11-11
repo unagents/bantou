@@ -46,7 +46,7 @@ branch: `feat/external-memory-write`（基点 origin/develop）。依頼: w-cap�
 - token: argv・log・status・応答・エラー文に出ない（test で確認）。唯一の経路は center の記憶内 → messenger の task メッセージ → server の記憶内。messenger は平文（memory も平文 HTTP。LAN / Tailscale 内前提）。server の「無視した指示」log は先頭 120 文字を出すので `"token":"…"` を伏せるようにした（`ignoreText`）。
 
 ### 共有モジュールの置き場
-`packages/protocol/src/memory.ts`。MCP SDK に依存させない（desktop も protocol を参照するため、`node:crypto` 以外の依存を足さない）。transport は注入: center / server がそれぞれ自分の `@modelcontextprotocol/sdk` の `Client` / `StreamableHTTPClientTransport` を `createMcpEventSink` に渡す（各 2 行）。center `src/memory-events.ts` と server `server/utils/bantou/memory.ts` は薄い層（eventId の組み立てと呼び出し点）。fake memory の test helper は center / server の test にそれぞれ同内容を置いた（package 間の相対 import を避けた）。
+`packages/protocol/src/memory.ts`。**（2 回目の build 修正で変更、下記「build 修正」参照）** Node にも MCP SDK にも依存しない。
 
 ### protocol の変更と後方互換
 - `MESSENGER_PROTOCOL` を **1.8.0 → 1.9.0**。`protocol.json` の `task.properties.memory`（任意）を追加。protocol.md の注記どおり、定義を変えると版を上げる必要がある（同名同版・内容違いは PROTOCOL_CONFLICT）。
@@ -95,3 +95,18 @@ branch: `feat/external-memory-write`（基点 origin/develop）。依頼: w-cap�
 - client の蓄積: sink は (url, token, agentId) ごとに client を保持し、設定の変更で古い組の client が閉じられずに残る（close() でまとめて閉じる）。
 - execute が error になった task も、受付時点で cap の記憶に task event が入る（result は error を書かないので対応する result が無い）。
 - close が hang 中の connect を abort しない: キューの close() は待ち timer を解くが、応答しない接続中の connect / callTool は SDK の timeout（15s）まで残る。
+
+## build 修正（macOS / bun 1.4.2 で `npm run build`（packages/protocol）が失敗: `memory.ts` の `node:crypto` TS2307 と `.unref` TS2339）
+
+- 原因: packages/protocol は @types/node 無しで tsc する（tsconfig に lib 指定が無く DOM lib 既定なので `setTimeout` の返り値は `number`）。204 では npm の hoisting で root の @types/node が見えて偶然通っていた。
+- 方針 (1)「Node 固有を protocol から出す／注入」で直した（(2) の @types/node 追加は採らない。protocol は desktop も使うので node 型を持ち込まない方が安全。工数も小さい: protocol 3 箇所 + center / server 各 1 箇所）。
+  - digest: `node:crypto` の import を protocol から削除。`HexDigest = (s) => string` を新設し、`makeEventId(digest, ns, ...parts)` と `digest8(digest, s)` が引数で受ける。center `src/memory-events.ts` / server `server/utils/bantou/memory.ts` が `node:crypto` の sha256 hex を実装して束ねる（eventId の文字列は従来と同一）。
+  - timer: `setTimeout` の返り値を `(t as unknown as { unref?: () => void }).unref?.()` で「あれば呼ぶ」に。
+  - MCP client: もともと protocol には置いていない（`createMcpEventSink` は構造的な型でクラスを注入。SDK を import しない）。変更なし。
+  - protocol に残したもの: 型（TaskMemory / MemoryEvent / MemorySink …）、`supportsMemory` / `readTaskMemory`、sanitizeBody（NUL 除去・サロゲートを割らない切り詰め）、makeEventId / digest8（digest 注入）、eventAt / buildEvent、body 整形、キュー（状態機械・backoff・上限）、redactReason、`createMcpEventSink`（注入）。
+- test: protocol の unit は決定的な fake の digest（FNV 系）を渡す。center / server の test は本物の sha256 のまま（`memory-events.test.ts` / `memory.test.ts` が従来どおり eventId の性質を検証）。
+- 確認:
+  - 修正前の同じ clone（HEAD 215786c）で、types を空にした tsconfig（`"types": [], "typeRoots": []`）の `tsc` が **master-cap と同じ 2 件のエラーを再現**した。修正後は 0 件（`NOTYPES-OK`）、`--traceResolution` に @types/node が現れない。
+  - 新しい clone（作業 dir 内に取り直し）で `npm install --no-package-lock` → `packages/protocol` の `npm run build` が通る。
+  - bun は host に無いので bun install 後の確認は **未実行**（上記の types 無し検査で代替）。
+- protocol の package.json に devDependencies の追加なし。bun.lock は未変更。version bump なし。
