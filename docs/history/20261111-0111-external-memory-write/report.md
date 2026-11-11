@@ -81,3 +81,17 @@ branch: `feat/external-memory-write`（基点 origin/develop）。依頼: w-cap�
 - 「書き込み」節に担当表・eventId・キュー仕様・hook payload の根拠・後方互換を追記。サブ節見出し（担当表 / 経路と形 / eventId の設計 / 後方互換）を足した。
 - 「server は endpoint を center から受け取る（protocol に memory を足す）」を「task に memory を載せる」に具体化（理由と別案を併記）。
 - 区間分担（推奨案）を採らず記憶（agent）分担にした点は、利用者 / master-cap のレビューで差し戻す余地あり。
+
+## review 対応（HEAD 78cd7a3 → verdict ok、差し戻しなし。test の追加のみ、実装は変更なし）
+
+追加した test（変異で落ちることを自分で確認）:
+1. [medium] eventId の digest: center `memory-events.test.ts` に「ts と prompt_id が同じで本文だけ違う user_prompt / assistant_message は別 eventId」、server `memory.test.ts` に同条件の report、protocol `memory.test.mjs` に digest8 / makeEventId の unit。変異: center の hook id から `digest8(text)` を外す → center の新 test が落ちた（他は pass のまま＝従来は検出できなかった穴）。server の report id から外す → server の新 test が落ちた。
+2. [low] hang する memory: center `memory-events.test.ts`（接続は受けるが応答しない TCP server に実 MCP sink で接続。onHook / task / result / report / reply が各 100ms 以内。実時間）と `remotes.test.ts`（応答しない sink で send / onWorkerReport / workerReply / applyLateReply が 100ms 以内）。変異: 記録点（push）で 300ms 同期ブロック → 両 test が落ちた。
+3. [low] `remotes.test.ts`: memory 有効 session で send / report / reply 後の remotes.json に token・url が含まれない（task cmd には token が載っていることも確認）。変異: 記録に task memory を JSON で保存 → 落ちた。変異は全て元に戻した（`git checkout`）。
+- docs: center README の memory の節に、hook 記録は live な設定を引くため動いている session でも追加/解除が次の hook から反映される旨を 1 文追記。
+
+### 残り（low。実装は変えていない。必要なら別 task）
+- 設定の反映時刻のずれ: center の hook 記録は呼ぶ時点の memory 設定を引く（動いている session でも追加/解除が即反映）。`--mcp-config` の memory と session_settings_update の説明「次の起動から」とずれる。
+- client の蓄積: sink は (url, token, agentId) ごとに client を保持し、設定の変更で古い組の client が閉じられずに残る（close() でまとめて閉じる）。
+- execute が error になった task も、受付時点で cap の記憶に task event が入る（result は error を書かないので対応する result が無い）。
+- close が hang 中の connect を abort しない: キューの close() は待ち timer を解くが、応答しない接続中の connect / callTool は SDK の timeout（15s）まで残る。

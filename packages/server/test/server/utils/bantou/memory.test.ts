@@ -151,3 +151,15 @@ test("log に token が出ない: describeCommand は memory を含めない。i
   assert.ok(!ignoreText(JSON.stringify(cmd)).includes("SUPER-SECRET"));
   assert.ok(!ignoreText('{"memory":{"url":"u","token" : "SUPER-SECRET"}}').includes("SUPER-SECRET"));
 });
+
+test("report の eventId: server の at と worker が同じでも本文が違えば別 id（digest を外すと同じ id になる）", async () => {
+  const { mem, sent } = setup();
+  mem.onTask(task());
+  mem.onReport("c-x-pm1", "w-1", "done", "first", "2026-11-11T00:00:00.000Z");
+  mem.onReport("c-x-pm1", "w-1", "done", "second", "2026-11-11T00:00:00.000Z");
+  await mem.drain(500);
+  const ids = sent.filter((s) => s.event.kind === "report").map((s) => s.event.eventId);
+  assert.equal(ids.length, 2);
+  assert.notEqual(ids[0], ids[1]);
+  mem.close();
+});

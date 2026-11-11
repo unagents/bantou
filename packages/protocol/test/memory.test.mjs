@@ -136,3 +136,14 @@ test("mcp sink: header と event tool を呼ぶ。isError は Permanent、throw 
   assert.equal(made[2].t.headers.Authorization, undefined);
   await sink.close();
 });
+
+test("digest8 と makeEventId: 本文だけが違う 2 つは別 id、同じ本文は同じ id（digest 部品が id を分ける）", () => {
+  assert.equal(digest8("same"), digest8("same"));
+  assert.notEqual(digest8("one"), digest8("two"));
+  assert.match(digest8("one"), /^[0-9a-f]{8}$/);
+  const id = (text) => makeEventId("c1", "pm1", "u", "p-1", 1000, digest8(text));
+  assert.notEqual(id("one"), id("two"));
+  assert.equal(id("one"), id("one"));
+  // digest を部品に入れない id は本文を区別できない（digest が必要な理由）
+  assert.equal(makeEventId("c1", "pm1", "u", "p-1", 1000), makeEventId("c1", "pm1", "u", "p-1", 1000));
+});

@@ -2075,3 +2075,37 @@ test("memory: 記録が壊れても remote は動く（sink が投げ続けて�
   await s.mgr.workerReply({ worker_id: "w-1", text: "OK" });
   memoryEvents.close();
 });
+
+test("memory: hang する memory でも remote_send / worker_report / worker_reply は即戻る（実時間 100ms 以内）", async () => {
+  const memoryEvents = createCenterMemoryEvents({ memoryOf: () => ({ url: "http://127.0.0.1:9/mcp" }), log: () => {}, sink: { send: () => new Promise<void>(() => {}) } });
+  const s = setup(replyOk, undefined, undefined, undefined, { memoryEvents, memoryOf: () => ({ url: "http://127.0.0.1:9/mcp" }) });
+  s.setPeers([{ ...peerA, version: "1.9.0" }, peerB]);
+  const timed = async <T>(f: () => T | Promise<T>): Promise<number> => {
+    const t = performance.now();
+    await f();
+    return performance.now() - t;
+  };
+  assert.ok((await timed(() => s.mgr.send({ owner: "pm1", goal: "g" }))) < 100);
+  assert.ok((await timed(() => s.mgr.onWorkerReport(report("ask", "w-1", "q") as never))) < 100);
+  assert.ok((await timed(() => s.mgr.workerReply({ worker_id: "w-1", text: "OK" }))) < 100);
+  assert.ok((await timed(() => s.mgr.applyLateReply(ok("late") as never))) < 100);
+  memoryEvents.close();
+});
+
+test("memory: remotes.json に memory の token は書かれない（task には載り、記録には載らない）", async () => {
+  const SECRET = "REMOTES-JSON-SECRET-TOKEN";
+  const memoryEvents = createCenterMemoryEvents({ memoryOf: () => ({ url: "http://mem/mcp", token: SECRET }), log: () => {}, sink: { send: async () => {} } });
+  const s = setup(replyOk, undefined, undefined, undefined, { memoryEvents, memoryOf: () => ({ url: "http://mem/mcp", token: SECRET }) });
+  s.setPeers([{ ...peerA, version: "1.9.0" }, peerB]);
+  const r = await s.mgr.send({ owner: "pm1", goal: "g" });
+  assert.equal((s.kicks[0].cmd.memory as { token?: string }).token, SECRET); // 意味のある test にするため: task には載っている
+  s.kicks[0].resolve(ok("done", r.task_id));
+  s.mgr.onWorkerReport(report("ask", "w-1", "q") as never);
+  await s.mgr.workerReply({ worker_id: "w-1", text: "OK" });
+  await sleep(150); // 保存（非同期）を待つ
+  const saved = await readFile(join(dir, "remotes.json"), "utf8");
+  assert.ok(saved.length > 10 && saved.includes(CAP));
+  assert.ok(!saved.includes(SECRET));
+  assert.ok(!saved.includes("http://mem/mcp"));
+  memoryEvents.close();
+});

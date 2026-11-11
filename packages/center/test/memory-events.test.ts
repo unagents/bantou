@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createServer as createNetServer } from "node:net";
 import { afterEach, beforeEach, test } from "node:test";
 import { createMemoryQueue, MEMORY_BODY_MAX, MEMORY_TRUNCATED_MARK, type MemorySink } from "@agent-hand/bantou-protocol";
 import { createCenterMemoryEvents, createCenterMemorySink, type CenterMemoryEvents } from "../src/memory-events.js";
@@ -189,4 +190,55 @@ test("result の eventId: 同じ結果の二重受信（send と遅れた返信�
   m.result("pm1", tr("B"));
   await waitFor(() => mem.calls.length === 3);
   assert.deepEqual(mem.calls.map((c) => c.status), ["recorded", "duplicate", "recorded"]);
+});
+
+test("eventId: ts と prompt_id が同じでも本文が違う発言は別の eventId（user_prompt / assistant_message。digest を外すと同じ id になる）", async () => {
+  const m = mk();
+  m.onHook("pm1", prompt("one", { prompt_id: "p-1", bantou_ts: 1000 }));
+  m.onHook("pm1", prompt("two", { prompt_id: "p-1", bantou_ts: 1000 }));
+  m.onHook("pm1", stop("answer A", { prompt_id: "p-1", bantou_ts: 2000 }));
+  m.onHook("pm1", stop("answer B", { prompt_id: "p-1", bantou_ts: 2000 }));
+  await waitFor(() => mem.calls.length === 4);
+  const ids = mem.calls.map((c) => c.args.eventId);
+  assert.equal(new Set(ids).size, 4);
+  assert.deepEqual(mem.calls.map((c) => c.status), ["recorded", "recorded", "recorded", "recorded"]);
+  assert.deepEqual(mem.recorded().map((e) => e.body), ["one", "two", "answer A", "answer B"]);
+});
+
+test("hang する memory（接続は受けるが応答しない）でも onHook と remote の記録点は即戻る（実時間 100ms 以内）", async () => {
+  const sockets = new Set<import("node:net").Socket>();
+  const hang = createNetServer((s) => {
+    sockets.add(s);
+    s.on("error", () => {});
+  });
+  await new Promise<void>((r) => hang.listen(0, "127.0.0.1", r));
+  const port = (hang.address() as import("node:net").AddressInfo).port;
+  setting = { url: `http://127.0.0.1:${port}/mcp`, token: "HANG-TOKEN" };
+  try {
+    const m = mk({ queue: createMemoryQueue({ sink: createCenterMemorySink(), log: (l) => void logs.push(l) }) });
+    const timed = (f: () => void): number => {
+      const t = performance.now();
+      f();
+      return performance.now() - t;
+    };
+    // 1 件目で接続が張られて応答待ちのまま固まる。その後の呼び出しも待たされない
+    assert.ok(timed(() => m.onHook("pm1", prompt("first", { bantou_ts: 1 }))) < 100);
+    await new Promise((r) => setTimeout(r, 50));
+    const rep = { bantou: 1 as const, type: "worker_report" as const, cap_id: "c", worker_id: "w", kind: "ask" as const, text: "q", at: "2026-11-11T00:00:00.000Z" };
+    const tr = { bantou: 1 as const, type: "task_result" as const, cap_id: "c", task_id: "t", state: "done" as const, summary: "s", workers: [], review: { verdict: "unknown" as const, items: [], rounds: 0 }, remaining: [] };
+    for (const f of [
+      () => m.onHook("pm1", prompt("second", { bantou_ts: 2 })),
+      () => m.onHook("pm1", stop("answer", { bantou_ts: 3 })),
+      () => m.task("pm1", { capId: "c", taskId: "t", goal: "g" }),
+      () => m.result("pm1", tr),
+      () => m.report("pm1", rep),
+      () => m.reply("pm1", { capId: "c", workerId: "w", text: "x" }),
+    ]) assert.ok(timed(f) < 100);
+    assert.equal(await m.drain(100), false); // 送れずに残っている（詰まっても呼び出し側は止まらない）
+  } finally {
+    ev?.close();
+    ev = undefined;
+    for (const s of sockets) s.destroy();
+    await new Promise<void>((r) => hang.close(() => r()));
+  }
 });
