@@ -361,6 +361,24 @@ test("delivery_basis task_id: 自分の task_id の worker_report が届いた�
   assert.equal(p.delivery_basis, "task_id");
 });
 
+test("progress の worker_report は push されない既定でも、task_id の観測（根拠 task_id）と到達性の更新（last_ok_at）を行い、記録に残る", async () => {
+  const sent: string[] = [];
+  const { mgr, st, clock } = setup({ notify: async (_o: string, text: string) => (sent.push(text), { ok: true as const }) });
+  st.accept = false;
+  const r = await mgr.send({ owner: "pm1", goal: "go" });
+  assert.equal(r.delivered, false);
+  const before = mgr.list()[0].reachability.last_ok_at;
+  clock.t += 5_000;
+  mgr.onWorkerReport({ bantou: 1, type: "worker_report", cap_id: CAP, task_id: r.task_id, worker_id: "w-1", kind: "progress", text: "経過", at: "2026-11-10T00:00:00.000Z" } as never, "id-a");
+  await sleep(10);
+  const v = mgr.list()[0];
+  assert.equal(v.pending[0].delivery, "observed");
+  assert.equal(v.pending[0].delivery_basis, "task_id");
+  assert.ok(v.reachability.last_ok_at && v.reachability.last_ok_at !== before);
+  assert.deepEqual(v.worker_reports.map((w) => w.kind), ["progress"]);
+  assert.deepEqual(sent, []);
+});
+
 test("cap lost の通知で cap_state が lost・state failed・summary.lost。新しい task が動けば戻る。SSE が出る", async () => {
   const { mgr, activity, changes } = setup();
   await mgr.send({ owner: "pm1", goal: "go" });

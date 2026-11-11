@@ -35,7 +35,7 @@ export interface SystemInstructionPart {
 /** master-cap の役割: 自分では作業せず、remote-cap に指示を出す。文面の根拠は docs/design/cap-orchestration.md と center の session 向け tool。 */
 export const MASTER_CAP_ROLE: SystemInstructionPart = {
   id: "master-cap-role",
-  version: 1,
+  version: 2,
   title: "master-cap は作業せず remote-cap に指示を出す",
   text: ({ session }) =>
     [
@@ -48,7 +48,7 @@ export const MASTER_CAP_ROLE: SystemInstructionPart = {
       "- remote_list: この session の cap の状態、最新の task_result、直近の worker の report。",
       "- worker_reply: worker の ask / approve への返答。",
       "- remote_delete: 使わなくなった cap を消す。",
-      "- 完了通知と worker の report（progress / ask / approve / done）は messenger の push で届く。届いたら読んで、必要なら worker_reply か次の remote_send を出す。",
+      "- 完了通知と worker の report（ask / approve / done）は messenger の push で届く。届いたら読んで、必要なら worker_reply か次の remote_send を出す。progress は push されない。進捗は remote_list で見る。",
       "",
       "[分担の指示]",
       "- 1 つの task に最低 2 体（実装 worker と review worker）。独立な作業は別 worker で並列に、依存は depends_on で。",

@@ -1587,12 +1587,39 @@ test("worker_report: cap の session へ push する（別 session の cap の r
   assert.deepEqual(n.sent.map((x) => x.owner), ["pm1", "pm1", "pm2"]);
 });
 
-test("worker_report: progress は同じ worker から 60 秒に 1 回まで（別 worker は別枠）。ask / approve / done は毎回。間引いても記録には積む", async () => {
+test("worker_report: 既定では progress を push しない（記録には積む）。ask / approve / done は push する。task_result の完了通知は変わらない", async () => {
+  const n = notifier();
+  const { mgr, kicks } = setup({}, undefined, n.notify);
+  const sent = await mgr.send({ owner: "pm1", goal: "g" });
+  mgr.onWorkerReport(report("progress", "w-1", "p1") as never);
+  mgr.onWorkerReport(report("progress", "w-2", "p2") as never);
+  await tick();
+  assert.equal(n.sent.length, 0);
+  mgr.onWorkerReport(report("ask", "w-1", "q1") as never);
+  mgr.onWorkerReport(report("approve", "w-1", "ok?") as never);
+  mgr.onWorkerReport(report("done", "w-1", "fin") as never);
+  await tick();
+  assert.deepEqual(n.sent.map((x) => x.text.split("\n")[1]), ["q1", "ok?", "fin"]);
+  // remote_list には progress も残る
+  assert.deepEqual(mgr.list()[0].worker_reports.map((w) => w.kind), ["progress", "progress", "ask", "approve", "done"]);
+  // 完了通知（task_result）は従来どおり push
+  const before = n.sent.length;
+  kicks[0].resolve(fullResult(sent.task_id));
+  await tick();
+  mgr.onActivity(CAP);
+  await tick();
+  assert.equal(n.sent.length, before + 1);
+  assert.match(n.sent[n.sent.length - 1].text, /^\[bantou\] remote 完了/);
+});
+
+test("worker_report: remotes.pushProgress が true なら progress も push する（同じ worker から 60 秒に 1 回まで）。false に戻すと止まる（config は受信のたびに読み直す）", async () => {
   let t = 1_000_000;
   const now = mock.method(Date, "now", () => t);
   try {
+    const path = join(dir, "config-push.json");
+    await writeFile(path, JSON.stringify({ remotes: { pushProgress: true } }));
     const n = notifier();
-    const { mgr } = setup({}, undefined, n.notify);
+    const { mgr } = setup({}, undefined, n.notify, undefined, { configPath: path });
     await mgr.send({ owner: "pm1", goal: "g" });
     mgr.onWorkerReport(report("progress", "w-1", "p1") as never);
     mgr.onWorkerReport(report("progress", "w-1", "p2") as never);
@@ -1602,18 +1629,46 @@ test("worker_report: progress は同じ worker から 60 秒に 1 回まで（�
     t += 59_000;
     mgr.onWorkerReport(report("progress", "w-1", "p4") as never);
     mgr.onWorkerReport(report("ask", "w-1", "q1") as never);
-    mgr.onWorkerReport(report("approve", "w-1", "ok?") as never);
-    mgr.onWorkerReport(report("done", "w-1", "fin") as never);
     await tick();
-    assert.deepEqual(n.sent.map((x) => x.text.split("\n")[1]), ["p1", "p3", "q1", "ok?", "fin"]);
+    assert.deepEqual(n.sent.map((x) => x.text.split("\n")[1]), ["p1", "p3", "q1"]);
     t += 1_000;
     mgr.onWorkerReport(report("progress", "w-1", "p5") as never);
     await tick();
     assert.equal(n.sent[n.sent.length - 1].text.split("\n")[1], "p5");
-    assert.equal(mgr.list()[0].worker_reports.length, 8);
+    await writeFile(path, JSON.stringify({ remotes: { pushProgress: false } }));
+    t += 120_000;
+    const cnt = n.sent.length;
+    mgr.onWorkerReport(report("progress", "w-1", "p6") as never);
+    await tick();
+    assert.equal(n.sent.length, cnt);
+    assert.equal(mgr.list()[0].worker_reports.length, 7);
   } finally {
     now.mock.restore();
   }
+});
+
+test("worker_report: progress の間引きは opts.now の時計で動く", async () => {
+  let clock = 5_000_000;
+  const n = notifier();
+  const { mgr } = setup({}, undefined, n.notify, undefined, { now: () => clock, pushProgress: true });
+  await mgr.send({ owner: "pm1", goal: "g" });
+  mgr.onWorkerReport(report("progress", "w-1", "p1") as never);
+  mgr.onWorkerReport(report("progress", "w-1", "p2") as never);
+  await tick();
+  assert.deepEqual(n.sent.map((x) => x.text.split("\n")[1]), ["p1"]);
+  clock += 60_000;
+  mgr.onWorkerReport(report("progress", "w-1", "p3") as never);
+  await tick();
+  assert.deepEqual(n.sent.map((x) => x.text.split("\n")[1]), ["p1", "p3"]);
+});
+
+test("worker_report: 起動時の opts.pushProgress が true なら configPath が無くても progress を push する", async () => {
+  const n = notifier();
+  const { mgr } = setup({}, undefined, n.notify, undefined, { pushProgress: true });
+  await mgr.send({ owner: "pm1", goal: "g" });
+  mgr.onWorkerReport(report("progress", "w-1", "p1") as never);
+  await tick();
+  assert.deepEqual(n.sent.map((x) => x.text.split("\n")[1]), ["p1"]);
 });
 
 test("worker_report: 未完了の指示が無くても cap の session へ push する。通知先が無い時は push せず、記録だけ残す。通知の失敗・throw で落ちない", async () => {
