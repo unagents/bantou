@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAgentManager } from "../../../../server/utils/bantou/agents";
@@ -10,7 +10,7 @@ import type { AgentRunner } from "../../../../server/utils/bantou/runner";
 import { readState, writeState } from "../../../../server/utils/bantou/state";
 
 const ok = (text: string): ClaudeRunResult => ({ ok: true, sessionId: "x", resultText: text, durationMs: 1 });
-const ng = (detail: string, extra: { sessionMissing?: boolean; timedOut?: boolean } = {}): ClaudeRunResult => ({
+const ng = (detail: string, extra: { sessionMissing?: boolean; timedOut?: boolean } = {}): Extract<ClaudeRunResult, { ok: false }> => ({
   ok: false,
   sessionMissing: extra.sessionMissing ?? false,
   timedOut: extra.timedOut ?? false,
@@ -643,5 +643,112 @@ test("agents: activeCount は invoke 中（待ち + 実行）を cap / worker �
     await Promise.all([a, b, c]);
     await new Promise((r) => setImmediate(r));
     assert.deepEqual(m.activeCount(), { caps: 0, workers: 0 });
+  });
+});
+
+test("agents: close は session_id を破棄し、次の指示は new の新しい session_id で始まる。logs/ は残り closed.jsonl に追記される", async () => {
+  await withFixture(0, async (f) => {
+    const m = mgr(f, async () => ok("r"));
+    const r1 = await m.invoke("cap", "c1", { prompt: "a" });
+    const dir = join(f.ws, "caps", "c1");
+    await mkdir(join(dir, "logs"), { recursive: true });
+    await writeFile(join(dir, "logs", "reports.jsonl"), '{"x":1}\n');
+    const c = await m.close("cap", "c1");
+    assert.deepEqual(c, { stopped: false, session_cleared: true, previous_session_id: r1.session_id });
+    const st = await readState(dir);
+    assert.equal(st.session_id, null);
+    assert.equal(st.state, "idle");
+    assert.equal(await readFile(join(dir, "logs", "reports.jsonl"), "utf8"), '{"x":1}\n');
+    const closed = (await readFile(join(dir, "logs", "closed.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+    assert.equal(closed.length, 1);
+    assert.equal(closed[0].session_id, r1.session_id);
+    assert.equal(closed[0].reason, "stop_cap");
+    const r2 = await m.invoke("cap", "c1", { prompt: "b" });
+    assert.deepEqual(f.calls.map((x) => x.mode), ["new", "new"]);
+    assert.notEqual(r2.session_id, r1.session_id);
+    assert.equal((await readState(dir)).session_id, r2.session_id);
+    // 2 回目の close は、また 1 つの session を破棄する（closed.jsonl は追記）
+    await m.close("cap", "c1");
+    assert.equal((await readFile(join(dir, "logs", "closed.jsonl"), "utf8")).trim().split("\n").length, 2);
+  });
+});
+
+test("agents: close は無い cap / session が無い cap では session_cleared=false。不正 id は拒否", async () => {
+  await withFixture(0, async (f) => {
+    const m = mgr(f, async () => ok("r"));
+    assert.deepEqual(await m.close("cap", "nothing"), { stopped: false, session_cleared: false, previous_session_id: null });
+    await assert.rejects(m.close("cap", "a b"), /不正/);
+  });
+});
+
+test("agents: failed（Prompt is too long）の cap も close で起こし直せる。新しい session で動き、conversation は作り直される", async () => {
+  await withFixture(0, async (f) => {
+    let n = 0;
+    const m = mgr(f, async () => (++n === 2 ? { ...ng("終了コード 1: Prompt is too long"), errorText: "Prompt is too long" } : { ...ok("r"), usage: { contextTokens: 900, contextWindow: 1000 } }));
+    const r1 = await m.invoke("cap", "c1", { prompt: "a" });
+    const r2 = await m.invoke("cap", "c1", { prompt: "b" });
+    assert.equal(r2.ok, false);
+    assert.equal(r2.session_id, r1.session_id);
+    const dir = join(f.ws, "caps", "c1");
+    assert.equal((await readState(dir)).state, "failed");
+    const failed = (await m.status()).caps[0];
+    assert.equal(failed.last_error, "終了コード 1: Prompt is too long");
+    assert.equal(failed.conversation?.last_error_text, "Prompt is too long");
+    assert.equal(failed.conversation?.tasks, 2);
+    assert.equal(failed.conversation?.context_tokens, 900);
+    assert.equal(failed.conversation?.context_percent, 90);
+    const c = await m.close("cap", "c1");
+    assert.equal(c.session_cleared, true);
+    const r3 = await m.invoke("cap", "c1", { prompt: "c" });
+    assert.equal(r3.ok, true);
+    assert.equal(f.calls[2].mode, "new");
+    assert.notEqual(r3.session_id, r1.session_id);
+    const after = (await m.status()).caps[0];
+    assert.equal(after.state, "idle");
+    assert.equal(after.conversation?.tasks, 1);
+    assert.equal(after.conversation?.last_error_text, undefined);
+  });
+});
+
+test("agents: 実行中の cap の close は worker を止め、実行が終わるのを待ってから session を破棄する", async () => {
+  await withFixture(2, async (f) => {
+    const fc = fakeChild();
+    let release!: () => void;
+    const m = mgr(f, (o) => {
+      o.onSpawn?.(fc.child as never);
+      return new Promise<ClaudeRunResult>((r) => (release = () => r(ng("終了コード null"))));
+    });
+    const p = m.invoke("cap", "c1", { prompt: "p" });
+    await new Promise((r) => setTimeout(r, 30));
+    const dir = join(f.ws, "caps", "c1");
+    const before = (await readState(dir)).session_id;
+    assert.ok(before);
+    const cp = m.close("cap", "c1");
+    await new Promise((r) => setTimeout(r, 10));
+    release();
+    const c = await cp;
+    assert.deepEqual(c, { stopped: true, session_cleared: true, previous_session_id: before });
+    assert.deepEqual(fc.sent, ["SIGTERM"]);
+    assert.equal((await p).error, "stop_cap により停止");
+    const st = await readState(dir);
+    assert.equal(st.session_id, null);
+    assert.equal(st.state, "idle");
+    assert.equal(m.isActive("cap", "c1"), false);
+  });
+});
+
+test("agents: status の conversation は開始時刻・run 数・直近の使用量を出し、使用量が読めない run では直近の値を残す", async () => {
+  await withFixture(0, async (f) => {
+    let n = 0;
+    const m = mgr(f, async () => (++n === 1 ? { ...ok("r"), usage: { contextTokens: 120_000, contextWindow: 1_000_000 } } : ok("r")));
+    await m.invoke("cap", "c1", { prompt: "a" });
+    await m.invoke("cap", "c1", { prompt: "b" });
+    const cv = (await m.status()).caps[0].conversation;
+    assert.ok(cv);
+    assert.equal(cv.tasks, 2);
+    assert.equal(cv.context_tokens, 120_000);
+    assert.equal(cv.context_window, 1_000_000);
+    assert.equal(cv.context_percent, 12);
+    assert.match(cv.started_at ?? "", /^\d{4}-/);
   });
 });

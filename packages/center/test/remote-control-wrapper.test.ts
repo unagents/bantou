@@ -873,7 +873,7 @@ test("memory 無しの session は従来どおり: mcp-config は bantou-messeng
   assert.deepEqual(Object.keys(mcpOf(l.args).mcpServers), ["bantou-messenger", "bantou"]);
   assert.equal(valueOf(l.args, "--mcp-config"), mcpConfigJson("http://127.0.0.1:4567/mcp/session", "pm1"));
   assert.equal(l.env.BANTOU_MEMORY_TOKEN, undefined);
-  assert.deepEqual(st.systemInstructions, ["master-cap-role@2", "master-cap-availability@1"]);
+  assert.deepEqual(st.systemInstructions, ["master-cap-role@3", "master-cap-availability@1"]);
   assert.equal(valueOf(l.args, "--append-system-prompt"), buildSystemInstructions({ session: "pm1" }));
   assert.ok(!valueOf(l.args, "--append-system-prompt")!.includes("mcp__memory__"));
   await sup.shutdown();
@@ -882,7 +882,7 @@ test("memory 無しの session は従来どおり: mcp-config は bantou-messeng
 test("memory あり: system-instructions に memory@1 が付く（文面は --append-system-prompt の先頭の部品群の末尾、label は status に出る）。利用者の指示はその後ろ", async () => {
   const { sup } = make({ realSystem: true, instructions: "利用者の指示", memory: { url: "http://m/mcp" } });
   const st = await sup.start("pm1");
-  assert.deepEqual(st.systemInstructions, ["master-cap-role@2", "master-cap-availability@1", "memory@1"]);
+  assert.deepEqual(st.systemInstructions, ["master-cap-role@3", "master-cap-availability@1", "memory@1"]);
   const v = valueOf(launches[0].args, "--append-system-prompt")!;
   assert.equal(v, `${buildSystemInstructions({ session: "pm1", memory: true })}\n\n利用者の指示`);
   assert.equal(st.instructions, true); // 利用者の指示だけを数える

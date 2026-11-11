@@ -414,7 +414,7 @@ export function registerSessionTools(server: McpServer, deps: { remotes: RemoteM
     {
       title: "remote 削除",
       description:
-        "この session の remote-cap の実行を止め（server へ stop_cap）、center の記録から外す。止められない時は error（force: true で記録だけ消す）。他の session の cap は対象外。remote_id 省略時はこの session の cap（server が複数あれば server で絞る）。旧共有 cap（session 無し。remote_list の include_shared: true で見える。remote_id = c-<center-id>）は remote_id で明示して消す。複数の server に同じ remote_id がある時は server（server_id / host 名 / peer id）で指定する",
+        "この session の remote-cap を閉じる: 実行中なら止め（idle / failed / 実行中のどれでも可）、server 側の cap の会話（session_id）を破棄して、center の記録から外す（server へ stop_cap）。次の remote_send は新しい会話で始まる。cap の記録（server の logs/・reports.jsonl）と配下の worker の dir は消さずに残す。返り値 { remote_id, deleted, stopped（実行中の run を止めた）, session_cleared（true = 会話を破棄した / false = 破棄するものが無かった / null = 確認できない。force の時のみ）, previous_session_id, warning? }。server が会話の破棄を確認できない時（届かない・旧版の server）は error で記録も消さない（force: true で記録だけ消す。server の cap の会話は残る）。他の session の cap は対象外。remote_id 省略時はこの session の cap（server が複数あれば server で絞る）。旧共有 cap（session 無し。remote_list の include_shared: true で見える。remote_id = c-<center-id>）は remote_id で明示して消す。複数の server に同じ remote_id がある時は server（server_id / host 名 / peer id）で指定する",
       inputSchema: {
         remote_id: agentId.optional(),
         server: z.string().min(1).optional().describe("server_id、host 名、peer id のどれでも指せる。host 名が複数の server に一致する時は error（候補を user と workspace 付きで返す）"),
@@ -428,7 +428,7 @@ export function registerSessionTools(server: McpServer, deps: { remotes: RemoteM
     "remote_list",
     {
       title: "remote 一覧",
-      description: "この session の remote-cap（server ごとに 1 つ。remote_id = cap_id, session, server（server_id。旧形式の記録で server_id が分からないものは peer id）, server_id, peer（今の到達先。長く確認できないと消える）, serverHost / serverUser / serverWorkspace, server_label（host 名を主に server_id を添えた表示。同じ host 名の server が複数ある時は user と workspace 付き）, state, 時刻, 最新の結果, 最新の task_result, 直近の worker_reports（最大 20 件、到着順）, 未完了の指示 pending（各要素に送達状態 delivery: unsent / sent / observed）、server の到達性 reachability { reachable, last_ok_at, failures }、cap の server 側の状態 cap_state（running / idle / lost / unknown）、通知を受けたものは activity 付き）の一覧。server に届かない間、作業中の cap の state は unknown。include_shared: true で旧共有 cap（session 無し。新しい指示は送らない。remote_delete で消せる）も含める",
+      description: "この session の remote-cap（server ごとに 1 つ。remote_id = cap_id, session, server（server_id。旧形式の記録で server_id が分からないものは peer id）, server_id, peer（今の到達先。長く確認できないと消える）, serverHost / serverUser / serverWorkspace, server_label（host 名を主に server_id を添えた表示。同じ host 名の server が複数ある時は user と workspace 付き）, state, 時刻, 最新の結果, 最新の task_result, 直近の worker_reports（最大 20 件、到着順）, 未完了の指示 pending（各要素に送達状態 delivery: unsent / sent / observed）、server の到達性 reachability { reachable, last_ok_at, failures }、cap の server 側の状態 cap_state（running / idle / lost / unknown）、通知を受けたものは activity 付き、server の status が取れていれば conversation { started_at, tasks, context_tokens, context_window, context_percent, usage_at, last_error_text? }（cap の会話の開始時刻・run 数・直近の context 使用量と、直近の失敗の claude の error 文。例: Prompt is too long）と、cap が failed の時の cap_last_error）の一覧。server に届かない間、作業中の cap の state は unknown。include_shared: true で旧共有 cap（session 無し。新しい指示は送らない。remote_delete で消せる）も含める",
       inputSchema: { include_shared: z.boolean().optional() },
     },
     ({ include_shared }) => guard(() => json(remotes.list({ owner, ...(include_shared ? { includeShared: true } : {}) }))),

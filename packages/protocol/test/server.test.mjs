@@ -501,3 +501,27 @@ test("retire: 旧 server の hello_result / status_result など既存の返信�
   assert.ok(isServerReply({ bantou: 1, type: "hello_result", ok: true, server_version: "0.6.2", protocol_version: "1.7.0", update: null, last_update: null }));
   assert.ok(isServerReply({ bantou: 1, type: "status_result", ok: true, caps: [], workers: [] }));
 });
+
+// -- stop_cap closes the cap (session_cleared) / status conversation: additive, no version bump ----------
+
+test("stop_result: session_cleared / previous_session_id are optional (an older server sends neither); wrong types are rejected", () => {
+  const base = { bantou: 1, type: "stop_result", ok: true, cap_id: "c1", stopped: true };
+  assert.ok(isServerReply(base));
+  assert.ok(isServerReply({ ...base, session_cleared: true, previous_session_id: "s-1" }));
+  assert.ok(isServerReply({ ...base, stopped: false, session_cleared: false, previous_session_id: null }));
+  assert.ok(!isServerReply({ ...base, session_cleared: "yes" }));
+  assert.ok(!isServerReply({ ...base, previous_session_id: 1 }));
+  assert.equal(MESSENGER_PROTOCOL.version, "1.8.0");
+});
+
+test("status_result: AgentStatus.conversation is optional and validated", () => {
+  const agent = { kind: "cap", id: "c1", path: "/ws/caps/c1", session_id: null, state: "idle", last_started_at: null, last_finished_at: null, retries: 0, queued: 0 };
+  const conversation = { started_at: "2026-11-11T00:00:00.000Z", tasks: 3, context_tokens: 112198, context_window: 1000000, context_percent: 11.2, usage_at: "2026-11-11T01:00:00.000Z", last_error_text: "Prompt is too long" };
+  const st = (a) => ({ bantou: 1, type: "status_result", ok: true, caps: [a], workers: [] });
+  assert.ok(isServerReply(st(agent)));
+  assert.ok(isServerReply(st({ ...agent, conversation })));
+  assert.ok(isServerReply(st({ ...agent, conversation: { ...conversation, context_tokens: null, context_window: null, context_percent: null, usage_at: null, last_error_text: undefined } })));
+  assert.ok(!isServerReply(st({ ...agent, conversation: { ...conversation, tasks: -1 } })));
+  assert.ok(!isServerReply(st({ ...agent, conversation: { ...conversation, context_tokens: "x" } })));
+  assert.ok(!isServerReply(st({ ...agent, conversation: "x" })));
+});

@@ -132,8 +132,17 @@ export async function execute(
       return { bantou: PROTOCOL_VERSION, type: "worker_reply_result", ok: true, cap_id: cmd.cap_id, worker_id: r.worker_id, accepted: true };
     }
     if (cmd.type === "stop_cap") {
-      const r = await manager.stop("cap", cmd.cap_id);
-      return { bantou: PROTOCOL_VERSION, type: "stop_result", ok: true, cap_id: cmd.cap_id, stopped: r.stopped };
+      // 止めるだけでなく会話（session_id）も破棄する。次の task は新しい会話で始まる
+      const r = await manager.close("cap", cmd.cap_id);
+      return {
+        bantou: PROTOCOL_VERSION,
+        type: "stop_result",
+        ok: true,
+        cap_id: cmd.cap_id,
+        stopped: r.stopped,
+        session_cleared: r.session_cleared,
+        previous_session_id: r.previous_session_id,
+      };
     }
     if (cmd.type === "resume_worker") {
       // worker は cap の依頼（/mcp の worker_start）で起動する。型は protocol に残るが center からの指示としては処理しない

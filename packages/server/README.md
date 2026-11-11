@@ -224,7 +224,7 @@ center から server を外す指示（protocol 1.8.0、`docs/protocol.md` の `
 | type | 内容 |
 |---|---|
 | `kick_cap` | cap を起動する（初回は新規 session、以降は resume） |
-| `stop_cap` | 実行中の cap（`claude -p`）を止める |
+| `stop_cap` | cap を閉じる: 実行中の `claude -p` を止め、cap の会話（`session_id`）を破棄する |
 | `status` | cap / worker の状態一覧 |
 
 `kick_cap`（`cap_id` と `prompt` 以外は任意）:
@@ -247,6 +247,9 @@ center から server を外す指示（protocol 1.8.0、`docs/protocol.md` の `
 { "bantou": 1, "type": "stop_cap", "cap_id": "cap-a" }
 ```
 
+- **cap を閉じる**: idle / failed / `state=error` / 実行中のどれでも受け付ける。実行中なら下の手順で止め、実行が state.json を書き終えるのを待ってから、cap の会話を破棄する（`state.json` を `session_id: null`・`state: idle`・`retries: 0`・`last_error` 無しに書き直す。`last_started_at` / `last_finished_at` は残す）。次の `task` / `kick_cap` は `--session-id` の新しい会話で始まる（`state=error` で起動を断られていた cap も、閉じると起動できる）。破棄した session は `logs/closed.jsonl` に 1 行追記する（`closed_at` / `session_id` / `reason` / 破棄時点の `conversation`）。
+- **残すもの**: cap の `logs/`（セッションごとの生出力 `<session_id>.jsonl`、`reports.jsonl`、`closed.jsonl`、`model.json`）は消さず、その場に残す。cap dir 直下の他のファイルも触らない。**配下の worker の dir（`workers/<id>/`）は閉じても消さず、止めもしない**（worker は cap の process group の外で動く。止めるなら `worker_stop`。溜まった dir は「終わった worker の掃除」の仕組みが掃除する）。
+- 閉じている間（stop 要求から破棄まで）に同じ cap へ届いた指示は実行されず、`stop_cap により停止` で返る。
 - 走っている `claude -p` を process group ごと SIGTERM し、3 秒以内に終わらなければ SIGKILL する。子は `detached`（setsid）で起動しているので、cap の Bash が起動した孫もこの group にいる限り止まる。
 - 中断された `kick_cap` は `cap_result`（`ok: false`, `error: "stop_cap により停止"`、再試行しない）で返り、state は `failed`。
 - その cap に待っている指示（直列待ち）も、実行されずに同じ `cap_result` で返る。spawn 前（git 準備中）に届いた stop も、claude を起動せずに中断する。
@@ -269,7 +272,7 @@ center から server を外す指示（protocol 1.8.0、`docs/protocol.md` の `
 { "bantou": 1, "type": "error", "ok": false, "message": "git clone 失敗: ...", "command": "kick_cap" }
 ```
 
-- `stop_result`: `{ "bantou": 1, "type": "stop_result", "ok": true, "cap_id": "cap-a", "stopped": true }`。stop_cap の失敗（`cap_id` が不正でない限り通常は無い）は `error`（`command: "stop_cap"`, `cap_id` 付き）。
+- `stop_result`: `{ "bantou": 1, "type": "stop_result", "ok": true, "cap_id": "cap-a", "stopped": true, "session_cleared": true, "previous_session_id": "0b6f...-uuid" }`。`stopped` = 実行中（または待ち）の指示を止めた。`session_cleared` = 会話を破棄した（cap の dir が無い・session が無い時は false）。この 2 項目は後から足した任意項目（protocol の版は 1.8.0 のまま）。stop_cap の失敗（`cap_id` が不正でない限り通常は無い）は `error`（`command: "stop_cap"`, `cap_id` 付き）。
 - `cap_result` は claude の実行が終わってから返る。数分かかることがある。
 - 実行が失敗しても `cap_result` で返る（`ok: false` と `error`）。
 - `error` は実行に入る前の失敗（git 失敗、state が `running` / `error` で起動できない、state 破損など）。
@@ -303,8 +306,16 @@ center から server を外す指示（protocol 1.8.0、`docs/protocol.md` の `
 - `state`: `idle`（待機）/ `running`（実行中）/ `failed`（直近の実行が失敗）/ `error`（孤児回収で判定できなかった時など）。
 - `last_error`: 失敗の理由。成功時は無い。
 - `retries`: 直近の実行で使った再試行回数。
+- `session_id` は `stop_cap`（cap を閉じる）で `null` に戻る。`null` の cap の次の実行は新しい会話。
 - `error` の agent は起動しない（`state=error のため起動しない`）。解除は手動で、state.json を削除するか内容を直す。
 - 書き込みは tmp ファイルへ書いて rename する。
+
+## 会話の記録（conversation）
+
+- `logs/conversation.json`（agent ごと。state.json の形は変えない）に、現在の会話の `started_at`（新しい会話を始めた run の開始時刻）、`tasks`（この会話での run 数。task・kick_cap・report 起因の resume を含む）、直近の使用量 `context_tokens` / `context_window` / `usage_at`、直近の run が失敗した時の `last_error_text` を持つ。`status_result` の各 agent の `conversation` に載る。
+- 使用量は claude の stream-json 最終行（`result`）から読む。`context_tokens` は `usage.iterations` の最後（最後の応答 1 回分）の `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`（`usage` 本体は run 全体の累計なので使わない）。`context_window` は `modelUsage` のうちトークン合計が最大のモデルの `contextWindow`。読めない run では直近の値を残す。
+- 失敗の理由: 失敗した run の `result` 行が `is_error`（または `errors` 配列）なら、その文を `last_error_text` と `last_error`（`終了コード 1: Prompt is too long` のように「終了コード N」の後ろに足す）に入れる。stderr があればそれが先頭。
+- `stop_cap` で会話ごと作り直す（`started_at` から数え直し）。会話の記録は補助情報で、書けなくても実行は止めない。
 
 ## retry と session 消失
 

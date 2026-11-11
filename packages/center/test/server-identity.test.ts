@@ -182,7 +182,7 @@ function setup(initial: ServerPeer[], extra: Partial<Parameters<typeof createRem
     },
     stopCapOn: async (peer: ServerPeer, cmd: { cap_id: string }) => {
       calls.push({ kind: "stop_cap", peer: peer.id });
-      return { bantou: 1, type: "stop_result", ok: true, cap_id: cmd.cap_id, stopped: true };
+      return { bantou: 1, type: "stop_result", ok: true, cap_id: cmd.cap_id, stopped: true, session_cleared: true, previous_session_id: "s-old" };
     },
   } as unknown as ServerLink;
   const store = createJsonListStore<RemoteRecord>(join(dir, "remotes.json"), () => {});

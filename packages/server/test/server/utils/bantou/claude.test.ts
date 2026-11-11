@@ -7,6 +7,7 @@ import { matchesSession } from "../../../../server/utils/bantou/processes";
 import {
   BASH_SANDBOX_OFF_SETTINGS,
   buildClaudeArgs,
+  readResultDetails,
   readResultEnvelope,
   runClaude,
   type ClaudeRunOptions,
@@ -268,5 +269,54 @@ test("runClaude: signal で終了した子は signal を返す。タイムアウ
     const r = await runClaude({ ...base, claude: exe, cwd: dir });
     assert.ok(!r.ok);
     if (!r.ok) assert.equal(r.signal, undefined);
+  });
+});
+
+const RESULT_OK = {
+  type: "result", subtype: "success", is_error: false, session_id: "sid-1", result: "r",
+  usage: { input_tokens: 38, cache_creation_input_tokens: 102587, cache_read_input_tokens: 1707521, output_tokens: 12035, iterations: [
+    { input_tokens: 5, output_tokens: 9, cache_read_input_tokens: 50, cache_creation_input_tokens: 1 },
+    { input_tokens: 2, output_tokens: 610, cache_read_input_tokens: 111201, cache_creation_input_tokens: 995 },
+  ] },
+  modelUsage: {
+    "claude-haiku-5-5": { inputTokens: 36694, outputTokens: 1599, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, contextWindow: 200000 },
+    "claude-sonnet-5-5": { inputTokens: 38, outputTokens: 12035, cacheReadInputTokens: 1707521, cacheCreationInputTokens: 102587, contextWindow: 1000000 },
+  },
+};
+
+test("readResultDetails: 最後の応答の context（累計でなく iterations の最後）と主モデルの contextWindow を読む", () => {
+  const d = readResultDetails(JSON.stringify(RESULT_OK));
+  assert.deepEqual(d.usage, { contextTokens: 2 + 111201 + 995, contextWindow: 1_000_000 });
+  assert.equal(d.errorText, null);
+});
+
+test("readResultDetails: is_error の result 文・errors 配列を error 文にする。result 行でなければ全部 null", () => {
+  assert.equal(readResultDetails('{"type":"result","subtype":"success","is_error":true,"result":"Prompt is too long"}').errorText, "Prompt is too long");
+  assert.equal(readResultDetails('{"type":"result","subtype":"error_during_execution","errors":["a","b"]}').errorText, "a; b");
+  assert.deepEqual(readResultDetails('{"type":"assistant"}'), { usage: null, errorText: null });
+  assert.deepEqual(readResultDetails("not json"), { usage: null, errorText: null });
+  assert.equal(readResultDetails('{"type":"result","subtype":"success","is_error":true,"result":"x"}').usage, null);
+});
+
+test("runClaude: 終了コード 1 + result 行が Prompt is too long なら detail と errorText にその文が出る", async () => {
+  const script = `
+process.stdout.write(JSON.stringify({type:"result",subtype:"success",is_error:true,session_id:"sid-1",result:"Prompt is too long"}) + "\\n");
+process.exit(1);
+`;
+  await withFake(script, async (exe, dir) => {
+    const r = await runClaude({ ...base, claude: exe, cwd: dir });
+    assert.ok(!r.ok);
+    if (!r.ok) {
+      assert.equal(r.detail, "終了コード 1: Prompt is too long");
+      assert.equal(r.errorText, "Prompt is too long");
+    }
+  });
+});
+
+test("runClaude: 成功の result 行から usage を返す", async () => {
+  await withFake(`process.stdout.write(JSON.stringify(${JSON.stringify(RESULT_OK)}));`, async (exe, dir) => {
+    const r = await runClaude({ ...base, claude: exe, cwd: dir });
+    assert.ok(r.ok);
+    if (r.ok) assert.deepEqual(r.usage, { contextTokens: 112198, contextWindow: 1_000_000 });
   });
 });

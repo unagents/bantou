@@ -199,15 +199,24 @@ The server builds the cap's first instruction from the fields (text: `docs/desig
 
 The server runs `worker_start` for the cap with the same `worker_id` and `text` as the prompt (the worker resumes its session). Reply: `worker_reply_result` `{"bantou":1,"type":"worker_reply_result","ok":true,"cap_id","worker_id","accepted":true}` right after the start is accepted (it does not wait for the work), or `error` (`command:"worker_reply"`, `cap_id`, `worker_id`; for example an unknown cap, or a worker of another cap). The worker's next report arrives as a `worker_report` notice. Accepted while the server waits to update.
 
-### `stop_cap` — stop a running cap
+### `stop_cap` — close a cap (stop the run, discard the conversation)
 
 ```json
 {"bantou":1,"type":"stop_cap","cap_id":"cap-a"}
 ```
 
-Kills the process group of the cap's running `claude -p` (SIGTERM, then
-SIGKILL after a short grace). Reply: `stop_result` `{"bantou":1,"type":"stop_result","ok":true,"cap_id":"cap-a","stopped":true}`
-(`stopped` is false when the cap is not running) or `error`. The interrupted
+Closes the cap. If a `claude -p` is running, its process group is killed
+(SIGTERM, then SIGKILL after a short grace); the server waits until the run has
+ended. Then it **discards the cap's conversation**: `state.json` is rewritten
+with `session_id: null`, `state: "idle"` (no `last_error`, `retries: 0`), so the next `task` /
+`kick_cap` starts a new claude session. This works whether the cap is idle,
+failed, `state=error` or running. The cap directory, `logs/` (the raw output of every
+session, `reports.jsonl`, `closed.jsonl`) and the workers' directories are kept;
+the discarded session is appended to `logs/closed.jsonl`. Reply: `stop_result`
+`{"bantou":1,"type":"stop_result","ok":true,"cap_id":"cap-a","stopped":true,"session_cleared":true,"previous_session_id":"0b6f...-uuid"}`
+(`stopped` is false when the cap is not running; `session_cleared` is false when there was
+no session to discard; both optional fields are absent from a server that only stops, and a
+center must not read absence as "discarded") or `error`. The interrupted
 `kick_cap` gets its own `cap_result` with `ok:false`. Not stopped: queued
 commands behind the running one, and workers the cap started outside its own
 process group (see server README).
@@ -406,6 +415,9 @@ the cap and all its workers. Messages carry the same `meta` as replies.
 | `started_at` / `finished_at` | ISO 8601, or `null` |
 | `error` | why the agent is `failed` / `lost` (at most 200 chars) |
 | `model` | model given with `--model`, or `null` when none was given. Absent from servers older than `1.4.0` |
+| `conversation` | optional `ConversationInfo` (below): size and health of the current claude session. Additive; absent from a server that does not send it (no version bump) |
+
+`ConversationInfo` (all read from claude's own output; unreadable = `null`): `started_at` (ISO 8601, when the session started), `tasks` (runs in this session), `context_tokens` (input + cache creation + cache read of the last answer that reported usage; output excluded), `context_window` (claude's `contextWindow` of the main model), `context_percent` (`context_tokens / context_window`, one decimal), `usage_at` (ISO 8601), `last_error_text` (error text from claude's output of the last failed run, e.g. `Prompt is too long`; absent otherwise). A new session (after `stop_cap`, or a first run) starts with `tasks` 0 and no usage.
 
 `state` (separate from `AgentState` of `state.json`):
 
@@ -655,7 +667,7 @@ a name outside it is refused with an error, never rewritten. Two sessions never 
 | `remote_send` | `goal`, `repo?`, `branch?`, `deliverables?`, `verify?`, `constraints?`, `workers?`, `server?`, `worker_model?` | `{ remote_id, server, serverName, state: "running", created, task_id, worker_model? }` |
 | `remote_create` | same | alias of `remote_send` (same handling) |
 | `worker_reply` | `remote_id?`, `worker_id`, `text`, `server?` | `{ remote_id, server, worker_id, accepted: true }` (sends `worker_reply`; also on `/mcp` for the desktop). Only the caller's cap (no `remote_id` = the caller's cap) |
-| `remote_delete` | `remote_id?`, `server?`, `force?` | `{ remote_id, deleted, stopped, warning? }` (`stop_cap` + drop the record). Only the caller's cap, or the old shared cap named by `remote_id` |
+| `remote_delete` | `remote_id?`, `server?`, `force?` | `{ remote_id, deleted, stopped, session_cleared, previous_session_id?, warning? }` (`stop_cap` closes the cap on the server: stops the run and discards its conversation; then drop the record. `session_cleared` true = discarded, false = nothing to discard, null = not confirmed (only with `force`, with `warning`). Without `force` an unconfirmed close is an error and the record stays). Only the caller's cap, or the old shared cap named by `remote_id` |
 | `remote_list` | `include_shared?` | `RemoteView[]` of the caller's caps; `include_shared: true` adds the old shared cap (no session) |
 | `remote_wait` | `remote_id?`, `server?`, `timeout_sec?` | the finished `RemoteView`. Only the caller's caps (or the old shared cap named by `remote_id`) |
 
