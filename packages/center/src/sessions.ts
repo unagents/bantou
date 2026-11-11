@@ -88,6 +88,8 @@ export interface SessionManager {
   getCenterSettings(): { settings: ProjectSettings };
   /** session が使ってよい server の指定（session の servers だけ。center 共通の設定には無い）。undefined = 全部。 */
   serversOf(name: string): string[] | undefined;
+  /** その session の外部記憶（共通 + session の合成後）。無ければ undefined。 */
+  memoryOf(name: string): MemorySetting | undefined;
   /** center 共通の設定を項目ごとにマージして保存し、全 session の次の起動に反映する。更新後の全体を返す。servers（null 以外）は error。 */
   updateCenterSettings(patch: CenterSettingsPatch): Promise<{ settings: ProjectSettings }>;
   /**
@@ -288,6 +290,8 @@ export function createSessionManager(opts: {
     getCenterSettings: () => ({ settings: redactSettings({ ...common }) }),
 
     serversOf: (name) => composeServers(saved.get(name)?.settings),
+
+    memoryOf: (name) => composeMemory(common, saved.get(name)?.settings),
 
     updateCenterSettings: (patch) =>
       serial(async () => {

@@ -209,8 +209,8 @@ test("worker_reply: 失敗は error（cap_id・worker_id 付き）。worker 機�
   assert.equal((e2 as { command?: string }).command, "worker_reply");
 });
 
-test("protocol 1.8.0: 返信 meta と hello の版は 1.8.0（1.7.0 の center / server とは版違いになる）", () => {
-  assert.equal(REPLY_META.version, "1.8.0");
+test("protocol 1.9.0: 返信 meta と hello の版は 1.9.0（1.8.0 の center / server とは版違いになる）", () => {
+  assert.equal(REPLY_META.version, "1.9.0");
 });
 
 test("commandCapId: cap を指す命令は cap_id、status は cap_id 付きの時だけ。hello / update_server は無し", () => {
