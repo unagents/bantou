@@ -98,3 +98,15 @@ desktop の設定ダイアログ（共通・歯車・追加）に「外部記憶
 - 書き込み tool の名前と event の形（bantou の event の項目は上記）。
 - Agent ID の正。session 名でよいか、固定 ID を設定で渡すか。
 - Ollama の embedding model の選定（日本語の品質）。
+
+## 設置の記録（2026-11-11、202 mini10）
+
+段階 1・2 まで実機で稼働。
+
+- chatp: `~/chatp`（vagrant）、systemd user unit `chatp.service`、`127.0.0.1:7920`、Node 22（nvm。`/usr/bin/node` は 20 で engines を満たさない）。env は `~/.config/chatp/env`（600）。隔離は `safe-mode`（auto 判定）。
+- memory: docker compose（`packages/memory/deploy`）で PostgreSQL+pgvector（`127.0.0.1:5434`。5433 は mflow-postgres が使用）と Ollama（`127.0.0.1:11435`、`nomic-embed-text`）。本体は systemd user unit `bantou-memory.service`（`0.0.0.0:7930`、Node 22）。env は `~/.config/bantou-memory/env`（600）。DB role は `memory_owner`（migration 専用）と `memory_app`（非 superuser、DELETE 無し）。
+- **build は本機で行う**: 202 の CPU（i7-2635QM、AVX2 無し）では `nuxt build` が SIGILL で落ちる。`packages/memory` を本機で `npm run build` し、`.output/` を rsync する（`.output` は JS のみで native 無し）。chatp（Nitro 単体）は 202 で build できる。
+- token の経路: memory の token は 202 の env file だけに置き、center への登録は mac200 で center の `/mcp`（`center_settings_update`）を呼んで行った（値を作業 session の文脈に出さないため。permission 分類器が token の表示を止める）。center の `center_settings_get` は `tokenSet: true` だけを返す。
+- center 共通設定: `memory.url = http://192.168.1.202:7930/mcp`。全 session（0.1.51）が `--mcp-config` に `memory`（`X-Agent-Id` = session 名、token は `BANTOU_MEMORY_TOKEN` env）を持つ。
+- 実機確認: session に pty から 1 行送ると、memory の `memory_events` に `user_prompt` と `assistant_message` が agent = session 名で記録された。別 agent の `recall` は空（RLS）。抽出は 1 分以内に `confirmed / semantic` を作り、`recall`（relevance 0.84）と `context`（policies / activeTasks）で返った。
+- 運用メモ: `.output` の更新は本機で build → rsync → `systemctl --user restart bantou-memory`。dead-letter は `memory_events.failed_at`。chatp の `--output-format json` は message の配列で返る（chatp 側で `type: result` を取る。chatp の README）。
