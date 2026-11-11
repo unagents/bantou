@@ -69,7 +69,7 @@ function setup(extra: Partial<Parameters<typeof createRemoteManager>[0]> = {}) {
           }
         }
       }),
-    stopCapOn: async () => ({ bantou: 1, type: "stop_result", ok: true, stopped: true }),
+    stopCapOn: async () => ({ bantou: 1, type: "stop_result", ok: true, stopped: true, session_cleared: true }),
   } as unknown as ServerLink;
   const store = createJsonListStore<RemoteRecord>(join(dir, "remotes.json"), () => {});
   const mgr = createRemoteManager({

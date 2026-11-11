@@ -16,6 +16,7 @@ import { agentDir, cleanedFile, ensureTmpDir, removeNonKept, runLogDir } from ".
 import { listLiveProcesses, matchesSession, type LiveProcess } from "./processes";
 import type { AgentRunner } from "./runner";
 import { readState, writeState, type AgentStateFile } from "./state";
+import { appendClosed, emptyConversation, readConversation, toConversationInfo, writeConversation, type ConversationRecord } from "./conversation";
 
 const execFileAsync = promisify(execFile);
 
@@ -80,6 +81,12 @@ export interface AgentManager {
    * 猶予内に終了しなければ SIGKILL する。待ちの指示は実行されずに失敗で返る。何も無ければ stopped=false。
    */
   stop(kind: AgentKind, id: string): Promise<{ stopped: boolean }>;
+  /**
+   * agent を閉じる（stop_cap）。実行中なら止め（実行が終わるまで待つ）、会話（state.json の session_id）を破棄して、
+   * 次の指示を新しい会話で始める。idle / failed / error / 実行中のどれでも閉じられる。logs/ と worker の dir は残す。
+   * 破棄した session は logs/closed.jsonl に追記する。
+   */
+  close(kind: AgentKind, id: string, reason?: string): Promise<CloseResult>;
   status(): Promise<{ caps: AgentStatus[]; workers: AgentStatus[] }>;
   reapOrphans(): Promise<ReapSummary>;
   /** invoke 中（待ち + 実行）の件数を kind 別に返す。server 更新の「全部終わった」判定に使う。 */
@@ -87,6 +94,15 @@ export interface AgentManager {
   /** その agent に invoke 中（待ち + 実行）の指示があるか。 */
   isActive(kind: AgentKind, id: string): boolean;
   shutdown(): Promise<void>;
+}
+
+export interface CloseResult {
+  /** 実行中（または待ち）の指示を見つけて止めた。 */
+  stopped: boolean;
+  /** 会話（session_id）を破棄した。破棄するものが無かった（dir 無し・session 無し）なら false。 */
+  session_cleared: boolean;
+  /** 破棄した session_id（無ければ null）。 */
+  previous_session_id: string | null;
 }
 
 /** stop_cap で中断された指示の error 文言。 */
@@ -321,6 +337,12 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
     let mode: RunMode = st.session_id ? "resume" : "new";
     let sessionId = st.session_id ?? randomUUID();
     const startedAt = new Date().toISOString();
+    // 会話の記録（開始時刻・run 数・使用量）。補助情報なので書けなくても実行は止めない
+    let conv: ConversationRecord = mode === "new" ? emptyConversation() : await readConversation(dir);
+    if (mode === "new" || conv.started_at === null) conv = { ...conv, started_at: startedAt };
+    conv = { ...conv, tasks: conv.tasks + 1 };
+    const saveConv = (): Promise<void> => writeConversation(dir, conv).catch((e: unknown) => log(`conversation 記録失敗: kind=${kind} id=${id} ${errMsg(e)}`));
+    await saveConv();
     const base = (): AgentStateFile => ({
       session_id: sessionId,
       state: "running",
@@ -383,6 +405,9 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
           sessionId = randomUUID();
           mode = "new";
           await writeState(dir, base());
+          // 別の会話になる
+          conv = { ...emptyConversation(), started_at: new Date().toISOString(), tasks: 1 };
+          await saveConv();
           continue;
         }
         if (isRetryable(r.detail, r.timedOut) && retriesUsed < config.session.maxRetries) {
@@ -399,6 +424,18 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
       }
 
       const finished = new Date().toISOString();
+      // 使用量は読めた時だけ更新（読めなければ直近の値を残す）。error 文は直近の run のものだけ持つ
+      if (r.usage && (r.usage.contextTokens !== null || r.usage.contextWindow !== null)) {
+        conv = {
+          ...conv,
+          context_tokens: r.usage.contextTokens ?? conv.context_tokens,
+          context_window: r.usage.contextWindow ?? conv.context_window,
+          usage_at: finished,
+        };
+      }
+      delete conv.last_error_text;
+      if (!r.ok && r.errorText !== undefined) conv.last_error_text = r.errorText;
+      await saveConv();
       if (r.ok) {
         await writeState(dir, {
           session_id: sessionId,
@@ -475,6 +512,48 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
     return { stopped: true };
   }
 
+  async function clearSession(kind: AgentKind, id: string, reason: string): Promise<{ cleared: boolean; previous: string | null }> {
+    const dir = agentDir(config.workspace, kind, id);
+    if (!(await exists(dir))) return { cleared: false, previous: null };
+    // state.json が壊れていても閉じられるようにする（読めなければ session 無しとして作り直す）
+    const st = await readState(dir).catch(() => null);
+    const previous = st?.session_id ?? null;
+    if (previous !== null) {
+      await appendClosed(dir, { closed_at: new Date().toISOString(), session_id: previous, reason, conversation: await readConversation(dir) });
+    }
+    await writeState(dir, {
+      session_id: null,
+      state: "idle",
+      last_started_at: st?.last_started_at ?? null,
+      last_finished_at: st?.last_finished_at ?? null,
+      retries: 0,
+    });
+    await writeConversation(dir, emptyConversation());
+    return { cleared: previous !== null, previous };
+  }
+
+  async function close(kind: AgentKind, id: string, reason = "stop_cap"): Promise<CloseResult> {
+    const { stopped } = await stop(kind, id);
+    const key = `${kind}:${id}`;
+    // 止めた実行が state を書き終えるまで待ち、同じ key の他の指示と並べて（chain に載せて）破棄する。
+    // chain の間は stopRequests が残るので、閉じている間に来た指示は実行されず STOP で返る
+    inflight.set(key, (inflight.get(key) ?? 0) + 1);
+    const prev = chains.get(key) ?? Promise.resolve();
+    const run = prev.then(() => clearSession(kind, id, reason));
+    void run.then(
+      () => settled(key),
+      () => settled(key),
+    );
+    const tail = run.catch(() => undefined);
+    chains.set(key, tail);
+    void tail.then(() => {
+      if (chains.get(key) === tail) chains.delete(key);
+    });
+    const r = await run;
+    log(`close: ${key} stopped=${stopped} session_cleared=${r.cleared} previous=${r.previous ?? "-"}`);
+    return { stopped, session_cleared: r.cleared, previous_session_id: r.previous };
+  }
+
   function invoke(kind: AgentKind, id: string, input: InvokeInput): Promise<RunOutcome> {
     if (!isValidAgentId(id)) {
       return Promise.reject(new Error(kind === "cap" ? `cap_id が不正: ${id}` : `worker_id が不正: ${id}`));
@@ -537,6 +616,7 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
         retries: s.retries,
         queued,
         model: (await readModelRecord(dir)).model ?? null,
+        conversation: toConversationInfo(await readConversation(dir)),
       };
       if (s.last_error !== undefined) out.last_error = s.last_error;
       return out;
@@ -650,5 +730,5 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
     return inflight.has(`${kind}:${id}`);
   }
 
-  return { invoke, stop, status, reapOrphans, activeCount, isActive, shutdown };
+  return { invoke, stop, close, status, reapOrphans, activeCount, isActive, shutdown };
 }

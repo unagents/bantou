@@ -205,7 +205,7 @@ function remotesWith(peers: ServerPeer[]) {
     },
     statusOn: async () => ({ bantou: 1, type: "status_result", ok: true, caps: [], workers: [] }),
     taskOn: () => new Promise(() => {}),
-    stopCapOn: async (_p: ServerPeer, cmd: { cap_id: string }) => ({ bantou: 1, type: "stop_result", ok: true, cap_id: cmd.cap_id, stopped: true }),
+    stopCapOn: async (_p: ServerPeer, cmd: { cap_id: string }) => ({ bantou: 1, type: "stop_result", ok: true, cap_id: cmd.cap_id, stopped: true, session_cleared: true, previous_session_id: "s-old" }),
   } as unknown as ServerLink;
   const store = createJsonListStore<RemoteRecord>(join(dir, "remotes.json"), () => {});
   return { mgr: createRemoteManager({ link, store, log: () => {}, capId: "c-0123456789", graceMs: 60, pollMs: 40 }), setLive: (p: ServerPeer[]) => (live = p) };

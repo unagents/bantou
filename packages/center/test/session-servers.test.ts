@@ -38,7 +38,7 @@ function setup(servers: Record<string, string[] | undefined>, peers = [lenovoA, 
     },
     statusOn: async () => ({ bantou: 1, type: "status_result", ok: true, caps: [], workers: [] }),
     taskOn: async (p: ServerPeer, cmd: { cap_id: string }) => (tasks.push({ peer: p.id, cap: cmd.cap_id }), new Promise(() => {})),
-    stopCapOn: async (p: ServerPeer, cmd: { cap_id: string }) => (stops.push({ peer: p.id, cap: cmd.cap_id }), { bantou: 1, type: "stop_result", ok: true, cap_id: cmd.cap_id, stopped: true }),
+    stopCapOn: async (p: ServerPeer, cmd: { cap_id: string }) => (stops.push({ peer: p.id, cap: cmd.cap_id }), { bantou: 1, type: "stop_result", ok: true, cap_id: cmd.cap_id, stopped: true, session_cleared: true, previous_session_id: "s-old" }),
     workerReplyOn: async (p: ServerPeer, cmd: { cap_id: string; worker_id: string }) => (replies.push({ peer: p.id, cap: cmd.cap_id, worker: cmd.worker_id }), { bantou: 1, type: "worker_reply_result", ok: true, cap_id: cmd.cap_id, worker_id: cmd.worker_id, accepted: true }),
   } as unknown as ServerLink;
   const store = createJsonListStore<RemoteRecord>(join(dir, "remotes.json"), () => {});

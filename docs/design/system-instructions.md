@@ -6,7 +6,9 @@
 
 center が master-cap（session の対話型 `claude --remote-control`）を起動するたびに、`--append-system-prompt` の値の**先頭**に付ける bantou 側の決まり文。利用者が設定で入れる追加指示（center 共通の `settings.instructions`、session ごとの `settings.instructions`）とは**別に管理**する。利用者の設定画面には出さず、編集もさせない。
 
-最初の部品は `master-cap-role`: master-cap は自分では実装・修正・長い調査をせず、remote-cap（server 上のオーケストレーター）に `remote_send` で指示を出し、report と `task_result` で結果を確かめ、利用者に報告する、という運用の案内（remote-cap 側の決まりは `docs/design/cap-orchestration.md`）。v2（2026-11-10）: worker の progress report は push されない（push は ask / approve / done と完了通知）。進捗は `remote_list` で見る、の 1 行を道具の節に反映（center の config `remotes.pushProgress` で push する側に戻せるが、文面は既定に合わせる）。
+最初の部品は `master-cap-role`: master-cap は自分では実装・修正・長い調査をせず、remote-cap（server 上のオーケストレーター）に `remote_send` で指示を出し、report と `task_result` で結果を確かめ、利用者に報告する、という運用の案内（remote-cap 側の決まりは `docs/design/cap-orchestration.md`）。v3（2026-11-11）: 「計画と cap の起こし直し」の節を足した。master-cap は受けた指示の計画を立て（作業のまとまりに切り分け、順序と依存を決める）、作業のまとまりごとに cap を起こし直す（同じ cap を使い回し続けない）。まとまりが終わったら結果を確かめて `remote_delete` で cap を閉じる（server 側の会話も破棄される）。次のまとまりが前の結果を要する時は成果物と決定事項を goal に書いて渡す（閉じた会話は引き継がれない）。cap が failed の時は理由（`error` / `conversation.last_error_text` / `cap_last_error`）を見て、会話が大きすぎるなら閉じて起こし直す。起こし直す時期や条件の数値は書かない（判断は master-cap。`remote_list` の `conversation` が材料）。背景: 1 つの cap に 7 日間すべての task を流し続け、会話が上限を超えて cap が起動できなくなった（`docs/design/center-tools.md`）。同じ節で `remote_delete` の説明と「足りなければ同じ cap に続きの task」を「同じまとまりの中で」に直した。
+
+v2（2026-11-10）: worker の progress report は push されない（push は ask / approve / done と完了通知）。進捗は `remote_list` で見る、の 1 行を道具の節に反映（center の config `remotes.pushProgress` で push する側に戻せるが、文面は既定に合わせる）。
 
 2 つ目の部品は `master-cap-availability`: master-cap は常に利用者の指示をいつでも受けられる状態で働く。ビルド・テスト・release・長い待ちで自分の turn を塞がず、時間のかかる作業は remote-cap に預ける。この Mac のローカルでしかできない作業（release の署名ビルド・publish など）は、ローカルのサブエージェント（Agent tool）か background 実行（`run_in_background`）に任せる（`master-cap-role` の「自分ではしない」の例外）。待つ時は turn を終えて通知で受け、並行の指示には普通に応える。
 
@@ -43,7 +45,7 @@ export const SYSTEM_INSTRUCTION_PARTS = [MASTER_CAP_ROLE, MASTER_CAP_AVAILABILIT
 - 文面は center の package の中に TypeScript の文字列として持つ。ファイル・config・環境変数からは読まない。理由: (1) center の版と一緒に配り、版で内容が決まる。(2) bun で 1 本に compile するので外部ファイルの同梱より単純。(3) テストで文面の要点（道具名、役割）を検証できる。
 - 部品が見てよい文脈は `ctx` だけ（今は session 名と、memory の設定があるか `memory?: boolean`）。将来 center id や permissionMode を足す時も `ctx` に足す。
 - 変更の手順: 文面を直す → `version` を上げる → `test/system-instructions.test.ts` の要点を更新する → 必要なら `docs/design` を直す。部品の追加は配列に足すだけ。
-- 見える化: 起動した session の status に `systemInstructions: ["master-cap-role@2", …]`、`center_info` に `systemInstructions: [{ id, version, title }]`（条件付きの部品も全部出る。`memory@1` の title に「設定がある session だけ」と書く）。本文は status にも log にも出さない（`--append-system-prompt` の値は長さだけに伏せる）。
+- 見える化: 起動した session の status に `systemInstructions: ["master-cap-role@3", …]`、`center_info` に `systemInstructions: [{ id, version, title }]`（条件付きの部品も全部出る。`memory@1` の title に「設定がある session だけ」と書く）。本文は status にも log にも出さない（`--append-system-prompt` の値は長さだけに伏せる）。
 
 ## 配線
 

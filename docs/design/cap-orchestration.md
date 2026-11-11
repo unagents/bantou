@@ -104,6 +104,15 @@ cap は worker の report のたびに再開するので、最終ではない返
 - 掃除後の同じ worker_id の `worker_start` は、dir に clone し直して起動する（`repo` を省いても、最初の clone の repo / branch を `logs/repo.json` から使う）。`repo` 引数なしで作った worker（dir の中で自分で clone する運用）は `repo.json` が無く clone 元が無いのが正常なので、空の dir（`logs/` と `state.json` は残る）でそのまま起動し、prompt に「この dir は掃除されて空。必要なら自分で clone し直すこと」を 1 行足す。session_id は state.json に残るので `--resume` は同じ。
 - 消すのは server が動いている間に done / stop を観測した worker だけ（記録はメモリ。server の再起動前に終わった worker は対象外）。
 
+## cap のライフサイクル（master-cap が作業のまとまりごとに起こし直す）
+
+- 背景（2026-11-11）: master-cap が 1 つの cap に 7 日間すべての task を流し続け、cap の会話が上限を超えた。cap の claude が「Prompt is too long」で起動 4 秒後に終了コード 1 になり、center には「終了コード 1」としか出なかった。`remote_delete` は center の記録だけ消し、server 側の cap（`caps/<cap_id>/state.json` の `session_id`）が残って、次の task が同じ会話を resume してまた落ちた。
+- 方針: cap は作業のまとまりごとに起こし直す。無意味に cap を使い回し続けない。計画（受けた指示を作業のまとまりに切り分ける）は master-cap の仕事で、埋め込み指示 `master-cap-role@3` に書く（`docs/design/system-instructions.md`）。起こし直す時期や条件の数値は決めない（判断は master-cap）。
+- 閉じ方: master-cap が `remote_delete` で cap を閉じる。server は `stop_cap` で実行中の worker を止め、cap の会話（`session_id`）を破棄する。次の task は同じ cap_id のまま新しい会話で始まる。cap が idle / failed / 実行中のどれでも閉じられる。
+- 残すもの: cap の `logs/`（セッションごとの生出力、`reports.jsonl`、閉じた会話の履歴 `closed.jsonl`）は消さずに残す。配下の worker の dir も閉じる操作では消さない。溜まった worker dir は「終わった worker の掃除」が掃除する。
+- 引き継ぎ: 閉じた会話は引き継がれない。次のまとまりに必要な成果物（branch・commit・report の置き場）と決定事項は、master-cap が次の goal に書いて渡す。
+- 判断の補助: `remote_list` の `conversation`（会話の開始時刻・run 数・context の使用量・直近の失敗の claude の error 文）と `cap_last_error`。失敗の理由は「終了コード 1: Prompt is too long」のように error 文まで出る。
+
 ## 根拠・補足
 
 - 2 体を最小にしたのは、実装した本人の確認では見落としが残るため。review は別 clone で差分を読み、テストを回す。

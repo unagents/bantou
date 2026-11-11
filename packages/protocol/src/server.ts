@@ -117,7 +117,9 @@ export interface ResumeWorkerCommand extends ServerCommandBase {
 }
 
 /**
- * Stop the running remote cap `cap_id` (its `claude -p` process group). Reply: stop_result, or error.
+ * Close the remote cap `cap_id`: stop its running `claude -p` process group (if any) and discard its conversation
+ * (the session_id in state.json), so the next task starts a new conversation. Works whether the cap is idle, failed or
+ * running. The cap's logs/ (raw output, reports.jsonl) are kept. Reply: stop_result, or error.
  * The interrupted kick_cap still gets its own cap_result with ok=false.
  */
 export interface StopCapCommand extends ServerCommandBase {
@@ -461,6 +463,35 @@ export interface StopResultReply {
   cap_id: string;
   /** true when a running (or about to start) run was found and stopped; false when the cap was not running. */
   stopped: boolean;
+  /**
+   * true when the server discarded the cap's conversation (state.json session_id -> null). false when there was nothing
+   * to discard (no such cap, or no session yet). Absent = the server only stops (it does not discard the conversation):
+   * a center must not read absence as "discarded".
+   */
+  session_cleared?: boolean;
+  /** The session_id that was discarded (null / absent when there was none). Servers that send session_cleared send this too. */
+  previous_session_id?: string | null;
+}
+
+/**
+ * Size and health of the conversation (one claude session) of a cap or worker. All fields are what the server could read
+ * from claude's own output; a field it could not read is null / absent. Optional in AgentStatus (additive; no version bump).
+ */
+export interface ConversationInfo {
+  /** ISO 8601. When the current conversation (session) started. */
+  started_at: string | null;
+  /** Number of runs (claude -p invocations that reached claude: task, kick_cap, report resume) in this conversation. */
+  tasks: number;
+  /** Tokens in the context at the last answer that reported usage: input + cache creation + cache read (claude's own figure; output excluded). */
+  context_tokens: number | null;
+  /** contextWindow claude reported for the main model. */
+  context_window: number | null;
+  /** context_tokens / context_window in percent (one decimal). null when either is unknown. */
+  context_percent: number | null;
+  /** ISO 8601. When context_tokens was read. */
+  usage_at: string | null;
+  /** Error text taken from claude's own output of the last failed run (e.g. "Prompt is too long"). Absent when the last run did not fail with one. */
+  last_error_text?: string;
 }
 
 export interface AgentStatus {
@@ -480,6 +511,8 @@ export interface AgentStatus {
   queued: number;
   /** Model the agent was started with (`--model`); null / absent = none given. Servers older than 1.4.0 omit it. */
   model?: string | null;
+  /** Conversation size / health (additive; absent on servers that do not send it). */
+  conversation?: ConversationInfo;
 }
 
 /**
@@ -889,7 +922,25 @@ function isAgentStatus(v: unknown): v is AgentStatus {
     optString(v.last_error) &&
     typeof v.retries === "number" &&
     typeof v.queued === "number" &&
-    (v.model === undefined || strOrNull(v.model))
+    (v.model === undefined || strOrNull(v.model)) &&
+    (v.conversation === undefined || isConversationInfo(v.conversation))
+  );
+}
+
+function numOrNull(v: unknown): boolean {
+  return v === null || (typeof v === "number" && Number.isFinite(v));
+}
+
+function isConversationInfo(v: unknown): v is ConversationInfo {
+  return (
+    isRecord(v) &&
+    strOrNull(v.started_at) &&
+    isCount(v.tasks) &&
+    numOrNull(v.context_tokens) &&
+    numOrNull(v.context_window) &&
+    numOrNull(v.context_percent) &&
+    strOrNull(v.usage_at) &&
+    optString(v.last_error_text)
   );
 }
 
@@ -938,7 +989,13 @@ export function isServerReply(v: unknown): v is ServerReply {
     case "worker_result":
       return isValidAgentId(v.worker_id) && isRunOutcome(v);
     case "stop_result":
-      return v.ok === true && isValidAgentId(v.cap_id) && typeof v.stopped === "boolean";
+      return (
+        v.ok === true &&
+        isValidAgentId(v.cap_id) &&
+        typeof v.stopped === "boolean" &&
+        (v.session_cleared === undefined || typeof v.session_cleared === "boolean") &&
+        (v.previous_session_id === undefined || strOrNull(v.previous_session_id))
+      );
     case "status_result":
       return (
         v.ok === true &&

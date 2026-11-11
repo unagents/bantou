@@ -32,7 +32,7 @@ function setup(opts: { statusWorkers?: unknown[]; activity?: ReturnType<typeof c
     selectPeer: async () => peerA,
     statusOn: async () => ({ bantou: 1, type: "status_result", ok: true, caps: kicks.map((k) => ({ kind: "cap", id: k.cmd.cap_id, state: "idle" })), workers: opts.statusWorkers ?? [] }),
     taskOn: (_p: ServerPeer, cmd: Record<string, unknown>) => new Promise((resolve) => kicks.push({ cmd, resolve })),
-    stopCapOn: async (_p: ServerPeer, cmd: { cap_id: string }) => (stops.push(cmd), { bantou: 1, type: "stop_result", ok: true, cap_id: cmd.cap_id, stopped: true }),
+    stopCapOn: async (_p: ServerPeer, cmd: { cap_id: string }) => (stops.push(cmd), { bantou: 1, type: "stop_result", ok: true, cap_id: cmd.cap_id, stopped: true, session_cleared: true, previous_session_id: "s-old" }),
     workerReplyOn: async (_p: ServerPeer, cmd: { cap_id: string; worker_id: string }) => (replies.push(cmd), { bantou: 1, type: "worker_reply_result", ok: true, cap_id: cmd.cap_id, worker_id: cmd.worker_id, accepted: true }),
   } as unknown as ServerLink;
   const store = createJsonListStore<RemoteRecord>(join(dir, "remotes.json"), () => {});
@@ -195,7 +195,7 @@ test("remote_delete: 旧共有 cap は remote_id で明示した時だけ消せ�
   await assert.rejects(mgr.delete({ owner: "alpha" }), /未定義/);
   assert.equal(stops.length, 0);
   const r = await mgr.delete({ remote_id: CENTER, owner: "alpha" });
-  assert.deepEqual(r, { remote_id: CENTER, deleted: true, stopped: true });
+  assert.deepEqual(r, { remote_id: CENTER, deleted: true, stopped: true, session_cleared: true, previous_session_id: "s-old" });
   assert.deepEqual(stops, [{ cap_id: CENTER }]);
   assert.deepEqual(mgr.list(), []);
 });

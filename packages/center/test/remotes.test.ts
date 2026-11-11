@@ -65,7 +65,7 @@ function setup(over: Partial<ServerLink> = {}, activity?: ActivityStore, notify?
       stops.push({ peer, cmd });
       // stop_cap は cap の実行を止めるだけで cap は残るが、delete 後の「作り直し」を試すため記録ごと server からも消す
       caps.set(peer.id, []);
-      return { bantou: 1, type: "stop_result", ok: true, cap_id: (cmd as { cap_id: string }).cap_id, stopped: true };
+      return { bantou: 1, type: "stop_result", ok: true, cap_id: (cmd as { cap_id: string }).cap_id, stopped: true, session_cleared: true, previous_session_id: "s-old" };
     },
     ...over,
   } as unknown as ServerLink;
@@ -796,7 +796,7 @@ test("remote_delete: stop_cap を同じ cap_id で送って記録を外す。外
   const { mgr, kicks, stops } = setup();
   await mgr.send({ owner: "pm1", goal: "p" });
   const r = await mgr.delete({ remote_id: CAP });
-  assert.deepEqual(r, { remote_id: CAP, deleted: true, stopped: true });
+  assert.deepEqual(r, { remote_id: CAP, deleted: true, stopped: true, session_cleared: true, previous_session_id: "s-old" });
   assert.deepEqual(stops.map((s) => [s.peer.id, s.cmd]), [["id-a", { cap_id: CAP }]]);
   assert.equal(mgr.list().length, 0);
   kicks[0].resolve({ ...ok(""), state: "failed", error: "stop_cap により停止" });
@@ -833,14 +833,15 @@ test("remote_delete: server の peer id が変わっていても名前 + host �
   assert.equal(stops[0].peer.id, "id-a2");
   await mgr.send({ owner: "pm1", goal: "p" });
   setPeers([peerB]);
-  await assert.rejects(mgr.delete({}), /止められない/);
+  await assert.rejects(mgr.delete({}), /閉じられない/);
   assert.equal(mgr.list().length, 1);
   const r = await mgr.delete({ force: true });
-  assert.match(r.warning ?? "", /stop_cap を送れなかった/);
+  assert.match(r.warning ?? "", /閉じられなかった/);
+  assert.equal(r.session_cleared, null);
   assert.equal(mgr.list().length, 0);
 });
 
-test("remote_delete: stop が error 返信なら running は拒否。終わった記録は警告付きで消せる", async () => {
+test("remote_delete: stop が error 返信なら、running でも終わった記録でも拒否（会話の破棄を確認できない）。force は警告付きで記録だけ消す", async () => {
   const { mgr, kicks } = setup({ stopCapOn: async () => ({ bantou: 1, type: "error", ok: false, message: "kill 失敗", command: "stop_cap" }) as never });
   await mgr.send({ owner: "pm1", goal: "p" });
   await assert.rejects(mgr.delete({}), /kill 失敗/);
@@ -848,8 +849,12 @@ test("remote_delete: stop が error 返信なら running は拒否。終わっ�
   await tick();
   mgr.onActivity(CAP);
   await tick();
-  const r = await mgr.delete({});
+  await assert.rejects(mgr.delete({}), /kill 失敗/);
+  assert.equal(mgr.list().length, 1);
+  const r = await mgr.delete({ force: true });
   assert.match(r.warning ?? "", /kill 失敗/);
+  assert.equal(r.session_cleared, null);
+  assert.equal(mgr.list().length, 0);
 });
 
 // -- restore / 旧形式 --
@@ -2089,4 +2094,53 @@ test("memory: remotes.json に memory の token は書かれない", async () =>
   assert.ok(!saved.includes(SECRET));
   assert.ok(!saved.includes("http://mem/mcp"));
   memoryEvents.close();
+});
+
+// -- cap の閉じ方（会話の破棄）と会話の使用量 --
+
+test("remote_delete: 会話を破棄しない旧 server（session_cleared 無し）は閉じたと見なさず拒否。force は session_cleared=null と警告で記録だけ消す", async () => {
+  const { mgr } = setup({ stopCapOn: async (_p: ServerPeer, cmd: unknown) => ({ bantou: 1, type: "stop_result", ok: true, cap_id: (cmd as { cap_id: string }).cap_id, stopped: false }) as never });
+  await mgr.send({ owner: "pm1", goal: "p" });
+  await assert.rejects(mgr.delete({}), /会話（session）を破棄したことを確認できない/);
+  assert.equal(mgr.list().length, 1);
+  const r = await mgr.delete({ force: true });
+  assert.equal(r.session_cleared, null);
+  assert.match(r.warning ?? "", /会話は残る/);
+  assert.equal(mgr.list().length, 0);
+});
+
+test("remote_delete: session が無かった cap は session_cleared=false（破棄するものが無い）で消せる", async () => {
+  const { mgr } = setup({ stopCapOn: async (_p: ServerPeer, cmd: unknown) => ({ bantou: 1, type: "stop_result", ok: true, cap_id: (cmd as { cap_id: string }).cap_id, stopped: false, session_cleared: false, previous_session_id: null }) as never });
+  await mgr.send({ owner: "pm1", goal: "p" });
+  const r = await mgr.delete({});
+  assert.deepEqual(r, { remote_id: CAP, deleted: true, stopped: false, session_cleared: false, previous_session_id: null });
+});
+
+test("remote_list: failed（Prompt is too long）の cap は会話の使用量（conversation）と失敗の理由（cap_last_error）を出す。閉じて同じ cap_id で起こし直せる", async () => {
+  const conversation = { started_at: "2026-11-04T00:00:00.000Z", tasks: 40, context_tokens: 1_000_000, context_window: 1_000_000, context_percent: 100, usage_at: "2026-11-11T00:00:00.000Z", last_error_text: "Prompt is too long" };
+  let failed = true;
+  const { mgr, kicks } = setup({
+    statusOn: async () => ({
+      bantou: 1,
+      type: "status_result",
+      ok: true,
+      caps: failed ? [{ kind: "cap", id: CAP, state: "failed", queued: 0, last_started_at: "s1", last_error: "終了コード 1: Prompt is too long", conversation }] : [],
+      workers: [],
+    }) as never,
+  });
+  await mgr.send({ owner: "pm1", goal: "p" });
+  kicks[0].resolve({ ...ok(""), state: "failed", error: "終了コード 1: Prompt is too long" });
+  await tick();
+  await mgr.checkReachability();
+  const v = mgr.list({ owner: "pm1" })[0];
+  assert.equal(v.error, "終了コード 1: Prompt is too long");
+  assert.deepEqual(v.conversation, conversation);
+  assert.equal(v.cap_last_error, "終了コード 1: Prompt is too long");
+  const d = await mgr.delete({ owner: "pm1" });
+  assert.equal(d.session_cleared, true);
+  failed = false;
+  assert.equal(mgr.list({ owner: "pm1" }).length, 0);
+  const again = await mgr.send({ owner: "pm1", goal: "again" });
+  assert.equal(again.created, true);
+  assert.equal(again.remote_id, CAP);
 });

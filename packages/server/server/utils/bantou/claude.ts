@@ -38,8 +38,16 @@ export interface ClaudeRunOptions {
   extraAllowedTools?: string[];
 }
 
+/** claude の result 行から読んだ、会話の大きさ。読めない項目は null。 */
+export interface ResultUsage {
+  /** 最後の応答の input + cache_creation + cache_read（claude の式。output は含まない）。 */
+  contextTokens: number | null;
+  /** 主モデルの contextWindow。 */
+  contextWindow: number | null;
+}
+
 export type ClaudeRunResult =
-  | { ok: true; sessionId: string; resultText: string; durationMs: number }
+  | { ok: true; sessionId: string; resultText: string; durationMs: number; usage?: ResultUsage }
   | {
       ok: false;
       sessionMissing: boolean;
@@ -48,6 +56,9 @@ export type ClaudeRunResult =
       durationMs: number;
       /** 子が signal で終わった時の signal。 */
       signal?: NodeJS.Signals | null;
+      /** claude の出力から取れた error 文（例: "Prompt is too long"）。detail にも含まれる。 */
+      errorText?: string;
+      usage?: ResultUsage;
     };
 
 /** claude が継続先 session を見つけられない時の文言（実測）。 */
@@ -102,6 +113,66 @@ export function readResultEnvelope(
   };
 }
 
+const finiteNum = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+
+/**
+ * stream-json の最終行（result envelope）から会話の大きさと error 文を読む。result 行でなければ両方 null。
+ * - contextTokens: usage.iterations の最後（最後の応答 1 回分）の input + cache_creation + cache_read。iterations が無ければ null
+ *   （usage 本体は run 全体の累計なので使わない）。
+ * - contextWindow: modelUsage のうち、トークン合計が最大のモデル（主モデル）の contextWindow。
+ * - errorText: is_error の result の result 文、または errors 配列（error_* subtype）。
+ */
+export function readResultDetails(lastLine: string): { usage: ResultUsage | null; errorText: string | null } {
+  const none = { usage: null, errorText: null };
+  let d: unknown;
+  try {
+    d = JSON.parse(lastLine);
+  } catch {
+    return none;
+  }
+  if (typeof d !== "object" || d === null || Array.isArray(d)) return none;
+  const e = d as Record<string, unknown>;
+  if (e.type !== "result") return none;
+  let contextTokens: number | null = null;
+  const u = e.usage as { iterations?: unknown } | null | undefined;
+  if (u && Array.isArray(u.iterations) && u.iterations.length > 0) {
+    const it = u.iterations[u.iterations.length - 1] as Record<string, unknown> | null;
+    if (it && typeof it === "object") {
+      const a = finiteNum(it.input_tokens);
+      const b = finiteNum(it.cache_creation_input_tokens);
+      const c = finiteNum(it.cache_read_input_tokens);
+      if (a !== null || b !== null || c !== null) contextTokens = (a ?? 0) + (b ?? 0) + (c ?? 0);
+    }
+  }
+  let contextWindow: number | null = null;
+  const mu = e.modelUsage;
+  if (mu && typeof mu === "object" && !Array.isArray(mu)) {
+    let best = -1;
+    for (const v of Object.values(mu as Record<string, unknown>)) {
+      if (!v || typeof v !== "object") continue;
+      const m = v as Record<string, unknown>;
+      const total = (finiteNum(m.inputTokens) ?? 0) + (finiteNum(m.outputTokens) ?? 0) + (finiteNum(m.cacheReadInputTokens) ?? 0) + (finiteNum(m.cacheCreationInputTokens) ?? 0);
+      const w = finiteNum(m.contextWindow);
+      if (w !== null && w > 0 && total > best) {
+        best = total;
+        contextWindow = w;
+      }
+    }
+  }
+  let errorText: string | null = null;
+  if (e.is_error === true || (typeof e.subtype === "string" && e.subtype !== "success")) {
+    if (typeof e.result === "string" && e.result.trim() !== "") errorText = e.result.trim();
+    else if (Array.isArray(e.errors)) {
+      const t = e.errors.filter((x): x is string => typeof x === "string" && x.trim() !== "").join("; ");
+      if (t !== "") errorText = t;
+    }
+  }
+  return {
+    usage: contextTokens !== null || contextWindow !== null ? { contextTokens, contextWindow } : null,
+    errorText,
+  };
+}
+
 /**
  * 子へ signal を送る。子は detached（setsid、pgid = pid）で起動するので process group ごと送り、
  * 孫まで止める。group が無い・pid が無い場合は子 1 本へ送る。
@@ -132,7 +203,7 @@ export function runClaude(o: ClaudeRunOptions): Promise<ClaudeRunResult> {
     };
     const fail = (
       detail: string,
-      extra: { sessionMissing?: boolean; timedOut?: boolean; signal?: NodeJS.Signals | null } = {},
+      extra: { sessionMissing?: boolean; timedOut?: boolean; signal?: NodeJS.Signals | null; errorText?: string; usage?: ResultUsage } = {},
     ): void =>
       finish({
         ok: false,
@@ -141,6 +212,8 @@ export function runClaude(o: ClaudeRunOptions): Promise<ClaudeRunResult> {
         detail,
         durationMs: Date.now() - started,
         ...(extra.signal ? { signal: extra.signal } : {}),
+        ...(extra.errorText !== undefined ? { errorText: extra.errorText } : {}),
+        ...(extra.usage ? { usage: extra.usage } : {}),
       });
 
     let child: ChildProcess;
@@ -222,16 +295,24 @@ export function runClaude(o: ClaudeRunOptions): Promise<ClaudeRunResult> {
           return;
         }
         const missing = `${stderr}${last}`.includes(SESSION_MISSING);
+        const details = readResultDetails(last);
+        const extra = {
+          ...(details.errorText !== null ? { errorText: details.errorText } : {}),
+          ...(details.usage ? { usage: details.usage } : {}),
+        };
+        // 「終了コード 1」だけにしない: claude の result 行の error 文（例: Prompt is too long）を添える
+        const withText = (base: string): string => (details.errorText !== null && !base.includes(details.errorText) ? `${base}: ${details.errorText}` : base);
         if (code !== 0) {
-          fail(stderr.trim() || (signal ? `signal ${signal} で終了` : `終了コード ${code}`), {
+          fail(withText(stderr.trim() || (signal ? `signal ${signal} で終了` : `終了コード ${code}`)), {
             sessionMissing: missing,
             signal,
+            ...extra,
           });
           return;
         }
         const env = readResultEnvelope(last);
         if (env === null) {
-          fail("応答が成功として読み取れない", { sessionMissing: missing });
+          fail(withText("応答が成功として読み取れない"), { sessionMissing: missing, ...extra });
           return;
         }
         finish({
@@ -239,6 +320,7 @@ export function runClaude(o: ClaudeRunOptions): Promise<ClaudeRunResult> {
           sessionId: env.sessionId ?? o.sessionId,
           resultText: env.resultText,
           durationMs: Date.now() - started,
+          ...(details.usage ? { usage: details.usage } : {}),
         });
       })();
     });

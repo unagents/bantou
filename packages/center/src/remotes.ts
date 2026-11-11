@@ -4,6 +4,7 @@ import {
   AGENT_ID_PATTERN,
   MODEL_PATTERN,
   type AgentStatus,
+  type ConversationInfo,
   type CapResultReply,
   type ErrorReply,
   type StatusReply,
@@ -212,6 +213,19 @@ export interface RemoteRecord {
   pending: PendingInstruction[];
 }
 
+/**
+ * remote_delete の結果。stopped = 実行中の run を止めた。session_cleared = server が cap の会話（session_id）を破棄した
+ * （true = 破棄した / false = 破棄するものが無かった / null = server が確認できなかった。force で記録だけ消した時。warning 付き）。
+ */
+export interface RemoteDeleteResult {
+  remote_id: string;
+  deleted: true;
+  stopped: boolean;
+  session_cleared: boolean | null;
+  previous_session_id?: string | null;
+  warning?: string;
+}
+
 /** remote_list が返す 1 件。通知がまだ無ければ activity は無い。 */
 export type RemoteView = Omit<RemoteRecord, "worker_reports" | "pending"> & {
   /** 未完了の指示。delivery は送達状態（旧形式の記録は sent）。 */
@@ -223,6 +237,13 @@ export type RemoteView = Omit<RemoteRecord, "worker_reports" | "pending"> & {
   owners: string[];
   worker_reports: StoredWorkerReport[];
   activity?: RemoteActivity;
+  /**
+   * cap の会話（claude の session）の使用量。server の status（周期取得）から。開始時刻・run 数・直近の context（tokens / window / %）・直近の失敗の error 文。
+   * 旧 server・status 未取得・cap が server に無い間は無い。
+   */
+  conversation?: ConversationInfo;
+  /** cap が failed の時の、server が記録した失敗の理由（status の last_error。claude の error 文を含む。例: 終了コード 1: Prompt is too long）。 */
+  cap_last_error?: string;
   /** 表示用の server。host 名を主にして server_id（無ければ peer id）を添える。同じ host 名の server が複数ある時は user と workspace も付く。 */
   server_label: string;
 };
@@ -389,7 +410,7 @@ export interface RemoteManager {
   /** server から worker_report を受けた時に呼ぶ。記録に積み、未完了の指示の owner へ push する（progress は既定で push しない。config の remotes.pushProgress が true の時だけ、同じ worker から 60 秒に 1 回）。 */
   onWorkerReport(report: WorkerReportNotice, fromId?: string): void;
   /** stop_cap を送って記録を外す。owner（session）を渡すと対象はその session の cap（と、remote_id で明示した旧共有 cap）だけ。remote_id 省略時は owner の cap（server が複数なら server で絞る）。 */
-  delete(input: { remote_id?: string; server?: string; force?: boolean; owner?: string }): Promise<{ remote_id: string; deleted: true; stopped: boolean; warning?: string }>;
+  delete(input: { remote_id?: string; server?: string; force?: boolean; owner?: string }): Promise<RemoteDeleteResult>;
   /**
    * 最初の返信の後に server が送ってきた task_result / cap_result / error（task・kick_cap。report 起因の再開など）を記録に反映する。
    * 記録が無い（delete 済み・cap_kick の cap・旧形式）・まだ最初の返信待ちの時は何もしない。反映したら true。
@@ -850,7 +871,13 @@ export function createRemoteManager(opts: {
     const base: RemoteView = { ...r, server_label: labelOf(r), reachability: reachOf(r), cap_state: capStateOf(r), pending: r.pending.map((p) => ({ ...p, delivery: p.delivery ?? ("sent" as const) })), owners: ownersOf(r), worker_reports: (r.worker_reports ?? []).map((w) => ({ ...w })), state };
     if (state === "running") delete base.finishedAt;
     const activity = activityOf(r);
-    return { ...base, ...(activity ? { activity } : {}) };
+    const snapCap = capSnap.get(r)?.cap;
+    return {
+      ...base,
+      ...(activity ? { activity } : {}),
+      ...(snapCap?.conversation ? { conversation: snapCap.conversation } : {}),
+      ...(snapCap?.state === "failed" && snapCap.last_error !== undefined ? { cap_last_error: snapCap.last_error } : {}),
+    };
   };
 
   const wake = (): void => {
@@ -1777,24 +1804,31 @@ export function createRemoteManager(opts: {
     async delete({ remote_id, server, force, owner }) {
       const rec = await pick(remote_id, server, owner, true);
       let stopped = false;
+      let sessionCleared: boolean | null = null;
+      let previousSession: string | null | undefined;
       let warning: string | undefined;
       try {
         const peer = await findPeer(rec);
         const reply = await link.stopCapOn(peer, { cap_id: rec.remote_id });
-        if (reply.type === "stop_result") stopped = reply.stopped;
-        else throw new Error(reply.type === "error" ? reply.message : "不明な返信");
+        if (reply.type === "stop_result") {
+          stopped = reply.stopped;
+          // session_cleared が無い = 止めるだけで会話を破棄しない旧 server。破棄したとは見なさない
+          if (reply.session_cleared === undefined) throw new Error("server が会話（session）を破棄したことを確認できない（旧版の server。次の指示が同じ会話を resume する）");
+          sessionCleared = reply.session_cleared;
+          previousSession = reply.previous_session_id;
+        } else throw new Error(reply.type === "error" ? reply.message : "不明な返信");
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        // 実行中の記録を、止められないまま消さない。force か、既に終わっている記録なら消す
-        if (stateOf(rec) === "running" && !force) throw new Error(`remote を止められない: ${msg}（force: true で記録だけ消せる）`);
-        warning = `server へ stop_cap を送れなかった: ${msg}`;
+        // 会話の破棄を確認できないまま記録を消さない（消すと次の指示が同じ会話を resume して同じ失敗を繰り返す）。force なら記録だけ消す
+        if (!force) throw new Error(`remote を閉じられない: ${msg}（force: true で記録だけ消せる。server の cap の会話は残る）`);
+        warning = `server の cap を閉じられなかった（記録だけ消した。server の cap の会話は残る）: ${msg}`;
       }
       forgetRecord(rec);
       opts.activity?.forget(rec.remote_id, peerOfRec(rec) ?? rec.server);
       wake();
       await persist();
-      log(`remote 削除: ${rec.remote_id} server=${describeServer(refOf(rec))} stopped=${stopped}${warning ? ` warning=${warning}` : ""}`);
-      return { remote_id: rec.remote_id, deleted: true, stopped, ...(warning ? { warning } : {}) };
+      log(`remote 削除: ${rec.remote_id} server=${describeServer(refOf(rec))} stopped=${stopped} session_cleared=${sessionCleared}${warning ? ` warning=${warning}` : ""}`);
+      return { remote_id: rec.remote_id, deleted: true, stopped, session_cleared: sessionCleared, ...(previousSession !== undefined ? { previous_session_id: previousSession } : {}), ...(warning ? { warning } : {}) };
     },
 
     async workerReply({ remote_id, server, worker_id, text, owner }) {
