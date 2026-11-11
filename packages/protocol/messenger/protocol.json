@@ -1,6 +1,6 @@
 {
   "name": "bantou",
-  "version": "1.8.0",
+  "version": "1.8.1",
   "description": "bantou-server commands (kick_cap, stop_cap, status, hello, update_server, task, worker_reply, retire_server), replies (cap_result, stop_result, status_result, hello_result, update_result, task_result, worker_reply_result, retire_result, error) and notices (activity, worker_report). Message body is one JSON object in the text; `bantou: 1` is the body schema version.",
   "messages": {
     "hello": {

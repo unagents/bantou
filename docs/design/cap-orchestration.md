@@ -115,6 +115,7 @@ cap は worker の report のたびに再開するので、最終ではない返
 
 ## 根拠・補足
 
+- protocol の定義（`packages/protocol/messenger/` の `protocol.json` / `PROTOCOL.md`）を変える task は、版を上げ `versions.json` に足す（`packages/protocol/test/versions.test.mjs` が落とす）。ただし package の version bump は worker の制約どおりしない。
 - 2 体を最小にしたのは、実装した本人の確認では見落としが残るため。review は別 clone で差分を読み、テストを回す。
 - 往復の上限は 3 回（固定。`CAP_GUIDE` 内の数値）。
 - 既存の決まりは cap の prompt（`kick_cap`）側にあり、server は中身を知らない。cap が worker の指示に引き継ぐ形にした。

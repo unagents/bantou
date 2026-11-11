@@ -272,7 +272,7 @@ center から server を外す指示（protocol 1.8.0、`docs/protocol.md` の `
 { "bantou": 1, "type": "error", "ok": false, "message": "git clone 失敗: ...", "command": "kick_cap" }
 ```
 
-- `stop_result`: `{ "bantou": 1, "type": "stop_result", "ok": true, "cap_id": "cap-a", "stopped": true, "session_cleared": true, "previous_session_id": "0b6f...-uuid" }`。`stopped` = 実行中（または待ち）の指示を止めた。`session_cleared` = 会話を破棄した（cap の dir が無い・session が無い時は false）。この 2 項目は後から足した任意項目（protocol の版は 1.8.0 のまま）。stop_cap の失敗（`cap_id` が不正でない限り通常は無い）は `error`（`command: "stop_cap"`, `cap_id` 付き）。
+- `stop_result`: `{ "bantou": 1, "type": "stop_result", "ok": true, "cap_id": "cap-a", "stopped": true, "session_cleared": true, "previous_session_id": "0b6f...-uuid" }`。`stopped` = 実行中（または待ち）の指示を止めた。`session_cleared` = 会話を破棄した（cap の dir が無い・session が無い時は false）。この 2 項目は後から足した任意項目（定義に入ったのは protocol 1.8.1。1.8.0 の定義には 2 つの hash があった）。stop_cap の失敗（`cap_id` が不正でない限り通常は無い）は `error`（`command: "stop_cap"`, `cap_id` 付き）。
 - `cap_result` は claude の実行が終わってから返る。数分かかることがある。
 - 実行が失敗しても `cap_result` で返る（`ok: false` と `error`）。
 - `error` は実行に入る前の失敗（git 失敗、state が `running` / `error` で起動できない、state 破損など）。

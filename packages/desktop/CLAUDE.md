@@ -27,6 +27,7 @@ Run E2E on mac200, never on this Mac.
 
 Do it without asking once the review check passes. The release runs on mac200 (claude-cli) with `packages/desktop/scripts/release.sh`.
 
+0. When `packages/protocol/messenger/` (`protocol.json` / `PROTOCOL.md`) changed: the protocol `version` must be raised and `versions.json` extended (`packages/protocol/test/versions.test.mjs` checks it). The center only talks to servers on the exact same protocol version, so publish the server first (step 1), then release the desktop.
 1. When `packages/server/` changed: the desktop embeds `packages/server/package.json`'s version as its paired server version (`build-sidecar.ts`). Bump `packages/server/package.json` on develop; otherwise centers ask servers for an unpublished version and show `failed`. The script runs the server tests and publishes the server to npm (before pushing) when that version is not on npm yet. npm on mac200 (claude-cli) is logged in.
 2. Sync the repo to mac200 (review check step 1), then run the script there:
    `ssh claude-cli@192.168.1.200 work/bantou-mono/packages/desktop/scripts/release.sh <ver>` (`release.sh --dry-run <ver>` stops before any push or publish).
