@@ -62,8 +62,8 @@ c.close()
 
 ## Results
 
-- `packages/web`: typecheck ok, test 46 pass / 0 fail (was 38; +8 on the built server).
-- `packages/center-client`: typecheck ok, test 158 pass / 0 fail (was 141; +17).
+- `packages/web`: typecheck ok, test 48 pass / 0 fail (was 38; +8 in the first commit, +2 body-cap tests in the review fix).
+- `packages/center-client`: typecheck ok, test 180 pass / 0 fail (was 141; +17 first commit, +22 review fix).
 - `packages/protocol`: 43 pass.
 - Wiring test checks: new routes behind the guard (no key 403 / no JWT 401 / other email 403 / bad Origin 403), start without a settings file and health says `no-target`, the settings file written later is used without restart, unknown command and tool (`server_retire`, `session_delete`) 404 with nothing sent to the center, set_settings 403 and file unchanged, token / URL password absent from health, get_settings, a tool body, error bodies and the server's stdout/stderr, SSE reaches two clients with one events connection to the center.
 - Fake centers listen on 127.0.0.1 with a free port.
@@ -72,3 +72,20 @@ c.close()
 
 - Not done: real-center check (no real center was used); `session_attach_*` / terminal commands (4a / 4b).
 - Clean-up of this clone is done with `mcp__bantou__bash` rm (relative paths).
+
+## Review fix (L1-L3)
+
+Code commits after `17a8ad4`: `1bb8b4d` (spellings, body cap, tests) and `6df3be1` (log lines, SSE target read). The branch HEAD is the report commit after them (full SHA in the report sent to the cap).
+
+- L1 spellings: new `src/secrets.ts` (`maskSecrets`, `formsOf`). A secret is also masked in other letter case, percent-encoded (`encodeURIComponent`), base64 (standard and url-safe, all 3 byte alignments, so also inside a longer base64 text), `\uXXXX` and JSON-escaped (`"`, `\`) forms. A secret under 4 chars (the existing minimum for derived forms, same as the URL password rule) is masked in its exact form only. `mcp.ts` `scrub` and `redact.ts` both use it, so the rpc result, rpc error, health reason, SSE body and logs are covered.
+- Found while testing: an SSE event could be sent before any rpc, when the redactor had not seen the target yet, so the token was not masked in the stream. The stream now reads the target for every event (one promise chain keeps the order). The logger given to `createCenterClient` is wrapped so every log line (mcp, sessions, events, rpc) passes the redactor; a secret noted from a settings input was missing from the mcp log lines before.
+- L2 body cap: new `src/body.ts` `readBodyLimited`. `Content-Length` over 1 MiB: not read, 413. Chunked: counted while it arrives, nothing kept after the cap, the rest dropped up to 4x the cap, then reading stops. 413 carries `Connection: close`. The route calls it instead of `readRawBody`.
+- L3 tests: `secret-forms.test.ts`, `body.test.ts`, 8 more in `client.test.ts` (special-char token, case, base64, URL-encoded, \u, health reason, rpc error, rpc result, SSE, log), 2 in the wiring test (Content-Length 400000000 with no body bytes; chunked 1.25 MiB; both 413, with a 5 s timeout that fails by assertion). Streams are closed in `finally` so a failed assertion does not hang.
+- Mutations (change put in, tests run, reverted; all killed by an assertion, no hang): no URL-encode form (2 fail), no JSON-escape form (2), no \u form (1), no base64 forms (5), case-sensitive match (9), health without redactor (1), rpc error without redactor (1), rpc result without redactor (3), SSE without redactor (2), logger wrapper off for warn (1), no Content-Length check in `readBodyLimited` (1), no counting (1); route using `readRawBody` again: the wiring test "Content-Length 超過" fails after 5 s.
+- Mutations not killed: the logger wrapper for `info` (no secret reaches an info line that I could build); the rpc warn line's own redactor (the wrapped logger covers it). The chunked wiring test passes with `readRawBody` (rpc() still refuses a body over the cap after reading it): only the memory use differs; the Content-Length test is the one that detects it.
+
+Results after the fix: web typecheck ok, 48 pass; center-client typecheck ok, 180 pass; protocol 43 pass.
+
+## Remaining (not fixed, by decision)
+
+- L4: other methods on `/api/rpc/:cmd`, `/api/health` and `/api/events` (GET on rpc, POST on health) get the SPA fallback 200 after the guard. No data is returned. Left as is.
