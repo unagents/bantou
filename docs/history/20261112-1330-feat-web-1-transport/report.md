@@ -23,9 +23,9 @@
 - `grep -rn "@tauri-apps" packages/desktop/src` は `src/tauri/` のみ（`e2e/mock/install.ts` のコメント 1 件は src 外）
 - `bun run typecheck`（`nuxt typecheck`）: exit 0、error TS 0 件
 - 既存 unit test: desktop に無し（`e2e` のみ）
-- 既存 e2e（mock、204 の headless chromium、`--retries=1`）: 220 passed / 0 failed (8.4m)
+- 既存 e2e（mock、Linux の headless chromium、`--retries=1`）: 220 passed / 0 failed (8.4m)
 - 動かせなかったもの
-  - mac200 での e2e・`bun run tauri build`: 204 から mac200 へ接続しない制約のため未実施。release 前に mac200 で実施が必要
+  - macOS 実機での e2e と `bun run tauri build`（`packages/desktop/CLAUDE.md` の手順）: 他 host へ接続しない制約のため未実施。release 前に実施が必要
   - 保存画像（`board.png` ほか）の人の目視比較: 未実施。コードは表示に触れていない
   - `cargo test`: Rust 未変更のため未実施
 - center の rc-orphan 1 件: 既知。今回は center を実行していない
