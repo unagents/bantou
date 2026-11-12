@@ -337,8 +337,8 @@ test("createCenterMcp: json() parses the text, connection() hides the userinfo a
   assert.deepEqual(await mcp.json("center_info"), { workspace: "/ws" });
   const c = await mcp.connection();
   assert.deepEqual(c, { url: mock.url, source: "remote", connected: true });
-  mock.rawTools.set("garbled", "not json");
-  await assert.rejects(mcp.json("garbled"), (e: Error) => e instanceof CenterMcpError && e.message.startsWith("garbled の結果を読めない"));
+  mock.rawTools.set("rc_list", "not json");
+  await assert.rejects(mcp.json("rc_list"), (e: Error) => e instanceof CenterMcpError && e.message.startsWith("rc_list の結果を読めない"));
   const dead = createCenterMcp({ settings: { selectTarget: async () => ({ url: "http://u:p@127.0.0.1:1/mcp?t=s", source: "remote" }) } });
   const dc = await dead.connection();
   assert.equal(dc.connected, false);

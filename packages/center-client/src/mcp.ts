@@ -6,6 +6,7 @@
 // Secrets: error text and log lines never carry the token or the userinfo of the URL (`redactUrl`, `scrub`).
 
 import { redactUrl } from "./normalize.ts";
+import { allowWebTool } from "./tool-policy.ts";
 import type { SettingsPolicy, Target } from "./settings.ts";
 
 export const PROTOCOL_VERSION = "2025-06-18";
@@ -167,19 +168,35 @@ export function fetchableUrl(url: string): string {
   }
 }
 
-/** Remove the token and the URL password from free text (an error text from a library, a response body). */
-export function scrub(text: string, url: string, token: string | undefined): string {
-  let out = text;
-  const secrets: string[] = [];
-  if (token) secrets.push(token);
+/** The secrets of a connection: the token and the URL password (raw and percent-decoded, each on its own). */
+export function secretsOf(url: string, token: string | undefined): string[] {
+  const out: string[] = [];
+  if (token) out.push(token);
+  let u: URL | undefined;
   try {
-    const u = new URL(url);
-    if (u.password.length >= 4) secrets.push(u.password, decodeURIComponent(u.password));
+    u = new URL(url);
   } catch {
     // not a URL: nothing to take from it
   }
-  for (const s of secrets) if (s) out = out.split(s).join("***");
+  if (u && u.password.length >= 4) {
+    out.push(u.password);
+    try {
+      out.push(decodeURIComponent(u.password));
+    } catch {
+      // not decodable (e.g. `%zz`): the raw form above is enough
+    }
+  }
   return out;
+}
+
+/**
+ * Remove the secrets of `url` / `token` from free text (a library error, a response body), and any
+ * `scheme://user:pass@` userinfo left in it.
+ */
+export function scrub(text: string, url: string, token: string | undefined): string {
+  let out = text;
+  for (const s of secretsOf(url, token)) out = out.split(s).join("***");
+  return out.replace(/([a-z][a-z0-9+.-]*:\/\/)[^/\s@]*@/gi, "$1");
 }
 
 function errText(e: unknown): string {
@@ -297,7 +314,13 @@ export class McpClient {
         scrub(`initialize が HTTP ${r.status} で失敗 (${redactUrl(url)}): ${snippet(r.body)}`, url, token),
       );
     }
-    const result = pickResponse(parseMessages(r.contentType, r.body), id);
+    let result: unknown;
+    try {
+      result = pickResponse(parseMessages(r.contentType, r.body), id);
+    } catch (e) {
+      if (e instanceof CenterMcpError) throw new CenterMcpError(scrub(e.message, url, token));
+      throw e;
+    }
     const proto = isObj(result) && typeof result.protocolVersion === "string" ? result.protocolVersion : PROTOCOL_VERSION;
     const session: McpSession = { url, token, id: r.sessionId, protocol: proto };
     let n: Reply;
@@ -466,10 +489,21 @@ export interface CenterMcp {
 }
 
 export function createCenterMcp(opts: CenterMcpOptions): CenterMcp {
-  const client = new McpClient(opts);
+  // Fail closed: without an `allowTool` the web list applies (a caller that wants every tool says so).
+  const client = new McpClient({ ...opts, policy: { allowTool: opts.policy?.allowTool ?? allowWebTool } });
+  let last: Target | undefined;
+  /** A failure of `selectTarget`: the text without the secrets of the last known target. */
+  const selectFailure = (e: unknown): string =>
+    scrub(e instanceof Error ? e.message : String(e), last?.url ?? "", last?.token);
   const target = async (): Promise<Target> => {
-    const t = await opts.settings.selectTarget();
+    let t: Target | undefined;
+    try {
+      t = await opts.settings.selectTarget();
+    } catch (e) {
+      throw new CenterMcpError(selectFailure(e));
+    }
     if (!t) throw new CenterMcpError(NO_TARGET);
+    last = t;
     return t;
   };
   return {
@@ -493,9 +527,10 @@ export function createCenterMcp(opts: CenterMcpOptions): CenterMcp {
       try {
         t = await opts.settings.selectTarget();
       } catch (e) {
-        return { connected: false, lastError: (e as Error).message };
+        return { connected: false, lastError: selectFailure(e) };
       }
       if (!t) return { connected: false, lastError: NO_TARGET };
+      last = t;
       let connected = true;
       try {
         await client.probe(t.url, t.token);

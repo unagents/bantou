@@ -123,6 +123,8 @@ export interface StreamOptions {
   readTimeoutMs?: number;
   /** Aborting ends the stream with `closed`. */
   signal?: AbortSignal;
+  /** The URL as configured (with userinfo): its password is removed from error text. `url` has no userinfo. */
+  secretUrl?: string;
 }
 
 /**
@@ -139,7 +141,7 @@ export async function streamOnce(
   const headers: Record<string, string> = { accept: "text/event-stream" };
   if (opts.token !== undefined) headers.authorization = `Bearer ${opts.token}`;
   if (opts.lastEventId !== undefined) headers["last-event-id"] = String(opts.lastEventId);
-  const clean = (m: string) => scrub(m, url.href, opts.token);
+  const clean = (m: string) => scrub(m, opts.secretUrl ?? url.href, opts.token);
   let resp: Response;
   try {
     resp = await doFetch(url.href, { method: "GET", headers, signal: opts.signal });
@@ -305,7 +307,7 @@ export function createCenterEvents(opts: CenterEventsOptions): CenterEvents {
             if (c) emit(c);
             return true;
           },
-          { fetch: opts.fetch, token: target.token, readTimeoutMs: readTimeout, signal: conn.signal },
+          { fetch: opts.fetch, token: target.token, readTimeoutMs: readTimeout, signal: conn.signal, secretUrl: target.url },
         );
       } catch (e) {
         result = e instanceof Error ? e : new Error(String(e));

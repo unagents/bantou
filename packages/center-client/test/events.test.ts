@@ -9,7 +9,6 @@ import { afterEach, test } from "node:test";
 import {
   SseParser,
   centerUrl,
-  createCenterEvents,
   eventsUrl,
   reconnectDelayMs,
   retryDelayMs,
@@ -20,6 +19,18 @@ import {
   type Target,
 } from "../src/index.ts";
 import { FakeCenter } from "./helpers/fake-center.ts";
+import { createCenterEvents, type CenterEvents, type CenterEventsOptions } from "../src/index.ts";
+
+/** Every subscription made by a test is stopped after it, also when the test failed (a failed test must not hang the run). */
+const live: CenterEvents[] = [];
+const mk = (o: CenterEventsOptions): CenterEvents => {
+  const e = createCenterEvents(o);
+  live.push(e);
+  return e;
+};
+afterEach(async () => {
+  await Promise.all(live.splice(0).map((e) => e.stop()));
+});
 
 const ev = (event: string, data: string): SseEvent => ({ id: undefined, event, data });
 const enc = new TextEncoder();
@@ -209,7 +220,7 @@ test("one subscription feeds every listener; the token is sent; stop ends it", a
   const mock = await FakeCenter.start("tok-abcdefghij");
   centers.push(mock);
   const h = eventsHandler(mock);
-  const events = createCenterEvents({
+  const events = mk({
     settings: { selectTarget: async () => ({ url: mock.url, token: "tok-abcdefghij", source: "remote" as const }) },
     ...fast,
   });
@@ -241,7 +252,7 @@ test("a closed connection is reopened and the first event after it is delivered"
   const mock = await FakeCenter.start();
   centers.push(mock);
   const h = eventsHandler(mock);
-  const events = createCenterEvents({ settings: { selectTarget: async () => ({ url: mock.url, source: "remote" as const }) }, ...fast });
+  const events = mk({ settings: { selectTarget: async () => ({ url: mock.url, source: "remote" as const }) }, ...fast });
   const got: Changed[] = [];
   events.subscribe((c) => got.push(c));
   events.start();
@@ -257,7 +268,7 @@ test("a target change reconnects to the new center at once; no target waits and 
   const ha = eventsHandler(a);
   const hb = eventsHandler(b);
   let target: Target | undefined;
-  const events = createCenterEvents({ settings: { selectTarget: async () => target }, ...fast });
+  const events = mk({ settings: { selectTarget: async () => target }, ...fast });
   const got: Changed[] = [];
   events.subscribe((c) => got.push(c));
   events.start();
@@ -281,7 +292,7 @@ test("a rejected token is asked again only after the long delay", async () => {
   centers.push(mock);
   const h = eventsHandler(mock);
   const warns: string[] = [];
-  const events = createCenterEvents({
+  const events = mk({
     settings: { selectTarget: async () => ({ url: mock.url, token: "wrong-token-xyz", source: "remote" as const }) },
     ...fast,
     rejectedDelayMs: 150,

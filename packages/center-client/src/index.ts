@@ -38,6 +38,8 @@ export {
   createCenterMcp,
   parseMessages,
   pickResponse,
+  scrub,
+  secretsOf,
   toolText,
   type CenterConnection,
   type CenterMcp,

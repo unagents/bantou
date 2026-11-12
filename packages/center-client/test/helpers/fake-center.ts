@@ -13,6 +13,8 @@ export class FakeCenter {
   requiredToken: string | undefined;
   sessions = new Set<string>();
   issued = 0;
+  /** Number of GET requests seen. */
+  gets = 0;
   log: MockReq[] = [];
   /** Per-tool canned result (JSON text of `content[0].text`); default echoes name and args. */
   tools = new Map<string, unknown>();
@@ -22,6 +24,10 @@ export class FakeCenter {
   errorTools = new Map<string, string>();
   /** tools/call always answers 404 (a center that keeps forgetting our session). */
   dropCalls = false;
+  /** Answer every request after this many with HTTP 500 "limit" (so a runaway retry ends with a count, not a hang). */
+  limit: number | undefined;
+  /** Take over a POST (after auth and logging). Return true when it answered. */
+  override: ((method: string, req: IncomingMessage, res: ServerResponse) => boolean) | undefined;
   /** Extra handler for GET paths (e.g. /events). Return true when it handled the request. */
   onGet: ((req: IncomingMessage, res: ServerResponse) => boolean) | undefined;
   readonly server: Server;
@@ -62,6 +68,11 @@ export class FakeCenter {
 
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (req.method === "GET") {
+      this.gets += 1;
+      if (this.limit !== undefined && this.gets > this.limit) {
+        res.writeHead(500).end("limit");
+        return;
+      }
       if (this.onGet?.(req, res)) return;
       res.writeHead(404).end("not found");
       return;
@@ -87,6 +98,11 @@ export class FakeCenter {
     }
     const known = sid !== undefined && this.sessions.has(sid);
     this.log.push(mreq);
+    if (this.limit !== undefined && this.log.length > this.limit) {
+      res.writeHead(500).end("limit");
+      return;
+    }
+    if (this.override?.(method, req, res)) return;
     const rpc = (result: unknown) => JSON.stringify({ jsonrpc: "2.0", id, result });
     if (method === "initialize") {
       this.issued += 1;
