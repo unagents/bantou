@@ -1,5 +1,5 @@
 import { getTransport } from "~/tauri";
-import type { Task } from "~/types";
+import type { Task } from "../types";
 
 export const listTasks = () => getTransport().invoke<Task[]>("list_tasks");
 

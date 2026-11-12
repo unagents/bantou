@@ -1,5 +1,5 @@
 import { getTransport } from "~/tauri";
-import type { ProjectSettings, Session, SessionList, SessionPathHints } from "~/types";
+import type { ProjectSettings, Session, SessionList, SessionPathHints } from "../types";
 
 export const SESSIONS_CHANGED_EVENT = "bantou://sessions-changed";
 /** The machine woke from sleep (emitted by the Rust side). */

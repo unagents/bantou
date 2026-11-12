@@ -1,5 +1,5 @@
 import { getTransport } from "~/tauri";
-import type { BrokerStatus, Ping, Thread } from "~/types";
+import type { BrokerStatus, Ping, Thread } from "../types";
 
 export const THREADS_CHANGED_EVENT = "bantou://threads-changed";
 export const PINGS_CHANGED_EVENT = "bantou://pings-changed";

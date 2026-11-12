@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { BUFFER_LIMIT, decodeBase64, encodeBase64, SessionBuffer } from "../src/composables/terminalBuffer";
+import { BUFFER_LIMIT, decodeBase64, encodeBase64, SessionBuffer } from "../../ui/composables/terminalBuffer";
 
 // Pure logic of the per-session buffer (no browser).
 

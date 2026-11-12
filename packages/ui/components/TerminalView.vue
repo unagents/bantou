@@ -11,9 +11,9 @@ import {
   sessionInput,
   sessionResize,
   type AttachOutcome,
-} from "~/api";
-import { encodeBase64 } from "~/composables/terminalBuffer";
-import type { CenterAuthState } from "~/types";
+} from "../api";
+import { encodeBase64 } from "../composables/terminalBuffer";
+import type { CenterAuthState } from "../types";
 
 const props = defineProps<{
   session: string;

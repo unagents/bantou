@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { ContextUsage } from "~/types";
+import type { ContextUsage } from "../types";
 
 const props = defineProps<{ usage: ContextUsage | null; percentOnly?: boolean }>();
 

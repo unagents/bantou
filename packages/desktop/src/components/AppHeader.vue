@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { BrokerStatus, UpdaterState } from "~/types";
+import type { BrokerStatus, UpdaterState } from "#bantou-ui/types";
 import { isLocalNetworkDenied, LOCAL_NETWORK_HINT } from "~/utils/localNetwork";
 
 const props = defineProps<{

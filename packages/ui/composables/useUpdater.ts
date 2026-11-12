@@ -7,8 +7,8 @@ import {
   logWebview,
   relaunchApp,
   type DownloadProgress,
-} from "~/api";
-import type { UpdaterState } from "~/types";
+} from "../api";
+import type { UpdaterState } from "../types";
 
 const MAIN_WINDOW_LABEL = "main";
 // How long "最新" stays in the header before it returns to the idle label.

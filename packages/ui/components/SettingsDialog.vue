@@ -10,10 +10,10 @@ import {
   centerRegenerateToken,
   centerSetSettings,
   centerStatus,
-} from "~/api";
-import { isRemoteOnly } from "~/composables/centerRole";
-import { draftError, draftOf, emptyDraft, toCenterUpdate, type SettingsDraft } from "~/composables/sessionInstructions";
-import type { CenterConnectSnippets, CenterIpStatus, CenterParsedConnect, CenterSettings, CenterStatus } from "~/types";
+} from "../api";
+import { isRemoteOnly } from "../composables/centerRole";
+import { draftError, draftOf, emptyDraft, toCenterUpdate, type SettingsDraft } from "../composables/sessionInstructions";
+import type { CenterConnectSnippets, CenterIpStatus, CenterParsedConnect, CenterSettings, CenterStatus } from "../types";
 
 const open = defineModel<boolean>("open", { required: true });
 const toast = useToast();

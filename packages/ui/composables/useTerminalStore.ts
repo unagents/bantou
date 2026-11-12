@@ -6,7 +6,7 @@ import {
   sessionOutputStop,
   type SessionOutput,
   type SessionOutputStatus,
-} from "~/api";
+} from "../api";
 import { decodeBase64, SessionBuffer } from "./terminalBuffer";
 
 

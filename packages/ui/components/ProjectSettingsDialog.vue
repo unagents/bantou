@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { getSessionSettings, sessionPathHints, sessionRestart, updateSession, updateSessionSettings } from "~/api";
-import { useHideAddDirs } from "~/composables/centerRole";
-import { draftError, draftOf, emptyDraft, toUpdate, type SettingsDraft } from "~/composables/sessionInstructions";
+import { getSessionSettings, sessionPathHints, sessionRestart, updateSession, updateSessionSettings } from "../api";
+import { useHideAddDirs } from "../composables/centerRole";
+import { draftError, draftOf, emptyDraft, toUpdate, type SettingsDraft } from "../composables/sessionInstructions";
 
 const open = defineModel<boolean>("open", { required: true });
 const props = defineProps<{ name: string; path?: string | null; existing?: string[] }>();

@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import type { SessionGroup } from "~/composables/useBoard";
-import type { Task, Thread } from "~/types";
+import type { SessionGroup } from "../composables/useBoard";
+import type { Task, Thread } from "../types";
 
 defineProps<{ group: SessionGroup; threads: Record<string, Thread>; running: Record<string, boolean> }>();
 defineEmits<{ openThread: [task: Task] }>();

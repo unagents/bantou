@@ -5,7 +5,7 @@ import { boardSeed } from "./seed";
 
 test.use({ seed: boardSeed });
 
-// Keep in step with src/composables/usePaneWidths.ts
+// Keep in step with packages/ui/composables/usePaneWidths.ts
 const MIN = { side: 160, middle: 320, right: 320 };
 const DEFAULT = { side: 240, middle: 420 };
 const KEY = "bantou.paneWidths";

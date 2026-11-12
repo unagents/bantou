@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { pickDirectory } from "~/api";
+import { pickDirectory } from "../api";
 
 // One folder path. canPick (this PC's folder dialog applies): the field is read-only and a click / Enter / Space
 // (or the 選択… button) opens the dialog; a cancel keeps the value. Otherwise it is a plain text input.

@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { centerTool, pickDirectory } from "~/api";
-import { INSTRUCTIONS_NOTE, type SettingsDraft } from "~/composables/sessionInstructions";
-import type { CenterServerPeers } from "~/types";
+import { centerTool, pickDirectory } from "../api";
+import { INSTRUCTIONS_NOTE, type SettingsDraft } from "../composables/sessionInstructions";
+import type { CenterServerPeers } from "../types";
 
 // One section per project-settings item. A future item (skills, output style) is another section here.
 const draft = defineModel<SettingsDraft>({ required: true });
