@@ -1,0 +1,5 @@
+{
+  "extends": "./.nuxt/tsconfig.server.json",
+  "compilerOptions": { "noUncheckedIndexedAccess": false },
+  "include": ["./.nuxt/types/nitro-nuxt.d.ts", "./server/**/*", "./test/**/*"]
+}

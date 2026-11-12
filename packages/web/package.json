@@ -1,0 +1,22 @@
+{
+  "name": "bantou-web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "bantou web app (web backend: Cloudflare Access guard)",
+  "scripts": {
+    "build": "nuxt build",
+    "test": "node --import tsx --test \"test/**/*.test.ts\"",
+    "typecheck": "nuxt prepare && tsc --noEmit -p tsconfig.json"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "h3": "^1.15.11",
+    "nuxt": "~4.5.2",
+    "tsx": "^4.19.0",
+    "typescript": "~5.9.0"
+  }
+}
