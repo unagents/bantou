@@ -166,13 +166,15 @@ export interface SessionList {
 export interface CenterSettings {
   enabled: boolean;
   port: number;
-  /** The IP the connection settings name as the URL host (the center itself listens on every address). */
-  bind: string;
+  /** The IP the connection settings name as the URL host (the center itself listens on every address). Absent in the web app (it has no connection snippets). */
+  bind?: string;
   /** The one workspace directory (default `~/.bantou`). */
   workspace: string;
   claudePath?: string;
   /** Bearer token the sidecar center requires on /mcp. Minted by the backend when empty. */
   token: string;
+  /** Web app only: `token` is returned empty and this says whether one is set. */
+  tokenSet?: boolean;
   /** Center on another host, taken from a pasted connection snippet (used instead of the sidecar). */
   remote?: CenterRemote;
 }
@@ -182,6 +184,8 @@ export interface CenterRemote {
   url: string;
   /** Unset: the snippet had no token (the center answers 401). */
   token?: string;
+  /** Web app only: `token` is returned empty and this says whether one is set. */
+  tokenSet?: boolean;
 }
 
 /** Mirror of `src-tauri/src/center_snippet.rs::ConnectSnippets`. */
