@@ -97,13 +97,12 @@ export function createCenterSettings(opts: CenterSettingsOptions): CenterSetting
   };
 }
 
-/** What goes to the store: `CenterSettings` without `bind` and `tokenSet`. */
+/** What goes to the store: the known items only (no `bind`, `tokenSet` or anything else). */
 function toStored(s: CenterSettings): CenterSettings {
-  const out: CenterSettings = { ...s };
-  delete out.bind;
-  delete out.tokenSet;
-  if (out.remote) {
-    out.remote = out.remote.token !== undefined ? { url: out.remote.url, token: out.remote.token } : { url: out.remote.url };
+  const out: CenterSettings = { enabled: s.enabled, port: s.port, workspace: s.workspace, token: s.token };
+  if (s.claudePath !== undefined) out.claudePath = s.claudePath;
+  if (s.remote) {
+    out.remote = s.remote.token !== undefined ? { url: s.remote.url, token: s.remote.token } : { url: s.remote.url };
   }
   return out;
 }
@@ -148,6 +147,14 @@ function merge(
     }
     delete next.remote;
     return next;
+  }
+  // env fixes the url but the file names another destination: the file keeps its own url, so a token from the
+  // input would be stored under that other url (and sent there once env is removed). Refuse it (R29).
+  if (env.url !== undefined && fileUrl !== undefined && eff.remote?.url !== fileUrl) {
+    const changes = redact ? inToken !== undefined : inToken !== undefined && inToken !== file.remote?.token;
+    if (changes && env.token === undefined) {
+      throw new CenterSettingsError("env（CENTER_URL）で固定した url と設定 file の remote の url が別のため、token は保存できない");
+    }
   }
   // A stored token never goes to another destination (R29), whether env fixes the token or not.
   let token: string | undefined;

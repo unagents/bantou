@@ -303,3 +303,86 @@ test("L3: the env url is normalized in the effective settings", async () => {
   assert.equal((await h.get()).remote!.url, URL_B);
   assert.equal((await h.selectTarget())!.url, URL_B);
 });
+
+// -- review 2 (N1 / N2 / N3) ----------------------------------------------------
+
+const extra = (o: Record<string, unknown>) => o as unknown as CenterSettings;
+
+test("N1: unknown keys of the input never reach the file (top level and remote)", async () => {
+  const store = memStore();
+  const input = extra({
+    ...withRemote(URL_A, TOKEN_A),
+    evil: "x",
+    nested: { a: 1 },
+    remote: { url: URL_A, token: TOKEN_A, sneaky: "y", tokenSet: true },
+  });
+  Object.defineProperty(input, "__proto__", { value: { p: 1 }, enumerable: true, configurable: true, writable: true });
+  await handle(store, {}, false).set(input);
+  const text = JSON.stringify(store.value);
+  for (const k of ["evil", "nested", "sneaky", "tokenSet", "__proto__", "bind"]) assert.ok(!text.includes(k), k);
+  assert.deepEqual(Object.keys(store.value as object).sort(), ["enabled", "port", "remote", "token", "workspace"]);
+  // redacting handle too
+  const store2 = memStore();
+  await handle(store2).set(extra({ ...defaultSettings(), evil: "x" }));
+  assert.ok(!JSON.stringify(store2.value).includes("evil"));
+});
+
+test("N1: unknown keys already in the file are not written back", async () => {
+  const store = memStore({ ...withRemote(URL_A, TOKEN_A), evil: "x", remoteUrl: "old" });
+  await handle(store).set({ ...withRemote(URL_A, ""), port: 7920 });
+  assert.ok(!JSON.stringify(store.value).includes("evil"));
+  assert.ok(!JSON.stringify(store.value).includes("remoteUrl"));
+});
+
+test("N2: CENTER_URL differs from the file url: a new token is refused, nothing is written", async () => {
+  const store = memStore(withRemote(URL_A));
+  const h = handle(store, { CENTER_URL: URL_B });
+  await assert.rejects(h.set(withRemote(URL_B, TOKEN_B)), /token は保存できない/);
+  assert.equal(store.writes, 0);
+  assert.ok(!JSON.stringify(store.value).includes(TOKEN_B));
+  // an empty token (unchanged) still saves the other items; the file url and token stay paired
+  await h.set({ ...withRemote(URL_B, ""), port: 7920 });
+  assert.deepEqual((store.value as CenterSettings).remote, { url: URL_A });
+  // with a stored token: it stays paired with its own url, a new one is refused
+  const store2 = memStore(withRemote(URL_A, TOKEN_A));
+  const h2 = handle(store2, { CENTER_URL: URL_B });
+  await assert.rejects(h2.set(withRemote(URL_B, TOKEN_B)), /token は保存できない/);
+  await h2.set(withRemote(URL_B, ""));
+  assert.deepEqual((store2.value as CenterSettings).remote, { url: URL_A, token: TOKEN_A });
+});
+
+test("N2: CENTER_URL differs from the file url, redactSecrets false: only the unchanged token passes", async () => {
+  const store = memStore(withRemote(URL_A, TOKEN_A));
+  const h = handle(store, { CENTER_URL: URL_B }, false);
+  await assert.rejects(h.set(withRemote(URL_B, TOKEN_B)), /token は保存できない/);
+  assert.equal(store.writes, 0);
+  // the desktop-shape client sends back what get returned (the effective token)
+  await h.set({ ...withRemote(URL_B, TOKEN_A), port: 7920 });
+  assert.deepEqual((store.value as CenterSettings).remote, { url: URL_A, token: TOKEN_A });
+});
+
+test("N2: CENTER_URL equals the file url: a new token is saved as before", async () => {
+  const store = memStore(withRemote(URL_A));
+  await handle(store, { CENTER_URL: URL_A }).set(withRemote(URL_A, TOKEN_B));
+  assert.deepEqual((store.value as CenterSettings).remote, { url: URL_A, token: TOKEN_B });
+});
+
+test("N3: redactSecrets false: a url in the shown form is a different url (token comes from the input)", async () => {
+  const store = memStore(withRemote(URL_UI, TOKEN_A));
+  await handle(store, {}, false).set(withRemote(URL_A, ""));
+  assert.deepEqual((store.value as CenterSettings).remote, { url: URL_A });
+  assert.ok(!JSON.stringify(store.value).includes(TOKEN_A));
+});
+
+test("N3: CENTER_URL fixed + redacted-form input: accepted as the same destination, stored form kept", async () => {
+  const store = memStore(withRemote(URL_UI, TOKEN_A));
+  const h = handle(store, { CENTER_URL: URL_UI });
+  assert.deepEqual((await h.get()).remote, { url: URL_A, token: "", tokenSet: true });
+  await h.set({ ...withRemote(URL_A, ""), port: 7920 });
+  assert.deepEqual((store.value as CenterSettings).remote, { url: URL_UI, token: TOKEN_A });
+  // another url is still refused
+  await assert.rejects(h.set(withRemote(URL_B, "")), /CENTER_URL/);
+  // redactSecrets false + env url: the shown form is not the env url
+  const h2 = handle(memStore(withRemote(URL_UI, TOKEN_A)), { CENTER_URL: URL_UI }, false);
+  await assert.rejects(h2.set(withRemote(URL_A, TOKEN_A)), /CENTER_URL/);
+});

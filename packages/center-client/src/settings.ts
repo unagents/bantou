@@ -82,13 +82,14 @@ export function assertSettingsShape(x: unknown): asserts x is CenterSettings {
 
 /**
  * Reject settings the center would refuse and normalise empty optionals. (center.rs `validate_settings`)
- * `bind` is not part of the web settings: it is dropped. Throws `CenterSettingsError`.
+ * Only the known items are kept: any other key of the input (`bind`, `tokenSet`, anything extra) is dropped,
+ * as serde drops unknown keys on the desktop. Throws `CenterSettingsError`.
  */
 export function validateSettings(input: CenterSettings, policy: SettingsPolicy = {}): CenterSettings {
   assertSettingsShape(input);
-  const s: CenterSettings = { ...input };
-  delete s.bind;
-  delete s.tokenSet;
+  const s: CenterSettings = { enabled: input.enabled, port: input.port, workspace: input.workspace, token: input.token };
+  if (input.claudePath != null) s.claudePath = input.claudePath;
+  if (input.remote != null) s.remote = { url: input.remote.url, token: input.remote.token };
   if (s.enabled && !policy.allowEnabled) {
     throw new CenterSettingsError("center の起動（enabled）はこの版では未対応");
   }
