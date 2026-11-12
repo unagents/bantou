@@ -5,6 +5,7 @@
 import { PassThrough, type Readable } from "node:stream";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { MAX_BODY_BYTES } from "./body.ts";
 import { createCenterSettings, type CenterSettingsHandle } from "./center-settings.ts";
 import { CommandError, createCommands, toCommandError, type CommandTable } from "./commands.ts";
 import { createCenterEvents, type CenterEvents } from "./events.ts";
@@ -76,7 +77,6 @@ export function defaultSettingsFile(env: Record<string, string | undefined>): st
   return join(state, "bantou-web", "settings.json");
 }
 
-export const MAX_BODY_BYTES = 1024 * 1024;
 const KEEP_ALIVE_MS = 15_000;
 
 export function createCenterClient(opts: CenterClientOptions = {}): CenterClient {
@@ -166,7 +166,14 @@ export function createCenterClient(opts: CenterClientOptions = {}): CenterClient
     const frame = (e: ClientEvent) => `event: ${e.event}\ndata: ${JSON.stringify(e.data)}\n\n`;
     // Headers go out with the first bytes: a comment line first.
     out.write(": ok\n\n");
-    const unsubscribe = subscribe((e) => out.write(redactor.textSync(frame(e))));
+    // The secrets are read from the settings for each event (an event can come before any rpc). One chain keeps the order.
+    let chain: Promise<void> = Promise.resolve();
+    const unsubscribe = subscribe((e) => {
+      chain = chain.then(async () => {
+        const text = await redactor.text(frame(e));
+        if (!out.destroyed && !out.writableEnded) out.write(text);
+      });
+    });
     const ka = setInterval(() => out.write(": ka\n\n"), opts.keepAliveMs ?? KEEP_ALIVE_MS);
     let closed = false;
     const close = () => {

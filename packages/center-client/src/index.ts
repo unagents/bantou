@@ -98,7 +98,6 @@ export {
 } from "./commands.ts";
 export { createRedactor, type Redactor } from "./redact.ts";
 export {
-  MAX_BODY_BYTES,
   createCenterClient,
   defaultSettingsFile,
   type CenterClient,
@@ -107,3 +106,5 @@ export {
   type Health,
   type RpcReply,
 } from "./client.ts";
+export { maskSecrets, formsOf, MIN_FORM_LEN } from "./secrets.ts";
+export { MAX_BODY_BYTES, readBodyLimited, type BodyRead } from "./body.ts";

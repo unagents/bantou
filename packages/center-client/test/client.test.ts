@@ -255,3 +255,106 @@ test("openEventStream: SSE frames, comment first, keep-alive, close ends it", as
   close();
   await ended;
 });
+
+// ---- review of 3d: spellings of the secrets on every path, and the redactor branches ----
+
+test("a tool body with the token in other spellings (case, URL-encoded, base64, \\u, JSON-escaped special chars) is cleaned", async () => {
+  const special = 'sp"ec\\ial-tok-0123456789';
+  const center = await FakeCenter.start(special);
+  const store = memStore({ enabled: false, port: 7910, workspace: "~", token: "", remote: { url: center.url, token: special } });
+  const c = mk(store);
+  live[live.length - 1]!.center = center;
+  const u = [...special].map((ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`).join("");
+  center.tools.set("center_settings_get", {
+    raw: special,
+    upper: special.toUpperCase(),
+    enc: encodeURIComponent(special),
+    b64: Buffer.from(special).toString("base64"),
+    b64url: Buffer.from(special).toString("base64url"),
+    uni: u,
+  });
+  const r = await post(c, "center_call", { name: "center_settings_get" });
+  assert.equal(r.status, 200);
+  const text = JSON.stringify(r.body);
+  for (const bad of [special, special.toUpperCase(), JSON.stringify(special).slice(1, -1), JSON.stringify(special.toUpperCase()).slice(1, -1),
+    encodeURIComponent(special), Buffer.from(special).toString("base64"), Buffer.from(special).toString("base64url"), u]) {
+    assert.ok(!text.includes(bad), `left: ${bad}`);
+  }
+  assert.ok(!text.toLowerCase().includes("sp\\\"ec"));
+  assert.ok(!text.includes("0123456789"));
+});
+
+test("error text with the token in other spellings is cleaned (rpc error body)", async () => {
+  const { c, center } = await withCenter();
+  center.errorTools.set("rc_list", `${TOKEN.toUpperCase()} ${encodeURIComponent(TOKEN)} ${Buffer.from(TOKEN).toString("base64")}`);
+  const r = await post(c, "center_call", { name: "rc_list" });
+  assert.equal(r.status, 502);
+  const s = JSON.stringify(r.body);
+  assert.ok(!s.toUpperCase().includes(TOKEN.toUpperCase()));
+  assert.ok(!s.includes(encodeURIComponent(TOKEN)) && !s.includes(Buffer.from(TOKEN).toString("base64")));
+});
+
+test("health reason: a secret only the redactor knows is cleaned (redactor on the health path)", async () => {
+  const { c, center } = await withCenter();
+  c.redactor.note(["only-redactor-knows-1"]);
+  center.override = (method, _req, res) => {
+    if (method !== "ping") return false;
+    res.writeHead(500).end("boom only-redactor-knows-1 ONLY-REDACTOR-KNOWS-1");
+    return true;
+  };
+  const h = await c.health();
+  assert.equal(h.status, "unreachable");
+  assert.ok(h.reason, "a reason is given");
+  assert.ok(!(h.reason ?? "").toLowerCase().includes("only-redactor-knows-1"), h.reason);
+});
+
+test("rpc error text: a secret only the redactor knows is cleaned (redactor on the error path)", async () => {
+  const { c, center } = await withCenter();
+  c.redactor.note(["only-redactor-knows-2"]);
+  center.errorTools.set("rc_list", "bad only-redactor-knows-2");
+  const r = await post(c, "center_call", { name: "rc_list" });
+  assert.equal(r.status, 502);
+  assert.ok(!JSON.stringify(r.body).includes("only-redactor-knows-2"));
+});
+
+test("rpc result: a secret only the redactor knows is cleaned inside the value (redactor on the result path)", async () => {
+  const { c, center } = await withCenter();
+  c.redactor.note(["only-redactor-knows-3"]);
+  center.tools.set("remote_list", { v: "x only-redactor-knows-3" });
+  const r = await post(c, "center_call", { name: "remote_list" });
+  assert.ok(!JSON.stringify(r.body).includes("only-redactor-knows-3"));
+});
+
+test("SSE body: a secret in an event is cleaned (redactor on the stream path)", async () => {
+  const { c, center } = await withCenter();
+  c.redactor.note(["only-redactor-knows-4"]);
+  const conns: import("node:http").ServerResponse[] = [];
+  center.onGet = (req, res) => {
+    if (req.url !== "/events") return false;
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.write(": hi\n\n");
+    conns.push(res);
+    return true;
+  };
+  const { readable, close } = c.openEventStream();
+  let text = "";
+  readable.on("data", (d: Buffer) => (text += d.toString()));
+  for (let i = 0; i < 100 && conns.length === 0; i++) await new Promise((r) => setTimeout(r, 20));
+  assert.equal(conns.length, 1);
+  conns[0]!.write(`event: sessions\ndata: {"reason":"${TOKEN} only-redactor-knows-4","name":"n"}\n\n`);
+  for (let i = 0; i < 100 && !text.includes("center-sessions-changed"); i++) await new Promise((r) => setTimeout(r, 20));
+  assert.match(text, /center-sessions-changed/);
+  assert.ok(!text.includes("only-redactor-knows-4"), text);
+  assert.ok(!text.includes(TOKEN), text);
+  close();
+});
+
+test("log: warn lines of a failed rpc do not carry the secrets", async () => {
+  const lines: string[] = [];
+  const { c, center } = await withCenter({ logger: { info: (m) => lines.push(m), warn: (m) => lines.push(m) } });
+  center.errorTools.set("rc_list", `bad ${TOKEN} ${TOKEN.toUpperCase()}`);
+  await post(c, "center_call", { name: "rc_list" });
+  assert.ok(lines.length > 0);
+  noSecret(lines);
+  assert.ok(!lines.join("\n").toUpperCase().includes(TOKEN.toUpperCase()));
+});

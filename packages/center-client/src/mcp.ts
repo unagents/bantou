@@ -6,6 +6,7 @@
 // Secrets: error text and log lines never carry the token or the userinfo of the URL (`redactUrl`, `scrub`).
 
 import { redactUrl } from "./normalize.ts";
+import { maskSecrets } from "./secrets.ts";
 import { allowWebTool } from "./tool-policy.ts";
 import { CenterSettingsError, type SettingsPolicy, type Target } from "./settings.ts";
 
@@ -194,8 +195,7 @@ export function secretsOf(url: string, token: string | undefined): string[] {
  * `scheme://user:pass@` userinfo left in it.
  */
 export function scrub(text: string, url: string, token: string | undefined): string {
-  let out = text;
-  for (const s of secretsOf(url, token)) out = out.split(s).join("***");
+  const out = maskSecrets(text, secretsOf(url, token));
   return out.replace(/([a-z][a-z0-9+.-]*:\/\/)[^/\s@]*@/gi, "$1");
 }
 

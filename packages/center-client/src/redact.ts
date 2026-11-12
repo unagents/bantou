@@ -2,6 +2,7 @@
 // A successful tool result is passed on as is by `mcp.ts`; whatever goes to the browser passes here first.
 
 import { scrub, secretsOf } from "./mcp.ts";
+import { maskSecrets } from "./secrets.ts";
 import type { Target } from "./settings.ts";
 
 const MASK = "***";
@@ -44,13 +45,7 @@ export function createRedactor(settings: { selectTarget(): Promise<Target | unde
       out = scrub(out, t.url, t.token);
       for (const s of secretsOf(t.url, t.token)) all.add(s);
     }
-    for (const s of all) {
-      out = out.split(s).join(MASK);
-      // The same secret inside JSON text: `"` and `\` are escaped there.
-      const esc = JSON.stringify(s).slice(1, -1);
-      if (esc !== s) out = out.split(esc).join(MASK);
-    }
-    return out;
+    return maskSecrets(out, all);
   };
 
   const walk = (v: unknown): unknown => {

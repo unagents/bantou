@@ -3,6 +3,7 @@ import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
+import { request as httpRequest } from "node:http";
 import { createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -273,6 +274,48 @@ describe("Nitro build の配線", { timeout: 300_000 }, () => {
       b.abort();
       for (const c of conns) c.end();
     }
+  });
+
+  // ---- review: body の上限は読み込み中に守る。超過は assertion（5 秒で無応答なら失敗）で落ちる ----
+  const rawPost = (headers: Record<string, string>, chunks: Buffer[], flushOnly = false) =>
+    new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const u = new URL(base);
+      const req = httpRequest(
+        { host: u.hostname, port: u.port, path: "/api/rpc/center_get_settings", method: "POST", timeout: 5000,
+          headers: { ...h(jwt()), origin: origin(), ...headers } },
+        (res) => {
+          let b = "";
+          res.on("data", (d) => (b += d));
+          res.on("end", () => resolve({ status: res.statusCode ?? 0, body: b }));
+          if (flushOnly) {
+            resolve({ status: res.statusCode ?? 0, body: "" });
+            req.destroy();
+          }
+        },
+      );
+      req.on("timeout", () => reject(new Error("5 秒たっても応答が無い（body を待っている）")));
+      req.on("error", (e) => {
+        if (!(flushOnly && (e as NodeJS.ErrnoException).code === "ECONNRESET")) reject(e);
+      });
+      if (flushOnly) req.flushHeaders();
+      else {
+        for (const c of chunks) req.write(c);
+        req.end();
+      }
+    });
+
+  it("body 上限: Content-Length が超過なら body を読まずに 413", async () => {
+    const r = await rawPost({ "content-length": "400000000" }, [], true);
+    assert.equal(r.status, 413);
+  });
+
+  it("body 上限: chunked で超過なら受信中に切って 413。上限内は通る", async () => {
+    const big = Buffer.alloc(256 * 1024, 97);
+    const r = await rawPost({ "transfer-encoding": "chunked" }, [big, big, big, big, big]); // 1.25 MiB
+    assert.equal(r.status, 413);
+    assert.match(r.body, /大きすぎる/);
+    const ok = await rawPost({ "transfer-encoding": "chunked", "content-type": "application/json" }, [Buffer.from("{}")]);
+    assert.equal(ok.status, 200);
   });
 
   it("child の log に token と password が出ていない", () => {
