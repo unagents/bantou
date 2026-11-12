@@ -57,9 +57,27 @@ async function startFakeCenter() {
         res.on("close", () => open.delete(res));
         return;
       }
+      if (req.method === "GET" && (url === "/sessions/badnl/output" || url === "/sessions/badchar/output")) {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        // 改行入りの data（SSE の別行になる）／ base64 でない data
+        res.write(url.includes("badnl") ? "id: 3\nevent: output\ndata: QUJD\ndata: injected-line\n\n" : "id: 3\nevent: output\ndata: !!not-base64!!\n\n");
+        open.add(res);
+        res.on("close", () => open.delete(res));
+        return;
+      }
       if (req.method === "GET" && url.startsWith("/sessions/") && url.endsWith("/output")) {
         res.writeHead(404, { "content-type": "application/json" });
         res.end(`{"error":"no such session ${CENTER_TOKEN}"}`);
+        return;
+      }
+      if (req.method === "POST" && url === "/sessions/auth/input") {
+        res.writeHead(401, { "content-type": "text/plain" });
+        res.end(`unauthorized ${CENTER_TOKEN}`);
+        return;
+      }
+      if (req.method === "POST" && url === "/sessions/failatt/attachments") {
+        res.writeHead(500, { "content-type": "application/json" });
+        res.end(`{"error":"disk ${CENTER_TOKEN}"}`);
         return;
       }
       if (req.method === "POST" && url === "/sessions/dead/input") {
@@ -293,6 +311,64 @@ describe("Nitro build の配線", { timeout: 300_000 }, () => {
     assert.equal(center.seen.length, m);
   });
 
+  it("output: center の data が改行入り／base64 でないと、その chunk は流さず status rejected で閉じる", async () => {
+    for (const name of ["badnl", "badchar"]) {
+      const r = await readSse(`/api/sessions/${name}/output`, ok(), () => false);
+      assert.match(r.text, /event: status\ndata: .*"state":"rejected"/, name);
+      assert.equal(r.text.includes("injected-line"), false, name);
+      assert.equal(r.text.includes("event: output"), false, name);
+      assert.equal(r.text.includes("not-base64"), false, name);
+    }
+  });
+
+  it("input: center の 401 は 502（ブラウザの認証と混同させない）で token は出ない", async () => {
+    const r = await post("/api/sessions/auth/input", { data: "QQ==" });
+    assert.equal(r.status, 502);
+    assert.equal((await r.text()).includes(CENTER_TOKEN), false);
+  });
+
+  it("attachments: center が保存に失敗(0 件)なら 502、本文の token は出ない", async () => {
+    const r = await upload(PNG, "image/png", "failatt");
+    assert.equal(r.status, 502);
+    const t = await r.text();
+    assert.equal(t.includes(CENTER_TOKEN), false);
+    assert.match(t, /\*\*\*/);
+  });
+
+  // chunked（Content-Length 無し）の body は受信中に数える。超えたら読み捨てて 413（接続は reset しない）
+  const chunked = (total: number, first: Buffer) => {
+    const piece = 1024 * 1024;
+    let sent = 0;
+    return new ReadableStream<Uint8Array>({
+      pull(c) {
+        if (sent >= total) return c.close();
+        const n = Math.min(piece, total - sent);
+        const b = Buffer.alloc(n);
+        if (sent === 0) first.copy(b);
+        sent += n;
+        c.enqueue(new Uint8Array(b));
+      },
+    });
+  };
+  const chunkedPost = (path: string, headers: Record<string, string>, body: ReadableStream<Uint8Array>) =>
+    fetch(base + path, { method: "POST", headers: { ...ok(), origin: new URL(base).origin, ...headers }, body, duplex: "half" } as RequestInit);
+
+  it("attachments: chunked で 25MB は 413（reset ではなく応答が返り、center へは届かない）", async () => {
+    const n = center.seen.length;
+    const r = await chunkedPost("/api/sessions/live/attachments", { "content-type": "image/png" }, chunked(25 * 1024 * 1024, PNG));
+    assert.equal(r.status, 413);
+    assert.equal(center.seen.length, n);
+  });
+
+  it("input: chunked の JSON が 1MiB を超えたら 413（center へは届かない）", async () => {
+    const n = center.seen.length;
+    const r = await chunkedPost("/api/sessions/live/input", { "content-type": "application/json" }, chunked(3 * 1024 * 1024, Buffer.from("{")));
+    assert.equal(r.status, 413);
+    const small = await post("/api/sessions/live/input", { data: "QQ==" });
+    assert.equal(small.status, 200);
+    assert.equal(center.seen.length, n + 1);
+  });
+
   it("input: center の 409 は 409、center が token を含む本文を返しても応答に出ない", async () => {
     assert.equal((await post("/api/sessions/dead/input", { data: "QQ==" })).status, 409);
     const r = await post("/api/sessions/echo/input", { data: "QQ==" });
@@ -301,8 +377,8 @@ describe("Nitro build の配線", { timeout: 300_000 }, () => {
   });
 
   const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(32)]);
-  const upload = (body: Buffer, type: string | null) =>
-    fetch(base + "/api/sessions/live/attachments", { method: "POST", headers: { ...ok(), origin: new URL(base).origin, ...(type ? { "content-type": type } : {}) }, body: new Uint8Array(body) });
+  const upload = (body: Buffer, type: string | null, session = "live") =>
+    fetch(base + `/api/sessions/${session}/attachments`, { method: "POST", headers: { ...ok(), origin: new URL(base).origin, ...(type ? { "content-type": type } : {}) }, body: new Uint8Array(body) });
 
   it("attachments: 画像 1 枚を中継し、保存先 path を pty に入力する", async () => {
     const n = center.seen.length;

@@ -4,11 +4,10 @@ import {
   getHeader,
   getQuery,
   getRouterParam,
-  readRawBody,
   type EventHandler,
   type H3Event,
 } from "h3";
-import { MAX_ATTACHMENT_BYTES, TerminalError, checkSessionName, sniffType } from "bantou-center-client";
+import { MAX_ATTACHMENT_BYTES, TerminalError, checkInputData, checkSessionName, sniffType } from "bantou-center-client";
 import type { TerminalService } from "../center";
 
 /** 薄い route の本体。検査は center-client（と center）が行い、ここは HTTP への写しだけ。 */
@@ -35,11 +34,33 @@ function sessionName(event: H3Event): string {
   }
 }
 
+/**
+ * body を受信しながら `max` bytes で数える。超えたら溜めるのをやめ、残りは読み捨てて（接続を reset せず 413 を返せるように）413。
+ * Content-Length が大きければ読まずに 413。
+ */
+async function readLimited(event: H3Event, max: number): Promise<Buffer> {
+  const tooLarge = () => createError({ statusCode: 413, statusMessage: "too_large" });
+  const declared = Number(getHeader(event, "content-length") ?? "0");
+  if (declared > max) throw tooLarge();
+  const chunks: Buffer[] = [];
+  let total = 0;
+  let over = false;
+  for await (const c of event.node.req as AsyncIterable<Buffer>) {
+    total += c.length;
+    if (total > max) {
+      over = true;
+      chunks.length = 0; // 以後は溜めない
+    } else if (!over) {
+      chunks.push(c);
+    }
+  }
+  if (over) throw tooLarge();
+  return Buffer.concat(chunks);
+}
+
 async function readJsonBody(event: H3Event): Promise<Record<string, unknown>> {
-  const len = Number(getHeader(event, "content-length") ?? "0");
-  if (len > JSON_MAX_BYTES) throw createError({ statusCode: 413, statusMessage: "too_large" });
-  const raw = await readRawBody(event, "utf8");
-  if (raw === undefined || raw.length > JSON_MAX_BYTES) throw createError({ statusCode: 400, statusMessage: "bad_request", data: { error: "body が無い／大きすぎる" } });
+  const raw = (await readLimited(event, JSON_MAX_BYTES)).toString("utf8");
+  if (raw === "") throw createError({ statusCode: 400, statusMessage: "bad_request", data: { error: "body が無い" } });
   try {
     const v: unknown = JSON.parse(raw);
     if (typeof v === "object" && v !== null && !Array.isArray(v)) return v as Record<string, unknown>;
@@ -80,7 +101,18 @@ export function createOutputHandler(getService: () => TerminalService): EventHan
       res.once("close", done);
       sub = svc.terminals.openOutput(name, {
         ...(after !== undefined ? { after } : {}),
-        onOutput: (p) => write(p.reset ? "event: reset\ndata: \n\n" : `id: ${p.id}\nevent: output\ndata: ${p.data}\n\n`),
+        onOutput: (p) => {
+          if (p.reset) return write("event: reset\ndata: \n\n");
+          // data は base64 のはず。外れた chunk は流さず（改行で別の SSE 行が混ざる）、stream を閉じる
+          try {
+            checkInputData(p.data);
+          } catch {
+            write(`event: status\ndata: ${JSON.stringify({ session: name, state: "rejected", message: "center の出力の形式が不正" })}\n\n`);
+            res.end();
+            return;
+          }
+          write(`id: ${p.id}\nevent: output\ndata: ${p.data}\n\n`);
+        },
         onStatus: (s) => {
           write(`event: status\ndata: ${JSON.stringify(s)}\n\n`);
           if (s.state === "rejected") res.end();
@@ -125,20 +157,9 @@ export function createAttachmentsHandler(getService: () => TerminalService): Eve
     const name = sessionName(event);
     const type = (getHeader(event, "content-type") ?? "").split(";")[0]!.trim().toLowerCase();
     if (!IMAGE_TYPES.has(type)) throw createError({ statusCode: 415, statusMessage: "unsupported_media_type", data: { error: "png / jpeg / gif / webp のみ" } });
-    const declared = Number(getHeader(event, "content-length") ?? "0");
-    if (declared > MAX_ATTACHMENT_BYTES) throw createError({ statusCode: 413, statusMessage: "too_large" });
-    const chunks: Buffer[] = [];
-    let total = 0;
-    for await (const c of event.node.req as AsyncIterable<Buffer>) {
-      total += c.length;
-      if (total > MAX_ATTACHMENT_BYTES) {
-        event.node.req.destroy();
-        throw createError({ statusCode: 413, statusMessage: "too_large" });
-      }
-      chunks.push(c);
-    }
-    if (total === 0) throw createError({ statusCode: 400, statusMessage: "bad_request", data: { error: "空のファイル" } });
-    const data = new Uint8Array(Buffer.concat(chunks));
+    const body = await readLimited(event, MAX_ATTACHMENT_BYTES);
+    if (body.length === 0) throw createError({ statusCode: 400, statusMessage: "bad_request", data: { error: "空のファイル" } });
+    const data = new Uint8Array(body);
     if (sniffType(data) !== type) throw createError({ statusCode: 415, statusMessage: "unsupported_media_type", data: { error: "画像の型が違う" } });
     try {
       const out = await getService().attachments.attachBytes(name, [{ name: "image", data }]);

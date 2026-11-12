@@ -731,3 +731,35 @@ test("input / resize / attachBytes: the first getTarget() throw (no secret known
     await f.close();
   }
 });
+
+// -- scrub on the paths a real fetch failure / 5xx takes (fake fetch: no server) ----------------
+
+test("scrub: upload 5xx body and upload connect failure never carry the token or userinfo", async () => {
+  const token = "tok-SECRET-123456";
+  const leak = `${token} http://u:pw-SECRET@h/x`;
+  const t = target("http://127.0.0.1:1", token);
+  const args = { target: t, session: "m", data: PNG, kind: "image/png" };
+  const bad = (e: Error) => ![token, "pw-SECRET", "u:pw"].some((s) => e.message.includes(s));
+  await assert.rejects(uploadAttachment({ ...args, fetch: async () => new Response(`{"error":"boom ${leak}"}`, { status: 500 }) }), (e: Error) => e instanceof TerminalError && e.status === 500 && e.message.includes("***") && bad(e));
+  await assert.rejects(uploadAttachment({ ...args, fetch: async () => new Response(`plain ${leak}`, { status: 502 }) }), (e: Error) => e.message.includes("***") && bad(e));
+  await assert.rejects(uploadAttachment({ ...args, fetch: async () => Promise.reject(new TypeError(`fetch failed ${leak}`)) }), (e: Error) => e.message.includes("***") && bad(e));
+});
+
+test("scrub: input/resize connect failure (cause message) and 5xx body are scrubbed in the error and in the log", async () => {
+  const token = "tok-SECRET-123456";
+  const leak = `${token} http://u:pw-SECRET@h/x`;
+  const logs: string[] = [];
+  const log = { info: (m: string) => logs.push(m), warn: (m: string) => logs.push(m) };
+  const bad = (e: Error) => ![token, "pw-SECRET", "u:pw"].some((s) => e.message.includes(s));
+  const cause = (fetchFn: typeof fetch) => createTerminals({ getTarget: async () => target("http://127.0.0.1:1", token), fetch: fetchFn, log });
+  const t1 = cause(async () => Promise.reject(Object.assign(new TypeError("fetch failed"), { cause: { message: `connect ${leak}` } })));
+  await assert.rejects(t1.input("m", "QQ=="), (e: Error) => e instanceof TerminalError && e.message.includes("***") && bad(e));
+  await assert.rejects(t1.resize("m", 80, 24), (e: Error) => e.message.includes("***") && bad(e));
+  const t2 = cause(async () => Promise.reject(new TypeError(`fetch failed ${leak}`)));
+  await assert.rejects(t2.input("m", "QQ=="), (e: Error) => e.message.includes("***") && bad(e));
+  const t3 = cause(async () => new Response(`boom ${leak}`, { status: 500 }));
+  await assert.rejects(t3.input("m", "QQ=="), (e: TerminalError) => e.status === 500 && e.message.includes("***") && bad(e));
+  const all = logs.join("\n");
+  assert.ok(logs.length >= 4);
+  for (const s of [token, "pw-SECRET", "u:pw"]) assert.equal(all.includes(s), false, `${s} leaked in log: ${all}`);
+});
