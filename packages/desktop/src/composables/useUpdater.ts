@@ -1,4 +1,4 @@
-import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { getPlatform } from "~/tauri";
 import {
   CHECK_FOR_UPDATES_EVENT,
   checkForUpdate,
@@ -144,7 +144,7 @@ export function useUpdater() {
   let unlisten: (() => void) | null = null;
   let unmounted = false;
   onMounted(async () => {
-    const win = getCurrentWebviewWindow();
+    const win = getPlatform().currentWindow();
     if (win.label === MAIN_WINDOW_LABEL && autoSchedule.owner === null) {
       autoSchedule.owner = token;
       if (!autoCheckFiredOnce.current) {

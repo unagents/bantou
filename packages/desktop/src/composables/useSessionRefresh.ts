@@ -1,4 +1,4 @@
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getTransport, type UnlistenFn } from "~/tauri";
 import { useIntervalFn } from "@vueuse/core";
 import { CENTER_RUNNING_EVENT, CENTER_SESSIONS_CHANGED_EVENT, errorText, logWebview, OS_NETWORK_EVENT, OS_WAKE_EVENT, refreshSessions } from "~/api";
 
@@ -87,14 +87,14 @@ export function useSessionRefresh() {
     document.addEventListener("pointerdown", onUserAction, true);
     document.addEventListener("keydown", onUserAction, true);
     unlisten.push(
-      await listen(CENTER_SESSIONS_CHANGED_EVENT, () => void refreshNow()),
-      await listen(OS_WAKE_EVENT, () => {
+      await getTransport().listen(CENTER_SESSIONS_CHANGED_EVENT, () => void refreshNow()),
+      await getTransport().listen(OS_WAKE_EVENT, () => {
         void refreshNow();
         clearTimeout(retry);
         retry = setTimeout(() => void refreshNow(), WAKE_RETRY_MS);
       }),
-      await listen(CENTER_RUNNING_EVENT, () => refreshUntilReachable()),
-      await listen(OS_NETWORK_EVENT, () => {
+      await getTransport().listen(CENTER_RUNNING_EVENT, () => refreshUntilReachable()),
+      await getTransport().listen(OS_NETWORK_EVENT, () => {
         clearTimeout(settle);
         settle = setTimeout(() => void refreshNow(), NETWORK_SETTLE_MS);
       }),

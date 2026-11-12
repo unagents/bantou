@@ -1,4 +1,4 @@
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getTransport, type UnlistenFn } from "~/tauri";
 import { useIntervalFn } from "@vueuse/core";
 import {
   getStatuses,
@@ -198,13 +198,13 @@ export function useBoard(dir: Ref<string | null>) {
   let unlistenPings: UnlistenFn | null = null;
   let unlistenSessions: UnlistenFn | null = null;
   onMounted(async () => {
-    unlisten = await listen<string>(THREADS_CHANGED_EVENT, (e) => {
-      if (e.payload === dir.value) void refresh();
+    unlisten = await getTransport().listen<string>(THREADS_CHANGED_EVENT, (p) => {
+      if (p === dir.value) void refresh();
     });
-    unlistenPings = await listen<string>(PINGS_CHANGED_EVENT, async (e) => {
-      if (e.payload === dir.value) setPings(await listPings());
+    unlistenPings = await getTransport().listen<string>(PINGS_CHANGED_EVENT, async (p) => {
+      if (p === dir.value) setPings(await listPings());
     });
-    unlistenSessions = await listen(SESSIONS_CHANGED_EVENT, async () => {
+    unlistenSessions = await getTransport().listen(SESSIONS_CHANGED_EVENT, async () => {
       setCenterList(await listSessions());
     });
     // A change before the listener was registered has no event: read once more now.

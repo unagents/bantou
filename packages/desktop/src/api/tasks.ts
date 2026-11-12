@@ -1,6 +1,6 @@
-import { invoke } from "@tauri-apps/api/core";
+import { getTransport } from "~/tauri";
 import type { Task } from "~/types";
 
-export const listTasks = () => invoke<Task[]>("list_tasks");
+export const listTasks = () => getTransport().invoke<Task[]>("list_tasks");
 
-export const getStatuses = () => invoke<string[]>("get_statuses");
+export const getStatuses = () => getTransport().invoke<string[]>("get_statuses");
