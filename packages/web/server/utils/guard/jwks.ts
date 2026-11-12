@@ -63,12 +63,17 @@ export class JwksCache {
         for (const jwk of body.keys as Array<Record<string, unknown>>) {
           if (jwk?.kty !== "RSA" || typeof jwk.kid !== "string") continue;
           try {
-            next.set(jwk.kid, createPublicKey({ key: jwk as never, format: "jwk" }));
+            const key = createPublicKey({ key: jwk as never, format: "jwk" });
+            // 退化した鍵 (node は n が空・短くても作れる) は捨てる
+            if ((key.asymmetricKeyDetails?.modulusLength ?? 0) < 2048) continue;
+            next.set(jwk.kid, key);
           } catch {
             // 壊れた鍵は捨てる
           }
         }
       }
+      // 空・不正な応答は既存 cache を置換しない（fetchedAt も進めない）
+      if (next.size === 0) return;
       this.keys = next;
       this.fetchedAt = this.now();
     } catch {

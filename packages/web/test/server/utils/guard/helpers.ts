@@ -79,3 +79,13 @@ export async function startApp(guard: Guard) {
   const port = (server.address() as AddressInfo).port;
   return { base: `http://127.0.0.1:${port}`, host: `127.0.0.1:${port}`, close: () => closeServer(server) };
 }
+
+/** JwksCache 単体用: 応答を差し替えられる fetch と手動の時計 */
+export function fakeFetch(first: TestKey[]) {
+  const st = { body: { keys: first.map((k) => k.jwk) } as unknown, ok: true, calls: 0 };
+  const fetch = async () => {
+    st.calls++;
+    return { ok: st.ok, json: async () => st.body };
+  };
+  return { st, fetch };
+}

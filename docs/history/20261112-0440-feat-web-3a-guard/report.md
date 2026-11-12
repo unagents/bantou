@@ -15,11 +15,12 @@
   - `handler.ts`: 上の順（共有鍵 → JWT → Origin）で全 route に掛ける h3 handler と `/api/me` の本体。
 - `server/middleware/00.guard.ts`（全 route）、`server/api/me.get.ts`（`GET /api/me` → `{ email }`）。
 - test: `test/server/utils/guard/`。test が生成した RSA 鍵の偽 JWKS（localhost の http server）で署名。メール・team・aud はダミー値。
+- review 往復 1 回目の追加: `jwks.ts` は空・不正（2048 bit 未満の退化した鍵を含む）な応答で既存 cache を置換しない。test: `jwks-jwt.test.ts`（JwksCache の TTL・取り直し 1 回・空応答、nbf/exp の leeway 境界、JWT email の正規化）、`nitro-wiring.test.ts`（実ファイルを `nuxt build` して起動し HTTP で確認）。
 - `bun.lock`: `packages/web` の分（workspace 追加と依存 5 件）のみ。bun が書き換えた `packages/server` の version 行（0.6.4→0.6.7）は戻した。
 
 ## 確認
 
-- `packages/web`: `npm test` 24 件 pass / 0 fail。
+- `packages/web`: `npm test` 38 件 pass / 0 fail（往復 1 回目後。初回は 24 件）。
   - JWT 無し・署名違い・本文改ざん・alg none/HS256・壊れた JWT・aud 違い・iss 違い・期限切れ・exp 無し・許可外 email（403）・email 無し/非文字列、共有鍵の欠落/不一致/空、POST/PUT/PATCH/DELETE の Origin 不一致/欠落/null、GET は Origin 不問、鍵ローテーション（未知 kid で取り直し 1 回、以降 cache）、JWKS 取得不可は 401、設定不正は 500、正常系（`/api/me` が email を返す）。
 - `packages/web`: `npm run typecheck`（`nuxt prepare && tsc --noEmit`）通過。
 - `packages/web`: `npm run build` 通過。`.output/server/index.mjs` を実際に起動して curl: 鍵無し 403 / 鍵のみ 401 / 壊れた JWT 401 / `/` も 403 / POST 401（JWT で止まる）。起動したプロセスは停止し、port 解放を確認。
@@ -40,3 +41,18 @@
 - `PROXY_KEY` の長さ下限は設けていない（空だけ拒否）。
 - Origin の比較は `Host` header のみ。`X-Forwarded-Host` は信用しない（nginx が `Host` を保つ前提、設計 8.1）。
 - `/api/health` などは 3d の範囲なので作っていない。`/api/me` 以外の route は無い。
+
+## review 往復 1 回目の対応
+
+- 配線 test（`test/server/nitro-wiring.test.ts`）: `nuxt build` した `.output/server/index.mjs` を偽 JWKS で起動し、実ファイルの `00.guard.ts` と `me.get.ts` を HTTP で確かめる。
+- 変異の結果（変異を入れて test を実行し、戻した）:
+  - middleware ファイルを移動して削除: nitro-wiring 4 件中 0 pass（全 fail）
+  - middleware を no-op に: 0 pass / 4 fail
+  - `/api/me` を固定値 (alice) に: 3 pass / 1 fail（JWT の email が別の許可 email の時に返らない）。初版の test は alice しか使わず固定値でも通ったので、2 人目 (bob) と大文字の JWT email の確認を足した
+  - `jwks.ts` の空応答ガードを削除: jwks-jwt 10 件中 3 fail
+- 未知の route は SPA fallback で守りを通れば 200 を返す（`ssr:false`）。test は 401/403 が先に出ることを見ている。
+
+## 5a への申し送り（直していない点）
+
+- **Nitro の静的配信は middleware より先に応答する**。`public/` の file と `/_nuxt/*` の実 asset は守りの外で、共有鍵・JWT なしで 200 になる。3a は asset が無いので実害は無い。5a で SPA を載せる時に、asset をどう守るか（nginx 側で共有鍵を付けて配る、static を Nitro の外に出さない設定、asset は公開でよいと割り切る等）の判断が要る。設計 5.2 は全 route に掛かる前提のため、実装は変えていない。
+- `WEB_CF_CERTS_URL` は `http://` や任意 host を取れる。実装は変えない。判断: この env を書き換えられる者は同じ env の `PROXY_KEY`・`CF_AUD`・`ALLOWED_EMAILS` も書けるので、権限の追加増は無い（env の置き場は 600 の EnvironmentFile、設計 5.2）。
