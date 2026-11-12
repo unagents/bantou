@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import {
   CenterMcpError,
+  CenterSettingsError,
   McpClient,
   ToolNotAllowedError,
   createCenterMcp,
@@ -199,27 +200,96 @@ test("createCenterMcp without a policy applies the web list; an explicit allowTo
   await only.call("rc_stop");
 });
 
-test("selectTarget failures are clean in call(), json() and connection()", async () => {
+test("selectTarget failures: an arbitrary error becomes a fixed text (also before any target was known)", async () => {
   const mock = await start();
-  let fail = false;
+  let fail: unknown;
   const mcp = createCenterMcp({
     settings: {
       selectTarget: async () => {
-        if (fail) throw new Error(`settings broke: http://usr:${PW}@h/mcp token ${TOK}`);
+        if (fail) throw fail;
         return { url: withPw(mock.url), token: TOK, source: "remote" as const };
       },
     },
   });
-  await mcp.call("rc_list"); // the target is known now
-  fail = true;
+  // nothing was known yet: the text of the error (a JSON parse error quotes the file) is not passed on
+  fail = new SyntaxError(`Unexpected token in {"token":"${TOK}","url":"http://usr:${PW}@h"}`);
   await assert.rejects(mcp.call("rc_list"), (e: Error) => {
-    assert.ok(e instanceof CenterMcpError && e.message.includes("settings broke"), e.message);
-    clean(e.message, "call");
+    assert.ok(e instanceof CenterMcpError && e.message === "接続先の選択に失敗", e.message);
     return true;
   });
-  await assert.rejects(mcp.json("rc_list"), (e: Error) => (clean(e.message, "json"), true));
+  const c0 = await mcp.connection();
+  assert.deepEqual(c0, { connected: false, lastError: "接続先の選択に失敗" });
+  // an error code is kept
+  fail = Object.assign(new Error(`EACCES: open /x/${TOK}`), { code: "EACCES" });
+  await assert.rejects(mcp.json("rc_list"), (e: Error) => (assert.equal(e.message, "接続先の選択に失敗 (EACCES)"), true));
+  // after the target was known and the settings changed: still fixed, nothing of the old or new secrets
+  fail = undefined;
+  await mcp.call("rc_list");
+  fail = new Error(`new settings with ${TOK} and usr:${PW}@h and brand-new-token-999`);
+  await assert.rejects(mcp.call("rc_list"), (e: Error) => {
+    assert.equal(e.message, "接続先の選択に失敗");
+    return true;
+  });
   const c = await mcp.connection();
   assert.equal(c.connected, false);
-  assert.ok(c.lastError!.includes("settings broke"));
+  assert.equal(c.lastError, "接続先の選択に失敗");
+});
+
+test("selectTarget failures: a CenterSettingsError message is passed on, scrubbed with the last known target", async () => {
+  const mock = await start();
+  let fail: unknown;
+  const mcp = createCenterMcp({
+    settings: {
+      selectTarget: async () => {
+        if (fail) throw fail;
+        return { url: withPw(mock.url), token: TOK, source: "remote" as const };
+      },
+    },
+  });
+  // learned through connection() only: the target is remembered there too
+  assert.equal((await mcp.connection()).connected, true);
+  fail = new CenterSettingsError(`bad settings ${TOK} ${PW}`);
+  const c = await mcp.connection();
+  assert.ok(c.lastError!.startsWith("bad settings"), c.lastError);
   clean(c.lastError, "connection");
+  await assert.rejects(mcp.call("rc_list"), (e: Error) => (clean(e.message, "call"), e.message.startsWith("bad settings")));
+});
+
+test("json(): an unreadable body is not quoted in the error, the list reason or the log", async () => {
+  const mock = await start();
+  const body = `<html>secret-body-${TOK}</html>`;
+  mock.rawTools.set("rc_list", body);
+  mock.rawTools.set("session_list", body);
+  const log: string[] = [];
+  const logger = { info: (m: string) => log.push(m), warn: (m: string) => log.push(m) };
+  const mcp = createCenterMcp({ settings: { selectTarget: async () => ({ url: mock.url, token: TOK, source: "remote" as const }) }, logger });
+  await assert.rejects(mcp.json("rc_list"), (e: Error) => {
+    assert.equal(e.message, "rc_list の結果を読めない (JSON ではない)");
+    return true;
+  });
+  const svc = createSessionService({ mcp, logger });
+  const l = await svc.refresh();
+  assert.equal(l.reachable, false);
+  assert.equal(l.reason, "session_list の結果を読めない (JSON ではない)");
+  assert.ok(log.length > 0);
+  for (const x of [...log, l.reason!]) assert.ok(!x.includes("secret-body") && !x.includes(TOK), x);
+});
+
+test("an initialized notification that fails with a body that echoes the secrets is clean in the error, lastError and the log", async () => {
+  const mock = await start();
+  mock.override = (method, _req, res) => {
+    if (method !== "notifications/initialized") return false;
+    res.writeHead(500, { "content-type": "text/plain" }).end(`notify failed ${TOK} ${PW}`);
+    return true;
+  };
+  const log: string[] = [];
+  const client = new McpClient({ logger: { info: (m) => log.push(m), warn: (m) => log.push(m) } });
+  await assert.rejects(client.callTool(withPw(mock.url), TOK, "rc_list"), (e: Error) => {
+    assert.ok(e.message.includes("initialized 通知が HTTP 500") && e.message.includes("notify failed"), e.message);
+    clean(e.message, "error");
+    return true;
+  });
+  clean(client.lastError(), "lastError");
+  assert.ok(log.some((l) => l.includes("notifications/initialized") && l.includes("notify failed")));
+  for (const l of log) clean(l, "log");
 });

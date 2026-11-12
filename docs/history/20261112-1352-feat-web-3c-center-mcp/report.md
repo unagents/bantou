@@ -61,3 +61,23 @@ Tests added (`test/secrets.test.ts`, `test/events-secrets.test.ts`, small edits 
 Mutation check (a change put into `src`, test run, change reverted): killed by an assertion, no hang, for: initialize error scrub removed, raw/decode order, `secretUrl` unused, default policy open, `selectTarget` text raw, token not sent on events, only first listener, `stop` without abort, `start` not idempotent, unbounded re-initialize, failures not reset, no read timeout, `lastError` not cleared, no `log.info`, 500 body / `log.warn` / read error / JSON-RPC error not scrubbed, no target follow, no long wait after rejected.
 Survived: the `scrub` in `createCenterEvents`' `logger.warn`. It is redundant (the message from `streamOnce` is already scrubbed); kept as a second guard, the warn path is covered by the `logger.warn` test.
 Not done: nothing from the list left over. `package.json` description untouched.
+
+## Review 2: fixes (commit after `09664256d6363e0fbdd3ecd4a67405d049e68e6e`)
+
+Results: `packages/center-client` typecheck ok, test 141 pass / 0 fail (was 135), 3 runs no flake. `packages/web` 38, `packages/protocol` 43.
+
+| # | finding | fix |
+|---|---|---|
+| 1 | `streamOnce` could be called without the secret URL, leaving the URL password in a rejected body | **API change**: `streamOnce(target: { url, token? }, segments, onEvent, opts)`. It takes the configured MCP url (with userinfo) and builds the request URL itself (`centerUrl`), so the password and the token are always known. `StreamOptions.secretUrl` and `StreamOptions.token` are gone; `StreamTarget` is exported. 4a: call it as `streamOnce({ url: mcpUrl, token }, ["sessions", name, "output"], onEvent, { lastEventId, signal })` |
+| 2 | `selectFailure` could leak a token when no target was known yet or settings had just changed | I read the settings layer: `selectTarget` errors come from the store (`readFile` / `JSON.parse`, whose message quotes the file) or are `CenterSettingsError` (our fixed texts). So an arbitrary error becomes the fixed text `接続先の選択に失敗` (+ ` (CODE)` when it has an error code like `EACCES`); only a `CenterSettingsError` message is passed on, scrubbed with the last known target. `last` is updated in `call()`, `json()` and `connection()` |
+| 3 | `json()` "結果を読めない" quoted the start of the body | fixed text `<tool> の結果を読めない (JSON ではない)`; the list `reason` and the log carry the same text. Test: the body (with a token) appears in none of error, reason, log |
+| 4 | "reestablish is tried once only" could hang | `mock.limit` added: a runaway retry gets HTTP 500 and the count assertions fail |
+| 5 | missing tests | initialized notification 500 body with token / password (error, `lastError`, log); sessions listener that throws (other listener still called, refresh resolves, cache already stored); events failure count reset on a target move; `stop()` waits for the loop (slow teardown finished when it resolves); `connection()` updates the last known target (CenterSettingsError text scrubbed) |
+
+Mutation check (change put into `src`, test run, reverted; the change was committed first so the revert cannot lose work): killed by an assertion, no hang, for: stream scrub with the built url, `selectFailure` raw (both branches), JSON body quoted, notification not scrubbed, unbounded re-initialize, listener not isolated, no failure reset on move, `stop` not awaiting the loop, `connection()` not updating the last target.
+
+## 3d・desktop 側の注意
+
+- `createCenterMcp` is fail-closed: without `policy.allowTool` the web list (`allowWebTool`) applies. A desktop-like caller that wants every tool must say so with `policy: { allowTool: () => true }`. `McpClient` alone still allows every tool when no policy is given.
+- The text of a successful tool result (`call()` / `json()` return value) is passed on as is. It can contain secrets the center put there (for example a session's login URL, or a token echoed by a tool). The 3d route is the gate: it must filter / scrub what it returns to the browser; nothing here does it.
+- `scrub` removes a URL password only when it has 4 or more characters, so a shorter password is not removed from free text (a body, a library error). Error texts built by this package use `redactUrl` and never contain the userinfo; only text taken from outside (response bodies, library errors) depends on `scrub`.

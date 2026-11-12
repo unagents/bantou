@@ -101,6 +101,7 @@ test("reestablish is tried once only: a second 404 is an error", async () => {
   const client = new McpClient();
   await client.callTool(mock.url, undefined, "rc_list");
   mock.dropCalls = true;
+  mock.limit = mock.log.length + 12; // a runaway retry gets HTTP 500 and the counts below fail, no hang
   await assert.rejects(client.callTool(mock.url, undefined, "rc_list"), /MCP session が切れた/);
   // the lost session, one new initialize, the retry: no third try
   assert.equal(mock.count("initialize"), 2);

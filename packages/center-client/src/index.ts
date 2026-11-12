@@ -79,4 +79,5 @@ export {
   type SseEvent,
   type StreamEnd,
   type StreamOptions,
+  type StreamTarget,
 } from "./events.ts";

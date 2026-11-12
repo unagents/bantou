@@ -259,3 +259,22 @@ test("no target: the list is flagged unreachable with the reason", async () => {
   assert.equal(r.reachable, false);
   assert.ok(r.reason!.includes("接続先が無い"));
 });
+
+test("a listener that throws neither stops the other listeners nor fails refresh", async () => {
+  const mock = await FakeCenter.start();
+  centers.push(mock);
+  mock.tools.set("session_list", [{ name: "a" }]);
+  const mcp = createCenterMcp({ settings: { selectTarget: async () => ({ url: mock.url, source: "remote" as const }) } });
+  const svc = createSessionService({ mcp });
+  const calls: string[] = [];
+  svc.onChanged(() => {
+    calls.push("bad");
+    throw new Error("listener bug");
+  });
+  svc.onChanged(() => calls.push("good"));
+  const l = await svc.refresh();
+  assert.deepEqual(names(l), ["a"]);
+  assert.deepEqual(calls, ["bad", "good"]);
+  // the cache was stored before the listeners ran
+  assert.equal(svc.get().rev, 1);
+});

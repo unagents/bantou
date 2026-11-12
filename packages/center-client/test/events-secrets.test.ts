@@ -43,12 +43,12 @@ afterEach(async () => {
 
 // -- streamOnce ---------------------------------------------------------------------
 
-test("streamOnce: connect error text is clean (token and URL password, also with the url given without userinfo)", async () => {
+test("streamOnce: connect error text is clean (token and URL password of the configured url)", async () => {
   const failing = (async () => {
     throw new Error(`connect failed ${TOK} ${PW} http://usr:${PW}@h`);
   }) as unknown as typeof fetch;
   await assert.rejects(
-    streamOnce(new URL("http://127.0.0.1:1/events"), () => true, { fetch: failing, token: TOK, secretUrl: SECRET_URL }),
+    streamOnce({ url: SECRET_URL, token: TOK }, ["events"], () => true, { fetch: failing }),
     (e: Error) => {
       assert.ok(e.message.includes("接続できない"), e.message);
       clean(e.message, "connect");
@@ -59,7 +59,7 @@ test("streamOnce: connect error text is clean (token and URL password, also with
 
 test("streamOnce: rejected body echo is clean", async () => {
   const f = (async () => new Response(`denied ${TOK} ${PW}`, { status: 401 })) as unknown as typeof fetch;
-  const end = await streamOnce(new URL("http://127.0.0.1:1/events"), () => true, { fetch: f, token: TOK, secretUrl: SECRET_URL });
+  const end = await streamOnce({ url: SECRET_URL, token: TOK }, ["events"], () => true, { fetch: f });
   assert.equal(end.type, "rejected");
   if (end.type === "rejected") {
     assert.ok(end.body.includes("denied") && end.status === 401);
@@ -78,7 +78,7 @@ test("streamOnce: read failure text is clean", async () => {
       { status: 200 },
     )) as unknown as typeof fetch;
   await assert.rejects(
-    streamOnce(new URL("http://127.0.0.1:1/events"), () => true, { fetch: f, token: TOK, secretUrl: SECRET_URL }),
+    streamOnce({ url: SECRET_URL, token: TOK }, ["events"], () => true, { fetch: f }),
     (e: Error) => {
       assert.ok(e.message.includes("読み取りに失敗"), e.message);
       clean(e.message, "read");
@@ -91,7 +91,7 @@ test("streamOnce: a silent stream ends by its read timeout (no hang)", async () 
   const f = (async () =>
     new Response(new ReadableStream({ start() {} }), { status: 200 })) as unknown as typeof fetch;
   const end = await within(
-    streamOnce(new URL("http://127.0.0.1:1/events"), () => true, { fetch: f, readTimeoutMs: 100 }),
+    streamOnce({ url: SECRET_URL }, ["events"], () => true, { fetch: f, readTimeoutMs: 100 }),
     2000,
     "read timeout",
   );
@@ -259,4 +259,66 @@ test("SseParser: comment lines are ignored, also between and inside an event", (
   const enc = new TextEncoder();
   out.push(...p.feed(enc.encode(": top\ndata: a\n: middle\ndata: b\n:event: no\n\n: tail\n\n")));
   assert.deepEqual(out, [{ id: undefined, event: "message", data: "a\nb" }]);
+});
+
+test("a target move resets the failure count (the next wait is asked with 0)", async () => {
+  const [a, b] = [await FakeCenter.start(), await FakeCenter.start()];
+  centers.push(a, b);
+  scripted(a, (n, res) => {
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    if (n <= 3) res.end(": nothing\n\n"); // connections 1-3 end at once with nothing: failures 0,1,2
+    else res.write(": held open\n\n"); // connection 4 stays open until the target moves
+  });
+  scripted(b, (_n, res) => {
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.end(": nothing\n\n");
+  });
+  a.limit = 400;
+  b.limit = 400;
+  let target = { url: a.url, source: "remote" as const };
+  const asked: number[] = [];
+  const events = mk({
+    settings: { selectTarget: async () => target },
+    ...fast,
+    reconnectDelayMs: (n) => (asked.push(n), 10),
+  });
+  events.start();
+  await until(() => a.gets === 4);
+  assert.deepEqual(asked, [0, 1, 2]);
+  target = { url: b.url, source: "remote" as const };
+  await until(() => asked.length >= 4);
+  await within(events.stop(), 2000, "stop");
+  // without the reset this would be 3
+  assert.equal(asked[3], 0);
+});
+
+test("stop waits until the loop has ended (a slow teardown is finished when stop resolves)", async () => {
+  let teardownDone = false;
+  const f = (async (_url: unknown, init: RequestInit) =>
+    new Response(
+      new ReadableStream({
+        start(c) {
+          c.enqueue(new TextEncoder().encode("event: sessions\ndata: {}\n\n"));
+          init.signal!.addEventListener("abort", () =>
+            setTimeout(() => {
+              teardownDone = true;
+              c.error(new Error("aborted late"));
+            }, 150),
+          );
+        },
+      }),
+      { status: 200 },
+    )) as unknown as typeof fetch;
+  const events = mk({
+    settings: { selectTarget: async () => ({ url: "http://127.0.0.1:1/mcp", source: "remote" as const }) },
+    fetch: f,
+    ...fast,
+    readTimeoutMs: 60_000,
+  });
+  const got: Changed[] = [];
+  events.subscribe((c) => got.push(c));
+  events.start();
+  await until(() => got.length === 1);
+  await within(events.stop(), 2000, "stop");
+  assert.equal(teardownDone, true);
 });

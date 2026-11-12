@@ -7,7 +7,7 @@
 
 import { redactUrl } from "./normalize.ts";
 import { allowWebTool } from "./tool-policy.ts";
-import type { SettingsPolicy, Target } from "./settings.ts";
+import { CenterSettingsError, type SettingsPolicy, type Target } from "./settings.ts";
 
 export const PROTOCOL_VERSION = "2025-06-18";
 export const SESSION_HEADER = "mcp-session-id";
@@ -492,9 +492,16 @@ export function createCenterMcp(opts: CenterMcpOptions): CenterMcp {
   // Fail closed: without an `allowTool` the web list applies (a caller that wants every tool says so).
   const client = new McpClient({ ...opts, policy: { allowTool: opts.policy?.allowTool ?? allowWebTool } });
   let last: Target | undefined;
-  /** A failure of `selectTarget`: the text without the secrets of the last known target. */
-  const selectFailure = (e: unknown): string =>
-    scrub(e instanceof Error ? e.message : String(e), last?.url ?? "", last?.token);
+  /**
+   * A failure of `selectTarget`, as a short fixed text. The text of an arbitrary error (a file read, a JSON parse) can
+   * carry a part of the stored settings, so only our own `CenterSettingsError` message is passed on (scrubbed with the last
+   * known target as well), and for anything else only the error code.
+   */
+  const selectFailure = (e: unknown): string => {
+    if (e instanceof CenterSettingsError) return scrub(e.message, last?.url ?? "", last?.token);
+    const code = (e as { code?: unknown } | null)?.code;
+    return typeof code === "string" && /^[A-Z0-9_]{1,40}$/.test(code) ? `接続先の選択に失敗 (${code})` : "接続先の選択に失敗";
+  };
   const target = async (): Promise<Target> => {
     let t: Target | undefined;
     try {
@@ -518,8 +525,9 @@ export function createCenterMcp(opts: CenterMcpOptions): CenterMcp {
       const text = toolText(r, "");
       try {
         return JSON.parse(text);
-      } catch (e) {
-        throw new CenterMcpError(`${tool} の結果を読めない: ${(e as Error).message}`);
+      } catch {
+        // the parser's message quotes the start of the body: not passed on
+        throw new CenterMcpError(`${tool} の結果を読めない (JSON ではない)`);
       }
     },
     async connection() {

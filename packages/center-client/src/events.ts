@@ -118,30 +118,36 @@ export type StreamEnd =
 
 export interface StreamOptions {
   fetch?: typeof fetch;
-  token?: string;
   lastEventId?: string | number;
   readTimeoutMs?: number;
   /** Aborting ends the stream with `closed`. */
   signal?: AbortSignal;
-  /** The URL as configured (with userinfo): its password is removed from error text. `url` has no userinfo. */
-  secretUrl?: string;
+}
+
+/** What a stream is opened for: the center's MCP URL as configured (it may carry userinfo) and the Bearer token. */
+export interface StreamTarget {
+  url: string;
+  token?: string | undefined;
 }
 
 /**
- * Open the stream once and feed events to `onEvent` until it ends. `onEvent` returns false to stop.
+ * Open `<origin of target.url>/<segments>` once and feed events to `onEvent` until it ends.
+ * It takes the configured URL (not a built one) so that the URL password and the token are known and removed from every error text. `onEvent` returns false to stop.
  * Throws an `Error` (text without secrets) when the center cannot be reached or the read fails. (`stream_once`)
  */
 export async function streamOnce(
-  url: URL,
+  target: StreamTarget,
+  segments: string[],
   onEvent: (e: SseEvent) => boolean,
   opts: StreamOptions = {},
 ): Promise<StreamEnd> {
+  const url = centerUrl(target.url, segments);
   const doFetch = opts.fetch ?? fetch;
   const readTimeout = opts.readTimeoutMs ?? READ_TIMEOUT_MS;
   const headers: Record<string, string> = { accept: "text/event-stream" };
-  if (opts.token !== undefined) headers.authorization = `Bearer ${opts.token}`;
+  if (target.token !== undefined) headers.authorization = `Bearer ${target.token}`;
   if (opts.lastEventId !== undefined) headers["last-event-id"] = String(opts.lastEventId);
-  const clean = (m: string) => scrub(m, opts.secretUrl ?? url.href, opts.token);
+  const clean = (m: string) => scrub(m, target.url, target.token);
   let resp: Response;
   try {
     resp = await doFetch(url.href, { method: "GET", headers, signal: opts.signal });
@@ -300,14 +306,15 @@ export function createCenterEvents(opts: CenterEventsOptions): CenterEvents {
       let result: StreamEnd | Error;
       try {
         result = await streamOnce(
-          eventsUrl(target.url),
+          target,
+          ["events"],
           (ev) => {
             gotEvents = true;
             const c = toChanged(ev);
             if (c) emit(c);
             return true;
           },
-          { fetch: opts.fetch, token: target.token, readTimeoutMs: readTimeout, signal: conn.signal, secretUrl: target.url },
+          { fetch: opts.fetch, readTimeoutMs: readTimeout, signal: conn.signal },
         );
       } catch (e) {
         result = e instanceof Error ? e : new Error(String(e));

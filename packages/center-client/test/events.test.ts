@@ -125,8 +125,7 @@ async function serve(responses: [number, string][]): Promise<{ base: string; hea
 test("T:512 stream_once delivers events and sends last-event-id and token", async () => {
   const { base, heads } = await serve([[200, "event: reset\ndata: {}\n\n: ka\n\nid: 4\nevent: output\ndata: QQ==\n\n"]]);
   const got: SseEvent[] = [];
-  const end = await streamOnce(centerUrl(`${base}/mcp`, ["sessions", "m", "output"]), (e) => (got.push(e), true), {
-    token: "tok",
+  const end = await streamOnce({ url: `${base}/mcp`, token: "tok" }, ["sessions", "m", "output"], (e) => (got.push(e), true), {
     lastEventId: 3,
     readTimeoutMs: 5000,
   });
@@ -139,7 +138,7 @@ test("T:512 stream_once delivers events and sends last-event-id and token", asyn
 
 test("T:532 stream_once omits last-event-id when none and reports rejection", async () => {
   const { base, heads } = await serve([[404, "no such session"]]);
-  const end = await streamOnce(centerUrl(`${base}/mcp`, ["sessions", "gone", "output"]), () => true, { readTimeoutMs: 5000 });
+  const end = await streamOnce({ url: `${base}/mcp` }, ["sessions", "gone", "output"], () => true, { readTimeoutMs: 5000 });
   assert.deepEqual(end, { type: "rejected", status: 404, body: "no such session" });
   assert.equal(heads[0]!.headers["last-event-id"], undefined);
   assert.equal(heads[0]!.headers.authorization, undefined);
@@ -148,7 +147,7 @@ test("T:532 stream_once omits last-event-id when none and reports rejection", as
 test("T:567 stream_once stops when the sink says so", async () => {
   const { base } = await serve([[200, "id: 1\nevent: output\ndata: QQ==\n\nid: 2\nevent: output\ndata: Qg==\n\n"]]);
   let n = 0;
-  const end = await streamOnce(centerUrl(`${base}/mcp`, ["sessions", "m", "output"]), () => (n++, false), { readTimeoutMs: 5000 });
+  const end = await streamOnce({ url: `${base}/mcp` }, ["sessions", "m", "output"], () => (n++, false), { readTimeoutMs: 5000 });
   assert.deepEqual([end, n], [{ type: "stopped" }, 1]);
 });
 
@@ -160,7 +159,7 @@ test("T:582 silent connection is dropped after the read timeout", async () => {
   servers.push(srv);
   await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
   const base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
-  const end = await streamOnce(centerUrl(`${base}/mcp`, ["events"]), () => true, { readTimeoutMs: 300 });
+  const end = await streamOnce({ url: `${base}/mcp` }, ["events"], () => true, { readTimeoutMs: 300 });
   assert.deepEqual(end, { type: "closed" });
 });
 
@@ -169,7 +168,7 @@ test("stream_once: an unreachable center throws a text without secrets", async (
   await new Promise<void>((r) => s.listen(0, "127.0.0.1", r));
   const port = (s.address() as AddressInfo).port;
   await new Promise<void>((r) => s.close(() => r()));
-  await assert.rejects(streamOnce(new URL(`http://127.0.0.1:${port}/events`), () => true, { token: "tok-secret-123" }), (e: Error) => {
+  await assert.rejects(streamOnce({ url: `http://127.0.0.1:${port}/mcp`, token: "tok-secret-123" }, ["events"], () => true), (e: Error) => {
     assert.ok(e.message.includes("接続できない") && !e.message.includes("tok-secret-123"), e.message);
     return true;
   });
