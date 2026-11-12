@@ -20,7 +20,7 @@
 4a. **center とつなぐ側（MCP client、SessionCache、events の中継、端末の出力・入力・添付の中継、center 設定の読み書き）は、web 専用にせず新設の共有 package `packages/center-client`（TS、framework 非依存）に置く。** web backend はそれを呼ぶ薄い層。desktop は今すぐは変えず（Rust のまま）、将来この package を使う形へ寄せられるようにする（5.6）。command 名・event 名の契約は desktop と同じ。
 5. **v1 は Cork の task・thread・messenger 受信（`bantou-core`）を web に持ち込まない。** 202 の共有 broker に `bantou-core` を 2 つ登録できない（`docs/handoff.md:16`）。
 6. スマホ画面は専用の page（一覧 → 端末の 2 画面）と、soft keyboard 用の「特殊キー列」「入力欄」を足す。
-7. 実装は 14 のまとまり（1、2a、2b、3a、3b、3c、4、5a、5b、5c、6a、6b、7、8）＋ v1 の後の S（center を起動する形）・(M)（desktop を共有 package に寄せる）・(9)（Cork）。10 章。既定の形（接続設定）はまとまり 3b・3c・4・5a で先に動き、S はそれを前提に後から足す。依存の一覧は 10.1。8（center に pty サイズの口）は判断 3 が A の時だけで、設置先の center に届くのは desktop の release を経てから。7（deploy の手順書、docs のみ）は 3c と 4 の後。
+7. 実装は 16 のまとまり（1、2a、2b、3a、3b、3c、3d、4a、4b、5a、5b、5c、6a、6b、7、8）＋ v1 の後の S（center を起動する形）・(M)（desktop を共有 package に寄せる）・(9)（Cork）。10 章。既定の形（接続設定）はまとまり 3b・3c・3d・4a・4b・5a で先に動き、S はそれを前提に後から足す。依存の一覧は 10.1。8（center に pty サイズの口）は判断 3 が A の時だけで、設置先の center に届くのは desktop の release を経てから。7（deploy の手順書、docs のみ）は 3d と 4b の後。
 
 ## 1. 構成図（文章）
 
@@ -117,7 +117,7 @@ interface Transport {
 
 全表は報告 1.1〜1.3。web 版に残すもの:
 
-- **center 設定**（desktop と同じ command 名、5.5）: `center_get_settings`、`center_set_settings`、`center_status`、`center_regenerate_token`（起動する形のみ。まとまり S）。
+- **center 設定**（desktop と同じ command 名、5.5）: `center_get_settings`、`center_set_settings`、`center_status`、`center_regenerate_token`（起動する形のみ。まとまり S。戻り値の token は返さない）。
 - **center への中継**: `center_call`（許可 tool のみ）、`center_connection`、`list_sessions`/`refresh_sessions`、`create_session`/`session_update`、`session_get_settings`/`session_update_settings`、`session_path_hints`、`session_output_*`/`session_input`/`session_resize`、`session_attach_bytes`（`attach_paths`/`attach_pick` は `File` から同じ経路）。
 - **web で意味が変わるもの**: `session_path_hints.canPick` は常に偽。`center_get_settings` の応答は **token を返さない**（`token` / `remote.token` は空で、設定済みかの印だけ。5.5）。`center_set_settings` は既定でブラウザからの変更を受けない（判断 14）。center の共通設定（`center_settings_get/update`、`SettingsDialog.vue:74-86`）はこれまで通り tool 経由。
 - **持ち込まないもの**: workspace/task/thread/broker/agent（Cork 系 17 command: workspace 4、task 4、thread 2、broker 3、agent 4）、updater、menu、window、single-instance、os 通知（ブラウザの標準 event で代替）、`center_connect_snippets`/`center_parse_connect`/`center_local_ips`/`center_ip_status`（この PC の IP を使う接続設定の生成。token をブラウザに出さない方針と、web が「この PC」を持たないため）。
@@ -190,7 +190,7 @@ desktop の `center_call` は任意 tool を呼べる（`center_mcp.rs:468-478`�
 
 ### 5.5 center 設定（desktop と同じ仕組み）
 
-desktop の仕組み（報告 9 章）: 設定は 1 つの object `CenterSettings`（`enabled` `port` `bind` `workspace` `claudePath` `token` `remote`）で、`settings.json` の `center` キーに保存される。**接続先は呼び出しのたびに保存済みの設定から選ぶ**: `enabled` が真なら自分が起動する center（loopback）、偽で `remote` があればそれ、どちらも無ければ「接続先が無い」（`D/src-tauri/src/center_mcp.rs:85-98,460`）。web も同じ object・同じ選び方・同じ command 名（`center_get_settings` / `center_set_settings` / `center_status` / `center_regenerate_token`）にし、型は `packages/ui` の既存の `CenterSettings`（`D/src/types/index.ts:166-185`）を使う。
+desktop の仕組み（報告 9 章）: 設定は 1 つの object `CenterSettings`（`enabled` `port` `bind` `workspace` `claudePath` `token` `remote`）で、`settings.json` の `center` キーに保存される。**接続先は呼び出しのたびに保存済みの設定から選ぶ**: `enabled` が真なら自分が起動する center（loopback）、偽で `remote` があればそれ、どちらも無ければ「接続先が無い」（`D/src-tauri/src/center_mcp.rs:85-98,460`）。web も同じ object・同じ選び方・同じ command 名（`center_get_settings` / `center_set_settings` / `center_status` / `center_regenerate_token`）にし、型は `packages/ui` の既存の `CenterSettings`（`D/src/types/index.ts:166-185`）を使う。web の応答では型の差が 2 つある: `bind` は持たないので optional にし、設定済みの印 `tokenSet` と `remote.tokenSet` を optional で足す（`packages/ui` の `types` に optional で足すだけで、desktop の応答型・値は変わらない）。
 
 **項目（名前・意味は desktop と同じ）**
 
@@ -219,7 +219,8 @@ desktop の仕組み（報告 9 章）: 設定は 1 つの object `CenterSetting
 
 **誰がどう変えるか**
 1. **運用者が設定 file か env を編集する**（既定の変え方）。次の呼び出しから有効。
-2. **設定画面**: 共有の `SettingsDialog`（`packages/ui`）。desktop が「別 host の center だけを使う」時の表示（`SettingsDialog.vue:285-294` の `sidecarVisible`）と同じ形で、web v1 は起動の欄（スイッチ、port、IP、token、snippet）を出さず、**接続先 center の url・token の欄と接続状態**だけを出す。画面からの**変更を受けるか**は判断 14（推奨: v1 は表示のみ、変更は file）。
+2. **設定画面**: 共有の `SettingsDialog`（`packages/ui`）。**desktop の「別 host の center だけを使う」表示（`sidecarVisible`）は流用できない**: `sidecarVisible = !remoteOnly || enabled`（`SettingsDialog.vue:294`）、`remoteOnly = !enabled && remote あり`（`D/src/composables/centerRole.ts:10`、`SettingsDialog.vue:50`）なので、web の既定（`enabled` 偽・`remote` なし）では `remoteOnly` が偽になり、起動スイッチ・port・IP・token・状態の欄が出てしまう。また「この PC の center を起動」ボタン（`:475`）は `enabled` を真にするが web は保存を拒否し、ダイアログは開く時に `centerStatus`（`:37`）・`centerLocalIps`（`:132`）・`centerIpStatus`（`:145`）を呼ぶが web の許可リストに無く 404 になる。そこで共有 `SettingsDialog` に **「web モード」の分岐**を足す（platform 機能として注入。`centerSidecar: false` 相当。起動系の欄・「この PC の center を起動」ボタン・IP/status 系の呼び出しを出さず、呼ばない）。web モードでは**接続先 center の url・token の欄（設定済みの印）と接続状態**だけを出す。desktop は注入が既定（`centerSidecar: true`）で表示も呼び出しも不変。画面からの**変更を受けるか**は判断 14（推奨: v1 は表示のみ、変更は file）。
+3. **設定の解除**: `center_set_settings` は空の token を「変更しない」と読むので（下記）、画面から `remote.token` を「無し」に戻す手段は無い。戻す時は設定 file の編集（`remote` の `token` を消す）。
 
 **token をブラウザに出さない**（方針を保つ）
 - `center_get_settings` は `token` と `remote.token` を**空で返し**、設定済みかの印（`tokenSet`）だけを足す（型に optional の項目を足す。desktop の応答は従来どおり token を含み、変わらない）。
@@ -268,12 +269,13 @@ desktop の仕組み（報告 9 章）: 設定は 1 つの object `CenterSetting
 | 1 | Cork（task・thread・messenger 受信 `bantou-core`）を出さない | 17 command と `bantou://threads-changed` などは持ち込まない（4 章） | 反しない。center とつなぐ側ではなく別の仕組みで、共有 package に含めない。共有の broker に `bantou-core` を 2 つ登録できない（`docs/handoff.md:16`） | 聞く（既存の判断 5） |
 | 2 | 許可 tool を絞る | web は 5.3 の一覧だけを通す。`server_retire` は出さない | 反しない。`center-client` は `policy` を受けるだけで、一覧は web backend が渡す。同じコードで desktop は全許可 | 聞く（既存の判断 10） |
 | 3 | スマホ専用の page | 一覧 → 端末の 2 画面、特殊キー列、入力欄（7 章） | 反しない。画面の差で、center とつなぐ側は共有。選択・フィルタは共有 composable（3.2） | 聞かない |
-| 4 | 設定の読み出しで token を返さず、書き込みで空の token を「変更しない」と読む | `center_get_settings` の応答と `center_set_settings` の入力（5.5）。desktop は応答に token を含み（`SettingsDialog.vue:405`）、`remote` の空 token は「無し」（`center.rs:156`）、sidecar の空 token は作り直し（`ensure_token`、`center.rs:116-123`）。web は `redactSecrets` が真の間、空を据え置きと読む | 反しない。command 名と型は同じ（`tokenSet` が optional で増える）。意味の差は `redactSecrets` の有無として注入で吸収され、desktop が将来使う時は偽にすれば今の動きのまま。ブラウザに token を出さない方針を保つため | 聞かない（方針どおり） |
+| 4 | 設定の読み出しで token を返さず、書き込みで空の token を「変更しない」と読む | `center_get_settings` の応答と `center_set_settings` の入力（5.5）。desktop は応答に token を含み（`SettingsDialog.vue:405`）、`remote` の空 token は「無し」（`center.rs:156`）、sidecar の空 token は作り直し（`ensure_token`、`center.rs:116-123`）。web は `redactSecrets` が真の間、空を据え置きと読む。このため web の画面からは `remote.token` を「無し」に戻せない（戻すのは設定 file の編集、5.5 の 3） | 反しない。command 名と型は同じ（`tokenSet` が optional で増える）。意味の差は `redactSecrets` の有無として注入で吸収され、desktop が将来使う時は偽にすれば今の動きのまま。ブラウザに token を出さない方針を保つため | 聞かない（方針どおり） |
 | 5 | 設定画面からの接続先の変更 | 既定は表示のみ、変更は file か env（5.5） | 反しない。同じ設定 object を、変更の口だけ絞る | **聞く（判断 14）** |
 | 6 | env による固定（`CENTER_URL` / `CENTER_TOKEN`） | env があれば file より優先し、画面で変更不可 | 反しない。設定の与え方の一つで、選び方は同じ | 聞かない |
 | 7 | 起動する形の待受 | web が起動する center は loopback のみで待つ（desktop は全 address、`center.rs:31`） | 反しない。設定値の違いで、web backend だけが client のため。他の PC から直接つなぐ口が要るなら desktop の center を使う | 聞かない |
 | 8 | 持ち込まない platform 機能 | フォルダ選択、IP の選択と snippet、updater、menu、window、os event（4 章、報告 1.3） | 反しない。center とつなぐ側の外 | 聞かない |
 | 9 | 端末の幅の既定（表示のみ。判断 3） | スマホは今の幅を送らない | 反しない。画面の挙動 | 聞く（既存の判断 3） |
+| 11 | `center_regenerate_token` の戻り値 | desktop は新 token の文字列を返す（`center.rs:758-766`）。web（S）は捨てて `tokenSet` だけ返す（画面にも新 token を出さない。控えが要る時は設定 file を見る） | 反しない。command 名は同じで、token をブラウザに出さない方針のため。desktop は `redactSecrets` 偽で従来どおり | 聞かない（方針どおり） |
 | 10 | token の生成の条件 | web は `enabled` が真の時だけ生成（desktop は常に、`center.rs:671`） | 反しない。使わない token を保存しないだけで、`enabled` が真の動きは同じ | 聞かない |
 
 ## 6. center をどこに置くか（設定で決まる。既定は別に置いた center につなぐ）
@@ -336,10 +338,10 @@ desktop の sidecar と同じ項目（`enabled` `port` `workspace` `claudePath` 
 **親が変わると center が終わる性質（`daemon.ts:238`）との関係**
 - この形では**web backend の再起動 = center の再起動**で、全 session の TUI が中断される（`--continue` で復帰、`daemon.ts:167-194,256`）。desktop でアプリを終了すると center が止まるのと同じ性質（R30）。
 - 既定の形（別に置いた center）なら、web の更新は session に影響しない（9.3）。**session を止めたくない運用では、起動する形を使わず既定の形を使う**。
-- systemd の unit は `KillMode` の既定（control-group）で子も止まる。`TimeoutStopSec` は center の停止猶予（約 15 秒、`center.rs:44`）より長くする。
+- systemd の unit は `KillMode` の既定（control-group）で子も止まる。`TimeoutStopSec` は center 自身の停止時間より長くする。center は SIGTERM で子を止めるのに `stopGraceMs`（5 秒、`C/src/config.ts:24`）を待ち、間に合わなければ `HARD_EXIT_MARGIN_MS`（5 秒、`C/src/daemon.ts:31,175`）後に強制終了するので最大約 10 秒。9.1 の center unit の 30 秒もこの 10 秒が基準（`center.rs:44` の 15 秒は desktop が center の終了を待つ時間で、center の停止時間ではない）。
 - 更新手順（9.3）は、この形の時だけ「web の更新 = center の更新」として cap が空の時に行う。
 
-**S に入れるもの**: `process` module、`enabled` の検証解除、`center_status`・`center_regenerate_token` の command、設定画面の起動の欄（スイッチ・port・状態・再起動回数・ログ。`SettingsDialog.vue` の `sidecarVisible`）、起動した center の `pty-wrapper` の解決（6.1 の (i)(ii)）。
+**S に入れるもの**: `process` module、`enabled` の検証解除、`center_status`・`center_regenerate_token` の command（**`center_regenerate_token` は desktop では新 token の文字列を返す**、`center.rs:758-766`・`D/src/api/center.ts:10`。web では戻り値を捨て、`tokenSet` だけ返す。5.7 #11）、設定画面の起動の欄（スイッチ・port・状態・再起動回数・ログ。`SettingsDialog.vue` の `sidecarVisible`）、起動した center の `pty-wrapper` の解決（6.1 の (i)(ii)）。
 
 ## 7. スマホの画面
 
@@ -529,27 +531,29 @@ WantedBy=default.target
 |---|---|---|
 | 1 | なし | 3a |
 | 2a | 1 | 3a |
-| 2b | 2a | 3a、3b、3c、4 |
-| 3a | なし | 1、2a、2b、3b |
+| 2b | 2a | 3a、3b、3c、3d、4a、4b |
+| 3a | なし | 1、2a、2b、3b、3c、4a |
 | 3b | 2a | 2b、3a |
-| 3c | 3a、3b | 2b、4 |
-| 4 | 3a、3b | 2b、3c |
-| 5a | 2b、3c | 4 |
-| 5b | 4、5a | 5c |
-| 5c | 5a（3c の設定 command を使う） | 5b、4 |
+| 3c | 3b | 2b、3a、4a |
+| 3d | 3a、3c | 2b、4a、4b |
+| 4a | 3b | 2b、3a、3c |
+| 4b | 3a、4a | 2b、3c、3d |
+| 5a | 2b、3d | 4a、4b |
+| 5b | 4b、5a | 5c |
+| 5c | 5a（3d の設定 command を使う） | 5b、4a、4b |
 | 6a | 5b | 7、8 |
 | 6b | 6a（同じ `TerminalView` を触るため直列） | 7、8 |
-| 7（docs のみ） | 3c、4 | 5a〜5c、6a、6b |
+| 7（docs のみ） | 3d、4b | 5a〜5c、6a、6b |
 | 8（center の変更） | なし | 全部（効果の確認だけが設置後） |
-| S（center を起動する形。**v1 の後**） | 3b、3c、5c | — |
-| (M)（desktop を共有 package に寄せる。**任意・後**） | 3b、4、S（desktop が起動する形を使う場合） | — |
+| S（center を起動する形。**v1 の後**） | 3c、3d、5c | — |
+| (M)（desktop を共有 package に寄せる。**任意・後**） | 3c、4a、S（desktop が起動する形を使う場合） | — |
 | (9)（Cork。任意・後） | 5b | — |
 
-- **v1 = 1〜8（14 まとまり）**。既定の形（接続設定）は 2a → 3b（共有 package と設定）→ 3c（設定 command と中継の route）→ 4（端末）→ 5a（一覧）で動き始める。S は v1 の後に、同じ設定の `enabled` を有効にする形で足す（S を足すまで `enabled` の保存は拒否される、5.5）。
+- **v1 = 1〜8（16 まとまり）**。既定の形（接続設定）は 2a → 3b（共有 package と設定）→ 3c（MCP・cache・events）→ 3d（設定 command と中継の route）→ 4a・4b（端末）→ 5a（一覧）で動き始める。S は v1 の後に、同じ設定の `enabled` を有効にする形で足す（S を足すまで `enabled` の保存は拒否される、5.5）。
 - 8 の流れ: 8 → desktop の release → 設置先の center の入れ替え → 13 章 15（設置後の実機確認）。他のまとまりはこれを待たない。
 - 6a・6b は 8 に**依存しない**（center にサイズの口が無くても方式 B で動く作りにし、口がある場合の挙動は偽 center で確かめる）。8 の効果の確認は設置後（13 章 15）。
 - 2a は import の書換と移動だけにとどめる（切り戻し点）。2b 以降で問題が出ても 2a の状態へ戻せる。
-- 3b は 2a の後（契約の型を `packages/ui` の `types` から `import type` で使うため。`types` は Nuxt/Tauri の実行時依存を持たない純粋な TS で、`center-client` が layer に依存するのではなく型だけを参照する）。3b 以降は desktop の整理（2b）や web の守り（3a）と並走できる。
+- 3b は 2a の後、3c・4a は 3b の後（契約の型を `packages/ui` の `types` から `import type` で使うため。`types` は Nuxt/Tauri の実行時依存を持たない純粋な TS で、`center-client` が layer に依存するのではなく型だけを参照する）。3b 以降は desktop の整理（2b）や web の守り（3a）と並走できる。
 
 ### 10.2 一覧
 
@@ -559,18 +563,20 @@ WantedBy=default.target
 | 2a | **`packages/ui` の抽出（layer 化と import 書換のみ。ここが切り戻し点）** | 1 | `packages/ui`（`package.json` を含む private package。components / composables / types / assets / api）。desktop は `extends: ["../ui"]`。`~/` の 47 箇所を相対 / named alias に書換（Nuxt 公式 docs: layer 内の `~/` は利用側 project 基準）。**ビルドへの影響の確認**: `D/src-tauri/tauri.conf.json:9-10` の `beforeBuildCommand`（`bun run build:sidecar && bun run generate`）と `frontendDist`（`../.output/public`）は desktop で実行・出力されるため変更不要の見込み（**推測**。layer の assets が `.output/public` に入ることを確認する）。`pages/index.vue` と `AppHeader` は desktop に残す。**他は変えない**（挙動・構造の変更は 2b 以降） | desktop の `nuxt typecheck`・`nuxt build`、`bun run generate` の出力（`.output/public`）が layer 化前と同じ構成であること（file 一覧の比較）、mac200 の e2e 全通過、`bun run tauri build` が通る（`D/CLAUDE.md`）。**見た目は e2e が保存する画像（`board.png` ほか）を、layer 化の前後で人が見比べる**（自動比較は無い） |
 | 2b | **`pages/index.vue` のロジック分離と文書更新** | 2a | 選択・フィルタ・ダイアログ管理（`pages/index.vue:62-158`）を composable（`useSessionBoard` 相当、`packages/ui`）に出し、desktop の 3 カラムはそれを使う。root `CLAUDE.md` の Map と役割分離の節を更新（`packages/ui` と `packages/center-client`、R15） | `nuxt typecheck`、mac200 の e2e 全通過、保存された画像を人が見て 2a と同じ見た目であること。`pages/index.vue` の行数が減り、選択・フィルタの state が composable に移っていること（diff で確認） |
 | 3a | **web backend: 守り（JWT・共有鍵・Origin・`/api/me`）** | なし | `packages/web/server/`: **Access の JWT 検証（5.2 の L3。署名・aud・iss・exp、鍵の cache、許可 email）、L4 の共有鍵照合、Origin 検査、`GET /api/me`**（login/cookie は持たない）と、これらを全 route に掛ける middleware。node の test | `node --import tsx --test`（`C/package.json` の test と同じ流儀）で: **JWT 無し・署名違い・aud 違い・期限切れ・許可外 email は 401/403（test が生成した偽 JWKS で署名）**、鍵ローテーション（未知の `kid` で 1 回だけ取り直す）、共有鍵が無い・違う要求は 403、POST の `Origin` が違えば 403、`/api/me` が email を返す |
-| 3b | **`packages/center-client`: 設定・MCP client・SessionCache・events（共有の核）** | 2a | 新設 package（5.6。framework 非依存）。**設定**: `CenterSettings`（`ui/types` の型）の検証・正規化・`select_target`・file 保存（一時 file→rename、chmod 600）・env の上書き（`CENTER_URL`/`CENTER_TOKEN`）・secret を伏せた読み出し（5.5）。**MCP client**（404 で 1 回だけ再 initialize、`center_mcp.rs` と同じ働き）、**SessionCache**（`rev`、`reachable:false`）、**events の購読**（`center_events.rs` と同じ働き）。注入点（`settingsStore` `policy` `redactSecrets`）。Rust の既存 test の入力・期待値を TS の test に写す（出典 file:line を記す、5.6 #5） | `node --import tsx --test` で、偽 center に対し: `select_target` が enabled／remote／無しの 3 通りで報告 9 章どおり、`normalize_remote` の表（`center_mcp.rs:878-892`）の全行、validate の拒否（port 範囲・workspace・claudePath・token 12 文字・remote の scheme）、`enabled:true` の保存は「未対応」で拒否（S まで）、get が token を返さず `tokenSet` を返す、set で token 空は据え置き・**remote.url を変えると token を引き継がない**、env 設定時は変更不可、center 停止中は `reachable:false`、再起動後に再 initialize（404→1 回だけ）、`rev` が単調増加。`packages/center-client` が Nuxt/Nitro/Tauri を import していない（grep） |
-| 3c | **web backend: 設定 command・中継の route** | 3a、3b | `packages/web/server/`: 許可 tool 一覧（5.3）、`/api/rpc/:cmd`（`center_get_settings` ほか center 設定 command と中継 command。実処理は `center-client` の handler）、`/api/events`（center-client の events を全ブラウザへ fan-out）、`/api/health`（接続先が無い・到達不可の理由）、設定の変更を受けるかの gate（判断 14。既定は読み取りのみ）。**この段階で UI は不要** | `node --import tsx --test` で（偽 center + 3a の middleware）: 許可外 tool は 404、設定 get の応答（`/api/rpc/center_get_settings`）・`/api/health`・ログに token が出ない、gate が閉じている時の `center_set_settings` は拒否、接続先無しで backend が起動し health が理由を返す、events が 2 クライアントに配られる、設定 file を書き換えると次の呼び出しから新しい宛先に向く（再起動なし） |
-| 4 | **web backend: 端末の中継** | 3a、3b | `packages/center-client` に端末の module（出力 stream の購読と再接続、`input`/`resize`/添付、`terminal.rs`・`attachment.rs` と同じ働き。45 秒無音で切る、指数待ち）と、`packages/web/server/` の route: `/api/sessions/:n/output`（SSE 中継、`Last-Event-ID`/`after`、header の即 flush、`: ka`、`X-Accel-Buffering: no`）、`input`/`resize`/`attachments`。検査（base64、cols/rows 1〜1000、画像型・20MB）の二重化 | 実 center（`C/scripts/e2e.ts` の流儀）に対し: 出力が届く、切断→`after` で続きが来る、`reset` が伝わる、20MB 超は 413、2 クライアント同時購読。curl で SSE を確認。`center-client` の端末 module が web の route 無しで単体 test できる |
-| 5a | **web frontend: 足場・HTTP transport・一覧** | 2b、3c | `packages/web`（`package.json`、`nuxt.config.ts` で `extends: ["../ui"]`、plugin で HTTP transport を登録）、HTTP transport（`/api/rpc/:cmd` と `/api/events`）、**Access の session 切れの検知（SSE 失敗が続けば `/api/me` を呼び、失敗なら再読込）**、session 一覧 page（mobile-first、共有 composable を使う）、「接続先が無い」状態の表示、e2e の土台（`packages/web/playwright.config.ts`、test 用の偽 JWKS と JWT 署名 helper） | Playwright（`devices` のスマホ幅）で、実 backend（偽 JWKS + 署名済み JWT）+ 実 center に対し: 一覧が出る、JWT 無しは何も出ない、JWT を失効させると再読込の経路に入る、接続先無しで「接続先が無い」が出る。e2e は mac200 で（`D/CLAUDE.md` 方針）。**「web だけ dev で backend モック」は却下済み**（`docs/handoff.md:18`）なので実 backend で行う |
-| 5b | **web frontend: 端末 page・server/cap のカード** | 4、5a | HTTP transport の端末系: `session_output_start/stop`（`EventSource` で `session-output` / `session-output-status` を再現、`useTerminalStore` は無変更）、**`session_input` / `session_resize`（JSON を `POST /api/sessions/:n/input|resize` へ。5.1 の個別 route）、`session_attach_bytes`（`Transport.invoke` の `body: Uint8Array` を、画像の Content-Type で `POST /api/sessions/:n/attachments` へ。3.2）**、端末 page（共有 `TerminalView` をそのまま使う最小版）、server・cap のカード（共有の `CenterDialog` / `RemoteActivity` の部品）、`docs/architecture.md` に web 節 | Playwright で: 端末に出力が出る、入力が center の `input` に届く、2 つのブラウザで同じ session の出力が両方に出る、cap カードが `remote_list` の内容を出す |
-| 5c | **web frontend: 設定画面（接続先 center）** | 5a | 共有 `SettingsDialog`（`packages/ui`）を、web では「接続先 center」の欄（url・token の設定済み表示・接続状態）だけを出す形にする（`sidecarVisible` と同じ出し分け、5.5）。desktop の表示は変えない。判断 14 が「変更を受ける」の場合の入力欄（token は書き込みのみ、url 変更時は token を同時入力） | Playwright（web）で: 設定画面に token が出ない（画面・DOM・ネットワークの応答）、既定（変更不可）では入力欄が無効、`CENTER_URL` 固定時は「env で固定」表示。**desktop の e2e（`D/CLAUDE.md` の手順）が全通過し、保存画像で設定ダイアログの見た目が変わらない**ことを人が確認 |
+| 3b | **`packages/center-client`: 新設と設定（共有の核 その 1）** | 2a | 新設 package（5.6。framework 非依存。契約の型は `packages/ui` の `types` から `import type`）。**設定**: `CenterSettings` の検証・正規化・`select_target`・file 保存（一時 file→rename、chmod 600）・env の上書き（`CENTER_URL`/`CENTER_TOKEN`）・secret を伏せた読み出し（5.5）。型の差（`bind` を optional、`tokenSet`・`remote.tokenSet` を optional で足す）は `packages/ui` の `types` に optional で足す（desktop の応答型は従来のまま）。注入点（`settingsStore` `policy` `redactSecrets`）。Rust の既存 test の入力・期待値を TS の test に写す（出典 file:line を記す、5.6 #5） | `node --import tsx --test` で: `select_target` が enabled／remote／無しの 3 通りで報告 9 章どおり、`normalize_remote` の表（`center_mcp.rs:878-892`）の全行、validate の拒否（port 範囲・workspace・claudePath・token 12 文字・remote の scheme）、`enabled:true` の保存は「未対応」で拒否（S まで）、get が token を返さず `tokenSet` を返す、set で token 空は据え置き・**remote.url を変えると token を引き継がない**、env 設定時は変更不可。`packages/center-client` が Nuxt/Nitro/Tauri を import していない（grep） |
+| 3c | **`packages/center-client`: MCP client・SessionCache・events（共有の核 その 2）** | 3b | **MCP client**（404 で 1 回だけ再 initialize、`center_mcp.rs` と同じ働き。接続先は 3b の `select_target` を呼び出しごとに引く）、**SessionCache**（`rev`、`reachable:false`）、**events の購読**（`center_events.rs` と同じ働き）。`policy.allowTool` の注入 | `node --import tsx --test` で偽 center に対し: center 停止中は `reachable:false`、再起動後に再 initialize（404→1 回だけ）、`rev` が単調増加、設定 file を書き換えると次の呼び出しから新しい宛先に向く、`policy` が false の tool は呼ばない |
+| 3d | **web backend: 設定 command・中継の route** | 3a、3c | `packages/web/server/`: 許可 tool 一覧（5.3）、`/api/rpc/:cmd`（`center_get_settings` ほか center 設定 command と中継 command。実処理は `center-client` の handler）、`/api/events`（center-client の events を全ブラウザへ fan-out）、`/api/health`（接続先が無い・到達不可の理由）、設定の変更を受けるかの gate（判断 14。既定は読み取りのみ）。**この段階で UI は不要** | `node --import tsx --test` で（偽 center + 3a の middleware）: 許可外 tool は 404、設定 get の応答（`/api/rpc/center_get_settings`）・`/api/health`・ログに token が出ない、gate が閉じている時の `center_set_settings` は拒否、接続先無しで backend が起動し health が理由を返す、events が 2 クライアントに配られる。S の後は `center_status`・`center_regenerate_token` の応答にも token が無い（S の確認方法） |
+| 4a | **`packages/center-client`: 端末の module** | 3b | 出力 stream の購読と再接続、`input`/`resize`/添付（`terminal.rs`・`attachment.rs` と同じ働き。45 秒無音で切る、指数待ち）。検査（base64、cols/rows 1〜1000、画像型・20MB）。web の route 無しで単体 test できる形 | 実 center（`C/scripts/e2e.ts` の流儀）に対し、center-client だけで: 出力が届く、切断→`after` で続きが来る、`reset` が伝わる、20MB 超は拒否、2 購読が同時に動く |
+| 4b | **web backend: 端末の route** | 3a、4a | `packages/web/server/` の route: `/api/sessions/:n/output`（SSE 中継、`Last-Event-ID`/`after`、header の即 flush、`: ka`、`X-Accel-Buffering: no`）、`input`/`resize`/`attachments`。検査の二重化 | 実 center に対し route 経由で: 出力が届く、切断→`after` で続き、20MB 超は 413、2 クライアント同時購読。curl で SSE を確認。3a の守りが全 route に掛かる |
+| 5a | **web frontend: 足場・HTTP transport・一覧** | 2b、3d | `packages/web`（`package.json`、`nuxt.config.ts` で `extends: ["../ui"]`、plugin で HTTP transport を登録）、HTTP transport（`/api/rpc/:cmd` と `/api/events`）、**Access の session 切れの検知（SSE 失敗が続けば `/api/me` を呼び、失敗なら再読込）**、session 一覧 page（mobile-first、共有 composable を使う）、「接続先が無い」状態の表示、e2e の土台（`packages/web/playwright.config.ts`、test 用の偽 JWKS と JWT 署名 helper） | Playwright（`devices` のスマホ幅）で、実 backend（偽 JWKS + 署名済み JWT）+ 実 center に対し: 一覧が出る、JWT 無しは何も出ない、JWT を失効させると再読込の経路に入る、接続先無しで「接続先が無い」が出る。e2e は mac200 で（`D/CLAUDE.md` 方針）。**「web だけ dev で backend モック」は却下済み**（`docs/handoff.md:18`）なので実 backend で行う |
+| 5b | **web frontend: 端末 page・server/cap のカード** | 4b、5a | HTTP transport の端末系: `session_output_start/stop`（`EventSource` で `session-output` / `session-output-status` を再現、`useTerminalStore` は無変更）、**`session_input` / `session_resize`（JSON を `POST /api/sessions/:n/input|resize` へ。5.1 の個別 route）、`session_attach_bytes`（`Transport.invoke` の `body: Uint8Array` を、画像の Content-Type で `POST /api/sessions/:n/attachments` へ。3.2）**、端末 page（共有 `TerminalView` をそのまま使う最小版）、server・cap のカード（共有の `CenterDialog` / `RemoteActivity` の部品）、`docs/architecture.md` に web 節 | Playwright で: 端末に出力が出る、入力が center の `input` に届く、2 つのブラウザで同じ session の出力が両方に出る、cap カードが `remote_list` の内容を出す |
+| 5c | **web frontend: 設定画面（接続先 center）** | 5a | 共有 `SettingsDialog`（`packages/ui`）に「web モード」の分岐（platform 機能として注入。5.5 の 2）を足し、web では「接続先 center」の欄（url・token の設定済み表示・接続状態）だけを出す。起動系の欄・「この PC の center を起動」ボタンを出さず、`centerStatus`・`centerLocalIps`・`centerIpStatus` を呼ばない。desktop の表示と呼び出しは不変（注入の既定が desktop の現状）。判断 14 が「変更を受ける」の場合の入力欄（token は書き込みのみ、url 変更時は token を同時入力） | Playwright（web）で: 設定画面に token が出ない（画面・DOM・ネットワークの応答。S の後は `center_regenerate_token` の応答も）、web モードで 404 になる呼び出しが無い（ネットワークに `center_status`・`center_local_ips`・`center_ip_status` が出ない）、起動スイッチ・port・IP の欄が無い、既定（変更不可）では入力欄が無効、`CENTER_URL` 固定時は「env で固定」表示。**desktop の e2e（`D/CLAUDE.md` の手順）が全通過し、保存画像で設定ダイアログの見た目が変わらない**ことを人が確認 |
 | 6a | **スマホの端末 UX（入力）** | 5b | 特殊キー列、入力欄（IME 区別。bracketed paste は先に偽の pty で実測し、結果を 7.2 に追記）、入力のまとめ送り（数十 ms。`session_input` の POST を束ねる） | Playwright のスマホ emulation で: 特殊キーが所定のバイト列を送る（center の `input` で受信）、入力欄の送信で本文 + `\r`、まとめ送りで連続入力の POST 回数が減り、順序と内容が保たれる。実機の確認は設置後（13 章 16） |
 | 6b | **スマホの端末 UX（表示・添付・幅）** | 6a | `visualViewport` 追従、ファイル選択による添付（`<input type=file>` の `File` を 5b の `session_attach_bytes` で送る。web では `session_attach_paths` / `session_attach_pick` を使わない）、`visibilitychange` での再取得、サイズ方針: **center にサイズの口が無い（404）時は方式 B（開いたら幅を送る）で動く**。口がある時の方式 A の挙動は偽 center（口を持つ）で実装・test する | Playwright のスマホ emulation で: 添付が保存され path が pty に打たれる、**口が 404 の center で B として動く**、口がある偽 center で A として動く（開いただけでは `resize` を送らない）、`visibilitychange` 後に一覧と端末が取り直される。cap の完了条件はここまで。**スマホ実機の確認と、実 center での A の確認は設置後の項目**（13 章 15・16） |
-| 7 | **deploy の手順書（docs のみ）** | 3c、4 | `docs/ops/web-install.md`、unit の雛形（web。center を同 host に置く場合の center の unit も）、設定 file の雛形（`center` キーの `remote`。値は書かない）、`env` の雛形（`WEB_SETTINGS_FILE` / `CF_TEAM` / `CF_AUD` / `ALLOWED_EMAILS` / `PROXY_KEY`、任意で `CENTER_URL` / `CENTER_TOKEN`。値は書かない）、nginx の block（8.3）、inet250 側の登録手順（8.4。実行は設置者）、更新手順（`BANTOU_PAIR_SERVER_VERSION` の扱いを含む、9.3）、R1 を避ける tag の指定方法、**13 章の確認項目を手順書の確認欄に 1 対 1 で転記**。**成果物は docs のみ。設置先と inet250 への実測や適用は含まない** | 手順書の確認欄が 13 章の全項目と対応していること（突き合わせ）、unit の雛形は `systemd-analyze verify` にかけられる範囲でかける（結果を記録。かけられない環境なら未実施と明記）、nginx の block は `nginx -t` を一時 config でかける（nginx が無ければ未実施と明記）。**設置先と inet250 への適用・実測は設置者の作業で、結果は 13 章の表に記録する** |
+| 7 | **deploy の手順書（docs のみ）** | 3d、4b | `docs/ops/web-install.md`、unit の雛形（web。center を同 host に置く場合の center の unit も）、設定 file の雛形（`center` キーの `remote`。値は書かない）、`env` の雛形（`WEB_SETTINGS_FILE` / `CF_TEAM` / `CF_AUD` / `ALLOWED_EMAILS` / `PROXY_KEY`、任意で `CENTER_URL` / `CENTER_TOKEN`。値は書かない）、nginx の block（8.3）、inet250 側の登録手順（8.4。実行は設置者）、更新手順（`BANTOU_PAIR_SERVER_VERSION` の扱いを含む、9.3）、R1 を避ける tag の指定方法、**13 章の確認項目を手順書の確認欄に 1 対 1 で転記**。**成果物は docs のみ。設置先と inet250 への実測や適用は含まない** | 手順書の確認欄が 13 章の全項目と対応していること（突き合わせ）、unit の雛形は `systemd-analyze verify` にかけられる範囲でかける（結果を記録。かけられない環境なら未実施と明記）、nginx の block は `nginx -t` を一時 config でかける（nginx が無ければ未実施と明記）。**設置先と inet250 への適用・実測は設置者の作業で、結果は 13 章の表に記録する** |
 | 8 | **center: pty の今のサイズを返す口**（判断 3 が A の時だけ） | なし | `packages/center` の `http.ts` に `GET /sessions/<n>/size`（Bearer、`core.size` を返す。無ければ 404 か null）と README・test | `C/test/http.test.ts` の流儀で: 認証なしは 401、未登録 session は 404、`resize` の後に同じ値が返る、実行中でない session の扱い。`npm test`（`C/package.json`） |
-| S | **center を起動する形（`enabled`）— v1 の後** | 3b、3c、5c | `packages/center-client` の `process` module（起動・監視・停止・設定反映、6.6）、`enabled` の保存の解禁、`center_status`・`center_regenerate_token` の command と許可、設定画面の起動の欄。web backend の SIGTERM で center を止める | `node --import tsx --test` で偽の center プロセスに対し: `enabled` で起動し loopback の宛先を選ぶ、異常終了で 2 秒から倍々に再起動し 10 分に 5 回超で断念（`center.rs:44-55` の表を写す）、設定の起動項目が変わると再起動・`remote` だけ変わっても再起動しない、web の終了で子が止まる。実 center で web backend を止めると center も終わり、再起動後に session が `--continue` で復帰する（13 章 21） |
-| (M) | 任意・後: desktop を `center-client` に寄せる | 3b、4（S） | 5.6 の「必要なこと」1〜6。fixture の共有化、2 つ目の sidecar、HTTP transport 化、Rust の撤去 | desktop の release 前 e2e（`D/CLAUDE.md`）。**着手は利用者の判断後**（desktop の変更を伴うため） |
+| S | **center を起動する形（`enabled`）— v1 の後** | 3c、3d、5c | `packages/center-client` の `process` module（起動・監視・停止・設定反映、6.6）、`enabled` の保存の解禁、`center_status`・`center_regenerate_token` の command と許可、設定画面の起動の欄。web backend の SIGTERM で center を止める | `node --import tsx --test` で偽の center プロセスに対し: `enabled` で起動し loopback の宛先を選ぶ、異常終了で 2 秒から倍々に再起動し 10 分に 5 回超で断念（`center.rs:44-55` の表を写す）、設定の起動項目が変わると再起動・`remote` だけ変わっても再起動しない、web の終了で子が止まる。実 center で web backend を止めると center も終わり、再起動後に session が `--continue` で復帰する（13 章 21）。`center_status`・`center_regenerate_token` の応答・DOM に token が無い（regenerate は `tokenSet` だけ） |
+| (M) | 任意・後: desktop を `center-client` に寄せる | 3c、4a（S） | 5.6 の「必要なこと」1〜6。fixture の共有化、2 つ目の sidecar、HTTP transport 化、Rust の撤去 | desktop の release 前 e2e（`D/CLAUDE.md`）。**着手は利用者の判断後**（desktop の変更を伴うため） |
 | (9) | 任意・後回し: Cork の task / thread を web に | 5b | 判断 5 の結果次第 | 別途 |
 
 **center の変更（まとまり 8）が設置先の center に届くまでの順序**（8 以外の作業はこれを待たない）: center は desktop の release に同梱され（`D/scripts/build-sidecar.ts:81-99`）、web が指す center を新しく立てる場合は R1 により desktop と同じ release の tag から作る必要がある。したがって次の順になる。
@@ -652,7 +658,7 @@ WantedBy=default.target
 - **推奨: v1 は変えられない（画面は現在の接続先と状態の表示まで。変更は設定 file か env）。** 理由: Access を通れる端末（盗まれたスマホなど）で接続先を差し替えられたり、起動する形で center を止められたりするのを避けられる。接続先の変更は頻繁ではなく、設置者が file で直せる。
 - A（推奨）: 画面では見るだけ。接続先を変えるには設置者が設定 file（か env）を編集する。desktop の設定ダイアログと同じ表示だが、保存はできない。
 - B: 画面で変えられる（desktop と同じ）。スマホだけで切り替えられる。url を変える時は token も入れ直す（既存の token を別の宛先へ送らないため）。Access を通れる人は center の全操作を持つ（R25）。接続先の差し替えが外から起こせるようになるが、url を変えると token を引き継がないので、既存の token を別の宛先へ送る経路は作らない（R29）。
-- どちらでも token は画面に出ない（5.5）。まとまり 5c の入力欄の有無とまとまり 3c の gate が変わる。
+- どちらでも token は画面に出ない（5.5）。まとまり 5c の入力欄の有無とまとまり 3d の gate が変わる。
 
 ## 12. 危険と未確定の点
 
@@ -684,7 +690,7 @@ WantedBy=default.target
 | R24 | backend が Access の鍵を取るため、202 から `<team>.cloudflareaccess.com` へ出る通信が要る。出られないと全要求が検証できず 401 になる | Cloudflare 公式 docs（certs の URL）、`server-install.md:41`（202 の外向き通信の既存要件の書き方） | 未確認（202 の egress） |
 | R25 | 外から使う前提では、Access の許可一覧 = 202 上で claude を動かせる人の一覧になる（session の `permissionMode` は center の設定、`C/src/config.ts:8-15,53`）。許可者の管理が実質 shell 権限の管理になる | `C/src/config.ts:8-15,53`、`C/src/http.ts:392-397` | 事実。判断 11 |
 | R27 | nginx を飛ばして 202 上のプロセスが backend の loopback port に来る（cap・worker は `claude -p`。Bash 権限は推測）。L2・L3 では防げない場合がある。共有鍵 header（L4）で防ぐ。鍵が nginx の設定 file を読める user に見える | `docs/architecture.md:27,31`、5.2 | 事実（cap の Bash sandbox 無効）+ 推測（worker の権限）+ 設計 |
-| R28 | center の token がブラウザに出る経路が増える: 設定の読み出し（desktop の `center_get_settings` は token を返す、`SettingsDialog.vue:405`）を共有 component がそのまま表示する、ログやエラー文に url の userinfo が出る | `D/src/components/SettingsDialog.vue:403-422`、5.5 | 設計で対処（応答で伏せる）。3c・5c の確認方法に入れる |
+| R28 | center の token がブラウザに出る経路が増える: 設定の読み出し（desktop の `center_get_settings` は token を返す、`SettingsDialog.vue:405`）を共有 component がそのまま表示する、ログやエラー文に url の userinfo が出る | `D/src/components/SettingsDialog.vue:403-422`、5.5 | 設計で対処（応答で伏せる。S の `center_regenerate_token` の戻り値も捨てる）。3d・5c・S の確認方法に入れる |
 | R29 | 設定の書き込みで `remote.url` を差し替えられると、保存済みの token が別の宛先へ送られる | 5.5 | 設計で対処（url が変わる時は token を引き継がない）。判断 14 の既定で書き込み自体も閉じる |
 | R30 | 起動する形（6.6）では web backend の再起動・停止が center の終了になり、全 session の TUI が中断される（親が変わると終わる性質） | `C/src/daemon.ts:238`、`C/src/parent-watch.ts:13-20`、`D/src-tauri/src/lib.rs:197-199`（desktop も終了時に止める） | 事実（性質）。S は v1 の後。session を止めたくない運用は既定の形 |
 | R31 | 共有 package（TS）と desktop の Rust が、(M) までは別実装で、挙動がずれる恐れ（`normalize_remote` `select_target` など） | 5.6 | 設計で対処（Rust の test の入力を TS の test に写す。(M) の最初に fixture を共有） |

@@ -29,7 +29,7 @@
 | `session_get_settings` (`session.rs:95`) / `session_update_settings` (`session.rs:105`) | center の `session_settings_get/update`。追加指示は 16,000 字まで検査（`session.rs:25,30-46`） | HTTP（同じ検査を backend にも置く） |
 | `session_path_hints` (`session.rs:326`) | center の `center_info` から既定の親フォルダ、`canPick`（sidecar かつ mac/win のみ真、`session.rs:321-323`） | HTTP。`canPick` は常に偽 |
 | `center_get_settings` (`center.rs:729`) / `center_set_settings` (`center.rs:743`) | desktop の `settings.json`（`center` キー、`center.rs:22`）にある center 設定（9 章） | **HTTP（改訂）**。同じ command 名・同じ設定 object を持つ。get は token を返さない。set は既定で受けない（design.md 5.5、判断 14） |
-| `center_regenerate_token` (`center.rs:758`) | sidecar の token 再生成→再起動 | 起動する形（まとまり S）でのみ。v1 は不要（改訂） |
+| `center_regenerate_token` (`center.rs:758`) | sidecar の token 再生成→再起動。**戻り値は新 token の文字列**（`center.rs:758-766`、`D/src/api/center.ts:10`） | 起動する形（まとまり S）でのみ。v1 は不要（改訂）。S でも戻り値の token は返さず `tokenSet` だけ（design.md 5.7 #11） |
 | `center_status` (`center.rs:769`) | sidecar の running/restarting/error・ログ | 起動する形（まとまり S）でのみ。v1 は `/api/health` が到達可否を返す（改訂） |
 | `center_ip_status` (`center.rs:737`) / `center_local_ips` (`center_snippet.rs:348`) / `center_connect_snippets` (`center_snippet.rs:354`) / `center_parse_connect` (`center_snippet.rs:359`) | 接続設定（mcp.json / `claude mcp add`）の生成・解析、この PC の IP 一覧 | 不要。token をブラウザに出さない（design.md 6.2） |
 | `center_call` (`center_mcp.rs:468`) | center の MCP tool を名前で呼ぶ（**任意の tool**、`CALL_TIMEOUT` 600 秒、`center_mcp.rs:31`） | HTTP。web では **許可 tool の一覧**に絞る（design.md 5.3） |
@@ -229,7 +229,7 @@ e2e のモックは既に「`invoke(cmd, args, options)` と `emitter` を差し
 |---|---|---|---|
 | `enabled` | sidecar（この PC の center）を起動する | **偽** | `center.rs:73`、既定 `:95`、test `:789` |
 | `port` | sidecar の待受 port | `DEFAULT_PORT` | `center.rs:28,74,96` |
-| `bind` | 接続設定（mcp.json / `claude mcp add`）の URL に書く IP。**center の待受ではない**（待受は常に `LISTEN_BIND = "0.0.0.0"`） | 空 | `center.rs:29-31,75-77` |
+| `bind` | 接続設定（mcp.json / `claude mcp add`）の URL に書く IP。**center の待受ではない**（待受は常に `LISTEN_BIND = "0.0.0.0"`）。検証は空白を含むと拒否（`center.rs:130-133`） | 保存値は空。ただし `center_get_settings` は空の `bind` を既定 IP で埋めて返す（`center.rs:729-733`） | `center.rs:29-31,75-77` |
 | `workspace` | center に渡す作業 dir（`session_create` を path 無しで呼んだ時の親）。`~` / `~/x` / 絶対 | `~/.bantou` | `center.rs:57-58,78-79,134-140` |
 | `claudePath` | claude の絶対 path。未設定なら center が login shell で解決 | なし | `center.rs:80-82,141-146` |
 | `token` | sidecar が `/mcp` で要求する Bearer。空なら初回に自動生成（32 文字） | 空→生成 | `center.rs:83-84,106-123` |
