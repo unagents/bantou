@@ -1,5 +1,12 @@
 # bantou
 
+## UI の置き場所
+
+- 画面の共有部品（components / composables / types / api / assets）は `packages/ui/`（Nuxt layer）にある。desktop は `nuxt.config.ts` の `extends: ["../ui"]` で取り込む。共有部品の変更も下の Review check（e2e）の対象。
+- `packages/ui/` の file は Tauri の package を import しない。`~/tauri`（desktop では `src/tauri/`）経由にする。`@tauri-apps` を import してよいのは `src/tauri/` だけ。
+- desktop 側の file から ui の file を参照する時は alias `#bantou-ui` を使う（例: `#bantou-ui/api`）。ui 内では `~/` が利用側 project 基準になるため、ui 内の相対 import に `~/` を使わない（`~/tauri` を除く）。
+- `pages/index.vue` の選択・フィルタ・ダイアログ管理は `packages/ui/composables/useSessionBoard.ts`。3 カラムの配置は `pages/index.vue` に残る。
+
 ## Review check (before release)
 
 Run E2E on mac200, never on this Mac.
