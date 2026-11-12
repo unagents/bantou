@@ -56,3 +56,10 @@
 
 - **Nitro の静的配信は middleware より先に応答する**。`public/` の file と `/_nuxt/*` の実 asset は守りの外で、共有鍵・JWT なしで 200 になる。3a は asset が無いので実害は無い。5a で SPA を載せる時に、asset をどう守るか（nginx 側で共有鍵を付けて配る、static を Nitro の外に出さない設定、asset は公開でよいと割り切る等）の判断が要る。設計 5.2 は全 route に掛かる前提のため、実装は変えていない。
 - `WEB_CF_CERTS_URL` は `http://` や任意 host を取れる。実装は変えない。判断: この env を書き換えられる者は同じ env の `PROXY_KEY`・`CF_AUD`・`ALLOWED_EMAILS` も書けるので、権限の追加増は無い（env の置き場は 600 の EnvironmentFile、設計 5.2）。
+
+## review 往復 2 回目の対応
+
+- `nitro-wiring.test.ts` の nuxt 起動を `node_modules/.bin/nuxt` の直書きから、`require.resolve("nuxt/package.json")` で解決した bin に変えた（依存が root に hoist されても動く）。
+- 確認: clean clone を作り `npm install --workspace packages/web`（nuxt は root の `node_modules` に hoist され、`packages/web/node_modules/.bin/nuxt` は無い）で `npm test` 38 pass / 0 fail・終了コード 0、`npm run typecheck` 終了コード 0。bun の install（packages/web 側に置かれる環境）でも 38 pass。
+- この test は `packages/web` 直下の `.nuxt` と `.output` を書き換える（`nuxt build` を走らせるため。どちらも `.gitignore` 済み）。build を含む全体で約 5 秒。`describe` の timeout 300 秒は、初回の依存解決や遅い環境の余裕として残した。
+- 空・不正な応答が続く間は、要求ごとに取り直しを試みる（往復 0 回目から記載の挙動のまま。共有鍵を通った要求だけ）。

@@ -1,12 +1,22 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { createServer } from "node:net";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, before, describe, it } from "node:test";
 import { AUD, PROXY_KEY, goodClaims, makeKey, sign, startJwks, TEAM, type TestKey } from "./utils/guard/helpers";
 
 // 実ファイル (server/middleware/00.guard.ts, server/api/me.get.ts) を Nitro で build して実際に起動し、HTTP で確かめる。
 const pkg = fileURLToPath(new URL("../..", import.meta.url));
+
+// nuxt の bin は node_modules の hoist 先に依らず、解決した package.json の bin から求める
+function nuxtBin(): string {
+  const pj = createRequire(import.meta.url).resolve("nuxt/package.json");
+  const bin = (JSON.parse(readFileSync(pj, "utf8")) as { bin: Record<string, string> }).bin.nuxt;
+  return resolve(dirname(pj), bin);
+}
 
 function freePort(): Promise<number> {
   return new Promise((resolve) => {
@@ -26,7 +36,7 @@ describe("Nitro build の配線", { timeout: 300_000 }, () => {
   before(async () => {
     key = makeKey("wire-kid");
     jwks = await startJwks([key]);
-    execFileSync("node_modules/.bin/nuxt", ["build"], { cwd: pkg, stdio: "pipe" });
+    execFileSync(process.execPath, [nuxtBin(), "build"], { cwd: pkg, stdio: "pipe" });
     const port = await freePort();
     base = `http://127.0.0.1:${port}`;
     child = spawn("node", [".output/server/index.mjs"], {
