@@ -78,3 +78,10 @@
 - packages/protocol: 43 → 43。
 - 3d・4b の test 名は 1 件も欠けていない（両 branch の `it`/`test` の題を merge 後と突き合わせて欠落 0）。
 - typecheck: web・center-client・protocol とも OK。test は全 pass。
+
+## review 往復 1 回目の修正（test 追加のみ。本番 code は無変更）
+1. 途中で切れた request: `packages/center-client/test/body.test.ts` に追加。偽 request で「data の後 `req.complete` が false のまま close → `ok:false`（`readBytesLimited` / `readBodyLimited` 両方）」「complete が true の close は body を返す」、本物の socket で「100 bytes を約束して 10 bytes で切る → `ok:false`」。変異 `over || !req.complete ?` → `over ?` で偽 request の test が落ちる。本物の socket の test は error 経路で `ok:false` になるためこの変異では落ちない（実経路の確認として残した）。
+2. 読み捨ての上限: 同 file に「上限の 4 倍までは読み捨て（pause されない・未完了）、4 倍を超えたら `end` 無しで解決し pause・listener 解除」を追加。変異 `if (total > max * DRAIN_FACTOR)` を無効化すると落ちる。
+3. status frame の伏せ字: `packages/web/test/server/utils/terminal/output-redact.test.ts` を追加。h3 の router に `createOutputHandler` を載せ、center-client の scrub を通らない偽 `terminal` が token を原文・大文字・小文字・URL encode・base64 の形で message に入れた `rejected` status を返す。応答にどの形も出ず `***` になる事を見る。変異（`c.redactor.textSync` を外す）で落ちる。
+- 3 つとも変異を入れて落ちるのを確認し、元に戻した（`git diff` 空）。
+- test 件数: web 61 → 62、center-client 225 → 229、protocol 43 → 43。typecheck は web・center-client とも OK。
