@@ -1,4 +1,4 @@
-import { terminalService } from "../../../utils/center";
+import { getCenterClient } from "../../../utils/center/client";
 import { createInputHandler } from "../../../utils/terminal/handlers";
 
-export default createInputHandler(() => terminalService());
+export default createInputHandler(() => getCenterClient());

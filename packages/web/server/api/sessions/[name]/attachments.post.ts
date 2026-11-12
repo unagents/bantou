@@ -1,4 +1,4 @@
-import { terminalService } from "../../../utils/center";
+import { getCenterClient } from "../../../utils/center/client";
 import { createAttachmentsHandler } from "../../../utils/terminal/handlers";
 
-export default createAttachmentsHandler(() => terminalService());
+export default createAttachmentsHandler(() => getCenterClient());

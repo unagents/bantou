@@ -120,3 +120,30 @@ export {
   type StreamOptions,
   type StreamTarget,
 } from "./events.ts";
+export {
+  CommandError,
+  SESSION_INSTRUCTIONS_MAX,
+  createArgs,
+  createCommands,
+  normalizeSettings,
+  renameArgs,
+  settingsOf,
+  toCommandError,
+  updateArgs,
+  workspaceOf,
+  type CommandDeps,
+  type CommandHandler,
+  type CommandTable,
+} from "./commands.ts";
+export { createRedactor, type Redactor } from "./redact.ts";
+export {
+  createCenterClient,
+  defaultSettingsFile,
+  type CenterClient,
+  type CenterClientOptions,
+  type ClientEvent,
+  type Health,
+  type RpcReply,
+} from "./client.ts";
+export { maskSecrets, formsOf, MIN_FORM_LEN } from "./secrets.ts";
+export { MAX_BODY_BYTES, readBodyLimited, readBytesLimited, type BodyRead, type BytesRead } from "./body.ts";
