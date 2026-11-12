@@ -208,3 +208,98 @@ test("center-client imports no Nuxt / Nitro / Tauri / browser module", async () 
     }
   }
 });
+
+// -- review 1 ------------------------------------------------------------------
+
+test("M1: with CENTER_TOKEN fixed, changing remote.url drops the file token (R29)", async () => {
+  const store = memStore(withRemote(URL_A, TOKEN_A));
+  const h = handle(store, { CENTER_TOKEN: TOKEN_B });
+  await h.set(withRemote(URL_B, ""));
+  assert.deepEqual((store.value as CenterSettings).remote, { url: URL_B });
+  assert.ok(!JSON.stringify(store.value).includes(TOKEN_A));
+  // same url: the file token stays
+  const store2 = memStore(withRemote(URL_A, TOKEN_A));
+  await handle(store2, { CENTER_TOKEN: TOKEN_B }).set(withRemote(URL_A, ""));
+  assert.deepEqual((store2.value as CenterSettings).remote, { url: URL_A, token: TOKEN_A });
+});
+
+const URL_UI = "http://user:pw@host-a:7910/mcp?token=qq";
+
+test("M2: redacted responses show no userinfo / query; the desktop shape (redactSecrets false) is unchanged", async () => {
+  const store = memStore(withRemote(URL_UI, TOKEN_A));
+  const h = handle(store);
+  const got = await h.get();
+  assert.deepEqual(got.remote, { url: URL_A, token: "", tokenSet: true });
+  const setOut = await h.set({ ...defaultSettings(), port: 7920, remote: { url: URL_A, token: "" } });
+  assert.deepEqual(setOut.remote, { url: URL_A, token: "", tokenSet: true });
+  for (const secret of ["user", "pw", "qq", TOKEN_A]) assert.ok(!JSON.stringify([got, setOut]).includes(secret), secret);
+  // the shown form means "unchanged": the stored url (with userinfo) and token stay
+  assert.deepEqual((store.value as CenterSettings).remote, { url: URL_UI, token: TOKEN_A });
+  assert.equal((store.value as CenterSettings).port, 7920);
+  // desktop shape: as stored
+  const raw = await handle(memStore(withRemote(URL_UI, TOKEN_A)), {}, false).get();
+  assert.deepEqual(raw.remote, { url: URL_UI, token: TOKEN_A });
+});
+
+test("M2: the redacted form of another url is a change (token dropped)", async () => {
+  const store = memStore(withRemote(URL_UI, TOKEN_A));
+  await handle(store).set(withRemote(URL_B, ""));
+  assert.deepEqual((store.value as CenterSettings).remote, { url: URL_B });
+});
+
+test("L1: wrong types in set are CenterSettingsError and nothing is written", async () => {
+  const store = memStore(withRemote(URL_A, TOKEN_A));
+  const h = handle(store);
+  for (const bad of [
+    { ...defaultSettings(), workspace: undefined },
+    { ...defaultSettings(), remote: { url: 5 } },
+    { ...defaultSettings(), remote: { url: URL_A, token: 5 } },
+    { ...defaultSettings(), token: 5 },
+    null,
+  ]) {
+    await assert.rejects(h.set(bad as unknown as CenterSettings), CenterSettingsError, JSON.stringify(bad));
+  }
+  assert.equal(store.writes, 0);
+});
+
+test("L3: enabled:true file (policy allows): get hides the top-level token, set with an empty token keeps it", async () => {
+  const TOP = "top-level-token-0123456789";
+  const store = memStore({ ...defaultSettings(), enabled: true, token: TOP });
+  const h = createCenterSettings({ settingsStore: store, redactSecrets: true, policy: { allowEnabled: true }, env: {} });
+  const s = await h.get();
+  assert.equal(s.token, "");
+  assert.equal(s.tokenSet, true);
+  assert.ok(!JSON.stringify(s).includes(TOP));
+  assert.equal((await h.selectTarget())!.token, TOP);
+  await h.set({ ...defaultSettings(), enabled: true, port: 7920, token: "" });
+  assert.equal((store.value as CenterSettings).token, TOP);
+  assert.equal((store.value as CenterSettings).port, 7920);
+  // a new token replaces it
+  await h.set({ ...defaultSettings(), enabled: true, token: TOKEN_B });
+  assert.equal((store.value as CenterSettings).token, TOKEN_B);
+});
+
+test("L3: a sidecar-enabled file without a token gets one minted and saved on load", async () => {
+  const store = memStore({ ...defaultSettings(), enabled: true });
+  const h = createCenterSettings({ settingsStore: store, policy: { allowEnabled: true }, env: {} });
+  const t = (await h.selectTarget())!;
+  assert.equal(t.token!.length, 32);
+  assert.equal((store.value as CenterSettings).token, t.token);
+});
+
+test("L3: CENTER_URL fixed and no remote in the file: a token alone is refused, an empty one is fine", async () => {
+  const store = memStore();
+  const h = handle(store, { CENTER_URL: URL_B });
+  await assert.rejects(h.set(withRemote(URL_B, TOKEN_A)), /token だけは保存できない/);
+  assert.equal(store.writes, 0);
+  await h.set({ ...withRemote(URL_B, ""), port: 7920 });
+  const saved = store.value as CenterSettings;
+  assert.equal(saved.port, 7920);
+  assert.ok(!("remote" in saved));
+});
+
+test("L3: the env url is normalized in the effective settings", async () => {
+  const h = handle(memStore(), { CENTER_URL: " http://host-b:7910// " });
+  assert.equal((await h.get()).remote!.url, URL_B);
+  assert.equal((await h.selectTarget())!.url, URL_B);
+});

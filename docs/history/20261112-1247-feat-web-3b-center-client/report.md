@@ -22,6 +22,8 @@
 - `redactUrl` は 5.5「userinfo をログ・エラーに出さない」の下地として Rust の `redact_url` を写した（呼び出し側は 3c 以降）。
 - `packages/ui/types/index.ts` が `import("~/tauri").Update`（Nuxt の alias）を含むため、center-client の typecheck 用に `src/ui-types-shim.d.ts` で stub した。ui 側は変えていない。
 - token 生成は Rust と違い `enabled` が真の時だけ（5.5）。
+- `isAbsolute`（workspace・claudePath）は Windows 形（`C:\`、`\\`）も絶対と見る。Rust（Linux ビルド）の `Path::is_absolute` は `/` 始まりだけなので、Windows 形の入力で差が出る（desktop は Windows ビルドなら Rust 側も許容。コードは変えていない）。
+- 設定 file の同時書き込みの排他は v1 では無い（temp→rename で file が壊れることは無いが、同時の set は後勝ち）。
 - URL の正規化は WHATWG URL（JS）。Rust の reqwest::Url と全 12 行の表で一致を確認。
 
 ## 確認
@@ -52,3 +54,15 @@
 | 写していない | | `bind_failure_is_read_from_the_log`・`config_json_*`・`autostart_*`（sidecar の起動、まとまり S）、`center_mcp.rs` の mock center 系（3c） |
 
 web 側の追加 test（`test/center-settings.test.ts`）: get が token を返さず `tokenSet` を返す／set で空 token は据え置き／`remote.url` を変えると token を引き継がない／env 固定／`enabled:true` 拒否／file 保存（mode 600、temp が残らない）／設定 file の書き換えが次の呼び出しから効く。
+
+## review 1 の修正
+
+- M1: `CENTER_TOKEN` 固定中でも、`remote.url` が変わる時は file の旧 token を捨てる（R29）。url が同じなら残す。test に再現手順（file{a, OLD}、env token、url→b）を追加。
+- M2: 設計書 5.5「画面に出すのは url の host 部…まで」「token と url の userinfo は…出さない」、R28「応答で伏せる」に従い、`redactSecrets` が真の時の get/set 応答は `remote.url` に `redactUrl`（userinfo・query・fragment を除く）を適用した。偽の時は desktop と同じ形（保存値のまま）。
+  - 判断: 伏せた形を画面が set に送り返しても、同じ宛先とみなし、保存済みの url（userinfo 付き）と token を保つ（伏せた形で file を上書きしない）。別の宛先なら従来どおり token を捨てる。env 固定の url 比較も同じ扱い。
+  - 設計書は「Rust の応答と揃える」とは書いていない（desktop の応答は token も含む従来形）。web だけの差として `redactSecrets` に閉じ込めた。
+- L1: 入口で型検査（`assertSettingsShape`、`validateSettings` と `set` の先頭）。型不正は TypeError でなく `CenterSettingsError`。
+- L3: test 追加。port 整数（7910.5・NaN）、https 受理、parseStored の型不正、enabled:true の file の上位 token（get は空と tokenSet:true、空 token の set で据え置き、新 token で置換、token 無しなら生成して保存）、CENTER_URL 固定で file に remote が無い時の token だけ保存の拒否、env url の正規化。
+  - 変異確認（変異は commit していない）: M1 の無条件 file token、redactUrl 無し、伏せた形の同一視無し、set／validate の型検査無し、port 整数検査無し、https 拒否、parseStored の enabled 検査無し、get の token 非表示無し、空 token 据え置き無し、token だけ保存の拒否無し、env url 正規化無し — 12 変異のすべてで test が落ちた。
+- L2: 上記「設計書との差」に記載。L4: 直さない（v1 は排他なし）。
+- 既存: web 38/38、protocol 43/43、server 349/349、center 616/617（既知の不安定 rc-orphan のみ）。

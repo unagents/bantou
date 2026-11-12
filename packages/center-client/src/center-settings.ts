@@ -2,8 +2,9 @@
 // Design 5.5. Command names (`center_get_settings` / `center_set_settings`) map to `get` / `set`.
 
 import type { CenterSettings } from "../../ui/types/index.ts";
-import { normalizeRemote } from "./normalize.ts";
+import { normalizeRemote, redactUrl } from "./normalize.ts";
 import {
+  assertSettingsShape,
   CenterSettingsError,
   ensureToken,
   parseStored,
@@ -85,6 +86,7 @@ export function createCenterSettings(opts: CenterSettingsOptions): CenterSetting
     selectTarget: async () => selectTarget(await effective()),
     get: async () => view(await effective()),
     async set(input) {
+      assertSettingsShape(input);
       const file = await load();
       const eff = await effective();
       const next = merge(file, eff, input, redact, { url: envUrl(), token: envToken() });
@@ -120,9 +122,12 @@ function merge(
   const inUrl = input.remote ? normalizeRemote(input.remote.url.trim()) : undefined;
   const inToken = input.remote?.token?.trim() || undefined;
   const fileUrl = file.remote?.url;
+  // Same destination as `stored`. With redact, the shown form (no userinfo / query) of the stored url counts as the same.
+  const sameDest = (stored: string | undefined) =>
+    inUrl !== undefined && stored !== undefined && (inUrl === stored || (redact && inUrl === redactUrl(stored)));
 
   if (env.url !== undefined) {
-    if (inUrl !== eff.remote?.url) throw new CenterSettingsError("remote の url は env（CENTER_URL）で固定されている");
+    if (!sameDest(eff.remote?.url)) throw new CenterSettingsError("remote の url は env（CENTER_URL）で固定されている");
   }
   if (env.token !== undefined) {
     const same = redact ? inToken === undefined : inToken === eff.remote?.token || inToken === undefined;
@@ -133,8 +138,9 @@ function merge(
     delete next.remote;
     return next;
   }
-  // Url: fixed by env -> the file keeps its own. Token: fixed by env -> the file keeps its own.
-  const url = env.url !== undefined ? fileUrl : input.remote.url;
+  // The destination stays when env fixes the url, or the input names the stored one (then the stored form is kept as is).
+  const keepsDest = env.url !== undefined || sameDest(fileUrl);
+  const url = keepsDest ? fileUrl : input.remote.url;
   if (url === undefined) {
     // env fixes the url and the file has none: only a token could be saved, and a token without a url is meaningless.
     if (inToken !== undefined && env.token === undefined) {
@@ -143,16 +149,16 @@ function merge(
     delete next.remote;
     return next;
   }
+  // A stored token never goes to another destination (R29), whether env fixes the token or not.
   let token: string | undefined;
   if (env.token !== undefined) {
-    token = file.remote?.token;
+    token = keepsDest ? file.remote?.token : undefined;
   } else if (!redact) {
     token = input.remote.token;
   } else if (inToken !== undefined) {
     token = inToken;
   } else {
-    // Empty = unchanged, but never to another destination (R29).
-    token = normalizeRemote(url.trim()) === fileUrl ? file.remote?.token : undefined;
+    token = keepsDest ? file.remote?.token : undefined;
   }
   next.remote = token !== undefined ? { url, token } : { url };
   return next;

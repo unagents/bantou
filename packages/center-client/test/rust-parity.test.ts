@@ -208,3 +208,28 @@ test("validate: enabled:true is refused unless the policy allows it (until work 
   assert.throws(() => validateSettings(base({ enabled: true })), /未対応/);
   assert.doesNotThrow(() => validateSettings(base({ enabled: true }), ok));
 });
+
+test("validate: port must be an integer, https remote is accepted, wrong types are CenterSettingsError", () => {
+  assert.throws(() => validateSettings(base({ port: 7910.5 })), CenterSettingsError);
+  assert.throws(() => validateSettings(base({ port: Number.NaN })), CenterSettingsError);
+  assert.equal(validateSettings(base({ remote: { url: "https://host-a" } })).remote!.url, "https://host-a/mcp");
+  const bad: unknown[] = [
+    null,
+    "x",
+    { ...base(), workspace: undefined },
+    { ...base(), remote: { url: 5 } },
+    { ...base(), remote: { url: "http://h:1", token: 5 } },
+    { ...base(), token: 5 },
+    { ...base(), port: "7910" },
+    { ...base(), enabled: "false" },
+    { ...base(), claudePath: 5 },
+  ];
+  for (const b of bad) assert.throws(() => validateSettings(b as CenterSettings), CenterSettingsError, JSON.stringify(b));
+});
+
+test("parseStored: a wrong type anywhere gives the defaults", () => {
+  assert.deepEqual(parseStored({ enabled: "yes", port: 7920 }), defaultSettings());
+  assert.deepEqual(parseStored({ port: 7920.5 }), defaultSettings());
+  assert.deepEqual(parseStored({ remote: { url: 5 } }), defaultSettings());
+  assert.equal(parseStored({ enabled: true, port: 7920 }).port, 7920);
+});

@@ -4,7 +4,7 @@
 
 import { randomInt } from "node:crypto";
 import type { CenterRemote, CenterSettings } from "../../ui/types/index.ts";
-import { MCP_PATH, normalizeRemote } from "./normalize.ts";
+import { MCP_PATH, normalizeRemote, redactUrl } from "./normalize.ts";
 
 export type { CenterRemote, CenterSettings };
 
@@ -60,11 +60,32 @@ export function ensureToken(s: CenterSettings): { settings: CenterSettings; mint
 
 const isAbsolute = (p: string) => p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p) || p.startsWith("\\\\");
 
+/** Type check of an input from outside (a command argument). Throws `CenterSettingsError`, never a TypeError later. */
+export function assertSettingsShape(x: unknown): asserts x is CenterSettings {
+  const bad = (name: string): never => {
+    throw new CenterSettingsError(`${name} の型が不正`);
+  };
+  if (x === null || typeof x !== "object" || Array.isArray(x)) return bad("settings");
+  const o = x as Record<string, unknown>;
+  if (typeof o.enabled !== "boolean") bad("enabled");
+  if (typeof o.port !== "number") bad("port");
+  if (typeof o.workspace !== "string") bad("workspace");
+  if (typeof o.token !== "string") bad("token");
+  if (o.claudePath != null && typeof o.claudePath !== "string") bad("claudePath");
+  if (o.remote != null) {
+    if (typeof o.remote !== "object" || Array.isArray(o.remote)) bad("remote");
+    const r = o.remote as Record<string, unknown>;
+    if (typeof r.url !== "string") bad("remote.url");
+    if (r.token != null && typeof r.token !== "string") bad("remote.token");
+  }
+}
+
 /**
  * Reject settings the center would refuse and normalise empty optionals. (center.rs `validate_settings`)
  * `bind` is not part of the web settings: it is dropped. Throws `CenterSettingsError`.
  */
 export function validateSettings(input: CenterSettings, policy: SettingsPolicy = {}): CenterSettings {
+  assertSettingsShape(input);
   const s: CenterSettings = { ...input };
   delete s.bind;
   delete s.tokenSet;
@@ -175,7 +196,8 @@ export function redactSettings(s: CenterSettings): CenterSettings {
   const out: CenterSettings = { ...s, token: "", tokenSet: s.token !== "" };
   delete out.bind;
   if (s.remote) {
-    out.remote = { url: s.remote.url, token: "", tokenSet: !!s.remote.token };
+    // Only host part and path: no userinfo, query or fragment (design 5.5, R28).
+    out.remote = { url: redactUrl(s.remote.url), token: "", tokenSet: !!s.remote.token };
   }
   return out;
 }
