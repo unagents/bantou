@@ -23,6 +23,15 @@
         "typescript": "^5.6.0",
       },
     },
+    "packages/center-client": {
+      "name": "bantou-center-client",
+      "version": "0.0.0",
+      "devDependencies": {
+        "@types/node": "^22.0.0",
+        "tsx": "^4.19.0",
+        "typescript": "~5.9.0",
+      },
+    },
     "packages/desktop": {
       "name": "bantou-desktop",
       "version": "0.1.53",
@@ -749,6 +758,8 @@
     "balanced-match": ["balanced-match@4.0.4", "", {}, "sha512-BLrgEcRTwX2o6gGxGOCNyMvGSp35YofuYzw9h1IMTRmKqttAZZVU67bdb9Pr2vUHA8+j3i2tJfjO6C6+4myGTA=="],
 
     "bantou": ["bantou@workspace:packages/server"],
+
+    "bantou-center-client": ["bantou-center-client@workspace:packages/center-client"],
 
     "bantou-desktop": ["bantou-desktop@workspace:packages/desktop"],
 
