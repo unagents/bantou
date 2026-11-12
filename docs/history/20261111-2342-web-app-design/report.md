@@ -2,7 +2,7 @@
 
 - 日付: 2026-11-11 / 実行: w-web-design（role=docs、調査と設計のみ。コードは変更していない）
 - 基点: `origin/develop` `2634a9712d0f43ded5601890067b73452c728c99`
-- 設計は同 dir の `design.md`。**利用者が決めた前提（2026-11-11）: web 版は外（internet）から使う／認証は web 独自に作らず inet250 の Cloudflare の認証を使う。** 8 章がその調査、設計への反映は design.md の 1・5.2・8 章、設置時に確かめる項目は design.md 13 章。この文書は「何を調べ、何が分かったか」だけを書く。
+- 設計は同 dir の `design.md`。**2026-11-12 追記: 利用者の方針（web は desktop と同じ仕組み・設定で動作を変える・既定は center を起動しない・実装は共有する前提）を受けて、9 章（desktop の center 設定の仕組み）を足し、1.1・1.3 の「不要」と判定していた行を直した。****利用者が決めた前提（2026-11-11）: web 版は外（internet）から使う／認証は web 独自に作らず inet250 の Cloudflare の認証を使う。** 8 章がその調査、設計への反映は design.md の 1・5.2・8 章、設置時に確かめる項目は design.md 13 章。この文書は「何を調べ、何が分かったか」だけを書く。
 - 根拠は `file:line`（repo root からの相対）。`packages/desktop/` は `D/`、`packages/center/` は `C/` と略す。**推測は「推測」と明記**する。
 - 202 の nginx・OS・user・空き port には触れていない（ssh 禁止）。そこは全て「未確認」。
 
@@ -28,9 +28,9 @@
 | `create_session` (`session.rs:335`) / `session_update` (`session.rs:357`) | center の `session_create` / `session_update` を呼び、一覧を読み直す | HTTP（MCP tool の中継） |
 | `session_get_settings` (`session.rs:95`) / `session_update_settings` (`session.rs:105`) | center の `session_settings_get/update`。追加指示は 16,000 字まで検査（`session.rs:25,30-46`） | HTTP（同じ検査を backend にも置く） |
 | `session_path_hints` (`session.rs:326`) | center の `center_info` から既定の親フォルダ、`canPick`（sidecar かつ mac/win のみ真、`session.rs:321-323`） | HTTP。`canPick` は常に偽 |
-| `center_get_settings` (`center.rs:729`) / `center_set_settings` (`center.rs:743`) | desktop の `settings.json`（`center` キー、`center.rs:22`）にある sidecar 設定 | 不要。web は center を自分で起動しない（design.md 6 章） |
-| `center_regenerate_token` (`center.rs:758`) | sidecar の token 再生成→再起動 | 不要 |
-| `center_status` (`center.rs:769`) | sidecar の running/restarting/error・ログ | 不要（backend は center の死活を別途返す） |
+| `center_get_settings` (`center.rs:729`) / `center_set_settings` (`center.rs:743`) | desktop の `settings.json`（`center` キー、`center.rs:22`）にある center 設定（9 章） | **HTTP（改訂）**。同じ command 名・同じ設定 object を持つ。get は token を返さない。set は既定で受けない（design.md 5.5、判断 14） |
+| `center_regenerate_token` (`center.rs:758`) | sidecar の token 再生成→再起動 | 起動する形（まとまり S）でのみ。v1 は不要（改訂） |
+| `center_status` (`center.rs:769`) | sidecar の running/restarting/error・ログ | 起動する形（まとまり S）でのみ。v1 は `/api/health` が到達可否を返す（改訂） |
 | `center_ip_status` (`center.rs:737`) / `center_local_ips` (`center_snippet.rs:348`) / `center_connect_snippets` (`center_snippet.rs:354`) / `center_parse_connect` (`center_snippet.rs:359`) | 接続設定（mcp.json / `claude mcp add`）の生成・解析、この PC の IP 一覧 | 不要。token をブラウザに出さない（design.md 6.2） |
 | `center_call` (`center_mcp.rs:468`) | center の MCP tool を名前で呼ぶ（**任意の tool**、`CALL_TIMEOUT` 600 秒、`center_mcp.rs:31`） | HTTP。web では **許可 tool の一覧**に絞る（design.md 5.3） |
 | `center_connection` (`center_mcp.rs:487`) | 接続先 URL・ping で到達確認 | HTTP |
@@ -48,7 +48,7 @@
 | `session-output-status`（`terminal.rs:24` / `:278`） | `useTerminalStore.ts:45` | 同上（`EventSource` の open/error から `connected`/`retrying`/`rejected` を作る） |
 | `center-sessions-changed`（`center_events.rs:18` / `:83`） | `useSessionRefresh.ts:90` | SSE（backend が center の `GET /events` を 1 本持ち、全ブラウザへ配る） |
 | `bantou://sessions-changed`（`session.rs:22` / `:276`） | `useBoard.ts:207` | SSE（上と同じ流れ。cache が変わった時だけ） |
-| `bantou://center-running`（`center.rs:26` / `:558`） | `useSessionRefresh.ts:96` | 不要（web は center を起動しない）。再接続は backend の再試行 |
+| `bantou://center-running`（`center.rs:26` / `:558`） | `useSessionRefresh.ts:96` | 既定の形では不要（起動しない）。起動する形（まとまり S）では同名 event を backend が出す。再接続は backend の再試行 |
 | `bantou://os-wake`（`os_events.rs:17` / `:67,:100`、mac・win のみ） | `useSessionRefresh.ts:91` | ブラウザ（`visibilitychange` / `pageshow`） |
 | `bantou://os-network-changed`（`os_events.rs:18` / `:40`） | `useSessionRefresh.ts:97` | ブラウザ（`online` event） |
 | `bantou://threads-changed`（`thread.rs:13`、emit は `broker.rs:797`, `agent.rs:147,239,337,363`） | `useBoard.ts:201` | 不要（v1） |
@@ -61,11 +61,11 @@
 
 | もの | 何をしているか | web での置換 |
 |---|---|---|
-| center の起動・監視（`center.rs:534-592` start、`:596-611` 再起動、`:247-290` 失敗の集計、`:489-520` 停止） | sidecar を `shell().sidecar("bantou-center")` で起動し、異常終了は 2 秒から倍々（上限 60 秒）で再起動、10 分に 5 回超で断念（`center.rs:46-53`）。アプリ終了時に SIGTERM（`lib.rs:197-199`） | 不要。systemd が担う（`Restart=on-failure`）。web backend は center を子にしない（design.md 6.1） |
-| center 設定の書き出し（`center.rs:174-205`） | `~/.local/share/bantou/center.json` に `workspace`/`token`/`remoteControl.claude` を書く。引数は `--transport http --port N --bind 0.0.0.0 --config <path>`（`center.rs:189-199`）。`LISTEN_BIND = "0.0.0.0"`（`center.rs:31`） | 手順書（design.md 9 章）。web 側の center は bind を `127.0.0.1` にできる（判断 2） |
-| 接続先の選択（`center_mcp.rs:89-98`） | `enabled` なら sidecar（`127.0.0.1:<port>`）、無ければ貼り付けた `remote`。**同じ設定で `terminal.rs`/`attachment.rs`/`center_events.rs` も同じ先に向く**（`terminal.rs:286`, `attachment.rs:141`, `center_events.rs:56-58`） | backend の設定（env）で 1 か所固定 |
+| center の起動・監視（`center.rs:534-592` start、`:596-611` 再起動、`:247-290` 失敗の集計、`:489-520` 停止） | sidecar を `shell().sidecar("bantou-center")` で起動し、異常終了は 2 秒から倍々（上限 60 秒）で再起動、10 分に 5 回超で断念（`center.rs:46-53`）。アプリ終了時に SIGTERM（`lib.rs:197-199`） | 既定の形（接続）では不要。起動する形（まとまり S）では同じ監視を `packages/center-client` の `process` に置く（design.md 6.6）。別に置く center は systemd が担う |
+| center 設定の書き出し（`center.rs:174-205`） | `~/.local/share/bantou/center.json` に `workspace`/`token`/`remoteControl.claude` を書く。引数は `--transport http --port N --bind 0.0.0.0 --config <path>`（`center.rs:189-199`）。`LISTEN_BIND = "0.0.0.0"`（`center.rs:31`） | 既定の形では不要（別に置く center の手順は design.md 6.1・9 章）。起動する形（S）では web が同じ config を書く（loopback の待受、design.md 6.6） |
+| 接続先の選択（`center_mcp.rs:89-98`） | `enabled` なら sidecar（`127.0.0.1:<port>`）、無ければ貼り付けた `remote`。**同じ設定で `terminal.rs`/`attachment.rs`/`center_events.rs` も同じ先に向く**（`terminal.rs:286`, `attachment.rs:141`, `center_events.rs:56-58`） | web の center 設定（`enabled` / `remote`、design.md 5.5）が同じ選び方で決める。`packages/center-client` に写す |
 | MCP クライアント（`center_mcp.rs:1-22`） | JSON-RPC を手書き。`initialize`/`ping`/`tools/call`。center が 404 を返したら 1 回だけ再 initialize（`center_mcp.rs:8-12`） | backend の TS で同等（center 側が 30 分無通信で MCP session を閉じる、`C/src/http.ts:34`） |
-| `settings.json`（plugin-store、`workspace.rs:8`） | workspace 履歴・center 設定の保存 | 不要（web は env とブラウザの `localStorage`。ペイン幅は既に `localStorage`、`D/src/composables/usePaneWidths.ts:12`） |
+| `settings.json`（plugin-store、`workspace.rs:8`） | workspace 履歴・center 設定の保存 | center 設定は backend の設定 file（`center` キー、同じ形、design.md 5.5）。ペイン幅などの画面の状態はブラウザの `localStorage`（既に `D/src/composables/usePaneWidths.ts:12`） |
 | window 管理（`workspace.rs:335-365` build/new window、`:419-435` mac の Dock reopen、`:471-495` CLI 起動、`lib.rs:60-67` single-instance、`lib.rs:138-146`/`:189-196` 終了時の挙動） | `bantou <path>` CLI、複数 window、全 window を閉じても常駐 | 不要 |
 | mac の window 外観（`workspace.rs:158-181` traffic light、`:345` `TitleBarStyle::Overlay`） | タイトルバー重ね | 不要。ただし UI 側に残骸: `AppHeader.vue:44-45`（`data-tauri-drag-region` と `pl-20`）、`pages/index.vue:180`、`assets/css/main.css:26,64-74` |
 | ログ（`lib.rs:68-80` plugin-log、JS は `api/log.ts:1,11`） | webview の例外・警告を OS のログ dir の `bantou.log` へ | web は `console` + 任意で `POST /api/log` |
@@ -218,3 +218,53 @@ e2e のモックは既に「`invoke(cmd, args, options)` と `emitter` を差し
 - 実際の通信: SSE が溜まらないか、idle 切断の秒数、添付 20MB が通るか、Access の session 期間と切れた後の挙動。
 - inet250 の LAN IP（202 の nginx で送信元を限るのに要る）、202 の nginx の構成（vhost、`default_server`）、202 から `cloudflareaccess.com` へ出られるか。
 - 202 の `bantou` 用 port の空き（候補 7920 は推測）。
+
+## 9. desktop の center 設定の仕組み（2026-11-12 追記。利用者の方針: web も同じ仕組み・設定で動作を変える・既定は center を起動しない）
+
+`D/src-tauri/src/` の実コードを読んだ事実だけを書く（動かしての確認はしていない）。web 版の設計は design.md の 5.5〜5.7・6 章。
+
+### 9.1 設定の項目（`CenterSettings`、`center.rs:70-102`）
+
+| 項目 | 意味（コードのコメントどおり） | 既定 | 根拠 |
+|---|---|---|---|
+| `enabled` | sidecar（この PC の center）を起動する | **偽** | `center.rs:73`、既定 `:95`、test `:789` |
+| `port` | sidecar の待受 port | `DEFAULT_PORT` | `center.rs:28,74,96` |
+| `bind` | 接続設定（mcp.json / `claude mcp add`）の URL に書く IP。**center の待受ではない**（待受は常に `LISTEN_BIND = "0.0.0.0"`） | 空 | `center.rs:29-31,75-77` |
+| `workspace` | center に渡す作業 dir（`session_create` を path 無しで呼んだ時の親）。`~` / `~/x` / 絶対 | `~/.bantou` | `center.rs:57-58,78-79,134-140` |
+| `claudePath` | claude の絶対 path。未設定なら center が login shell で解決 | なし | `center.rs:80-82,141-146` |
+| `token` | sidecar が `/mcp` で要求する Bearer。空なら初回に自動生成（32 文字） | 空→生成 | `center.rs:83-84,106-123` |
+| `remote` | 別 host の center。`{ url, token? }`（token は貼った接続設定から） | なし | `center.rs:60-68,85-89` |
+
+- JSON は camelCase（`#[serde(rename_all = "camelCase", default)]`、`center.rs:70-71`）。足りない項目は既定で埋まる（test `center.rs:797-801`）。型の鏡は `D/src/types/index.ts:166-185`。
+- 検証（`validate_settings`、`center.rs:126-160`）: port 1〜65535、workspace は絶対か `~` 始まり、claudePath は絶対、token は 12 文字以上（`MIN_TOKEN_LEN`、`center.rs:33`）、remote の url は `http(s)://` で始まり、`/mcp` に正規化（`normalize_remote`、`center_mcp.rs:53-67`。表は test `center_mcp.rs:878-892`）、remote の空 token は「無し」。
+
+### 9.2 保存場所
+
+- tauri-plugin-store の `settings.json`（`SETTINGS_FILE`、`workspace.rs:8`）の `center` キー（`CENTER_KEY`、`center.rs:22`）。読みは `load_settings`（`center.rs:664-681`）: 壊れた値は既定に戻し、token が無ければ生成して書き戻し、古い形の remote url（`//mcp` など）を直して書き戻す。書きは `center_set_settings`（`center.rs:743-753`）: 検証→token 保証→保存→`apply`。
+- sidecar に渡す center 側の config は別 file（`config_path`、`center.rs:202`、書き出し `:174-187,223-232`）。`workspace`・`remoteControl.claude`・`token` を持つ。`remote` は center に渡さない（`center.rs:207-211`）。
+
+### 9.3 「起動する」と「接続する」の切り替え
+
+- **接続先は、呼び出しのたびに保存済みの設定から選ぶ**（`center_mcp.rs:7-8`）。`select_target`（`center_mcp.rs:85-98`）: `enabled` が真 → 自分の sidecar（`http://127.0.0.1:<port>/mcp`、host は常に loopback `SIDECAR_HOST`、token は自分のもの）。偽で `remote` あり → その url と token。どちらも無し → 接続先なし（`NO_TARGET`「接続先が無い」、`center_mcp.rs:460-464`）。**`enabled` が真のあいだ、保存済みの `remote` は残るが無視される**（test `center_mcp.rs:542-549`）。
+- 同じ選び方を使うのは MCP（`center_mcp.rs:463,482,489`）に加え、端末の出力（`terminal.rs:286`）・入力と resize（`terminal.rs:341`）・添付（`attachment.rs:141`）・events（`center_events.rs:57`）。つまり接続先の切り替えは設定 1 か所で全部に効く。
+- 起動: アプリ起動時 `autostart`（`center.rs:703-726`、`lib.rs:168`）が `enabled` なら sidecar を起動。偽なら「起動しない」とログに残す（`center.rs:695-700`）。設定を保存すると `apply`（`center.rs:615-647`）が、起動に関わる項目（`enabled` `port` `workspace` `claudePath` `token`）が変わった時だけ止めて起動し直す（`needs_restart`、`center.rs:211-221`）。`remote` と `bind` は再起動を起こさない。
+- 監視: 異常終了は 2 秒から倍々（上限 60 秒）で再起動、10 分に 5 回超で断念、5 分以上動けば失敗の数を戻す（`center.rs:44-55,247-290`）。停止は SIGTERM を先に送って 15 秒待つ（`center.rs:44,504-508`）。アプリ終了時も止める（`lib.rs:197-199`）。
+
+### 9.4 接続設定の形（remote）
+
+- 貼り付けた接続設定（mcp.json 形式か `claude mcp add` 形式）から url と token を取り出す（`parse_connect`、`center_snippet.rs:331`。command は `center_parse_connect`、`:359`）。自分の sidecar 用の接続設定は `center_connect_snippets`（`center_snippet.rs:168,354`）が、`bind` の IP・port・token から作る。
+- 取り出した値は `remote = { url, token? }` として保存される（`SettingsDialog.vue:246`）。
+
+### 9.5 設定画面（`D/src/components/SettingsDialog.vue`）
+
+- 「この PC の center」: スイッチ「center を起動する」（`:386`）、port（`:392`）、接続設定の IP（`:394`）、Auth Token と再生成（`:405-422`）、接続設定の表示（`:427`）、workspace（`:449`）、claudePath（`:453`）。`enabled` の下にだけ出る（`:389`）。
+- 「別 host の center」: 接続設定の貼り付け欄（`:486`）、解析結果（`:492`）、「この PC の center を起動」ボタン（`:475`）、解除（`clearRemote`、`:277`）。
+- **「別 host の center だけを使う」時の表示**: 保存値が `enabled` 偽かつ `remote` あり（`isRemoteOnly`、`D/src/composables/centerRole.ts:10`）だと、起動のスイッチ・状態・ログ・参照 dir の欄を出さない（`sidecarVisible`、`SettingsDialog.vue:285-294`）。
+- api は `D/src/api/center.ts`: `centerGetSettings`（`:4`）、`centerSetSettings`（`:6`）、`centerRegenerateToken`（`:10`）、`centerConnectSnippets`（`:19`）、`centerParseConnect`（`:23`）、`centerStatus`（`:25`）、`centerConnection`（`:27`）。**`center_get_settings` の応答は token を含む**（画面が表示・コピーする、`SettingsDialog.vue:405-413`）。web ではこれを返さない設計にした（design.md 5.5）。
+
+### 9.6 web への含意（コードから言えること）
+
+- 「起動しない＋接続設定」は desktop で既に**既定**（`enabled` 偽、remote 経由は完成した経路）で、`remote` だけで MCP・端末・添付・events の全部が動く。web も同じ形で既定にできる。
+- 設定の選び方・検証・正規化は Tauri に依存しない純粋な関数（`select_target`、`validate_settings`、`normalize_remote`、`ensure_token`）で、test も入力と期待値の表になっている。TS に写して同じ test を通せる。
+- 一方、`load_settings(app)`（`center_mcp.rs:463` ほか）のように `AppHandle` と plugin-store に直接依存する部分は多く、Rust を共有 crate にするには切り離しが要る（design.md 5.6 の案 B）。
+- 未確認: tauri-plugin-store の file が単純な JSON object か（形式の確認はしていない）。
