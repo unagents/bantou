@@ -84,10 +84,17 @@ const canned =
 
 const parseAll = (chunks: string[]): SseEvent[] => {
   const p = new SseParser();
-  return chunks.flatMap((c) => p.feed(c));
+  return chunks.flatMap((c) => p.feed(new TextEncoder().encode(c)));
 };
 const target = (base: string, token?: string) => ({ url: `${base}/mcp`, source: "remote" as const, ...(token ? { token } : {}) });
 const PNG = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+/** `streamOnce` against `<base>/mcp` for `session`'s output. */
+const stream = (
+  base: string,
+  session: string,
+  onEvent: (e: SseEvent) => boolean,
+  o: { token?: string; lastEventId?: number; readTimeoutMs?: number } = {},
+) => streamOnce({ url: `${base}/mcp`, token: o.token }, ["sessions", session, "output"], onEvent, o);
 const noWait = () => new Promise<void>((r) => setTimeout(r, 5)); // a macrotask: a microtask-only loop would starve the test timers
 
 // -- T: SSE parsing ------------------------------------------------------------------------
@@ -116,7 +123,7 @@ test("T handles_events_split_across_chunks_and_crlf", () => {
 });
 
 test("T multiple_data_lines_join_with_newline_and_default_event_is_message", () => {
-  assert.deepEqual(parseAll(["data: a\ndata: b\n\n"]), [{ event: "message", data: "a\nb" }]);
+  assert.deepEqual(parseAll(["data: a\ndata: b\n\n"]), [{ id: undefined, event: "message", data: "a\nb" }]);
 });
 
 // -- T: payload ----------------------------------------------------------------------------
@@ -128,7 +135,7 @@ test("T payload_for_output_tracks_last_id", () => {
 });
 
 test("T payload_for_reset_forgets_last_id", () => {
-  const r = toPayload("s", { event: "reset", data: "{}" }, 99);
+  const r = toPayload("s", { id: undefined, event: "reset", data: "{}" }, 99);
   assert.equal(r.payload?.reset, true);
   assert.deepEqual([r.payload?.id, r.payload?.data], [0, ""]);
   assert.equal(r.lastId, undefined);
@@ -138,7 +145,7 @@ test("T payload_ignores_unknown_events_and_broken_ids", () => {
   for (const ev of [
     { id: "6", event: "message", data: "x" },
     { id: "abc", event: "output", data: "x" },
-    { event: "output", data: "x" },
+    { id: undefined, event: "output", data: "x" },
   ]) {
     const r = toPayload("s", ev, 5);
     assert.equal(r.payload, undefined);
@@ -181,14 +188,8 @@ test("T stream_once_delivers_events_and_sends_last_event_id_and_token", async ()
   const f = await fake(canned([[200, body]]));
   try {
     const got: SseEvent[] = [];
-    const end = await streamOnce({
-      url: sessionUrl(`${f.base}/mcp`, "m", "output"),
-      token: "tok",
-      lastId: 3,
-      readTimeoutMs: 5000,
-      onEvent: (e) => (got.push(e), true),
-    });
-    assert.deepEqual(end, { kind: "closed" });
+    const end = await stream(f.base, "m", (e) => (got.push(e), true), { token: "tok", lastEventId: 3, readTimeoutMs: 5000 });
+    assert.deepEqual(end, { type: "closed" });
     assert.deepEqual(got.map((e) => e.event), ["reset", "output"]);
     const s = f.seen[0]!;
     assert.equal(s.method, "GET");
@@ -203,8 +204,8 @@ test("T stream_once_delivers_events_and_sends_last_event_id_and_token", async ()
 test("T stream_once_omits_last_event_id_when_none_and_reports_rejection", async () => {
   const f = await fake(canned([[404, "no such session"]]));
   try {
-    const end = await streamOnce({ url: sessionUrl(`${f.base}/mcp`, "gone", "output"), onEvent: () => true });
-    assert.deepEqual(end, { kind: "rejected", status: 404, body: "no such session" });
+    const end = await stream(f.base, "gone", () => true);
+    assert.deepEqual(end, { type: "rejected", status: 404, body: "no such session" });
     assert.equal(f.seen[0]!.headers["last-event-id"], undefined);
     assert.equal(f.seen[0]!.headers.authorization, undefined);
   } finally {
@@ -220,17 +221,17 @@ test("T reconnect_resumes_from_the_last_received_id", async () => {
     let last: number | undefined;
     const ids: number[] = [];
     for (let i = 0; i < 2; i++) {
-      await streamOnce({
-        url: sessionUrl(`${f.base}/mcp`, "m", "output"),
-        lastId: last,
-        readTimeoutMs: 5000,
-        onEvent: (e) => {
+      await stream(
+        f.base,
+        "m",
+        (e) => {
           const r = toPayload("m", e, last);
           last = r.lastId;
           if (r.payload) ids.push(r.payload.id);
           return true;
         },
-      });
+        { ...(last !== undefined ? { lastEventId: last } : {}), readTimeoutMs: 5000 },
+      );
     }
     assert.deepEqual(ids, [1, 2, 3]);
     assert.equal(f.seen[0]!.headers["last-event-id"], undefined);
@@ -245,8 +246,8 @@ test("T stream_once_stops_when_the_sink_says_so", async () => {
   const f = await fake(canned([[200, body]]));
   try {
     let n = 0;
-    const end = await streamOnce({ url: sessionUrl(`${f.base}/mcp`, "m", "output"), readTimeoutMs: 5000, onEvent: () => (n++, false) });
-    assert.deepEqual([end, n], [{ kind: "stopped" }, 1]);
+    const end = await stream(f.base, "m", () => (n++, false), { readTimeoutMs: 5000 });
+    assert.deepEqual([end, n], [{ type: "stopped" }, 1]);
   } finally {
     await f.close();
   }
@@ -258,10 +259,34 @@ test("T silent_connection_is_dropped_after_the_read_timeout", async () => {
     res.flushHeaders();
   });
   try {
-    const end: StreamEnd = await streamOnce({ url: sessionUrl(`${f.base}/mcp`, "m", "output"), readTimeoutMs: 300, onEvent: () => true });
-    assert.deepEqual(end, { kind: "closed" });
+    const end: StreamEnd = await stream(f.base, "m", () => true, { readTimeoutMs: 300 });
+    assert.deepEqual(end, { type: "closed" });
   } finally {
     await f.close();
+  }
+});
+
+test("stream_once: a center that never sends headers fails at the connect timeout (text without secrets); the timer does not cut the body", async () => {
+  const hang = await fake(() => {}); // accepts, never answers
+  try {
+    await assert.rejects(
+      streamOnce({ url: `${hang.base}/mcp`, token: "tok-SECRET" }, ["sessions", "m", "output"], () => true, { connectTimeoutMs: 100 }),
+      (e: Error) => /接続がタイムアウト/.test(e.message) && !e.message.includes("tok-SECRET"),
+    );
+  } finally {
+    await hang.close();
+  }
+  const slow = await fake((_req, res) => {
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.flushHeaders();
+    setTimeout(() => res.end("id: 1\nevent: output\ndata: QQ==\n\n"), 250);
+  });
+  try {
+    const got: SseEvent[] = [];
+    const end = await streamOnce({ url: `${slow.base}/mcp` }, ["sessions", "m", "output"], (e) => (got.push(e), true), { connectTimeoutMs: 100, readTimeoutMs: 5000 });
+    assert.deepEqual([end, got.length], [{ type: "closed" }, 1]);
+  } finally {
+    await slow.close();
   }
 });
 
@@ -587,8 +612,8 @@ test("secrets: a center body that echoes the token is scrubbed; scrub drops user
   } finally {
     await f.close();
   }
-  assert.equal(scrub("x http://u:p@h/y tok", "tok"), "x http://h/y ***");
-  assert.equal(centerUrl("http://u:p@127.0.0.1:1/mcp", ["a"]), "http://127.0.0.1:1/a");
+  assert.equal(scrub("x http://u:p@h/y tok", "http://u:p@h/mcp", "tok"), "x http://h/y ***");
+  assert.equal(centerUrl("http://u:p@127.0.0.1:1/mcp", ["a"]).href, "http://127.0.0.1:1/a");
 });
 
 test("no target: input and output report it", async () => {

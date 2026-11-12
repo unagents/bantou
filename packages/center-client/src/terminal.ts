@@ -3,16 +3,15 @@
 // only. The connection target comes from `selectTarget` (inject `getTarget`); URL and token are
 // never rebuilt here. Errors and logs carry neither the token nor the userinfo of a URL.
 
+import { centerUrl, reconnectDelayMs, streamOnce, type SseEvent } from "./events.ts";
+import { scrub } from "./mcp.ts";
 import { redactUrl } from "./normalize.ts";
 import type { Target } from "./settings.ts";
-import { SseParser, type SseEvent } from "./sse.ts";
 
 export const OUTPUT_EVENT = "session-output";
 export const STATUS_EVENT = "session-output-status";
 
 export const CONNECT_TIMEOUT_MS = 5_000;
-/** The center sends a keep-alive every 15 s; three missed ones mean the connection is dead. */
-export const READ_TIMEOUT_MS = 45_000;
 export const POST_TIMEOUT_MS = 10_000;
 /** Longest response body written to the log. */
 export const LOG_BODY_CHARS = 2000;
@@ -58,43 +57,24 @@ export function clipBody(body: string): string {
   return t === "" ? "(empty body)" : t;
 }
 
-/** Remove the token and any `user:pass@` from text that may be shown or logged. */
-export function scrub(text: string, token?: string): string {
-  let t = text;
-  if (token) t = t.split(token).join("***");
-  return t.replace(/(\/\/)[^/@\s]*@/g, "$1");
-}
-
 // -- requests ----------------------------------------------------------------------------
 
 /**
- * `<origin of the MCP url>/sessions/<name>/<tail>`; the name is percent-encoded as a path segment.
- * (terminal.rs `session_url`.) The userinfo of the url is dropped (fetch refuses it); the token is
- * sent as a Bearer header.
+ * `<origin of the MCP url>/sessions/<name>/<tail>` (the name is percent-encoded as a path segment; userinfo, query and
+ * fragment are dropped). Only http(s) is accepted. (terminal.rs `session_url`)
  */
 export function sessionUrl(mcpUrl: string, session: string, tail: string): string {
-  return centerUrl(mcpUrl, ["sessions", session, tail]);
-}
-
-/** `<origin of the MCP url>/<segments...>` (segments are percent-encoded). (terminal.rs `center_url`.) */
-export function centerUrl(mcpUrl: string, segments: string[]): string {
-  let u: URL;
   try {
-    u = new URL(mcpUrl);
+    const u = new URL(mcpUrl);
+    if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error("scheme");
+    return centerUrl(mcpUrl, ["sessions", session, tail]).href;
   } catch {
     throw new TerminalError("center の URL が不正");
   }
-  if (u.protocol !== "http:" && u.protocol !== "https:") throw new TerminalError("center の URL が不正");
-  return `${u.origin}/${segments.map(encodeURIComponent).join("/")}`;
 }
 
 export const inputBody = (dataB64: string): { data: string } => ({ data: dataB64 });
 export const resizeBody = (cols: number, rows: number): { cols: number; rows: number } => ({ cols, rows });
-
-/** Wait (ms) before reconnect attempt `n` (0-based): 1, 2, 4, 8, then 15 s. */
-export function reconnectDelayMs(n: number): number {
-  return Math.min(2 ** Math.min(n, 4), 15) * 1000;
-}
 
 // -- checks (the center checks too, `http.ts` input / resize; ours give the same answer early) ----
 
@@ -140,101 +120,11 @@ export function toPayload(
   return { lastId };
 }
 
-// -- one connection ----------------------------------------------------------------------
-
-/** How one connection ended. */
-export type StreamEnd =
-  /** The server closed the stream or it went silent: reconnect. */
-  | { kind: "closed" }
-  /** The caller's sink or signal asked to stop. */
-  | { kind: "stopped" }
-  /** The center answered with this status and body (404: unknown session, 401: bad token): do not retry blindly. */
-  | { kind: "rejected"; status: number; body: string };
-
-export interface StreamOnceOptions {
-  fetch?: typeof fetch;
-  /** Full url from `sessionUrl`. */
-  url: string;
-  token?: string;
-  /** Sent as `Last-Event-ID` when known. */
-  lastId?: number;
-  readTimeoutMs?: number;
-  connectTimeoutMs?: number;
-  signal?: AbortSignal;
-  /** Return false to stop. */
-  onEvent: (ev: SseEvent) => boolean;
-}
-
 function causeText(e: unknown): string {
   const c = (e as { cause?: { code?: unknown; message?: unknown } } | undefined)?.cause;
   if (typeof c?.code === "string") return c.code;
   if (typeof c?.message === "string") return c.message;
   return e instanceof Error ? e.message : String(e);
-}
-
-/**
- * Open the output stream once and feed events to `onEvent` until it ends. A connection silent for
- * longer than `readTimeoutMs` is dropped (`closed`). A failure to connect or read throws
- * `TerminalError` (message already scrubbed). (terminal.rs `stream_once`)
- */
-export async function streamOnce(o: StreamOnceOptions): Promise<StreamEnd> {
-  const doFetch = o.fetch ?? fetch;
-  const readMs = o.readTimeoutMs ?? READ_TIMEOUT_MS;
-  const ctrl = new AbortController();
-  let timedOut = false;
-  let timer: NodeJS.Timeout | undefined;
-  const arm = (ms: number) => {
-    clearTimeout(timer);
-    timer = setTimeout(() => {
-      timedOut = true;
-      ctrl.abort();
-    }, ms);
-  };
-  const onAbort = () => ctrl.abort();
-  if (o.signal?.aborted) return { kind: "stopped" };
-  o.signal?.addEventListener("abort", onAbort, { once: true });
-  const headers: Record<string, string> = { accept: "text/event-stream" };
-  if (o.token) headers.authorization = `Bearer ${o.token}`;
-  if (o.lastId !== undefined) headers["last-event-id"] = String(o.lastId);
-  const where = redactUrl(o.url);
-  try {
-    arm(o.connectTimeoutMs ?? CONNECT_TIMEOUT_MS);
-    let resp: Response;
-    try {
-      resp = await doFetch(o.url, { method: "GET", headers, signal: ctrl.signal });
-    } catch (e) {
-      if (o.signal?.aborted) return { kind: "stopped" };
-      const why = timedOut ? "接続がタイムアウト" : causeText(e);
-      throw new TerminalError(scrub(`${where} に接続できない: ${why}`, o.token));
-    }
-    if (!resp.ok) {
-      clearTimeout(timer);
-      const body = await resp.text().catch(() => "");
-      return { kind: "rejected", status: resp.status, body: scrub(body, o.token) };
-    }
-    if (!resp.body) return { kind: "closed" };
-    const reader = resp.body.getReader();
-    const parser = new SseParser();
-    for (;;) {
-      arm(readMs);
-      let r: ReadableStreamReadResult<Uint8Array>;
-      try {
-        r = await reader.read();
-      } catch (e) {
-        if (o.signal?.aborted) return { kind: "stopped" };
-        if (timedOut) return { kind: "closed" };
-        throw new TerminalError(scrub(`読み取りに失敗: ${causeText(e)}`, o.token));
-      }
-      if (r.done) return { kind: "closed" };
-      for (const ev of parser.feed(r.value)) {
-        if (!o.onEvent(ev)) return { kind: "stopped" };
-      }
-    }
-  } finally {
-    clearTimeout(timer);
-    o.signal?.removeEventListener("abort", onAbort);
-    ctrl.abort(); // release the connection
-  }
 }
 
 // -- POST (input / resize) ---------------------------------------------------------------
@@ -270,15 +160,15 @@ export async function postSession(o: PostOptions): Promise<void> {
       signal: AbortSignal.timeout(o.timeoutMs ?? POST_TIMEOUT_MS),
     });
   } catch (e) {
-    const why = scrub(causeText(e), tok);
+    const why = scrub(causeText(e), o.target.url, tok);
     o.log?.warn(`terminal ${o.tail} [${o.session}]: cannot reach ${where}: ${why} (sent ${sent})`);
-    throw new TerminalError(scrub(`${where} に接続できない: ${why}`, tok));
+    throw new TerminalError(scrub(`${where} に接続できない: ${why}`, o.target.url, tok));
   }
   if (resp.ok) {
     await resp.arrayBuffer().catch(() => undefined);
     return;
   }
-  const text = scrub(await resp.text().catch(() => ""), tok);
+  const text = scrub(await resp.text().catch(() => ""), o.target.url, tok);
   o.log?.warn(`terminal ${o.tail} [${o.session}]: HTTP ${resp.status}: ${clipBody(text)} (sent ${sent})`);
   const reason = resp.status === 409 ? "セッションは動いていない" : [...text].slice(0, 200).join("");
   throw new TerminalError(`center が ${resp.status} を返した: ${reason}`, resp.status);
@@ -350,17 +240,12 @@ export function createTerminals(opts: TerminalsOptions) {
         try {
           target = await opts.getTarget();
           if (!target) throw new TerminalError("接続先が無い");
-          const url = sessionUrl(target.url, session, "output");
+          sessionUrl(target.url, session, "output"); // http(s) only
           let announced = false;
-          const end = await streamOnce({
-            fetch: opts.fetch,
-            url,
-            token: target.token,
-            lastId: last,
-            readTimeoutMs: opts.readTimeoutMs,
-            connectTimeoutMs: opts.connectTimeoutMs,
-            signal: ctrl.signal,
-            onEvent: (ev) => {
+          const end = await streamOnce(
+            { url: target.url, token: target.token },
+            ["sessions", session, "output"],
+            (ev) => {
               if (!announced) {
                 announced = true;
                 status("connected", null);
@@ -376,9 +261,16 @@ export function createTerminals(opts: TerminalsOptions) {
               }
               return true;
             },
-          });
-          if (end.kind === "stopped") return;
-          if (end.kind === "rejected") {
+            {
+              fetch: opts.fetch,
+              ...(last !== undefined ? { lastEventId: last } : {}),
+              readTimeoutMs: opts.readTimeoutMs,
+              connectTimeoutMs: opts.connectTimeoutMs ?? CONNECT_TIMEOUT_MS,
+              signal: ctrl.signal,
+            },
+          );
+          if (ctrl.signal.aborted || end.type === "stopped") return;
+          if (end.type === "rejected") {
             log?.warn(`terminal output [${session}]: center rejected the stream: HTTP ${end.status}: ${clipBody(end.body)}`);
             status("rejected", `center が ${end.status} を返した`);
             return;
@@ -387,7 +279,7 @@ export function createTerminals(opts: TerminalsOptions) {
           status("retrying", null);
         } catch (e) {
           if (ctrl.signal.aborted) return;
-          status("retrying", scrub(e instanceof Error ? e.message : String(e), target?.token));
+          status("retrying", target ? scrub(e instanceof Error ? e.message : String(e), target.url, target.token) : e instanceof Error ? e.message : String(e));
         }
         await sleep(reconnectDelayMs(failures), ctrl.signal);
         failures = Math.min(failures + 1, 1000);

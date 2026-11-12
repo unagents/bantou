@@ -5,7 +5,8 @@
 
 import { redactUrl } from "./normalize.ts";
 import type { Target } from "./settings.ts";
-import { checkSessionName, clipBody, scrub, sessionUrl, TerminalError, type Logger, type Terminals } from "./terminal.ts";
+import { scrub } from "./mcp.ts";
+import { checkSessionName, clipBody, sessionUrl, TerminalError, type Logger, type Terminals } from "./terminal.ts";
 
 /** One image at most 20 MB (the center refuses more). */
 export const MAX_BYTES = 20 * 1024 * 1024;
@@ -99,10 +100,10 @@ export async function upload(o: UploadOptions): Promise<Saved> {
     });
   } catch (e) {
     const c = (e as { cause?: { code?: unknown } }).cause?.code;
-    throw new TerminalError(scrub(`${where} に接続できない: ${typeof c === "string" ? c : e instanceof Error ? e.message : String(e)}`, tok));
+    throw new TerminalError(scrub(`${where} に接続できない: ${typeof c === "string" ? c : e instanceof Error ? e.message : String(e)}`, o.target.url, tok));
   }
   const text = await resp.text().catch(() => "");
-  if (!resp.ok) throw new TerminalError(scrub(`center が ${resp.status} を返した: ${errorReason(text)}`, tok), resp.status);
+  if (!resp.ok) throw new TerminalError(scrub(`center が ${resp.status} を返した: ${errorReason(text)}`, o.target.url, tok), resp.status);
   try {
     const v = JSON.parse(text) as Partial<Saved>;
     if (typeof v.path !== "string" || typeof v.bytes !== "number" || typeof v.type !== "string") throw new Error("shape");

@@ -30,6 +30,8 @@ export interface Target {
 export interface SettingsPolicy {
   /** Accept `enabled: true` on save. Web v1: false ("this version does not support it", until work unit S). */
   allowEnabled?: boolean;
+  /** Which center tools may be called (design 5.3). Unset: every tool (desktop). Web: `allowWebTool`. */
+  allowTool?: (name: string) => boolean;
 }
 
 export class CenterSettingsError extends Error {
