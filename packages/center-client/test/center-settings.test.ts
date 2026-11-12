@@ -160,11 +160,32 @@ test("env: CENTER_URL / CENTER_TOKEN win over the file and cannot be changed", a
   assert.ok(!JSON.stringify(saved).includes(TOKEN_B));
 });
 
-test("env: only CENTER_URL fixes the url, the file token is used with it", async () => {
+test("env: only CENTER_URL, file has no remote: no token; file url equals env url: the file token is used", async () => {
+  const none = handle(memStore(), { CENTER_URL: URL_B });
+  assert.deepEqual(none.envLocks(), { remoteUrl: true, remoteToken: false });
+  assert.deepEqual(await none.selectTarget(), { url: URL_B, source: "remote" });
+  assert.deepEqual((await none.get()).remote, { url: URL_B, token: "", tokenSet: false });
+  // same destination (compared normalized): the file token goes with it
+  const same = handle(memStore(withRemote(URL_A, TOKEN_A)), { CENTER_URL: " http://host-a:7910// " });
+  assert.deepEqual(await same.selectTarget(), { url: URL_A, token: TOKEN_A, source: "remote" });
+  assert.deepEqual((await same.get()).remote, { url: URL_A, token: "", tokenSet: true });
+});
+
+test("env: only CENTER_URL, file remote is another destination: the file token is not used (tokenSet false)", async () => {
   const store = memStore(withRemote(URL_A, TOKEN_A));
   const h = handle(store, { CENTER_URL: URL_B });
-  assert.deepEqual(h.envLocks(), { remoteUrl: true, remoteToken: false });
-  assert.deepEqual(await h.selectTarget(), { url: URL_B, token: TOKEN_A, source: "remote" });
+  assert.deepEqual(await h.selectTarget(), { url: URL_B, source: "remote" });
+  assert.deepEqual((await h.get()).remote, { url: URL_B, token: "", tokenSet: false });
+  assert.ok(!JSON.stringify(await h.get()).includes(TOKEN_A));
+  // desktop shape: no token either
+  assert.deepEqual((await handle(store, { CENTER_URL: URL_B }, false).get()).remote, { url: URL_B });
+  // CENTER_TOKEN in env is used; the file token is still not
+  const withTok = handle(store, { CENTER_URL: URL_B, CENTER_TOKEN: TOKEN_B });
+  assert.deepEqual(await withTok.selectTarget(), { url: URL_B, token: TOKEN_B, source: "remote" });
+  assert.deepEqual((await withTok.get()).remote, { url: URL_B, token: "", tokenSet: true });
+  // only CENTER_TOKEN (no env url): the file url keeps being used
+  const onlyTok = handle(store, { CENTER_TOKEN: TOKEN_B });
+  assert.deepEqual(await onlyTok.selectTarget(), { url: URL_A, token: TOKEN_B, source: "remote" });
 });
 
 test("env: CENTER_URL with an empty file gives a target; a blank env is ignored", async () => {
@@ -351,14 +372,15 @@ test("N2: CENTER_URL differs from the file url: a new token is refused, nothing 
   assert.deepEqual((store2.value as CenterSettings).remote, { url: URL_A, token: TOKEN_A });
 });
 
-test("N2: CENTER_URL differs from the file url, redactSecrets false: only the unchanged token passes", async () => {
+test("N2: CENTER_URL differs from the file url, redactSecrets false: any token is refused, the file remote stays", async () => {
   const store = memStore(withRemote(URL_A, TOKEN_A));
   const h = handle(store, { CENTER_URL: URL_B }, false);
   await assert.rejects(h.set(withRemote(URL_B, TOKEN_B)), /token は保存できない/);
   assert.equal(store.writes, 0);
-  // the desktop-shape client sends back what get returned (the effective token)
-  await h.set({ ...withRemote(URL_B, TOKEN_A), port: 7920 });
+  // get shows no token for the env destination, so the client sends none back: the file token is not cleared
+  await h.set({ ...withRemote(URL_B), port: 7920 });
   assert.deepEqual((store.value as CenterSettings).remote, { url: URL_A, token: TOKEN_A });
+  assert.equal((store.value as CenterSettings).port, 7920);
 });
 
 test("N2: CENTER_URL equals the file url: a new token is saved as before", async () => {

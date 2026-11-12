@@ -75,7 +75,8 @@ export function createCenterSettings(opts: CenterSettingsOptions): CenterSetting
     if (url === undefined && token === undefined) return s;
     const baseUrl = url !== undefined ? normalizeRemote(url) : s.remote?.url;
     if (baseUrl === undefined) return s;
-    const t = token ?? s.remote?.token;
+    // The file token belongs to the file url: it goes only to the same destination (R29). Another one: none.
+    const t = token ?? (s.remote !== undefined && s.remote.url === baseUrl ? s.remote.token : undefined);
     return { ...s, remote: t !== undefined ? { url: baseUrl, token: t } : { url: baseUrl } };
   }
 
@@ -148,13 +149,16 @@ function merge(
     delete next.remote;
     return next;
   }
-  // env fixes the url but the file names another destination: the file keeps its own url, so a token from the
-  // input would be stored under that other url (and sent there once env is removed). Refuse it (R29).
-  if (env.url !== undefined && fileUrl !== undefined && eff.remote?.url !== fileUrl) {
-    const changes = redact ? inToken !== undefined : inToken !== undefined && inToken !== file.remote?.token;
-    if (changes && env.token === undefined) {
+  // env fixes the url but the file names another destination: the file keeps its own url and token (the client
+  // never saw that token: `get` shows the env destination). A token from the input would be stored under the
+  // file url (and sent there once env is removed). Refuse it (R29); otherwise leave the file remote as it is.
+  const fileOtherThanEnv = env.url !== undefined && fileUrl !== undefined && eff.remote?.url !== fileUrl;
+  if (fileOtherThanEnv && env.token === undefined) {
+    if (inToken !== undefined) {
       throw new CenterSettingsError("env（CENTER_URL）で固定した url と設定 file の remote の url が別のため、token は保存できない");
     }
+    next.remote = file.remote?.token !== undefined ? { url, token: file.remote.token } : { url };
+    return next;
   }
   // A stored token never goes to another destination (R29), whether env fixes the token or not.
   let token: string | undefined;
