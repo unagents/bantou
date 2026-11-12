@@ -2,7 +2,7 @@
 
 ## 基点
 - origin/develop は feat/web-4a-terminal (c29aff6) を含まなかった。origin/develop (a507dc0) から branch を切り、origin/feat/web-4a-terminal を merge（merge commit 636ed77）。rebase・force-push なし。
-- 初回 commit 365ade5。review 後の修正 commit が最新（full SHA は末尾「review 後の修正」に記載）。
+- 初回 commit 365ade5。review 後の修正 commit が最新（修正 commit の full SHA は末尾に記載）。
 
 ## 追加した route（packages/web/server/api/sessions/[name]/）
 - `output.get.ts`: SSE。`Last-Event-ID` が先、無ければ `?after=`（10 進整数以外は 400）。header 即 flush、`: ok` 後に 15 秒ごと `: ka`、`X-Accel-Buffering: no`。center の `output`/`reset` は `id`/`event`/`data` のまま写し、`event: status`（JSON、`StatusPayload`）を足す。`rejected` で閉じる。切断で購読を止める。
@@ -46,3 +46,4 @@
 5. 配線 test: center の 401 → 502（本文の token は出ない）、保存 0 件（center が 500）→ 502（token は出ない）。`toHttpError` の 401/403 除外、`saved.length === 0` の判定を外すと落ちることを確認。「redactSecrets:false でも通る件」は、route の応答が設定の redact に依らず token を出さない確認と解釈し、上の 2 件が token を応答に出さないことを assert する形で入れた（redactSecrets を切る口は本番コードに置いていない）。
 - 直さない（報告のみ）: 指摘 6（center origin の表示は desktop と揃う）、7（4a の scrub 仕様）。
 - test: web 51 件、center-client 186 件、protocol 43 件、各 typecheck OK。
+- 修正 commit: 418157e68bba7f6e899be6e0935f1283dba56844（この記載を足した docs commit が branch の HEAD。その full SHA は完了報告に記載）
