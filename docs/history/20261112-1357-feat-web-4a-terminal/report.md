@@ -31,3 +31,29 @@
 - `after` は Rust と同じく `Last-Event-ID` header で送る（`?after=` は 4b の route が受けて `after` に渡す）
 - 出力 stream は `openOutput`（購読ごと、web backend の接続ごと）を足した。Rust の `session_output_start` 相当の `outputStart` は session 名で置換
 - 実 center に対する確認（10.2 の確認方法）は未実施。偽 server の test のみ（4a の依頼どおり）
+
+## 3c との統合（追記）
+
+- 3c（feat/web-3c-center-mcp, 7646e4bf6c2095ba969d2f762b3d5b4e1c7afdef）を merge（rebase なし）。3c は develop 未反映のため branch を直接 merge。
+- コード HEAD（merge commit）: cee594b4d2c33b59c6ec22f47a5533a9c47cd740
+- index.ts の export 衝突は 3c 側の SseParser / SseEvent / StreamEnd / streamOnce / centerUrl / reconnectDelayMs / scrub と、READ_TIMEOUT_MS（events.ts）に一本化。
+
+### 消した物
+- `packages/center-client/src/sse.ts`（SseParser は events.ts のみ）
+- `terminal.ts` の独自 `scrub` / `centerUrl` / `streamOnce`（+ StreamOnceOptions / StreamEnd）/ `reconnectDelayMs` / `READ_TIMEOUT_MS`
+
+### 3c の部品に足した物
+- `events.ts` の `StreamOptions.connectTimeoutMs`（任意）。ヘッダが来るまでの時間切れ。未指定なら従来どおり無制限。header 受信後に timer を外すので body は切らない。時間切れは「接続がタイムアウト」の Error（secret は scrub 済）。
+- 45 秒の無音切断（`readTimeoutMs`）、`lastEventId`、abort → closed は 3c に既にあり、足していない。reset の扱いは端末固有の `toPayload`（terminal.ts）に残した。
+- 3c の関数・型の挙動と 3c の test（141 件）は変更なし。
+
+### 4a 側の変更
+- `streamOnce({ url: target.url, token }, ["sessions", name, "output"], onEvent, opts)` で呼ぶ（設定の URL を渡し、内部で scrub）。connect timeout 既定 5 秒は terminal 側で指定。
+- `postSession` / attachment `upload` の scrub も `scrub(text, target.url, token)`（URL の password も除く）。
+- `sessionUrl` は残し、http(s) 以外を TerminalError で拒否（3c の centerUrl は変えていない）。
+- 検査（session 名・base64・cols/rows・画像の型・20MB）と Rust 写しの test は維持。StreamEnd の `kind` → `type`、SseEvent の `id` 必須化に合わせて test の期待値を直した（弱めていない）。
+
+### test 件数
+- center-client 179 件 pass（3c 141 + 4a 37 + connect timeout 1）、typecheck 通過
+- packages/web 38、packages/protocol 43 pass
+- bun.lock / packages/server 変更なし
