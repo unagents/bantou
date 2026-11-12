@@ -47,3 +47,34 @@
 - 直さない（報告のみ）: 指摘 6（center origin の表示は desktop と揃う）、7（4a の scrub 仕様）。
 - test: web 51 件、center-client 186 件、protocol 43 件、各 typecheck OK。
 - 修正 commit: 418157e68bba7f6e899be6e0935f1283dba56844（この記載を足した docs commit が branch の HEAD。その full SHA は完了報告に記載）
+
+## 4b と 3d の統合（merge）
+- 取り込んだ物: origin/develop 335dbee（衝突なし）、feat/web-3d-rpc-routes 3e54400。merge commit は 1f56b8fc00cd313d685e617678c3176195037e76（この記載を足した docs commit が branch の HEAD。その full SHA は完了報告に記載）。rebase・force-push なし。
+
+### 衝突した file と解き方
+- `packages/web/tsconfig.json`: include の並びだけが違う（中身は同じ）。4b の並びを採用。
+- `packages/web/test/server/nitro-wiring.test.ts`: 偽 center と env の準備を 1 つにした。3d の `FakeCenter` + 設定 file（起動時は無し）を土台にし、4b の端末用の偽 center（`/sessions/...` を返す）は別 server のまま残し、入れ子 `describe("4b: 端末の route")` の `before` で同じ設定 file をそこへ向ける（env `CENTER_URL` / `CENTER_TOKEN` は廃止）。順は 3d の test → 4b の test → child の log の確認（端末用 token も見る）。3d の 10 本・4b の 13 本とも残した。
+- package.json の dependencies、bun.lock、center-client の index.ts 末尾の export は自動で解けた（bun.lock は `bun install --frozen-lockfile` が通る。server の version 行も変わらず）。
+
+### 1 つにした物
+- 組み立て: `createCenterClient` に `terminal`（`createTerminals`）と `attachments`（`createAttachments`）を追加。`getTarget` は同じ `settings.selectTarget()`、log は redactor で包んだ logger。`close()` は terminal も止める。端末の route は `getCenterClient()` から取る。
+- 上限つき読み取り: center-client の `body.ts` に `readBytesLimited`（bytes を返す）を足し、`readBodyLimited` はそれを text に直す薄い形にした。端末の route はこれを使う（JSON 1MiB・添付 20MB、Content-Length 超過は読まずに 413、chunked は受信中に打ち切り、413 の応答は `connection: close`、溜めるのは上限まで）。4b の挙動のうち「超過後に全部読み捨てる」は 3d の「上限の 4 倍まで読み捨て、以後は読むのを止める」になった（配線 test の chunked 25MB・3MiB は通る）。
+- 1 点だけ挙動を足した: 3d の reader は client が途中で切れた時（close が end より先）に溜まった分を body として返していた。添付が途中までの bytes で保存されるのを避けるため、`req.complete` でない close は `ok:false` にした（text 側も同じ関数なので同じ）。
+- WEB_SETTINGS_FILE の既定 path は 3d の `defaultSettingsFile`（`$XDG_STATE_HOME/bantou-web/settings.json`、無ければ `~/.local/state/...`）。
+
+### 消した物
+- `packages/web/server/utils/center.ts`（仮置きの `terminalService()`）。
+- `handlers.ts` の `readLimited`（独自の読み取り。`readBytes413` は `readBytesLimited` を呼んで 413 に直すだけの薄い関数）。
+- 端末の route の `() => terminalService()`（4 file を `() => getCenterClient()` に変更）。
+
+### 伏せ字（redactor）
+- 端末 module（terminal.ts / attachment.ts）の scrub は `mcp.ts` の `scrub` → 3d の `maskSecrets`（`secrets.ts`）を使っており、強い方になっている。
+- 端末の route の error 文（`toHttpError`）、attachments の応答、output SSE の `status` frame は `client.redactor` を通す。log は `createCenterClient` が logger 全体を redactor で包む形に乗る。
+- output の `data` frame（pty の base64）は redactor を通さない（通すと端末の bytes を壊す。形は `checkInputData` で検査済み）。
+
+### test 件数（merge 前後）
+- packages/web: 3d 48 → 4b 51 → merge 後 61（基礎 38 + 3d 10 + 4b 13）。
+- packages/center-client: 3d 180 / 4b 186 → merge 後 225（共通 141 + 3d 39 + 4b 45）。
+- packages/protocol: 43 → 43。
+- 3d・4b の test 名は 1 件も欠けていない（両 branch の `it`/`test` の題を merge 後と突き合わせて欠落 0）。
+- typecheck: web・center-client・protocol とも OK。test は全 pass。
