@@ -26,6 +26,44 @@ export {
   type CenterSettingsOptions,
   type EnvLocks,
 } from "./center-settings.ts";
+export {
+  CONNECT_TIMEOUT_MS,
+  LOG_BODY_CHARS,
+  OUTPUT_EVENT,
+  POST_TIMEOUT_MS,
+  STATUS_EVENT,
+  TerminalError,
+  checkInputData,
+  checkSessionName,
+  checkSize as checkTerminalSize,
+  clipBody,
+  createTerminals,
+  inputBody,
+  postSession,
+  resizeBody,
+  sessionUrl,
+  toPayload,
+  type Logger,
+  type OpenOutputOptions,
+  type OutputPayload,
+  type OutputSubscription,
+  type StatusPayload,
+  type Terminals,
+  type TerminalsOptions,
+} from "./terminal.ts";
+export {
+  MAX_BYTES as MAX_ATTACHMENT_BYTES,
+  checkSize as checkAttachmentSize,
+  createAttachments,
+  errorReason,
+  inputText,
+  loadBytes,
+  sniffType,
+  upload as uploadAttachment,
+  type AttachOutcome,
+  type ByteSource,
+  type Saved,
+} from "./attachment.ts";
 export { WEB_ALLOWED_TOOLS, allowWebTool } from "./tool-policy.ts";
 export {
   CALL_TIMEOUT_MS,
@@ -65,6 +103,7 @@ export {
 } from "./sessions.ts";
 export {
   CENTER_SESSIONS_CHANGED_EVENT,
+  READ_TIMEOUT_MS,
   SseParser,
   centerUrl,
   createCenterEvents,

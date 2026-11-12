@@ -120,6 +120,8 @@ export interface StreamOptions {
   fetch?: typeof fetch;
   lastEventId?: string | number;
   readTimeoutMs?: number;
+  /** Give up when the response headers do not arrive within this time (no limit when unset). */
+  connectTimeoutMs?: number;
   /** Aborting ends the stream with `closed`. */
   signal?: AbortSignal;
 }
@@ -148,19 +150,42 @@ export async function streamOnce(
   if (target.token !== undefined) headers.authorization = `Bearer ${target.token}`;
   if (opts.lastEventId !== undefined) headers["last-event-id"] = String(opts.lastEventId);
   const clean = (m: string) => scrub(m, target.url, target.token);
+  // With a connect timeout the request gets its own controller: the timer is cleared once the headers are in, so it never cuts the body.
+  let signal = opts.signal;
+  let connectTimer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+  const link = new AbortController();
+  const onCallerAbort = () => link.abort();
+  if (opts.connectTimeoutMs !== undefined) {
+    signal = link.signal;
+    if (opts.signal?.aborted) link.abort();
+    else opts.signal?.addEventListener("abort", onCallerAbort, { once: true });
+    connectTimer = setTimeout(() => {
+      timedOut = true;
+      link.abort();
+    }, opts.connectTimeoutMs);
+  }
   let resp: Response;
   try {
-    resp = await doFetch(url.href, { method: "GET", headers, signal: opts.signal });
+    resp = await doFetch(url.href, { method: "GET", headers, signal });
   } catch (e) {
+    opts.signal?.removeEventListener("abort", onCallerAbort);
     if (opts.signal?.aborted) return { type: "closed" };
     const c = (e as { cause?: { code?: string; message?: string } }).cause;
-    throw new Error(clean(`${redactUrl(url.href)} に接続できない: ${(e as Error).message}${c ? ` (${c.code ?? c.message})` : ""}`));
+    const why = timedOut ? "接続がタイムアウト" : (e as Error).message;
+    throw new Error(clean(`${redactUrl(url.href)} に接続できない: ${why}${c && !timedOut ? ` (${c.code ?? c.message})` : ""}`));
+  } finally {
+    clearTimeout(connectTimer);
   }
   if (!resp.ok) {
     const body = await resp.text().catch(() => "");
+    opts.signal?.removeEventListener("abort", onCallerAbort);
     return { type: "rejected", status: resp.status, body: clean(body) };
   }
-  if (!resp.body) return { type: "closed" };
+  if (!resp.body) {
+    opts.signal?.removeEventListener("abort", onCallerAbort);
+    return { type: "closed" };
+  }
   const reader = resp.body.getReader();
   const parser = new SseParser();
   try {
@@ -184,6 +209,7 @@ export async function streamOnce(
       }
     }
   } finally {
+    opts.signal?.removeEventListener("abort", onCallerAbort);
     reader.cancel().catch(() => {});
   }
 }
