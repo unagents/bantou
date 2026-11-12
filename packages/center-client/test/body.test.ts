@@ -4,7 +4,9 @@ import assert from "node:assert/strict";
 import { request, createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
-import { readBodyLimited } from "../src/index.ts";
+import { EventEmitter } from "node:events";
+import type { IncomingMessage } from "node:http";
+import { readBodyLimited, readBytesLimited } from "../src/index.ts";
 
 let server: Server;
 let port = 0;
@@ -70,4 +72,72 @@ test("chunked body over the cap: 413 (nothing kept)", async () => {
 test("chunked body within the cap is read", async () => {
   const r = await send({ "transfer-encoding": "chunked" }, [Buffer.from("ab"), Buffer.from("cd")]);
   assert.deepEqual(r, { status: 200, body: "abcd" });
+});
+
+// -- with a stand-in request: events are fired by hand, so the order of 'close' / 'end' / 'data' is exact ----------------
+
+class FakeReq extends EventEmitter {
+  headers: Record<string, string> = {};
+  complete = false;
+  paused = false;
+  pause() {
+    this.paused = true;
+    return this;
+  }
+}
+const fake = () => new FakeReq();
+const asReq = (r: FakeReq) => r as unknown as IncomingMessage;
+const settled = (p: Promise<unknown>) => Promise.race([p.then(() => true), new Promise<boolean>((r) => setTimeout(() => r(false), 100))]);
+
+test("closed before the whole body came (req.complete false): not a body, even when the bytes so far are within the cap", async () => {
+  const r = fake();
+  const p = readBytesLimited(asReq(r), 100);
+  r.emit("data", Buffer.from("partial"));
+  r.emit("close");
+  assert.deepEqual(await p, { ok: false });
+  const r2 = fake();
+  const p2 = readBodyLimited(asReq(r2), 100);
+  r2.emit("data", Buffer.from("partial"));
+  r2.emit("close");
+  assert.deepEqual(await p2, { ok: false });
+});
+
+test("close after the whole body came (req.complete true) still returns the body", async () => {
+  const r = fake();
+  const p = readBytesLimited(asReq(r), 100);
+  r.emit("data", Buffer.from("whole"));
+  r.complete = true;
+  r.emit("close");
+  assert.deepEqual(await p, { ok: true, bytes: Buffer.from("whole") });
+});
+
+test("a socket that goes away mid-body (real request, headers promise 100 bytes, 10 sent): not a body", async () => {
+  let s!: Server;
+  const got = new Promise<unknown>((resolve) => {
+    s = createServer(async (req) => resolve(await readBytesLimited(req, 1000)));
+    s.listen(0, "127.0.0.1", () => {
+      const p = (s.address() as AddressInfo).port;
+      const q = request({ host: "127.0.0.1", port: p, method: "POST", headers: { "content-length": "100" } });
+      q.on("error", () => {});
+      q.write(Buffer.alloc(10, 97));
+      setTimeout(() => q.destroy(), 50);
+    });
+  });
+  assert.deepEqual(await got, { ok: false });
+  s.closeAllConnections();
+  await new Promise<void>((r) => s.close(() => r()));
+});
+
+test("after the cap, the rest is dropped only up to 4 x cap; then reading stops at once (paused, answer can go out)", async () => {
+  const r = fake();
+  const p = readBytesLimited(asReq(r), 100);
+  r.emit("data", Buffer.alloc(150, 97)); // over the cap: nothing kept
+  r.emit("data", Buffer.alloc(150, 97)); // 300 total: still draining
+  assert.equal(r.paused, false);
+  assert.equal(await settled(p), false); // not finished: no 'end' yet, below 4 x cap
+  r.emit("data", Buffer.alloc(101, 97)); // 401 total: over 4 x cap
+  assert.equal(await settled(p), true); // resolved without any 'end'
+  assert.deepEqual(await p, { ok: false });
+  assert.equal(r.paused, true);
+  assert.equal(r.listenerCount("data"), 0);
 });

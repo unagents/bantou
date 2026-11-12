@@ -146,4 +146,4 @@ export {
   type RpcReply,
 } from "./client.ts";
 export { maskSecrets, formsOf, MIN_FORM_LEN } from "./secrets.ts";
-export { MAX_BODY_BYTES, readBodyLimited, type BodyRead } from "./body.ts";
+export { MAX_BODY_BYTES, readBodyLimited, readBytesLimited, type BodyRead, type BytesRead } from "./body.ts";

@@ -8,6 +8,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import {
+  CenterSettingsError,
   LOG_BODY_CHARS,
   MAX_ATTACHMENT_BYTES,
   SseParser,
@@ -666,7 +667,7 @@ test("a bad session name is refused before any request: input, resize, attachByt
   }
 });
 
-test("openOutput: a getTarget() that throws gets scrubbed (known secrets of an earlier target, userinfo)", async () => {
+test("openOutput: a getTarget() that throws shows a fixed text (3c form); CenterSettingsError is passed on, scrubbed", async () => {
   const token = "tok-SECRET-123456";
   const f = await fake((_q, res) => {
     res.writeHead(200, { "content-type": "text/event-stream" });
@@ -676,19 +677,89 @@ test("openOutput: a getTarget() that throws gets scrubbed (known secrets of an e
     let n = 0;
     const t = createTerminals({
       getTarget: async () => {
-        if (n++ === 0) return target(f.base, token);
-        throw new Error(`settings read failed: ${token} http://user:pw-SECRET@h/x`);
+        n++;
+        if (n === 1) return target(f.base, token);
+        if (n === 2) throw new Error(`settings read failed: ${token} http://user:pw-SECRET@h/x`);
+        if (n === 3) throw Object.assign(new Error(`read ${token}`), { code: "EACCES" });
+        throw new CenterSettingsError(`bad ${token} http://user:pw-SECRET@h/x`);
       },
       sleep: noWait,
     });
     const st: StatusPayload[] = [];
     const sub = t.openOutput("m", { onOutput: () => {}, onStatus: (s) => st.push(s) });
-    await until(() => st.some((s) => s.message?.includes("settings read failed")));
+    await until(() => st.some((s) => s.message?.startsWith("bad ")));
     sub.stop();
-    const msg = st.map((s) => s.message ?? "").join("\n");
-    for (const secret of [token, "user:", "pw-SECRET"]) assert.equal(msg.includes(secret), false, `${secret} leaked: ${msg}`);
-    assert.match(msg, /settings read failed: \*\*\* http:\/\/h\/x/);
+    const msgs = st.map((s) => s.message ?? "");
+    const msg = msgs.join("\n");
+    for (const secret of [token, "user:", "pw-SECRET", "settings read failed"]) assert.equal(msg.includes(secret), false, `${secret} leaked: ${msg}`);
+    assert.ok(msgs.includes("接続先の選択に失敗"));
+    assert.ok(msgs.includes("接続先の選択に失敗 (EACCES)"));
+    assert.ok(msgs.includes("bad *** http://h/x"));
   } finally {
     await f.close();
   }
+});
+
+test("input / resize / attachBytes: the first getTarget() throw (no secret known yet) becomes a fixed TerminalError, not a re-throw", async () => {
+  const leak = "tok-SECRET-123456 http://user:pw-SECRET@h/x";
+  const bad = createTerminals({
+    getTarget: async () => {
+      throw new Error(`parse failed near ${leak}`);
+    },
+  });
+  const check = (e: unknown) => e instanceof TerminalError && e.message === "接続先の選択に失敗";
+  await assert.rejects(bad.input("m", "QQ=="), check);
+  await assert.rejects(bad.resize("m", 80, 24), check);
+  await assert.rejects(createAttachments(bad).attachBytes("m", [{ name: "ok", data: PNG }]), check);
+  const coded = createTerminals({ getTarget: async () => Promise.reject(Object.assign(new Error(leak), { code: "ENOENT" })) });
+  await assert.rejects(coded.input("m", "QQ=="), (e: Error) => e.message === "接続先の選択に失敗 (ENOENT)");
+  const odd = createTerminals({ getTarget: async () => Promise.reject(Object.assign(new Error(leak), { code: `x ${leak}` })) });
+  await assert.rejects(odd.input("m", "QQ=="), (e: Error) => e.message === "接続先の選択に失敗");
+  // our own CenterSettingsError: message passes, scrubbed with the target seen earlier
+  let n = 0;
+  const f = await fake(canned([[200, "{}"]]));
+  try {
+    const t = createTerminals({
+      getTarget: async () => {
+        if (n++ === 0) return target(f.base, "tok-SECRET-123456");
+        throw new CenterSettingsError("設定が不正 tok-SECRET-123456");
+      },
+    });
+    await t.input("m", "QQ==");
+    await assert.rejects(t.input("m", "QQ=="), (e: Error) => e instanceof TerminalError && e.message === "設定が不正 ***");
+  } finally {
+    await f.close();
+  }
+});
+
+// -- scrub on the paths a real fetch failure / 5xx takes (fake fetch: no server) ----------------
+
+test("scrub: upload 5xx body and upload connect failure never carry the token or userinfo", async () => {
+  const token = "tok-SECRET-123456";
+  const leak = `${token} http://u:pw-SECRET@h/x`;
+  const t = target("http://127.0.0.1:1", token);
+  const args = { target: t, session: "m", data: PNG, kind: "image/png" };
+  const bad = (e: Error) => ![token, "pw-SECRET", "u:pw"].some((s) => e.message.includes(s));
+  await assert.rejects(uploadAttachment({ ...args, fetch: async () => new Response(`{"error":"boom ${leak}"}`, { status: 500 }) }), (e: Error) => e instanceof TerminalError && e.status === 500 && e.message.includes("***") && bad(e));
+  await assert.rejects(uploadAttachment({ ...args, fetch: async () => new Response(`plain ${leak}`, { status: 502 }) }), (e: Error) => e.message.includes("***") && bad(e));
+  await assert.rejects(uploadAttachment({ ...args, fetch: async () => Promise.reject(new TypeError(`fetch failed ${leak}`)) }), (e: Error) => e.message.includes("***") && bad(e));
+});
+
+test("scrub: input/resize connect failure (cause message) and 5xx body are scrubbed in the error and in the log", async () => {
+  const token = "tok-SECRET-123456";
+  const leak = `${token} http://u:pw-SECRET@h/x`;
+  const logs: string[] = [];
+  const log = { info: (m: string) => logs.push(m), warn: (m: string) => logs.push(m) };
+  const bad = (e: Error) => ![token, "pw-SECRET", "u:pw"].some((s) => e.message.includes(s));
+  const cause = (fetchFn: typeof fetch) => createTerminals({ getTarget: async () => target("http://127.0.0.1:1", token), fetch: fetchFn, log });
+  const t1 = cause(async () => Promise.reject(Object.assign(new TypeError("fetch failed"), { cause: { message: `connect ${leak}` } })));
+  await assert.rejects(t1.input("m", "QQ=="), (e: Error) => e instanceof TerminalError && e.message.includes("***") && bad(e));
+  await assert.rejects(t1.resize("m", 80, 24), (e: Error) => e.message.includes("***") && bad(e));
+  const t2 = cause(async () => Promise.reject(new TypeError(`fetch failed ${leak}`)));
+  await assert.rejects(t2.input("m", "QQ=="), (e: Error) => e.message.includes("***") && bad(e));
+  const t3 = cause(async () => new Response(`boom ${leak}`, { status: 500 }));
+  await assert.rejects(t3.input("m", "QQ=="), (e: TerminalError) => e.status === 500 && e.message.includes("***") && bad(e));
+  const all = logs.join("\n");
+  assert.ok(logs.length >= 4);
+  for (const s of [token, "pw-SECRET", "u:pw"]) assert.equal(all.includes(s), false, `${s} leaked in log: ${all}`);
 });

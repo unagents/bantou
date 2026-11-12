@@ -1,10 +1,11 @@
-// The one assembly of the center-facing parts: settings, MCP, sessions, events (terminal: work unit 4a, see the note).
+// The one assembly of the center-facing parts: settings, MCP, sessions, events, terminal, attachments.
 // A process builds this once and reuses it (design 5.4: one MCP session and one events subscription for all browsers).
 // The route layer (web) only calls `rpc`, `health` and `openEventStream`. No Nuxt / Nitro / Tauri import.
 
 import { PassThrough, type Readable } from "node:stream";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { createAttachments } from "./attachment.ts";
 import { MAX_BODY_BYTES } from "./body.ts";
 import { createCenterSettings, type CenterSettingsHandle } from "./center-settings.ts";
 import { CommandError, createCommands, toCommandError, type CommandTable } from "./commands.ts";
@@ -12,6 +13,7 @@ import { createCenterEvents, type CenterEvents } from "./events.ts";
 import { createFileSettingsStore } from "./file-store.ts";
 import { createCenterMcp, NO_TARGET, type CenterMcp, type McpLogger } from "./mcp.ts";
 import { createRedactor, type Redactor } from "./redact.ts";
+import { createTerminals, type Terminals } from "./terminal.ts";
 import { createSessionService, SESSIONS_CHANGED_EVENT, type SessionService } from "./sessions.ts";
 import type { SettingsStore } from "./store.ts";
 import { allowWebTool } from "./tool-policy.ts";
@@ -56,6 +58,10 @@ export interface CenterClient {
   readonly mcp: CenterMcp;
   readonly sessions: SessionService;
   readonly events: CenterEvents;
+  /** Terminal relay (output / input / resize) to the target `settings` select. */
+  readonly terminal: Terminals;
+  /** Image attachments typed into a terminal (built on `terminal`). */
+  readonly attachments: ReturnType<typeof createAttachments>;
   /** Command table (name -> handler). Its keys are the allow-list of `rpc`. */
   readonly commands: CommandTable;
   readonly redactor: Redactor;
@@ -68,7 +74,6 @@ export interface CenterClient {
   openEventStream(): { readable: Readable; close(): void };
   /** Stop the center subscription. */
   close(): Promise<void>;
-  // Work unit 4a adds `terminal` here (built from `settings`, with `redactor`), next to `events`.
 }
 
 /** The settings file when `WEB_SETTINGS_FILE` is not set: the backend's state dir. */
@@ -94,6 +99,8 @@ export function createCenterClient(opts: CenterClientOptions = {}): CenterClient
   const mcp = createCenterMcp({ settings, fetch: opts.fetch, logger, policy: { allowTool: allowWebTool } });
   const sessions = createSessionService({ mcp, logger });
   const events = createCenterEvents({ settings, fetch: opts.fetch, logger });
+  const terminal = createTerminals({ getTarget: () => settings.selectTarget(), fetch: opts.fetch, log: logger });
+  const attachments = createAttachments(terminal, { fetch: opts.fetch, log: logger });
 
   const raw = createCommands({
     settings,
@@ -197,13 +204,18 @@ export function createCenterClient(opts: CenterClientOptions = {}): CenterClient
     mcp,
     sessions,
     events,
+    terminal,
+    attachments,
     commands: raw,
     redactor,
     rpc,
     health,
     subscribe,
     openEventStream,
-    close: () => events.stop(),
+    close: async () => {
+      terminal.close();
+      await events.stop();
+    },
   };
 }
 

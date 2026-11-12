@@ -6,7 +6,7 @@
 import { centerUrl, reconnectDelayMs, streamOnce, type SseEvent } from "./events.ts";
 import { scrub } from "./mcp.ts";
 import { redactUrl } from "./normalize.ts";
-import type { Target } from "./settings.ts";
+import { CenterSettingsError, type Target } from "./settings.ts";
 
 export const OUTPUT_EVENT = "session-output";
 export const STATUS_EVENT = "session-output-status";
@@ -218,6 +218,28 @@ export function createTerminals(opts: TerminalsOptions) {
   const log = opts.log;
   const sleep = opts.sleep ?? defaultSleep;
   const running = new Map<string, OutputSubscription>();
+  let known: Target | undefined; // last target seen: its secrets are removed from later failures
+
+  /**
+   * A failure of `getTarget`, as a short fixed text. The text of an arbitrary error (a file read, a JSON parse) can carry
+   * a part of the stored settings, and the first failure has no known secret to remove, so only our own
+   * `CenterSettingsError` message is passed on (scrubbed with the last known target), and for anything else only the error code.
+   */
+  const targetFailure = (e: unknown): string => {
+    if (e instanceof CenterSettingsError) return scrub(e.message, known?.url ?? "", known?.token);
+    const code = (e as { code?: unknown } | null)?.code;
+    return typeof code === "string" && /^[A-Z0-9_]{1,40}$/.test(code) ? `接続先の選択に失敗 (${code})` : "接続先の選択に失敗";
+  };
+  /** `getTarget` with its failure turned into a `TerminalError` of that text. */
+  const selectTarget = async (): Promise<Target | undefined> => {
+    try {
+      const t = await opts.getTarget();
+      if (t) known = t;
+      return t;
+    } catch (e) {
+      throw new TerminalError(targetFailure(e));
+    }
+  };
 
   function openOutput(sessionName: string, o: OpenOutputOptions): OutputSubscription {
     const session = checkSessionName(sessionName);
@@ -235,12 +257,10 @@ export function createTerminals(opts: TerminalsOptions) {
     const run = async () => {
       let last = o.after;
       let failures = 0;
-      let known: Target | undefined; // last target seen: its secrets are removed even when getTarget() itself fails later
       while (!ctrl.signal.aborted) {
         let target: Target | undefined;
         try {
-          target = await opts.getTarget();
-          if (target) known = target;
+          target = await selectTarget();
           if (!target) throw new TerminalError("接続先が無い");
           sessionUrl(target.url, session, "output"); // http(s) only
           let announced = false;
@@ -292,7 +312,7 @@ export function createTerminals(opts: TerminalsOptions) {
   }
 
   async function target(): Promise<Target> {
-    const t = await opts.getTarget();
+    const t = await selectTarget();
     if (!t) throw new TerminalError("接続先が無い");
     return t;
   }
