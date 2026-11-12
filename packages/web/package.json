@@ -12,6 +12,9 @@
   "engines": {
     "node": ">=22"
   },
+  "dependencies": {
+    "bantou-center-client": "workspace:*"
+  },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "h3": "^1.15.11",
