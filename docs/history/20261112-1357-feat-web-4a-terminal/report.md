@@ -57,3 +57,11 @@
 - center-client 179 件 pass（3c 141 + 4a 37 + connect timeout 1）、typecheck 通過
 - packages/web 38、packages/protocol 43 pass
 - bun.lock / packages/server 変更なし
+
+## review 指摘の修正（追記）
+
+- 追加 test 4 件（center-client 179 → 183）: checkInputData（非 string・不正 padding・URL-safe）、input() の不正 data は request 前に拒否、不正 session 名は input / resize / attachBytes / openOutput で request 前に拒否（偽 server に request 0 件）、getTarget() が throw した message の scrub。
+- 変異で test が落ちることを確認: typeof string 検査の削除 / `={0,2}`→`=*` / URL-safe 文字を許可 / openOutput・attachBytes・resize・input の checkSessionName 削除 / known target の secret での scrub を外す。
+- openOutput: getTarget() 自体が throw した時も、直前に得た target（known）の URL password・token と URL 内 userinfo を status message から除く（terminal.ts）。
+- 4 短い password / username の scrub: 変えない。3c の test（secrets.test.ts「a short password (under 4 chars) is not blanked」）が 4 文字未満を伏せない仕様を明示しており、1〜3 文字を伏せると本文中のその文字列すべてが `***` になる誤爆が大きい。username 単体も同様。3c の test を変えないため対応しない。残る穴: 裸で書き返された 4 文字未満の password は残る（URL 形式の userinfo は除かれる）。
+- 確認: center-client typecheck と 183 件、packages/web 38、packages/protocol 43 pass。

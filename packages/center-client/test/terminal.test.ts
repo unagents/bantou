@@ -625,3 +625,70 @@ test("no target: input and output report it", async () => {
   sub.stop();
   assert.deepEqual(st[0], { session: "m", state: "retrying", message: "接続先が無い" });
 });
+
+// -- input checks (each one must hold on its own path, before any request) -------------------
+
+test("checkInputData: non-string, bad padding and URL-safe characters are refused; plain base64 passes", () => {
+  for (const bad of [123, null, undefined, {}, ["QQ=="], "QQ===", "Q===", "QQ=Q", "a-_b", "ab_c", "a b", "QQ==\n"]) {
+    assert.throws(() => checkInputData(bad), TerminalError, String(bad));
+  }
+  for (const ok of ["", "QQ==", "QUI=", "QUJD", "a+/b"]) assert.equal(checkInputData(ok), ok);
+});
+
+test("input(): a non-string / malformed data is refused before any request", async () => {
+  const f = await fake(canned([[200, "{}"]]));
+  try {
+    const t = createTerminals({ getTarget: async () => target(f.base) });
+    for (const bad of [123, "QQ===", "a-_b"]) await assert.rejects(t.input("m", bad as unknown as string), TerminalError);
+    assert.equal(f.seen.length, 0);
+  } finally {
+    await f.close();
+  }
+});
+
+test("a bad session name is refused before any request: input, resize, attachBytes, openOutput", async () => {
+  const f = await fake(canned([[200, "{}"], [200, "{}"], [200, "{}"], [200, "{}"]]));
+  const subs: Array<{ stop(): void }> = []; // only filled when the name check is missing
+  try {
+    const t = createTerminals({ getTarget: async () => target(f.base, "tok"), sleep: noWait });
+    const a = createAttachments(t);
+    for (const bad of ["a/b", "", "a b", "../x", "x\n"]) {
+      await assert.rejects(t.input(bad, "QQ=="), TerminalError, `input ${bad}`);
+      await assert.rejects(t.resize(bad, 80, 24), TerminalError, `resize ${bad}`);
+      await assert.rejects(a.attachBytes(bad, [{ name: "ok", data: PNG }]), TerminalError, `attachBytes ${bad}`);
+      assert.throws(() => subs.push(t.openOutput(bad, { onOutput: () => {} })), TerminalError, `openOutput ${bad}`);
+    }
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(f.seen.length, 0);
+  } finally {
+    for (const s of subs) s.stop();
+    await f.close();
+  }
+});
+
+test("openOutput: a getTarget() that throws gets scrubbed (known secrets of an earlier target, userinfo)", async () => {
+  const token = "tok-SECRET-123456";
+  const f = await fake((_q, res) => {
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.end("id: 1\nevent: output\ndata: QQ==\n\n");
+  });
+  try {
+    let n = 0;
+    const t = createTerminals({
+      getTarget: async () => {
+        if (n++ === 0) return target(f.base, token);
+        throw new Error(`settings read failed: ${token} http://user:pw-SECRET@h/x`);
+      },
+      sleep: noWait,
+    });
+    const st: StatusPayload[] = [];
+    const sub = t.openOutput("m", { onOutput: () => {}, onStatus: (s) => st.push(s) });
+    await until(() => st.some((s) => s.message?.includes("settings read failed")));
+    sub.stop();
+    const msg = st.map((s) => s.message ?? "").join("\n");
+    for (const secret of [token, "user:", "pw-SECRET"]) assert.equal(msg.includes(secret), false, `${secret} leaked: ${msg}`);
+    assert.match(msg, /settings read failed: \*\*\* http:\/\/h\/x/);
+  } finally {
+    await f.close();
+  }
+});

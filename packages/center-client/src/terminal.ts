@@ -235,10 +235,12 @@ export function createTerminals(opts: TerminalsOptions) {
     const run = async () => {
       let last = o.after;
       let failures = 0;
+      let known: Target | undefined; // last target seen: its secrets are removed even when getTarget() itself fails later
       while (!ctrl.signal.aborted) {
         let target: Target | undefined;
         try {
           target = await opts.getTarget();
+          if (target) known = target;
           if (!target) throw new TerminalError("接続先が無い");
           sessionUrl(target.url, session, "output"); // http(s) only
           let announced = false;
@@ -279,7 +281,7 @@ export function createTerminals(opts: TerminalsOptions) {
           status("retrying", null);
         } catch (e) {
           if (ctrl.signal.aborted) return;
-          status("retrying", target ? scrub(e instanceof Error ? e.message : String(e), target.url, target.token) : e instanceof Error ? e.message : String(e));
+          status("retrying", scrub(e instanceof Error ? e.message : String(e), (target ?? known)?.url ?? "", (target ?? known)?.token));
         }
         await sleep(reconnectDelayMs(failures), ctrl.signal);
         failures = Math.min(failures + 1, 1000);
