@@ -1,4 +1,4 @@
-import type { BrokerStatus, CenterSettings, Session, SessionList, Task, Thread } from "../../src/types";
+import type { BrokerStatus, CenterSettings, Session, SessionList, Task, Thread } from "../../../ui/types";
 
 export interface Seed {
   dir: string | null;

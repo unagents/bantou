@@ -1,4 +1,4 @@
-import type { CenterCommonSettings, ProjectSettings } from "~/types";
+import type { CenterCommonSettings, ProjectSettings } from "../types";
 
 /** Note shown next to every project-settings form. */
 export const INSTRUCTIONS_NOTE = "保存後に起動する session から効く。動いている session には効かない";

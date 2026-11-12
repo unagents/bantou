@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { openExternalUrl, sessionLogin, sessionLoginCode, sessionRestart } from "~/api";
-import type { CenterAuthState } from "~/types";
+import { openExternalUrl, sessionLogin, sessionLoginCode, sessionRestart } from "../api";
+import type { CenterAuthState } from "../types";
 
 const open = defineModel<boolean>("open", { required: true });
 const props = defineProps<{

@@ -1,6 +1,6 @@
 import { getTransport, type UnlistenFn } from "~/tauri";
 import { useIntervalFn } from "@vueuse/core";
-import { CENTER_RUNNING_EVENT, CENTER_SESSIONS_CHANGED_EVENT, errorText, logWebview, OS_NETWORK_EVENT, OS_WAKE_EVENT, refreshSessions } from "~/api";
+import { CENTER_RUNNING_EVENT, CENTER_SESSIONS_CHANGED_EVENT, errorText, logWebview, OS_NETWORK_EVENT, OS_WAKE_EVENT, refreshSessions } from "../api";
 
 /** Insurance against missed notifications: long on purpose. */
 export const SAFETY_REFRESH_MS = 5 * 60_000;

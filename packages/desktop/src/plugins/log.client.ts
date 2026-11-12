@@ -1,4 +1,4 @@
-import { errorText, logWebview } from "~/api/log";
+import { errorText, logWebview } from "#bantou-ui/api/log";
 
 // Failures nobody catches: they would only reach the devtools console, which is gone after a restart.
 export default defineNuxtPlugin((nuxtApp) => {

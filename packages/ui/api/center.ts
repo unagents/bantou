@@ -1,5 +1,5 @@
 import { getPlatform, getTransport } from "~/tauri";
-import type { CenterRetireResult, CenterConnection, CenterConnectSnippets, CenterIpStatus, CenterLoginCode, CenterLoginStart, CenterParsedConnect, CenterCommonSettings, CenterSettings, CenterStatus, McpToolResult, ProjectSettings } from "~/types";
+import type { CenterRetireResult, CenterConnection, CenterConnectSnippets, CenterIpStatus, CenterLoginCode, CenterLoginStart, CenterParsedConnect, CenterCommonSettings, CenterSettings, CenterStatus, McpToolResult, ProjectSettings } from "../types";
 
 export const centerGetSettings = () => getTransport().invoke<CenterSettings>("center_get_settings");
 

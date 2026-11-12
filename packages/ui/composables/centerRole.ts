@@ -1,5 +1,5 @@
-import { centerGetSettings } from "~/api";
-import type { CenterSettings } from "~/types";
+import { centerGetSettings } from "../api";
+import type { CenterSettings } from "../types";
 
 /**
  * This desktop runs no sidecar of its own and talks to another host's center: center off with a remote set.

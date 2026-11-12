@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { RemoteIssue, SessionActivity } from "~/types";
+import type { RemoteIssue, SessionActivity } from "../types";
 
 const props = defineProps<{
   activity: SessionActivity;

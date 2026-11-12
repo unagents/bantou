@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { Task, Thread } from "~/types";
+import type { Task, Thread } from "../types";
 
 const props = defineProps<{
   task: Task;

@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { centerTool } from "~/api";
-import type { CenterActivityState, CenterRemoteRecord, CenterWorkerReport } from "~/types";
+import { centerTool } from "../api";
+import type { CenterActivityState, CenterRemoteRecord, CenterWorkerReport } from "../types";
 
 const props = defineProps<{ owner?: string }>();
 

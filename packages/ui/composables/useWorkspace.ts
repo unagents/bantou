@@ -1,4 +1,4 @@
-import { getWorkspaceDirectory, pickDirectory, setWorkspaceDirectory } from "~/api";
+import { getWorkspaceDirectory, pickDirectory, setWorkspaceDirectory } from "../api";
 
 /** Current workspace directory for this window (null = welcome screen). */
 export function useWorkspace() {

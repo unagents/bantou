@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { getTransport, type UnlistenFn } from "~/tauri";
-import { AGENT_EVENT, agentAnswer, agentClose, agentOpen, agentSay } from "~/api";
-import type { AgentEvent, Task, Thread } from "~/types";
+import { AGENT_EVENT, agentAnswer, agentClose, agentOpen, agentSay } from "../api";
+import type { AgentEvent, Task, Thread } from "../types";
 
 const props = defineProps<{ task: Task; thread: Thread; workspace: string }>();
 const open = defineModel<boolean>("open", { required: true });

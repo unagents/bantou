@@ -9,8 +9,8 @@ import {
   PINGS_CHANGED_EVENT,
   SESSIONS_CHANGED_EVENT,
   THREADS_CHANGED_EVENT,
-} from "~/api";
-import type { CenterAuthState, ContextUsage, Ping, RemoteIssue, SessionActivity, SessionList, Task, Thread } from "~/types";
+} from "../api";
+import type { CenterAuthState, ContextUsage, Ping, RemoteIssue, SessionActivity, SessionList, Task, Thread } from "../types";
 
 /** How often the remaining time of the ping timers is re-evaluated. */
 const PING_TICK_MS = 5000;

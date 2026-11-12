@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { useElementSize, useIntervalFn } from "@vueuse/core";
-import { brokerConnect, brokerStatus, centerGetSettings } from "~/api";
-import type { BrokerStatus, SessionActivity, Task } from "~/types";
+import { brokerConnect, brokerStatus, centerGetSettings } from "#bantou-ui/api";
+import type { BrokerStatus, SessionActivity, Task } from "#bantou-ui/types";
 
 const { dir, loaded, load, pickAndOpen } = useWorkspace();
 const { refreshNow: refreshSessions } = useSessionRefresh();

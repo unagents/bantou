@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { centerConnection, centerTool, serverRetire } from "~/api";
-import { retireBlockedReason } from "~/composables/serverRetire";
+import { centerConnection, centerTool, serverRetire } from "../api";
+import { retireBlockedReason } from "../composables/serverRetire";
 import type {
   CenterRetireResult,
   CenterConnection,
@@ -9,7 +9,7 @@ import type {
   CenterServerInfo,
   CenterServerPeer,
   CenterServerPeers,
-} from "~/types";
+} from "../types";
 
 const open = defineModel<boolean>("open", { required: true });
 
