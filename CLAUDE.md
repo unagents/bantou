@@ -2,7 +2,8 @@
 
 ## Map
 
-- `packages/desktop/`: Tauri 2 + Nuxt 4。`src/`（Nuxt、Cork の `src/` 相当）と `src-tauri/`（Rust）。
+- `packages/desktop/`: Tauri 2 + Nuxt 4。`src/`（Nuxt。`pages/index.vue`・`AppHeader`・`src/tauri/` など desktop 固有の部分）と `src-tauri/`（Rust）。画面の共有部品は `packages/ui` から取り込む（`nuxt.config.ts` の `extends: ["../ui"]`）。
+- `packages/ui/`: bantou-ui（private）。desktop（将来は web も）が共有する Nuxt 4 layer。`components/` `composables/` `types/` `assets/` `api/`。Tauri の package に依存しない。
 - `packages/server/`: TypeScript。npm package として npx で起動。desktop からの remote session 起動と remote cap の起動を担う。雛形のみ。
 - `packages/protocol/`: desktop・server・plugin 共通のメッセージ仕様と TS 型。雛形のみ。
 - `docs/`: 共通資料。`concept.md`（概念、設計判断の前提） / `protocol.md` / `handoff.md`。
@@ -20,6 +21,7 @@
 
 - `packages/desktop/` と `packages/server/` の中身を互いに混ぜない。
 - 両者に共通するものは root の `docs/` と `packages/plugin/` に置く。
+- 画面（Nuxt の components / composables / types / api）の共有部品は `packages/ui/` に置く。`packages/ui/` は Tauri の package を import しない。ui 内の file が `~/tauri` を import する形で、利用側 project の `src/tauri/`（desktop では Tauri 実装）に解決させる。desktop 固有の部分（`pages/index.vue`・`AppHeader`・`src/tauri/`・Rust）は `packages/desktop/` に残す。
 
 ## 資料ポインタ
 
