@@ -1,33 +1,33 @@
-import { invoke } from "@tauri-apps/api/core";
+import { getPlatform, getTransport } from "~/tauri";
 import type { CenterRetireResult, CenterConnection, CenterConnectSnippets, CenterIpStatus, CenterLoginCode, CenterLoginStart, CenterParsedConnect, CenterCommonSettings, CenterSettings, CenterStatus, McpToolResult, ProjectSettings } from "~/types";
 
-export const centerGetSettings = () => invoke<CenterSettings>("center_get_settings");
+export const centerGetSettings = () => getTransport().invoke<CenterSettings>("center_get_settings");
 
 export const centerSetSettings = (settings: CenterSettings) =>
-  invoke<CenterSettings>("center_set_settings", { settings });
+  getTransport().invoke<CenterSettings>("center_set_settings", { settings });
 
 /** Mint a new token, store it and restart a running center with it. Returns the token. */
-export const centerRegenerateToken = () => invoke<string>("center_regenerate_token");
+export const centerRegenerateToken = () => getTransport().invoke<string>("center_regenerate_token");
 
 /** Addresses of this machine (IPv4 first, then IPv6): the choices for the host of the connection settings. */
-export const centerLocalIps = () => invoke<string[]>("center_local_ips");
+export const centerLocalIps = () => getTransport().invoke<string[]>("center_local_ips");
 
 /** The saved IP checked against this machine's addresses now (missing = the saved IP is gone). */
-export const centerIpStatus = () => invoke<CenterIpStatus>("center_ip_status");
+export const centerIpStatus = () => getTransport().invoke<CenterIpStatus>("center_ip_status");
 
 /** Connection snippets (mcp.json / claude mcp add) for the given IP, port and token. The IP is the host they name. */
 export const centerConnectSnippets = (bind: string, port: number, token: string) =>
-  invoke<CenterConnectSnippets>("center_connect_snippets", { bind, port, token });
+  getTransport().invoke<CenterConnectSnippets>("center_connect_snippets", { bind, port, token });
 
 /** Read a pasted connection snippet (either format) into URL and token. Rejects with a readable message. */
-export const centerParseConnect = (text: string) => invoke<CenterParsedConnect>("center_parse_connect", { text });
+export const centerParseConnect = (text: string) => getTransport().invoke<CenterParsedConnect>("center_parse_connect", { text });
 
-export const centerStatus = () => invoke<CenterStatus>("center_status");
+export const centerStatus = () => getTransport().invoke<CenterStatus>("center_status");
 
-export const centerConnection = () => invoke<CenterConnection>("center_connection");
+export const centerConnection = () => getTransport().invoke<CenterConnection>("center_connection");
 
 export const centerCall = (name: string, args?: Record<string, unknown>) =>
-  invoke<McpToolResult>("center_call", { name, arguments: args });
+  getTransport().invoke<McpToolResult>("center_call", { name, arguments: args });
 
 /** The center-wide settings (`center_settings_get`): `{ settings }`, a session's project settings without `servers`. */
 export const centerCommonSettingsGet = () => centerTool<{ settings: CenterCommonSettings }>("center_settings_get");
@@ -93,7 +93,7 @@ export const openExternalUrl = (url: string) => {
   } catch (e) {
     return Promise.reject(e instanceof Error ? e : new Error(String(e)));
   }
-  return invoke<void>("plugin:shell|open", { path: href });
+  return getPlatform().openExternal(href);
 };
 
 /** Retire a server (`server_retire`, irreversible). `serverId` is the server_id (never a host name: two servers can share a host). Rejects with the center's reason (not supported, no reply, ...). */

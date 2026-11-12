@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { getTransport } from "~/tauri";
 
 /** One output chunk (or a reset) of a session's terminal, emitted by the Rust SSE client. */
 export const SESSION_OUTPUT_EVENT = "session-output";
@@ -24,13 +24,13 @@ export interface SessionOutputStatus {
 
 /** Open the output stream of a session; `after` = the last chunk id already held (null: from the start). */
 export const sessionOutputStart = (session: string, after: number | null) =>
-  invoke<void>("session_output_start", { session, after });
+  getTransport().invoke<void>("session_output_start", { session, after });
 
-export const sessionOutputStop = (session: string) => invoke<void>("session_output_stop", { session });
+export const sessionOutputStop = (session: string) => getTransport().invoke<void>("session_output_stop", { session });
 
 /** Keystrokes (base64 of the bytes) to the session's pty. */
 export const sessionInput = (session: string, dataB64: string) =>
-  invoke<void>("session_input", { session, dataB64 });
+  getTransport().invoke<void>("session_input", { session, dataB64 });
 
 export const sessionResize = (session: string, cols: number, rows: number) =>
-  invoke<void>("session_resize", { session, cols, rows });
+  getTransport().invoke<void>("session_resize", { session, cols, rows });

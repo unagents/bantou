@@ -457,7 +457,7 @@ export type UpdaterState =
   | { kind: "idle" }
   | { kind: "checking" }
   | { kind: "latest" }
-  | { kind: "available"; update: import("@tauri-apps/plugin-updater").Update; version: string }
+  | { kind: "available"; update: import("~/tauri").Update; version: string }
   | { kind: "downloading"; version: string; downloaded: number; contentLength: number | null }
   | { kind: "installing"; version: string }
   | { kind: "error"; message: string; version: string | null };

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getTransport, type UnlistenFn } from "~/tauri";
 import { AGENT_EVENT, agentAnswer, agentClose, agentOpen, agentSay } from "~/api";
 import type { AgentEvent, Task, Thread } from "~/types";
 
@@ -19,9 +19,9 @@ const busy = computed(() => agentState.value === "busy" || agentState.value === 
 let unlisten: UnlistenFn | null = null;
 
 onMounted(async () => {
-  unlisten = await listen<AgentEvent>(AGENT_EVENT, (e) => {
-    if (e.payload.workspace === props.workspace && e.payload.task_id === props.thread.task_id) {
-      agentState.value = e.payload.state;
+  unlisten = await getTransport().listen<AgentEvent>(AGENT_EVENT, (p) => {
+    if (p.workspace === props.workspace && p.task_id === props.thread.task_id) {
+      agentState.value = p.state;
     }
   });
   if (!answered.value) {

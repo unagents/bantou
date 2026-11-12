@@ -1,5 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { getPlatform, getTransport } from "~/tauri";
 
 /** Mirror of `src-tauri/src/attachment.rs::AttachOutcome`. */
 export interface AttachOutcome {
@@ -11,19 +10,18 @@ export interface AttachOutcome {
 
 /** Clipboard image: raw bytes as the request body (no JSON array). */
 export const sessionAttachBytes = (session: string, bytes: Uint8Array) =>
-  invoke<AttachOutcome>("session_attach_bytes", bytes, {
+  getTransport().invoke<AttachOutcome>("session_attach_bytes", undefined, {
     headers: { "x-bantou-session": session },
+    body: bytes,
   });
 
 /** Dropped files (absolute paths from the drag-drop event). */
 export const sessionAttachPaths = (session: string, paths: string[]) =>
-  invoke<AttachOutcome>("session_attach_paths", { session, paths });
+  getTransport().invoke<AttachOutcome>("session_attach_paths", { session, paths });
 
 /** File dialog (several files). Cancel returns empty lists. */
-export const sessionAttachPick = (session: string) => invoke<AttachOutcome>("session_attach_pick", { session });
+export const sessionAttachPick = (session: string) => getTransport().invoke<AttachOutcome>("session_attach_pick", { session });
 
 /** Files dropped on the window: `position` is in physical pixels. */
 export const onFilesDropped = (handler: (paths: string[], position: { x: number; y: number }) => void) =>
-  getCurrentWebview().onDragDropEvent((e) => {
-    if (e.payload.type === "drop") handler(e.payload.paths, e.payload.position);
-  });
+  getPlatform().onFilesDropped(handler);

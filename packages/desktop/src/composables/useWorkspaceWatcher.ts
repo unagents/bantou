@@ -1,5 +1,5 @@
-import { watch as watchFs, type UnwatchFn } from "@tauri-apps/plugin-fs";
 import { onBeforeUnmount, watch, type Ref } from "vue";
+import { getPlatform, type UnlistenFn } from "~/tauri";
 
 /**
  * Re-run `onMdChange` whenever a `.md` file directly under `dir` changes
@@ -7,16 +7,16 @@ import { onBeforeUnmount, watch, type Ref } from "vue";
  * Ported from Cork's `useWorkspaceWatcher`.
  */
 export function useWorkspaceWatcher(dir: Ref<string | null>, onMdChange: () => void) {
-  let unwatch: UnwatchFn | null = null;
+  let unwatch: UnlistenFn | null = null;
 
   async function attach(path: string) {
     detach();
-    unwatch = await watchFs(
+    unwatch = await getPlatform().watchDir(
       path,
-      (event) => {
-        if (event.paths.some((p) => p.endsWith(".md"))) onMdChange();
+      (paths) => {
+        if (paths.some((p) => p.endsWith(".md"))) onMdChange();
       },
-      { recursive: false, delayMs: 300 },
+      300,
     );
   }
 

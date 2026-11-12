@@ -1,4 +1,4 @@
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getTransport, type UnlistenFn } from "~/tauri";
 import {
   SESSION_OUTPUT_EVENT,
   SESSION_OUTPUT_STATUS_EVENT,
@@ -41,9 +41,9 @@ function onOutput(p: SessionOutput) {
 function ensureListening(): Promise<void> {
   listening ??= (async () => {
     unlisten = [
-      await listen<SessionOutput>(SESSION_OUTPUT_EVENT, (e) => onOutput(e.payload)),
-      await listen<SessionOutputStatus>(SESSION_OUTPUT_STATUS_EVENT, (e) => {
-        status[e.payload.session] = e.payload.state;
+      await getTransport().listen<SessionOutput>(SESSION_OUTPUT_EVENT, (p) => onOutput(p)),
+      await getTransport().listen<SessionOutputStatus>(SESSION_OUTPUT_STATUS_EVENT, (p) => {
+        status[p.session] = p.state;
       }),
     ];
   })();
