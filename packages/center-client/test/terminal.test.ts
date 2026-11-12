@@ -8,6 +8,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import {
+  CenterSettingsError,
   LOG_BODY_CHARS,
   MAX_ATTACHMENT_BYTES,
   SseParser,
@@ -666,7 +667,7 @@ test("a bad session name is refused before any request: input, resize, attachByt
   }
 });
 
-test("openOutput: a getTarget() that throws gets scrubbed (known secrets of an earlier target, userinfo)", async () => {
+test("openOutput: a getTarget() that throws shows a fixed text (3c form); CenterSettingsError is passed on, scrubbed", async () => {
   const token = "tok-SECRET-123456";
   const f = await fake((_q, res) => {
     res.writeHead(200, { "content-type": "text/event-stream" });
@@ -676,18 +677,56 @@ test("openOutput: a getTarget() that throws gets scrubbed (known secrets of an e
     let n = 0;
     const t = createTerminals({
       getTarget: async () => {
-        if (n++ === 0) return target(f.base, token);
-        throw new Error(`settings read failed: ${token} http://user:pw-SECRET@h/x`);
+        n++;
+        if (n === 1) return target(f.base, token);
+        if (n === 2) throw new Error(`settings read failed: ${token} http://user:pw-SECRET@h/x`);
+        if (n === 3) throw Object.assign(new Error(`read ${token}`), { code: "EACCES" });
+        throw new CenterSettingsError(`bad ${token} http://user:pw-SECRET@h/x`);
       },
       sleep: noWait,
     });
     const st: StatusPayload[] = [];
     const sub = t.openOutput("m", { onOutput: () => {}, onStatus: (s) => st.push(s) });
-    await until(() => st.some((s) => s.message?.includes("settings read failed")));
+    await until(() => st.some((s) => s.message?.startsWith("bad ")));
     sub.stop();
-    const msg = st.map((s) => s.message ?? "").join("\n");
-    for (const secret of [token, "user:", "pw-SECRET"]) assert.equal(msg.includes(secret), false, `${secret} leaked: ${msg}`);
-    assert.match(msg, /settings read failed: \*\*\* http:\/\/h\/x/);
+    const msgs = st.map((s) => s.message ?? "");
+    const msg = msgs.join("\n");
+    for (const secret of [token, "user:", "pw-SECRET", "settings read failed"]) assert.equal(msg.includes(secret), false, `${secret} leaked: ${msg}`);
+    assert.ok(msgs.includes("接続先の選択に失敗"));
+    assert.ok(msgs.includes("接続先の選択に失敗 (EACCES)"));
+    assert.ok(msgs.includes("bad *** http://h/x"));
+  } finally {
+    await f.close();
+  }
+});
+
+test("input / resize / attachBytes: the first getTarget() throw (no secret known yet) becomes a fixed TerminalError, not a re-throw", async () => {
+  const leak = "tok-SECRET-123456 http://user:pw-SECRET@h/x";
+  const bad = createTerminals({
+    getTarget: async () => {
+      throw new Error(`parse failed near ${leak}`);
+    },
+  });
+  const check = (e: unknown) => e instanceof TerminalError && e.message === "接続先の選択に失敗";
+  await assert.rejects(bad.input("m", "QQ=="), check);
+  await assert.rejects(bad.resize("m", 80, 24), check);
+  await assert.rejects(createAttachments(bad).attachBytes("m", [{ name: "ok", data: PNG }]), check);
+  const coded = createTerminals({ getTarget: async () => Promise.reject(Object.assign(new Error(leak), { code: "ENOENT" })) });
+  await assert.rejects(coded.input("m", "QQ=="), (e: Error) => e.message === "接続先の選択に失敗 (ENOENT)");
+  const odd = createTerminals({ getTarget: async () => Promise.reject(Object.assign(new Error(leak), { code: `x ${leak}` })) });
+  await assert.rejects(odd.input("m", "QQ=="), (e: Error) => e.message === "接続先の選択に失敗");
+  // our own CenterSettingsError: message passes, scrubbed with the target seen earlier
+  let n = 0;
+  const f = await fake(canned([[200, "{}"]]));
+  try {
+    const t = createTerminals({
+      getTarget: async () => {
+        if (n++ === 0) return target(f.base, "tok-SECRET-123456");
+        throw new CenterSettingsError("設定が不正 tok-SECRET-123456");
+      },
+    });
+    await t.input("m", "QQ==");
+    await assert.rejects(t.input("m", "QQ=="), (e: Error) => e instanceof TerminalError && e.message === "設定が不正 ***");
   } finally {
     await f.close();
   }
