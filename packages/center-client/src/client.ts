@@ -84,11 +84,16 @@ export function createCenterClient(opts: CenterClientOptions = {}): CenterClient
   const file = opts.settingsFile ?? (env.WEB_SETTINGS_FILE?.trim() || defaultSettingsFile(env));
   const store = opts.settingsStore ?? createFileSettingsStore(file);
   // Web: tokens are hidden from `get`, the web tool list applies, `enabled: true` is refused until work unit S.
+  const redactor = createRedactor({ selectTarget: () => settings.selectTarget() });
+  // every log line (mcp, sessions, events, rpc) is cleaned of the secrets known so far
+  const logger: McpLogger | undefined = opts.logger && {
+    info: (m) => opts.logger!.info(redactor.textSync(m)),
+    warn: (m) => opts.logger!.warn(redactor.textSync(m)),
+  };
   const settings = createCenterSettings({ settingsStore: store, redactSecrets: true, env, policy: { allowEnabled: false } });
-  const mcp = createCenterMcp({ settings, fetch: opts.fetch, logger: opts.logger, policy: { allowTool: allowWebTool } });
-  const sessions = createSessionService({ mcp, logger: opts.logger });
-  const events = createCenterEvents({ settings, fetch: opts.fetch, logger: opts.logger });
-  const redactor = createRedactor(settings);
+  const mcp = createCenterMcp({ settings, fetch: opts.fetch, logger, policy: { allowTool: allowWebTool } });
+  const sessions = createSessionService({ mcp, logger });
+  const events = createCenterEvents({ settings, fetch: opts.fetch, logger });
 
   const raw = createCommands({
     settings,
@@ -140,7 +145,7 @@ export function createCenterClient(opts: CenterClientOptions = {}): CenterClient
       return { status: 200, body: await redactor.value(out ?? null) };
     } catch (e) {
       const ce = toCommandError(e);
-      opts.logger?.warn(`rpc ${cmd} failed (${ce.status}): ${await redactor.text(ce.message)}`);
+      logger?.warn(`rpc ${cmd} failed (${ce.status}): ${await redactor.text(ce.message)}`);
       return { status: ce.status, body: { error: await redactor.text(ce.message) } };
     }
   }

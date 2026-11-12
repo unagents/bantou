@@ -339,14 +339,17 @@ test("SSE body: a secret in an event is cleaned (redactor on the stream path)", 
   const { readable, close } = c.openEventStream();
   let text = "";
   readable.on("data", (d: Buffer) => (text += d.toString()));
-  for (let i = 0; i < 100 && conns.length === 0; i++) await new Promise((r) => setTimeout(r, 20));
-  assert.equal(conns.length, 1);
-  conns[0]!.write(`event: sessions\ndata: {"reason":"${TOKEN} only-redactor-knows-4","name":"n"}\n\n`);
-  for (let i = 0; i < 100 && !text.includes("center-sessions-changed"); i++) await new Promise((r) => setTimeout(r, 20));
-  assert.match(text, /center-sessions-changed/);
-  assert.ok(!text.includes("only-redactor-knows-4"), text);
-  assert.ok(!text.includes(TOKEN), text);
-  close();
+  try {
+    for (let i = 0; i < 100 && conns.length === 0; i++) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(conns.length, 1);
+    conns[0]!.write(`event: sessions\ndata: {"reason":"${TOKEN} only-redactor-knows-4","name":"n"}\n\n`);
+    for (let i = 0; i < 100 && !text.includes("center-sessions-changed"); i++) await new Promise((r) => setTimeout(r, 20));
+    assert.match(text, /center-sessions-changed/);
+    assert.ok(!text.includes("only-redactor-knows-4"), text);
+    assert.ok(!text.includes(TOKEN), text);
+  } finally {
+    close();
+  }
 });
 
 test("log: warn lines of a failed rpc do not carry the secrets", async () => {
@@ -357,4 +360,14 @@ test("log: warn lines of a failed rpc do not carry the secrets", async () => {
   assert.ok(lines.length > 0);
   noSecret(lines);
   assert.ok(!lines.join("\n").toUpperCase().includes(TOKEN.toUpperCase()));
+});
+
+test("log: a failed rpc is logged without a secret only the redactor knows", async () => {
+  const lines: string[] = [];
+  const { c, center } = await withCenter({ logger: { info: (m) => lines.push(m), warn: (m) => lines.push(m) } });
+  c.redactor.note(["only-redactor-knows-5"]);
+  center.errorTools.set("rc_list", "bad only-redactor-knows-5");
+  await post(c, "center_call", { name: "rc_list" });
+  assert.ok(lines.some((l) => l.includes("rpc center_call failed")), lines.join("|"));
+  assert.ok(!lines.join("\n").includes("only-redactor-knows-5"));
 });
