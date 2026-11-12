@@ -49,7 +49,7 @@ test("E:154 changed serializes with the event field names", () => {
 
 test("E:160 events url is on the mcp origin", () => {
   assert.equal(eventsUrl("http://127.0.0.1:7910/mcp").href, "http://127.0.0.1:7910/events");
-  assert.equal(eventsUrl("http://mac200:7910/mcp?x=1").href, "http://mac200:7910/events");
+  assert.equal(eventsUrl("http://host-a:7910/mcp?x=1").href, "http://host-a:7910/events");
   assert.throws(() => eventsUrl("nope"));
   // no userinfo goes along (fetch refuses it), the session name is a percent-encoded segment
   assert.equal(eventsUrl("http://u:p@h:1/mcp").href, "http://h:1/events");
