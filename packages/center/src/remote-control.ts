@@ -463,6 +463,16 @@ export function createRemoteControlSupervisor(opts: {
     const name = e.project.name;
     const rc = currentRc(name);
     const wd = e.wrapper ? opts.wrapper : undefined;
+    // 統括の session も起動のたびに取り直す（CLI で変えた設定が次の起動から効く）。取れなければ無効
+    let coordinatorNow: string | null = coordinatorSession;
+    if (opts.coordinatorOf) {
+      try {
+        coordinatorNow = opts.coordinatorOf();
+      } catch (err) {
+        log(`統括の設定を取れない（付けずに起動）: project=${name} ${err instanceof Error ? err.name : "error"}`);
+        coordinatorNow = null;
+      }
+    }
     // 外部記憶は起動のたびに取り直す（CLI で変えた設定が次の起動から効く）。取れなければ add / setMemory の値
     let memory: MemorySetting | null = e.memory;
     if (opts.memoryOf) {
@@ -485,7 +495,6 @@ export function createRemoteControlSupervisor(opts: {
       wd.core.register(name);
       const mcpUrl = wd.mcpUrl();
       if (!mcpUrl) log(`session 向け MCP 窓口が無いので bantou の MCP を付けない（messenger のみ）: project=${name}`);
-      const coordinatorNow = opts.coordinatorOf ? opts.coordinatorOf() : coordinatorSession;
       const sysCtx = { session: name, memory: memory !== null, coordinator: coordinatorNow === name };
       const system = opts.systemInstructions?.build(sysCtx) ?? "";
       const appendSystemPrompt = [system, e.instructions].filter((t) => t !== "").join("\n\n");
