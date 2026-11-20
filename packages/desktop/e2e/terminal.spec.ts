@@ -178,6 +178,21 @@ test("keystrokes go to session_input as base64 for the shown session", async ({ 
   await expect.poll(() => mock(page, (m) => m.inputs.at(-1))).toEqual({ session: "careery", data: "eA==" });
 });
 
+test("shift+enter is sent once as ESC CR; plain Enter and ctrl+enter stay as xterm sends them", async ({ page }) => {
+  await page.goto("/");
+  await send(page, "agent-messenger", 1, "$ ");
+  await expect(term(page)).toContainText("$");
+  await page.locator(".xterm-helper-textarea").focus();
+  await page.keyboard.type("a");
+  await page.keyboard.press("Shift+Enter");
+  await page.keyboard.type("b");
+  await page.keyboard.press("Enter");
+  await expect.poll(() => decodeInputs(page)).toBe("a\x1b\rb\r");
+  await page.keyboard.press("Control+Enter");
+  await page.keyboard.type("c");
+  await expect.poll(() => decodeInputs(page)).toBe("a\x1b\rb\r\rc");
+});
+
 test("fit and window resize go to session_resize", async ({ page }) => {
   await page.goto("/");
   await expect.poll(() => mock(page, (m) => m.resizes.length)).toBeGreaterThan(0);
