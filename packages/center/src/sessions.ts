@@ -145,7 +145,18 @@ export function createSessionManager(opts: {
     return run;
   };
 
-  const persist = (): Promise<void> => store.save([...saved.values()]);
+  /**
+   * memory-settings.json に移せなかった旧形式の memory（元の値のまま）。次の起動で移し直せるよう、保存のたびに書き戻す
+   * （書き戻さないと他項目の更新の保存で旧形式が disk から消える）。移行できた起動では空。
+   */
+  const legacyKeep: { common?: unknown; sessions: Map<string, unknown> } = { sessions: new Map() };
+  const withLegacy = (rec: SavedSession): SavedSession => {
+    if (!legacyKeep.sessions.has(rec.name)) return rec;
+    return { ...rec, settings: { ...(rec.settings ?? {}), memory: legacyKeep.sessions.get(rec.name) } as ProjectSettings };
+  };
+  const withLegacyCommon = (s: ProjectSettings): ProjectSettings => ("common" in legacyKeep ? ({ ...s, memory: legacyKeep.common } as ProjectSettings) : s);
+
+  const persist = (): Promise<void> => store.save([...saved.values()].map(withLegacy));
 
   const info = (s: RcStatus): SessionInfo => ({
     name: s.project,
@@ -240,6 +251,8 @@ export function createSessionManager(opts: {
         if (m) legacy.sessions[s.name] = m;
       }
       f.useFallback(legacy);
+      if (commonHas) legacyKeep.common = (rawCommon as { memory: unknown }).memory;
+      for (const s of withKey) legacyKeep.sessions.set(s.name, (s.settings as { memory: unknown }).memory);
       log(`外部記憶の設定を memory-settings.json へ移せない（旧形式のまま残し、この起動は旧い値で動く）: ${e instanceof Error ? e.message : String(e)}`);
       return false;
     }
@@ -372,7 +385,7 @@ export function createSessionManager(opts: {
         const next = readCenterSettings(mergeSettings(prev, patch as ProjectSettingsPatch));
         if (opts.centerStore) {
           try {
-            await opts.centerStore.save(next);
+            await opts.centerStore.save(withLegacyCommon(next));
           } catch (e) {
             throw new Error(`設定ファイルに保存できない: ${(e as Error).message}`);
           }

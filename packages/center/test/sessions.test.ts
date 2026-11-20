@@ -779,6 +779,42 @@ test("memory: 旧形式の移行で memory-settings.json に書けなければ�
   assert.ok(!/memory|SECRET/.test(await readFile(join(dir, "sessions.json"), "utf8")));
 });
 
+test("memory: 移行の書き込み失敗中に他項目を更新（updateSettings / updateCenterSettings）しても、旧形式の memory は disk に残り、書ける次の起動で移る", async () => {
+  const logs: string[] = [];
+  await writeFile(join(dir, "center-settings.json"), JSON.stringify({ instructions: "ic", memory: { url: "http://old-common/mcp", token: "OLD-COMMON-SECRET" } }));
+  await mkdir(join(dir, "pa"), { recursive: true });
+  await writeFile(join(dir, "sessions.json"), JSON.stringify([{ name: "a", path: join(dir, "pa"), permissionMode: "auto", settings: { instructions: "ia", memory: { url: "http://old-a/mcp", token: "OLD-A-SECRET" } }, createdAt: "2026-01-01T00:00:00Z" }]));
+  const memoryFile = createMemoryFile(dir);
+  memoryFile.write = () => {
+    throw new Error("EACCES: permission denied, open 'memory-settings.json'");
+  };
+  const { mgr } = setup({ memoryFile, log: (m: string) => void logs.push(m) });
+  await mgr.restore();
+  await mgr.updateSettings("a", { instructions: "ia2" });
+  await mgr.updateCenterSettings({ instructions: "ic2" });
+  const s = JSON.parse(await readFile(join(dir, "sessions.json"), "utf8"));
+  const c = JSON.parse(await readFile(join(dir, "center-settings.json"), "utf8"));
+  assert.equal(s[0].settings.instructions, "ia2", "他項目の更新は保存される");
+  assert.equal(c.instructions, "ic2");
+  assert.deepEqual(s[0].settings.memory, { url: "http://old-a/mcp", token: "OLD-A-SECRET" }, "旧形式が残る");
+  assert.deepEqual(c.memory, { url: "http://old-common/mcp", token: "OLD-COMMON-SECRET" });
+  // 画面・MCP からは旧 memory が見えない（応答に出ない）
+  assert.deepEqual(mgr.getSettings("a"), { name: "a", settings: { instructions: "ia2" } });
+  assert.deepEqual(mgr.getCenterSettings(), { settings: { instructions: "ic2" } });
+  // 動作中の値は旧い値のまま
+  assert.deepEqual(mgr.memoryOf("a"), { url: "http://old-a/mcp", token: "OLD-A-SECRET" });
+  for (const l of logs) assert.ok(!/SECRET/.test(l), l);
+  // 書ける次の起動で移り、他項目の更新も残る
+  const memoryFile2 = createMemoryFile(dir);
+  const { mgr: mgr2 } = setup({ memoryFile: memoryFile2, log: () => {} });
+  await mgr2.restore();
+  assert.deepEqual(memoryFile2.read(), { common: { url: "http://old-common/mcp", token: "OLD-COMMON-SECRET" }, sessions: { a: { url: "http://old-a/mcp", token: "OLD-A-SECRET" } } });
+  assert.deepEqual(mgr2.getSettings("a"), { name: "a", settings: { instructions: "ia2" } });
+  assert.deepEqual(mgr2.getCenterSettings(), { settings: { instructions: "ic2" } });
+  assert.ok(!/memory|SECRET/.test(await readFile(join(dir, "sessions.json"), "utf8")));
+  assert.ok(!/memory|SECRET/.test(await readFile(join(dir, "center-settings.json"), "utf8")));
+});
+
 test("coordinator: 起動の時と center 共通の設定の更新で supervisor に渡り、coordinatorOf は呼ぶたびに今の設定を返す", async () => {
   const { mgr, opts } = setup();
   assert.equal(mgr.coordinatorOf(), null);
