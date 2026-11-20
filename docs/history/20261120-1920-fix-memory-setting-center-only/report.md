@@ -83,7 +83,17 @@ bantou-center memory unset [--config <path>] [--session <name>]
 - 基点: 9f57726 の上に 1 commit。直したのは low 1 と low 2 のみ。low 3（session の改名で改名先の設定を上書きする）は触っていない。
 - low 1（CLI の引数 error に値が出る）: `memory` の不明な引数の error 文から引数の中身を外した。`--token` と `--token=…` は「token は引数に書けない」、`--名前=値` は名前だけ（例: `不明な引数: --bogus（値を引数に書けない。token は標準入力か file を使う）`）、位置引数など `--` で始まらない物は中身を出さない一般文。test: `--token VALUE` / `--token=VALUE` / 余分な位置引数（set・get）/ `--bogus=VALUE` / `--url=VALUE` / `-tVALUE` の 7 形で、stdout・stderr に値が出ず exit 2・file を書かない事。
 - low 2（移行の書き込み失敗で外部記憶が無効になる）: `MemoryFile` に `useFallback(data)` を足した。移行で `memory-settings.json` に書けなかった時、旧形式（sessions.json / center-settings.json）は消さず、旧い値をこの起動の間だけ memory として使い（file の値が優先。保存はしない）、失敗を log に残す（fs のエラー文だけで、値は出さない）。次の起動で書ければ移る。test: 書き込みを失敗させた状態で、`memoryOf` が旧い値（session → 共通の順）を返す・旧 file の中身が変わらない・log に失敗が残り値が出ない・書けるようになった次の起動で移る。
-- 残る限界（判断）: 書き込み失敗の起動の間に、center 共通の設定を画面から更新すると、`center-settings.json` は memory を持たない形で保存され、旧形式の共通の値が disk から消える（session の旧形式は、その session の設定を更新した時に同様）。この起動の間の動作は旧い値のまま。直すには更新の保存で旧形式の key を持ち回る必要があり、指示の範囲（2 件）を超えるので入れていない。
+- 残る限界だった事象（書き込み失敗中に他項目を更新すると旧形式が disk から消える）は、下の「review 往復 1 回目の修正」で直した。
 - 変異: (1) CLI の名前の抽出を `k` そのままに戻す → 新 test が落ちた、(2) `useFallback` の呼び出しを外す → 新 test が落ちた。どちらも戻した。
 - 確認: center typecheck 通過（protocol を先に build）/ center test 666 件中 665 pass・1 fail（「center を SIGKILL すると rc が孤児で残り…」。既知の不安定 test）。
 - host: bun install は `--frozen-lockfile --registry <127.0.0.1 の IPv4 中継>` で通った（--offline は 5 分で応答せず中断）。bun.lock は変わらず。中継の疎通確認の command は hook に止められたので飛ばし、bun install で兼ねた。
+
+## review 往復 1 回目の修正（commit 5917077）
+
+- 指摘（medium）: 移行の書き込み失敗中（useFallback 中）に他項目を `updateSettings` / `updateCenterSettings` で更新すると、その保存で旧形式の memory が sessions.json / center-settings.json から消え、次の起動でも移らない。
+- 選んだ方針: **旧 key を元の値のまま保持し、保存のたびに書き戻す**。移行に失敗した時だけ、旧形式の `memory`（共通と session ごと）の生の値を `sessions.ts` の中（`legacyKeep`）に持ち、`persist`（sessions.json）と `updateCenterSettings` の保存（center-settings.json）で書き戻す。
+  理由: (1) 旧い値を解釈し直さず元のまま返すので、壊れた値も含めて次の起動の移行が今と同じ入力を見る、(2) 画面・MCP の応答（get / update）と `common` / `saved` の中身は memory を持たないままで、memory を画面に出さない原則を変えない、(3) 移行できた起動では `legacyKeep` が空で、既存の動き（旧 key を disk から消す）は変わらない。fallback 中に書き戻す案（memory-settings.json への書き込みを再試行する案）は、書けない原因が続く間は同じ失敗を繰り返すので採らなかった。
+- test: 旧形式を置く → memory-settings.json の write を失敗させる → `updateSettings` と `updateCenterSettings` で他項目を更新 → 他項目の更新は保存され・旧 memory（token 付き）が disk に残り・get の応答に memory が出ず・動作中の値は旧い値のまま・log に値が出ない → 書ける次の起動で memory-settings.json に移り、旧形式は disk から消え、他項目の更新は残る。
+- 変異: (1) `persist` の書き戻しを外す、(2) center-settings.json の保存の書き戻しを外す → どちらも新 test が落ちた。戻した。
+- 確認: protocol を先に build → center typecheck 通過 / center test 667 件中 666 pass・1 fail（「center を SIGKILL すると rc が孤児で残り…」。既知の不安定 test）。
+- 触れていない事: 書き込み失敗中の session の改名・削除では、その session の旧形式の key は新しい名前に付け替えない（改名先の設定の扱いは low 3 の範囲で、触っていない）。削除ではその session ごと disk から消える（元の動き）。
