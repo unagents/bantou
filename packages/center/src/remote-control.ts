@@ -7,6 +7,7 @@ import type { ResolvedClaude } from "./claude-path.js";
 import { loadConfigSync, type Config, type ProjectConfig } from "./config.js";
 import type { Logger } from "./log.js";
 import { reapOrphans } from "./reap.js";
+import { capSessionName } from "./session-name.js";
 import type { Core } from "./core.js";
 import type { SessionTokens } from "./session-auth.js";
 import {
@@ -155,7 +156,7 @@ export function buildRcArgs(
   return [
     "remote-control",
     "--name",
-    project.name,
+    capSessionName(project.name),
     ...(plain ? [] : ["--spawn", project.spawn ?? "same-dir"]),
     "--permission-mode",
     project.permissionMode,

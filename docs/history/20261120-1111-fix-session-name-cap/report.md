@@ -1,0 +1,44 @@
+# fix: master-cap の session 名を `<project 名>-cap` にする
+
+## 解釈
+変えるのは (a) Claude に渡す名前と (b) messenger の peer 名。(c) 内部の識別子は変えない。調べた結果、この解釈で成り立つ（内部 key まで変える必要は無い）。
+
+## 利用者の意図（補足）
+remote の session 一覧で、center が起動した master-cap の session を見分けられるようにする。project 名そのものは変えず、「session の名前」だけに `<project>-cap` を当てる。project 名を key にした紐付けは変えない。名前が変わる影響は運用で補い、互換の別名・移行の処理は作らない。
+
+## 対象ごとの判断
+| 対象 | 場所 | 判断 | 理由 |
+|---|---|---|---|
+| `--remote-control` の引数（remote-control 一覧の名前） | wrapper.ts buildWrapperArgs | **変えた** `<project>-cap` | 目的そのもの。表示名で、他の記録の key に使われていない。起動引数の test で確認 |
+| `--name`（旧経路の rc 直起動） | remote-control.ts buildRcArgs | **変えた** `<project>-cap` | 同じく表示名。key には使われていない |
+| messenger 登録名 | `--mcp-config` の `AGENT_MESSENGER_NAME`（mcpConfigJson） | **変えた** | center が起動時に決める session を指す名前。code を確かめた結果、remotes.json・sessions.json・cap_id・memory はどれも project 名（session）で持ち、messenger 名は保存されていない（通知のたびに導出）。project 名を key にした紐付けには当たらない |
+| daemon notify の宛先引き | daemon.ts notify → notifyPeer（peer 名で引く） | **変えた**（新名だけで引く。旧名への fallback は外した） | 宛先は messenger 名なので、登録名と同じ関数で導出する。owner（= session = project 名）自体は変えない |
+| 起動時の指示文 | system-instructions.ts master-cap-role「session「…」」 | **変えた**（`<project>-cap`、role@4） | session を指す所。実際に付く名前と一致させる。project を指す所は無い |
+| 孤児 rc の回収の照合 | reap.ts matchesRc（argv の `--name`） | **変えた**（`<project>-cap` と `<project>` のどちらの `--name` でも合う） | 旧経路が `--name <project>-cap` で起動するので、照合を今の起動引数に合わせた。旧名も許すのは、変更前に起動した孤児も回収するため（互換の別名ではなくプロセス照合の修正）。reap.test.ts・rc-orphan.test.ts で確認 |
+| sessions の key | sessions.ts, project-settings.ts | 変えない | project 名を key とする内部の識別子。変えると既存 session の記録との対応が切れる |
+| remote の cap_id `c-<center-id>-<session>`（remotes.json の session も） | center-id.ts, remotes.ts | 変えない | server 側の cap の記録との対応が切れる。cap_id が変わらない test あり |
+| 作業 dir | project の path | 変えない | 既存の dir との対応 |
+| log 名 | remote-control.ts（`<project>.log`） | 変えない | 既存の file との対応 |
+| memory の agent ID（X-Agent-Id） | wrapper.ts mcpConfigJson | 変えない | 記憶との対応 |
+| bantou MCP の X-Bantou-Session | wrapper.ts mcpConfigJson | 変えない | center が tool の owner（session）を特定する内部の識別子 |
+| session token | session-auth.ts | 変えない | 同上（project 名 key） |
+| desktop の操作名・引数 | desktop | 変えない | project 名を key にした内部の識別子 |
+| tool（remote_send 等）が受ける session 名 | tools.ts | 変えない | 同上。session 名を引数にする既存の呼び出しが壊れる |
+
+変換は `src/session-name.ts` の `capSessionName(project)` 1 か所。`-cap` で終わる名前は重ねない。messenger 名は center が env で決めるので、Claude に set_name させる方式は採らない。
+
+## 運用で補う事（互換の別名・移行は作っていない）
+互換処理（旧名の別名登録、通知の旧名への fallback、sessions.json 等の移行）は入れていない。理由: 利用者の方針が「名前が変わる事で出る問題は運用で補う期間を設ける」であり、互換処理は新旧の名前が混在する状態を固定してしまい、remote の session 一覧で見分けるという目的も損なうため。内部の識別子は変えていないので、移行が要る記録も無い。
+- 変わる名前: remote-control 一覧の session 名と messenger の peer 名が `<project>` から `<project>-cap`（例 bantou → bantou-cap）になる。
+- いつ変わるか: center（または app）を更新して再起動した後、master-cap の session が次に起動された時（session の再起動・`session_create`・center 再起動で session を立て直す時）。起動済みの session は再起動するまで旧名のまま。
+- 古い名前を宛先にしている物: center が master-cap へ push する完了通知は、center 更新後は新名 `<project>-cap` の peer だけに出す。再起動前の旧名の session には届かない（旧名の session は通知を受け取れない）（center.log に「messenger に peer …-cap がいない」と出る）。この時は session を再起動して新名にするか、`remote_wait` / `remote_list` で結果を確かめる。他の session や peer が旧名で master-cap へ送っている場合も、再起動後は届かないので宛先を新名へ更新する。
+- 確認の仕方: Claude の remote-control の session 一覧で `<project>-cap` が見える事、`list_peers` で `<project>-cap` が見える事、center.log の通知の送信結果（`送れた／peer がいない`）。
+- 変わらない物: sessions.json、cap_id、remotes.json、作業 dir、log、memory の対応。移行は不要。
+
+## test
+- packages/center typecheck: 通る。
+- packages/center test: 625 件中 624 pass・1 fail。fail は既知の不安定 test「center を SIGKILL すると rc が孤児で残り、次の center の起動で回収される」（rc-orphan.test.ts）。単独再実行でも環境により落ちる（この host でも「stub A が ppid=1 で残る」のタイムアウトで落ちた。この時点は孤児の回収・名前の照合より前の前提）。origin/develop でも同じ失敗（review の host で確認）。なお以前の report の「単独再実行で pass」は別の test を拾った誤りだったので取り下げる。
+- 追加・更新した test: `capSessionName`（session-name.test.ts。`-cap` を重ねない）、起動引数の `--remote-control <session>-cap` と `-cap` で終わる名前を重ねない事、messenger の `AGENT_MESSENGER_NAME`、X-Bantou-Session / X-Agent-Id / token / status が session 名のままである事（remote-control-wrapper.test.ts）、旧経路の `--name`、指示文の名前と role@4（system-instructions.test.ts）、cap_id が変わらない事。
+- 既知の制約: project 名 `x` と `x-cap` が両方あると、session の名前（`x-cap`）が衝突する（remote-control 一覧・messenger の peer 名・孤児の照合）。
+- desktop: 変更が無い（画面は session 名＝内部の識別子を使い続ける）ので typecheck・e2e は回していない。
+- daemon の notify（新名だけで引く）の単体 test は無い（daemon の組み立て内。`notifyPeer` 自体の test は既存）。
