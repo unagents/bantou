@@ -41,3 +41,7 @@
 9. 確認表 8-3: 許可内 200・許可外 403（か前段で停止）の両方を確かめる。
 10. 確認表 8-15 に nginx の access/error log に JWT・共有鍵が出ない事、6 章に「log_format に `$http_*` を入れない」を追加。
 未実行（実機検証なし）である点は前回と同じ。
+
+## 2 回目の review の反映（3 回目の commit）
+1. env 値の許可文字に `:` を追加（`CENTER_URL` の `http://<host>:<port>` 用）。`CENTER_TOKEN` が制限外の文字を含む時は env でなく設定 file の `remote.token` に置く旨を追記。
+2. 手動起動の例をサブシェル `( … exec … )` で包み、対話 shell を置き換えないようにした。`<run-dir>` の作り方（`install -d -m 700 -o <run-user>`、親 dir の権限）を 4.2 に追記。
