@@ -56,6 +56,16 @@
 - 接続設定の共有: 設定画面が token 入りの接続設定（`mcp.json` 形式と `claude mcp add --transport http ... --header 'Authorization: Bearer <token>'`）を出す。別ホストの desktop はそれを貼り付け、URL と token を取り出して保存し、MCP client が全リクエストに Bearer を付ける。center は常に全アドレス（`0.0.0.0`）で待ち受ける。snippet の URL のホストは設定画面で選んだ IP（この PC の IP 一覧から選ぶ。保存値が無ければ外側 IPv4 の先頭、LAN 優先。外側 IP が無い時だけ `127.0.0.1`）。保存済みの IP が今のこの PC に無い時は設定画面が報告し、前のままか新しい IP かを選ばせる
 - 待ち受けは全アドレスで、center は Host / Origin を絞らず Bearer だけで守る（TLS は無く平文）
 
+## web（スマホ版。`packages/web/`、5b 時点）
+
+- 構成: Nuxt の SPA（`ssr:false`）と、同じ process の web backend（Nitro）。画面部品は `packages/ui`（Nuxt layer）を desktop と共有する。backend は center の token を持ち、ブラウザには出さない（Cloudflare Access の守りは全要求の前に立つ。設計は別 branch の design.md 5.2）
+- transport の継ぎ目: 共有コードは `~/tauri` の `getTransport()` だけを見る。web の実装は `packages/web/app/tauri/transport.ts`（command 名・event 名・payload の型は desktop と同じ）
+  - 通常の command: `POST /api/rpc/<cmd>`（body は args の JSON）。event: `GET /api/events`（SSE）
+  - 端末: `session_output_start` / `session_output_stop` は session ごとの `EventSource`（`GET /api/sessions/<n>/output[?after=<id>]`）を開閉し、frame を `session-output` / `session-output-status` に写す（`output` → `{id: lastEventId, data}`、`reset`、`status`）。`useTerminalStore` は無変更。切れた接続の再接続と `Last-Event-ID` はブラウザが行い、`CLOSED` になれば `/api/me` で session を確かめた後に `rejected` を出す
+  - `session_input` / `session_resize` は JSON を `POST /api/sessions/<n>/input|resize` へ（`dataB64` は `data` に名前を変える）。`session_attach_bytes` は `body` の bytes を、先頭 bytes から決めた画像の Content-Type（png / jpeg / gif / webp）で `POST /api/sessions/<n>/attachments` へ
+- 画面: `/`（session 一覧と、タブ「server・cap」）→ `/s/<name>`（共有の `TerminalView`）。server・cap のタブは共有の `RemoteActivity`（cap の状態）と `CenterDialog`（server の版・rc 状態。web は `server_retire` を許可しないので退役の button を出さない `hide-retire`）を使う
+- 5b に無いもの（後続）: 特殊キー列・入力欄・入力のまとめ送り（6a）、`visualViewport`・ファイル選択による添付・端末の幅の方式（6b）、設定画面（5c）。端末 page は desktop と同じく、開くと今の幅を `resize` で送る
+
 ## 未決
 
 - 認証（center ↔ server）は後回し。desktop ↔ center は Bearer token（上記）

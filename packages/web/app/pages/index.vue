@@ -3,7 +3,9 @@ import { fetchHealth, type WebHealth } from "~/utils/health";
 import { isAccessDenied, onAccessDenied } from "~/tauri/session-watch";
 
 // Phone screen, level 1: the center's session list (design 7.1). The selection / filter state is the shared
-// composable the desktop's 3 columns use; only the layout is the web's own. A row leads to the session's page later (5b).
+// composable the desktop's 3 columns use; only the layout is the web's own. A row leads to the session's page (`/s/:name`).
+// The tab "server / cap" shows the servers and the caps' state as cards.
+const tab = ref<"session" | "server">("session");
 // Reloading did not bring the session back (a 403 a login cannot fix): say so instead of looping.
 const denied = ref(isAccessDenied());
 let stopDenied: (() => void) | null = null;
@@ -35,7 +37,25 @@ const reason = computed(() => health.value?.reason ?? centerList.value.reason);
 <template>
   <div class="bg-default text-default flex h-dvh flex-col overflow-hidden">
     <WebHeader title="bantou" :unreachable="loaded && !centerList.reachable && !noTarget" />
-    <main class="min-h-0 flex-1 overflow-y-auto" data-testid="session-list-page">
+    <nav class="border-cork-border flex shrink-0 border-b text-sm" role="tablist" data-testid="web-tabs">
+      <button
+        v-for="t in ([['session', 'session'], ['server', 'server・cap']] as const)"
+        :key="t[0]"
+        type="button"
+        role="tab"
+        class="min-h-11 flex-1 px-3"
+        :class="tab === t[0] ? 'border-cork-accent border-b-2 font-semibold' : 'text-cork-muted'"
+        :aria-selected="tab === t[0]"
+        :data-testid="`tab-${t[0]}`"
+        @click="tab = t[0]"
+      >
+        {{ t[1] }}
+      </button>
+    </nav>
+    <main v-if="tab === 'server'" class="min-h-0 flex-1 overflow-y-auto" data-testid="server-cap-page">
+      <ServerCapCards />
+    </main>
+    <main v-else class="min-h-0 flex-1 overflow-y-auto" data-testid="session-list-page">
       <div v-if="denied" class="p-4 text-sm" role="alert" data-testid="access-denied">
         <p class="font-semibold">許可されていません</p>
         <p class="text-cork-muted mt-1">このアカウントではこの web を使えない。管理者に確認してほしい。</p>
@@ -78,10 +98,11 @@ const reason = computed(() => health.value?.reason ?? centerList.value.reason);
           <li
             v-for="g in sideRows"
             :key="g.name"
-            class="border-cork-border flex min-h-12 items-center gap-2 border-b px-3 py-2 text-sm"
+            class="border-cork-border flex min-h-12 items-center gap-2 border-b text-sm"
             data-testid="side-row"
             :data-name="g.name"
           >
+            <NuxtLink :to="`/s/${encodeURIComponent(g.name)}`" class="flex min-h-12 min-w-0 flex-1 items-center gap-2 py-2 pr-3 pl-3" data-testid="side-link">
             <UIcon name="i-lucide-terminal-square" class="text-cork-accent size-4 shrink-0" />
             <span class="truncate">{{ g.name }}</span>
             <UIcon
@@ -95,6 +116,7 @@ const reason = computed(() => health.value?.reason ?? centerList.value.reason);
             />
             <SessionActivityMark v-if="g.activity" :activity="g.activity" :waiting-reply="g.remoteWaiting" :issues="g.remoteIssues" class="ml-auto" />
             <ContextUsage :usage="g.contextUsage" percent-only :class="g.activity ? '' : 'ml-auto'" data-scope="side" />
+            </NuxtLink>
           </li>
         </ul>
         <p v-if="centerList.reachable && !sessionCount" class="text-cork-muted p-4 text-sm" data-testid="no-sessions">session が無い</p>
