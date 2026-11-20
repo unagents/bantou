@@ -275,6 +275,17 @@ async function onPaste(text: string) {
   }
 }
 
+// The field often holds a complete connection already (the saved remote is filled in when the dialog opens). A paste
+// with the caret in it would be inserted into that text and break the JSON, so the new connection could not be saved
+// without emptying the field first. When the text parses as a whole and nothing is selected, the paste replaces it.
+function onPasteEvent(e: ClipboardEvent) {
+  const el = e.target as HTMLTextAreaElement;
+  const text = e.clipboardData?.getData("text") ?? "";
+  if (!text.trim() || !parsed.value || el.selectionStart !== el.selectionEnd) return;
+  e.preventDefault();
+  void onPaste(text);
+}
+
 // With the center off and a saved remote, open with the paste field filled by it (mcp.json form) and parsed.
 // The saved remote stays as it is, so the draft equals the baseline and save stays disabled.
 async function showSavedRemote(s: CenterSettings) {
@@ -564,6 +575,7 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
             placeholder="{ &quot;mcpServers&quot;: ... } または claude mcp add --transport http ..."
             data-testid="center-remote-paste"
             @update:model-value="onPaste(String($event))"
+            @paste="onPasteEvent"
           />
           <p v-if="parseError" class="text-cork-danger-text text-xs whitespace-pre-wrap" data-testid="center-remote-error">
             {{ parseError }}
