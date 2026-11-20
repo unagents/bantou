@@ -31,7 +31,7 @@ remote の session 一覧で、center が起動した master-cap の session を
 
 ## test
 - packages/center typecheck: 通る。
-- packages/center test: 623 件中 622 pass・1 fail。fail は既知の不安定 test「center を SIGKILL すると rc が孤児で残り…」で、単独再実行では pass（1/1）。1 回目の実行（622 件）でも同じ test が落ち、同様に単独では通った。
-- 追加した test: `capSessionName`（session-name.test.ts）、起動引数の `--remote-control <session>-cap` と messenger の `AGENT_MESSENGER_NAME`、X-Bantou-Session / X-Agent-Id / token / status が session 名のままである事（remote-control-wrapper.test.ts）、指示文の名前（system-instructions.test.ts）、cap_id が変わらない事（session-name.test.ts）。既存 test の期待値（`--name`、`--remote-control`、role@4）は更新。
+- packages/center test: 624 件中 623 pass・1 fail。fail は既知の不安定 test「center を SIGKILL すると rc が孤児で残り…」で、単独再実行では pass（1/1）。
+- 追加・更新した test: `capSessionName`（session-name.test.ts。`-cap` を重ねない）、起動引数の `--remote-control <session>-cap` と `-cap` で終わる名前を重ねない事、messenger の `AGENT_MESSENGER_NAME`、X-Bantou-Session / X-Agent-Id / token / status が session 名のままである事（remote-control-wrapper.test.ts）、旧経路の `--name`、指示文の名前と role@4（system-instructions.test.ts）、cap_id が変わらない事。
 - desktop: 変更が無い（画面は session 名＝内部の識別子を使い続ける）ので typecheck・e2e は回していない。
-- daemon の notify fallback（新名→旧名）は単体の test が無い（daemon の組み立て内。`notifyPeer` 自体の test は既存）。
+- daemon の notify（新名だけで引く）の単体 test は無い（daemon の組み立て内。`notifyPeer` 自体の test は既存）。
