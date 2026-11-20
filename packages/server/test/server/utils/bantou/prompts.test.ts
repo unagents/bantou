@@ -171,3 +171,47 @@ test("prompts: worker の system prompt に常設の制約（server / center を
   assert.ok(WORKER_GUIDE.includes("bantou-server / bantou-center を install・起動・停止・再起動しない"));
   assert.ok(WORKER_GUIDE.includes("report で報告するだけ"));
 });
+
+import { readFileSync } from "node:fs";
+import { COMMON_MD, REMOTE_CAP_MD, WORKER_MD } from "../../../../server/utils/bantou/instructions.generated";
+import { REMOTE_CAP_SECTIONS } from "../../../../server/utils/bantou/prompts";
+
+const readMd = (rel: string): string => readFileSync(new URL(rel, import.meta.url), "utf8");
+const COMMON_HEADINGS = ["bantou の体制", "窓口", "記録", "権限", "置き場", "待ち"];
+
+test("基盤仕様: 共通の文面（全見出し・全行）が CAP_GUIDE と WORKER_GUIDE の両方に入る", () => {
+  for (const g of [CAP_GUIDE, WORKER_GUIDE]) {
+    for (const h of COMMON_HEADINGS) assert.ok(g.includes(`\n[${h}]\n`), h);
+    for (const line of COMMON_MD.split("\n").filter((l) => l.trim() !== "")) assert.ok(g.includes(line), line);
+  }
+});
+
+test("基盤仕様: remote-cap の節見出しと全行が CAP_GUIDE に入り、worker の節見出しと全行が WORKER_GUIDE に入る（逆は入らない）", () => {
+  assert.deepEqual([...REMOTE_CAP_SECTIONS.keys()], ["役割", "自分の層で直し切る", "完了の判定", "見張り", "残った問題", "窓口を預かっている時"]);
+  for (const h of REMOTE_CAP_SECTIONS.keys()) assert.ok(CAP_GUIDE.includes(`\n[${h}]\n`), h);
+  for (const line of REMOTE_CAP_MD.split("\n").filter((l) => l.trim() !== "")) assert.ok(CAP_GUIDE.includes(line), line);
+  for (const h of ["範囲", "進め方", "終わる時"]) assert.ok(WORKER_GUIDE.includes(`\n[${h}]\n`), h);
+  for (const line of WORKER_MD.split("\n").filter((l) => l.trim() !== "")) assert.ok(WORKER_GUIDE.includes(line), line);
+  assert.ok(WORKER_GUIDE.includes("質問しない。止まらず最後まで進む"));
+  assert.ok(!CAP_GUIDE.includes("質問しない。止まらず最後まで進む"));
+  assert.ok(!WORKER_GUIDE.includes("[自分の層で直し切る]"));
+});
+
+test("基盤仕様: worker の案内に ask / approve を勧める記述は無い（口そのものは protocol に残る）", () => {
+  assert.ok(!/\bask\b|approve|質問・承認/.test(WORKER_GUIDE.replace("質問しない", "")));
+  assert.ok(WORKER_GUIDE.includes("kind: progress | done"));
+});
+
+test("基盤仕様: worker 終了通知の行と見張りの節は 1 つにまとまっている（見出しは 1 回、重複した節が無い）", () => {
+  assert.equal(CAP_GUIDE.split("[見張り]").length, 2);
+  assert.ok(!CAP_GUIDE.includes("[report が来ない worker]"));
+  const watch = CAP_GUIDE.slice(CAP_GUIDE.indexOf("[見張り]"), CAP_GUIDE.indexOf("[残った問題]"));
+  assert.ok(watch.includes("[worker 終了通知]") && watch.includes("再開の回数には上限") && watch.includes("idle になった時"));
+  assert.ok(watch.includes("報告を待つだけにしない"));
+});
+
+test("生成物: instructions.generated.ts は md と一致し、共通の文面は center の元と同じ", () => {
+  assert.equal(COMMON_MD, readMd("../../../../../center/instructions/common.md"));
+  assert.equal(REMOTE_CAP_MD, readMd("../../../../instructions/remote-cap.md"));
+  assert.equal(WORKER_MD, readMd("../../../../instructions/worker.md"));
+});

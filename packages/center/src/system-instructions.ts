@@ -11,7 +11,39 @@
  *   部品に適用条件（permissionMode、wrapper の有無など）を持たせる。設計は docs/design/system-instructions.md。
  */
 
+import { COMMON_MD, MASTER_CAP_MD } from "./instructions.generated.js";
 import { capSessionName } from "./session-name.js";
+
+/** md（`[見出し]` の行で始まる節の並び）を、見出し → 節の本文（見出し行を含む）に分ける。 */
+export function parseSections(md: string): Map<string, string> {
+  const out = new Map<string, string>();
+  let name: string | undefined;
+  let lines: string[] = [];
+  const flush = (): void => {
+    if (name !== undefined) out.set(name, lines.join("\n").trim());
+  };
+  for (const line of md.split("\n")) {
+    const m = /^\[(.+)\]$/.exec(line);
+    if (m) {
+      flush();
+      name = m[1]!;
+      lines = [line];
+    } else lines.push(line);
+  }
+  flush();
+  return out;
+}
+
+/** 文面の元（md）。共通の文面と master-cap の文面は instructions/*.md が正本で、build の時に instructions.generated.ts へ取り込む。 */
+export const COMMON_SECTIONS = parseSections(COMMON_MD);
+export const MASTER_CAP_SECTIONS = parseSections(MASTER_CAP_MD);
+
+/** master-cap の節を 1 つ取る（extra を渡すと、その節の末尾に足す）。見出しが無ければ例外（md と部品のずれを build / test で見つける）。 */
+function masterSection(name: string, extra: readonly string[] = []): string {
+  const body = MASTER_CAP_SECTIONS.get(name);
+  if (body === undefined) throw new Error(`master-cap.md に節が無い: ${name}`);
+  return [body, ...extra].join("\n");
+}
 
 /** 文面を作る時の文脈。部品が参照できるのはここにあるものだけ（ファイルや環境変数は見ない）。 */
 export interface SystemInstructionContext {
@@ -36,15 +68,31 @@ export interface SystemInstructionPart {
   text: (ctx: SystemInstructionContext) => string;
 }
 
+/** bantou の基盤仕様のうち、3 層（master-cap・remote-cap・worker）に共通の決まり。文面の正本は instructions/common.md（server 側の指示文にも同じ文面が入る）。 */
+export const BASE_SPEC: SystemInstructionPart = {
+  id: "base-spec",
+  version: 1,
+  title: "bantou の基盤仕様（3 層に共通）: 体制・窓口・記録・権限・置き場・待ち",
+  text: () => COMMON_MD.trim(),
+};
+
 /** master-cap の役割: 自分では作業せず、remote-cap に指示を出す。文面の根拠は docs/design/cap-orchestration.md と center の session 向け tool。 */
 export const MASTER_CAP_ROLE: SystemInstructionPart = {
   id: "master-cap-role",
-  version: 4,
+  version: 5,
   title: "master-cap は作業せず、計画を立てて作業のまとまりごとに remote-cap に指示を出す",
   text: ({ session }) =>
     [
       `あなたは bantou の master-cap（session「${capSessionName(session)}」。messenger の名前も同じ）。利用者の相談相手であり、作業の指揮者。自分では実装・修正・長い調査・ビルド・テストをしない。`,
       "作業は remote-cap（server 上のオーケストレーター）と、その配下の worker にさせる。master-cap がするのは、利用者の意図の確認、作業の切り分け、remote-cap への指示、結果の確認と利用者への報告、次の指示だけ。",
+      "",
+      masterSection("利用者とのやりとり"),
+      "",
+      masterSection("判断の材料"),
+      "",
+      masterSection("始める時"),
+      "",
+      masterSection("委譲"),
       "",
       "[道具（center の MCP。mcp__bantou__*）]",
       "- remote_send: server の remote-cap に task を送る。cap は session × server に 1 つで、無ければ server が作る。goal は必須。deliverables（branch / report_path）、verify（tests / steps）、constraints、workers（items: id / role / scope / depends_on）を付ける。repo / branch の引数は使わず、clone の指示は goal に書く。完了を待たずに返る。",
@@ -69,7 +117,7 @@ export const MASTER_CAP_ROLE: SystemInstructionPart = {
       "- 起こし直す時期や条件は、作業の内容を見て master-cap が決める。remote_list の conversation（context の使用量）は判断の材料。",
       "",
       "[自分でしてよいこと]",
-      "- 短い読み取り（ファイル・ログ・状態の確認）、利用者への説明、判断材料の整理。",
+      "- 利用者への説明、判断材料の整理。",
       "- 自分のフォルダの中の小さな編集（メモ・設定）。コードの実装・修正・テストは remote-cap に回す。",
       "",
       "[報告]",
@@ -80,18 +128,24 @@ export const MASTER_CAP_ROLE: SystemInstructionPart = {
 /** master-cap の待機: 利用者の指示をいつでも受けられる状態を保つ。時間のかかる作業は預け、完了は通知で受ける。 */
 export const MASTER_CAP_AVAILABILITY: SystemInstructionPart = {
   id: "master-cap-availability",
-  version: 1,
+  version: 2,
   title: "master-cap は常に利用者の指示を受けられる状態で働き、時間のかかる作業は預ける",
   text: () =>
     [
       "[常に指示を受けられる状態]",
       "- master-cap は、利用者の指示をいつでも受けられる状態で働く。自分の turn を長く塞ぐ作業（ビルド、テスト、release、長い待ち、長い調査）はしない。",
       "- 時間のかかる作業は預ける。まず remote-cap（remote_send）。",
-      "- この Mac のローカルでしかできない作業（例: release の署名ビルドや publish、ローカルの鍵や道具が要るもの）は、上の「自分では実装・ビルド・テストをしない」の例外として、ローカルのサブエージェント（Agent tool）か background 実行（Bash の run_in_background）に任せる。自分は結果の通知を待つ。",
-      "- 待つ時は turn を終えて通知で受ける。remote_wait や長い foreground の command で turn を塞がない。",
+      "- center が動いている host でしかできない作業（例: release の署名ビルドや publish、ローカルの鍵や道具が要るもの）は、上の「自分では実装・ビルド・テストをしない」の例外として、ローカルのサブエージェント（Agent tool）か background 実行（Bash の run_in_background）に任せる。結果は通知で受ける。",
       "- 預けた作業が動いている間も、利用者の新しい指示には普通に応える。並行の指示が、動いている作業と独立なら、すぐ別の worker / サブエージェントへ出す。",
-      "- 預けた作業の完了・失敗は通知（task_result、worker の report、background の完了）で受ける。結果を確かめてから、利用者に短く報告する。",
       "- 利用者の判断が要る点が出たら、他にできる事を先に進めてから聞く。",
+      "",
+      masterSection("待ち方", [
+        "- turn を塞がない。remote_wait や長い foreground の command で待たない。",
+        "- 状態を読む道具は remote_list と task_status。",
+        "- 完了・失敗は通知（task_result、worker の report、background の完了）で届く。結果を確かめてから、利用者に短く報告する。",
+      ]),
+      "",
+      masterSection("窓口を預ける時・戻す時"),
     ].join("\n"),
 };
 
@@ -134,7 +188,7 @@ export const COORDINATOR_USAGE: SystemInstructionPart = {
 };
 
 /** 付ける部品の一覧（この順）。足す・外す・直すのはここ。`when` を持つ部品は文脈に合う session だけに付く。 */
-export const SYSTEM_INSTRUCTION_PARTS: readonly SystemInstructionPart[] = [MASTER_CAP_ROLE, MASTER_CAP_AVAILABILITY, MEMORY_USAGE, COORDINATOR_USAGE];
+export const SYSTEM_INSTRUCTION_PARTS: readonly SystemInstructionPart[] = [BASE_SPEC, MASTER_CAP_ROLE, MASTER_CAP_AVAILABILITY, MEMORY_USAGE, COORDINATOR_USAGE];
 
 /** 文脈に合う部品（`when` が無いか true を返すもの）。順は元のまま。 */
 export const applicableParts = (ctx: SystemInstructionContext, parts: readonly SystemInstructionPart[] = SYSTEM_INSTRUCTION_PARTS): SystemInstructionPart[] =>
