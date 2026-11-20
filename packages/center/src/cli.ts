@@ -1,7 +1,12 @@
 #!/usr/bin/env node
-import { parseArgs, USAGE, type CliArgs } from "./args.js";
+import { readFileSync } from "node:fs";
+import { DEFAULT_CONFIG, parseArgs, USAGE, type CliArgs } from "./args.js";
 import { runDaemon } from "./daemon.js";
 import { fatalLine } from "./log.js";
+// 静的 import にする（動的 import にしない）。daemon.ts / sessions.ts が静的に import している module を
+// ここで動的 import すると、bun build --compile がその依存（zod）を遅延初期化に包み、MCP SDK の
+// top-level が zod の初期化前に走って起動時に落ちる（0.1.54: TypeError: undefined is not a constructor）。
+import { runMemoryCli } from "./memory-settings.js";
 
 if (process.argv[2] === "status-line") {
   // claude の statusLine から呼ばれるサブコマンド（stdin の JSON を center に POST する）。daemon は読み込まない
@@ -17,9 +22,6 @@ if (process.argv[2] === "hook") {
 
 if (process.argv[2] === "memory") {
   // 外部記憶の設定（center の側だけで扱う。MCP からは変えられない）。daemon は読み込まない
-  const { runMemoryCli } = await import("./memory-settings.js");
-  const { readFileSync } = await import("node:fs");
-  const { DEFAULT_CONFIG } = await import("./args.js");
   process.exit(
     runMemoryCli(process.argv.slice(3), DEFAULT_CONFIG, {
       readStdin: () => readFileSync(0, "utf8"),
