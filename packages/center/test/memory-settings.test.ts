@@ -79,6 +79,25 @@ test("不正な入力は exit 2 で、token の値を出さず、何も書かな
   await assert.rejects(stat(join(dir, MEMORY_SETTINGS_FILE)));
 });
 
+test("引数に書かれた値（--token VALUE / --token=VALUE / 余分な位置引数 / 不明な --x=VALUE）は error の文にも出力にも出ず、何も書かない", async () => {
+  const cases = [
+    ["set", "--url", "http://m/x", "--token", "ARGSECRET1"],
+    ["set", "--url", "http://m/x", "--token=ARGSECRET2"],
+    ["set", "--url", "http://m/x", "ARGSECRET3"],
+    ["get", "ARGSECRET4"],
+    ["unset", "--bogus=ARGSECRET5"],
+    ["set", "--url", "http://m/x", "--url=ARGSECRET6"],
+    ["set", "--url", "http://m/x", "-tARGSECRET7"],
+  ];
+  for (const argv of cases) {
+    const r = run(argv);
+    assert.equal(r.code, 2, JSON.stringify(argv));
+    assert.ok(!/ARGSECRET/.test(r.err + r.out), `${JSON.stringify(argv)}: ${r.err}`);
+  }
+  assert.match(run(["unset", "--bogus=ARGSECRET5"]).err, /--bogus/, "名前は出す");
+  await assert.rejects(stat(join(dir, MEMORY_SETTINGS_FILE)));
+});
+
 test("MemoryFile: 外から書き換えられた内容を次の resolve から読む。壊れた file は無いとして扱い、値は log に出ない", async () => {
   const logs: string[] = [];
   const f = createMemoryFile(dir, (m) => logs.push(m));

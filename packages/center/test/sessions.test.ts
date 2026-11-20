@@ -751,6 +751,34 @@ test("memory: 旧形式（sessions.json / center-settings.json の memory）は 
   for (const l of logs) assert.ok(!/SECRET/.test(l), l);
 });
 
+test("memory: 旧形式の移行で memory-settings.json に書けなければ、旧形式を消さず・読み捨てず、この起動は旧い値で動く。失敗を log に残し、値は出さない", async () => {
+  const logs: string[] = [];
+  await writeFile(join(dir, "center-settings.json"), JSON.stringify({ instructions: "ic", memory: { url: "http://old-common/mcp", token: "OLD-COMMON-SECRET" } }));
+  await mkdir(join(dir, "pa"), { recursive: true });
+  await writeFile(join(dir, "sessions.json"), JSON.stringify([{ name: "a", path: join(dir, "pa"), permissionMode: "auto", settings: { instructions: "ia", memory: { url: "http://old-a/mcp", token: "OLD-A-SECRET" } }, createdAt: "2026-01-01T00:00:00Z" }]));
+  const before = { c: await readFile(join(dir, "center-settings.json"), "utf8"), s: await readFile(join(dir, "sessions.json"), "utf8") };
+  const memoryFile = createMemoryFile(dir);
+  memoryFile.write = () => {
+    throw new Error("EACCES: permission denied, open 'memory-settings.json'");
+  };
+  const { mgr } = setup({ memoryFile, log: (m: string) => void logs.push(m) });
+  await mgr.restore();
+  // 旧い値で動く（session の値が先、無ければ共通）
+  assert.deepEqual(mgr.memoryOf("a"), { url: "http://old-a/mcp", token: "OLD-A-SECRET" });
+  assert.deepEqual(mgr.memoryOf("other"), { url: "http://old-common/mcp", token: "OLD-COMMON-SECRET" });
+  // 旧形式は消えていない
+  assert.equal(await readFile(join(dir, "center-settings.json"), "utf8"), before.c);
+  assert.equal(await readFile(join(dir, "sessions.json"), "utf8"), before.s);
+  assert.ok(logs.some((l) => /移せない/.test(l)), "失敗を log に残す");
+  for (const l of logs) assert.ok(!/SECRET/.test(l), l);
+  // 書き込みが直った次の起動では移る
+  const memoryFile2 = createMemoryFile(dir);
+  const { mgr: mgr2 } = setup({ memoryFile: memoryFile2, log: () => {} });
+  await mgr2.restore();
+  assert.deepEqual(memoryFile2.read().sessions.a, { url: "http://old-a/mcp", token: "OLD-A-SECRET" });
+  assert.ok(!/memory|SECRET/.test(await readFile(join(dir, "sessions.json"), "utf8")));
+});
+
 test("coordinator: 起動の時と center 共通の設定の更新で supervisor に渡り、coordinatorOf は呼ぶたびに今の設定を返す", async () => {
   const { mgr, opts } = setup();
   assert.equal(mgr.coordinatorOf(), null);

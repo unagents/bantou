@@ -3,7 +3,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
 import { projectSchema, PERMISSION_MODES, type Config, type ProjectConfig } from "./config.js";
 import { assertNoMemory, CENTER_SERVERS_ERROR, composeAddDirs, composeInstructions, composeOutputStyle, composeServers, mergeSettings, projectSettingsPatchSchema, readCenterSettings, readCoordinator, readSettings, type CenterSettingsPatch, type MemorySetting, type ProjectSettings, type ProjectSettingsPatch } from "./project-settings.js";
-import { parseMemoryFile, type MemoryFile } from "./memory-settings.js";
+import { parseMemoryFile, type MemoryFile, type MemoryFileData } from "./memory-settings.js";
 import type { Logger } from "./log.js";
 import type { RcStatus, RemoteControlSupervisor } from "./remote-control.js";
 import type { EventHub } from "./events.js";
@@ -232,7 +232,15 @@ export function createSessionManager(opts: {
     try {
       f.write(d);
     } catch (e) {
-      log(`外部記憶の設定を memory-settings.json へ移せない（旧形式のまま残す）: ${e instanceof Error ? e.message : String(e)}`);
+      // 旧形式は消さず、この起動の間は旧い値で動く（次の起動で移し直す）。fs のエラー文は path だけで、値は出さない
+      const legacy: MemoryFileData = { sessions: {} };
+      if (lc) legacy.common = lc;
+      for (const s of withKey) {
+        const m = legacyOf(s.settings);
+        if (m) legacy.sessions[s.name] = m;
+      }
+      f.useFallback(legacy);
+      log(`外部記憶の設定を memory-settings.json へ移せない（旧形式のまま残し、この起動は旧い値で動く）: ${e instanceof Error ? e.message : String(e)}`);
       return false;
     }
     if (commonHas && opts.centerStore) await opts.centerStore.save(readCenterSettings(rawCommon));

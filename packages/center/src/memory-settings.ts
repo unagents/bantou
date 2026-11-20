@@ -26,6 +26,10 @@ export interface MemoryFile {
   write(data: MemoryFileData): void;
   /** session の外部記憶（session の値、無ければ共通、どちらも無ければ undefined）。 */
   resolve(session: string): MemorySetting | undefined;
+  /**
+   * 旧形式から移せなかった値（memory-settings.json に書けなかった時）をこの起動の間だけ使う。file の値が優先。保存はしない。
+   */
+  useFallback(data: MemoryFileData): void;
 }
 
 let tmpSeq = 0;
@@ -56,6 +60,7 @@ export function parseMemoryFile(raw: unknown): MemoryFileData {
 export function createMemoryFile(stateDir: string, log: (m: string) => void = () => {}): MemoryFile {
   const path = join(stateDir, MEMORY_SETTINGS_FILE);
   let cache: { key: string; data: MemoryFileData } | undefined;
+  let fallback: MemoryFileData | undefined;
   const read = (): MemoryFileData => {
     let key: string;
     try {
@@ -90,7 +95,10 @@ export function createMemoryFile(stateDir: string, log: (m: string) => void = ()
     },
     resolve(session) {
       const d = read();
-      return d.sessions[session] ?? d.common;
+      return d.sessions[session] ?? fallback?.sessions[session] ?? d.common ?? fallback?.common;
+    },
+    useFallback(data) {
+      fallback = data;
     },
   };
 }
@@ -151,8 +159,12 @@ export function runMemoryCli(argv: string[], defaultConfig: string, deps: Memory
       else if (k === "--token-file" && action === "set") o.tokenFile = val();
       else if (k === "--token-stdin" && action === "set") o.tokenStdin = true;
       else if (k === "--clear-token" && action === "set") o.clearToken = true;
-      else if (k === "--token") throw new Error("token は引数に書けない（--token-stdin か --token-file を使う）");
-      else throw new Error(`不明な引数: ${k}`);
+      else if (k === "--token" || k.startsWith("--token=")) throw new Error("token は引数に書けない（--token-stdin か --token-file を使う）");
+      else {
+        // 値が混ざりうるので、引数の中身は出さない（`--名前` の名前の部分だけ出す）
+        const name = /^--[A-Za-z][A-Za-z0-9-]*/.exec(k)?.[0];
+        throw new Error(name ? `不明な引数: ${name}（値を引数に書けない。token は標準入力か file を使う）` : "不明な引数（位置引数は受け付けない。値を引数に書けない。token は標準入力か file を使う）");
+      }
     }
     if (o.session !== undefined && !SESSION_NAME.test(o.session)) throw new Error("session は英数字と _ - のみ");
     if ([o.tokenStdin, o.tokenFile !== undefined, o.clearToken].filter(Boolean).length > 1) throw new Error("--token-stdin / --token-file / --clear-token は 1 つだけ");
