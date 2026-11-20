@@ -9,7 +9,7 @@ branch: `feat/web-5a-app-shell`（origin/develop 7e086d7 から）。HEAD の SH
     - 新しい stream が開いた時に `bantou://sessions-changed` を listener へ流す（backend が stream 接続前に変えた一覧は replay が無く、一覧が空のまま止まるため。e2e で見つけた）。落ちて再接続した時は `bantou://os-wake` も流し、center の取りこぼしを読み直させる。
     - browser が諦めた stream（Access 切れの redirect など）は閉じて、5〜60 秒の間隔で開き直す。
     - 端末の出力・入力（`body`）は 5b なので未対応（呼ぶと RpcError）。
-  - `session-watch.ts`: 設計書 5.2。SSE の失敗が 3 回続く、または browser が諦めたら `/api/me` を呼び、backend の答えでなければ（redirect・HTML・非 2xx）reload。通信不能（offline）では reload しない。30 秒以内の再 reload は拒否（ログインできない時の loop 防止）。command が 401/403/redirect の時も同じ確認。
+  - `session-watch.ts`: 設計書 5.2。SSE の失敗が 3 回続く、または browser が諦めたら `/api/me` を呼び、backend の答えでなければ（redirect・HTML・非 2xx）reload。通信不能（offline）では reload しない。reload は同一タブで 10 分に 2 回まで（sessionStorage に時刻を持つ）。続けて 2 回 reload しても直らない時（許可外 email の 403 など）は止めて、画面に「許可されていません」（`data-testid=access-denied`）を出す。stream が開けば履歴を消す。command が 401/403/redirect の時、および 2xx なのに本文が JSON でない時（login 画面の HTML が 200 で来る場合）も同じ確認。後者は `RpcError` にする（本文が空の 2xx は従来どおり undefined で通る）。
   - `platform.ts`: browser 用 Platform。
 - `app/pages/index.vue`: スマホ向け一覧（設計書 7.1 の 1 階層目）。`useBoard` / `useSessionBoard`（ui の共有 composable）を使用。「接続先が無い」「center に問い合わせられなかった」「session が無い」の表示。
 - `server/plugins/00.guard.ts`: 守りを h3 stack の先頭に積む（下記）。`server/middleware/00.guard.ts` は削除。
@@ -21,16 +21,16 @@ Nitro の静的配信（public/ と `/_nuxt/*`）は server middleware より先
 ## 確認の結果
 | 確認 | 結果 |
 |---|---|
-| packages/web test（`node --test`） | 68 件 pass（既存 62 + 配線 1 + session-watch 5） |
+| packages/web test（`node --test`） | 75 件 pass（既存 62 + 配線 1 + app/tauri の test 12） |
 | packages/web typecheck（`tsc --noEmit` と `nuxt typecheck`） | pass（tsconfig の lib に DOM を追加。test が app/tauri を import するため） |
 | packages/web `nuxt build` | pass |
-| packages/web e2e（Playwright、chromium headless shell を executablePath 指定、`--retries=1 --workers=1`） | 7 件 pass |
+| packages/web e2e（Playwright、chromium headless shell を executablePath 指定、`--retries=1 --workers=1`） | 8 件 pass |
 | packages/center-client test | 229 件 pass |
 | packages/center-client typecheck | pass |
 | desktop typecheck（`nuxt typecheck`） | pass |
 | desktop の mock e2e（220 件） | 回していない。packages/ui・desktop は 1 行も変えていない（`git diff origin/develop -- packages/ui packages/desktop` が空）ため |
 
-e2e の中身（`packages/web/e2e/`）: 実際に build した backend（守りの内側）+ 偽 JWKS + 署名済み JWT（Cloudflare の代わりに request header で付与）+ 偽 center（127.0.0.1 のみ、空き port）。一覧が出る／center の event で一覧が SSE 経由で変わる／空の一覧／鍵・JWT なしでは何も出ない／接続先なしで「接続先が無い」／stream が戻らず `/api/me` が backend の答えでない時に reload／`/api/me` が答える時は reload しない。`bun run e2e` は `nuxt build` の後に playwright を回す。`CHROMIUM_PATH` で chromium の実行 file を指定できる。
+e2e の中身（`packages/web/e2e/`）: 実際に build した backend（守りの内側）+ 偽 JWKS + 署名済み JWT（Cloudflare の代わりに request header で付与）+ 偽 center（127.0.0.1 のみ、空き port）。一覧が出る／center の event で一覧が SSE 経由で変わる／空の一覧／build 済みの `/` と `/_nuxt/*.js` が、鍵・JWT なし 403・JWT のみ 403・鍵のみ 401・両方ありで 200（entry 名は `/` の HTML から取る）／鍵・JWT なしの browser には page が出ない／接続先なしで「接続先が無い」／stream 失敗→`/api/me`→reload の順序を確かめ、直らない時は 2 回で止まって「許可されていません」／stream が 3 回つながらなくても `/api/me` が backend の答えなら reload しない（`/api/me` の応答を待ってから判定）。`bun run e2e` は `nuxt build` の後に playwright を回す。`CHROMIUM_PATH` で chromium の実行 file を指定できる。
 
 ## 動かせなかった確認と理由
 - desktop の mock e2e（220 件）: 上記の通り ui・desktop 無変更のため未実施。
@@ -44,3 +44,11 @@ e2e の中身（`packages/web/e2e/`）: 実際に build した backend（守り�
 
 ## 足した依存
 packages/web の devDependencies に `@playwright/test ^1.63.0`（e2e）と `vue-tsc 3.2.5`（`nuxt typecheck` が要求。desktop と同じ版）。bun.lock は workspace の 2 行のみ。version は変えていない。
+
+## review 往復 1 回目の反映
+- reload の回数制限と「許可されていません」の表示（`planReload` の test 4 件）。
+- JSON でない 2xx を `RpcError` に（test 3 件）。
+- e2e: asset を直接 request して 403/401/200 を確認。reload の順序と `/api/me` が呼ばれた事を確認。負の確認は固定の待ちでなく、`/api/me` の応答と stream の復帰を待つ条件待ちに。
+
+## 残った事
+- 5a の commit（caef92a、e0b0c8f、5ad7f05、04a34f2）の author が develop の author と違う。force-push・rebase は禁止のため直していない。

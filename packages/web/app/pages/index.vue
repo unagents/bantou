@@ -1,8 +1,15 @@
 <script setup lang="ts">
 import { fetchHealth, type WebHealth } from "~/utils/health";
+import { isAccessDenied, onAccessDenied } from "~/tauri/session-watch";
 
 // Phone screen, level 1: the center's session list (design 7.1). The selection / filter state is the shared
 // composable the desktop's 3 columns use; only the layout is the web's own. A row leads to the session's page later (5b).
+// Reloading did not bring the session back (a 403 a login cannot fix): say so instead of looping.
+const denied = ref(isAccessDenied());
+let stopDenied: (() => void) | null = null;
+onMounted(() => (stopDenied = onAccessDenied(() => (denied.value = true))));
+onBeforeUnmount(() => stopDenied?.());
+
 const board = useBoard(ref<string | null>(null));
 const { centerList, activityCounts } = board;
 const { sideRows, activityFilter, toggleFilter } = useSessionBoard(board);
@@ -29,7 +36,11 @@ const reason = computed(() => health.value?.reason ?? centerList.value.reason);
   <div class="bg-default text-default flex h-dvh flex-col overflow-hidden">
     <WebHeader title="bantou" :unreachable="loaded && !centerList.reachable && !noTarget" />
     <main class="min-h-0 flex-1 overflow-y-auto" data-testid="session-list-page">
-      <p v-if="!loaded" class="text-cork-muted p-4 text-sm" data-testid="list-loading">読み込み中…</p>
+      <div v-if="denied" class="p-4 text-sm" role="alert" data-testid="access-denied">
+        <p class="font-semibold">許可されていません</p>
+        <p class="text-cork-muted mt-1">このアカウントではこの web を使えない。管理者に確認してほしい。</p>
+      </div>
+      <p v-else-if="!loaded" class="text-cork-muted p-4 text-sm" data-testid="list-loading">読み込み中…</p>
       <div v-else-if="noTarget" class="p-4 text-sm" data-testid="no-target">
         <p class="font-semibold">接続先が無い</p>
         <p class="text-cork-muted mt-1">この web が指す center が設定されていない。</p>
@@ -38,7 +49,7 @@ const reason = computed(() => health.value?.reason ?? centerList.value.reason);
         <p class="font-semibold">center に問い合わせられなかった</p>
         <p v-if="reason" class="text-cork-muted mt-1 break-words">{{ reason }}</p>
       </div>
-      <template v-if="loaded && !noTarget">
+      <template v-if="!denied && loaded && !noTarget">
         <div
           v-if="sessionCount"
           class="border-cork-border flex flex-wrap items-center gap-1 border-b px-2 py-1.5 text-xs"

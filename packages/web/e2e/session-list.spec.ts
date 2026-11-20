@@ -29,14 +29,30 @@ test.describe("session list (phone, level 1)", () => {
 });
 
 test.describe("guard and target", () => {
-  test("without the shared key / JWT nothing is served (page and assets)", async ({ stack, browser }) => {
+  test("the SPA's HTML and built /_nuxt asset are not served without the shared key / JWT", async ({ stack }) => {
+    const key = stack.headers["x-bantou-proxy-key"]!;
+    const jwt = stack.headers["cf-access-jwt-assertion"]!;
+    // the entry asset's name comes from the page itself
+    const html = await (await fetch(stack.base + "/", { headers: stack.headers })).text();
+    const asset = html.match(/\/_nuxt\/[^"'\s]+\.js/)?.[0];
+    expect(asset, "the SPA HTML names a /_nuxt/*.js entry").toBeTruthy();
+    const get = (path: string, headers: Record<string, string>) => fetch(stack.base + path, { headers });
+    for (const path of ["/", asset!]) {
+      expect((await get(path, {})).status, `${path}: no key, no JWT`).toBe(403);
+      expect((await get(path, { "cf-access-jwt-assertion": jwt })).status, `${path}: JWT only`).toBe(403);
+      expect((await get(path, { "x-bantou-proxy-key": key })).status, `${path}: key only`).toBe(401);
+      const ok = await get(path, stack.headers);
+      expect(ok.status, `${path}: key and JWT`).toBe(200);
+      expect((await ok.text()).length).toBeGreaterThan(50);
+    }
+  });
+
+  test("a browser without the headers gets no page", async ({ stack, browser }) => {
     const ctx = await browser.newContext({ extraHTTPHeaders: {} }); // no Cloudflare headers
     const page = await ctx.newPage();
     const res = await page.goto(stack.base + "/");
     expect(res?.status()).toBe(403);
     expect(await page.content()).not.toContain("_nuxt");
-    const noJwt = await ctx.request.get(stack.base + "/api/me", { headers: { "x-bantou-proxy-key": stack.headers["x-bantou-proxy-key"]! } });
-    expect(noJwt.status()).toBe(401);
     await ctx.close();
   });
 
@@ -55,40 +71,47 @@ test.describe("Access session expiry (design 5.2)", () => {
   // The first event stream ends by itself (a dropped connection); the browser reconnects after `retry` ms.
   const DROPPED = { status: 200, contentType: "text/event-stream", body: "retry: 200\n: hi\n\n" } as const;
 
-  test("reloads when the stream cannot come back and /api/me no longer answers as the backend", async ({ page, stack }) => {
+  test("stream fails -> /api/me asked -> reload (in that order); a refusal that reloading cannot fix ends in a message, not a loop", async ({ page, stack }) => {
     stack.setSessions(["alpha"]);
     // Cloudflare after the Access session is gone: a redirect to the login page for the stream, the login page (HTML 200) for /api/me
+    const order: string[] = [];
     let streams = 0;
-    await page.route("**/api/events", (route) =>
-      ++streams === 1 ? route.fulfill(DROPPED) : route.fulfill({ status: 302, headers: { location: "/cdn-cgi/access/login" } }),
-    );
+    await page.route("**/api/events", (route) => {
+      if (++streams === 1) return route.fulfill(DROPPED);
+      order.push("stream-failed");
+      return route.fulfill({ status: 302, headers: { location: "/cdn-cgi/access/login" } });
+    });
     await page.route("**/cdn-cgi/access/login", (route) => route.fulfill({ status: 200, contentType: "text/html", body: "<html>login</html>" }));
-    let meAsked = 0;
     await page.route("**/api/me", (route) => {
-      meAsked++;
+      order.push("me");
       return route.fulfill({ status: 200, contentType: "text/html", body: "<html>login</html>" });
     });
     let loads = 0;
-    page.on("load", () => loads++);
-    await page.goto("/");
-    // the page was loaded once; the reload is a second load
-    await expect.poll(() => loads, { timeout: 20_000 }).toBeGreaterThanOrEqual(2);
-    expect(meAsked).toBeGreaterThan(0); // it asked before reloading
-  });
-
-  test("does not reload while /api/me answers (a plain drop of the stream)", async ({ page, stack }) => {
-    stack.setSessions(["alpha"]);
-    let streams = 0;
-    await page.route("**/api/events", (route) => (++streams === 1 ? route.fulfill(DROPPED) : route.continue()));
-    let navigations = 0;
-    page.on("framenavigated", (f) => {
-      if (f === page.mainFrame()) navigations++;
+    page.on("load", () => {
+      if (++loads > 1) order.push("reload");
     });
     await page.goto("/");
+    await expect(page.getByTestId("access-denied")).toBeVisible({ timeout: 20_000 });
+    expect(loads).toBe(3); // the page, and MAX_RELOADS (2) reloads; then it stops
+    // every reload came after a failed stream and an /api/me question
+    expect(order.slice(0, 3)).toEqual(["stream-failed", "me", "reload"]);
+    expect(order.indexOf("reload")).toBeGreaterThan(order.indexOf("me"));
+    expect(order.filter((x) => x === "reload")).toHaveLength(2);
+  });
+
+  test("does not reload while /api/me answers (the stream fails to connect three times, then comes back)", async ({ page, stack }) => {
+    stack.setSessions(["alpha"]);
+    let streams = 0;
+    await page.route("**/api/events", (route) => (++streams <= 3 ? route.abort("connectionrefused") : route.continue()));
+    let loads = 0;
+    page.on("load", () => loads++);
+    const me = page.waitForResponse((r) => r.url().endsWith("/api/me")); // three failures make it ask
+    await page.goto("/");
+    expect((await me).status()).toBe(200); // the backend's own answer: the session is fine
+    const loadsAtAnswer = loads;
+    await expect.poll(() => streams, { timeout: 10_000 }).toBeGreaterThan(3); // the stream came back
     await expect(page.getByTestId("side-row")).toHaveCount(1);
-    await expect.poll(() => streams, { timeout: 10_000 }).toBeGreaterThan(1); // it came back
-    const settled = navigations;
-    await page.waitForTimeout(2000);
-    expect(navigations).toBe(settled);
+    expect(loads).toBe(loadsAtAnswer);
+    await expect(page.getByTestId("access-denied")).toHaveCount(0);
   });
 });
