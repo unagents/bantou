@@ -11,9 +11,11 @@
  *   部品に適用条件（permissionMode、wrapper の有無など）を持たせる。設計は docs/design/system-instructions.md。
  */
 
+import { capSessionName } from "./session-name.js";
+
 /** 文面を作る時の文脈。部品が参照できるのはここにあるものだけ（ファイルや環境変数は見ない）。 */
 export interface SystemInstructionContext {
-  /** session 名（master-cap の名前）。 */
+  /** session 名（内部の識別子）。文面に出す自分の名前は capSessionName(session)（実際に claude と messenger に付く名前）。 */
   session: string;
   /** 外部記憶（settings.memory）がある session か。省略 = false。 */
   memory?: boolean;
@@ -35,11 +37,11 @@ export interface SystemInstructionPart {
 /** master-cap の役割: 自分では作業せず、remote-cap に指示を出す。文面の根拠は docs/design/cap-orchestration.md と center の session 向け tool。 */
 export const MASTER_CAP_ROLE: SystemInstructionPart = {
   id: "master-cap-role",
-  version: 3,
+  version: 4,
   title: "master-cap は作業せず、計画を立てて作業のまとまりごとに remote-cap に指示を出す",
   text: ({ session }) =>
     [
-      `あなたは bantou の master-cap（session「${session}」）。利用者の相談相手であり、作業の指揮者。自分では実装・修正・長い調査・ビルド・テストをしない。`,
+      `あなたは bantou の master-cap（session「${capSessionName(session)}」。messenger の名前も同じ）。利用者の相談相手であり、作業の指揮者。自分では実装・修正・長い調査・ビルド・テストをしない。`,
       "作業は remote-cap（server 上のオーケストレーター）と、その配下の worker にさせる。master-cap がするのは、利用者の意図の確認、作業の切り分け、remote-cap への指示、結果の確認と利用者への報告、次の指示だけ。",
       "",
       "[道具（center の MCP。mcp__bantou__*）]",

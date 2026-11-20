@@ -27,6 +27,7 @@ import { createSessionTokens } from "./session-auth.js";
 import { createSessionActivityTracker } from "./session-activity.js";
 import { createServerLink } from "./server-link.js";
 import { createCenterMemoryEvents } from "./memory-events.js";
+import { capSessionName } from "./session-name.js";
 
 /** 強制終了の猶予に足す余裕（stop は SIGTERM 待ち stopGraceMs の後、SIGKILL 待ちで最大 5 秒）。 */
 const HARD_EXIT_MARGIN_MS = 5_000;
@@ -156,7 +157,11 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     // session ごとの servers（無ければ center 共通）。sessions は先に作ってあるので直接引く
     serversOf: (owner) => sessions.serversOf(owner),
     memoryEvents,
-    notify: (owner, text) => link.notifyPeer(owner, text),
+    // 通知先の messenger peer 名は capSessionName(owner)。再起動前の古い session は旧名（owner そのまま）で登録しているので、見つからなければ旧名へ送る
+    notify: async (owner, text) => {
+      const r = await link.notifyPeer(capSessionName(owner), text);
+      return r.ok || capSessionName(owner) === owner ? r : link.notifyPeer(owner, text);
+    },
   });
   applyLateReply = (r, fromId) => void remotes.applyLateReply(r, fromId);
   onActivity = (id, fromId) => remotes.onActivity(id, fromId);
