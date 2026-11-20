@@ -117,3 +117,54 @@ README の節に同じ内容がある。要点:
 - `mcp-status.json` の書き込みに lock が無い。2 つの command が同時に `test` すると後勝ち（他の接続の結果が消えうる）。壊れた file は空として読み、次の `test` で上書きされる。
 - `--stdin` を端末で使うと入力が端末に表示される（echo off にしていない）。パイプか `--file` を使う前提。
 - status の key `<scope>/<名前>` は、session 名に `/` が入らない規則（`[A-Za-z0-9_-]`）なので衝突しないが、scope に `common` という名前の session があると共通と区別できない。
+
+---
+
+# review の反映（往復 2 回目）
+
+基点: `cc2d572b16062eb327205bae53c55b2815fbc867`。この上に commit した。
+
+## 直した 3 件
+
+### M-A（medium）: 値らしさの検査が正当な既存データを壊れた file にした
+
+- 状況: 前回入れた名前の検査（64 文字以内 + 値らしさ）を file の読み込みにも使っていたため、設計が許す名前（`relay.<64 文字の session 名>` = 70 文字、`memory.alice20261121abcd`）の entry が捨てられ、list は接続 0 件に見え、secret list は鍵を捨て、set は「壊れた file」で exit 1 になった。
+- 方針: 検査を 2 つに分けた（`src/mcp-secrets.ts`）。
+  - `checkSecretNameShape`: 設計の R-15 のとおり、英数字と `. _ -` の **100 文字以内**（上限を 64 から 100 に戻した）。**file の読み込み**（鍵の file、接続の file の `auth.secret`）はこれだけ。
+  - `checkSecretNameNew`: 形に加えて値らしさを見る。**新しく書く時だけ**（`set --secret`、`secret set <名前>`、`secret unset <名前>`）。
+- 値らしさの規則（新規の書き込みだけ）:
+  - 値によくある接頭辞（`sk-`・`ghp_`・`github_pat`・`xox*`・`AKIA`・`eyJ`・`Bearer` など + 英数字 8 文字以上）で始まる物は断る。
+  - 区切り（`. _ -`）で分けた各部分の英数字の連続について、16 文字以上で文字種（小文字・大文字・数字）の切り替えが 6 回以上なら乱数らしいので断る（前回の「16 文字以上で英字と数字が混ざる」は `alice20261121abcd` のような日付つきの名前も断ったため、切り替えの回数に変えた）。
+  - 連続が 24 文字以上なら断る。ただし `<接続名>.<session 名>` の形の session 名の部分は、長い session 名がありうるので、長さだけでは断らない（乱数らしさの規則は当てる）。
+- `secret unset <名前>` は、名前が既に鍵の file にあれば値らしくても消せる（保存済みの名前を消せなくならないように）。無い名前は新規の書き込みと同じ検査。
+- 前回の値らしい 7 種は新規の書き込みで断られ続ける（test で確認）。
+- 限界（前回と同じ）: 名前として通る形の値は事前に区別できない。接頭辞が `sk-live-…` のように区切りの後に短い語を挟む形は、接頭辞の規則だけでは判らず、乱数らしさの規則に当たらなければ通る。
+
+### L-A（low）: usage に限界を書いた
+
+usage に「名前の検査は値らしい形を断るだけの緩和で、短い値は名前として通りうる。値は必ず標準入力か file で渡す」を足した。
+
+### L-B（low）: 接頭辞の検査単独の test
+
+他の規則（長さ・連続・切り替え）に当たらない `sk-abcdefgh`・`ghp_abcdef1234`・`AKIAIOSFODNN7EXAMPLE`・`github_pat_abcdefgh`・`eyJhbGciOiJIUzI1` が、接頭辞の規則だけで断られる test。接頭辞に見えても短い名前（`sk-1`・`key-main`・`token.s1`・`pass-a`）は通る。
+
+## test（`test/mcp-connections.test.ts` を 31 件に。前回の 1 件を置き換え、3 件追加）
+
+- 設計が許す名前（70 文字の `relay.<64 文字の session 名>`、`memory.alice20261121abcd`、`relay`、`memory.alice`、`k-1_x`、`relay-prod.s_1`）が、`secret set` と `set --secret` の新規の書き込みで断られない。
+- 手書きの file（上の 2 つの長い名前を含む鍵 3 件と、それを指す接続 3 件）が読め、list が接続 3 件と鍵の状態（rev）を出し、secret list が 3 件、`set` が exit 0（壊れた file 扱いにならない）、`secret unset` も動く。
+- 値らしい 7 種（前回）+ 接頭辞だけで判る 5 種が、`secret set` と `set --secret` の両方で断られ続け、何も保存されない。
+- 接頭辞の検査単独（上記）。
+
+## 確認
+
+- `packages/protocol` を build。`packages/center` の `tsc --noEmit`: 0 件。
+- center 全体: 710 件、709 pass、1 fail。落ちたのは既知の不安定「center を SIGKILL すると rc が孤児で残り…」だけ。
+- 変異（入れて落ちる事を確かめて戻した）:
+  - 接頭辞の行を外す → 4 件が落ちる（`--secret`、位置引数、断られ続ける test、接頭辞単独の test）。
+  - 名前の上限を 100 から 64 に戻す（旧の挙動）→ 2 件が落ちる（長い名前の新規の書き込み、手書きの file が読める事）。
+  - 戻した後の `git status` は変異の痕跡なし。
+  - 参考: 読み込みに `checkSecretNameNew` を当てる変異は、新しい規則では 2 つの正当な名前が通るため落ちない（意図どおり。読み込みの寛容さは上限 100 の変異で守っている）。
+
+## 直さない low（前回どおり）
+
+`allow '*'` 未実装、平文 http の確認が set の時だけ、status の lock・壊れた file、`--stdin` の端末表示、status の key の衝突。内容は前回の節に書いたとおり。
