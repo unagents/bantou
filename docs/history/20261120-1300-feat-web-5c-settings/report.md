@@ -44,3 +44,19 @@ branch: feat/web-5c-settings
 - typecheck: packages/web、packages/desktop（ui を含む）とも rc=0、error なし。
 - nuxt build（packages/web）: 成功。
 - desktop e2e: 変更は SettingsDialog の web 分岐（と早期 return）だけで desktop 経路に触れないため、全 220 件でなく関連 spec（settings、settings-remote-center、local-network、login、session-instructions）の 75 件を実行: 75 passed / 0 failed。前回の全件 220 passed は初回 commit 時点の結果。
+
+## develop（dbb7e852f467ef913354d04cdf969a02823be434）取り込みと衝突解消、確認結果
+`git merge --no-ff origin/develop`（rebase なし）。衝突は 2 file、指示どおりの解で解消した（他の file は触っていない）。
+- `packages/web/app/components/WebHeader.vue`: `defineProps` は develop 版（`title`、`unreachable?`、`back?`）、`defineEmits<{ settings: [] }>()` は 5c の物を残した。template は自動 merge で両方（先頭の back の NuxtLink = `web-back`、末尾の設定 UButton = `web-settings-open`、unreachable の class 切替）が入っている。
+- `packages/web/app/pages/index.vue`: develop の構造（tab nav、server tab の `ServerCapCards`、session tab の `session-list-page`）に、`<WebHeader @settings="settingsOpen = true">` と `<SettingsDialog v-if="settingsOpen" v-model:open="settingsOpen" />` を足した。`settingsOpen` の宣言は 5c 側のまま。
+
+merge 後の確認:
+- web e2e: 21 passed / 0 failed（terminal 6、session-list 8、settings 7）。settings に「session / server tab のどちらからでも設定ダイアログが開き Escape で閉じ、tab の選択が保たれ、404 が 0」の test を 1 件追加した（取り込み後の噛み合わせの確認用。test のみの追加）。
+- web test 90 pass、center-client test 230 pass。
+- typecheck: packages/web、packages/desktop（ui を含む）とも rc=0、error TS なし。
+- nuxt build（packages/web）: 成功。
+- desktop e2e: 全件 220 passed / 0 failed（13.4 分、この host 内の一時 config、既存 chromium 1243）。
+- 落ちた test なし（既知の不安定 test「attachments: 型違い 415…」も出なかった）。
+
+残った問題（今回は直さなかった）:
+- 5b の端末 page（`pages/s/[name].vue`）は `<WebHeader :title="name" back="/" />` で、ヘッダーに 5c の設定ボタンが出るが、その page は `@settings` を受けないため押しても何も起きない。指示が 2 file の解消だけだったので手を入れていない。直すなら、`WebHeader` で設定ボタンを `@settings` が付いた時だけ出す、または端末 page 側で扱う。

@@ -81,6 +81,20 @@ test.describe("settings (web mode, design decision 14: view only)", () => {
     await expect(page.getByTestId("web-center-note")).toBeVisible();
   });
 
+  test("the dialog opens and closes from either tab, and the 5b server tab asks nothing the web refuses", async ({ page }) => {
+    const seen = watch(page);
+    await page.goto("/");
+    for (const tab of ["tab-session", "tab-server", "tab-session"]) {
+      await page.getByTestId(tab).click();
+      await page.getByTestId("web-settings-open").click();
+      await expect(page.getByTestId("web-center-section")).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(page.getByTestId("web-center-section")).toHaveCount(0);
+      await expect(page.getByTestId(tab)).toHaveAttribute("aria-selected", "true");
+    }
+    expect(seen.rpc.filter((c) => c.status === 404)).toEqual([]);
+  });
+
   test("a failed settings read shows the error and still calls no sidecar command (no 404)", async ({ page }) => {
     const seen = watch(page);
     await page.route("**/api/rpc/center_get_settings", (r) => r.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "settings read failed" }) }));
