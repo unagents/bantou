@@ -24,14 +24,14 @@ test("部品: id は英数字と - で重複なし、version は 1 以上、文�
 
 test("master-cap-role: session 名が入り、作業は remote-cap に回す旨と道具名がある", () => {
   const t = MASTER_CAP_ROLE.text({ session: "pm-x" });
-  assert.ok(t.includes("「pm-x」"));
+  assert.ok(t.includes("「pm-x-cap」"));
   assert.ok(t.includes("自分では実装"));
   for (const tool of ["remote_send", "remote_wait", "remote_list", "worker_reply", "remote_delete"]) assert.ok(t.includes(tool), tool);
   assert.ok(t.includes("repo / branch の引数は使わず"));
   assert.ok(t.includes("progress は push されない。進捗は remote_list で見る"));
   assert.ok(t.includes("worker の report（ask / approve / done）は messenger の push"));
   assert.ok(!t.includes("（progress / ask / approve / done）"));
-  assert.equal(MASTER_CAP_ROLE.version, 3);
+  assert.equal(MASTER_CAP_ROLE.version, 4);
 });
 
 test("master-cap-availability: 2 つ目に並び、いつでも受けられる・remote_send・background・turn を塞がない旨がある。label は master-cap-availability@1", () => {
@@ -53,7 +53,7 @@ test("buildSystemInstructions: 出力で master-cap-availability の文面が ma
 });
 
 test("describeSystemInstructions: 既定は 3 件（role, availability, memory の順）。memory は条件付きだと title で分かる", () => {
-  assert.deepEqual(describeSystemInstructions().map((d) => `${d.id}@${d.version}`), ["master-cap-role@3", "master-cap-availability@1", "memory@1"]);
+  assert.deepEqual(describeSystemInstructions().map((d) => `${d.id}@${d.version}`), ["master-cap-role@4", "master-cap-availability@1", "memory@1"]);
   assert.ok(describeSystemInstructions()[2]!.title.includes("設定がある session だけ"));
 });
 
@@ -62,9 +62,9 @@ test("memory@1: memory 設定がある session だけに付く。context / recal
   assert.ok(!MEMORY_USAGE.title.includes("\n"));
   const t = MEMORY_USAGE.text({ session: "s", memory: true });
   for (const w of ["mcp__memory__", "context", "recall", "起動した時", "判断する前", "自動で渡す", "自分では書き込み"]) assert.ok(t.includes(w), w);
-  assert.deepEqual(applicableParts({ session: "s" }).map(partLabel), ["master-cap-role@3", "master-cap-availability@1"]);
-  assert.deepEqual(applicableParts({ session: "s", memory: false }).map(partLabel), ["master-cap-role@3", "master-cap-availability@1"]);
-  assert.deepEqual(applicableParts({ session: "s", memory: true }).map(partLabel), ["master-cap-role@3", "master-cap-availability@1", "memory@1"]);
+  assert.deepEqual(applicableParts({ session: "s" }).map(partLabel), ["master-cap-role@4", "master-cap-availability@1"]);
+  assert.deepEqual(applicableParts({ session: "s", memory: false }).map(partLabel), ["master-cap-role@4", "master-cap-availability@1"]);
+  assert.deepEqual(applicableParts({ session: "s", memory: true }).map(partLabel), ["master-cap-role@4", "master-cap-availability@1", "memory@1"]);
 });
 
 test("buildSystemInstructions: memory 無しの出力は従来どおり（role + availability のみ）。memory ありは末尾に memory@1 が空行区切りで付く", () => {
@@ -97,10 +97,16 @@ test("buildSystemInstructions: 部品を順に空行で結合。空の部品は�
 });
 
 test("master-cap-role v3: 受けた指示の計画を立て、作業のまとまりごとに cap を起こし直す・まとまりが終わったら閉じる旨があり、数値の決まりは書かない", () => {
-  assert.equal(MASTER_CAP_ROLE.version, 3);
-  assert.equal(partLabel(MASTER_CAP_ROLE), "master-cap-role@3");
+  assert.equal(MASTER_CAP_ROLE.version, 4);
+  assert.equal(partLabel(MASTER_CAP_ROLE), "master-cap-role@4");
   const t = MASTER_CAP_ROLE.text({ session: "s" });
   for (const w of ["[計画と cap の起こし直し]", "計画を立てる", "作業のまとまりごとに起こし直す", "使い回し続けない", "remote_delete で cap を閉じる", "新しい会話", "last_error_text", "master-cap が決める"]) assert.ok(t.includes(w), w);
   const section = t.slice(t.indexOf("[計画と cap の起こし直し]"), t.indexOf("[自分でしてよいこと]"));
   assert.ok(!/\d/.test(section), "数値の決まりを書かない");
+});
+
+test("session 名の案内は実際に付く名前（<session>-cap）。既に -cap で終わる名前は重ねない", () => {
+  assert.ok(buildSystemInstructions({ session: "bantou" }).includes("session「bantou-cap」"));
+  assert.ok(!buildSystemInstructions({ session: "bantou" }).includes("session「bantou」"));
+  assert.ok(buildSystemInstructions({ session: "x-cap" }).includes("session「x-cap」"));
 });

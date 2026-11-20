@@ -94,14 +94,14 @@ test("buildRcArgs: same-dir / 未指定は --spawn / --capacity を付けず --c
   const p = cfg.projects[0];
   assert.equal(p.spawn, "same-dir");
   assert.deepEqual(buildRcArgs(p, cfg.remoteControl, { continue: false }), [
-    "remote-control", "--name", "p1", "--permission-mode", "auto",
+    "remote-control", "--name", "p1-cap", "--permission-mode", "auto",
   ]);
   assert.deepEqual(buildRcArgs(p, cfg.remoteControl, { continue: true }), [
-    "remote-control", "--name", "p1", "--permission-mode", "auto", "--continue",
+    "remote-control", "--name", "p1-cap", "--permission-mode", "auto", "--continue",
   ]);
   const u = { ...p, spawn: undefined } as unknown as typeof p;
   assert.deepEqual(buildRcArgs(u, cfg.remoteControl, { continue: true }), [
-    "remote-control", "--name", "p1", "--permission-mode", "auto", "--continue",
+    "remote-control", "--name", "p1-cap", "--permission-mode", "auto", "--continue",
   ]);
 });
 
@@ -109,16 +109,16 @@ test("buildRcArgs: worktree / session / capacity 指定は --spawn / --capacity 
   const p = cfg.projects[0];
   const w = { ...p, spawn: "worktree" as const, permissionMode: "plan" as const };
   assert.deepEqual(buildRcArgs(w, cfg.remoteControl, { continue: true }), [
-    "remote-control", "--name", "p1", "--spawn", "worktree", "--permission-mode", "plan",
+    "remote-control", "--name", "p1-cap", "--spawn", "worktree", "--permission-mode", "plan",
   ]);
   const s = { ...p, spawn: "session" as const };
   assert.deepEqual(buildRcArgs(s, cfg.remoteControl, { continue: true }), [
-    "remote-control", "--name", "p1", "--spawn", "session", "--permission-mode", "auto",
+    "remote-control", "--name", "p1-cap", "--spawn", "session", "--permission-mode", "auto",
   ]);
   const c = { ...p, capacity: 2 };
   for (const cont of [true, false]) {
     assert.deepEqual(buildRcArgs(c, cfg.remoteControl, { continue: cont }), [
-      "remote-control", "--name", "p1", "--spawn", "same-dir", "--permission-mode", "auto", "--capacity", "2",
+      "remote-control", "--name", "p1-cap", "--spawn", "same-dir", "--permission-mode", "auto", "--capacity", "2",
     ]);
   }
 });
@@ -579,7 +579,7 @@ test("add / remove: 実行中に project を足して起動でき、remove で�
   assert.throws(() => sup.add({ name: "p1", path: "/tmp/x", spawn: "same-dir", permissionMode: "auto", autostart: false }), /既に存在/);
   assert.deepEqual(sup.list().map((s) => s.project), ["p1", "dyn"]);
   await sup.start("dyn");
-  assert.deepEqual(children[0].args, ["remote-control", "--name", "dyn", "--permission-mode", "plan"]);
+  assert.deepEqual(children[0].args, ["remote-control", "--name", "dyn-cap", "--permission-mode", "plan"]);
   assert.equal(children[0].cwd, "/tmp/dyn");
   await assert.rejects(sup.remove("p1"), /config 由来/);
   await sup.remove("dyn");

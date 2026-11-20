@@ -1,4 +1,5 @@
 import { dirname, join } from "node:path";
+import { capSessionName } from "./session-name.js";
 
 /** wrapper（bantou-pty-wrapper）の場所。env BANTOU_PTY_WRAPPER で上書き、無ければ center の実行ファイルと同じ dir。 */
 export function resolveWrapperPath(env: NodeJS.ProcessEnv = process.env, execPath = process.execPath): string {
@@ -60,7 +61,8 @@ export const MEMORY_TOKEN_ENV = "BANTOU_MEMORY_TOKEN";
 
 /**
  * --mcp-config に渡す JSON 文字列。
- * - messenger: session 名を peer 名（AGENT_MESSENGER_NAME）にした agent-messenger の stdio MCP。常に付ける。
+ * - messenger: capSessionName(session)（`<session>-cap`）を peer 名（AGENT_MESSENGER_NAME）にした agent-messenger の stdio MCP。常に付ける。
+ *   bantou の X-Bantou-Session と memory の X-Agent-Id は内部の識別子なので session 名のまま。
  *   broker は client が自分で解決する（env → config → UDP 発見）ので指名しない。
  * - bantou: token は ${BANTOU_SESSION_TOKEN} のまま（claude が環境変数から展開する）。url が無い時は付けない。
  * - memory: 外部記憶の設定がある時だけ付ける（type: "http"）。X-Agent-Id は agentId、無ければ session 名。
@@ -72,7 +74,7 @@ export function mcpConfigJson(url: string | null, session: string, memory?: { ur
       type: "stdio",
       command: "npx",
       args: ["-y", `@unagents/messenger@${MESSENGER_VERSION}`, "mcp"],
-      env: { AGENT_MESSENGER_NAME: session, AGENT_MESSENGER_CLIENT_SPEC: MESSENGER_VERSION },
+      env: { AGENT_MESSENGER_NAME: capSessionName(session), AGENT_MESSENGER_CLIENT_SPEC: MESSENGER_VERSION },
     },
   };
   if (url) {
@@ -119,6 +121,7 @@ export const DEFAULT_ROWS = 40;
 /** wrapper の引数全体（wrapper 自身のオプション + `--` + claude とその引数）。 */
 export function buildWrapperArgs(opts: {
   claudePath: string;
+  /** session 名（内部の識別子）。claude へは capSessionName(name) を渡す。 */
   name: string;
   permissionMode: string;
   mcpConfig: string | null;
@@ -142,7 +145,7 @@ export function buildWrapperArgs(opts: {
     "--",
     opts.claudePath,
     "--remote-control",
-    opts.name,
+    capSessionName(opts.name),
     "--permission-mode",
     opts.permissionMode,
     ...(opts.model ? ["--model", opts.model] : []),

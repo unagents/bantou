@@ -315,7 +315,7 @@ test("wrapper 起動: wrapper -- claude --remote-control の引数、env の tok
   assert.equal(l.cmd, "/fake/bantou-pty-wrapper");
   assert.equal(l.cwd, "/tmp/pm1");
   assert.deepEqual(l.args.slice(0, 6), ["--cols", "120", "--rows", "40", "--", "fake-claude"]);
-  assert.deepEqual(l.args.slice(6, 10), ["--remote-control", "pm1", "--permission-mode", "plan"]);
+  assert.deepEqual(l.args.slice(6, 10), ["--remote-control", "pm1-cap", "--permission-mode", "plan"]);
   assert.equal(l.args[10], "--mcp-config");
   assert.equal(l.args[12], "--settings");
   assert.equal(l.args.length, 14); // 初回は --continue 無し
@@ -334,7 +334,7 @@ test("wrapper 起動: wrapper -- claude --remote-control の引数、env の tok
     type: "stdio",
     command: "npx",
     args: ["-y", "@unagents/messenger@0.12.2", "mcp"],
-    env: { AGENT_MESSENGER_NAME: "pm1", AGENT_MESSENGER_CLIENT_SPEC: "0.12.2" },
+    env: { AGENT_MESSENGER_NAME: "pm1-cap", AGENT_MESSENGER_CLIENT_SPEC: "0.12.2" },
   });
   assert.equal(l.env.AGENT_MESSENGER_NAME, undefined);
   assert.deepEqual(json.mcpServers.bantou, {
@@ -358,7 +358,7 @@ test("http 窓口が無い（mcpUrl が null）時も --mcp-config を付け、m
   const json = JSON.parse(launches[0].args[i + 1]) as { mcpServers: Record<string, { env?: Record<string, string> }> };
   assert.deepEqual(Object.keys(json.mcpServers), ["bantou-messenger"]);
   assert.deepEqual(JSON.parse(valueOf(launches[0].args, "--settings")!), { permissions: { allow: ["mcp__bantou-messenger__*"] } }, "窓口が無い時は statusLine / hooks も mcp__bantou も付けない");
-  assert.equal(json.mcpServers["bantou-messenger"].env?.AGENT_MESSENGER_NAME, "pm1");
+  assert.equal(json.mcpServers["bantou-messenger"].env?.AGENT_MESSENGER_NAME, "pm1-cap");
   await sup.shutdown();
 });
 
@@ -368,7 +368,7 @@ test("再起動（--continue）でも同じ session 名で messenger の peer �
   const a = launches[launches.length - 1].args;
   assert.ok(a.includes("--continue"));
   const json = JSON.parse(a[a.indexOf("--mcp-config") + 1]) as { mcpServers: Record<string, { env?: Record<string, string> }> };
-  assert.equal(json.mcpServers["bantou-messenger"].env?.AGENT_MESSENGER_NAME, "pm1");
+  assert.equal(json.mcpServers["bantou-messenger"].env?.AGENT_MESSENGER_NAME, "pm1-cap");
   await sup.shutdown();
 });
 
@@ -552,22 +552,22 @@ test("add: wrapper 設定が無い supervisor では wrapper 起動の project �
 test("wrapper.ts: 引数組み立て / プロトコル行の解釈 / 窓の照合 / wrapper の場所", () => {
   assert.deepEqual(
     buildWrapperArgs({ claudePath: "c", name: "n", permissionMode: "auto", mcpConfig: null, resume: true, cols: 90, rows: 30 }),
-    ["--cols", "90", "--rows", "30", "--", "c", "--remote-control", "n", "--permission-mode", "auto", "--continue"],
+    ["--cols", "90", "--rows", "30", "--", "c", "--remote-control", "n-cap", "--permission-mode", "auto", "--continue"],
   );
   // model: 指定時だけ --model を付ける（mcp-config の前）。無ければ従来どおり
   assert.deepEqual(
     buildWrapperArgs({ claudePath: "c", name: "n", permissionMode: "auto", mcpConfig: "{}", resume: false, model: "opus[1m]" }),
-    ["--cols", "120", "--rows", "40", "--", "c", "--remote-control", "n", "--permission-mode", "auto", "--model", "opus[1m]", "--mcp-config", "{}"],
+    ["--cols", "120", "--rows", "40", "--", "c", "--remote-control", "n-cap", "--permission-mode", "auto", "--model", "opus[1m]", "--mcp-config", "{}"],
   );
   assert.ok(!buildWrapperArgs({ claudePath: "c", name: "n", permissionMode: "auto", mcpConfig: null, resume: false }).includes("--model"));
   // settings: 指定時だけ --settings（mcp-config の後、--continue の前）
   assert.deepEqual(
     buildWrapperArgs({ claudePath: "c", name: "n", permissionMode: "auto", mcpConfig: "{}", settings: '{"statusLine":{}}', resume: true }),
-    ["--cols", "120", "--rows", "40", "--", "c", "--remote-control", "n", "--permission-mode", "auto", "--mcp-config", "{}", "--settings", '{"statusLine":{}}', "--continue"],
+    ["--cols", "120", "--rows", "40", "--", "c", "--remote-control", "n-cap", "--permission-mode", "auto", "--mcp-config", "{}", "--settings", '{"statusLine":{}}', "--continue"],
   );
   assert.ok(!buildWrapperArgs({ claudePath: "c", name: "n", permissionMode: "auto", mcpConfig: null, settings: null, resume: false }).includes("--settings"));
   assert.equal(JSON.parse(mcpConfigJson("http://h/mcp/session", "n")).mcpServers.bantou.headers["X-Bantou-Session"], "n");
-  assert.equal(JSON.parse(mcpConfigJson("http://h/mcp/session", "n")).mcpServers["bantou-messenger"].env.AGENT_MESSENGER_NAME, "n");
+  assert.equal(JSON.parse(mcpConfigJson("http://h/mcp/session", "n")).mcpServers["bantou-messenger"].env.AGENT_MESSENGER_NAME, "n-cap");
   assert.equal(JSON.parse(mcpConfigJson(null, "n")).mcpServers.bantou, undefined);
   // memory: 無ければ従来どおり（キーが増えない）。あれば type http、token がある時だけ Authorization（${BANTOU_MEMORY_TOKEN} のまま）、X-Agent-Id は agentId か session 名
   assert.deepEqual(Object.keys(JSON.parse(mcpConfigJson("http://h/mcp/session", "n")).mcpServers), ["bantou-messenger", "bantou"]);
@@ -873,7 +873,7 @@ test("memory 無しの session は従来どおり: mcp-config は bantou-messeng
   assert.deepEqual(Object.keys(mcpOf(l.args).mcpServers), ["bantou-messenger", "bantou"]);
   assert.equal(valueOf(l.args, "--mcp-config"), mcpConfigJson("http://127.0.0.1:4567/mcp/session", "pm1"));
   assert.equal(l.env.BANTOU_MEMORY_TOKEN, undefined);
-  assert.deepEqual(st.systemInstructions, ["master-cap-role@3", "master-cap-availability@1"]);
+  assert.deepEqual(st.systemInstructions, ["master-cap-role@4", "master-cap-availability@1"]);
   assert.equal(valueOf(l.args, "--append-system-prompt"), buildSystemInstructions({ session: "pm1" }));
   assert.ok(!valueOf(l.args, "--append-system-prompt")!.includes("mcp__memory__"));
   await sup.shutdown();
@@ -882,7 +882,7 @@ test("memory 無しの session は従来どおり: mcp-config は bantou-messeng
 test("memory あり: system-instructions に memory@1 が付く（文面は --append-system-prompt の先頭の部品群の末尾、label は status に出る）。利用者の指示はその後ろ", async () => {
   const { sup } = make({ realSystem: true, instructions: "利用者の指示", memory: { url: "http://m/mcp" } });
   const st = await sup.start("pm1");
-  assert.deepEqual(st.systemInstructions, ["master-cap-role@3", "master-cap-availability@1", "memory@1"]);
+  assert.deepEqual(st.systemInstructions, ["master-cap-role@4", "master-cap-availability@1", "memory@1"]);
   const v = valueOf(launches[0].args, "--append-system-prompt")!;
   assert.equal(v, `${buildSystemInstructions({ session: "pm1", memory: true })}\n\n利用者の指示`);
   assert.equal(st.instructions, true); // 利用者の指示だけを数える
@@ -917,4 +917,18 @@ test("permissions.allow: memory あり = mcp__memory__* も入る。deny は一�
 test("permissions.allow: bantouAllowRules の組み合わせ", () => {
   assert.deepEqual(bantouAllowRules({ bantou: false, memory: false }), ["mcp__bantou-messenger__*"]);
   assert.deepEqual(bantouAllowRules({ bantou: true, memory: true }), ["mcp__bantou-messenger__*", "mcp__bantou__*", "mcp__memory__*"]);
+});
+
+test("session 名: claude の --remote-control と messenger の peer 名は <session>-cap。内部の識別子（X-Bantou-Session・X-Agent-Id・log・token・status の key）は session 名のまま", async () => {
+  const { sup, tokens } = make({ memory: { url: "http://m/mcp" } });
+  await sup.start("pm1");
+  const l = launches[0];
+  assert.equal(valueOf(l.args, "--remote-control"), "pm1-cap");
+  const mcp = JSON.parse(valueOf(l.args, "--mcp-config")!).mcpServers;
+  assert.equal(mcp["bantou-messenger"].env.AGENT_MESSENGER_NAME, "pm1-cap");
+  assert.equal(mcp.bantou.headers["X-Bantou-Session"], "pm1");
+  assert.equal(mcp.memory.headers["X-Agent-Id"], "pm1");
+  assert.equal(sup.status("pm1").project, "pm1");
+  assert.equal(tokens.verify("pm1", l.env.BANTOU_SESSION_TOKEN!), true);
+  await sup.shutdown();
 });
