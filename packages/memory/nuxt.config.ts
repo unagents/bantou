@@ -16,7 +16,7 @@ export default defineNuxtConfig({
   },
   nitro: {
     experimental: { tasks: true },
-    // 抽出 worker を 1 分ごとに起動（未処理 event が無ければ何もしない）
-    scheduledTasks: { "* * * * *": ["memory:extract"] },
+    // 抽出と埋め込みを 1 分ごとに起動（する事が無ければ何もしない）。別名の task は並行に動き、互いを待たない
+    scheduledTasks: { "* * * * *": ["memory:extract", "memory:embed"] },
   },
 });

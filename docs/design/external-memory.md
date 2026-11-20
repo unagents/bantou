@@ -109,4 +109,5 @@ desktop の設定ダイアログ（共通・歯車・追加）に「外部記憶
 - token の経路: memory の token は 202 の env file だけに置き、center への登録は mac200 で center の `/mcp`（`center_settings_update`）を呼んで行った（値を作業 session の文脈に出さないため。permission 分類器が token の表示を止める）。center の `center_settings_get` は `tokenSet: true` だけを返す。
 - center 共通設定: `memory.url = http://192.168.1.202:7930/mcp`。全 session（0.1.51）が `--mcp-config` に `memory`（`X-Agent-Id` = session 名、token は `BANTOU_MEMORY_TOKEN` env）を持つ。
 - 実機確認: session に pty から 1 行送ると、memory の `memory_events` に `user_prompt` と `assistant_message` が agent = session 名で記録された。別 agent の `recall` は空（RLS）。抽出は 1 分以内に `confirmed / semantic` を作り、`recall`（relevance 0.84）と `context`（policies / activeTasks）で返った。
+- 2026-11-20: 埋め込みを小分け・新しい順・失敗の後回しに変え、`status` tool と worker の log を足した（`docs/history/20261120-fix-memory-embed-batch/report.md`、`packages/memory/README.md` の「埋め込みの消化」「状態と log」）。埋め込みは抽出とは別の task（`memory:embed`、毎分）で、抽出が長引いても進む。
 - 運用メモ: `.output` の更新は本機で build → rsync → `systemctl --user restart bantou-memory`。dead-letter は `memory_events.failed_at`。chatp の `--output-format json` は message の配列で返る（chatp 側で `type: result` を取る。chatp の README）。

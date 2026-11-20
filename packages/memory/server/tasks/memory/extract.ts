@@ -1,24 +1,12 @@
 import { defineTask } from "nitropack/runtime";
-import { embedPending } from "../../utils/embed";
-import { extractAll } from "../../utils/extract";
-import { getRuntime } from "../../utils/runtime";
+import { runExtractTask } from "../../utils/tasks";
 
 // 未処理 event を agent ごとにまとめて chatp に投げ、候補を検証して memory_items に登録する。
-// その後、埋め込み未設定の item を Ollama で埋める。
+// 埋め込みは別の task（memory:embed）。抽出が長引いても埋め込みを待たせない。
+// 件数が動いた時と error の時は log に出す（runExtractCycle）。配線は server/utils/tasks.ts（runExtractTask）。
 export default defineTask({
-  meta: { name: "memory:extract", description: "event から記憶候補を抽出し、検証して登録・埋め込みする" },
+  meta: { name: "memory:extract", description: "event から記憶候補を抽出し、検証して登録する" },
   async run() {
-    const rt = await getRuntime();
-    const { results, errors } = await extractAll(rt.db, { chat: rt.chat, batchSize: rt.extractBatch });
-    const embedErrors: { agentId: string; message: string }[] = [];
-    const agents = (await rt.db.query<{ id: string }>("SELECT id FROM agents")).rows;
-    for (const a of agents) {
-      try {
-        await embedPending(rt.db, a.id, rt.embedder);
-      } catch (e) {
-        embedErrors.push({ agentId: a.id, message: e instanceof Error ? e.message : String(e) });
-      }
-    }
-    return { result: { results, errors, embedErrors } };
+    return { result: await runExtractTask() };
   },
 });

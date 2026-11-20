@@ -2,7 +2,7 @@
 
 bantou の外部記憶。横断 PM（master-cap）と remote-cap 向けの Persistent Memory を、MCP server（Streamable HTTP, `/mcp`）として提供する。設計は `docs/design/external-memory.md`（接続）と `docs/design/memory-design.md`（原文。Python / FastAPI の記述は TypeScript / Nuxt に読み替える）。
 
-Phase 1 の範囲: event の保存、LLM（chatp）による記憶候補の抽出と検証、埋め込み（Ollama）、recall / context / explain。Graphiti は Outbox に積むだけ（反映は Phase 2）。
+Phase 1 の範囲: event の保存、LLM（chatp）による記憶候補の抽出と検証、埋め込み（Ollama）、recall / context / explain / status。Graphiti は Outbox に積むだけ（反映は Phase 2）。
 
 ## 構成
 
@@ -21,6 +21,7 @@ Phase 1 の範囲: event の保存、LLM（chatp）による記憶候補の抽�
 | `recall` | `query`、`memoryTypes?`、`scope?`（`projectIds` / `agentIds` / `userId`）、`temporal?`（`validAt` / `from` / `to`）、`includeInferred?`、`limit?`（≤ 50、既定 10） | `[{ id, content, memoryType, status, sourceEventIds, validFrom?, validUntil?, confidence?, relevance }]` |
 | `context` | `agentId?`（自分のみ） | `{ agentId, policies, recentDecisions, openQuestions, activeTasks }` |
 | `explain` | `id` | `{ item, sources: [event…], verification }` |
+| `status` | なし | `{ agentId, memories: { total, byStatus, embedded, pendingEmbedding, embeddingRetryWait, oldestPendingCreatedAt, newestPendingCreatedAt }, events: { total, unprocessed, deadLetter, oldestUnprocessedAt }, lastExtractedAt, lastEmbeddedAt, lastErrors: { extract, embed, workerExtract, workerEmbed, workerExtractRun, workerEmbedRun }, worker: { extract, embed }, embedModel }`。自分の agent の分だけ。本文は返さない（下の「状態と log」） |
 
 recall の規則:
 
@@ -53,9 +54,63 @@ context は LLM を使わず保存済みの情報から作る: `policies` = conf
 - dead-letter は `SELECT * FROM memory_events WHERE failed_at IS NOT NULL` で見る（再処理は `failed_at` / `attempts` を戻す）。
 - **排他の検証範囲（未検証の部分）**: `FOR UPDATE SKIP LOCKED` と適用時の再確認は、真の並行 transaction でのふるまいが **PGlite（単一接続）では未検証**。PGlite の test で確かめているのは、逐次に再現できる場面だけ（lease 切れ後に別 run が処理済みなら、遅れて戻った run は何も書かない／他が一部だけ先に処理した時の claim 解除）。同時に claim する競合は **docker 版の並行 test が要る**（`test/integration.pg.test.ts` の「並行」。pool の複数接続で 6 並列の `extractForAgent` が同じ event を二重に取らないことを検査）。この host（docker 無し）では未実行なので、docker のある host で `npm test` を回して確認すること。
 
+## 埋め込みの消化（task `memory:embed`）
+
+埋め込み未設定（または `embed_model` が現在の model と違う）item を Ollama で埋める。`server/utils/embed.ts` の `embedBacklog`。抽出（`memory:extract`）とは別の Nitro task で、どちらも毎分起動する。Nitro は別名の task を並行に動かすので、chatp が遅い・無応答で抽出が長引いていても、埋め込みは毎分進む。
+
+- **小分け**。1 回の `/api/embed` に送るのは `MEMORY_EMBED_BATCH` 件（既定 1）。Ollama への request は常に 1 本ずつ。agent を順に回し、1 巡で agent ごとに小分け 1 回（溜まりの多い agent が他を待たせない）。
+- **始める agent は前回の続き**。run が時間の上限で打ち切られても、次の run は「最後に送った agent の次」から始める。毎 run 先頭の agent から始めて、後ろの agent が待たされ続ける事は無い。
+- **順序は枠で回す**。agent ごとに、送った小分けの通し回数で 4 つの枠を繰り返す: 新しい順・新しい順・古い順・再試行。
+  - 新しい順（枠の半分）: まだ失敗していない item を `created_at` の新しい順。溜まった古い分があっても、今入った記憶がすぐ recall に出る。
+  - 古い順（1/4）: まだ失敗していない item を古い順。新しい記憶が処理能力いっぱいに入り続けても、溜まった古い分が残り続けない。
+  - 再試行（1/4）: 間隔の明けた失敗 item を、失敗の古い順。未失敗の item が残っていても再試行される。
+  - 枠の対象が無い時は、他の種類の item を取る（枠を空費しない）。
+- **失敗した時**。小分け（2 件以上の設定の時）が失敗したら 1 件ずつ試す。1 件でも失敗した item は `embed_attempts` を加算し、`embed_failed_at` / `embed_error`（要旨。本文・URL は入れない）を記録して**後回し**にする。次に試せるのは 60 秒 × 2^(回数-1)（上限 1 時間）が空いた後。失敗する 1 件が列の先頭を塞がない。成功すれば失敗の記録は消える。回数の上限（諦め）は無い（最長でも 1 時間に 1 回の再試行）。
+- **1 回の run の時間上限**。`MEMORY_EMBED_RUN_MS`（既定 50 秒）。過ぎたら新しい小分けを始めない。さらに、その run で測った 1 件の所要（最大）から「始めると上限をまたぐ」と見込まれる小分けも始めない。run は上限の内で終わり、毎分の起動を飛ばさない（Nitro は実行中の task の起動を捨てる）。残りは次の run。時間は単調な時計（`performance.now()`）で測る。
+  - 上限を超えるのは、送った 1 回が見込みより長くかかった時（最悪は timeout まで = 上限 + `MEMORY_EMBED_TIMEOUT_MS`）。その時は次の起動が 1 回飛ぶだけで、積み上がらない。
+  - 小分けが失敗した直後の 1 件目だけは、上限を過ぎていても試す（毎回同じ小分けで時間切れになって進まない、を防ぐ）。
+- **続けて 2 件失敗した agent はその run から外す**。1 件の失敗では外さない（その item を後回しにして、同じ agent の次の item へ進む。最新側に必ず失敗する item があっても、同じ run で正常な item が進む）。同じ agent で続けて 2 件失敗したら（間に 1 件でも通れば数え直す）、その run ではもう試さない。他の agent は続ける。run 全体を打ち切るのは、Ollama の障害とみなせる時だけ: 接続できない（`ECONNREFUSED` など。**item に失敗を付けない**ので、復帰後に後回しにならない）、または続けて 2 つの agent が外れた時。
+- **障害の種類と、復帰後の遅れ**。
+  - 接続できない: item に失敗は付かない。復帰した次の run から、そのまま進む。
+  - 応答しない（つながるが返らない。timeout）: 1 run で 1 件に失敗が付く（timeout の 60 秒で run の上限を過ぎるため）。
+  - **つながるが失敗を返す（HTTP 5xx など）**: 失敗がすぐ返るので、1 run で agent ごとに 2 件まで（run 全体で 4 件まで）に失敗が付く。障害が続く間、毎分これが繰り返され、再試行のたびに回数が増える。
+  - 失敗が付いた item は、復帰後もその時点の間隔（60 秒 × 2^(回数-1)、**最大 1 時間**）が明けるまで埋まらない。障害が 1 時間ほど続くと、一部の item は復帰から最大 1 時間遅れる。失敗の付いていない item と新しい記憶は、復帰した次の run から進む。遅れている件数は `status` の `embeddingRetryWait` と log の `retry-wait` で分かる。
+- **小分けでは通らず 1 件ずつなら通る**時（遅い host で小分けが timeout に収まらない等）は、その run の残りと、以後 30 回の run を初めから 1 件ずつ送る（process の中に覚える。毎 run timeout を待たない）。30 回の後に設定の件数をもう一度試し、通れば戻る。log に `batch of N failed (...); retried one by one` が出るなら `MEMORY_EMBED_BATCH=1` にする。
+- **run は重ならない**。Nitro の `runTask` は同名の task が実行中なら同じ Promise を返す（新しい実行を始めない）。加えて `runEmbedCycle` / `runExtractCycle`（`server/utils/worker.ts`）が process 内で実行中なら何もせず戻る。別 process との排他は埋め込みには無い（同じ item を二重に埋めても結果は同じ。service は 1 process で動かす前提）。
+- **recall の query を優先**。recall の query の埋め込みは門（`EmbedGate`）を通る。query が実行中・待ち中の間、消化は次の小分けを送らない。Ollama に送信済みの 1 回は止めないので、query が待つのは最長で小分け 1 回分（既定で 1 件分）。ただし **run の最初の 1 回**と、1 件ずつに落とした時の 1 件目は、20 秒（run の最初の 1 回は、run の上限の半分も越えない）を上限に query へ譲ってから送る。recall が重なり続けて query が途切れない間も、1 run に最低 1 回は送る（消化が止まらない）。2 回目以降は query を優先する。query の timeout は `MEMORY_RECALL_EMBED_TIMEOUT_MS`（既定 60 秒）。取れなければ recall は `recall: query の埋め込みを取得できない（理由）` の error（MCP の `isError`）を返す。context / explain / status は埋め込みを使わないので影響を受けない。
+- **SQL の時間上限**。消化の SQL（agent の一覧を含む）は 1 文 15 秒、`status` は 1 文 5 秒（transaction ごとの `statement_timeout`）。DB が lock などで遅い時は error になり、固まらない。
+
+### 既定値での所要の見積もり（計算。実機では未実測）
+
+既定（1 回 1 件、run の上限 50 秒、毎分起動）。次の 1 件は「経過 + 1 件の所要 ≤ 50 秒」の時だけ始める。
+
+| 1 件の所要 | 1 run の始まり（秒） | 1 run の件数 | run の終わり | 毎分の起動 | 400 件の消化 |
+|---|---|---|---|---|---|
+| 10 秒 | 0, 10, 20, 30 | 4 | 約 40 秒 | 飛ばない | 約 100 分 |
+| 15 秒 | 0, 15, 30 | 3 | 45 秒 | 飛ばない | 約 134 分（2.2 時間） |
+| 40 秒 | 0 | 1 | 40 秒 | 飛ばない | 400 分（6.7 時間） |
+
+- 10 秒の機械でも 5 件目（40 秒に始めて 50 秒に終わる）は始まらない。1 件ごとに DB の時間（数ミリ秒〜数十ミリ秒）が足されるので、「経過 + 1 件の所要 ≤ 50 秒」を満たさない。
+- 新しい記憶が入っている間は、その分も同じ枠を使う（上の数字は溜まった分だけを消化する時）。agent が複数あっても合計の件数は同じ。
+- recall の query が待つのは最長で 1 件分（10 / 15 / 40 秒）。
+
+## 状態と log
+
+- **log**（stdout / stderr。systemd なら journal）。run ごとに、件数が動いた時と error の時だけ出す（何も無い run は 0 行）。本文・token・URL は出さない。
+  - `[memory] extract: agent=<id> events=N accepted=N rejected=N downgraded=N retried=N dead-letter=N systemic=N aborted=N`
+  - `[memory] embed: agent=<id> embedded=N failed=N remaining=N retry-wait=N run=done|deadline|failing`（`remaining` = 埋め込み待ちの残り。`retry-wait` = そのうち失敗して後回し中。`run=failing` = Ollama の障害とみなして打ち切った、または 1 件も通らなかった）
+  - `[memory] extract error: agent=<id> <要旨>` / `[memory] embed error: agent=<id> <要旨>` / `[memory] extract run error: <要旨>` / `[memory] embed run error: <要旨>` / `[memory] run error: <要旨>`（起動時の検査の失敗）
+  - **同じ要旨の error が続く間は、初回と 30 分ごとにだけ出す**（item の ID・件数・所要時間のような毎回変わる値だけが違う物は同じ要旨。HTTP の status や error の code が違えば別の error として出す。出し直す時は `(same error suppressed N times)` を付ける）。1 件も通らない run の件数の行も一緒に絞る。解消した時に `[memory] embed recovered: agent=<id>` / `[memory] extract recovered: agent=<id>` / `[memory] embed run recovered` / `[memory] extract run recovered` / `[memory] run recovered`（起動時の検査）を 1 行出す。
+  - task は失敗を外へ throw しない（throw すると Nitro の scheduler が毎分 error を丸ごと出力するため）。失敗は上の行と `status` で見る。
+- **`status` tool**。認証済み agent（`X-Agent-Id`）の分だけを数える（SQL の条件 + RLS）。`lastErrors.extract` / `lastErrors.embed` は DB に残っている直近の失敗（未処理の event / 埋め込み待ちの item）。`lastErrors.workerExtract` / `workerEmbed`（その agent の直近の失敗）と `workerExtractRun` / `workerEmbedRun`（run 全体の失敗）はこの process が持つ値で、**次に成功した時に消える**（再起動でも消える）。run 全体の失敗の要旨は `embed run failed: connection error (code ECONNREFUSED)` のように、種類 + error の code だけ（DB の接続先などは載せない。詳しい要旨は log の `run error` の行）。`worker.extract` / `worker.embed`（実行中か・最後の run の開始時刻と所要時間）は service 全体の値（agent の data を含まない）。`lastEmbeddedAt` は migration 002 より前に埋めた item では `updated_at` の近似。
+
 ## DB スキーマと migration
 
 `migrations/001_init.sql`: agents / projects / memory_items / memory_sources / memory_events / memory_candidates / outbox_events / agent_messages（設計書 §6 の最小。organizations / memory_relations / memory_permissions / memory_promotions / agent_tasks は Phase 5 以降）。`agent_messages` は表のみで、Phase 1 では書き込まない。
+
+`migrations/002_embed_retry.sql`: `memory_items` に `embedded_at` / `embed_attempts` / `embed_failed_at` / `embed_error` を足し、埋め込み済みの行の `embedded_at` を `updated_at` で埋める。index は足さない（埋め込み待ちの条件と並びに合う部分 index を作れず、待ちの行は少数で `agent_id` の絞り込みで足りる）。全て `IF NOT EXISTS` / `WHERE embedded_at IS NULL`（何度当てても同じ）で、既定値は定数（表の書き換え無し）。旧版の code は足した列を見ないので、**migration を先に当ててから**新しい code に切り替える（逆順だと、新しい code の埋め込みと `status` が「列が無い」で失敗する。log に出る）。`memory_app` は表単位の権限を持つので GRANT の追加は不要。
+
+- `embedded_at` を埋める UPDATE について: `memory_items` は `FORCE ROW LEVEL SECURITY` なので、owner が superuser でないと、素の UPDATE は policy に当たらず黙って 0 行になる。migration は agent ごとに `app.agent_id` を設定して更新する（`DO` block）ので、superuser でない owner でも埋まる。仮に 0 行でも害は無い（埋め込みの消化と recall には影響せず、`status` の `lastEmbeddedAt` が次の埋め込みまで `null` になるだけ）。
 
 - 埋め込み列は `vector(768)` + HNSW（`vector_cosine_ops`）。
 - 各表に Row Level Security（`FORCE`）。各 transaction で `set_config('app.agent_id', <認証済み agent>, true)` を設定する。
@@ -67,7 +122,7 @@ pgvector の列型（`vector(768)`）、HNSW index、`CREATE EXTENSION`、RLS �
 
 ### 埋め込みの次元
 
-次元は migration の `vector(N)` で固定し、環境変数 `MEMORY_EMBED_DIM`（既定 768 = nomic-embed-text）で server に伝える。起動時（最初の呼び出し時）に `memory_items.embedding` の次元と一致するか検査し、違えば止まる。embedder が違う次元を返した場合も検査で拒否する。model を変えて次元が変わる時は、新しい migration（列の作り直し）と `MEMORY_EMBED_DIM` の変更が必要。次元が同じ別 model に変えた場合は、`embed_model` が違う item は recall の対象外になり、`memory:extract` が再埋め込みする。初回問い合わせで次元を決める方式は採らなかった（migration と実行時の食い違いを隠すため）。
+次元は migration の `vector(N)` で固定し、環境変数 `MEMORY_EMBED_DIM`（既定 768 = nomic-embed-text）で server に伝える。起動時（最初の呼び出し時）に `memory_items.embedding` の次元と一致するか検査し、違えば止まる。embedder が違う次元を返した場合も検査で拒否する。model を変えて次元が変わる時は、新しい migration（列の作り直し）と `MEMORY_EMBED_DIM` の変更が必要。次元が同じ別 model に変えた場合は、`embed_model` が違う item は recall の対象外になり、`memory:embed` が再埋め込みする。初回問い合わせで次元を決める方式は採らなかった（migration と実行時の食い違いを隠すため）。
 
 ## 環境変数
 
@@ -77,14 +132,19 @@ pgvector の列型（`vector(768)`）、HNSW index、`CREATE EXTENSION`、RLS �
 | `MEMORY_PORT` | 7930 | listen port（`bin/memory.mjs` が `NITRO_PORT` にする） |
 | `MEMORY_DATABASE_URL` | なし（必須） | PostgreSQL。**非 superuser・非 BYPASSRLS の role で接続する**（superuser / BYPASSRLS は RLS を無視する。そうした role だと最初の呼び出しで拒否する）。compose の `memory_owner` は superuser なので migration 専用で、ここに使わない |
 | `NITRO_HOST` | 全 interface | listen する address。LAN に出さないなら `127.0.0.1` か Tailscale の address を指定する（Nitro の標準変数） |
-| `OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama |
+| `OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama。認証情報（`user:pass@`）を入れない（Node の fetch が受け付けない） |
 | `MEMORY_EMBED_MODEL` | `nomic-embed-text` | 埋め込み model |
 | `MEMORY_EMBED_DIM` | 768 | model の次元（migration の `vector(N)` と一致させる） |
 | `CHATP_URL` | なし | chatp の base URL（`/v1/chat/completions` を付けて呼ぶ） |
 | `CHATP_TOKEN` | なし | chatp の Bearer token |
 | `CHATP_MODEL` | `claude` | chat の model 名 |
 | `MEMORY_EXTRACT_BATCH` | 50 | 1 回の抽出に渡す event 数の上限 |
-| `MEMORY_HTTP_TIMEOUT_MS` | 120000 | chatp / Ollama の timeout |
+| `MEMORY_HTTP_TIMEOUT_MS` | 120000 | chatp の timeout（互換のために残した名前。`CHATP_TIMEOUT_MS` があればそちらを使う）。**Ollama には効かない** |
+| `CHATP_TIMEOUT_MS` | `MEMORY_HTTP_TIMEOUT_MS` の値 | chatp（抽出 LLM）の timeout |
+| `MEMORY_EMBED_TIMEOUT_MS` | 60000 | 溜まった分の埋め込み（`/api/embed` 1 回）の timeout |
+| `MEMORY_RECALL_EMBED_TIMEOUT_MS` | 60000 | recall の query の埋め込みの timeout。過ぎたら recall は error を返す |
+| `MEMORY_EMBED_BATCH` | 1 | 1 回の `/api/embed` に送る件数。recall の query が待つ最長時間はこの 1 回分 |
+| `MEMORY_EMBED_RUN_MS` | 50000 | 1 回の run で埋め込みに使う時間の上限。上限をまたぐと見込まれる小分けは始めない。残りは次の run（毎分）。**55000 で頭打ち**（それより大きい値を入れても 55000 として動く）。run が 60 秒を越えると、実行中の task の起動は捨てられるので、毎分の起動が飛ぶ |
 
 認証: `Authorization: Bearer <MEMORY_TOKEN>`（定数時間比較）と `X-Agent-Id`（必須。`[\w.@:-]{1,128}`）。どちらかが無い・不正なら 401（理由は返さない）。`/mcp` 以外の path は 404。
 
@@ -127,6 +187,12 @@ MEMORY_TOKEN=… MEMORY_DATABASE_URL=… CHATP_URL=… node bin/memory.mjs   # �
 
 systemd user unit（`deploy/bantou-memory.service`）を login していなくても動かすには、一度 `loginctl enable-linger <user>` が要る（無いと logout で止まる）。
 
+### 更新と戻し方
+
+- 更新: 作業用の機械で build し、`.output/` を配置して service を再起動する。配置（`rsync --delete`）の前に、設置先で旧 `.output` を別名で退避しておく: `cp -a .output .output.prev`（unit の `WorkingDirectory` で。`mv` ではなく copy にする。動いている旧 process が、まだ読み込んでいない file を元の場所から読むため）。
+- **配置から再起動までの間は、旧 process が新しい file の上で動く**（server は一部の file を必要になった時に読み込むので、新旧が混ざる）。配置したらすぐ再起動する。
+- 戻し方: 旧 `.output` を戻して service を再起動する（`rm -rf .output && mv .output.prev .output && systemctl --user restart bantou-memory`）。**migration は戻さない**。旧 code は 002 で足した列を見ないので、列が残っていても動く。
+
 bantou 側は center の「外部記憶設定」に `http://<host>:7930/mcp` と token を登録する。
 
 ### bun.lock（マージ前の作業）
@@ -141,7 +207,8 @@ npm test            # unit + 統合
 npm run typecheck
 ```
 
-- unit: 認証（token 無し / 不正 / X-Agent-Id 無し）、検証規則（confirmed → inferred の降格など）、入力検証、chatp / Ollama client（`node:http` の fake server）、SQL パラメータ化の検査。
+- unit: 認証（token 無し / 不正 / X-Agent-Id 無し）、検証規則（confirmed → inferred の降格など）、入力検証、chatp / Ollama client（`node:http` の fake server。timeout・接続失敗・error に URL を写さない事を含む）、timeout の設定の分離、query 優先の門、agent の並びの回し方、task の配線（抽出と埋め込みが別の task）、runtime の組み立て（query 用の timeout と門の共有）、log の間引きの要旨、status に載せる error の要旨、SQL パラメータ化の検査。
+- 埋め込みの消化・log・`status`・migration 002 の test は統合の筋書き（`test/helpers/suite.ts`）にあり、偽の Ollama（`test/helpers/fakes.ts` の `startFakeOllama`。遅い応答・HTTP 失敗・無応答を作る）を本物の Ollama client で叩く。時間に依る筋書き（run の上限・見込み・query へ譲る時間）は数十〜数百ミリ秒に縮めて回す。
 - 統合（設計書 §17 の A / B / D / H ほか）: 同じ筋書き（`test/helpers/suite.ts`）を 2 つの PostgreSQL で回す。chatp と埋め込みは決定論的な fake。
   - `test/integration.pg.test.ts`: docker の実 PostgreSQL（`pgvector/pgvector:pg17`）。docker が使える host では `npm test` が自動で container（名前 `w-mem1-impl-pg-<pid>-<乱数>`）を起動し、migration を当て、非 superuser role（README の GRANT と同じ権限）で接続して回し、終了時に `docker rm -f -v` する。docker が使えなければ skip し、理由（例: `docker unavailable: … /var/run/docker.sock …`）を出力する。image は `MEMORY_TEST_PG_IMAGE` で変えられる。docker ありでの回し方: `docker info` が通る host で `cd packages/memory && npm test`（初回は image の pull に時間がかかる）。
   - `test/integration.test.ts`: PGlite（WASM の PostgreSQL + pgvector）。docker 不要。migration の SQL をそのまま流し、非 superuser role に `SET ROLE` して RLS を効かせる。docker が無い host でも統合の筋書きを確かめるために置いている。

@@ -6,11 +6,14 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { decideCandidate, normalizeContent, buildPrompt, createChatClient, CANDIDATE_JSON_SCHEMA, ChatContentError, ChatTimeoutError, type Candidate } from "../server/utils/extract.ts";
-import { createOllamaEmbedder, checkVectors, toVectorLiteral } from "../server/utils/embed.ts";
+import { createEmbedGate, createOllamaEmbedder, createQueryEmbedder, checkVectors, EmbedTimeoutError, EmbedUnreachableError, errorSummary, publicErrorSummary, rotateAgents, toVectorLiteral } from "../server/utils/embed.ts";
 import { eventSchema } from "../server/utils/events.ts";
 import { recallSchema } from "../server/utils/recall.ts";
-import { readEnv } from "../server/utils/config.ts";
-import { fakeEmbedder } from "./helpers/fakes.ts";
+import { MAX_EMBED_RUN_MS, readEnv } from "../server/utils/config.ts";
+import { buildRuntime } from "../server/utils/runtime.ts";
+import { gist } from "../server/utils/worker.ts";
+import type { Db } from "../server/utils/db.ts";
+import { closedPortUrl, fakeEmbedder, startFakeOllama } from "./helpers/fakes.ts";
 
 const cand = (o: Partial<Candidate> = {}): Candidate => ({ memoryType: "semantic", content: "c", status: "confirmed", sourceEventIds: ["e1"], ...o });
 const known = new Map([["e1", "user_prompt"], ["e2", "assistant_message"], ["e3", "report"]]);
@@ -193,6 +196,151 @@ test("config: 既定値（model nomic-embed-text / 次元 768）と上書き", (
   assert.equal(d.embedDim, 768);
   const o = readEnv({ MEMORY_EMBED_MODEL: "m", MEMORY_EMBED_DIM: "1024", CHATP_URL: "http://x/" });
   assert.deepEqual([o.embedModel, o.embedDim, o.chatpUrl], ["m", 1024, "http://x"]);
+});
+
+test("config: 埋め込みの timeout は chatp の timeout と別の設定。MEMORY_HTTP_TIMEOUT_MS は chatp にだけ効く（互換）", () => {
+  const d = readEnv({});
+  assert.deepEqual([d.chatTimeoutMs, d.embedTimeoutMs, d.recallEmbedTimeoutMs, d.embedBatch, d.embedRunMs], [120000, 60000, 60000, 1, 50000]);
+  assert.ok(d.embedRunMs < 60000, "run の上限は、毎分の起動の間隔より短い");
+  const legacy = readEnv({ MEMORY_HTTP_TIMEOUT_MS: "300000" });
+  assert.deepEqual([legacy.chatTimeoutMs, legacy.embedTimeoutMs, legacy.recallEmbedTimeoutMs], [300000, 60000, 60000]);
+  const o = readEnv({ MEMORY_HTTP_TIMEOUT_MS: "300000", CHATP_TIMEOUT_MS: "200000", MEMORY_EMBED_TIMEOUT_MS: "90000", MEMORY_RECALL_EMBED_TIMEOUT_MS: "20000", MEMORY_EMBED_BATCH: "4", MEMORY_EMBED_RUN_MS: "30000" });
+  assert.deepEqual([o.chatTimeoutMs, o.embedTimeoutMs, o.recallEmbedTimeoutMs, o.embedBatch, o.embedRunMs], [200000, 90000, 20000, 4, 30000]);
+  const bad = readEnv({ MEMORY_EMBED_BATCH: "0", MEMORY_EMBED_TIMEOUT_MS: "abc" });
+  assert.deepEqual([bad.embedBatch, bad.embedTimeoutMs], [1, 60000]);
+  // run の上限は 60 秒より短く頭打ちにする（60 秒以上だと毎分の起動が飛ぶ）
+  assert.equal(MAX_EMBED_RUN_MS, 55000);
+  assert.deepEqual(["55000", "55001", "60000", "600000"].map((v) => readEnv({ MEMORY_EMBED_RUN_MS: v }).embedRunMs), [55000, 55000, 55000, 55000]);
+});
+
+test("runtime の組み立て: query 用の embedder は query 用の timeout を使い、消化と同じ門を通る。消化用は消化用の timeout", async () => {
+  const seen: number[] = [];
+  let rt!: ReturnType<typeof buildRuntime>;
+  const srv = await startFakeOllama({ fail: () => { seen.push(rt.gate.queries); return "hang"; } });
+  try {
+    const env = readEnv({ OLLAMA_URL: srv.url, MEMORY_EMBED_MODEL: "m", MEMORY_EMBED_TIMEOUT_MS: "250", MEMORY_RECALL_EMBED_TIMEOUT_MS: "120", MEMORY_EMBED_BATCH: "3", MEMORY_EMBED_RUN_MS: "30000", MEMORY_EXTRACT_BATCH: "7" });
+    const db = {} as Db;
+    rt = buildRuntime(env, db);
+    assert.equal(rt.db, db);
+    assert.deepEqual([rt.embedder.model, rt.queryEmbedder.model, rt.embed, rt.extractBatch], ["m", "m", { batchSize: 3, maxRunMs: 30000 }, 7]);
+    await assert.rejects(rt.queryEmbedder.embed(["q"]), (e: Error) => e instanceof EmbedTimeoutError && /timeout \(120 ms/.test(e.message));
+    assert.deepEqual(seen, [1], "query は runtime の門（消化に渡す門）を通る");
+    assert.equal(rt.gate.queries, 0);
+    await assert.rejects(rt.embedder.embed(["x"]), (e: Error) => e instanceof EmbedTimeoutError && /timeout \(250 ms/.test(e.message));
+    assert.deepEqual(seen, [1, 0], "消化は query として数えない");
+  } finally {
+    await srv.close();
+  }
+});
+
+test("Ollama embedder: timeout は EmbedTimeoutError。呼び出しごとの timeout で上書きできる。error に入力の本文を入れない", async () => {
+  const srv = await startFakeOllama({ fail: (input) => (input[0] === "hang" ? "hang" : input[0] === "bad" ? 500 : undefined) });
+  try {
+    const e = createOllamaEmbedder({ url: srv.url, model: "m", dim: 768, timeoutMs: 60_000 });
+    const started = Date.now();
+    await assert.rejects(e.embed(["hang"], { timeoutMs: 100 }), (err: Error) => err instanceof EmbedTimeoutError && /timeout \(100 ms, 1 texts\)/.test(err.message));
+    assert.ok(Date.now() - started < 2000);
+    await assert.rejects(e.embed(["bad", "秘密の本文"]), (err: Error) => /HTTP 500/.test(err.message) && !err.message.includes("秘密"));
+    assert.equal((await e.embed(["ok"])).length, 1);
+    // 接続できない: EmbedUnreachableError。message は固定の文言 + error の code だけ
+    const down = createOllamaEmbedder({ url: await closedPortUrl(), model: "m", dim: 768, timeoutMs: 1000 });
+    await assert.rejects(down.embed(["秘密の本文"]), (err: Error) => err instanceof EmbedUnreachableError && err.message === "ollama embed failed: connection error (ECONNREFUSED)");
+    // fetch の message（URL が入る事がある）を写さない。OLLAMA_URL に認証情報が入っていても log / embed_error に出ない
+    const cred = createOllamaEmbedder({ url: "http://ollama-user:secretpw@127.0.0.1:9", model: "m", dim: 768, timeoutMs: 1000 });
+    await assert.rejects(cred.embed(["x"]), (err: Error) => err.message === "ollama embed failed: connection error (unknown)" && !(err instanceof EmbedUnreachableError));
+    // 応答の途中で切れた（入力が原因で落ちた恐れがある）は、接続できないとは扱わない = item の失敗として数える
+    const reset = createServer((req) => req.socket.destroy());
+    await new Promise<void>((r) => reset.listen(0, "127.0.0.1", r));
+    try {
+      const e2 = createOllamaEmbedder({ url: `http://127.0.0.1:${(reset.address() as AddressInfo).port}`, model: "m", dim: 768, timeoutMs: 1000 });
+      await assert.rejects(e2.embed(["x"]), (err: Error) => /^ollama embed failed: connection error \([A-Z_]+\)$/.test(err.message) && !(err instanceof EmbedUnreachableError));
+    } finally {
+      reset.close();
+    }
+  } finally {
+    await srv.close();
+  }
+});
+
+test("errorSummary: 空白を畳み、長さを切る（log・状態の口・DB に長い文字列を残さない）", () => {
+  assert.equal(errorSummary(new Error("a\n  b\tc")), "a b c");
+  assert.equal(errorSummary(new Error("x".repeat(500))).length, 200);
+  assert.equal(errorSummary("y".repeat(500), 80).length, 80);
+  // URL の認証情報は伏せる（log にも出さない）
+  assert.equal(errorSummary(new Error("cannot reach postgres://app:s3cret@db.example:5432/memory")), "cannot reach postgres://***@db.example:5432/memory");
+});
+
+test("publicErrorSummary: status に載せる run の error は、固定の文言 + error の code だけ（message の host・port・URL を写さない）", () => {
+  const withCode = (message: string, code: unknown) => Object.assign(new Error(message), { code });
+  assert.equal(publicErrorSummary(withCode("connect ECONNREFUSED 192.0.2.10:5432", "ECONNREFUSED")), "connection error (code ECONNREFUSED)");
+  assert.equal(publicErrorSummary(withCode("getaddrinfo ENOTFOUND db.example", "ENOTFOUND")), "connection error (code ENOTFOUND)");
+  assert.equal(publicErrorSummary(withCode("canceling statement due to statement timeout", "57014")), "database error (code 57014)");
+  assert.equal(publicErrorSummary(withCode('relation "agents" does not exist', "42P01")), "database error (code 42P01)");
+  // 複数の address を試して全て失敗した時（AggregateError）と、cause に code がある時
+  assert.equal(publicErrorSummary(Object.assign(new Error("all failed"), { errors: [{ code: "EHOSTUNREACH" }] })), "connection error (code EHOSTUNREACH)");
+  assert.equal(publicErrorSummary(new Error("fetch failed", { cause: { code: "EAI_AGAIN" } })), "connection error (code EAI_AGAIN)");
+  // code が無い・code らしくない: message を写さない
+  assert.equal(publicErrorSummary(new Error("timeout exceeded when trying to connect to 192.0.2.10")), "timeout");
+  assert.equal(publicErrorSummary(new Error("something at 192.0.2.10:5432")), "internal error");
+  assert.equal(publicErrorSummary(withCode("x", "host 192.0.2.10")), "internal error");
+  assert.equal(publicErrorSummary("plain string 192.0.2.10"), "internal error");
+});
+
+test("log の間引きの要旨: 毎回変わる値（ID・件数・所要時間）だけを潰し、HTTP の status と error の code は区別する", () => {
+  assert.notEqual(gist("ollama embed failed: HTTP 500"), gist("ollama embed failed: HTTP 404"));
+  assert.notEqual(gist("batch of 2 failed (ollama embed failed: HTTP 500); retried one by one"), gist("batch of 2 failed (ollama embed failed: HTTP 503); retried one by one"));
+  assert.notEqual(gist("database error (code 57014)"), gist("database error (code 53300)"));
+  assert.notEqual(gist("connection error (ECONNREFUSED)"), gist("connection error (ENOTFOUND)"));
+  // 毎回変わる値だけが違う物は同じ
+  assert.equal(gist("item 0b9e1c1e-7a4f-4c59-9d2b-3d1f6a7b8c9d: ollama embed failed: HTTP 500"), gist("item 11111111-2222-4333-8444-555555555555: ollama embed failed: HTTP 500"));
+  assert.equal(gist("batch of 2 failed (ollama embed failed: HTTP 500); retried one by one"), gist("batch of 16 failed (ollama embed failed: HTTP 500); retried one by one"));
+  assert.equal(gist("ollama embed timeout (60000 ms, 1 texts)"), gist("ollama embed timeout (150 ms, 12 texts)"));
+  assert.equal(gist("chatp: all 4 events failed (no batch passed); will retry"), gist("chatp: all 37 events failed (no batch passed); will retry"));
+  assert.equal(gist("connection 1 terminated unexpectedly"), gist("connection 22 terminated unexpectedly"));
+});
+
+test("rotateAgents: 前回最後に送った agent の次から始める", () => {
+  assert.deepEqual(rotateAgents(["a", "b", "c"], undefined), ["a", "b", "c"]);
+  assert.deepEqual(rotateAgents(["a", "b", "c"], "a"), ["b", "c", "a"]);
+  assert.deepEqual(rotateAgents(["a", "b", "c"], "c"), ["a", "b", "c"]);
+  // 前回の agent が居なくなっていたら、id の順でその次から
+  assert.deepEqual(rotateAgents(["a", "c", "d"], "b"), ["c", "d", "a"]);
+  assert.deepEqual(rotateAgents(["a", "b"], "z"), ["a", "b"]);
+});
+
+test("task の配線: 抽出と埋め込みは別の task で、どちらも毎分起動する（抽出が長引いても埋め込みを待たせない）", () => {
+  const read = (p: string) => readFileSync(fileURLToPath(new URL(p, import.meta.url)), "utf8");
+  assert.match(read("../nuxt.config.ts"), /scheduledTasks:\s*\{\s*"\* \* \* \* \*":\s*\["memory:extract",\s*"memory:embed"\]/);
+  const embedTask = read("../server/tasks/memory/embed.ts");
+  assert.match(embedTask, /name: "memory:embed"/);
+  // task の file は中身（server/utils/tasks.ts。統合 test で実際に呼んで確かめる）を呼んで、その結果を返すだけ
+  assert.match(embedTask, /return \{ result: await runEmbedTask\(\) \};/);
+  const extractTask = read("../server/tasks/memory/extract.ts");
+  assert.match(extractTask, /name: "memory:extract"/);
+  assert.match(extractTask, /return \{ result: await runExtractTask\(\) \};/);
+});
+
+test("embed gate: query の実行中は waitIdle が待ち、終われば通す。上限を過ぎたら false", async () => {
+  const gate = createEmbedGate();
+  assert.equal(await gate.waitIdle(0), true);
+  let release!: () => void;
+  const held = gate.runQuery(() => new Promise<void>((r) => (release = r)));
+  assert.equal(gate.queries, 1);
+  assert.equal(await gate.waitIdle(0), false);
+  assert.equal(await gate.waitIdle(30), false);
+  const waiting = gate.waitIdle(5000);
+  release();
+  await held;
+  assert.equal(await waiting, true);
+  assert.equal(gate.queries, 0);
+  // 失敗した query も数を戻す
+  await assert.rejects(gate.runQuery(async () => { throw new Error("x"); }));
+  assert.equal(gate.queries, 0);
+  // query 用 embedder は門を通し、query 用の timeout を渡す
+  const seen: (number | undefined)[] = [];
+  const base = { model: "m", dim: 1, embed: async (t: string[], o?: { timeoutMs?: number }) => { seen.push(o?.timeoutMs); assert.equal(gate.queries, 1); return t.map(() => [1]); } };
+  await createQueryEmbedder(base, gate, 1234).embed(["q"]);
+  assert.deepEqual(seen, [1234]);
 });
 
 test("SQL は全てパラメータ化: server/ の query に値を埋め込むテンプレート（${}）が無い", () => {
