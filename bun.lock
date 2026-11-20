@@ -131,11 +131,13 @@
         "bantou-center-client": "workspace:*",
       },
       "devDependencies": {
+        "@playwright/test": "^1.63.0",
         "@types/node": "^22.0.0",
         "h3": "^1.15.11",
         "nuxt": "~4.5.2",
         "tsx": "^4.19.0",
         "typescript": "~5.9.0",
+        "vue-tsc": "3.2.5",
       },
     },
   },
