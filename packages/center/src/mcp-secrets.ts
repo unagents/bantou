@@ -15,7 +15,7 @@ export const SECRET_NAME_ERROR = "鍵の名前の形でない（短い識別子�
 /** session 名の部分で、英字だけ・数字だけの連続がこの長さ以上なら断る。 */
 const TAIL_PLAIN_RUN = 20;
 /** `<接続名>.<session 名>` の形（session 名は 64 文字まで）。 */
-const CONN_SESSION = /^([a-z0-9][a-z0-9_-]{0,31})\.(.+)$/;
+const CONN_SESSION = /^([A-Za-z0-9][A-Za-z0-9_-]{0,31})\.(.+)$/;
 
 /** 名前の形だけの検査（読み込み用。値らしさは見ない）。 */
 export function checkSecretNameShape(name: string): string | undefined {
@@ -35,7 +35,7 @@ function classChanges(run: string): number {
  * - 値によくある接頭辞（sk- / ghp_ / eyJ など）で始まる物は断る。
  * - 区切り（. _ -）で分けた各部分の英数字の連続が、16 文字以上で文字種（小文字・大文字・数字）の切り替えが 6 回以上なら乱数らしいので断る。
  * - 連続が 24 文字以上なら断る（ただし `<接続名>.<session 名>` の形の session 名の部分は、長い名前がありうるので長さだけでは断らない）。
- * - `<接続名>.<session 名>` の session 名の部分にも（`.` で区切った各部分に）、接頭辞・切り替え回数の検査と、英字だけ・数字だけの 20 文字以上の連続の検査を当てる。
+ * - `<接続名>.<session 名>` の session 名の部分にも（`.` `_` `-` の直後のどこからでも）、接頭辞・切り替え回数の検査と、英字だけ・数字だけの 20 文字以上の連続の検査を当てる。
  * 名前として通る形の値は事前に区別できないので、これは保証でなく緩和。
  */
 export function checkSecretNameNew(name: string): string | undefined {
@@ -45,7 +45,8 @@ export function checkSecretNameNew(name: string): string | undefined {
   const head = m ? m[1] : name;
   const tail = m ? m[2] : "";
   // session 名の部分にも同じ値らしさの検査を当てる（先頭にしか当てないと `a.ghp_…` が通る）
-  if (tail.split(".").some((seg) => VALUE_PREFIX.test(seg))) return SECRET_NAME_ERROR;
+  // 区切り（. _ -）の直後ならどこからでも接頭辞を見る（tail が区切りで始まる形も含む）
+  for (let i = 0; i < tail.length; i++) if ((i === 0 || "._-".includes(tail[i - 1])) && VALUE_PREFIX.test(tail.slice(i))) return SECRET_NAME_ERROR;
   if (tail && tail.length >= TAIL_PLAIN_RUN) for (const run of tail.match(/[A-Za-z0-9]+/g) ?? []) if (run.length >= TAIL_PLAIN_RUN && /^(?:[A-Za-z]+|[0-9]+)$/.test(run)) return SECRET_NAME_ERROR;
   for (const [part, longOk] of [[head, false], [tail, true]] as const) {
     for (const run of part.match(/[A-Za-z0-9]+/g) ?? []) {
