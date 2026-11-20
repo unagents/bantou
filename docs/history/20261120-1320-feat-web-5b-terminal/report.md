@@ -15,7 +15,7 @@
 - 判断 14（設定の変更を受けるか）は 5b の範囲外（設定画面は 5c）。触れていない。5a の guard・allow-list も変えていない。
 - web では `server_retire` が許可 tool に無いので、web の CenterDialog は `hide-retire` で退役ボタンを出さない（desktop は既定のまま出る）。
 - `session_attach_bytes` の画像型が 4 種のどれでもなければ送らずに RpcError（center-client と同じ sniff）。
-- desktop e2e は手順（mac200 へ ssh）が他 host への接続になり禁止のため、この host で一時 config（chromium を指定、repo 外の変更なし・削除済み）を使い、dev server は別 port で実行した。
+- desktop e2e は手順書が指す他 host への接続（ssh）は禁止のため、この host で一時 config（chromium を指定、repo 外の変更なし・削除済み）を使い、dev server は別 port で実行した。
 
 ## 確認の結果
 - packages/web typecheck（nuxt prepare + tsc + nuxt typecheck）: 通過。
@@ -29,9 +29,12 @@
 
 ## 回さなかった確認と理由
 - desktop の `nuxt typecheck`: 実行したが `vue-router/volar/sfc-route-blocks` が解決できず（install 環境の問題。差分の型エラーではない）、型の結果は得られなかった。未実施扱い。
-- desktop e2e の残りの spec（CenterDialog を使わない 20 超）: 差分が CenterDialog の既定不変の prop だけなので回さず。mac200 での手順は他 host のため未実施。
+- desktop e2e の残りの spec（CenterDialog を使わない 20 超）: 差分が CenterDialog の既定不変の prop だけなので回さず。他 host での手順は接続できないため未実施。
 - Rust・protocol: 変更なし。
 
 ## 残った問題
 - 上記 desktop typecheck の環境問題。
 - 実機のスマホ・実 center での確認は設置後（設計 13 章）。
+
+## 追記（review 往復 1 回目）
+- 上の 2 か所の host 名を「他 host」に匿名化した。docs だけの変更なので test・e2e は再実行していない。
