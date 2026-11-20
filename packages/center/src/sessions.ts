@@ -131,6 +131,8 @@ export function createSessionManager(opts: {
   renameRemoteSession?: (oldName: string, newName: string) => Promise<unknown> | unknown;
   /** name が remote の記録と衝突する理由（無ければ null）。create / update の newName の検証に使う。省略時は検査しない。 */
   remoteNameConflict?: (name: string, mode: "create" | "rename", oldName?: string) => string | null;
+  /** session の使う server の範囲（settings.servers）が変わった時に、その session の master-cap へ知らせる先（messenger の push）。省略時は知らせない。失敗しても更新は成功にする。 */
+  notifyServersChanged?: (name: string, text: string) => Promise<{ ok: boolean; reason?: string }>;
 }): SessionManager {
   const { config, supervisor, store, log } = opts;
   const waitMs = opts.waitMs ?? 15_000;
@@ -365,6 +367,16 @@ export function createSessionManager(opts: {
         supervisor.setAddDirs(name, composeAddDirs(common, next));
         supervisor.setOutputStyle(name, composeOutputStyle(common, next));
         log(`session の設定を更新: ${name} (項目: ${Object.keys(next).join(",") || "なし"})`);
+        const before = composeServers(prev);
+        const after = composeServers(next);
+        if (JSON.stringify(before) !== JSON.stringify(after) && opts.notifyServersChanged) {
+          const fmt = (s: string[] | undefined): string => (s === undefined ? "指定なし（全部）" : s.length === 0 ? "なし（どの server も使わない）" : s.join(", "));
+          const text = `[使う server の範囲が変わった] ${fmt(before)} → ${fmt(after)}。remote_send の server 省略・remote_list の既定はこの範囲に従う。範囲外になった自分の古い cap は remote_id を指して remote_delete で片付けられる。（session の設定 settings.servers。起動時の指示文には次の起動で反映される）`;
+          void Promise.resolve(opts.notifyServersChanged(name, text)).then(
+            (r) => { if (!r.ok) log(`範囲の変更を知らせられない: ${name} ${r.reason ?? ""}`); },
+            (e: unknown) => log(`範囲の変更を知らせられない: ${name} ${e instanceof Error ? e.message : String(e)}`),
+          );
+        }
         return { name, settings: next };
       }),
 

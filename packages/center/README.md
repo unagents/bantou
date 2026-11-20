@@ -287,7 +287,11 @@ center は wrapper 経由の session（master-cap）を起動するたび（新�
 - **未設定と空配列**: 未設定（`null` で削除、または項目なし）= 範囲を絞らない（全部）。**空配列 `[]` = どの server も使わない**（保存する。`addDirs` の空配列が削除と同じなのとは違う。使わない session を作れるようにするため、未設定と区別する）。
 - **合成**: session の `servers` だけを見る（center 共通の設定は見ない）。無ければ全部。`servers: []` は「使わない」。**通知は範囲外の server からも受ける**（`servers` は送信先を絞る設定であり、受信は絞らない。既に起動済みの cap の worker_report / activity / cap_result は捨てない）。
 - **効き方**: `remote_send` / `remote_create`（server 省略時は範囲内の先頭を宛先にする。明示指定が範囲外ならエラー）、`remote_delete` / `worker_reply`（server 省略時は範囲内の cap だけが候補、明示指定が範囲外ならエラー）。エラー文は `この session の servers に無い: <server>（session=<名>, servers=[…]）`。範囲内に使える server が無ければ `この session の servers に無い: 使える server が無い（…）`。host 名が複数の server に一致する曖昧エラーは、範囲に関わらず従来どおり。設定の更新は**次の呼び出しからすぐ効く**（`instructions` / `addDirs` と違い、起動し直し不要）。owner の無い呼び出し（desktop の `center_call`）は範囲の影響を受けない。
-- **一覧**: `remote_list`（session 向け）と desktop の session 画面（RemoteActivity）に出る server は、その session の cap があるものだけ（`servers` で範囲を後から狭めても、すでにある cap は出る。消すには範囲を広げて `remote_delete`）。center 設定画面の server 一覧は center 全体の全 server を出す。
+- **置き場**: session の `servers` は center の状態 dir の `sessions.json` の各 session の `settings.servers` にある（`session_settings_get` / `session_settings_update`、desktop の session 設定ダイアログで読み書きする）。center 共通の `center-settings.json` には持たない。**config の `servers[]`（`config.json` の server の接続・`model` / `workerModel` の設定）とは別物**で、名前が同じだけ。
+- **master-cap への知らせ**: 起動時は指示文の部品 `master-cap-role` に「使う server の範囲」の節を出す（範囲の指定がある時だけ。範囲が変わったら部品の version を上げる）。範囲を変えた時（`session_settings_update`）は、その session の master-cap へ完了通知と同じ messenger の push で新旧の範囲を知らせる（指示文への反映は次の起動）。`remote_list` は範囲の指定がある時、配列の先頭に `{ scope: { servers, out_of_scope_caps, note } }` を 1 件足す。`remote_send` / `worker_reply` / `remote_delete` / `remote_list` の道具の説明にも範囲を書く。
+- **一覧**: `remote_list`（session 向け）は、範囲の指定がある時、範囲外の server の cap を**既定で出さない**（`include_out_of_scope: true` で出す。他の session の cap はどちらでも出ない）。`task_status` と外向けの `remote_list`（`/mcp`）は範囲で絞らない。desktop の session 画面は今までどおり。center 設定画面の server 一覧は center 全体の全 server を出す。
+- **範囲外に残った古い cap**: 範囲を後から狭めると、範囲外の server の cap が残る。`remote_delete` に `remote_id` を明示すれば、その session 自身の cap に限り範囲外でも消せる（`remote_id` 省略時は範囲内だけが候補。旧共有 cap や他の session の cap は対象外）。
+- **server が見つからない時**: 候補は範囲内の server だけ（`server が見つからない: <指定>（範囲内の候補: …）`）。範囲が 1 つなら `remote_send` は `server` を省ける。
 - **互換**: `servers` の無い旧形式の settings は未設定（全部）として読む。壊れた値（配列でない）も未設定として読み、全 server を止めない。
 
 ## server の版合わせ

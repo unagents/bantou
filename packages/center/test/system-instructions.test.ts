@@ -36,7 +36,7 @@ test("master-cap-role: session 名が入り、作業は remote-cap に回す旨�
   assert.ok(t.includes("progress は push されない。進捗は remote_list で見る"));
   assert.ok(t.includes("worker の report（ask / approve / done）は messenger の push"));
   assert.ok(!t.includes("（progress / ask / approve / done）"));
-  assert.equal(MASTER_CAP_ROLE.version, 5);
+  assert.equal(MASTER_CAP_ROLE.version, 6);
 });
 
 test("master-cap-availability: 2 つ目に並び、いつでも受けられる・remote_send・background・turn を塞がない旨がある。label は master-cap-availability@2", () => {
@@ -106,7 +106,7 @@ test("buildSystemInstructions: 部品を順に空行で結合。空の部品は�
 });
 
 test("master-cap-role v3: 受けた指示の計画を立て、作業のまとまりごとに cap を起こし直す・まとまりが終わったら閉じる旨があり、数値の決まりは書かない", () => {
-  assert.equal(MASTER_CAP_ROLE.version, 5);
+  assert.equal(MASTER_CAP_ROLE.version, 6);
   assert.equal(partLabel(MASTER_CAP_ROLE), "master-cap-role@5");
   const t = MASTER_CAP_ROLE.text({ session: "s" });
   for (const w of ["[計画と cap の起こし直し]", "計画を立てる", "作業のまとまりごとに起こし直す", "使い回し続けない", "remote_delete で cap を閉じる", "新しい会話", "last_error_text", "master-cap が決める"]) assert.ok(t.includes(w), w);

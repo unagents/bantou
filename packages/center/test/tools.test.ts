@@ -52,6 +52,7 @@ async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partia
     workerReply: async (i: unknown) => (calls.push({ workerReply: i }), { remote_id: "c-1", server: "id", worker_id: "w-1", accepted: true }),
     delete: async (i: unknown) => (calls.push({ remoteDelete: i }), { remote_id: "r-1", deleted: true, stopped: true }),
     list: (f: unknown) => (calls.push({ remoteList: f }), []),
+    scopeOf: () => ({ servers: undefined, out_of_scope: 0 }),
     ...mgrs.remotes,
   } as unknown as RemoteManager;
   const server = createCenterServer({ ...(mgrs.systemInstructions ? { systemInstructions: mgrs.systemInstructions } : {}), config: parseConfig(mgrs.workspace ? { workspace: mgrs.workspace } : {}, "/x/c.json"), supervisor, link: fullLink, sessions, remotes, follow: mgrs.follow, login: mgrs.login });
@@ -352,7 +353,7 @@ test("remote_delete / remote_list: remote_list は session 向けなら自分の
     { remoteDelete: { owner: "pm1" } },
     { remoteDelete: { owner: "pm1", remote_id: "c-1", server: "id", force: true } },
     { remoteList: { owner: "pm1", includeShared: true } },
-    { remoteList: {} }, { remoteList: { owner: "pm1" } },
+    { remoteList: {} }, { remoteList: { owner: "pm1", includeOutOfScope: true } },
   ]);
   await c.close();
   await close();

@@ -367,6 +367,8 @@ export function createRemoteControlSupervisor(opts: {
    * center は memory-settings.json を読む（CLI で変えた設定が次の起動から効く）。
    */
   memoryOf?: (name: string) => MemorySetting | undefined;
+  /** session が使える server の範囲（session 設定 settings.servers）。undefined = 全部。起動のたびに指示文へ出す。 */
+  serversOf?: (name: string) => string[] | undefined;
   /** 認証状態（auth / loginUrl / loginError）が変わった時の通知。 */
   onAuthChange?: (project: string, status: RcStatus) => void;
 }): RemoteControlSupervisor {
@@ -480,7 +482,8 @@ export function createRemoteControlSupervisor(opts: {
       wd.core.register(name);
       const mcpUrl = wd.mcpUrl();
       if (!mcpUrl) log(`session 向け MCP 窓口が無いので bantou の MCP を付けない（messenger のみ）: project=${name}`);
-      const sysCtx = { session: name, memory: memory !== null, coordinator: coordinatorSession === name };
+      const servers = opts.serversOf?.(name);
+      const sysCtx = { session: name, memory: memory !== null, coordinator: coordinatorSession === name, ...(servers !== undefined ? { servers } : {}) };
       const system = opts.systemInstructions?.build(sysCtx) ?? "";
       const appendSystemPrompt = [system, e.instructions].filter((t) => t !== "").join("\n\n");
       // 出力スタイルは project の .claude/output-styles/ に書いて名前で選ぶ。書けなくても起動は止めない（style 無しで起動）
@@ -532,7 +535,7 @@ export function createRemoteControlSupervisor(opts: {
       args: shownArgs,
       instructions: e.wrapper && !!e.instructions,
       ...(e.wrapper && opts.systemInstructions
-        ? { systemInstructions: typeof opts.systemInstructions.labels === "function" ? opts.systemInstructions.labels({ session: name, memory: memory !== null, coordinator: coordinatorSession === name }) : [...opts.systemInstructions.labels] }
+        ? { systemInstructions: typeof opts.systemInstructions.labels === "function" ? opts.systemInstructions.labels({ session: name, memory: memory !== null, coordinator: coordinatorSession === name, ...(opts.serversOf?.(name) !== undefined ? { servers: opts.serversOf(name)! } : {}) }) : [...opts.systemInstructions.labels] }
         : {}),
     };
     delete e.status.lastError;
