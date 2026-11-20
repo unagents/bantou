@@ -60,7 +60,7 @@ test("buildSystemInstructions: 出力で master-cap-availability の文面が ma
 });
 
 test("describeSystemInstructions: 既定は 5 件（base-spec, role, availability, memory, coordinator の順）。memory・coordinator は条件付きだと title で分かる", () => {
-  assert.deepEqual(describeSystemInstructions().map((d) => `${d.id}@${d.version}`), ["base-spec@1", "master-cap-role@5", "master-cap-availability@2", "memory@1", "coordinator@1"]);
+  assert.deepEqual(describeSystemInstructions().map((d) => `${d.id}@${d.version}`), ["base-spec@1", "master-cap-role@5", "master-cap-availability@2", "memory@1", "coordinator@2"]);
   assert.ok(describeSystemInstructions()[3]!.title.includes("設定がある session だけ"));
   assert.ok(describeSystemInstructions()[4]!.title.includes("統括の session"));
 });

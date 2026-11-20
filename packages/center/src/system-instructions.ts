@@ -173,14 +173,15 @@ export const MEMORY_USAGE: SystemInstructionPart = {
  */
 export const COORDINATOR_USAGE: SystemInstructionPart = {
   id: "coordinator",
-  version: 1,
+  version: 2,
   title: "統括の session（設定で指定した 1 つ）だけ: 各 session の状態を session_brief で読む",
   when: (ctx) => ctx.coordinator === true,
   text: () =>
     [
       "[統括の session]",
       "- この session は、他の session の状態を見渡す統括の session に指定されている。自分の project の master-cap でもある。",
-      "- 使える道具は session_brief（mcp__bantou__session_brief）だけ。各 session の状態（起動の状態・作業状態・context の使用量・remote の件数）を 1 行ずつ読む。件数だけで、report や結果の本文は入らない。",
+      "- 新しい project の session を立てる時は coordinator_session_create（mcp__bantou__coordinator_session_create。name・instructions（省略可）・start（既定は起動する））。作業 dir は center が決める。同じ名前は断られる。既存の session は消せない・変えられない。",
+      "- 状態を読む道具は session_brief（mcp__bantou__session_brief）。各 session の状態（起動の状態・作業状態・context の使用量・remote の件数）を 1 行ずつ読む。件数だけで、report や結果の本文は入らない。",
       "- 他の session の作業の中身には踏み込まない。各 project の進め方はその session の master-cap が決める。他の session の remote-cap や worker に直接は指示しない。",
       "- remote_list の include_shared は使わない（旧共有の cap は owner に関係なく返るため、他の project の結果が流れ込む）。",
       "- 他の session の作業 dir と、center の状態 dir の file は Read しない。",

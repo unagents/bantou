@@ -1,3 +1,4 @@
+import { createSessionVia } from "./coordinator.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { CapResultReply, ErrorReply, TaskResultReply, WorkerReportNotice } from "@agent-hand/bantou-protocol";
 import type { CliArgs } from "./args.js";
@@ -222,7 +223,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     }
     http = await startHttpServer({
       createServer: makeServer,
-      createSessionServer: (owner) => createSessionMcpServer({ remotes, follow, owner, coordinator: { session: () => sessions.coordinatorOf(), sessions: () => sessions.list() } }),
+      createSessionServer: (owner) => createSessionMcpServer({ remotes, follow, owner, coordinator: { session: () => sessions.coordinatorOf(), sessions: () => sessions.list(), createSession: createSessionVia(sessions) } }),
       sessionAuth: sessionTokens,
       onStatusLine: (name, payload) => {
         const s = sessions.list().find((x) => x.name === name);

@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { SessionInfo } from "./sessions.js";
+import { SESSION_NAME, type SessionInfo, type SessionManager } from "./sessions.js";
+import { SESSION_INSTRUCTIONS_MAX } from "./config.js";
 
 /** session_brief: 1 行の文字数・1 回の行数・1 回の文字数の上限（設計書 14.3 (3)）。 */
 export const SESSION_BRIEF_LINE_MAX = 200;
@@ -78,7 +79,18 @@ export interface CoordinatorDeps {
   /** 今の全 session。 */
   sessions: () => SessionInfo[];
   now?: () => number;
+  /**
+   * 新しい session を作る（SessionManager.create と同じ経路。path は渡さない = center の workspace の下だけ）。
+   * 無ければ session_create の道具を出さない。
+   */
+  createSession?: (input: { name: string; instructions?: string; start: boolean }) => Promise<SessionInfo>;
 }
+
+/** 統括の道具 coordinator_session_create の実体: 既存の追加と同じ SessionManager.create。path は渡さない（workspace の下だけ）。 */
+export const createSessionVia =
+  (sessions: Pick<SessionManager, "create">): NonNullable<CoordinatorDeps["createSession"]> =>
+  (i) =>
+    sessions.create({ name: i.name, start: i.start, ...(i.instructions ? { settings: { instructions: i.instructions } } : {}) });
 
 type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean };
 const json = (value: unknown, isError = false): ToolResult => ({ content: [{ type: "text", text: JSON.stringify(value, null, 2) }], ...(isError ? { isError: true } : {}) });
@@ -106,6 +118,31 @@ export function registerCoordinatorTools(server: McpServer, deps: CoordinatorDep
       const all = deps.sessions();
       if (session !== undefined && !all.some((s) => s.name === session)) return json({ error: `未定義の session: ${session}` }, true);
       return json(buildSessionBrief(all, owner, (deps.now ?? Date.now)(), session !== undefined ? { session } : undefined));
+    },
+  );  const { createSession } = deps;
+  if (!createSession) return;
+  server.registerTool(
+    "coordinator_session_create",
+    {
+      title: "新しい project の session を立てる",
+      description:
+        "新しい project の session（master-cap）を center の workspace の下に作る（統括の session だけが使える）。name は英数字と _ - のみ。同じ名前の session が在れば断る。作業 dir は <workspace>/<name> に決まり、path は指定できない。instructions はその session の最初の追加指示（省略可）。start = false で作るだけにする（既定は起動する）。center 共通の設定（追加の指示など）は desktop の追加と同じに効く。既存の session の削除・変更はできない。返り値 { name, state }",
+      inputSchema: {
+        name: z.string().regex(SESSION_NAME, "英数字と _ - のみ"),
+        instructions: z.string().max(SESSION_INSTRUCTIONS_MAX, `${SESSION_INSTRUCTIONS_MAX} 文字以内`).optional(),
+        start: z.boolean().optional(),
+      },
+    },
+    async ({ name, instructions, start }) => {
+      // 呼ばれた時にも設定を見直す
+      const refused = refuseUnlessCoordinator(deps, owner);
+      if (refused) return refused;
+      try {
+        const created = await createSession({ name, ...(instructions ? { instructions } : {}), start: start ?? true });
+        return json({ name: created.name, state: created.state });
+      } catch (e) {
+        return json({ error: e instanceof Error ? e.message : String(e) }, true);
+      }
     },
   );
 }
