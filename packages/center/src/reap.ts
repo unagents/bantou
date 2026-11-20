@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import type { Logger } from "./log.js";
+import { capSessionName } from "./session-name.js";
 
 export interface ProcInfo {
   pid: number;
@@ -31,14 +32,16 @@ export function listProcesses(): Promise<ProcInfo[] | null> {
 }
 
 /**
- * argv が `remote-control ... --name <project>` の形か。token 完全一致のみ（foo と foobar を区別する）。
+ * argv が `remote-control ... --name <名>` の形か。token 完全一致のみ（foo と foobar を区別する）。
+ * <名> は `capSessionName(project)`（今の起動引数）か `project`（変更前に起動した孤児も回収するため）。互換の別名ではなく、プロセス照合を起動引数に合わせたもの。
  * 他のフラグ（--continue 等）は見ない。広い pkill -f 相当の照合はしない。
  */
 export function matchesRc(command: string, project: string): boolean {
   const tokens = command.split(/\s+/).filter((t) => t !== "");
   if (!tokens.includes("remote-control")) return false;
+  const names = [capSessionName(project), project];
   for (let i = 0; i < tokens.length - 1; i++) {
-    if (tokens[i] === "--name" && tokens[i + 1] === project) return true;
+    if (tokens[i] === "--name" && names.includes(tokens[i + 1])) return true;
   }
   return false;
 }

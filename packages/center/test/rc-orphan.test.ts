@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { listProcesses } from "../src/reap.js";
+import { capSessionName } from "../src/session-name.js";
 
 const centerDir = fileURLToPath(new URL("..", import.meta.url));
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -136,10 +137,10 @@ test("center を SIGKILL すると rc が孤児で残り、次の center の起�
   assert.match(logsB.join(""), /孤児回収: SIGTERM/);
   assert.match(readFileSync(sigLog, "utf8"), new RegExp(`^${stubA} SIGTERM$`, "m"));
 
-  // 4) 重複していない: 同 project の rc は B 1 本だけ（name に乱数を含むので他と混ざらない。stub は argv に --name を持つ）
+  // 4) 重複していない: 同 project の rc は B 1 本だけ（name に乱数を含むので他と混ざらない。stub は argv に --name <project>-cap を持つ）
   const procs = await listProcesses();
   assert.ok(procs);
-  const rcs = procs.filter((p) => p.pid !== process.pid && /\bremote-control\b/.test(p.command) && p.command.split(/\s+/).includes(project));
+  const rcs = procs.filter((p) => p.pid !== process.pid && /\bremote-control\b/.test(p.command) && p.command.split(/\s+/).includes(capSessionName(project)));
   assert.deepEqual(rcs.map((p) => p.pid), [stubB]);
 
   // 5) 正常停止（SIGTERM）では子と孫が残らない
