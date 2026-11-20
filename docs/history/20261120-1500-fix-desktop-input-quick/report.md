@@ -18,7 +18,7 @@
 ## 確認
 - unit（`packages/desktop/e2e/terminal-keys.spec.ts`、playwright 単体 config）: terminal-keys + terminal-buffer 11 件 pass。
 - 変異: gate の間隔判定を削除 → 2 件落ちる（連打 1 回・休止後再開）。`ev.shiftKey` 条件を削除 → 1 件落ちる。いずれも戻して 11 pass。
-- e2e（browser）: `terminal.spec.ts` に shift+enter の test を追加（`a ⇧⏎ b ⏎` が `a\x1b\rb\r`、ctrl+enter は `\r`、二重送信なし）。terminal.spec 9 件 pass。`return false` を true にする変異は、実行中に session が時間切れで終わり結果未確認（戻したことは tree で確認済み）。
+- e2e（browser）: `terminal.spec.ts` に shift+enter の test を追加（`a ⇧⏎ b ⏎` が `a\x1b\rb\r`、ctrl+enter は `\r`、二重送信なし）。terminal.spec 9 件 pass。handler の `return false` を true にする変異で shift+enter の test が落ちる（二重送信を検出）ことを確認し、戻した。
 - desktop e2e: 1 回目に全件（先頭 139 件 pass、途中で timeout により打ち切り）、残り（session-path 以降、terminal 系含む）85 件 pass、落ちた test なし。再開指示以降の全件再実行はしていない（test 役が実施）。
 - typecheck: desktop `nuxt typecheck` exit 0、web `bun run typecheck` exit 0（ui は両者の layer として検査される。ui 単独の script は無い）。
 - packages/web test: 78 件 pass / 0 fail。
@@ -28,5 +28,5 @@
 - 実測（claude の TUI）は別 worker の結果を cap が統合。
 
 ## 残った問題
-- 上記変異（handler の戻り値）の再確認は未了。
+- なし（実測は別 worker）。
 - 作業 tree の一時 config（pw-*.tmp.config.ts）は commit していない。
