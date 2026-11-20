@@ -60,3 +60,11 @@ merge 後の確認:
 
 残った問題（今回は直さなかった）:
 - 5b の端末 page（`pages/s/[name].vue`）は `<WebHeader :title="name" back="/" />` で、ヘッダーに 5c の設定ボタンが出るが、その page は `@settings` を受けないため押しても何も起きない。指示が 2 file の解消だけだったので手を入れていない。直すなら、`WebHeader` で設定ボタンを `@settings` が付いた時だけ出す、または端末 page 側で扱う。
+
+## 往復 2 回目の対応（review: issues、medium 1 件）
+- 指摘: 5b の端末 page（`pages/s/[name].vue`）のヘッダーに 5c の設定ボタンが出るが `@settings` を受けず、押しても無反応（5c が持ち込んだ不具合）。
+- 直し（案 A）: `WebHeader` に `settings?: boolean`（既定 false）を足し、設定ボタンは true の時だけ出す。`pages/index.vue` だけが `settings` を渡す。端末 page は変えていない（5b の挙動のまま）。他の file は触っていない。
+- test 追加（web e2e settings）: 一覧には `web-settings-open` が 1 つ、`/s/alpha`（端末 page、`web-back` は有る）には 0。
+- 変異: (a) index の `settings` を外す → 「一覧に有る」が Expected 1 / Received 0 で落ちる。(b) WebHeader の `v-if="settings"` を外す → 「端末 page に無い」が Expected 0 / Received 1 で落ちる。どちらも戻して通った。
+- 確認: web e2e 22 passed / 0 failed（terminal 6、session-list 8、settings 8。tab またぎの開閉 test も通る）、web test 90 pass、center-client test 230 pass、typecheck web・desktop（ui を含む）rc=0 で error TS なし、nuxt build 成功。
+- desktop e2e 全件は回していない: 変更は web 専用の WebHeader・index.vue と web の test だけで、desktop の経路に触れないため。直前の develop 取り込み後の全件 220 passed を引用する。
