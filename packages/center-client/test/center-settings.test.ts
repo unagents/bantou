@@ -70,6 +70,14 @@ test("get without redactSecrets keeps the desktop shape (token included, no toke
   assert.equal(s.tokenSet, undefined);
 });
 
+test("get tells the web screen which items env fixes; the desktop shape has no envLocks", async () => {
+  const store = memStore(withRemote(URL_A, TOKEN_A));
+  assert.deepEqual((await handle(store).get()).envLocks, { remoteUrl: false, remoteToken: false });
+  assert.deepEqual((await handle(store, { CENTER_URL: URL_B }).get()).envLocks, { remoteUrl: true, remoteToken: false });
+  assert.deepEqual((await handle(store, { CENTER_URL: URL_B, CENTER_TOKEN: TOKEN_B }).get()).envLocks, { remoteUrl: true, remoteToken: true });
+  assert.equal("envLocks" in (await handle(store, { CENTER_URL: URL_B }, false).get()), false);
+});
+
 test("set: empty token keeps the stored remote token when the url is unchanged", async () => {
   const store = memStore(withRemote(URL_A, TOKEN_A));
   const h = handle(store);

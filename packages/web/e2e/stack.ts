@@ -34,10 +34,12 @@ export interface Stack {
   setTarget(on: boolean): void;
   /** Push a `sessions` event from the center to the web backend. */
   pushSessionsEvent(reason: string, name: string): Promise<void>;
+  /** What the backend process wrote to stdout / stderr so far. */
+  logs(): string;
   close(): Promise<void>;
 }
 
-export async function startStack(): Promise<Stack> {
+export async function startStack(extraEnv: (center: FakeCenter) => Record<string, string> = () => ({})): Promise<Stack> {
   const key = makeKey("e2e-kid");
   const jwks = await startJwks([key]);
   const center = await FakeCenter.start("e2e-center-token-0123456789");
@@ -68,6 +70,7 @@ export async function startStack(): Promise<Stack> {
       WEB_SETTINGS_FILE: settingsFile,
       HOST: "127.0.0.1",
       PORT: String(port),
+      ...extraEnv(center),
     },
   });
   let log = "";
@@ -103,6 +106,7 @@ export async function startStack(): Promise<Stack> {
       for (let i = 0; i < 100 && conns.length === 0; i++) await new Promise((r) => setTimeout(r, 50));
       for (const c of conns) c.write(`event: sessions\ndata: ${JSON.stringify({ reason, name })}\n\n`);
     },
+    logs: () => log,
     close,
   };
 }

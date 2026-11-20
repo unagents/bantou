@@ -177,6 +177,8 @@ export interface CenterSettings {
   tokenSet?: boolean;
   /** Center on another host, taken from a pasted connection snippet (used instead of the sidecar). */
   remote?: CenterRemote;
+  /** Web app only: which remote items the backend's env (`CENTER_URL` / `CENTER_TOKEN`) fixes; the screen cannot change them. */
+  envLocks?: { remoteUrl: boolean; remoteToken: boolean };
 }
 
 /** Mirror of `src-tauri/src/center.rs::CenterRemote`. */

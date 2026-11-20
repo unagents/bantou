@@ -20,6 +20,8 @@ export type DownloadProgress = Parameters<Update["downloadAndInstall"]>[0] exten
   : never;
 
 export interface Platform {
+  /** Whether this shell can run a center of its own (the settings dialog's start switch, port, IP, status). Absent: it can. */
+  readonly centerSidecar?: boolean;
   checkForUpdate(): Promise<Update | null>;
   downloadAndInstall(update: Update, onProgress?: (event: DownloadProgress) => void): Promise<void>;
   relaunch(): Promise<void>;

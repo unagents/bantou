@@ -15,6 +15,8 @@ export type DownloadProgress =
   | { event: "Finished" };
 
 export interface Platform {
+  /** Whether this shell can run a center of its own (the settings dialog's start switch, port, IP, status). The web cannot. */
+  readonly centerSidecar?: boolean;
   checkForUpdate(): Promise<Update | null>;
   downloadAndInstall(update: Update, onProgress?: (event: DownloadProgress) => void): Promise<void>;
   relaunch(): Promise<void>;
@@ -33,6 +35,8 @@ export interface Platform {
 const none: UnlistenFn = () => {};
 
 const browserPlatform: Platform = {
+  // The web backend only connects to a center that runs elsewhere (design 5.5).
+  centerSidecar: false,
   // The web app is updated by the server, not by itself.
   checkForUpdate: async () => null,
   downloadAndInstall: async () => {},

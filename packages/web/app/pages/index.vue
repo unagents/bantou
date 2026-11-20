@@ -10,6 +10,8 @@ let stopDenied: (() => void) | null = null;
 onMounted(() => (stopDenied = onAccessDenied((d) => (denied.value = d))));
 onBeforeUnmount(() => stopDenied?.());
 
+const settingsOpen = ref(false);
+
 const board = useBoard(ref<string | null>(null));
 const { centerList, activityCounts } = board;
 const { sideRows, activityFilter, toggleFilter } = useSessionBoard(board);
@@ -34,7 +36,8 @@ const reason = computed(() => health.value?.reason ?? centerList.value.reason);
 
 <template>
   <div class="bg-default text-default flex h-dvh flex-col overflow-hidden">
-    <WebHeader title="bantou" :unreachable="loaded && !centerList.reachable && !noTarget" />
+    <WebHeader title="bantou" :unreachable="loaded && !centerList.reachable && !noTarget" @settings="settingsOpen = true" />
+    <SettingsDialog v-if="settingsOpen" v-model:open="settingsOpen" />
     <main class="min-h-0 flex-1 overflow-y-auto" data-testid="session-list-page">
       <div v-if="denied" class="p-4 text-sm" role="alert" data-testid="access-denied">
         <p class="font-semibold">許可されていません</p>
