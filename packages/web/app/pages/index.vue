@@ -7,7 +7,7 @@ import { isAccessDenied, onAccessDenied } from "~/tauri/session-watch";
 // Reloading did not bring the session back (a 403 a login cannot fix): say so instead of looping.
 const denied = ref(isAccessDenied());
 let stopDenied: (() => void) | null = null;
-onMounted(() => (stopDenied = onAccessDenied(() => (denied.value = true))));
+onMounted(() => (stopDenied = onAccessDenied((d) => (denied.value = d))));
 onBeforeUnmount(() => stopDenied?.());
 
 const board = useBoard(ref<string | null>(null));

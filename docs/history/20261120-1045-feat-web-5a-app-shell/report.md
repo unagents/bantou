@@ -9,7 +9,7 @@ branch: `feat/web-5a-app-shell`（origin/develop 7e086d7 から）。HEAD の SH
     - 新しい stream が開いた時に `bantou://sessions-changed` を listener へ流す（backend が stream 接続前に変えた一覧は replay が無く、一覧が空のまま止まるため。e2e で見つけた）。落ちて再接続した時は `bantou://os-wake` も流し、center の取りこぼしを読み直させる。
     - browser が諦めた stream（Access 切れの redirect など）は閉じて、5〜60 秒の間隔で開き直す。
     - 端末の出力・入力（`body`）は 5b なので未対応（呼ぶと RpcError）。
-  - `session-watch.ts`: 設計書 5.2。SSE の失敗が 3 回続く、または browser が諦めたら `/api/me` を呼び、backend の答えでなければ（redirect・HTML・非 2xx）reload。通信不能（offline）では reload しない。reload は同一タブで 10 分に 2 回まで（sessionStorage に時刻を持つ）。続けて 2 回 reload しても直らない時（許可外 email の 403 など）は止めて、画面に「許可されていません」（`data-testid=access-denied`）を出す。stream が開けば履歴を消す。command が 401/403/redirect の時、および 2xx なのに本文が JSON でない時（login 画面の HTML が 200 で来る場合）も同じ確認。後者は `RpcError` にする（本文が空の 2xx は従来どおり undefined で通る）。
+  - `session-watch.ts`: 設計書 5.2。SSE の失敗が 3 回続く、または browser が諦めたら `/api/me` を呼び、backend の答えでなければ（redirect・HTML・非 2xx）reload。通信不能（offline）では reload しない。reload は同一タブで 10 分に 2 回まで（sessionStorage に時刻を持つ）。続けて 2 回 reload しても直らない時（許可外 email の 403 など）は止めて、画面に「許可されていません」（`data-testid=access-denied`）を出す。stream が開けば履歴を消し、「許可されていません」の表示も消す（`noteSessionOk`。listener に伝える）。`/api/me` の見方: gone にするのは redirect・401・403・2xx で非 JSON（login 画面）だけ。5xx（backend の再起動中）・その他の 4xx・通信失敗は offline 扱いで reload を使わない。command が 401/403/redirect の時、および 2xx なのに本文が JSON でない時（login 画面の HTML が 200 で来る場合）も同じ確認。後者は `RpcError` にする（本文が空の 2xx は従来どおり undefined で通る）。
   - `platform.ts`: browser 用 Platform。
 - `app/pages/index.vue`: スマホ向け一覧（設計書 7.1 の 1 階層目）。`useBoard` / `useSessionBoard`（ui の共有 composable）を使用。「接続先が無い」「center に問い合わせられなかった」「session が無い」の表示。
 - `server/plugins/00.guard.ts`: 守りを h3 stack の先頭に積む（下記）。`server/middleware/00.guard.ts` は削除。
@@ -21,7 +21,7 @@ Nitro の静的配信（public/ と `/_nuxt/*`）は server middleware より先
 ## 確認の結果
 | 確認 | 結果 |
 |---|---|
-| packages/web test（`node --test`） | 75 件 pass（既存 62 + 配線 1 + app/tauri の test 12） |
+| packages/web test（`node --test`） | 78 件 pass（既存 62 + 配線 1 + app/tauri の test 15） |
 | packages/web typecheck（`tsc --noEmit` と `nuxt typecheck`） | pass（tsconfig の lib に DOM を追加。test が app/tauri を import するため） |
 | packages/web `nuxt build` | pass |
 | packages/web e2e（Playwright、chromium headless shell を executablePath 指定、`--retries=1 --workers=1`） | 8 件 pass |
@@ -52,3 +52,7 @@ packages/web の devDependencies に `@playwright/test ^1.63.0`（e2e）と `vue
 
 ## 残った事
 - 5a の commit（caef92a、e0b0c8f、5ad7f05、04a34f2）の author が develop の author と違う。force-push・rebase は禁止のため直していない。
+
+## review 往復 2 回目の反映
+- `probeSession`: 5xx・その他の 4xx を gone にしない（reload を消費しない）。test: 5xx は offline、5xx が続いても履歴が増えず denied にならない。
+- `noteSessionOk`（stream open）で denied を false に戻して listener へ通知。test: 403 が続いて denied → stream 回復で消える（履歴も消える。変化が無い時は通知しない）。
