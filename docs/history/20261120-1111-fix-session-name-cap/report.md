@@ -37,7 +37,7 @@ remote の session 一覧で、center が起動した master-cap の session を
 
 ## test
 - packages/center typecheck: 通る。
-- packages/center test: __COUNT__
+- packages/center test: 625 件中 624 pass・1 fail。fail は既知の不安定 test「center を SIGKILL すると rc が孤児で残り、次の center の起動で回収される」（rc-orphan.test.ts）。単独再実行でも環境により落ちる（この host でも「stub A が ppid=1 で残る」のタイムアウトで落ちた。この時点は孤児の回収・名前の照合より前の前提）。origin/develop でも同じ失敗（review の host で確認）。なお以前の report の「単独再実行で pass」は別の test を拾った誤りだったので取り下げる。
 - 追加・更新した test: `capSessionName`（session-name.test.ts。`-cap` を重ねない）、起動引数の `--remote-control <session>-cap` と `-cap` で終わる名前を重ねない事、messenger の `AGENT_MESSENGER_NAME`、X-Bantou-Session / X-Agent-Id / token / status が session 名のままである事（remote-control-wrapper.test.ts）、旧経路の `--name`、指示文の名前と role@4（system-instructions.test.ts）、cap_id が変わらない事。
 - 既知の制約: project 名 `x` と `x-cap` が両方あると、session の名前（`x-cap`）が衝突する（remote-control 一覧・messenger の peer 名・孤児の照合）。
 - desktop: 変更が無い（画面は session 名＝内部の識別子を使い続ける）ので typecheck・e2e は回していない。
