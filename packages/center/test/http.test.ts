@@ -38,7 +38,7 @@ async function boot(
   const link = { list: async () => [] } as unknown as ServerLink;
   const sessions = {} as unknown as SessionManager;
   const remotes = {
-    list: (f?: { owner?: string }) => [{ remote_id: "c-1", owner: f?.owner ?? "(all)", worker_reports: [] }],
+    list: (f?: { owner?: string }) => [{ remote_id: "c-1", owner: f?.owner ?? "(all)", worker_reports: [], pending: [] }],
     send: async (i: { owner: string }) => ({ remote_id: "c-9", server: "s", serverName: "n", state: "running", owner: i.owner }),
   } as unknown as RemoteManager;
   const tokens = createSessionTokens();
