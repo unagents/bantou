@@ -22,7 +22,7 @@ branch: feat/web-5c-settings
 - packages/web test: 78 pass / 0 fail。
 - typecheck: packages/web（nuxt prepare + tsc + nuxt typecheck）rc=0、packages/desktop（nuxt typecheck、ui を含む）rc=0。packages/ui は独自の typecheck script が無く、web・desktop の typecheck で検査される。desktop の log に `vue-router/volar/sfc-route-blocks` の解決 warning が出るが rc=0（この環境の既知の warning、今回の変更と無関係と判断。確認はしていない）。
 - nuxt build（packages/web）: 成功。
-- 設定ダイアログの保存画像: before-/after-settings-center-{on,off}.png。byte 単位で同一（cmp 一致、md5 同一）。token・IP 欄は塗りつぶし済み、host 名・user 名は写っていない。before は変更前 code で撮った前提（撮影手順の記録は残していない）。人の最終確認用。
+- 設定ダイアログの保存画像: 往復 1 回目で撮り直した（下記）。
 
 ## 回さなかった確認
 - 実機（スマホ）での表示。実の center は起動していない。
@@ -30,4 +30,17 @@ branch: feat/web-5c-settings
 
 ## 残った問題
 - 判断 14 の A 以外（web から接続先を変える）は未実装。
-- web e2e の画像確認は desktop 表示のみ（web モードの画像は保存していない）。
+
+## 往復 1 回目の対応（review: issues）
+1. [medium] `load()` で web モードの centerGetSettings 失敗時に centerStatus / centerLocalIps / centerIpStatus へ落ちていた。catch のあとに `if (webMode) return;` を足した（desktop の経路は不変）。失敗時の表示は既存の error 表示（`v-else-if="error"`）のまま。
+   - test 追加（web e2e）: `/api/rpc/center_get_settings` を 500 にし、エラー表示が出る・sidecar 系と snippet 系の call が 0・404 が 0 を確認。
+   - 変異確認: 上の `if (webMode) return;` を外して build し直すと、この test が落ちる（`center_status` `center_local_ips` `center_ip_status` が呼ばれた）。戻して再度通った。
+2. [low] 画像の出自: clean な origin/develop 80bd939110f0d1bc6f743f36d86fd10440ae59a6 の clone と本 branch の clone で、同じ手順（desktop の mock IPC e2e の page で設定ダイアログを開く。center off と、起動 switch を on にした状態の 2 枚、1280x800）で撮り直した。token・接続設定の snippet・IP・paste 欄は css で塗りつぶして撮影した。`before-*.png`（develop）と `after-*.png`（本 branch）は byte 同一（cmp 一致）。desktop の表示が変わっていない根拠。
+3. [low] web モードの画像を 1 枚追加: `web-settings-phone.png`（Pixel 7、偽 center。url は 127.0.0.1 の偽 center、token は「設定済み」だけ）。
+
+### 往復 1 回目の確認結果
+- web e2e: 14 passed / 0 failed（新規 1 を含む）。
+- web test 78 pass、center-client test 230 pass。
+- typecheck: packages/web、packages/desktop（ui を含む）とも rc=0、error なし。
+- nuxt build（packages/web）: 成功。
+- desktop e2e: 変更は SettingsDialog の web 分岐（と早期 return）だけで desktop 経路に触れないため、全 220 件でなく関連 spec（settings、settings-remote-center、local-network、login、session-instructions）の 75 件を実行: 75 passed / 0 failed。前回の全件 220 passed は初回 commit 時点の結果。

@@ -74,6 +74,8 @@ async function load() {
   } catch (e) {
     error.value = String(e);
   }
+  // Web mode never calls the sidecar commands, a failed read included.
+  if (webMode) return;
   ipChoice.value = null;
   await Promise.all([refreshStatus(), loadLocalIps(), loadIpStatus(), loadCommon()]);
 }

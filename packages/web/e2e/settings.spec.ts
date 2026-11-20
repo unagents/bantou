@@ -81,6 +81,20 @@ test.describe("settings (web mode, design decision 14: view only)", () => {
     await expect(page.getByTestId("web-center-note")).toBeVisible();
   });
 
+  test("a failed settings read shows the error and still calls no sidecar command (no 404)", async ({ page }) => {
+    const seen = watch(page);
+    await page.route("**/api/rpc/center_get_settings", (r) => r.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "settings read failed" }) }));
+    await page.goto("/");
+    await page.getByTestId("web-settings-open").click();
+    await expect(page.getByRole("dialog")).toContainText("settings read failed");
+    await expect(page.getByTestId("web-center-section")).toHaveCount(0);
+    // let anything the dialog would still fire after the failure arrive
+    await page.waitForTimeout(1500);
+    const called = seen.rpc.map((c) => c.cmd);
+    for (const c of ["center_status", "center_local_ips", "center_ip_status", ...CALLS_NOT_FOR_THE_WEB]) expect(called, c).not.toContain(c);
+    expect(seen.rpc.filter((c) => c.status === 404)).toEqual([]);
+  });
+
   test("a center that does not answer shows 'つながらない'", async ({ page, stack }) => {
     const was = stack.center.requiredToken;
     stack.center.requiredToken = "another-token-0123456789"; // the stored token is now wrong: 401
