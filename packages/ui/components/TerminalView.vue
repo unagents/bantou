@@ -13,6 +13,7 @@ import {
   type AttachOutcome,
 } from "../api";
 import { encodeBase64 } from "../composables/terminalBuffer";
+import { terminalKeyBytes } from "../composables/terminalKeys";
 import type { CenterAuthState } from "../types";
 
 const props = defineProps<{
@@ -37,6 +38,7 @@ let term: Terminal | null = null;
 let fit: FitAddon | null = null;
 let observer: ResizeObserver | null = null;
 let current: string | null = null;
+let composing = false; // IME composition in progress (compositionstart..end)
 
 function report(e: unknown) {
   error.value = String(e);
@@ -180,6 +182,19 @@ onMounted(async () => {
     () => {}, // plain browser: no drag-drop events
   );
   term.onData((d) => current && sendInput(current, encodeBase64(new TextEncoder().encode(d))));
+  // Keys xterm would send differently from what the TUI wants (shift+enter): send our bytes on keydown and stop
+  // xterm's own handling for the whole keydown / keypress / keyup sequence (else it also sends a plain "\r").
+  host.value!.addEventListener("compositionstart", () => (composing = true), true);
+  host.value!.addEventListener("compositionend", () => (composing = false), true);
+  term.attachCustomKeyEventHandler((ev) => {
+    const bytes = terminalKeyBytes(ev, composing);
+    if (bytes === null) return true;
+    if (ev.type === "keydown") {
+      ev.preventDefault();
+      if (current) sendInput(current, encodeBase64(new TextEncoder().encode(bytes)));
+    }
+    return false;
+  });
   // Mouse reports and similar arrive as a Latin-1 string, one byte per char.
   term.onBinary((d) => {
     if (!current) return;
