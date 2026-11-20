@@ -30,13 +30,6 @@ export interface MemorySetting {
   agentId?: string;
 }
 
-/** 読み出し用（session_settings_get など）。token の値は返さず、設定済みかどうかだけ返す。 */
-export interface MemoryView {
-  url: string;
-  agentId?: string;
-  tokenSet: boolean;
-}
-
 /**
  * プロジェクト（session）ごとの設定。sessions.json の各 session の `settings` に保存する。
  * 既知の項目は検証し、未知の項目は JSON のまま保持する（将来の項目を足しても古い center が消さない）。
@@ -56,11 +49,6 @@ export interface ProjectSettings {
    * session の設定だけで持つ（center 共通の設定には無い）。
    */
   servers?: string[];
-  /**
-   * 外部記憶（memory）の MCP endpoint。あれば起動のたびに `--mcp-config` に `memory` を足す。
-   * session の値があれば共通の値は使わない（outputStyle と同じ。連結・項目ごとの合成はしない）。
-   */
-  memory?: MemorySetting;
   [key: string]: unknown;
 }
 
@@ -90,7 +78,8 @@ const memoryUrlSchema = z
     { message: "url は http / https の絶対 URL（user:pass@ は不可。token は token に書く）" },
   );
 
-const memorySchema = z
+/** 外部記憶の設定の入力検証（center の CLI `bantou-center memory` が使う。MCP の更新では受け付けない）。 */
+export const memorySchema = z
   .object({
     url: memoryUrlSchema,
     token: z
@@ -130,11 +119,19 @@ export const projectSettingsPatchSchema = z
     addDirs: z.array(addDirSchema).max(ADD_DIRS_MAX, `参照フォルダは ${ADD_DIRS_MAX} 個以内`).nullable().optional(),
     outputStyle: z.string().max(OUTPUT_STYLE_MAX, `出力スタイルは ${OUTPUT_STYLE_MAX} 文字以内`).nullable().optional(),
     servers: z.array(serverRefSchema).max(SERVERS_MAX, `servers は ${SERVERS_MAX} 個以内`).nullable().optional(),
-    memory: memorySchema.nullable().optional(),
   })
   .passthrough();
 
 export type ProjectSettingsPatch = z.infer<typeof projectSettingsPatchSchema>;
+
+/** 外部記憶（memory）の項目を MCP（画面・web・master-cap の設定更新）から受けた時のエラー文。 */
+export const MEMORY_MCP_ERROR =
+  "外部記憶（memory）の設定は MCP からは変えられない（url・token・agentId は center の側だけで扱う）。center を動かしている host で `bantou-center memory`（README の「外部記憶の設定」）を使う";
+
+/** patch に memory の項目（null を含む）があれば投げる。黙って捨てない。 */
+export function assertNoMemory(patch: object | undefined): void {
+  if (patch !== undefined && Object.prototype.hasOwnProperty.call(patch, "memory")) throw new Error(MEMORY_MCP_ERROR);
+}
 
 /**
  * center 共通の設定の更新の入力。session の設定から `servers` を除いたもの（servers は session ごとの設定だけで持つ）。
@@ -161,8 +158,7 @@ export function readCenterSettings(raw: unknown): ProjectSettings {
  * - null はその項目を削除する。`instructions` / `outputStyle` の空文字・`addDirs` の空配列も削除と同じ（保存しない）。
  * - `addDirs` は重複を除く（先勝ち）。
  * - `servers` は重複を除く（先勝ち）。空配列は保存する（= どの server も使わない。未設定と区別する）。削除は null。
- * - `memory` は object ごと置き換える（url 必須）。token が省略（undefined）なら今の token を引き継ぎ、空文字なら token を消す。
- *   agentId の空文字は消す（= session 名）。null で削除。
+ * - `memory` は扱わない（無視する。MCP の入口で assertNoMemory が断る。外部記憶は memory-settings.ts）。
  * - 未知の項目は値をそのまま入れる。
  */
 export function mergeSettings(current: ProjectSettings | undefined, patch: ProjectSettingsPatch): ProjectSettings {
@@ -175,32 +171,10 @@ export function mergeSettings(current: ProjectSettings | undefined, patch: Proje
       if (dirs.length) out.addDirs = dirs;
       else delete out.addDirs;
     } else if (k === "servers") out.servers = uniqueDirs(v);
-    else if (k === "memory") {
-      const m = normalizeMemory(v, readMemory(out.memory)?.token);
-      if (m) out.memory = m;
-      else delete out.memory;
-    }
+    else if (k === "memory") continue;
     else out[k] = v;
   }
   return out;
-}
-
-/** 入力の memory を保存形にする。url が無ければ undefined。token が undefined の時は inherited を使う。空の token / agentId は持たない。 */
-function normalizeMemory(v: unknown, inheritedToken?: string): MemorySetting | undefined {
-  if (typeof v !== "object" || v === null || Array.isArray(v)) return undefined;
-  const o = v as Record<string, unknown>;
-  if (typeof o.url !== "string" || o.url === "") return undefined;
-  const token = o.token === undefined ? inheritedToken : typeof o.token === "string" ? o.token : undefined;
-  return {
-    url: o.url,
-    ...(token ? { token } : {}),
-    ...(typeof o.agentId === "string" && o.agentId !== "" ? { agentId: o.agentId } : {}),
-  };
-}
-
-/** 保存済みの memory を取り出す（壊れていれば undefined）。 */
-function readMemory(raw: unknown): MemorySetting | undefined {
-  return normalizeMemory(raw);
 }
 
 /** 文字列の配列から空と重複を除く（先勝ち）。配列でなければ空。 */
@@ -220,9 +194,8 @@ export function readSettings(raw: unknown): ProjectSettings {
   const dirs = uniqueDirs(out.addDirs);
   if (dirs.length) out.addDirs = dirs;
   else delete out.addDirs;
-  const memory = readMemory(out.memory);
-  if (memory) out.memory = memory;
-  else delete out.memory;
+  // 外部記憶は memory-settings.json だけで持つ（ここに残っていても読み捨てる。sessions.ts の restore が移し替える）
+  delete out.memory;
   // servers: 配列なら（空でも）残す。配列でなければ未設定（壊れた値で全 server を止めない）
   if (Array.isArray(out.servers)) out.servers = uniqueDirs(out.servers);
   else delete out.servers;
@@ -262,20 +235,4 @@ export function composeServers(own: ProjectSettings | undefined): string[] | und
 export function serverAllowed(servers: string[] | undefined, s: { server_id?: string; host?: string }): boolean {
   if (servers === undefined) return true;
   return servers.some((e) => (s.server_id !== undefined && e === s.server_id) || (s.host !== undefined && e.toLowerCase() === s.host.toLowerCase()));
-}
-
-/**
- * 外部記憶。session の値があればそれ、無ければ center 共通の値、どちらも無ければ undefined（付けない）。
- * 項目ごとには合成しない（session に memory があれば共通の token / agentId は使わない）。
- */
-export function composeMemory(common: ProjectSettings | undefined, own: ProjectSettings | undefined): MemorySetting | undefined {
-  return readSettings(own).memory ?? readSettings(common).memory;
-}
-
-/** 外に出す settings（MCP の応答など）から memory.token を除く。代わりに tokenSet を付ける。保存形は変えない。 */
-export function redactSettings(settings: ProjectSettings): ProjectSettings {
-  const m = readMemory(settings.memory);
-  if (!m) return settings;
-  const view: MemoryView = { url: m.url, ...(m.agentId ? { agentId: m.agentId } : {}), tokenSet: m.token !== undefined };
-  return { ...settings, memory: view as unknown as MemorySetting };
 }

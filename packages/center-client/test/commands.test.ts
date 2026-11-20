@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   CommandError,
+  MEMORY_REFUSAL,
   SESSION_INSTRUCTIONS_MAX,
   createArgs,
   normalizeSettings,
@@ -51,4 +52,14 @@ test("S: update_args, settings_of, workspace_of", () => {
   assert.equal(workspaceOf({ workspace: "  " }), null);
   assert.equal(workspaceOf({ workspace: null }), null);
   assert.equal(workspaceOf(null), null);
+});
+
+test("memory: a settings object with a memory key (null too) is refused with the reason, not dropped", () => {
+  for (const memory of [{ url: "http://m/mcp", token: "T" }, null, undefined]) {
+    assert.throws(
+      () => normalizeSettings({ instructions: "i", memory }),
+      (e: unknown) => e instanceof CommandError && e.message === MEMORY_REFUSAL && !e.message.includes("T\""),
+    );
+  }
+  assert.deepEqual(normalizeSettings({ instructions: "i", addDirs: ["/a"], outputStyle: "o", servers: ["s"] }), { instructions: "i", addDirs: ["/a"], outputStyle: "o", servers: ["s"] });
 });

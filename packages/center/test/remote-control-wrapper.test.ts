@@ -96,7 +96,7 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-function make(opts: { mcpUrl?: string | null; configPath?: string; logs?: string[]; instructions?: string; addDirs?: string[]; outputStyle?: string; path?: string; system?: string; memory?: { url: string; token?: string; agentId?: string }; realSystem?: boolean } = {}) {
+function make(opts: { mcpUrl?: string | null; configPath?: string; logs?: string[]; instructions?: string; addDirs?: string[]; outputStyle?: string; path?: string; system?: string; memory?: { url: string; token?: string; agentId?: string }; realSystem?: boolean; memoryOf?: (name: string) => { url: string; token?: string; agentId?: string } | undefined } = {}) {
   const core = createCore();
   const tokens = createSessionTokens();
   const url = opts.mcpUrl === undefined ? "http://127.0.0.1:4567/mcp/session" : opts.mcpUrl;
@@ -105,6 +105,7 @@ function make(opts: { mcpUrl?: string | null; configPath?: string; logs?: string
     ...(opts.configPath ? { configPath: opts.configPath } : {}),
     log: (m) => void opts.logs?.push(m),
     spawnImpl,
+    ...(opts.memoryOf ? { memoryOf: opts.memoryOf } : {}),
     wrapper: { core, tokens, path: "/fake/bantou-pty-wrapper", mcpUrl: () => url, statusLineSelf: ["/fake/bantou-center"] },
     ...(opts.realSystem ? { systemInstructions: { build: (ctx: { session: string; memory?: boolean; coordinator?: boolean }) => buildSystemInstructions(ctx), labels: (ctx: { session: string; memory?: boolean; coordinator?: boolean }) => applicableParts(ctx).map(partLabel) } } : {}),
     ...(opts.system !== undefined ? { systemInstructions: { build: ({ session }: { session: string }) => opts.system!.replace("{session}", session), labels: ["t@1"] } } : {}),
@@ -863,6 +864,35 @@ test("memory: --mcp-config に memory（type http、Authorization は ${BANTOU_M
     else process.env.BANTOU_MEMORY_TOKEN = prev;
   }
   assert.throws(() => sup.setMemory("nope", undefined), /未定義の project/);
+  await sup.shutdown();
+});
+
+test("memory: memoryOf があれば起動のたびにそれを呼ぶ（add の値は使わない）。変えた設定は次の起動から効き、取れなければ付けずに起動する", async () => {
+  let cur: { url: string; token?: string } | undefined = { url: "http://one.local/mcp", token: "ONE-SECRET" };
+  let boom = false;
+  const logs: string[] = [];
+  const { sup } = make({ memory: { url: "http://added.local/mcp" }, memoryOf: () => {
+    if (boom) throw new Error("読めない SECRET");
+    return cur;
+  }, logs });
+  await sup.start("pm1");
+  assert.equal(mcpOf(launches[0].args).mcpServers.memory.url, "http://one.local/mcp");
+  assert.equal(launches[0].env.BANTOU_MEMORY_TOKEN, "ONE-SECRET");
+  cur = { url: "http://two.local/mcp" }; // 動いている間に CLI で変えた
+  assert.equal(mcpOf(launches[0].args).mcpServers.memory.url, "http://one.local/mcp", "動いている session は変わらない");
+  await sup.stop("pm1");
+  await sup.start("pm1", { resume: true });
+  assert.equal(mcpOf(launches[1].args).mcpServers.memory.url, "http://two.local/mcp");
+  assert.equal(launches[1].env.BANTOU_MEMORY_TOKEN, undefined);
+  cur = undefined;
+  await sup.stop("pm1");
+  await sup.start("pm1");
+  assert.equal(mcpOf(launches[2].args).mcpServers.memory, undefined);
+  boom = true;
+  await sup.stop("pm1");
+  await sup.start("pm1");
+  assert.equal(mcpOf(launches[3].args).mcpServers.memory, undefined);
+  assert.ok(logs.some((l) => l.includes("外部記憶の設定を取れない")) && logs.every((l) => !l.includes("SECRET")));
   await sup.shutdown();
 });
 

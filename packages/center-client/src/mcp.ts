@@ -7,7 +7,7 @@
 
 import { redactUrl } from "./normalize.ts";
 import { maskSecrets } from "./secrets.ts";
-import { allowWebTool } from "./tool-policy.ts";
+import { allowWebTool, webToolArgsRefusal } from "./tool-policy.ts";
 import { CenterSettingsError, type SettingsPolicy, type Target } from "./settings.ts";
 
 export const PROTOCOL_VERSION = "2025-06-18";
@@ -48,6 +48,17 @@ export class ToolNotAllowedError extends Error {
   }
 }
 
+/** The tool is allowed but its arguments are not (`policy.refuseArgs`). Nothing was sent to the center. */
+export class ToolArgsRefusedError extends Error {
+  constructor(
+    readonly tool: string,
+    reason: string,
+  ) {
+    super(reason);
+    this.name = "ToolArgsRefusedError";
+  }
+}
+
 /** The center no longer knows our session id (HTTP 404 on a session request). */
 class SessionGone extends Error {
   constructor() {
@@ -73,7 +84,7 @@ interface Reply {
 export interface McpClientOptions {
   fetch?: typeof fetch;
   /** `policy.allowTool`: when set, `callTool` refuses other names. Unset: every tool is allowed (desktop). */
-  policy?: Pick<SettingsPolicy, "allowTool">;
+  policy?: Pick<SettingsPolicy, "allowTool"> & { refuseArgs?: (name: string, args: unknown) => string | undefined };
   logger?: McpLogger;
   clientName?: string;
   clientVersion?: string;
@@ -209,6 +220,7 @@ function errText(e: unknown): string {
 export class McpClient {
   private readonly doFetch: typeof fetch;
   private readonly allowTool: ((name: string) => boolean) | undefined;
+  private readonly refuseArgs: ((name: string, args: unknown) => string | undefined) | undefined;
   private readonly log: McpLogger;
   private readonly clientName: string;
   private readonly clientVersion: string;
@@ -222,6 +234,7 @@ export class McpClient {
   constructor(opts: McpClientOptions = {}) {
     this.doFetch = opts.fetch ?? fetch;
     this.allowTool = opts.policy?.allowTool;
+    this.refuseArgs = opts.policy?.refuseArgs;
     this.log = opts.logger ?? NO_LOG;
     this.clientName = opts.clientName ?? "bantou-center-client";
     this.clientVersion = opts.clientVersion ?? "0.0.0";
@@ -430,6 +443,8 @@ export class McpClient {
    */
   async callTool(url: string, token: string | undefined, name: string, args?: unknown): Promise<McpToolResult> {
     if (this.allowTool && !this.allowTool(name)) throw new ToolNotAllowedError(name);
+    const refused = this.refuseArgs?.(name, args);
+    if (refused !== undefined) throw new ToolArgsRefusedError(name, refused);
     const params = { name, arguments: args ?? {} };
     let result: unknown;
     try {
@@ -490,7 +505,7 @@ export interface CenterMcp {
 
 export function createCenterMcp(opts: CenterMcpOptions): CenterMcp {
   // Fail closed: without an `allowTool` the web list applies (a caller that wants every tool says so).
-  const client = new McpClient({ ...opts, policy: { allowTool: opts.policy?.allowTool ?? allowWebTool } });
+  const client = new McpClient({ ...opts, policy: { allowTool: opts.policy?.allowTool ?? allowWebTool, refuseArgs: opts.policy?.refuseArgs ?? webToolArgsRefusal } });
   let last: Target | undefined;
   /**
    * A failure of `selectTarget`, as a short fixed text. The text of an arbitrary error (a file read, a JSON parse) can

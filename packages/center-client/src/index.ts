@@ -64,10 +64,11 @@ export {
   type ByteSource,
   type Saved,
 } from "./attachment.ts";
-export { WEB_ALLOWED_TOOLS, allowWebTool } from "./tool-policy.ts";
+export { MEMORY_REFUSAL, WEB_ALLOWED_TOOLS, allowWebTool, webToolArgsRefusal } from "./tool-policy.ts";
 export {
   CALL_TIMEOUT_MS,
   CenterMcpError,
+  ToolArgsRefusedError,
   McpClient,
   NO_TARGET,
   PROTOCOL_VERSION,

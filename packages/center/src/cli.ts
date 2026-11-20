@@ -15,6 +15,21 @@ if (process.argv[2] === "hook") {
   process.exit(await runHook(process.argv.slice(3)));
 }
 
+if (process.argv[2] === "memory") {
+  // 外部記憶の設定（center の側だけで扱う。MCP からは変えられない）。daemon は読み込まない
+  const { runMemoryCli } = await import("./memory-settings.js");
+  const { readFileSync } = await import("node:fs");
+  const { DEFAULT_CONFIG } = await import("./args.js");
+  process.exit(
+    runMemoryCli(process.argv.slice(3), DEFAULT_CONFIG, {
+      readStdin: () => readFileSync(0, "utf8"),
+      readFile: (p) => readFileSync(p, "utf8"),
+      out: (l) => console.log(l),
+      err: (l) => console.error(l),
+    }),
+  );
+}
+
 let args: CliArgs;
 try {
   args = parseArgs(process.argv.slice(2));
