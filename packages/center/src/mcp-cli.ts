@@ -355,6 +355,7 @@ export async function runMcpCli(argv: string[], defaultConfig: string, deps: Mcp
         patch.timeoutMs = t;
       }
       if (!Object.keys(patch).length) return fail("変える項目が無い");
+      if (base === undefined) patch.transport = "http";
       if (session === undefined && base === undefined && patch.url === undefined) return fail("新しい接続には --url が要る");
 
       const next: ConnectionsData = structuredClone(data);
