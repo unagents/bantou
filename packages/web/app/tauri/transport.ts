@@ -11,7 +11,7 @@ export type UnlistenFn = () => void;
 
 export interface InvokeOptions {
   headers?: Record<string, string>;
-  /** Raw request body (sent instead of `args`). Not carried over HTTP yet (terminal input is a later step). */
+  /** Raw request body (sent instead of `args`): the image bytes of `session_attach_bytes`. */
   body?: Uint8Array;
 }
 
@@ -41,14 +41,51 @@ const OS_WAKE_EVENT = "bantou://os-wake";
 const SESSIONS_CHANGED_EVENT = "bantou://sessions-changed";
 const OS_NETWORK_EVENT = "bantou://os-network-changed";
 
+/** Image types the attachment route takes (`packages/center-client` sniffs the same four). */
+function sniffImageType(b: Uint8Array): string | undefined {
+  const at = (off: number, bytes: number[]) => bytes.every((v, i) => b[off + i] === v);
+  if (at(0, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return "image/png";
+  if (at(0, [0xff, 0xd8, 0xff])) return "image/jpeg";
+  if (at(0, [0x47, 0x49, 0x46, 0x38, 0x37, 0x61]) || at(0, [0x47, 0x49, 0x46, 0x38, 0x39, 0x61])) return "image/gif";
+  if (b.length >= 12 && at(0, [0x52, 0x49, 0x46, 0x46]) && at(8, [0x57, 0x45, 0x42, 0x50])) return "image/webp";
+  return undefined;
+}
+
+const sessionPath = (session: unknown, tail: string) => `/api/sessions/${encodeURIComponent(String(session ?? ""))}/${tail}`;
+
+/**
+ * Terminal commands that are not an RPC: each has its own route (design 5.1). Returns undefined for any other command.
+ * `session_output_start` / `_stop` are not here (they open and close an EventSource, see `startOutput`).
+ */
+function terminalRequest(cmd: string, args: Record<string, unknown> | undefined, opts: InvokeOptions | undefined): { path: string; headers: Record<string, string>; body: BodyInit } | undefined {
+  switch (cmd) {
+    case "session_input":
+      return { path: sessionPath(args?.session, "input"), headers: { "content-type": "application/json" }, body: JSON.stringify({ data: args?.dataB64 }) };
+    case "session_resize":
+      return { path: sessionPath(args?.session, "resize"), headers: { "content-type": "application/json" }, body: JSON.stringify({ cols: args?.cols, rows: args?.rows }) };
+    case "session_attach_bytes": {
+      const { "x-bantou-session": session, ...rest } = opts?.headers ?? {};
+      if (!opts?.body) throw new RpcError(0, "画像の body が無い");
+      const type = sniffImageType(opts.body);
+      if (!type) throw new RpcError(0, "画像の型が違う（png / jpeg / gif / webp のみ）");
+      return { path: sessionPath(session, "attachments"), headers: { ...rest, "content-type": type }, body: opts.body as unknown as BodyInit };
+    }
+    default:
+      return undefined;
+  }
+}
+
 async function invoke<T>(cmd: string, args?: Record<string, unknown>, opts?: InvokeOptions): Promise<T> {
-  if (opts?.body) throw new RpcError(0, "この transport は body を送れない（端末の入力は未対応）");
+  if (cmd === "session_output_start") return startOutput(String(args?.session ?? ""), (args?.after as number | null | undefined) ?? null) as T;
+  if (cmd === "session_output_stop") return stopOutput(String(args?.session ?? "")) as T;
+  const term = terminalRequest(cmd, args, opts);
+  if (!term && opts?.body) throw new RpcError(0, `${cmd} は body を送れない`);
   let res: Response;
   try {
-    res = await fetch(RPC_PATH + encodeURIComponent(cmd), {
+    res = await fetch(term ? term.path : RPC_PATH + encodeURIComponent(cmd), {
       method: "POST",
-      headers: { "content-type": "application/json", ...opts?.headers },
-      body: JSON.stringify(args ?? {}),
+      headers: term ? term.headers : { "content-type": "application/json", ...opts?.headers },
+      body: term ? term.body : JSON.stringify(args ?? {}),
       cache: "no-store",
       // An expired Access session answers with a redirect to the login page: keep it visible as an opaque redirect.
       redirect: "manual",
@@ -80,6 +117,57 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>, opts?: Inv
     throw new RpcError(res.status, "応答が JSON でない（ログイン画面かもしれない）");
   }
   return json as T;
+}
+
+// -- terminal output: one EventSource per session, re-presented as the desktop's `session-output` /
+// `session-output-status` events so `useTerminalStore` runs unchanged. The browser reconnects by itself with `Last-Event-ID`.
+const SESSION_OUTPUT_EVENT = "session-output";
+const SESSION_OUTPUT_STATUS_EVENT = "session-output-status";
+const outputs = new Map<string, EventSource>();
+
+function stopOutput(session: string): void {
+  outputs.get(session)?.close();
+  outputs.delete(session);
+}
+
+function startOutput(session: string, after: number | null): void {
+  stopOutput(session);
+  const url = sessionPath(session, "output") + (after !== null ? `?after=${after}` : "");
+  const es = new EventSource(url);
+  outputs.set(session, es);
+  const status = (state: "connected" | "retrying" | "rejected", message: string | null) => dispatch(SESSION_OUTPUT_STATUS_EVENT, { session, state, message });
+  es.addEventListener("output", (e) => {
+    const m = e as MessageEvent<string>;
+    if (!/^\d+$/.test(m.lastEventId)) return;
+    const id = Number(m.lastEventId);
+    if (!Number.isSafeInteger(id)) return;
+    dispatch(SESSION_OUTPUT_EVENT, { session, id, data: m.data, reset: false });
+  });
+  es.addEventListener("reset", () => dispatch(SESSION_OUTPUT_EVENT, { session, id: 0, data: "", reset: true }));
+  es.addEventListener("status", (e) => {
+    try {
+      const p = JSON.parse((e as MessageEvent<string>).data) as { state?: string; message?: string | null };
+      if (p.state === "connected" || p.state === "retrying" || p.state === "rejected") status(p.state, p.message ?? null);
+    } catch {
+      // a frame that is not JSON carries no state
+    }
+  });
+  // A dropped connection is retried by the browser (`retrying`); `open` after that is `connected`. When the browser gave up
+  // (a non-200 answer or an expired Access session) the watch checks the session, then we say `rejected`.
+  let everOpen = false;
+  startSessionWatch(es, () => {
+    if (outputs.get(session) !== es) return;
+    es.close();
+    outputs.delete(session);
+    status("rejected", "output stream closed");
+  });
+  es.addEventListener("open", () => {
+    if (everOpen) status("connected", null);
+    everOpen = true;
+  });
+  es.addEventListener("error", () => {
+    if (es.readyState !== EventSource.CLOSED) status("retrying", null);
+  });
 }
 
 // One EventSource for every listener (the backend fans the center's events out to all browsers; one stream per tab is enough).
@@ -129,8 +217,12 @@ function ensureSource() {
   for (const event of listeners.keys()) attach(event);
 }
 
+/** Events this file raises itself (the browser's own, and the per-session terminal streams): not on `GET /api/events`. */
+const isLocalEvent = (event: string) =>
+  event === OS_WAKE_EVENT || event === OS_NETWORK_EVENT || event === SESSION_OUTPUT_EVENT || event === SESSION_OUTPUT_STATUS_EVENT;
+
 function attach(event: string) {
-  if (!source || sourceListeners.has(event) || event === OS_WAKE_EVENT || event === OS_NETWORK_EVENT) return;
+  if (!source || sourceListeners.has(event) || isLocalEvent(event)) return;
   const fn = (e: MessageEvent) => {
     let payload: unknown = null;
     try {
@@ -177,7 +269,7 @@ async function listen<T>(event: string, handler: (payload: T) => void): Promise<
   if (!set) listeners.set(event, (set = new Set()));
   set.add(handler as Handler);
   startBrowserEvents();
-  if (event !== OS_WAKE_EVENT && event !== OS_NETWORK_EVENT) {
+  if (!isLocalEvent(event)) {
     ensureSource();
     attach(event);
   }
