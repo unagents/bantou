@@ -5,6 +5,8 @@ import { defineNuxtConfig } from "nuxt/config";
 export default defineNuxtConfig({
   extends: ["../ui"],
   compatibilityDate: "2026-10-28",
+  // The ui layer sets srcDir "." (its parts sit at its root); this app keeps its own under app/ (like desktop's src/).
+  srcDir: "app/",
   ssr: false,
   devtools: { enabled: false },
   telemetry: false,

@@ -8,7 +8,7 @@
     "build": "nuxt build",
     "test": "node --import tsx --test \"test/**/*.test.ts\"",
     "typecheck": "nuxt prepare && tsc --noEmit -p tsconfig.json && nuxt typecheck",
-    "e2e": "playwright test"
+    "e2e": "nuxt build && playwright test"
   },
   "engines": {
     "node": ">=22"
