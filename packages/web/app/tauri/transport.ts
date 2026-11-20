@@ -38,6 +38,7 @@ export const EVENTS_PATH = "/api/events";
 
 /** Events the browser itself produces (desktop gets them from the OS through Rust). */
 const OS_WAKE_EVENT = "bantou://os-wake";
+const SESSIONS_CHANGED_EVENT = "bantou://sessions-changed";
 const OS_NETWORK_EVENT = "bantou://os-network-changed";
 
 async function invoke<T>(cmd: string, args?: Record<string, unknown>, opts?: InvokeOptions): Promise<T> {
@@ -98,7 +99,10 @@ function ensureSource() {
   source = es;
   es.addEventListener("open", () => {
     reopenDelay = REOPEN_MIN_MS;
-    // Events missed while the stream was down have no replay: read the lists again.
+    // Nothing is replayed to a new stream: a change the backend saw before this stream was open (the first read of the
+    // list races with the stream opening) or while it was down has no event. Tell the listeners to read again: the
+    // session list the backend caches, and (after a drop) the center itself.
+    dispatch(SESSIONS_CHANGED_EVENT, null);
     if (reopened) dispatch(OS_WAKE_EVENT, null);
     reopened = false;
   });
