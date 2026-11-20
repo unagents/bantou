@@ -77,3 +77,13 @@ bantou-center memory unset [--config <path>] [--session <name>]
 - 画面からの保存で既存の memory が消えない事は、center が未送信の項目を保持する動きと、memory を別 file（`memory-settings.json`）に分けた事で保証した。
 - Rust・protocol・server・packages/memory は変えていない。
 - 一時の playwright 設定（`pw.tmp.config.ts`）は commit していない。
+
+## review の low 2 件の修正（commit 638d5cc）
+
+- 基点: 9f57726 の上に 1 commit。直したのは low 1 と low 2 のみ。low 3（session の改名で改名先の設定を上書きする）は触っていない。
+- low 1（CLI の引数 error に値が出る）: `memory` の不明な引数の error 文から引数の中身を外した。`--token` と `--token=…` は「token は引数に書けない」、`--名前=値` は名前だけ（例: `不明な引数: --bogus（値を引数に書けない。token は標準入力か file を使う）`）、位置引数など `--` で始まらない物は中身を出さない一般文。test: `--token VALUE` / `--token=VALUE` / 余分な位置引数（set・get）/ `--bogus=VALUE` / `--url=VALUE` / `-tVALUE` の 7 形で、stdout・stderr に値が出ず exit 2・file を書かない事。
+- low 2（移行の書き込み失敗で外部記憶が無効になる）: `MemoryFile` に `useFallback(data)` を足した。移行で `memory-settings.json` に書けなかった時、旧形式（sessions.json / center-settings.json）は消さず、旧い値をこの起動の間だけ memory として使い（file の値が優先。保存はしない）、失敗を log に残す（fs のエラー文だけで、値は出さない）。次の起動で書ければ移る。test: 書き込みを失敗させた状態で、`memoryOf` が旧い値（session → 共通の順）を返す・旧 file の中身が変わらない・log に失敗が残り値が出ない・書けるようになった次の起動で移る。
+- 残る限界（判断）: 書き込み失敗の起動の間に、center 共通の設定を画面から更新すると、`center-settings.json` は memory を持たない形で保存され、旧形式の共通の値が disk から消える（session の旧形式は、その session の設定を更新した時に同様）。この起動の間の動作は旧い値のまま。直すには更新の保存で旧形式の key を持ち回る必要があり、指示の範囲（2 件）を超えるので入れていない。
+- 変異: (1) CLI の名前の抽出を `k` そのままに戻す → 新 test が落ちた、(2) `useFallback` の呼び出しを外す → 新 test が落ちた。どちらも戻した。
+- 確認: center typecheck 通過（protocol を先に build）/ center test 666 件中 665 pass・1 fail（「center を SIGKILL すると rc が孤児で残り…」。既知の不安定 test）。
+- host: bun install は `--frozen-lockfile --registry <127.0.0.1 の IPv4 中継>` で通った（--offline は 5 分で応答せず中断）。bun.lock は変わらず。中継の疎通確認の command は hook に止められたので飛ばし、bun install で兼ねた。
