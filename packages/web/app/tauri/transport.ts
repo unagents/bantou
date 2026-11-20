@@ -85,11 +85,36 @@ function dispatch(event: string, payload: unknown) {
   for (const h of listeners.get(event) ?? []) h(payload as never);
 }
 
+/** Delay before a stream the browser gave up on is opened again (doubles up to the cap; `open` resets it). */
+const REOPEN_MIN_MS = 5_000;
+const REOPEN_MAX_MS = 60_000;
+let reopenDelay = REOPEN_MIN_MS;
+let reopenTimer: ReturnType<typeof setTimeout> | null = null;
+let reopened = false;
+
 function ensureSource() {
-  if (source) return;
+  if (source || reopenTimer) return;
   const es = new EventSource(EVENTS_PATH);
   source = es;
-  startSessionWatch(es);
+  es.addEventListener("open", () => {
+    reopenDelay = REOPEN_MIN_MS;
+    // Events missed while the stream was down have no replay: read the lists again.
+    if (reopened) dispatch(OS_WAKE_EVENT, null);
+    reopened = false;
+  });
+  startSessionWatch(es, () => {
+    if (source !== es) return;
+    es.close();
+    source = null;
+    sourceListeners.clear();
+    if (listeners.size === 0) return;
+    reopened = true;
+    reopenTimer = setTimeout(() => {
+      reopenTimer = null;
+      ensureSource();
+    }, reopenDelay);
+    reopenDelay = Math.min(reopenDelay * 2, REOPEN_MAX_MS);
+  });
   for (const event of listeners.keys()) attach(event);
 }
 
@@ -123,6 +148,8 @@ function startBrowserEvents() {
 }
 
 function stopAll() {
+  if (reopenTimer) clearTimeout(reopenTimer);
+  reopenTimer = null;
   source?.close();
   source = null;
   sourceListeners.clear();
