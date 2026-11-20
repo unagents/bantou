@@ -190,7 +190,7 @@ export function composeConnection(common: McpConnection | undefined, override: C
 
 /** ある scope（session 名。無ければ共通）で有効な接続（合成後。検証前の形）。 */
 export function effectiveRaw(data: ConnectionsData, session?: string): Record<string, Record<string, unknown>> {
-  const out: Record<string, Record<string, unknown>> = {};
+  const out: Record<string, Record<string, unknown>> = Object.create(null);
   if (session === undefined) {
     for (const [n, c] of Object.entries(data.common)) out[n] = { ...c };
     return out;

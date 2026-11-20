@@ -373,3 +373,85 @@ describe("試す", () => {
     assert.ok((await readJson("mcp-status.json")).results["bob/relay"]);
   });
 });
+
+describe("鍵の名前と値の取り違え・prototype の名前", () => {
+  const VALUE_LIKE = [
+    "sk-live-AbCdEf0123456789xyz",
+    "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0",
+    "AKIAIOSFODNN7EXAMPLE",
+    "a1b2c3d4e5f6g7h8i9j0",
+    "Abcdefghijklmnopqrstuvwxyzabcdefgh",
+    `n${"x".repeat(64)}`,
+  ];
+  const noFile = async (f: string) => assert.rejects(stat(state(f)), `${f} は作られない`);
+
+  test("--secret に値らしい物を書くと、値を出さずに断り、何も保存しない", async () => {
+    for (const v of VALUE_LIKE) {
+      const r = await run(["set", "c1", "--url", "https://relay.example/mcp", "--secret", v]);
+      assert.equal(r.code, 2, v);
+      assert.match(r.err, /鍵の名前の形でない.*標準入力か file/);
+      assert.ok(!r.out.includes(v) && !r.err.includes(v), "断る文に値が出ない");
+    }
+    await noFile("mcp-connections.json");
+    for (const l of transcript) for (const v of VALUE_LIKE) assert.ok(!l.includes(v));
+  });
+
+  test("secret set / unset の位置引数に値を書くと、値を出さずに断る（鍵は保存されない）", async () => {
+    for (const v of VALUE_LIKE) {
+      for (const sub of ["set", "unset"]) {
+        const r = await run(["secret", sub, v, ...(sub === "set" ? ["--stdin"] : [])], "another-secret-value");
+        assert.equal(r.code, 2, `${sub} ${v}`);
+        assert.ok(!r.out.includes(v) && !r.err.includes(v));
+        assert.ok(!r.err.includes("another-secret-value"));
+      }
+    }
+    await noFile("mcp-secrets.json");
+  });
+
+  test("普通の鍵の名前（接続名・<接続名>.<session>）は通る。保存済みの値らしい名前は読み込みで捨てる", async () => {
+    for (const n of ["relay", "memory.alice", "k-1_x", "relay-prod.s_1"]) {
+      assert.equal((await run(["secret", "set", n, "--stdin"], SECRET)).code, 0, n);
+    }
+    const { writeFile } = await import("node:fs/promises");
+    const f = await readJson("mcp-secrets.json");
+    f.secrets["sk-live-AbCdEf0123456789xyz"] = { value: SECRET, rev: 1, updatedAt: "x" };
+    await writeFile(state("mcp-secrets.json"), JSON.stringify(f));
+    const list = await run(["secret", "list"]);
+    assert.ok(!list.out.includes("sk-live"), "値らしい名前は一覧に出さない");
+    assert.match(list.err, /不正/);
+  });
+
+  test("prototype の名前（constructor / toString / hasOwnProperty / __proto__）を鍵名・接続名・session 名に使っても prototype を拾わない", async () => {
+    const protoNames = ["constructor", "toString", "hasOwnProperty", "valueOf", "__proto__"];
+    for (const n of protoNames) {
+      // 鍵: 無い物は無い。設定済みや「消した」と出ない
+      const un = await run(["secret", "unset", n]);
+      assert.match(un.out, /元から無い/, n);
+      await run(["set", "relay", "--url", "https://relay.example/mcp", "--secret", n]);
+      assert.match((await run(["get", "relay"])).out, new RegExp(`鍵 ${n}: 未設定`), n);
+      assert.doesNotMatch((await run(["get", "relay"])).out, /rev undefined/);
+      // 入れてから消す
+      assert.equal((await run(["secret", "set", n, "--stdin"], SECRET)).code, 0, n);
+      assert.match((await run(["get", "relay"])).out, new RegExp(`鍵 ${n}: 設定済み rev 1`), n);
+      assert.match((await run(["secret", "unset", n])).out, /消した/);
+      assert.match((await run(["secret", "unset", n])).out, /元から無い/);
+    }
+    // 接続名・session 名
+    for (const n of ["constructor", "valueof"]) {
+      assert.match((await run(["unset", n])).out, /元から無い/, n);
+      assert.match((await run(["get", n])).out, /共通の接続なし/, n);
+      assert.equal((await run(["test", n])).code, 2, n);
+    }
+    for (const s of ["constructor", "toString", "__proto__"]) {
+      assert.match((await run(["get", "relay", "--session", s])).out, /上書きなし/, s);
+      assert.match((await run(["unset", "relay", "--session", s])).out, /元から無い/, s);
+      assert.equal((await run(["set", "relay", "--session", s, "--identity-header", "X-Agent-Id", "--identity", "a1"])).code, 0, s);
+      assert.match((await run(["get", "relay", "--session", s])).out, /identity=X-Agent-Id=a1/, s);
+      assert.match((await run(["unset", "relay", "--session", s])).out, /消した（?(?!元から)/, s);
+    }
+    assert.equal(({} as Record<string, unknown>).identity, undefined, "Object.prototype が汚れない");
+    assert.equal((await run(["set", "constructor", "--url", "https://relay.example/mcp"])).code, 0, "名前としては使える");
+    assert.match((await run(["get", "constructor"])).out, /constructor: role=/);
+  });
+});
