@@ -18,8 +18,18 @@
 - remote_list の truncated は設計書の「返り値に truncated」でなく cap ごとの印（配列を保つため）。
 - 「完了」状態は pending が残る間は done でも出るが、pending が消えた task は出ない。
 
-## 確認 — 未実施
-- bun install が 2 回（各 240〜280 秒）とも `Terminated`（timeout）で node_modules が入らず、typecheck / test / 変異は回せなかった。IPv4 限定の CONNECT 中継を使用。他 worker の bun install も同時に走っていた。
-- 従って test は書いたが一度も実行していない。typecheck も未実施。コードの誤りが残っている可能性がある。変異（上限を外す、owner 絞りを外す）も未実施。
-## 残り
-- install が通る状態で `bun run typecheck` / `node --import tsx --test test/*.test.ts`（packages/center）と変異 2 つ。
+## 確認（再開後）
+- bun install: 中継経由で成功（約 5 秒。前回の timeout は他 worker の同時 install の待ちだったと思われる）。packages/protocol を `bun run build` してから typecheck（dist が無いと protocol が解決しない）。bun.lock の差分なし。
+- typecheck（packages/center）: 通過。
+- test（packages/center 全体）1 回目: 634 件、630 通過、4 失敗: 既知の不安定 1 件（SIGKILL で rc が孤児）、+ 3 件は自分の変更が原因:
+  - 既存 2 件（session 向け tool 一覧が 6 個固定: tools.test.ts / http.test.ts）→ task_status を足した一覧に更新（意図した変更）。
+  - 自分の test「limitRemoteList: 大量の入力でも 20000 文字以内」が 20019 で失敗 → 実バグ: 切った印の note を総量の判定の後に付けていた。note を先に付けてから判定するよう修正（aed1837 → 653f8f7）。
+  - http.test.ts の mock が worker_reports の無い record を返していたため、mock に `worker_reports: []` を足した（本物の RemoteView には必ずある）。
+- 修正後の全体: 634 件、633 通過、1 失敗（既知の不安定「center を SIGKILL すると rc が孤児で残り…」のみ）。
+- 変異: (1) 総量の上限（while / fallback）を外す → 「大量の入力でも 20000 文字以内」が落ちた。(2) owner の絞り込み（v.session / pending.owner）を外す → 「他の session の task は見えない」が落ちた。両方戻して git status は clean。
+- 外向けの remote_list が切られない事: test「外向けの remote_list は切らない」で確認（5000 / 9000 文字が全文のまま、truncated 無し）。tool schema に pattern が無い事も確認（既存の mcp tool 定義の検査 test も通過）。
+
+## 回さなかった確認
+- 実 API に schema を通す確認（実 center・外部接続禁止のため）。
+## 残った問題
+- `full` / `offset`（全文取得）が無い。上の食い違いの項のとおり。
