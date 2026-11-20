@@ -33,3 +33,8 @@ export function createPgDb(connectionString: string): Db {
     close: () => pool.end(),
   };
 }
+
+/** transaction の中の SQL 1 文の時間上限（SET LOCAL 相当。lock 待ち等で固まらない）。withAgent の fn の先頭で呼ぶ */
+export async function setStatementTimeout(q: Queryable, ms: number): Promise<void> {
+  await q.query("SELECT set_config('statement_timeout', $1, true)", [String(Math.max(1, Math.floor(ms)))]);
+}

@@ -1,4 +1,6 @@
 // 環境変数の読み取り。値（token 等）は log に出さない。
+import { DEFAULT_EMBED_BATCH, DEFAULT_EMBED_RUN_MS } from "./embed";
+
 export interface MemoryEnv {
   databaseUrl: string;
   embedModel: string;
@@ -16,7 +18,7 @@ export interface MemoryEnv {
   recallEmbedTimeoutMs: number;
   /** 1 回の /api/embed に送る件数 */
   embedBatch: number;
-  /** 1 回の run で埋め込みに使う時間の上限 */
+  /** 1 回の run で埋め込みに使う時間の上限（毎分の起動が飛ばないよう、60 秒より短くする） */
   embedRunMs: number;
 }
 
@@ -38,7 +40,7 @@ export function readEnv(env: Record<string, string | undefined> = process.env): 
     // 埋め込みは MEMORY_HTTP_TIMEOUT_MS を引き継がない（chatp に合わせて延ばした値で Ollama を長く待たないため）
     embedTimeoutMs: int(env.MEMORY_EMBED_TIMEOUT_MS, 60000),
     recallEmbedTimeoutMs: int(env.MEMORY_RECALL_EMBED_TIMEOUT_MS, 60000),
-    embedBatch: int(env.MEMORY_EMBED_BATCH, 2),
-    embedRunMs: int(env.MEMORY_EMBED_RUN_MS, 45000),
+    embedBatch: int(env.MEMORY_EMBED_BATCH, DEFAULT_EMBED_BATCH),
+    embedRunMs: int(env.MEMORY_EMBED_RUN_MS, DEFAULT_EMBED_RUN_MS),
   };
 }

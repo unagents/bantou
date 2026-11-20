@@ -1,5 +1,8 @@
-import type { Db } from "./db";
-import type { ErrorNote, WorkerState } from "./worker";
+import { setStatementTimeout, type Db } from "./db";
+import type { ErrorNote, TaskRunState, WorkerState } from "./worker";
+
+/** status の SQL 1 文の時間上限（DB が lock 等で遅い時も、status は error で早く返る） */
+export const STATUS_SQL_TIMEOUT_MS = 5_000;
 
 /** status tool の出力。件数と時刻と error の要旨だけ（記憶・event の本文は返さない） */
 export interface StatusResult {
@@ -31,14 +34,24 @@ export interface StatusResult {
     /** DB に残っている直近の失敗（未処理の event / 埋め込み待ちの item のもの） */
     extract: { message: string; deadLetterAt: string | null } | null;
     embed: { message: string; at: string | null; attempts: number } | null;
-    /** この process の worker が直近に記録した失敗（再起動で消える） */
+    /** この process の worker が直近に記録した失敗（次に成功した時と、再起動で消える） */
     workerExtract: ErrorNote | null;
     workerEmbed: ErrorNote | null;
-    workerRun: ErrorNote | null;
+    /** run 全体の失敗（agent の一覧が取れない等） */
+    workerExtractRun: ErrorNote | null;
+    workerEmbedRun: ErrorNote | null;
   };
-  worker: { running: boolean; lastRunAt: string | null; lastRunMs: number | null };
+  /** 抽出（memory:extract）と埋め込み（memory:embed）は別の task */
+  worker: { extract: TaskRunInfo; embed: TaskRunInfo };
   embedModel: string;
 }
+
+export interface TaskRunInfo {
+  running: boolean;
+  lastRunAt: string | null;
+  lastRunMs: number | null;
+}
+const runInfo = (t: TaskRunState): TaskRunInfo => ({ running: t.running, lastRunAt: t.lastRunAt ?? null, lastRunMs: t.lastRunMs ?? null });
 
 const iso = (v: Date | string | null | undefined): string | null => (v ? new Date(v).toISOString() : null);
 
@@ -48,6 +61,7 @@ const iso = (v: Date | string | null | undefined): string | null => (v ? new Dat
  */
 export async function buildStatus(db: Db, agentId: string, embedModel: string, worker: WorkerState): Promise<StatusResult> {
   return db.withAgent(agentId, async (q) => {
+    await setStatementTimeout(q, STATUS_SQL_TIMEOUT_MS);
     const items = (await q.query<{
       total: number; embedded: number; pending: number; retry_wait: number;
       last_embedded_at: Date | string | null; oldest_pending: Date | string | null; newest_pending: Date | string | null;
@@ -115,9 +129,10 @@ export async function buildStatus(db: Db, agentId: string, embedModel: string, w
         embed: embedErr ? { message: (embedErr.embed_error ?? "").slice(0, 200), at: iso(embedErr.embed_failed_at), attempts: Number(embedErr.embed_attempts) } : null,
         workerExtract: w?.extractError ?? null,
         workerEmbed: w?.embedError ?? null,
-        workerRun: worker.lastRunError ?? null,
+        workerExtractRun: worker.extract.lastRunError ?? null,
+        workerEmbedRun: worker.embed.lastRunError ?? null,
       },
-      worker: { running: worker.running, lastRunAt: worker.lastRunAt ?? null, lastRunMs: worker.lastRunMs ?? null },
+      worker: { extract: runInfo(worker.extract), embed: runInfo(worker.embed) },
       embedModel,
     };
   });

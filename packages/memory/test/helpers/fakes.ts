@@ -95,6 +95,15 @@ export async function startFakeOllama(behavior: FakeOllamaBehavior = {}): Promis
   return out;
 }
 
+/** 誰も listen していない port の URL（接続が拒否される = Ollama が落ちている時の再現） */
+export async function closedPortUrl(): Promise<string> {
+  const server = createServer();
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const port = (server.address() as AddressInfo).port;
+  await new Promise<void>((r) => server.close(() => r()));
+  return `http://127.0.0.1:${port}`;
+}
+
 export type ChatScript = (req: { system: string; user: string }) => unknown | Promise<unknown>;
 
 export function fakeChat(script: ChatScript): ChatClient & { requests: { system: string; user: string; schemaName: string; schema: object }[] } {

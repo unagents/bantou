@@ -6,11 +6,11 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { decideCandidate, normalizeContent, buildPrompt, createChatClient, CANDIDATE_JSON_SCHEMA, ChatContentError, ChatTimeoutError, type Candidate } from "../server/utils/extract.ts";
-import { createEmbedGate, createOllamaEmbedder, createQueryEmbedder, checkVectors, EmbedTimeoutError, toVectorLiteral } from "../server/utils/embed.ts";
+import { createEmbedGate, createOllamaEmbedder, createQueryEmbedder, checkVectors, EmbedTimeoutError, EmbedUnreachableError, errorSummary, rotateAgents, toVectorLiteral } from "../server/utils/embed.ts";
 import { eventSchema } from "../server/utils/events.ts";
 import { recallSchema } from "../server/utils/recall.ts";
 import { readEnv } from "../server/utils/config.ts";
-import { fakeEmbedder, startFakeOllama } from "./helpers/fakes.ts";
+import { closedPortUrl, fakeEmbedder, startFakeOllama } from "./helpers/fakes.ts";
 
 const cand = (o: Partial<Candidate> = {}): Candidate => ({ memoryType: "semantic", content: "c", status: "confirmed", sourceEventIds: ["e1"], ...o });
 const known = new Map([["e1", "user_prompt"], ["e2", "assistant_message"], ["e3", "report"]]);
@@ -197,13 +197,14 @@ test("config: 既定値（model nomic-embed-text / 次元 768）と上書き", (
 
 test("config: 埋め込みの timeout は chatp の timeout と別の設定。MEMORY_HTTP_TIMEOUT_MS は chatp にだけ効く（互換）", () => {
   const d = readEnv({});
-  assert.deepEqual([d.chatTimeoutMs, d.embedTimeoutMs, d.recallEmbedTimeoutMs, d.embedBatch, d.embedRunMs], [120000, 60000, 60000, 2, 45000]);
+  assert.deepEqual([d.chatTimeoutMs, d.embedTimeoutMs, d.recallEmbedTimeoutMs, d.embedBatch, d.embedRunMs], [120000, 60000, 60000, 1, 50000]);
+  assert.ok(d.embedRunMs < 60000, "run の上限は、毎分の起動の間隔より短い");
   const legacy = readEnv({ MEMORY_HTTP_TIMEOUT_MS: "300000" });
   assert.deepEqual([legacy.chatTimeoutMs, legacy.embedTimeoutMs, legacy.recallEmbedTimeoutMs], [300000, 60000, 60000]);
   const o = readEnv({ MEMORY_HTTP_TIMEOUT_MS: "300000", CHATP_TIMEOUT_MS: "200000", MEMORY_EMBED_TIMEOUT_MS: "90000", MEMORY_RECALL_EMBED_TIMEOUT_MS: "20000", MEMORY_EMBED_BATCH: "4", MEMORY_EMBED_RUN_MS: "30000" });
   assert.deepEqual([o.chatTimeoutMs, o.embedTimeoutMs, o.recallEmbedTimeoutMs, o.embedBatch, o.embedRunMs], [200000, 90000, 20000, 4, 30000]);
   const bad = readEnv({ MEMORY_EMBED_BATCH: "0", MEMORY_EMBED_TIMEOUT_MS: "abc" });
-  assert.deepEqual([bad.embedBatch, bad.embedTimeoutMs], [2, 60000]);
+  assert.deepEqual([bad.embedBatch, bad.embedTimeoutMs], [1, 60000]);
 });
 
 test("Ollama embedder: timeout は EmbedTimeoutError。呼び出しごとの timeout で上書きできる。error に入力の本文を入れない", async () => {
@@ -215,11 +216,49 @@ test("Ollama embedder: timeout は EmbedTimeoutError。呼び出しごとの tim
     assert.ok(Date.now() - started < 2000);
     await assert.rejects(e.embed(["bad", "秘密の本文"]), (err: Error) => /HTTP 500/.test(err.message) && !err.message.includes("秘密"));
     assert.equal((await e.embed(["ok"])).length, 1);
-    const down = createOllamaEmbedder({ url: "http://127.0.0.1:1", model: "m", dim: 768, timeoutMs: 1000 });
-    await assert.rejects(down.embed(["秘密の本文"]), (err: Error) => /ollama embed failed/.test(err.message) && !err.message.includes("秘密"));
+    // 接続できない: EmbedUnreachableError。message は固定の文言 + error の code だけ
+    const down = createOllamaEmbedder({ url: await closedPortUrl(), model: "m", dim: 768, timeoutMs: 1000 });
+    await assert.rejects(down.embed(["秘密の本文"]), (err: Error) => err instanceof EmbedUnreachableError && err.message === "ollama embed failed: connection error (ECONNREFUSED)");
+    // fetch の message（URL が入る事がある）を写さない。OLLAMA_URL に認証情報が入っていても log / embed_error に出ない
+    const cred = createOllamaEmbedder({ url: "http://ollama-user:secretpw@127.0.0.1:9", model: "m", dim: 768, timeoutMs: 1000 });
+    await assert.rejects(cred.embed(["x"]), (err: Error) => err.message === "ollama embed failed: connection error (unknown)" && !(err instanceof EmbedUnreachableError));
+    // 応答の途中で切れた（入力が原因で落ちた恐れがある）は、接続できないとは扱わない = item の失敗として数える
+    const reset = createServer((req) => req.socket.destroy());
+    await new Promise<void>((r) => reset.listen(0, "127.0.0.1", r));
+    try {
+      const e2 = createOllamaEmbedder({ url: `http://127.0.0.1:${(reset.address() as AddressInfo).port}`, model: "m", dim: 768, timeoutMs: 1000 });
+      await assert.rejects(e2.embed(["x"]), (err: Error) => /^ollama embed failed: connection error \([A-Z_]+\)$/.test(err.message) && !(err instanceof EmbedUnreachableError));
+    } finally {
+      reset.close();
+    }
   } finally {
     await srv.close();
   }
+});
+
+test("errorSummary: 空白を畳み、長さを切る（log・状態の口・DB に長い文字列を残さない）", () => {
+  assert.equal(errorSummary(new Error("a\n  b\tc")), "a b c");
+  assert.equal(errorSummary(new Error("x".repeat(500))).length, 200);
+  assert.equal(errorSummary("y".repeat(500), 80).length, 80);
+});
+
+test("rotateAgents: 前回最後に送った agent の次から始める", () => {
+  assert.deepEqual(rotateAgents(["a", "b", "c"], undefined), ["a", "b", "c"]);
+  assert.deepEqual(rotateAgents(["a", "b", "c"], "a"), ["b", "c", "a"]);
+  assert.deepEqual(rotateAgents(["a", "b", "c"], "c"), ["a", "b", "c"]);
+  // 前回の agent が居なくなっていたら、id の順でその次から
+  assert.deepEqual(rotateAgents(["a", "c", "d"], "b"), ["c", "d", "a"]);
+  assert.deepEqual(rotateAgents(["a", "b"], "z"), ["a", "b"]);
+});
+
+test("task の配線: 抽出と埋め込みは別の task で、どちらも毎分起動する（抽出が長引いても埋め込みを待たせない）", () => {
+  const read = (p: string) => readFileSync(fileURLToPath(new URL(p, import.meta.url)), "utf8");
+  assert.match(read("../nuxt.config.ts"), /scheduledTasks:\s*\{\s*"\* \* \* \* \*":\s*\["memory:extract",\s*"memory:embed"\]/);
+  const embedTask = read("../server/tasks/memory/embed.ts");
+  assert.match(embedTask, /name: "memory:embed"/);
+  assert.ok(embedTask.includes("runEmbedCycle(") && !embedTask.includes("runExtractCycle"));
+  const extractTask = read("../server/tasks/memory/extract.ts");
+  assert.ok(extractTask.includes("runExtractCycle(") && !extractTask.includes("runEmbedCycle"));
 });
 
 test("embed gate: query の実行中は waitIdle が待ち、終われば通す。上限を過ぎたら false", async () => {
