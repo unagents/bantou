@@ -28,3 +28,16 @@
 - `HOST` / `PORT` が Nitro の既定 env である事は test の起動 env に依拠。他の名前（`NITRO_HOST` 等）は未確認。
 - nginx 例は実 nginx で確かめていない。
 - 設計書 13 章の実測項目（JWT の到達、SSE の束、idle、添付上限、Access session 切れ等）はすべて設置者が確かめる。
+
+## review 指摘の反映（2 回目の commit）
+1. env file の読み方の差（systemd `EnvironmentFile` と shell の `.`）: 値を `[A-Za-z0-9._@,+/=-]` だけに制限し、`PROXY_KEY` は `openssl rand -hex 32` を指定（2.2）。4.2 の script は shell で読む旨を注記。
+2. `web-run.sh`: 起動前に pid file の pid が web backend（cmdline・cwd 一致）なら失敗終了。stale なら上書き。
+3. stop / run の pid 照合に `readlink /proc/$pid/cwd` = `<install-dir>/packages/web` を追加（`<install-dir>` は実 path）。
+4. sudoers の Cmnd を空引数 `""` で引数なしに限定。script と `<install-dir>`・`bin/` の親 dir を `<unit-owner>` が書けない事を 0.1・4.2 に明記。
+5. `sudo -n -H -u`、加えて env に `WEB_SETTINGS_FILE` を絶対 path で明示する旨（2.2）。
+6. user unit の `After=network-online.target` を外し、注記。
+7. 設定 file の親 dir を `700` で先に作る手順（2.2・2.3）。
+8. 手動起動の env の読み方 `set -a; . <env-dir>/web.env; set +a` を 3 章に追加。
+9. 確認表 8-3: 許可内 200・許可外 403（か前段で停止）の両方を確かめる。
+10. 確認表 8-15 に nginx の access/error log に JWT・共有鍵が出ない事、6 章に「log_format に `$http_*` を入れない」を追加。
+未実行（実機検証なし）である点は前回と同じ。
