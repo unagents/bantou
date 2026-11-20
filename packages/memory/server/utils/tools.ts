@@ -2,6 +2,8 @@ import type { McpRequestExtra } from "@nuxtjs/mcp-toolkit/server";
 import { recordEvent } from "./events";
 import { buildContext, explain, recall } from "./recall";
 import { getRuntime } from "./runtime";
+import { buildStatus } from "./status";
+import { workerState } from "./worker";
 
 /** 認証済みの agent。middleware が X-Agent-Id を検証済み。無ければ tool を動かさない */
 export function agentIdOf(extra: Pick<McpRequestExtra, "requestInfo">): string {
@@ -16,8 +18,8 @@ export async function handleEvent(agentId: string, args: unknown) {
   return recordEvent(db, agentId, args);
 }
 export async function handleRecall(agentId: string, args: unknown) {
-  const { db, embedder } = await getRuntime();
-  return recall(db, embedder, agentId, args);
+  const { db, queryEmbedder } = await getRuntime();
+  return recall(db, queryEmbedder, agentId, args);
 }
 export async function handleContext(agentId: string, args: unknown) {
   const { db } = await getRuntime();
@@ -26,4 +28,8 @@ export async function handleContext(agentId: string, args: unknown) {
 export async function handleExplain(agentId: string, args: unknown) {
   const { db } = await getRuntime();
   return { ...(await explain(db, agentId, args)) };
+}
+export async function handleStatus(agentId: string) {
+  const { db, embedder } = await getRuntime();
+  return { ...(await buildStatus(db, agentId, embedder.model, workerState())) };
 }

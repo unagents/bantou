@@ -2,11 +2,15 @@
 // docs/design/memory-design.md §17 の A / B / D / H と、冪等・分離・埋め込み整合・SQL パラメータ化。
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { fakeChat, fakeEmbedder, ev, type TestDb } from "./fakes.ts";
+import { DIM, fakeChat, fakeEmbedder, ev, startFakeOllama, type TestDb } from "./fakes.ts";
 import { recordEvent } from "../../server/utils/events.ts";
 import { extractAll, extractForAgent } from "../../server/utils/extract.ts";
-import { embedPending } from "../../server/utils/embed.ts";
-import { buildContext, explain, ForbiddenError, NotFoundError, recall, supersede } from "../../server/utils/recall.ts";
+import { DEFAULT_EMBED_BATCH, createEmbedGate, createOllamaEmbedder, createQueryEmbedder, embedBacklog, embedPending } from "../../server/utils/embed.ts";
+import { buildStatus } from "../../server/utils/status.ts";
+import { resetWorkerState, runCycle, workerState } from "../../server/utils/worker.ts";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { buildContext, EmbedUnavailableError, explain, ForbiddenError, NotFoundError, recall, supersede } from "../../server/utils/recall.ts";
 import { assertRlsEnforced, checkEmbeddingDim } from "../../server/utils/runtime.ts";
 import { MAX_ATTEMPTS, MAX_CANDIDATES, createChatClient } from "../../server/utils/extract.ts";
 import { createServer, type Server } from "node:http";
@@ -624,6 +628,374 @@ test("排他: lease が切れて別の run が同じ event を処理済みなら
   assert.deepEqual([sA.accepted, sA.rejected], [0, 0]);
   const n = await t.asSuper(async (sq) => (await sq.query<{ c: string }>("SELECT count(*)::text AS c FROM memory_candidates WHERE agent_id = $1", [a])).rows[0]!.c);
   assert.equal(n, "1", "遅れた run の candidates（duplicate 却下）が書かれていない");
+});
+
+// ---- 埋め込みの小分け・後回し・時間上限・query 優先・log・状態（2026-11-20 fix/memory-embed-batch） ----
+
+/** 記憶を n 件作る（埋め込み前）。contents[0] が最も古く、末尾が最も新しい（created_at を 1 分刻みでずらす） */
+async function seedItems(agent: string, contents: string[]): Promise<void> {
+  await recordEvent(t.db, agent, ev({ eventId: `${agent}-seed`, body: "seed" }));
+  // 1 回の応答で受ける候補は MAX_CANDIDATES まで
+  assert.ok(contents.length <= MAX_CANDIDATES);
+  const s = await extractForAgent(
+    t.db,
+    { chat: fakeChat(() => cands(...contents.map((content) => ({ memoryType: "semantic", content, status: "confirmed", sourceEventIds: [`${agent}-seed`] })))), batchSize: 50 },
+    agent,
+  );
+  assert.equal(s.accepted, contents.length);
+  await t.asSuper(async (sq) => {
+    for (let i = 0; i < contents.length; i++) {
+      await sq.query("UPDATE memory_items SET created_at = $3::timestamptz WHERE agent_id = $1 AND content = $2", [agent, contents[i], new Date(Date.UTC(2026, 10, 1, 0, i)).toISOString()]);
+    }
+  });
+}
+
+const embedState = (a: string) =>
+  t.asSuper(async (sq) =>
+    (await sq.query<{ content: string; embedded: boolean; attempts: number; failed: boolean; err: string | null; embedded_at: Date | null }>(
+      "SELECT content, embedding IS NOT NULL AS embedded, embed_attempts AS attempts, embed_failed_at IS NOT NULL AS failed, embed_error AS err, embedded_at FROM memory_items WHERE agent_id = $1 ORDER BY created_at", [a])).rows,
+  );
+
+const ollama = (url: string, timeoutMs = 5000) => createOllamaEmbedder({ url, model: "fake-embed", dim: DIM, timeoutMs });
+
+test("埋め込み: 小分けで送る（大きな 1 回にまとめない）。溜まった分が全て埋まる", async () => {
+  const a = newAgent();
+  const contents = Array.from({ length: 7 }, (_, i) => `小分けの記憶 ${i}`);
+  await seedItems(a, contents);
+  // 5 件以上を 1 回で送ると失敗する Ollama（遅い host で大きな batch が timeout に収まらない事の代わり）
+  const srv = await startFakeOllama({ fail: (input) => (input.length > 4 ? 500 : undefined) });
+  try {
+    assert.equal(await embedPending(t.db, a, ollama(srv.url)), 7);
+    assert.ok(srv.calls.length >= 2 && srv.calls.every((c) => c.length <= DEFAULT_EMBED_BATCH), `1 回の件数: ${srv.calls.map((c) => c.length)}`);
+    assert.equal(srv.maxInFlight, 1, "Ollama への request は 1 本ずつ");
+    const rows = await embedState(a);
+    assert.ok(rows.every((r) => r.embedded && r.attempts === 0 && r.embedded_at));
+    assert.equal(await embedPending(t.db, a, ollama(srv.url)), 0, "埋め込み済みは送らない");
+    // env の件数（batchSize）で変えられる
+    const b = newAgent();
+    await seedItems(b, contents.map((c) => `b ${c}`));
+    const n = srv.calls.length;
+    assert.equal(await embedPending(t.db, b, ollama(srv.url), { batchSize: 3 }), 7);
+    assert.deepEqual(srv.calls.slice(n).map((c) => c.length), [3, 3, 1]);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("埋め込み: 順序は新しい順（溜まった古い分があっても、新しい記憶が先に recall に出る）", async () => {
+  const a = newAgent();
+  await seedItems(a, ["古い記憶 0", "古い記憶 1", "古い記憶 2", "今日のデプロイの決定"]);
+  const srv = await startFakeOllama();
+  try {
+    const r = await embedBacklog(t.db, ollama(srv.url), [a], { batchSize: 1, maxRunMs: 0 });
+    assert.deepEqual([r.stopped, r.agents[0]!.embedded, r.agents[0]!.remaining], ["deadline", 0, 4], "時間の上限 0 なら何も送らない");
+    assert.equal(srv.calls.length, 0);
+    await embedPending(t.db, a, ollama(srv.url), { batchSize: 1 });
+    assert.deepEqual(srv.calls.map((c) => c[0]), ["今日のデプロイの決定", "古い記憶 2", "古い記憶 1", "古い記憶 0"]);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("埋め込み: 小分けが失敗したら 1 件ずつ試し、失敗する 1 件は後回しになって先頭を塞がない", async () => {
+  const a = newAgent();
+  // POISON が最も新しい = 列の先頭
+  await seedItems(a, ["正常な記憶 0", "正常な記憶 1", "正常な記憶 2", "正常な記憶 3", "POISON の記憶"]);
+  const srv = await startFakeOllama({ fail: (input) => (input.some((x) => x.includes("POISON")) ? 500 : undefined) });
+  try {
+    const e = ollama(srv.url);
+    const r1 = await embedBacklog(t.db, e, [a], { batchSize: 2 });
+    const s1 = r1.agents[0]!;
+    assert.deepEqual([s1.embedded, s1.failed, s1.remaining, s1.retryWait], [4, 1, 1, 1]);
+    assert.equal(r1.stopped, "done");
+    assert.deepEqual(srv.calls[0], ["POISON の記憶", "正常な記憶 3"], "先頭の小分けに poison が入る");
+    assert.deepEqual(srv.calls.slice(1, 3), [["POISON の記憶"], ["正常な記憶 3"]], "失敗した小分けを 1 件ずつ");
+    assert.ok(s1.errors.some((m) => /HTTP 500/.test(m)));
+    assert.ok(s1.errors.every((m) => !m.includes("POISON") && !m.includes("正常な記憶")), "error の要旨に本文を入れない");
+    let rows = await embedState(a);
+    const poison = () => rows.find((x) => x.content.includes("POISON"))!;
+    assert.deepEqual([poison().embedded, poison().attempts, poison().failed], [false, 1, true]);
+    assert.match(poison().err!, /HTTP 500/);
+    assert.ok(rows.filter((x) => !x.content.includes("POISON")).every((x) => x.embedded));
+    // 他の記憶は recall に出る
+    assert.equal((await recall(t.db, e, a, { query: "正常な記憶", limit: 10 })).length, 4);
+
+    // 間隔が空くまで、失敗した 1 件は送らない（Ollama を叩き続けない）
+    const n = srv.calls.length;
+    assert.equal(await embedPending(t.db, a, e), 0);
+    assert.equal(srv.calls.length, n);
+    // 新しく入った記憶は、後回し中の 1 件より先に埋まる
+    await t.db.withAgent(a, (q) => q.query("INSERT INTO memory_items (agent_id, memory_type, content, content_norm, status) VALUES ($1,'semantic','後から来た記憶','後から来た記憶','confirmed')", [a]));
+    assert.equal(await embedPending(t.db, a, e), 1);
+    assert.deepEqual(srv.calls.slice(n), [["後から来た記憶"]]);
+
+    // 間隔が空けば再試行し、失敗回数が増える
+    const r3 = await embedBacklog(t.db, e, [a], { retryBaseSec: 0 });
+    assert.deepEqual([r3.stopped, r3.agents[0]!.failed], ["failing", 1]);
+    rows = await embedState(a);
+    assert.equal(poison().attempts, 2);
+    // 直れば埋まり、失敗の記録は消える
+    srv.behavior.fail = undefined;
+    assert.equal(await embedPending(t.db, a, e, { retryBaseSec: 0 }), 1);
+    rows = await embedState(a);
+    assert.deepEqual([poison().embedded, poison().attempts, poison().failed, poison().err], [true, 0, false, null]);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("埋め込み: 先頭の小分けが全滅しても、次の run は別の item から進む（同じ先頭を送り続けない）", async () => {
+  const a = newAgent();
+  await seedItems(a, ["正常 0", "正常 1", "正常 2", "POISON 1", "POISON 2"]);
+  const srv = await startFakeOllama({ fail: (input) => (input.some((x) => x.includes("POISON")) ? 500 : undefined) });
+  try {
+    const e = ollama(srv.url);
+    const r1 = await embedBacklog(t.db, e, [a], { batchSize: 2 });
+    assert.deepEqual([r1.stopped, r1.agents[0]!.embedded, r1.agents[0]!.failed, r1.agents[0]!.remaining], ["failing", 0, 2, 5]);
+    const r2 = await embedBacklog(t.db, e, [a], { batchSize: 2 });
+    assert.deepEqual([r2.stopped, r2.agents[0]!.embedded, r2.agents[0]!.remaining, r2.agents[0]!.retryWait], ["done", 3, 2, 2]);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("埋め込み: Ollama が応答しない（timeout）時も run は終わり、失敗を記録して次へ進む", async () => {
+  const a = newAgent();
+  await seedItems(a, ["速い記憶 0", "速い記憶 1", "遅すぎる記憶"]);
+  const srv = await startFakeOllama({ fail: (input) => (input.some((x) => x.includes("遅すぎる")) ? "hang" : undefined) });
+  try {
+    const e = ollama(srv.url, 150);
+    const started = Date.now();
+    const r = await embedBacklog(t.db, e, [a], { batchSize: 2 });
+    assert.ok(Date.now() - started < 3000);
+    assert.deepEqual([r.agents[0]!.embedded, r.agents[0]!.failed, r.agents[0]!.remaining], [2, 1, 1]);
+    assert.ok(r.agents[0]!.errors.some((m) => /timeout \(150 ms/.test(m)));
+    const row = (await embedState(a)).find((x) => x.content === "遅すぎる記憶")!;
+    assert.match(row.err!, /timeout/);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("埋め込み: 1 回の run の時間上限で止まり、残りは次の run に回る", async () => {
+  const a = newAgent();
+  await seedItems(a, Array.from({ length: 8 }, (_, i) => `時間上限の記憶 ${i}`));
+  const srv = await startFakeOllama({ delayMs: 60 });
+  try {
+    const e = ollama(srv.url);
+    const started = Date.now();
+    const r1 = await embedBacklog(t.db, e, [a], { batchSize: 1, maxRunMs: 150 });
+    const took = Date.now() - started;
+    const s1 = r1.agents[0]!;
+    assert.equal(r1.stopped, "deadline");
+    assert.ok(s1.embedded >= 1 && s1.embedded < 8, `embedded=${s1.embedded}`);
+    assert.equal(s1.remaining, 8 - s1.embedded);
+    assert.equal(s1.failed, 0, "時間切れは失敗として数えない");
+    assert.ok(took < 1500, `took=${took}`);
+    // 次の run が続きから進める
+    let total = s1.embedded;
+    for (let i = 0; i < 20 && total < 8; i++) total += (await embedBacklog(t.db, e, [a], { batchSize: 1, maxRunMs: 150 })).agents[0]!.embedded;
+    assert.equal(total, 8);
+    assert.equal(srv.calls.length, 8, "同じ item を送り直していない");
+    assert.equal(srv.maxInFlight, 1);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("埋め込み: 複数の agent を小分け 1 回ずつ交互に進める（溜まりの多い agent が他を待たせない）", async () => {
+  const a = newAgent();
+  const b = newAgent();
+  await seedItems(a, Array.from({ length: 6 }, (_, i) => `多い方 ${i}`));
+  await seedItems(b, ["少ない方 0"]);
+  const srv = await startFakeOllama();
+  try {
+    const r = await embedBacklog(t.db, ollama(srv.url), [a, b], { batchSize: 2 });
+    assert.deepEqual(r.agents.map((s) => [s.agentId, s.embedded, s.remaining]), [[a, 6, 0], [b, 1, 0]]);
+    assert.deepEqual(srv.calls[1], ["少ない方 0"], "b は a の 1 回目の直後に入る");
+  } finally {
+    await srv.close();
+  }
+});
+
+test("recall の query を優先: query が待っている間は消化の次の小分けを送らない。query が終われば再開する", async () => {
+  const a = newAgent();
+  await seedItems(a, Array.from({ length: 4 }, (_, i) => `門の記憶 ${i}`));
+  const srv = await startFakeOllama({ delayMs: 30 });
+  try {
+    const gate = createEmbedGate();
+    const base = ollama(srv.url);
+    // query が 1 つ実行中（Ollama の列に並んでいる）
+    let release!: () => void;
+    const held = gate.runQuery(() => new Promise<void>((r) => (release = r)));
+    const run = embedBacklog(t.db, base, [a], { batchSize: 1, gate, maxRunMs: 5000 });
+    await new Promise((r) => setTimeout(r, 150));
+    assert.equal(srv.calls.length, 0, "query の間は消化を送らない");
+    release();
+    await held;
+    const r = await run;
+    assert.deepEqual([r.stopped, r.agents[0]!.embedded], ["done", 4]);
+
+    // 消化の途中に来た query は、送信済みの小分け 1 回の次に入る（残りの消化より先）
+    const c = newAgent();
+    await seedItems(c, Array.from({ length: 5 }, (_, i) => `途中の記憶 ${i}`));
+    const q = createQueryEmbedder(base, gate, 5000);
+    const n = srv.calls.length;
+    const run2 = embedBacklog(t.db, base, [c], { batchSize: 1, gate, maxRunMs: 5000 });
+    while (srv.calls.length === n) await new Promise((r) => setTimeout(r, 2));
+    await q.embed(["割り込みの query"]);
+    await run2;
+    const order = srv.calls.slice(n).map((x) => x[0]!);
+    assert.ok(order.indexOf("割り込みの query") <= 2, `query の位置: ${order.indexOf("割り込みの query")} / ${order.length}`);
+    assert.equal(order.length, 6);
+    assert.equal(srv.maxInFlight <= 2, true);
+
+    // query が時間の上限まで終わらなければ、その run は何も送らずに終わる（次の run に回る）
+    const d = newAgent();
+    await seedItems(d, ["待ちの記憶"]);
+    let release2!: () => void;
+    const held2 = gate.runQuery(() => new Promise<void>((r) => (release2 = r)));
+    const r3 = await embedBacklog(t.db, base, [d], { gate, maxRunMs: 80 });
+    assert.deepEqual([r3.stopped, r3.agents[0]!.embedded, r3.agents[0]!.remaining], ["deadline", 0, 1]);
+    release2();
+    await held2;
+  } finally {
+    await srv.close();
+  }
+});
+
+test("recall: query の埋め込みが取れない時は、timeout で打ち切って理由を返す（長く固まらない。query の本文は出さない）", async () => {
+  const a = newAgent();
+  const srv = await startFakeOllama({ fail: () => "hang" });
+  try {
+    const q = createQueryEmbedder(ollama(srv.url, 60_000), createEmbedGate(), 120);
+    const started = Date.now();
+    await assert.rejects(recall(t.db, q, a, { query: "秘密の問い合わせ" }), (e: Error) => {
+      assert.ok(e instanceof EmbedUnavailableError);
+      assert.match(e.message, /timeout \(120 ms/);
+      assert.ok(!e.message.includes("秘密の問い合わせ"));
+      return true;
+    });
+    assert.ok(Date.now() - started < 2000, "query 用の timeout（消化用の 60 秒ではない）で打ち切る");
+    srv.behavior.fail = () => 503;
+    await assert.rejects(recall(t.db, q, a, { query: "x" }), /HTTP 503/);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("worker の log: 件数が動いた時と error の時だけ出す。本文は出さない。何も無い run は 1 行も出さない", async () => {
+  resetWorkerState();
+  const a = newAgent();
+  await recordEvent(t.db, a, ev({ eventId: `${a}-1`, body: "log に出してはいけない本文" }));
+  const lines: string[] = [];
+  const log = { info: (l: string) => lines.push(l), warn: (l: string) => lines.push(`WARN ${l}`) };
+  const mine = () => lines.filter((l) => l.includes(`agent=${a} `));
+  const chat = fakeChat((req) => {
+    const events = parseEvents(req.user);
+    return cands(...events.filter((e) => e.id === `${a}-1`).map((e) => ({ memoryType: "semantic", content: "log に出してはいけない記憶", status: "inferred", sourceEventIds: [e.id] })));
+  });
+  const srv = await startFakeOllama({ fail: (input) => (input.some((x) => x.includes("出してはいけない")) ? 500 : undefined) });
+  try {
+    const deps = { db: t.db, embedder: ollama(srv.url), chat, extractBatch: 50, embed: { batchSize: 2, maxRunMs: 5000 } };
+    // 1 回目: 抽出 1 件、埋め込みは失敗
+    const r1 = await runCycle(deps, log);
+    assert.equal(mine().filter((l) => l.startsWith("[memory] extract: ")).length, 1);
+    assert.match(mine().find((l) => l.startsWith("[memory] extract: "))!, /events=1 accepted=1 /);
+    assert.match(mine().find((l) => l.startsWith("[memory] embed: "))!, /embedded=0 failed=1 remaining=1 retry-wait=1/);
+    assert.ok(mine().some((l) => l.startsWith("WARN [memory] embed error: ") && /HTTP 500/.test(l)));
+    assert.ok(lines.every((l) => !l.includes("出してはいけない")), "本文を log に出さない");
+    assert.ok(r1.embedErrors.some((e) => e.agentId === a));
+    assert.match(workerState().agents.get(a)!.embedError!.message, /HTTP 500/);
+    // 2 回目: 動きが無い（失敗した 1 件は後回し中）→ この agent の行は出ない
+    lines.length = 0;
+    await runCycle(deps, log);
+    assert.deepEqual(mine(), []);
+    // 実行中は重ねて走らない
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const slow = { ...deps, chat: fakeChat(async () => { await gate; return cands(); }) };
+    await recordEvent(t.db, a, ev({ eventId: `${a}-2`, body: "二つ目" }));
+    const first = runCycle(slow, log);
+    for (let i = 0; i < 100 && slow.chat.requests.length === 0; i++) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(workerState().running, true);
+    assert.equal((await runCycle(deps, log)).skipped, true);
+    release();
+    assert.equal((await first).skipped, undefined);
+    assert.equal(workerState().running, false);
+    assert.ok(workerState().lastRunAt);
+    // 抽出の障害（chatp が落ちている）は error として出る
+    lines.length = 0;
+    await recordEvent(t.db, a, ev({ eventId: `${a}-3`, body: "三つ目" }));
+    await runCycle({ ...deps, chat: fakeChat(() => { throw new Error("chatp failed: HTTP 503"); }) }, log);
+    assert.ok(mine().some((l) => l.startsWith("WARN [memory] extract error: ") && /HTTP 503/.test(l)));
+    assert.match(workerState().agents.get(a)!.extractError!.message, /HTTP 503/);
+  } finally {
+    await srv.close();
+    resetWorkerState();
+  }
+});
+
+test("status: 件数・待ち・最後に成功した時刻・dead-letter・直近の error を返す。本文は返さない。他 agent の値は見えない", async () => {
+  resetWorkerState();
+  const a = newAgent();
+  const b = newAgent();
+  await seedItems(a, ["状態の記憶 0", "状態の記憶 1", "状態の POISON"]);
+  await recordEvent(t.db, a, ev({ eventId: `${a}-wait`, body: "まだ抽出していない event の本文" }));
+  await recordEvent(t.db, a, ev({ eventId: `${a}-dead`, body: "dead-letter の本文" }));
+  await t.asSuper((sq) => sq.query("UPDATE memory_events SET failed_at = now(), attempts = 5, last_error = 'chatp: response does not match the candidates schema' WHERE agent_id = $1 AND event_id = $2", [a, `${a}-dead`]));
+  await recordEvent(t.db, b, ev({ eventId: `${b}-1`, body: "b の event" }));
+  const srv = await startFakeOllama({ fail: (input) => (input.some((x) => x.includes("POISON")) ? 500 : undefined) });
+  try {
+    const e = ollama(srv.url);
+    const before = await buildStatus(t.db, a, e.model, workerState());
+    assert.deepEqual([before.memories.total, before.memories.embedded, before.memories.pendingEmbedding, before.lastEmbeddedAt], [3, 0, 3, null]);
+    await embedPending(t.db, a, e);
+    workerState().agents.set(a, { embedError: { at: "2026-11-20T00:00:00.000Z", message: "ollama embed failed: HTTP 500" } });
+    workerState().agents.set(b, { extractError: { at: "2026-11-20T00:00:00.000Z", message: "b だけの error" } });
+    const s = await buildStatus(t.db, a, e.model, workerState());
+    assert.equal(s.agentId, a);
+    assert.deepEqual(s.memories.byStatus, { confirmed: 3 });
+    assert.deepEqual([s.memories.total, s.memories.embedded, s.memories.pendingEmbedding, s.memories.embeddingRetryWait], [3, 2, 1, 1]);
+    assert.equal(s.memories.oldestPendingCreatedAt, s.memories.newestPendingCreatedAt);
+    assert.deepEqual([s.events.total, s.events.unprocessed, s.events.deadLetter], [3, 1, 1]);
+    assert.ok(s.events.oldestUnprocessedAt);
+    assert.ok(s.lastExtractedAt && Date.now() - Date.parse(s.lastExtractedAt) < 600_000);
+    assert.ok(s.lastEmbeddedAt && Date.now() - Date.parse(s.lastEmbeddedAt) < 600_000);
+    assert.match(s.lastErrors.embed!.message, /HTTP 500/);
+    assert.equal(s.lastErrors.embed!.attempts, 1);
+    assert.match(s.lastErrors.extract!.message, /candidates schema/);
+    assert.ok(s.lastErrors.extract!.deadLetterAt);
+    assert.equal(s.lastErrors.workerEmbed!.message, "ollama embed failed: HTTP 500");
+    assert.equal(s.lastErrors.workerExtract, null);
+    assert.equal(s.embedModel, "fake-embed");
+    const json = JSON.stringify(s);
+    for (const secret of ["状態の記憶", "POISON", "まだ抽出していない", "dead-letter の本文", "b だけの error"]) assert.ok(!json.includes(secret), `本文を返さない: ${secret}`);
+    // 他 agent: 自分の分だけ
+    const sb = await buildStatus(t.db, b, e.model, workerState());
+    assert.deepEqual([sb.memories.total, sb.memories.pendingEmbedding, sb.events.total, sb.events.unprocessed, sb.events.deadLetter], [0, 0, 1, 1, 0]);
+    assert.deepEqual([sb.lastErrors.embed, sb.lastErrors.extract, sb.lastErrors.workerEmbed], [null, null, null]);
+    assert.equal(sb.lastErrors.workerExtract!.message, "b だけの error");
+    // model が変わると、旧 model の埋め込みは「待ち」に数える
+    const other = await buildStatus(t.db, a, "other-model", workerState());
+    assert.deepEqual([other.memories.embedded, other.memories.pendingEmbedding], [0, 3]);
+  } finally {
+    await srv.close();
+    resetWorkerState();
+  }
+});
+
+test("migration 002: 何度当てても同じ（設置済みの DB に安全に当てられる）。memory_app は足した列を更新できる", async () => {
+  const sql = readFileSync(fileURLToPath(new URL("../../migrations/002_embed_retry.sql", import.meta.url)), "utf8").split("-- Up Migration")[1]!.split("-- Down Migration")[0]!;
+  const a = newAgent();
+  await seedItems(a, ["移行の記憶"]);
+  await embedPending(t.db, a, emb);
+  const before = (await embedState(a))[0]!;
+  await t.asSuper(async (sq) => {
+    for (const stmt of sql.split(";").map((x) => x.replace(/^\s*--.*$/gm, "").trim()).filter(Boolean)) await sq.query(stmt);
+  });
+  const after = (await embedState(a))[0]!;
+  assert.deepEqual([after.embedded, after.attempts, new Date(after.embedded_at!).getTime()], [true, 0, new Date(before.embedded_at!).getTime()]);
 });
 
 extra?.(() => t);

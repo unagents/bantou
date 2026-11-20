@@ -6,11 +6,11 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { decideCandidate, normalizeContent, buildPrompt, createChatClient, CANDIDATE_JSON_SCHEMA, ChatContentError, ChatTimeoutError, type Candidate } from "../server/utils/extract.ts";
-import { createOllamaEmbedder, checkVectors, toVectorLiteral } from "../server/utils/embed.ts";
+import { createEmbedGate, createOllamaEmbedder, createQueryEmbedder, checkVectors, EmbedTimeoutError, toVectorLiteral } from "../server/utils/embed.ts";
 import { eventSchema } from "../server/utils/events.ts";
 import { recallSchema } from "../server/utils/recall.ts";
 import { readEnv } from "../server/utils/config.ts";
-import { fakeEmbedder } from "./helpers/fakes.ts";
+import { fakeEmbedder, startFakeOllama } from "./helpers/fakes.ts";
 
 const cand = (o: Partial<Candidate> = {}): Candidate => ({ memoryType: "semantic", content: "c", status: "confirmed", sourceEventIds: ["e1"], ...o });
 const known = new Map([["e1", "user_prompt"], ["e2", "assistant_message"], ["e3", "report"]]);
@@ -193,6 +193,56 @@ test("config: 既定値（model nomic-embed-text / 次元 768）と上書き", (
   assert.equal(d.embedDim, 768);
   const o = readEnv({ MEMORY_EMBED_MODEL: "m", MEMORY_EMBED_DIM: "1024", CHATP_URL: "http://x/" });
   assert.deepEqual([o.embedModel, o.embedDim, o.chatpUrl], ["m", 1024, "http://x"]);
+});
+
+test("config: 埋め込みの timeout は chatp の timeout と別の設定。MEMORY_HTTP_TIMEOUT_MS は chatp にだけ効く（互換）", () => {
+  const d = readEnv({});
+  assert.deepEqual([d.chatTimeoutMs, d.embedTimeoutMs, d.recallEmbedTimeoutMs, d.embedBatch, d.embedRunMs], [120000, 60000, 60000, 2, 45000]);
+  const legacy = readEnv({ MEMORY_HTTP_TIMEOUT_MS: "300000" });
+  assert.deepEqual([legacy.chatTimeoutMs, legacy.embedTimeoutMs, legacy.recallEmbedTimeoutMs], [300000, 60000, 60000]);
+  const o = readEnv({ MEMORY_HTTP_TIMEOUT_MS: "300000", CHATP_TIMEOUT_MS: "200000", MEMORY_EMBED_TIMEOUT_MS: "90000", MEMORY_RECALL_EMBED_TIMEOUT_MS: "20000", MEMORY_EMBED_BATCH: "4", MEMORY_EMBED_RUN_MS: "30000" });
+  assert.deepEqual([o.chatTimeoutMs, o.embedTimeoutMs, o.recallEmbedTimeoutMs, o.embedBatch, o.embedRunMs], [200000, 90000, 20000, 4, 30000]);
+  const bad = readEnv({ MEMORY_EMBED_BATCH: "0", MEMORY_EMBED_TIMEOUT_MS: "abc" });
+  assert.deepEqual([bad.embedBatch, bad.embedTimeoutMs], [2, 60000]);
+});
+
+test("Ollama embedder: timeout は EmbedTimeoutError。呼び出しごとの timeout で上書きできる。error に入力の本文を入れない", async () => {
+  const srv = await startFakeOllama({ fail: (input) => (input[0] === "hang" ? "hang" : input[0] === "bad" ? 500 : undefined) });
+  try {
+    const e = createOllamaEmbedder({ url: srv.url, model: "m", dim: 768, timeoutMs: 60_000 });
+    const started = Date.now();
+    await assert.rejects(e.embed(["hang"], { timeoutMs: 100 }), (err: Error) => err instanceof EmbedTimeoutError && /timeout \(100 ms, 1 texts\)/.test(err.message));
+    assert.ok(Date.now() - started < 2000);
+    await assert.rejects(e.embed(["bad", "秘密の本文"]), (err: Error) => /HTTP 500/.test(err.message) && !err.message.includes("秘密"));
+    assert.equal((await e.embed(["ok"])).length, 1);
+    const down = createOllamaEmbedder({ url: "http://127.0.0.1:1", model: "m", dim: 768, timeoutMs: 1000 });
+    await assert.rejects(down.embed(["秘密の本文"]), (err: Error) => /ollama embed failed/.test(err.message) && !err.message.includes("秘密"));
+  } finally {
+    await srv.close();
+  }
+});
+
+test("embed gate: query の実行中は waitIdle が待ち、終われば通す。上限を過ぎたら false", async () => {
+  const gate = createEmbedGate();
+  assert.equal(await gate.waitIdle(0), true);
+  let release!: () => void;
+  const held = gate.runQuery(() => new Promise<void>((r) => (release = r)));
+  assert.equal(gate.queries, 1);
+  assert.equal(await gate.waitIdle(0), false);
+  assert.equal(await gate.waitIdle(30), false);
+  const waiting = gate.waitIdle(5000);
+  release();
+  await held;
+  assert.equal(await waiting, true);
+  assert.equal(gate.queries, 0);
+  // 失敗した query も数を戻す
+  await assert.rejects(gate.runQuery(async () => { throw new Error("x"); }));
+  assert.equal(gate.queries, 0);
+  // query 用 embedder は門を通し、query 用の timeout を渡す
+  const seen: (number | undefined)[] = [];
+  const base = { model: "m", dim: 1, embed: async (t: string[], o?: { timeoutMs?: number }) => { seen.push(o?.timeoutMs); assert.equal(gate.queries, 1); return t.map(() => [1]); } };
+  await createQueryEmbedder(base, gate, 1234).embed(["q"]);
+  assert.deepEqual(seen, [1234]);
 });
 
 test("SQL は全てパラメータ化: server/ の query に値を埋め込むテンプレート（${}）が無い", () => {

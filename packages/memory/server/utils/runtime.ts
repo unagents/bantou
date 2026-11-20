@@ -1,13 +1,18 @@
 import { readEnv } from "./config";
 import { createPgDb, type Db, type Queryable } from "./db";
-import { createOllamaEmbedder, type Embedder } from "./embed";
+import { createEmbedGate, createOllamaEmbedder, createQueryEmbedder, type EmbedGate, type Embedder } from "./embed";
 import { createChatClient, type ChatClient } from "./extract";
 
 export interface Runtime {
   db: Db;
+  /** 溜まった分の消化用（timeout は MEMORY_EMBED_TIMEOUT_MS） */
   embedder: Embedder;
+  /** recall の query 用（門を通して消化より優先。timeout は MEMORY_RECALL_EMBED_TIMEOUT_MS） */
+  queryEmbedder: Embedder;
+  gate: EmbedGate;
   chat: ChatClient;
   extractBatch: number;
+  embed: { batchSize: number; maxRunMs: number };
 }
 
 let current: Runtime | undefined;
@@ -52,11 +57,16 @@ export function getRuntime(): Promise<Runtime> {
     const db = createPgDb(env.databaseUrl);
     await assertRlsEnforced(db);
     await checkEmbeddingDim(db, env.embedDim);
+    const embedder = createOllamaEmbedder({ url: env.ollamaUrl, model: env.embedModel, dim: env.embedDim, timeoutMs: env.embedTimeoutMs });
+    const gate = createEmbedGate();
     current = {
       db,
-      embedder: createOllamaEmbedder({ url: env.ollamaUrl, model: env.embedModel, dim: env.embedDim, timeoutMs: env.timeoutMs }),
-      chat: createChatClient({ url: env.chatpUrl, token: env.chatpToken, model: env.chatpModel, timeoutMs: env.timeoutMs }),
+      embedder,
+      queryEmbedder: createQueryEmbedder(embedder, gate, env.recallEmbedTimeoutMs),
+      gate,
+      chat: createChatClient({ url: env.chatpUrl, token: env.chatpToken, model: env.chatpModel, timeoutMs: env.chatTimeoutMs }),
       extractBatch: env.extractBatch,
+      embed: { batchSize: env.embedBatch, maxRunMs: env.embedRunMs },
     };
     return current;
   })().catch((e) => {

@@ -1,10 +1,12 @@
 import { z } from "zod";
 import type { Db } from "./db";
 import type { Embedder } from "./embed";
-import { toVectorLiteral, checkVectors } from "./embed";
+import { toVectorLiteral, checkVectors, errorSummary } from "./embed";
 
 export class ForbiddenError extends Error {}
 export class NotFoundError extends Error {}
+/** query の埋め込みを取れなかった（Ollama の timeout・障害）。recall は結果を返せない */
+export class EmbedUnavailableError extends Error {}
 
 const iso = z.iso.datetime({ offset: true });
 
@@ -80,7 +82,13 @@ export async function recall(db: Db, embedder: Embedder, agentId: string, raw: u
   for (const a of req.scope?.agentIds ?? []) {
     if (a !== agentId) throw new ForbiddenError("他の agent の記憶は読めない");
   }
-  const [vec] = checkVectors(await embedder.embed([req.query]), 1, embedder.dim);
+  let vec: number[] | undefined;
+  try {
+    [vec] = checkVectors(await embedder.embed([req.query]), 1, embedder.dim);
+  } catch (e) {
+    // 長く固まらせず、理由を返す（呼び出し側は時間を置いて再試行するか、context を使う）。query の本文は message に入れない
+    throw new EmbedUnavailableError(`recall: query の埋め込みを取得できない（${errorSummary(e)}）。時間を置いて再試行すること`);
+  }
   const types = req.memoryTypes?.length ? req.memoryTypes : ["semantic", "episodic", "relational", "procedural"];
   const t = req.temporal;
   const temporal = !!(t?.validAt || t?.from || t?.to);
