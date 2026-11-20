@@ -834,3 +834,18 @@ test("coordinator: 起動の時と center 共通の設定の更新で supervisor
   await mgr.updateCenterSettings({ instructions: "x" });
   assert.equal(mgr.coordinatorOf(), null);
 });
+
+test("updateSettings: servers の範囲が変わった時だけ master-cap へ知らせる（新旧の範囲を載せる）。他の項目だけの更新・同じ範囲では知らせない。知らせに失敗しても更新は成功", async () => {
+  const sent: { name: string; text: string }[] = [];
+  const { mgr } = setup({ notifyServersChanged: async (name, text) => (sent.push({ name, text }), { ok: false, reason: "届かない" }) });
+  await mgr.create({ name: "pm1" });
+  await mgr.updateSettings("pm1", { instructions: "x" });
+  assert.equal(sent.length, 0);
+  assert.deepEqual((await mgr.updateSettings("pm1", { servers: ["host-a"] })).settings.servers, ["host-a"]);
+  await mgr.updateSettings("pm1", { servers: ["host-a"] });
+  await mgr.updateSettings("pm1", { servers: null });
+  assert.equal(sent.length, 2);
+  assert.equal(sent[0]!.name, "pm1");
+  assert.match(sent[0]!.text, /指定なし（全部） → host-a/);
+  assert.match(sent[1]!.text, /host-a → 指定なし（全部）/);
+});

@@ -56,11 +56,11 @@ test("coordinator: 保存と読み込み。null で消える。壊れた保存�
 
 test("部品 coordinator: 統括の session だけに付く。未設定の時の指示文は今と同じ（部品が増えない）", () => {
   const plain = { session: "a", memory: false };
-  assert.deepEqual(applicableParts(plain).map(partLabel), ["base-spec@1", "master-cap-role@5", "master-cap-availability@2"]);
-  assert.deepEqual(applicableParts({ ...plain, coordinator: false }).map(partLabel), ["base-spec@1", "master-cap-role@5", "master-cap-availability@2"]);
+  assert.deepEqual(applicableParts(plain).map(partLabel), ["base-spec@1", "master-cap-role@6", "master-cap-availability@2"]);
+  assert.deepEqual(applicableParts({ ...plain, coordinator: false }).map(partLabel), ["base-spec@1", "master-cap-role@6", "master-cap-availability@2"]);
   assert.equal(buildSystemInstructions({ ...plain, coordinator: false }), buildSystemInstructions(plain));
   const co = buildSystemInstructions({ ...plain, coordinator: true });
-  assert.deepEqual(applicableParts({ ...plain, coordinator: true }).map(partLabel), ["base-spec@1", "master-cap-role@5", "master-cap-availability@2", "coordinator@2"]);
+  assert.deepEqual(applicableParts({ ...plain, coordinator: true }).map(partLabel), ["base-spec@1", "master-cap-role@6", "master-cap-availability@2", "coordinator@2"]);
   assert.ok(co.startsWith(buildSystemInstructions(plain)));
   // 文面はその時点で出す道具（session_brief）だけ。まだ無い道具の名前は出ない
   assert.match(co, /session_brief/);

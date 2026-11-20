@@ -432,8 +432,13 @@ export interface RemoteManager {
    * 消すのは center の記録だけで server には何も送らない（server は止まっていく途中で、cap は server が止める）。消した件数と、その session 名を返す。
    */
   forgetServer(target: { server_id?: string; peerId?: string }): Promise<{ removed: number; sessions: string[] }>;
-  /** owner を渡すと、その session の cap だけ（includeShared で旧共有 cap も）。省くと全件。 */
-  list(filter?: { owner?: string; includeShared?: boolean }): RemoteView[];
+  /**
+   * owner を渡すと、その session の cap だけ（includeShared で旧共有 cap も）。省くと全件。
+   * owner の session に servers の範囲があれば、範囲外の server の cap（その session 自身の物）は既定で除く。includeOutOfScope: true で含める。
+   */
+  list(filter?: { owner?: string; includeShared?: boolean; includeOutOfScope?: boolean }): RemoteView[];
+  /** owner の session の servers の範囲と、その範囲外になっている自分の cap の件数。範囲の指定が無ければ servers は undefined。 */
+  scopeOf(owner: string): { servers: string[] | undefined; out_of_scope: number };
   /** session の remote 集計。cap が無ければ 0 / 0。 */
   summary(session: string): RemoteSummary;
   /**
@@ -1228,6 +1233,9 @@ export function createRemoteManager(opts: {
   const notInServers = (what: string, allowed: string[], owner: string | undefined): string =>
     `この session の servers に無い: ${what}（session=${owner ?? "?"}, servers=[${allowed.join(", ")}]${allowed.length === 0 ? "。空 = どの server も使わない" : ""}）`;
 
+  const recInRange = (r: RemoteRecord, allowed: string[] | undefined): boolean =>
+    serverAllowed(allowed, { ...(r.server_id !== undefined ? { server_id: r.server_id } : {}), ...(r.serverHost ? { host: r.serverHost } : {}) });
+
   const pick = async (remote_id: string | undefined, server: string | undefined, owner?: string, restrict = false): Promise<RemoteRecord> => {
     // owner あり: その session の cap。旧共有 cap（session 無し）は remote_id で明示した時だけ。他の session の cap は見えない
     const visible = (r: RemoteRecord): boolean =>
@@ -1286,7 +1294,17 @@ export function createRemoteManager(opts: {
       const inR = matches.filter(inRange);
       if (matches.length > 0 && inR.length === 0) throw new Error(notInServers(describeServer({ ...matches[0], peerId: matches[0].id }), allowed, owner));
       // 範囲内が 1 台に決まるなら、その server_id（無ければ peer id）で直接解決する。2 台以上は従来どおり曖昧エラー
-      const p = await link.selectPeer(inR.length === 1 && inR.length < matches.length ? (inR[0].server_id ?? inR[0].id) : sel);
+      let p: ServerPeer;
+      try {
+        p = await link.selectPeer(inR.length === 1 && inR.length < matches.length ? (inR[0].server_id ?? inR[0].id) : sel);
+      } catch (e) {
+        // 見つからない時の候補は範囲内の server だけ（link.selectPeer は全 server を並べるので範囲外が漏れる）
+        if (matches.length === 0 && e instanceof Error && e.message.includes("見つからない")) {
+          const cand = (await livePeers().catch(() => [] as ServerPeer[])).filter(inRange).map((x) => `${hostOf(x) || x.id}(${x.server_id ?? x.id})`);
+          throw new Error(`server が見つからない: ${sel}（範囲内の候補: ${cand.length > 0 ? cand.join(", ") : "なし"}。session の servers=[${allowed.join(", ")}]）`);
+        }
+        throw e;
+      }
       if (!inRange(p)) throw new Error(notInServers(describeServer({ ...p, peerId: p.id }), allowed, owner));
       return p;
     }
@@ -1805,7 +1823,14 @@ export function createRemoteManager(opts: {
     },
 
     async delete({ remote_id, server, force, owner }) {
-      const rec = await pick(remote_id, server, owner, true);
+      // remote_id を明示した時は、その session 自身の cap なら範囲外でも消せる（範囲を狭めた後に残った古い cap の片付け）。
+      // remote_id 省略時は従来どおり範囲内だけが候補。旧共有 cap（session 無し）は範囲外なら消せない
+      const own = remote_id !== undefined && owner !== undefined;
+      const rec = await pick(remote_id, server, owner, !own);
+      if (own && rec.session !== owner) {
+        const allowed = opts.serversOf?.(owner);
+        if (allowed !== undefined && !recInRange(rec, allowed)) throw new Error(notInServers(describeServer(refOf(rec)), allowed, owner));
+      }
       let stopped = false;
       let sessionCleared: boolean | null = null;
       let previousSession: string | null | undefined;
@@ -1951,10 +1976,18 @@ export function createRemoteManager(opts: {
 
     summary: summarize,
 
-    list: (filter) =>
-      records
+    list: (filter) => {
+      const allowed = filter?.owner !== undefined && filter.includeOutOfScope !== true ? opts.serversOf?.(filter.owner) : undefined;
+      return records
         .filter((r) => filter?.owner === undefined || r.session === filter.owner || (filter.includeShared === true && r.session === undefined))
-        .map(viewOf),
+        .filter((r) => allowed === undefined || r.session !== filter?.owner || recInRange(r, allowed))
+        .map(viewOf);
+    },
+
+    scopeOf: (owner) => {
+      const servers = opts.serversOf?.(owner);
+      return { servers, out_of_scope: servers === undefined ? 0 : records.filter((r) => r.session === owner && !recInRange(r, servers)).length };
+    },
 
     onActivity(id, fromId) {
       const r = resolveRecord(id, fromId);

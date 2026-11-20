@@ -75,6 +75,8 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   const memoryFile = createMemoryFile(dirname(resolve(configPath)), log);
   const supervisor = createRemoteControlSupervisor({
     memoryOf: (name) => memoryFile.resolve(name),
+    // sessions は supervisor の後に作るので、呼ばれる時に参照する
+    serversOf: (name) => sessions.serversOf(name),
     systemInstructions: { build: (ctx) => buildSystemInstructions(ctx), labels: (ctx) => applicableParts(ctx).map(partLabel) },
     config,
     configPath,
@@ -141,6 +143,8 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     // remotes は sessions の後に作るので、呼ばれる時に参照する
     renameRemoteSession: (oldName, newName) => remotes.renameSession(oldName, newName),
     remoteNameConflict: (name, mode, oldName) => remotes.conflictsWith(name, mode, oldName),
+    // 範囲の変更を master-cap へ知らせる（完了通知と同じ messenger の push）
+    notifyServersChanged: (name, text) => link.notifyPeer(capSessionName(name), text),
     log,
   });
   // 外部記憶への書き込み（設定がある session だけ。非同期キュー。失敗しても session・hook・remote は止まらない）

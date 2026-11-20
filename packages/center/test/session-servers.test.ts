@@ -88,13 +88,14 @@ test("servers: 空配列は「どの server も使わない」。明示指定も
   assert.equal(tasks.length, 0);
 });
 
-test("remote_delete / worker_reply: server 省略は範囲内の cap だけが候補、明示指定が範囲外ならエラー（stop_cap も worker_reply も送らない）。list は範囲に関わらずその session の cap を出す", async () => {
+test("remote_delete / worker_reply: server 省略は範囲内の cap だけが候補、明示指定が範囲外ならエラー（stop_cap も worker_reply も送らない）。list は既定で範囲外の cap を出さない", async () => {
   const servers: Record<string, string[] | undefined> = {};
   const { mgr, stops, replies } = setup(servers);
   await mgr.send({ owner: "pm1", goal: "a", server: "srv-mac" });
   await mgr.send({ owner: "pm1", goal: "b", server: "srv-lenovo-a" });
   servers.pm1 = ["mac200"];
-  assert.equal(mgr.list({ owner: "pm1" }).length, 2, "範囲を後で狭めても、その session の cap は list に出る");
+  assert.equal(mgr.list({ owner: "pm1" }).length, 1, "範囲を後で狭めると、範囲外の cap は list の既定に出ない");
+  assert.equal(mgr.list({ owner: "pm1", includeOutOfScope: true }).length, 2, "includeOutOfScope で範囲外の cap も出る");
   await assert.rejects(mgr.delete({ owner: "pm1", server: "srv-lenovo-a" }), /この session の servers に無い/);
   await assert.rejects(mgr.workerReply({ owner: "pm1", server: "lenovo", worker_id: "w-1", text: "x" }), /この session の servers に無い/);
   assert.equal(stops.length, 0);
@@ -107,7 +108,8 @@ test("remote_delete / worker_reply: server 省略は範囲内の cap だけが�
   assert.deepEqual(stops.map((s) => s.peer), ["p-mac"]);
   // 範囲内の cap がもう無い: 省略でも範囲外の cap を消さない
   await assert.rejects(mgr.delete({ owner: "pm1" }), /この session の servers に無い/);
-  assert.equal(mgr.list({ owner: "pm1" }).length, 1);
+  assert.equal(mgr.list({ owner: "pm1" }).length, 0, "既定の list には範囲外の cap は出ない");
+  assert.equal(mgr.list({ owner: "pm1", includeOutOfScope: true }).length, 1);
   // 範囲を外せば消せる
   servers.pm1 = undefined;
   assert.equal((await mgr.delete({ owner: "pm1" })).deleted, true);
