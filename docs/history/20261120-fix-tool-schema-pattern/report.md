@@ -66,4 +66,6 @@ Claude の API はこの schema を `400 tools.N.custom.input_schema: JSON schem
 - web: 「attachments: 型違い 415…」（EPIPE）
 - server: `cleanup.test.ts` の一時 dir の片付けで時々落ちる（`ENOTEMPTY`）。`cleanup.test.ts` だけを 5 回ずつ回すと、修正後は 5 回とも通り、develop の内容に戻すと 5 回中 3 回通った。
 
-修正前の server の code に戻すと、足した test は `worker_start.model` の 1 件で落ちる。center と memory は修正前でも通る。
+修正前の server の code に戻すと、足した test は 2 件落ちる（全 tool の検査が `worker_start.model` の 1 か所を指して落ちる。もう 1 件は「server の `MODEL_PATTERN` は protocol の定数そのもの」）。center と memory は修正前でも通る。
+
+検査の関数は server / center / memory の test に同じ内容で置いてある（package をまたぐ test 用の置き場が無いため）。基準を変える時は 3 か所を揃える。
