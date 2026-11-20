@@ -5,7 +5,8 @@
 
 import type { Session, SessionList, SessionPathHints } from "../../ui/types/index.ts";
 import type { CenterSettingsHandle } from "./center-settings.ts";
-import { CenterMcpError, ToolNotAllowedError, type CenterMcp } from "./mcp.ts";
+import { CenterMcpError, ToolArgsRefusedError, ToolNotAllowedError, type CenterMcp } from "./mcp.ts";
+import { MEMORY_REFUSAL } from "./tool-policy.ts";
 import type { SessionService } from "./sessions.ts";
 import { parseSession } from "./sessions.ts";
 import { CenterSettingsError } from "./settings.ts";
@@ -53,6 +54,7 @@ const nonBlank = (v: string | undefined) => (v === undefined || v.trim() === "" 
  */
 export function normalizeSettings(settings: unknown): Record<string, unknown> {
   if (!isObj(settings)) return bad("設定はオブジェクトで渡す");
+  if (Object.prototype.hasOwnProperty.call(settings, "memory")) return bad(MEMORY_REFUSAL);
   const out = { ...settings };
   const t = out.instructions;
   if (t === undefined || t === null) return out;
@@ -115,6 +117,7 @@ export interface CommandDeps {
 export function toCommandError(e: unknown): CommandError {
   if (e instanceof CommandError) return e;
   if (e instanceof ToolNotAllowedError) return new CommandError(404, e.message);
+  if (e instanceof ToolArgsRefusedError) return new CommandError(400, e.message);
   if (e instanceof CenterSettingsError) return new CommandError(400, e.message);
   if (e instanceof CenterMcpError) return new CommandError(502, e.message);
   // Anything else: its text is not known to be free of secrets, so it is not passed on.

@@ -362,6 +362,11 @@ export function createRemoteControlSupervisor(opts: {
     /** 付けた部品の `<id>@<version>`。関数なら起動ごとの文脈（memory の有無）で決める。 */
     labels: string[] | ((ctx: { session: string; memory?: boolean; coordinator?: boolean }) => string[]);
   };
+  /**
+   * 外部記憶の取得元。あれば起動のたびに（add / setMemory で渡した値でなく）これを呼んで使う。
+   * center は memory-settings.json を読む（CLI で変えた設定が次の起動から効く）。
+   */
+  memoryOf?: (name: string) => MemorySetting | undefined;
   /** 認証状態（auth / loginUrl / loginError）が変わった時の通知。 */
   onAuthChange?: (project: string, status: RcStatus) => void;
 }): RemoteControlSupervisor {
@@ -453,6 +458,16 @@ export function createRemoteControlSupervisor(opts: {
     const name = e.project.name;
     const rc = currentRc(name);
     const wd = e.wrapper ? opts.wrapper : undefined;
+    // 外部記憶は起動のたびに取り直す（CLI で変えた設定が次の起動から効く）。取れなければ add / setMemory の値
+    let memory: MemorySetting | null = e.memory;
+    if (opts.memoryOf) {
+      try {
+        memory = opts.memoryOf(name) ?? null;
+      } catch (err) {
+        log(`外部記憶の設定を取れない（付けずに起動）: project=${name} ${err instanceof Error ? err.name : "error"}`);
+        memory = null;
+      }
+    }
     let command = claude.path;
     let args: string[];
     let env = childEnv(e.project, rc);
@@ -465,7 +480,7 @@ export function createRemoteControlSupervisor(opts: {
       wd.core.register(name);
       const mcpUrl = wd.mcpUrl();
       if (!mcpUrl) log(`session 向け MCP 窓口が無いので bantou の MCP を付けない（messenger のみ）: project=${name}`);
-      const sysCtx = { session: name, memory: e.memory !== null, coordinator: coordinatorSession === name };
+      const sysCtx = { session: name, memory: memory !== null, coordinator: coordinatorSession === name };
       const system = opts.systemInstructions?.build(sysCtx) ?? "";
       const appendSystemPrompt = [system, e.instructions].filter((t) => t !== "").join("\n\n");
       // 出力スタイルは project の .claude/output-styles/ に書いて名前で選ぶ。書けなくても起動は止めない（style 無しで起動）
@@ -481,13 +496,13 @@ export function createRemoteControlSupervisor(opts: {
         ...(mcpUrl ? statusLineSettings(statusLineCommand(statusLineUrl(mcpUrl, name), wd.statusLineSelf), hookCommand(hookUrl(mcpUrl, name), wd.statusLineSelf)) : {}),
         ...(outputStyle ? { outputStyle: OUTPUT_STYLE_NAME } : {}),
         // bantou 自身の MCP tool を許可（allow は利用者の allow と連結され、利用者の deny が優先される）
-        permissions: { allow: bantouAllowRules({ bantou: !!mcpUrl, memory: e.memory !== null }) },
+        permissions: { allow: bantouAllowRules({ bantou: !!mcpUrl, memory: memory !== null }) },
       };
       args = buildWrapperArgs({
         claudePath: claude.path,
         name,
         permissionMode: e.project.permissionMode,
-        mcpConfig: mcpConfigJson(mcpUrl, name, e.memory ?? undefined),
+        mcpConfig: mcpConfigJson(mcpUrl, name, memory ?? undefined),
         settings: Object.keys(settings).length ? JSON.stringify(settings) : null,
         resume: useContinue,
         ...(rc.model ? { model: rc.model } : {}),
@@ -498,7 +513,7 @@ export function createRemoteControlSupervisor(opts: {
       command = wd.path ?? resolveWrapperPath();
       env = { ...env, BANTOU_SESSION_TOKEN: wd.tokens.issue(name) };
       // 外部記憶の token は env だけで渡す（argv・--mcp-config・log・status には出さない）。token が無ければ継承分も消す
-      if (e.memory?.token) env[MEMORY_TOKEN_ENV] = e.memory.token;
+      if (memory?.token) env[MEMORY_TOKEN_ENV] = memory.token;
       else delete env[MEMORY_TOKEN_ENV];
     } else {
       args = buildRcArgs(e.project, rc, { continue: useContinue });
@@ -517,7 +532,7 @@ export function createRemoteControlSupervisor(opts: {
       args: shownArgs,
       instructions: e.wrapper && !!e.instructions,
       ...(e.wrapper && opts.systemInstructions
-        ? { systemInstructions: typeof opts.systemInstructions.labels === "function" ? opts.systemInstructions.labels({ session: name, memory: e.memory !== null, coordinator: coordinatorSession === name }) : [...opts.systemInstructions.labels] }
+        ? { systemInstructions: typeof opts.systemInstructions.labels === "function" ? opts.systemInstructions.labels({ session: name, memory: memory !== null, coordinator: coordinatorSession === name }) : [...opts.systemInstructions.labels] }
         : {}),
     };
     delete e.status.lastError;

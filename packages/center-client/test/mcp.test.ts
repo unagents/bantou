@@ -12,6 +12,8 @@ import {
   PROTOCOL_VERSION,
   ToolNotAllowedError,
   WEB_ALLOWED_TOOLS,
+  ToolArgsRefusedError,
+  webToolArgsRefusal,
   allowWebTool,
   createCenterMcp,
   parseMessages,
@@ -299,6 +301,25 @@ test("5.3 the web list is exactly the designed one", () => {
     ].sort(),
   );
   for (const t of ["session_delete", "server_retire", "rc_status", "cap_kick", ""]) assert.equal(allowWebTool(t), false, t);
+});
+
+test("memory: the web policy refuses settings with a memory key for the 3 settings tools before anything is sent; other items go through", async () => {
+  const mock = await start();
+  const mcp = createCenterMcp({ settings: { selectTarget: async () => ({ url: mock.url, source: "remote" }) } });
+  const mem = { url: "http://m/mcp", token: "T-SECRET" };
+  for (const [tool, args] of [
+    ["session_settings_update", { name: "a", settings: { memory: mem } }],
+    ["session_settings_update", { name: "a", settings: { instructions: "i", memory: null } }],
+    ["center_settings_update", { settings: { memory: mem } }],
+    ["session_create", { name: "a", settings: { memory: mem } }],
+  ] as const) {
+    await assert.rejects(mcp.call(tool, args), (e: Error) => e instanceof ToolArgsRefusedError && /bantou-center memory/.test(e.message) && !e.message.includes("SECRET"), tool);
+  }
+  assert.equal(mock.count("tools/call"), 0);
+  await mcp.call("session_settings_update", { name: "a", settings: { instructions: "i", addDirs: ["/x"], outputStyle: "o", servers: [] } });
+  await mcp.call("center_settings_update", { settings: { instructions: "i" } });
+  assert.equal(mock.count("tools/call"), 2);
+  assert.equal(webToolArgsRefusal("rc_list", { settings: { memory: 1 } }), undefined);
 });
 
 test("5.3 a tool outside allowTool is refused before anything is sent; no policy allows every tool", async () => {

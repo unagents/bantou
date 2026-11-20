@@ -6,6 +6,7 @@ import { afterEach, beforeEach, test } from "node:test";
 import { parseConfig, type Config, type ProjectConfig } from "../src/config.js";
 import type { RcStatus, RemoteControlSupervisor } from "../src/remote-control.js";
 import { createSessionManager, type SavedSession } from "../src/sessions.js";
+import { createMemoryFile } from "../src/memory-settings.js";
 import { createJsonListStore, createJsonObjectStore } from "../src/store.js";
 import type { ProjectSettings } from "../src/project-settings.js";
 import { createEventHub, type SessionsEvent } from "../src/events.js";
@@ -688,39 +689,130 @@ test("center 共通の設定は servers を受け付けない: null 以外は er
   assert.deepEqual(JSON.parse(await readFile(join(dir, "center-settings.json"), "utf8")), { instructions: "共通" }, "保存し直すと servers は消える");
 });
 
-test("memory: session の値があれば共通は使わない（項目ごとにも合成しない）。supervisor には token つきで渡し、get / update の応答と log には token を出さない。保存には入る", async () => {
+test("memory: MCP の設定更新（create / updateSettings / updateCenterSettings）は memory を含むと理由つきで断り、何も変えない。含まない更新では memory-settings.json の値が残る", async () => {
   const logs: string[] = [];
-  const { mgr, opts, calls } = setup({ log: (m: string) => void logs.push(m) });
+  const memoryFile = createMemoryFile(dir);
+  memoryFile.write({ common: { url: "http://mem.local:3000/mcp", token: "COMMON-SECRET", agentId: "shared" }, sessions: { a: { url: "https://own.example/mcp", token: "OWN-SECRET" } } });
+  const { mgr } = setup({ memoryFile, log: (m: string) => void logs.push(m) });
   await mgr.restore();
-  const common = await mgr.updateCenterSettings({ memory: { url: "http://mem.local:3000/mcp", token: "COMMON-SECRET", agentId: "shared" } });
-  assert.deepEqual(common, { settings: { memory: { url: "http://mem.local:3000/mcp", agentId: "shared", tokenSet: true } } });
-  assert.deepEqual(mgr.getCenterSettings(), common);
-  await mgr.create({ name: "a", settings: { memory: { url: "https://own.example/mcp", token: "OWN-SECRET" } } });
+  await mgr.create({ name: "a" });
   await mgr.create({ name: "b" });
-  assert.deepEqual(opts.add.a, { wrapper: true, memory: { url: "https://own.example/mcp", token: "OWN-SECRET" } }); // 共通の agentId / token は混ざらない
-  assert.deepEqual(opts.add.b, { wrapper: true, memory: { url: "http://mem.local:3000/mcp", token: "COMMON-SECRET", agentId: "shared" } });
-  // get: token の値は返さず tokenSet だけ
-  assert.deepEqual(mgr.getSettings("a"), { name: "a", settings: { memory: { url: "https://own.example/mcp", tokenSet: true } } });
-  // update: token 省略は今の token を引き継ぐ。空文字で消す。応答に token は無い
-  const u1 = await mgr.updateSettings("a", { memory: { url: "https://own2.example/mcp", agentId: "pm" } });
-  assert.deepEqual(u1.settings, { memory: { url: "https://own2.example/mcp", agentId: "pm", tokenSet: true } });
-  assert.deepEqual(opts.setMem.a, { url: "https://own2.example/mcp", token: "OWN-SECRET", agentId: "pm" });
-  const u2 = await mgr.updateSettings("a", { memory: { url: "https://own2.example/mcp", token: "" } });
-  assert.deepEqual(u2.settings, { memory: { url: "https://own2.example/mcp", tokenSet: false } });
-  assert.deepEqual(opts.setMem.a, { url: "https://own2.example/mcp" });
-  // null で session の値を消すと共通に戻る。共通も消すと undefined
-  await mgr.updateSettings("a", { memory: null });
-  assert.deepEqual(opts.setMem.a, { url: "http://mem.local:3000/mcp", token: "COMMON-SECRET", agentId: "shared" });
-  await mgr.updateCenterSettings({ memory: null });
-  assert.equal(opts.setMem.a, undefined);
-  assert.equal(opts.setMem.b, undefined);
+  const before = await readFile(memoryFile.path, "utf8");
+  await assert.rejects(mgr.create({ name: "c", settings: { memory: { url: "http://x/mcp" } } as never }), /MCP からは変えられない/);
+  await assert.rejects(mgr.updateSettings("a", { memory: { url: "http://x/mcp", token: "NEW-SECRET" } } as never), /center の側だけ/);
+  await assert.rejects(mgr.updateSettings("a", { instructions: "i", memory: null } as never), /MCP からは変えられない/);
+  await assert.rejects(mgr.updateCenterSettings({ memory: { url: "http://x/mcp" } } as never), /MCP からは変えられない/);
+  await assert.rejects(mgr.updateCenterSettings({ instructions: "i", memory: null } as never), /MCP からは変えられない/);
+  assert.deepEqual(mgr.getSettings("a"), { name: "a", settings: {} }, "断った更新の他の項目も入らない");
   assert.deepEqual(mgr.getCenterSettings(), { settings: {} });
-  assert.equal(calls.filter((c) => c.startsWith("start:")).length, 2); // 更新で起動し直さない
-  // 保存（sessions.json）には token が入る（起動に要る）。log には入らない
-  await mgr.updateSettings("b", { memory: { url: "http://x.local/mcp", token: "B-SECRET" } });
-  assert.ok((await readFile(join(dir, "sessions.json"), "utf8")).includes("B-SECRET"));
+  assert.equal(mgr.list().some((x) => x.name === "c"), false);
+  // memory を含まない更新は通り、外部記憶は変わらない
+  await mgr.updateSettings("a", { instructions: "ia" });
+  await mgr.updateCenterSettings({ instructions: "ic" });
+  assert.equal(await readFile(memoryFile.path, "utf8"), before);
+  assert.deepEqual(mgr.memoryOf("a"), { url: "https://own.example/mcp", token: "OWN-SECRET" }); // session の値があれば共通は使わない
+  assert.deepEqual(mgr.memoryOf("b"), { url: "http://mem.local:3000/mcp", token: "COMMON-SECRET", agentId: "shared" });
+  // 応答・保存・log に外部記憶の値は無い
+  const shown = JSON.stringify([mgr.getSettings("a"), mgr.getCenterSettings(), mgr.list()]) + (await readFile(join(dir, "sessions.json"), "utf8")) + (await readFile(join(dir, "center-settings.json"), "utf8"));
+  assert.ok(!/SECRET|mem\.local|own\.example/.test(shown));
   for (const l of logs) assert.ok(!/SECRET/.test(l), l);
-  assert.ok(!JSON.stringify(mgr.list()).includes("SECRET")); // session_list
+});
+
+test("memory: CLI で書き換えた設定は次の memoryOf から効く（center を再起動しない）。改名で付け替わり、削除で消える", async () => {
+  const memoryFile = createMemoryFile(dir);
+  const { mgr } = setup({ memoryFile });
+  await mgr.restore();
+  await mgr.create({ name: "a" });
+  assert.equal(mgr.memoryOf("a"), undefined);
+  memoryFile.write({ sessions: { a: { url: "http://one/mcp" } } }); // CLI 相当
+  assert.deepEqual(mgr.memoryOf("a"), { url: "http://one/mcp" });
+  memoryFile.write({ sessions: { a: { url: "http://two/mcp", token: "T" } } });
+  assert.deepEqual(mgr.memoryOf("a"), { url: "http://two/mcp", token: "T" });
+  await mgr.update({ name: "a", newName: "a2" });
+  assert.equal(mgr.memoryOf("a"), undefined);
+  assert.deepEqual(mgr.memoryOf("a2"), { url: "http://two/mcp", token: "T" });
+  await mgr.delete("a2");
+  assert.deepEqual(memoryFile.read(), { sessions: {} });
+});
+
+test("memory: 旧形式（sessions.json / center-settings.json の memory）は restore で memory-settings.json へ移し、元から消す。log に値は出ない", async () => {
+  const logs: string[] = [];
+  await writeFile(join(dir, "center-settings.json"), JSON.stringify({ instructions: "ic", memory: { url: "http://old-common/mcp", token: "OLD-COMMON-SECRET" } }));
+  await mkdir(join(dir, "pa"), { recursive: true });
+  await writeFile(join(dir, "sessions.json"), JSON.stringify([{ name: "a", path: join(dir, "pa"), permissionMode: "auto", settings: { instructions: "ia", memory: { url: "http://old-a/mcp", token: "OLD-A-SECRET", agentId: "x" } }, createdAt: "2026-01-01T00:00:00Z" }]));
+  const memoryFile = createMemoryFile(dir);
+  const { mgr } = setup({ memoryFile, log: (m: string) => void logs.push(m) });
+  await mgr.restore();
+  assert.deepEqual(memoryFile.read(), { common: { url: "http://old-common/mcp", token: "OLD-COMMON-SECRET" }, sessions: { a: { url: "http://old-a/mcp", token: "OLD-A-SECRET", agentId: "x" } } });
+  assert.deepEqual(mgr.getSettings("a"), { name: "a", settings: { instructions: "ia" } });
+  assert.deepEqual(mgr.getCenterSettings(), { settings: { instructions: "ic" } });
+  assert.ok(!/memory|SECRET/.test(await readFile(join(dir, "sessions.json"), "utf8")));
+  assert.ok(!/memory|SECRET/.test(await readFile(join(dir, "center-settings.json"), "utf8")));
+  for (const l of logs) assert.ok(!/SECRET/.test(l), l);
+});
+
+test("memory: 旧形式の移行で memory-settings.json に書けなければ、旧形式を消さず・読み捨てず、この起動は旧い値で動く。失敗を log に残し、値は出さない", async () => {
+  const logs: string[] = [];
+  await writeFile(join(dir, "center-settings.json"), JSON.stringify({ instructions: "ic", memory: { url: "http://old-common/mcp", token: "OLD-COMMON-SECRET" } }));
+  await mkdir(join(dir, "pa"), { recursive: true });
+  await writeFile(join(dir, "sessions.json"), JSON.stringify([{ name: "a", path: join(dir, "pa"), permissionMode: "auto", settings: { instructions: "ia", memory: { url: "http://old-a/mcp", token: "OLD-A-SECRET" } }, createdAt: "2026-01-01T00:00:00Z" }]));
+  const before = { c: await readFile(join(dir, "center-settings.json"), "utf8"), s: await readFile(join(dir, "sessions.json"), "utf8") };
+  const memoryFile = createMemoryFile(dir);
+  memoryFile.write = () => {
+    throw new Error("EACCES: permission denied, open 'memory-settings.json'");
+  };
+  const { mgr } = setup({ memoryFile, log: (m: string) => void logs.push(m) });
+  await mgr.restore();
+  // 旧い値で動く（session の値が先、無ければ共通）
+  assert.deepEqual(mgr.memoryOf("a"), { url: "http://old-a/mcp", token: "OLD-A-SECRET" });
+  assert.deepEqual(mgr.memoryOf("other"), { url: "http://old-common/mcp", token: "OLD-COMMON-SECRET" });
+  // 旧形式は消えていない
+  assert.equal(await readFile(join(dir, "center-settings.json"), "utf8"), before.c);
+  assert.equal(await readFile(join(dir, "sessions.json"), "utf8"), before.s);
+  assert.ok(logs.some((l) => /移せない/.test(l)), "失敗を log に残す");
+  for (const l of logs) assert.ok(!/SECRET/.test(l), l);
+  // 書き込みが直った次の起動では移る
+  const memoryFile2 = createMemoryFile(dir);
+  const { mgr: mgr2 } = setup({ memoryFile: memoryFile2, log: () => {} });
+  await mgr2.restore();
+  assert.deepEqual(memoryFile2.read().sessions.a, { url: "http://old-a/mcp", token: "OLD-A-SECRET" });
+  assert.ok(!/memory|SECRET/.test(await readFile(join(dir, "sessions.json"), "utf8")));
+});
+
+test("memory: 移行の書き込み失敗中に他項目を更新（updateSettings / updateCenterSettings）しても、旧形式の memory は disk に残り、書ける次の起動で移る", async () => {
+  const logs: string[] = [];
+  await writeFile(join(dir, "center-settings.json"), JSON.stringify({ instructions: "ic", memory: { url: "http://old-common/mcp", token: "OLD-COMMON-SECRET" } }));
+  await mkdir(join(dir, "pa"), { recursive: true });
+  await writeFile(join(dir, "sessions.json"), JSON.stringify([{ name: "a", path: join(dir, "pa"), permissionMode: "auto", settings: { instructions: "ia", memory: { url: "http://old-a/mcp", token: "OLD-A-SECRET" } }, createdAt: "2026-01-01T00:00:00Z" }]));
+  const memoryFile = createMemoryFile(dir);
+  memoryFile.write = () => {
+    throw new Error("EACCES: permission denied, open 'memory-settings.json'");
+  };
+  const { mgr } = setup({ memoryFile, log: (m: string) => void logs.push(m) });
+  await mgr.restore();
+  await mgr.updateSettings("a", { instructions: "ia2" });
+  await mgr.updateCenterSettings({ instructions: "ic2" });
+  const s = JSON.parse(await readFile(join(dir, "sessions.json"), "utf8"));
+  const c = JSON.parse(await readFile(join(dir, "center-settings.json"), "utf8"));
+  assert.equal(s[0].settings.instructions, "ia2", "他項目の更新は保存される");
+  assert.equal(c.instructions, "ic2");
+  assert.deepEqual(s[0].settings.memory, { url: "http://old-a/mcp", token: "OLD-A-SECRET" }, "旧形式が残る");
+  assert.deepEqual(c.memory, { url: "http://old-common/mcp", token: "OLD-COMMON-SECRET" });
+  // 画面・MCP からは旧 memory が見えない（応答に出ない）
+  assert.deepEqual(mgr.getSettings("a"), { name: "a", settings: { instructions: "ia2" } });
+  assert.deepEqual(mgr.getCenterSettings(), { settings: { instructions: "ic2" } });
+  // 動作中の値は旧い値のまま
+  assert.deepEqual(mgr.memoryOf("a"), { url: "http://old-a/mcp", token: "OLD-A-SECRET" });
+  for (const l of logs) assert.ok(!/SECRET/.test(l), l);
+  // 書ける次の起動で移り、他項目の更新も残る
+  const memoryFile2 = createMemoryFile(dir);
+  const { mgr: mgr2 } = setup({ memoryFile: memoryFile2, log: () => {} });
+  await mgr2.restore();
+  assert.deepEqual(memoryFile2.read(), { common: { url: "http://old-common/mcp", token: "OLD-COMMON-SECRET" }, sessions: { a: { url: "http://old-a/mcp", token: "OLD-A-SECRET" } } });
+  assert.deepEqual(mgr2.getSettings("a"), { name: "a", settings: { instructions: "ia2" } });
+  assert.deepEqual(mgr2.getCenterSettings(), { settings: { instructions: "ic2" } });
+  assert.ok(!/memory|SECRET/.test(await readFile(join(dir, "sessions.json"), "utf8")));
+  assert.ok(!/memory|SECRET/.test(await readFile(join(dir, "center-settings.json"), "utf8")));
 });
 
 test("coordinator: 起動の時と center 共通の設定の更新で supervisor に渡り、coordinatorOf は呼ぶたびに今の設定を返す", async () => {

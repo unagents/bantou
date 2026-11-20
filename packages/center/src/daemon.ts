@@ -18,6 +18,7 @@ import { createRemoteControlSupervisor } from "./remote-control.js";
 import { createContextUsageTracker } from "./context-usage.js";
 import { createLoginFlow } from "./login.js";
 import { createSessionManager } from "./sessions.js";
+import { createMemoryFile } from "./memory-settings.js";
 import { backupFileOnce, createJsonListStore, createJsonObjectStore } from "./store.js";
 import { applicableParts, buildSystemInstructions, partLabel } from "./system-instructions.js";
 import { createCenterServer, createSessionMcpServer } from "./server.js";
@@ -69,7 +70,10 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   };
   // session の増減・認証状態の変化を desktop へ知らせる（GET /events）
   const events = createEventHub();
+  // 外部記憶の設定（CLI `bantou-center memory` だけが書く。session の起動のたびに読む）
+  const memoryFile = createMemoryFile(dirname(resolve(configPath)), log);
   const supervisor = createRemoteControlSupervisor({
+    memoryOf: (name) => memoryFile.resolve(name),
     systemInstructions: { build: (ctx) => buildSystemInstructions(ctx), labels: (ctx) => applicableParts(ctx).map(partLabel) },
     config,
     configPath,
@@ -132,6 +136,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     supervisor,
     store: createJsonListStore(join(stateDir, "sessions.json"), log),
     centerStore: createJsonObjectStore(join(stateDir, "center-settings.json"), log),
+    memoryFile,
     // remotes は sessions の後に作るので、呼ばれる時に参照する
     renameRemoteSession: (oldName, newName) => remotes.renameSession(oldName, newName),
     remoteNameConflict: (name, mode, oldName) => remotes.conflictsWith(name, mode, oldName),

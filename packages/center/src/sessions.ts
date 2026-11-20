@@ -2,7 +2,8 @@ import { mkdir, rename } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
 import { projectSchema, PERMISSION_MODES, type Config, type ProjectConfig } from "./config.js";
-import { CENTER_SERVERS_ERROR, composeAddDirs, composeInstructions, composeMemory, composeOutputStyle, composeServers, redactSettings, mergeSettings, projectSettingsPatchSchema, readCenterSettings, readCoordinator, readSettings, type CenterSettingsPatch, type MemorySetting, type ProjectSettings, type ProjectSettingsPatch } from "./project-settings.js";
+import { assertNoMemory, CENTER_SERVERS_ERROR, composeAddDirs, composeInstructions, composeOutputStyle, composeServers, mergeSettings, projectSettingsPatchSchema, readCenterSettings, readCoordinator, readSettings, type CenterSettingsPatch, type MemorySetting, type ProjectSettings, type ProjectSettingsPatch } from "./project-settings.js";
+import { parseMemoryFile, type MemoryFile, type MemoryFileData } from "./memory-settings.js";
 import type { Logger } from "./log.js";
 import type { RcStatus, RemoteControlSupervisor } from "./remote-control.js";
 import type { EventHub } from "./events.js";
@@ -56,7 +57,7 @@ export const sessionCreateSchema = {
   name: z.string().regex(SESSION_NAME, "英数字と _ - のみ"),
   path: z.string().min(1).optional().describe("絶対パス。省略時は <workspace>/<name>（無ければ作る）"),
   permissionMode: z.enum(PERMISSION_MODES).optional().describe("省略時 auto"),
-  settings: projectSettingsPatchSchema.optional().describe("プロジェクトごとの設定（{ instructions?: string, addDirs?: string[], outputStyle?: string, servers?: string[], … }）。instructions は --append-system-prompt、addDirs（絶対パス）は 1 つずつ --add-dir で渡す、outputStyle（claude の output style の markdown 本文）は session のフォルダの .claude/output-styles/bantou.md に書いて --settings で選ぶ（再起動・--continue でも付く）。servers（host 名か server_id）はこの session が使う server の範囲（未設定 = 全部、空配列 = 使わない）。memory（{ url, token?, agentId? }）は外部記憶の MCP endpoint（url は http/https の絶対 URL、token は Bearer、agentId は X-Agent-Id で省略時は session 名）。省略・空は無し"),
+  settings: projectSettingsPatchSchema.optional().describe("プロジェクトごとの設定（{ instructions?: string, addDirs?: string[], outputStyle?: string, servers?: string[], … }）。instructions は --append-system-prompt、addDirs（絶対パス）は 1 つずつ --add-dir で渡す、outputStyle（claude の output style の markdown 本文）は session のフォルダの .claude/output-styles/bantou.md に書いて --settings で選ぶ（再起動・--continue でも付く）。servers（host 名か server_id）はこの session が使う server の範囲（未設定 = 全部、空配列 = 使わない）。外部記憶（memory）は MCP からは設定できない（含めると error。center の `bantou-center memory` で設定する）"),
 };
 
 export const sessionUpdateSchema = {
@@ -113,6 +114,8 @@ export function createSessionManager(opts: {
   store: JsonListStore<SavedSession>;
   /** center 共通の設定の保存先（center-settings.json）。省略時は共通の設定なし（更新は保存されない）。 */
   centerStore?: JsonObjectStore<ProjectSettings>;
+  /** 外部記憶の設定（memory-settings.json。CLI だけが書く）。省略時は外部記憶なし。 */
+  memoryFile?: MemoryFile;
   log: Logger;
   /** create 後、接続（URL 取得）か失敗を待つ上限。0 で待たない。既定 15 秒。 */
   waitMs?: number;
@@ -142,7 +145,18 @@ export function createSessionManager(opts: {
     return run;
   };
 
-  const persist = (): Promise<void> => store.save([...saved.values()]);
+  /**
+   * memory-settings.json に移せなかった旧形式の memory（元の値のまま）。次の起動で移し直せるよう、保存のたびに書き戻す
+   * （書き戻さないと他項目の更新の保存で旧形式が disk から消える）。移行できた起動では空。
+   */
+  const legacyKeep: { common?: unknown; sessions: Map<string, unknown> } = { sessions: new Map() };
+  const withLegacy = (rec: SavedSession): SavedSession => {
+    if (!legacyKeep.sessions.has(rec.name)) return rec;
+    return { ...rec, settings: { ...(rec.settings ?? {}), memory: legacyKeep.sessions.get(rec.name) } as ProjectSettings };
+  };
+  const withLegacyCommon = (s: ProjectSettings): ProjectSettings => ("common" in legacyKeep ? ({ ...s, memory: legacyKeep.common } as ProjectSettings) : s);
+
+  const persist = (): Promise<void> => store.save([...saved.values()].map(withLegacy));
 
   const info = (s: RcStatus): SessionInfo => ({
     name: s.project,
@@ -166,12 +180,11 @@ export function createSessionManager(opts: {
     projectSchema.parse({ name: s.name, path: s.path, permissionMode: s.permissionMode });
 
   /** 共通 + session の settings から supervisor に渡す instructions / addDirs / outputStyle（あれば）。 */
-  const instrOpt = (s: ProjectSettings | undefined): { instructions?: string; addDirs?: string[]; outputStyle?: string; memory?: MemorySetting } => {
+  const instrOpt = (s: ProjectSettings | undefined): { instructions?: string; addDirs?: string[]; outputStyle?: string } => {
     const i = composeInstructions(common, s);
-    const m = composeMemory(common, s);
     const d = composeAddDirs(common, s);
     const o = composeOutputStyle(common, s);
-    return { ...(i ? { instructions: i } : {}), ...(d.length ? { addDirs: d } : {}), ...(o ? { outputStyle: o } : {}), ...(m ? { memory: m } : {}) };
+    return { ...(i ? { instructions: i } : {}), ...(d.length ? { addDirs: d } : {}), ...(o ? { outputStyle: o } : {}) };
   };
 
   /** 接続（URL 取得）か失敗までを少し待つ。待ちきれなければ starting のまま返す。 */
@@ -193,16 +206,79 @@ export function createSessionManager(opts: {
     for (const [k, v] of next) saved.set(k, v);
   };
 
+  /** session の外部記憶の設定を別の名前へ付け替える（from の分は消える。無ければ何もしない）。 */
+  const moveMemory = (from: string, to: string | undefined): void => {
+    const f = opts.memoryFile;
+    if (!f) return;
+    const d = f.read();
+    const m = d.sessions[from];
+    if (!m) return;
+    delete d.sessions[from];
+    if (to !== undefined) d.sessions[to] = m;
+    f.write(d);
+  };
+
+  /**
+   * 旧形式（sessions.json / center-settings.json の settings.memory）を memory-settings.json へ移し、元から消す。
+   * memory-settings.json に同じ範囲の値があればそちらを残す。値は log に出さない。
+   */
+  const migrateLegacyMemory = async (rawCommon: unknown, list: SavedSession[]): Promise<boolean> => {
+    const f = opts.memoryFile;
+    if (!f) return false;
+    const legacyOf = (settings: unknown): MemorySetting | undefined => {
+      if (typeof settings !== "object" || settings === null || !("memory" in settings)) return undefined;
+      return parseMemoryFile({ common: (settings as { memory: unknown }).memory }).common;
+    };
+    const hasKey = (settings: unknown): boolean => typeof settings === "object" && settings !== null && "memory" in settings;
+    const commonHas = hasKey(rawCommon);
+    const withKey = list.filter((s) => hasKey(s.settings));
+    if (!commonHas && withKey.length === 0) return false;
+    const d = f.read();
+    const lc = legacyOf(rawCommon);
+    if (lc && !d.common) d.common = lc;
+    for (const s of withKey) {
+      const m = legacyOf(s.settings);
+      if (m && !(s.name in d.sessions)) d.sessions[s.name] = m;
+    }
+    try {
+      f.write(d);
+    } catch (e) {
+      // 旧形式は消さず、この起動の間は旧い値で動く（次の起動で移し直す）。fs のエラー文は path だけで、値は出さない
+      const legacy: MemoryFileData = { sessions: {} };
+      if (lc) legacy.common = lc;
+      for (const s of withKey) {
+        const m = legacyOf(s.settings);
+        if (m) legacy.sessions[s.name] = m;
+      }
+      f.useFallback(legacy);
+      if (commonHas) legacyKeep.common = (rawCommon as { memory: unknown }).memory;
+      for (const s of withKey) legacyKeep.sessions.set(s.name, (s.settings as { memory: unknown }).memory);
+      log(`外部記憶の設定を memory-settings.json へ移せない（旧形式のまま残し、この起動は旧い値で動く）: ${e instanceof Error ? e.message : String(e)}`);
+      return false;
+    }
+    if (commonHas && opts.centerStore) await opts.centerStore.save(readCenterSettings(rawCommon));
+    for (const s of withKey) {
+      const next = readSettings(s.settings);
+      if (Object.keys(next).length) s.settings = next;
+      else delete s.settings;
+    }
+    log(`外部記憶の設定を memory-settings.json へ移した（共通 ${lc ? 1 : 0} 件、session ${withKey.length} 件。値は出さない）`);
+    return withKey.length > 0;
+  };
+
   const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
   return {
     async restore() {
+      const rawCommon = opts.centerStore ? await opts.centerStore.load() : undefined;
+      const list = await store.load();
+      const migrated = await migrateLegacyMemory(rawCommon, list);
       if (opts.centerStore) {
-        common = readCenterSettings(await opts.centerStore.load());
+        common = readCenterSettings(rawCommon);
         if (Object.keys(common).length) log(`center 共通の設定を読んだ (項目: ${Object.keys(common).join(",")})`);
       }
       supervisor.setCoordinator(readCoordinator(common.coordinator));
-      for (const s of await store.load()) {
+      for (const s of list) {
         try {
           if (!SESSION_NAME.test(s.name) || !isAbsolute(s.path)) throw new Error("保存内容が不正");
           supervisor.add(toProject(s), { wrapper: true, ...instrOpt(s.settings) });
@@ -215,6 +291,7 @@ export function createSessionManager(opts: {
           log(`session 復帰失敗: ${s.name} ${e instanceof Error ? e.message : String(e)}`);
         }
       }
+      if (migrated) await persist();
     },
 
     create: (input) =>
@@ -235,6 +312,7 @@ export function createSessionManager(opts: {
         const rc = opts.remoteNameConflict?.(name, "create");
         if (rc) throw new Error(rc);
         await mkdir(path, { recursive: true });
+        assertNoMemory(input.settings);
         const settings = input.settings ? mergeSettings(undefined, input.settings) : undefined;
         const rec: SavedSession = {
           name,
@@ -261,11 +339,12 @@ export function createSessionManager(opts: {
     getSettings: (name) => {
       const known = supervisor.list().some((p) => p.project === name);
       if (!known) throw new Error(`未定義の session: ${name}`);
-      return { name, settings: redactSettings(readSettings(saved.get(name)?.settings)) };
+      return { name, settings: readSettings(saved.get(name)?.settings) };
     },
 
     updateSettings: (name, patch) =>
       serial(async () => {
+        assertNoMemory(patch);
         const rec = saved.get(name);
         if (!rec) {
           const known = supervisor.list().some((p) => p.project === name);
@@ -285,28 +364,28 @@ export function createSessionManager(opts: {
         supervisor.setInstructions(name, composeInstructions(common, next));
         supervisor.setAddDirs(name, composeAddDirs(common, next));
         supervisor.setOutputStyle(name, composeOutputStyle(common, next));
-        supervisor.setMemory(name, composeMemory(common, next));
         log(`session の設定を更新: ${name} (項目: ${Object.keys(next).join(",") || "なし"})`);
-        return { name, settings: redactSettings(next) };
+        return { name, settings: next };
       }),
 
-    getCenterSettings: () => ({ settings: redactSettings({ ...common }) }),
+    getCenterSettings: () => ({ settings: { ...common } }),
 
     serversOf: (name) => composeServers(saved.get(name)?.settings),
 
-    memoryOf: (name) => composeMemory(common, saved.get(name)?.settings),
+    memoryOf: (name) => opts.memoryFile?.resolve(name),
 
     coordinatorOf: () => readCoordinator(common.coordinator),
 
     updateCenterSettings: (patch) =>
       serial(async () => {
+        assertNoMemory(patch);
         // servers は session の設定だけ。null（削除）は無害なので通し、それ以外は黙って捨てずに error にする
         if (patch.servers !== undefined && patch.servers !== null) throw new Error(CENTER_SERVERS_ERROR);
         const prev = common;
         const next = readCenterSettings(mergeSettings(prev, patch as ProjectSettingsPatch));
         if (opts.centerStore) {
           try {
-            await opts.centerStore.save(next);
+            await opts.centerStore.save(withLegacyCommon(next));
           } catch (e) {
             throw new Error(`設定ファイルに保存できない: ${(e as Error).message}`);
           }
@@ -318,10 +397,9 @@ export function createSessionManager(opts: {
           supervisor.setInstructions(rec.name, composeInstructions(common, rec.settings));
           supervisor.setAddDirs(rec.name, composeAddDirs(common, rec.settings));
           supervisor.setOutputStyle(rec.name, composeOutputStyle(common, rec.settings));
-          supervisor.setMemory(rec.name, composeMemory(common, rec.settings));
         }
         log(`center 共通の設定を更新 (項目: ${Object.keys(next).join(",") || "なし"})`);
-        return { settings: redactSettings(next) };
+        return { settings: next };
       }),
 
     update: (input) =>
@@ -363,6 +441,7 @@ export function createSessionManager(opts: {
         let moved = false;
         let swapped = false;
         let added = false;
+        let movedMemory = false;
         await supervisor.remove(name);
         try {
           if (moving) {
@@ -380,6 +459,10 @@ export function createSessionManager(opts: {
             await persist();
           } catch (e) {
             throw new Error(`状態ファイルに保存できない: ${(e as Error).message}`);
+          }
+          if (renaming) {
+            moveMemory(name, newName);
+            movedMemory = true;
           }
           if (renaming && opts.renameRemoteSession) {
             // 呼び出し中に例外（persist 失敗など）でも remotes のメモリは付け替わりうるので、先に印を立てて戻す
@@ -402,6 +485,7 @@ export function createSessionManager(opts: {
               log(`session 更新の巻き戻し失敗 (${what}): ${name} ${e2 instanceof Error ? e2.message : String(e2)}`);
             }
           };
+          if (movedMemory) await undo("外部記憶の設定の付け替え", () => moveMemory(newName, name));
           if (added) await undo("新しい名前の停止", () => supervisor.remove(newName));
           if (renamedRemotes) await undo("remotes の付け替え", () => opts.renameRemoteSession?.(newName, name));
           if (swapped) {
@@ -426,6 +510,11 @@ export function createSessionManager(opts: {
         await supervisor.remove(name);
         saved.delete(name);
         await persist();
+        try {
+          moveMemory(name, undefined);
+        } catch (e) {
+          log(`外部記憶の設定を消せない: ${name} ${e instanceof Error ? e.message : String(e)}`);
+        }
         opts.events?.publish({ reason: "deleted", name });
         log(`session 削除: ${name}`);
         return { name, deleted: true as const };

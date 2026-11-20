@@ -440,19 +440,19 @@ export class MockBantou {
         return structuredClone(s);
       }
       case "session_get_settings":
-        return redactMemory(this.centerSettings[(args.name as string).trim()] ?? {});
+        return stripMemory(this.centerSettings[(args.name as string).trim()] ?? {});
       case "session_update_settings": {
         if (this.centerSettingsUpdateError) throw new Error(this.centerSettingsUpdateError);
         const name = (args.name as string).trim();
+        refuseMemory(args.settings);
         const next = { ...(this.centerSettings[name] ?? {}) };
         for (const [k, v] of Object.entries(args.settings as Record<string, unknown>)) {
-          if (k === "memory") applyMemory(next, v);
-          else if (v === null || v === "") delete next[k];
+          if (v === null || v === "") delete next[k];
           else next[k] = v;
         }
         if (Object.keys(next).length) this.centerSettings[name] = next;
         else delete this.centerSettings[name];
-        return redactMemory(next);
+        return stripMemory(next);
       }
       case "session_output_start":
         this.outputStarts.push({ session: args.session as string, after: (args.after as number | null) ?? null });
@@ -599,17 +599,17 @@ export class MockBantou {
             return text(this.fetchCenterList());
           case "center_settings_get":
             if (this.centerCommonSettingsError) throw new Error(this.centerCommonSettingsError);
-            return text({ settings: redactMemory(this.centerCommonSettings) });
+            return text({ settings: stripMemory(this.centerCommonSettings) });
           case "center_settings_update": {
             if (this.centerCommonSettingsError) throw new Error(this.centerCommonSettingsError);
             const next = { ...this.centerCommonSettings };
+            refuseMemory((args.arguments as { settings: Record<string, unknown> }).settings);
             for (const [k, v] of Object.entries((args.arguments as { settings: Record<string, unknown> }).settings)) {
-              if (k === "memory") applyMemory(next, v);
-              else if (v === null || v === "") delete next[k];
+              if (v === null || v === "") delete next[k];
               else next[k] = v;
             }
             this.centerCommonSettings = next;
-            return text({ settings: redactMemory(next) });
+            return text({ settings: stripMemory(next) });
           }
           case "session_create":
             return text(this.createCenterSession((args.arguments as { name: string }).name));
@@ -700,24 +700,18 @@ export class MockBantou {
 /** This machine's addresses as `center_local_ips` returns them (IPv4 first, then IPv6). */
 /** Default IP as the backend picks it: first external IPv4 (private/LAN first), else 127.0.0.1. */
 /**
- * The center's `memory` handling: an update replaces the whole object; an omitted `token` keeps the stored one and
- * "" removes it. The stored value keeps the token (tests read it); answers go through `redactMemory` (no token, `tokenSet`).
+ * The center's `memory` handling: the center refuses an update that carries `memory`, and never returns it. A test may put a
+ * `memory` into the stored settings by hand (the center's own file): a save that does not send it leaves it as it is.
  */
-function applyMemory(store: Record<string, unknown>, patch: unknown): void {
-  if (patch === null || patch === undefined) {
-    delete store.memory;
-    return;
+function refuseMemory(settings: unknown): void {
+  if (typeof settings === "object" && settings !== null && "memory" in settings) {
+    throw new Error("外部記憶（memory）の設定は MCP からは変えられない（url・token・agentId は center の側だけで扱う）");
   }
-  const p = patch as { url: string; token?: string; agentId?: string };
-  const prev = (store.memory as { token?: string } | undefined)?.token;
-  const token = p.token === undefined ? prev : p.token;
-  store.memory = { url: p.url, ...(token ? { token } : {}), ...(p.agentId ? { agentId: p.agentId } : {}) };
 }
 
-function redactMemory(settings: Record<string, unknown>): Record<string, unknown> {
+function stripMemory(settings: Record<string, unknown>): Record<string, unknown> {
   const out = structuredClone(settings);
-  const m = out.memory as { url: string; token?: string; agentId?: string } | undefined;
-  if (m) out.memory = { url: m.url, ...(m.agentId ? { agentId: m.agentId } : {}), tokenSet: m.token !== undefined };
+  delete out.memory;
   return out;
 }
 

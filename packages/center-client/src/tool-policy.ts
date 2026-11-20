@@ -29,3 +29,23 @@ const allowed = new Set(WEB_ALLOWED_TOOLS);
 
 /** `policy.allowTool` for the web backend. */
 export const allowWebTool = (name: string): boolean => allowed.has(name);
+
+/** Why a call is refused although the tool itself is allowed (shown to the user). */
+export const MEMORY_REFUSAL =
+  "外部記憶（memory）の設定は web からは変えられない（url・token・agentId は center の側だけで扱う）。center を動かしている host で `bantou-center memory` を使う";
+
+// Tools whose `settings` argument could carry the memory setting.
+const SETTINGS_TOOLS: ReadonlySet<string> = new Set(["session_create", "session_settings_update", "center_settings_update"]);
+
+/**
+ * The reason a call is refused by its arguments, or undefined. The memory setting (url / token / agentId) is not
+ * changed from a screen: a `settings` with a `memory` key (null too) is refused, not silently dropped. The center
+ * refuses it as well; this refuses before anything is sent.
+ */
+export function webToolArgsRefusal(name: string, args: unknown): string | undefined {
+  if (!SETTINGS_TOOLS.has(name)) return undefined;
+  if (typeof args !== "object" || args === null) return undefined;
+  const settings = (args as { settings?: unknown }).settings;
+  if (typeof settings !== "object" || settings === null) return undefined;
+  return Object.prototype.hasOwnProperty.call(settings, "memory") ? MEMORY_REFUSAL : undefined;
+}
