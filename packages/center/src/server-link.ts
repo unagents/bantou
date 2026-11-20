@@ -175,6 +175,8 @@ export interface ServerLink {
   gate(peer: ServerPeer, command: ServerCommandType): ErrorReply | undefined;
   /** 追加の門（更新待ちの判定）を差し込む。protocol の版の門はこの前に常に効く。 */
   setGate(g: Gate | undefined): void;
+  /** 版が合わず断る error の文に足す、その server の更新の状態（follow が差し込む）。 */
+  setVersionNote(f: ((peer: { id: string }) => string) | undefined): void;
   close(): Promise<void>;
 }
 
@@ -309,9 +311,9 @@ const transportError = (message: string, command?: ServerCommandType): ErrorRepl
 export const isTransportError = (r: { type: string }): boolean => r.type === "error" && (r as { transport?: unknown }).transport === true;
 
 /** protocol の版が合わない server への指示を断る error。 */
-export function versionMismatchError(declared: string | undefined, command: ServerCommandType): ErrorReply {
+export function versionMismatchError(declared: string | undefined, command: ServerCommandType, note?: string): ErrorReply {
   return errorReply(
-    `server の protocol の版が合わない（server=${declared ?? "不明"}, center=${MESSENGER_PROTOCOL.version}）。版が揃うまで指示を送らない。server の更新後に再送`,
+    `server の protocol の版が合わない（server=${declared ?? "不明"}, center=${MESSENGER_PROTOCOL.version}）。版が揃うまで指示を送らない。${note ? `${note}。` : ""}server の更新後に再送`,
     command,
     { code: "version_mismatch", retryable: true },
   );
@@ -353,6 +355,7 @@ export function createServerLink(opts: {
 }): ServerLink {
   const { config, log } = opts;
   let extraGate: Gate | undefined;
+  let versionNote: ((peer: { id: string }) => string) | undefined;
   const clientFactory = opts.clientFactory ?? ((s: ServerConfig): LinkClient => createClient(s, log));
   const healthCheck =
     opts.healthCheck ??
@@ -423,7 +426,7 @@ export function createServerLink(opts: {
   /** 門。制御メッセージは通す。宣言された protocol の版が違えば断り、次に更新待ちの判定。版が不明（名前宛て）は通す。 */
   const gateOf = (peer: { id: string; version?: string }, command: ServerCommandType): ErrorReply | undefined => {
     if (CONTROL_COMMANDS.includes(command)) return undefined;
-    if (peer.version !== undefined && peer.version !== MESSENGER_PROTOCOL.version) return versionMismatchError(peer.version, command);
+    if (peer.version !== undefined && peer.version !== MESSENGER_PROTOCOL.version) return versionMismatchError(peer.version, command, versionNote?.(peer));
     return extraGate?.(peer, command);
   };
 
@@ -904,6 +907,9 @@ export function createServerLink(opts: {
     gate: (peer, command) => gateOf(peer, command),
     setGate: (g) => {
       extraGate = g;
+    },
+    setVersionNote: (f) => {
+      versionNote = f;
     },
     async close() {
       closed = true;
