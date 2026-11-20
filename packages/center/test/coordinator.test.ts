@@ -95,6 +95,13 @@ test("session_brief: 1 行 200 文字・40 行・6000 文字の上限。越え�
   assert.ok(r2.sessions.every((s) => s.line.length <= SESSION_BRIEF_LINE_MAX));
   assert.ok(r2.sessions.reduce((n, s) => n + s.line.length, 0) <= SESSION_BRIEF_MAX_CHARS);
   assert.ok(r2.truncated && r2.omitted > 0);
+  // 返り値全体（整形ありの JSON。name の二重を含む）でも 6000 文字以内
+  assert.ok(JSON.stringify(r2, null, 2).length <= SESSION_BRIEF_MAX_CHARS);
+  for (const n of [1, 30, 64]) {
+    const rs = buildSessionBrief(Array.from({ length: SESSION_BRIEF_MAX_LINES }, (_, i) => info(`${"m".repeat(n)}${i}`)), "x", NOW);
+    assert.ok(JSON.stringify(rs, null, 2).length <= SESSION_BRIEF_MAX_CHARS, `name ${n}`);
+    assert.equal(rs.sessions.length + rs.omitted, SESSION_BRIEF_MAX_LINES);
+  }
 });
 
 // ---- 道具の出し分けと断り（in-memory） ----
