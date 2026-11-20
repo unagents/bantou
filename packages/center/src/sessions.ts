@@ -2,7 +2,7 @@ import { mkdir, rename } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
 import { projectSchema, PERMISSION_MODES, type Config, type ProjectConfig } from "./config.js";
-import { assertNoMemory, CENTER_SERVERS_ERROR, composeAddDirs, composeInstructions, composeOutputStyle, composeServers, mergeSettings, projectSettingsPatchSchema, readCenterSettings, readCoordinator, readSettings, type CenterSettingsPatch, type MemorySetting, type ProjectSettings, type ProjectSettingsPatch } from "./project-settings.js";
+import { assertCenterOnly, CENTER_SERVERS_ERROR, composeAddDirs, composeInstructions, composeOutputStyle, composeServers, mergeSettings, projectSettingsPatchSchema, readCenterSettings, readCoordinator, readSettings, type CenterSettingsPatch, type MemorySetting, type ProjectSettings, type ProjectSettingsPatch } from "./project-settings.js";
 import { parseMemoryFile, type MemoryFile, type MemoryFileData } from "./memory-settings.js";
 import type { Logger } from "./log.js";
 import type { RcStatus, RemoteControlSupervisor } from "./remote-control.js";
@@ -312,7 +312,7 @@ export function createSessionManager(opts: {
         const rc = opts.remoteNameConflict?.(name, "create");
         if (rc) throw new Error(rc);
         await mkdir(path, { recursive: true });
-        assertNoMemory(input.settings);
+        assertCenterOnly(input.settings);
         const settings = input.settings ? mergeSettings(undefined, input.settings) : undefined;
         const rec: SavedSession = {
           name,
@@ -344,7 +344,7 @@ export function createSessionManager(opts: {
 
     updateSettings: (name, patch) =>
       serial(async () => {
-        assertNoMemory(patch);
+        assertCenterOnly(patch);
         const rec = saved.get(name);
         if (!rec) {
           const known = supervisor.list().some((p) => p.project === name);
@@ -378,7 +378,7 @@ export function createSessionManager(opts: {
 
     updateCenterSettings: (patch) =>
       serial(async () => {
-        assertNoMemory(patch);
+        assertCenterOnly(patch);
         // servers は session の設定だけ。null（削除）は無害なので通し、それ以外は黙って捨てずに error にする
         if (patch.servers !== undefined && patch.servers !== null) throw new Error(CENTER_SERVERS_ERROR);
         const prev = common;

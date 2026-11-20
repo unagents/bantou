@@ -30,9 +30,16 @@ const allowed = new Set(WEB_ALLOWED_TOOLS);
 /** `policy.allowTool` for the web backend. */
 export const allowWebTool = (name: string): boolean => allowed.has(name);
 
-/** Why a call is refused although the tool itself is allowed (shown to the user). */
-export const MEMORY_REFUSAL =
-  "外部記憶（memory）の設定は web からは変えられない（url・token・agentId は center の側だけで扱う）。center を動かしている host で `bantou-center memory` を使う";
+/** Why a call is refused although the tool itself is allowed (shown to the user). Holds no value of the item. */
+export const CENTER_ONLY_REFUSAL =
+  "外部記憶（memory）や MCP の接続の設定は web からは変えられない（url・token・agentId などは center の側だけで扱う）。center を動かしている host の command（`bantou-center memory` など）を使う";
+export const MEMORY_REFUSAL = CENTER_ONLY_REFUSAL;
+
+/** Setting keys only the center handles (a screen / the web cannot set or delete them; null too). */
+export const CENTER_ONLY_KEYS: readonly string[] = ["memory", "mcp", "mcpConnections", "mcpSecrets"];
+
+/** True when `settings` has a center-only key (null value included). */
+export const hasCenterOnlyKey = (settings: object): boolean => CENTER_ONLY_KEYS.some((k) => Object.prototype.hasOwnProperty.call(settings, k));
 
 // Tools whose `settings` argument could carry the memory setting.
 const SETTINGS_TOOLS: ReadonlySet<string> = new Set(["session_create", "session_settings_update", "center_settings_update"]);
@@ -47,5 +54,5 @@ export function webToolArgsRefusal(name: string, args: unknown): string | undefi
   if (typeof args !== "object" || args === null) return undefined;
   const settings = (args as { settings?: unknown }).settings;
   if (typeof settings !== "object" || settings === null) return undefined;
-  return Object.prototype.hasOwnProperty.call(settings, "memory") ? MEMORY_REFUSAL : undefined;
+  return hasCenterOnlyKey(settings) ? CENTER_ONLY_REFUSAL : undefined;
 }
