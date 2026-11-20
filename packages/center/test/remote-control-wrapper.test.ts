@@ -932,3 +932,9 @@ test("session 名: claude の --remote-control と messenger の peer 名は <se
   assert.equal(tokens.verify("pm1", l.env.BANTOU_SESSION_TOKEN!), true);
   await sup.shutdown();
 });
+
+test("起動引数: project 名が -cap で終わる時は --remote-control と messenger 名に -cap を重ねない", () => {
+  const a = buildWrapperArgs({ claudePath: "c", name: "x-cap", permissionMode: "auto", mcpConfig: null, resume: false });
+  assert.equal(a[a.indexOf("--remote-control") + 1], "x-cap");
+  assert.equal(JSON.parse(mcpConfigJson(null, "x-cap")).mcpServers["bantou-messenger"].env.AGENT_MESSENGER_NAME, "x-cap");
+});
