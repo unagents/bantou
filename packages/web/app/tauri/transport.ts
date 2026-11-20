@@ -63,14 +63,21 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>, opts?: Inv
   if (res.type === "opaqueredirect") throw new RpcError(0, "ログインが必要");
   const text = await res.text();
   let json: unknown;
+  let parsed = true;
   try {
     json = text === "" ? undefined : JSON.parse(text);
   } catch {
     json = undefined;
+    parsed = false;
   }
   if (!res.ok) {
     const msg = json && typeof json === "object" && typeof (json as { error?: unknown }).error === "string" ? (json as { error: string }).error : `HTTP ${res.status}`;
     throw new RpcError(res.status, msg);
+  }
+  if (!parsed) {
+    // A 2xx that is not JSON is not our backend's answer (the Access login page can come back as a 200): do not hand it on as a value.
+    void noteAuthFailure();
+    throw new RpcError(res.status, "応答が JSON でない（ログイン画面かもしれない）");
   }
   return json as T;
 }

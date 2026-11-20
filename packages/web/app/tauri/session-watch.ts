@@ -5,9 +5,42 @@
 
 /** Consecutive EventSource errors before `/api/me` is asked. */
 export const SSE_FAILURES_BEFORE_CHECK = 3;
-/** A reload is refused when the previous one was this recent (a login that cannot succeed must not loop). */
-export const RELOAD_GUARD_MS = 30_000;
-const RELOAD_KEY = "bantou-web:access-reload-at";
+/** In one tab, at most this many reloads within `RELOAD_WINDOW_MS`; then stop and say "not allowed" (a 403 that a login cannot fix must not loop). */
+export const MAX_RELOADS = 2;
+export const RELOAD_WINDOW_MS = 10 * 60_000;
+const RELOADS_KEY = "bantou-web:access-reloads";
+
+/** Pure: the reload times kept in the tab's sessionStorage (JSON array of epoch ms) -> reload now (with the new list) or stop. */
+export function planReload(stored: string | null, now: number): { reload: boolean; list: number[] } {
+  let prev: number[] = [];
+  try {
+    const v = stored ? (JSON.parse(stored) as unknown) : [];
+    if (Array.isArray(v)) prev = v.filter((x): x is number => typeof x === "number" && now - x < RELOAD_WINDOW_MS);
+  } catch {
+    // a broken value counts as no history
+  }
+  if (prev.length >= MAX_RELOADS) return { reload: false, list: prev };
+  return { reload: true, list: [...prev, now] };
+}
+
+const deniedListeners = new Set<() => void>();
+let denied = false;
+/** True once reloading did not help (the session is refused, not expired). */
+export const isAccessDenied = () => denied;
+/** Be told when `isAccessDenied()` becomes true. Returns the unsubscribe. */
+export function onAccessDenied(fn: () => void): () => void {
+  deniedListeners.add(fn);
+  return () => deniedListeners.delete(fn);
+}
+
+/** The stream (or a command) worked: the session is fine, forget the reload history. */
+export function noteSessionOk(): void {
+  try {
+    sessionStorage.removeItem(RELOADS_KEY);
+  } catch {
+    // no storage: nothing to forget
+  }
+}
 
 export type SessionState = "ok" | "gone" | "offline";
 
@@ -30,10 +63,13 @@ export async function probeSession(fetchFn: typeof fetch = fetch): Promise<Sessi
 }
 
 function reload() {
-  const now = Date.now();
-  const last = Number(sessionStorage.getItem(RELOAD_KEY) ?? "0");
-  if (now - last < RELOAD_GUARD_MS) return;
-  sessionStorage.setItem(RELOAD_KEY, String(now));
+  const plan = planReload(sessionStorage.getItem(RELOADS_KEY), Date.now());
+  if (!plan.reload) {
+    denied = true;
+    for (const fn of deniedListeners) fn();
+    return;
+  }
+  sessionStorage.setItem(RELOADS_KEY, JSON.stringify(plan.list));
   location.reload();
 }
 
@@ -58,7 +94,10 @@ export function noteAuthFailure(): Promise<void> {
  */
 export function startSessionWatch(es: EventSource, onGaveUp: () => void): void {
   let failures = 0;
-  es.addEventListener("open", () => (failures = 0));
+  es.addEventListener("open", () => {
+    failures = 0;
+    noteSessionOk();
+  });
   es.addEventListener("error", () => {
     if (es.readyState === EventSource.CLOSED) {
       void noteAuthFailure().finally(onGaveUp);
