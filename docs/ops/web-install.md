@@ -25,7 +25,7 @@
 
 1. `<run-user>` が存在し、HOME が `750` 以下（他の user が読めない）。
 2. `<run-user>` の linger が有効（`loginctl show-user <run-user> -p Linger` が `Linger=yes`）。**host を再起動しても、login なしで unit が戻る**ための前提。
-3. 実行 user と unit の持ち主が違う形（4.2）を使う場合のみ: 3 章の 2 つの script への `sudo -n` の許可（4.2 の sudoers 例）。
+3. 実行 user と unit の持ち主が違う形（4.2）を使う場合のみ: 2 つの script（`web-run.sh` / `web-stop.sh`）と、`<install-dir>`・`<install-dir>/bin` の親 dir が `<unit-owner>` に書けない事、および引数なしに限った `sudo -n` の許可（4.2 の sudoers 例）。
 4. 設置先 dir と env 置き場（2 章）を `<run-user>` が書ける。
 
 ## 1. 構成と route（実物）
@@ -67,12 +67,14 @@
 
 | もの | 場所 | 権限 |
 |---|---|---|
-| env file | `<env-dir>/web.env`（`KEY=value` の行。引用符を付けない） | `600`、持ち主 `<run-user>`。dir は `700` |
+| env file | `<env-dir>/web.env`（`KEY=value` の行。引用符を付けない。値の制限は下） | `600`、持ち主 `<run-user>`。dir は `700` |
 | 共有鍵（nginx 側） | `<nginx-conf-dir>/bantou-proxy-key.conf`（`proxy_set_header X-Bantou-Proxy-Key "<鍵>";` の 1 行） | nginx の master process だけが読める（例 `640`、group は nginx の読む group）。`<run-user>` の env の `PROXY_KEY` と同じ値 |
-| 設定 file | `WEB_SETTINGS_FILE` の path | backend が一時 file→rename で書く（`600`）。dir は `<run-user>` だけ |
+| 設定 file | `WEB_SETTINGS_FILE` の path | backend が一時 file→rename で書く（`600`）。親 dir は**設置時に先に作る**（`install -d -m 700 -o <run-user> <settings-dir>`。`<run-user>` として `mkdir -m 700` でもよい） |
 | build 物 | `<install-dir>/packages/web/.output` | `<run-user>` が読める。他の user が書けない |
 
-- 鍵・token・JWT を、コマンドライン引数・unit file の `Environment=`・ログ・shell の履歴に出さない。`EnvironmentFile`（または 3 章の script が読む env file）だけに置く。
+- **env file の値は `[A-Za-z0-9._@,+/=-]` の文字だけにする**（空白・引用符・`$`・バッククォート・`;`・`#`・バックスラッシュを入れない）。systemd の `EnvironmentFile` と shell の `. <file>`（4.2 の script、3 章の手動起動）で読み方が違い、記号入りの値は片方で壊れたり、shell 側で別の command が走ったりするため。`PROXY_KEY` は `openssl rand -hex 32` の出力を使う。`ALLOWED_EMAILS` は email をカンマで繋ぐ（空白なし）。
+- 鍵・token・JWT を、コマンドライン引数・unit file の `Environment=`・ログ・shell の履歴に出さない。`EnvironmentFile`（または 4.2 の script が shell で読む env file）だけに置く。
+- `WEB_SETTINGS_FILE` は env file に**絶対 path で明示する**（`HOME` の違いで別の場所に書かれるのを避ける）。
 - 同じ host の別 user が `/proc/<pid>/environ` を読めない事（一般の Linux の権限）と、`<run-user>` の HOME が `750` 以下である事を設置者が確かめる（8 章 0）。
 
 ### 2.3 center 設定（設定 file）
@@ -89,6 +91,7 @@
 }
 ```
 
+- 親 dir（`<settings-dir>`）が `700`・持ち主 `<run-user>` で存在する事を、起動前に確かめる（2.2）。
 - 実際に使うのは `remote`（`url` と `token`）。他は互換の項目で、`enabled` は **false のまま**（true は検証で拒否される）。file が無い・壊れている時は既定（接続先なし）として扱われ、backend は起動する。
 - `remote.url` は `http(s)://` で、`/mcp` に正規化される。url に userinfo（`user:pass@`）を入れない。
 - 接続先は**呼び出しのたびに file から選ぶ**ので、file の `remote` を書き換えても再起動は要らない（env の `CENTER_URL` / `CENTER_TOKEN` を変えた時は再起動）。
@@ -107,7 +110,13 @@ cd packages/web && bun run build      # = nuxt build。出力は packages/web/.o
 
 - build は `packages/web` だけでよい（`packages/center-client` と `packages/ui` の型はソースのまま build に取り込まれる。別の build は要らない）。
 - 起動 command（実物）: `node .output/server/index.mjs`。cwd は `<install-dir>/packages/web`。env は 2.1。
-- 手で動かして確かめる時も、env は 2.2 の file から読む（値を command line に書かない）。
+- 手で動かして確かめる時も、env は 2.2 の file から読む（値を command line に書かない）:
+  ```bash
+  # <run-user> として、cwd は <install-dir>/packages/web
+  set -a; . <env-dir>/web.env; set +a
+  exec node .output/server/index.mjs
+  ```
+  値の制限（2.2）を守れば、この読み方と systemd の `EnvironmentFile` で同じ値になる。
 
 ## 4. 常駐（systemd user unit + linger）
 
@@ -121,7 +130,8 @@ web backend は `<run-user>` で動かし、systemd の **user unit** として�
 # <run-user> の ~/.config/systemd/user/bantou-web.service
 [Unit]
 Description=bantou web backend
-After=network-online.target
+# user unit では After=network-online.target は効かない（system の target を待てない）ので書かない。
+# 起動時に center へ届かなくても backend は起動し、/api/health が到達不可を返す
 
 [Service]
 Type=simple
@@ -153,11 +163,12 @@ unit は持ち主（`<unit-owner>`）の user manager に置くが、**process �
 
 準備（0.1 で管理者が 1 回だけ。以後 password は要らない）:
 
-1. `<install-dir>/bin/web-run.sh` と `web-stop.sh` を置く。**持ち主は `<run-user>` か root で、`<unit-owner>` が書き換えられない**事（書き換えられると `<run-user>` の権限を取れる）。
+1. `<install-dir>/bin/web-run.sh` と `web-stop.sh` を置く。**持ち主は `<run-user>` か root で、`<unit-owner>` が書き換えられない**事（書き換えられると `<run-user>` の権限を取れる）。script だけでなく、**`<install-dir>` と `<install-dir>/bin` の親 dir も `<unit-owner>` が書けない**ようにする（dir に書けると rename で script を差し替えられる）。`<install-dir>` は symlink を含まない実 path で書く。
 2. sudoers に、`<unit-owner>` が `<run-user>` として**この 2 つの script だけ**を password 無しで実行する許可を書く。
 
 ```sudoers
-<unit-owner> ALL=(<run-user>) NOPASSWD: <install-dir>/bin/web-run.sh, <install-dir>/bin/web-stop.sh
+# 末尾の "" は「引数なし」に限る指定
+<unit-owner> ALL=(<run-user>) NOPASSWD: <install-dir>/bin/web-run.sh "", <install-dir>/bin/web-stop.sh ""
 ```
 
 ```sh
@@ -165,22 +176,40 @@ unit は持ち主（`<unit-owner>`）の user manager に置くが、**process �
 # <install-dir>/bin/web-run.sh（<run-user> として実行される）
 set -eu
 umask 077
+pid_file="<run-dir>/web.pid"
+web_dir="<install-dir>/packages/web"
+
+# 旧 process が生きていたら起動しない（orphan を作らない）。判定は stop script と同じ
+if [ -f "$pid_file" ]; then
+  old="$(cat "$pid_file")"
+  if [ -r "/proc/$old/cmdline" ] \
+     && [ "$(readlink "/proc/$old/cwd")" = "$web_dir" ] \
+     && tr '\0' ' ' < "/proc/$old/cmdline" | grep -q '\.output/server/index\.mjs'; then
+    echo "bantou-web: 旧 process (pid $old) が動いている。web-stop.sh で止めてから起動する" >&2
+    exit 1
+  fi
+fi
+
 set -a; . "<env-dir>/web.env"; set +a
-cd "<install-dir>/packages/web"
-echo $$ > "<run-dir>/web.pid"
+cd "$web_dir"
+echo $$ > "$pid_file"
 exec /usr/bin/node .output/server/index.mjs
 ```
 
-（env は `set -a` の行で読む。`exec` するので pid file の pid がそのまま node の pid になる。）
+（env は `set -a` の行で **shell として** 読む（2.2 の値の制限が前提）。`exec` するので pid file の pid がそのまま node の pid になる。pid file が残っていても、その pid が上の 3 条件に合わない（stale）なら上書きして起動する。）
 
 ```sh
 #!/bin/sh
 # <install-dir>/bin/web-stop.sh（<run-user> として実行される）。残っていなければ何もせず成功
 pid_file="<run-dir>/web.pid"
+web_dir="<install-dir>/packages/web"
 [ -f "$pid_file" ] || exit 0
 pid="$(cat "$pid_file")"
-# pid が今も web backend のものか（pid の使い回しで別の process を殺さない）
-if [ -r "/proc/$pid/cmdline" ] && tr '\0' ' ' < "/proc/$pid/cmdline" | grep -q '\.output/server/index\.mjs'; then
+# pid が今も web backend のものか（pid の使い回しで別の process を殺さない）。
+# cmdline に加えて cwd が <install-dir>/packages/web である事も条件にする
+if [ -r "/proc/$pid/cmdline" ] \
+   && [ "$(readlink "/proc/$pid/cwd")" = "$web_dir" ] \
+   && tr '\0' ' ' < "/proc/$pid/cmdline" | grep -q '\.output/server/index\.mjs'; then
   kill -TERM "$pid" 2>/dev/null || true
   i=0
   while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i+1)); done
@@ -193,15 +222,15 @@ rm -f "$pid_file"
 # <unit-owner> の ~/.config/systemd/user/bantou-web.service
 [Unit]
 Description=bantou web backend (runs as <run-user>)
-After=network-online.target
+# user unit では After=network-online.target は効かないので書かない
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/sudo -n -u <run-user> <install-dir>/bin/web-run.sh
+ExecStart=/usr/bin/sudo -n -H -u <run-user> <install-dir>/bin/web-run.sh
 # 停止: unit の持ち主は <run-user> の process を直接止められないので、実行 user として止める
-ExecStop=/usr/bin/sudo -n -u <run-user> <install-dir>/bin/web-stop.sh
+ExecStop=/usr/bin/sudo -n -H -u <run-user> <install-dir>/bin/web-stop.sh
 # 異常終了・sudo だけ死んだ時にも process を残さない（残っていれば止め、無ければ何もしない）
-ExecStopPost=/usr/bin/sudo -n -u <run-user> <install-dir>/bin/web-stop.sh
+ExecStopPost=/usr/bin/sudo -n -H -u <run-user> <install-dir>/bin/web-stop.sh
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=20
@@ -292,6 +321,7 @@ server {
 | JWT の header | 触らない | `Cf-Access-Jwt-Assertion` が backend の検証に届く |
 | `Host` | `proxy_set_header Host $host` | 変更系の `Origin` 検査が `Host` と比べる |
 
+- **access log の format に header の値（`$http_cf_access_jwt_assertion`・`$http_x_bantou_proxy_key` など `$http_*`）を入れない**。JWT と共有鍵がログに残る。
 - 他の vhost と同居する時は、`default_server` に Host の合わない要求が行って、他の app に届かないか確認する。
 - `nginx -t` が通ってから reload する。設置の前後で、既存の URL の応答が変わらない事を確かめる（8 章 5）。
 
@@ -316,7 +346,7 @@ server {
 | 0 | 前提と権限（0・2 章）: `<run-user>` が人の login 用 user でない。HOME が `750` 以下。env file が `600`。linger 有効 | `loginctl show-user <run-user> -p Linger` が `Linger=yes`。他の user が env file と HOME 配下を読めない |
 | 1 | team 名と AUD tag（Access の application） | backend の env に入れた値で、本物の JWT の `aud` / `iss` が一致する（本物の JWT で `GET /api/me` が 200 と email を返す） |
 | 2 | `Cf-Access-Jwt-Assertion` が backend まで届くか（前段 → 中継 → nginx → backend） | backend が受けた request に header がある（8-1 が通れば届いている）。**届かない場合は、nginx の送信元制限と共有鍵だけの運用に切り替えるか、中継を飛ばす構成にするかを、設置者が実測で決める**（backend は JWT 無しを 401 で拒否するので、そのままでは動かない） |
-| 3 | 許可外の email の扱い | 許可外 email で開くと、backend（nginx の access log）まで届かない（前段で止まる）。届いても backend が 403（`email_not_allowed`）で止める |
+| 3 | 許可外の email の扱い | **許可内の email は 200（`/api/me` が email を返す）、許可外の email は 403 か前段で止まる**の両方を確かめる。許可外は backend（nginx の access log）まで届かないか、届いても 403（`email_not_allowed`）で止まる |
 | 4 | 送信元の制限が効くか（中継 host の address と、nginx が見る送信元） | 同じ network の別端末から `:80` を `Host` 付きで直接打つと 403。前段経由は通る（NAT・`X-Forwarded-For` の有無も確認） |
 | 5 | nginx の構成（`default_server`、他の vhost への影響、`nginx -t`） | 既存の URL が設置前後で同じ応答 |
 | 6 | SSE が溜まらず届くか（前段 → 中継 → nginx → backend） | `GET /api/sessions/<name>/output` と `/api/events` を開き、端末の出力と keep-alive（`: ka`、15 秒間隔）が **1 秒以内**に手元に届く（束にならない） |
@@ -328,7 +358,7 @@ server {
 | 12 | web 用 hostname の DNS・ingress・route | ブラウザで開くと Access の login が出て、許可した利用者だけ通る |
 | 13 | 空き port・arch・toolchain | `ss -tlnp` で `<web-port>` が衝突しない。`node -v` が 22 以上 |
 | 14 | 待受 address と常駐（4.3） | `<web-port>` が `127.0.0.1` だけで LISTEN。stop 後に process・port が残らない。host を再起動した後、login なしで戻る |
-| 15 | 設定 file の `remote`（url と token）を与えて起動する | `/api/health` が到達可を返し、center につながる。**ブラウザの DevTools（ネットワーク・storage）、`/api/health`、backend のログ（`journalctl`）のどこにも token が出ない** |
+| 15 | 設定 file の `remote`（url と token）を与えて起動する | `/api/health` が到達可を返し、center につながる。**ブラウザの DevTools（ネットワーク・storage）、`/api/health`、backend のログ（`journalctl`）のどこにも token が出ない。nginx の access / error log にも、JWT（`Cf-Access-Jwt-Assertion`）と共有鍵（`X-Bantou-Proxy-Key`）の値が出ていない**（`log_format` に `$http_*` を入れていない） |
 | 16 | 接続先が空（設定なし）で起動し、後から file に `remote` を書く | backend は起動し、`/api/health` は「接続先なし」を返す。file に書くと、再起動なしで次の呼び出しから届く |
 | 17 | 設定を書く経路が閉じているか | `POST /api/rpc/center_set_settings` が拒否される（接続先は file か env でだけ変えられる） |
 | 18 | 更新の手順（5 章）を 1 回通す | restart 後に再接続して端末が続く。center の session は止まらない |
