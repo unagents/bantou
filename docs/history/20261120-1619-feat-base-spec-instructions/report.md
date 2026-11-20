@@ -50,3 +50,11 @@ base-spec@1（新規。共通の文面）、master-cap-role@4→5、master-cap-a
 ## 残った問題
 - build-sidecar.ts は md の再生成を呼ばない（desktop を変えない制約）。生成物は commit 済みで、test が一致を確かめる。
 - bun install は中継経由で約 5 分かかった。
+
+## 基点の更新（coordinator-read ebfa53f、task-status 4dbb57d）の取り込みと確認結果
+- feat/center-coordinator-read の HEAD ebfa53fb3295f6821d8d392f77580011471e7edc（feat/center-task-status 4dbb57d955baaf05bb3f8a64055cbe212a18c206 を含む）を git merge で取り込んだ（rebase なし）。衝突なし。merge 前の HEAD は ba8672353d84495e167e44a007e1af248d2799fd。取り込みで system-instructions.ts とその test に差分は出ていない。
+- center: typecheck 通過。test 655 件、654 通過、1 落ち（既知の「center を SIGKILL すると rc が孤児で残り…」）。部品の並び（base-spec@1・master-cap-role@5・master-cap-availability@2・memory@1・coordinator@1）の test は通る。生成物と md の一致の test も通る。
+- server: test 367 件、全通過。typecheck の error は default-config.test.ts の 6 件のみ（既知）。
+- [待ち方] で名前を出す道具: remote_list と task_status は、取り込み後の packages/center/src/tools.ts に実在する（task_status は 4dbb57d で入った物）。
+- coordinator@1 の文面と base-spec の [窓口] の読み合わせ（変えていない）: 矛盾は無いが、2 点の差がある。(1) 共通の文面は統括の session の役目を「利用者の指示を各 project の master-cap に渡す事と、状態を答える事だけ」とするが、coordinator@1 は「使える道具は session_brief だけ」で、指示を渡す道具（P5）はまだ無い。道具が入るまで、指示を渡す役目の方は文面だけで道具が無い。(2) coordinator@1 の「自分の project の master-cap でもある」は、共通の文面の「窓口は project ごとに 1 つ。既定は master-cap」「統括は渡す事と答える事だけ」と並ぶと、統括が自分の project では master-cap として方針を決めてよいのかが曖昧に読める。変更が要るか判断が要る。
+- 回さなかった確認: build の成果物の再確認（取り込みで文面と build 手順に差分が無いため）。
