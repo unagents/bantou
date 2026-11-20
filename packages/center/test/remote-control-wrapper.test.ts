@@ -989,7 +989,7 @@ test("起動引数: project 名が -cap で終わる時は --remote-control と 
   assert.equal(JSON.parse(mcpConfigJson(null, "x-cap")).mcpServers["bantou-messenger"].env.AGENT_MESSENGER_NAME, "x-cap");
 });
 
-test("coordinator: setCoordinator('a') の後に a と b を起動すると、launch の ctx.coordinator は a だけ true。指示文と labels の coordinator@1 も a だけ。解除すると a からも消える", async () => {
+test("coordinator: setCoordinator('a') の後に a と b を起動すると、launch の ctx.coordinator は a だけ true。指示文と labels の coordinator@2 も a だけ。解除すると a からも消える", async () => {
   const seen: { session: string; coordinator?: boolean }[] = [];
   // ctx を記録しつつ本物の部品を使う supervisor
   const core = createCore();
@@ -1010,13 +1010,13 @@ test("coordinator: setCoordinator('a') の後に a と b を起動すると、la
   const sa = await sup2.start("a");
   const sb = await sup2.start("b");
   assert.deepEqual(seen, [{ session: "a", coordinator: true }, { session: "b", coordinator: false }]);
-  assert.ok(sa.systemInstructions!.includes("coordinator@1"));
-  assert.ok(!sb.systemInstructions!.includes("coordinator@1"));
+  assert.ok(sa.systemInstructions!.includes("coordinator@2"));
+  assert.ok(!sb.systemInstructions!.includes("coordinator@2"));
   assert.equal(valueOf(launches[0].args, "--append-system-prompt"), buildSystemInstructions({ session: "a", coordinator: true }));
   assert.equal(valueOf(launches[1].args, "--append-system-prompt"), buildSystemInstructions({ session: "b" }));
   await sup2.stop("a");
   sup2.setCoordinator(null);
   const sa2 = await sup2.start("a");
-  assert.ok(!sa2.systemInstructions!.includes("coordinator@1"));
+  assert.ok(!sa2.systemInstructions!.includes("coordinator@2"));
   await sup2.shutdown();
 });

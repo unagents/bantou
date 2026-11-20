@@ -77,7 +77,7 @@ export interface SessionUpdateInput {
 export interface SessionManager {
   /** 保存済みの session を supervisor に載せて --continue で復帰させる（失敗時は素の起動へ fallback）。 */
   restore(): Promise<void>;
-  create(input: { name: string; path?: string; permissionMode?: ProjectConfig["permissionMode"]; settings?: ProjectSettingsPatch }): Promise<SessionInfo>;
+  create(input: { name: string; path?: string; permissionMode?: ProjectConfig["permissionMode"]; settings?: ProjectSettingsPatch; /** false = 作って保存するだけで起動しない。省略 = 起動する。 */ start?: boolean }): Promise<SessionInfo>;
   /** session の settings を返す（未設定・config 由来の project は `{}`。未定義の name は例外）。 */
   getSettings(name: string): { name: string; settings: ProjectSettings };
   /**
@@ -331,6 +331,10 @@ export function createSessionManager(opts: {
           throw new Error(`状態ファイルに保存できない: ${(e as Error).message}`);
         }
         opts.events?.publish({ reason: "created", name });
+        if (input.start === false) {
+          log(`session 作成（起動しない）: ${name} (${path})`);
+          return info(supervisor.status(name));
+        }
         const st = await supervisor.start(name);
         log(`session 作成: ${name} (${path})`);
         return info(await settle(name, st));
