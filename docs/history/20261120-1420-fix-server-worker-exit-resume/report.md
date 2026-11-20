@@ -34,3 +34,11 @@
 ## 残った問題
 - 実際の claude 経由での挙動確認（cap が通知で worker_start し直す等）は別 worker の結果を cap が統合。
 - recover は server 再起動の度に走る。exit-handled が無い古い worker は `exitRecoverMs` 内なら 1 回拾う。
+
+## review 往復 1 回目の対応
+1. [medium] 上限超過の経路: `holdCap` → `failTask`（task_result(failed) を先に送る）→ 送り終えたら `releaseCap` の順にした。worker の failed の activity が出る時は cap が running なので center は完了にせず、task_result(failed) が届いた後の idle の activity で、failed の結果として 1 回だけ完了にする。採った理由: center を変えずに「成功扱いの完了が先に届く」余地を無くせるため。偽 center の test に、完了が 1 回で `failed` として届く事（成功扱いが先に届かない事）を追加。failTask の fake は実際の送信に近づけて 1 tick 遅らせた。変異: 上限超過の holdCap を外す → 上限 0 の test が落ちる（戻して pass）。
+2. [low] 「再開しない」条件を done のみに揃えた（ask / approve の report だけの run は再開する）。前回は cap が report で再開済みと見て含めていたが、仕様どおり done のみ。test 追加（ask だけでは再開、done で再開しない）。変異（ask を含める）で落ちる事を確認して戻した。
+3. [low] recover は state が running のまま残った worker（seedLost 経由で lost 登録される物）を拾わない。これは仕様の範囲の判断（終わった事が state に残っている物だけを対象にする）で、挙動は変えていない。
+4. [low] holdCap と resumeCap の呼び出し順の入れ替えは、同期区間で同等のため test で区別されない。対応不要。
+
+確認: server typecheck 新規 error 0 / server test 362 pass 0 fail / protocol test 43 pass。

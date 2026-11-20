@@ -19,12 +19,13 @@ const T1 = "2026-11-20T00:10:00.000Z";
 /** 今の center（古い版）と同じ判定の偽物: activity で cap も worker も running でなく、未完了の指示があれば完了にして 1 回数える。 */
 function fakeCenter() {
   const state = { cap: "idle", workers: new Map<string, string>() };
-  const c = { completions: 0, pending: 1, events: [] as string[] };
+  const c = { completions: 0, pending: 1, events: [] as string[], got: "none" as "none" | "failed", completedAs: [] as string[] };
   const complete = (why: string): void => {
     const busy = state.cap === "running" || state.cap === "stalled" || [...state.workers.values()].some((s) => s === "running" || s === "stalled");
     if (busy || c.pending === 0) return;
     c.pending = 0;
     c.completions++;
+    c.completedAs.push(c.got === "failed" ? "failed" : "success");
     c.events.push(`complete:${why}`);
   };
   return {
@@ -40,6 +41,7 @@ function fakeCenter() {
       complete("activity");
     },
     taskResult(): void {
+      c.got = "failed";
       c.events.push("task_result");
       complete("task_result");
     },
@@ -97,6 +99,7 @@ async function withFx(opts: { max?: number; recoverMs?: number; task?: () => str
       },
       failTask: async (_capId, message) => {
         fails.push(message);
+        await settle(); // route の送信には時間がかかる（worker の activity が先に届き得る）
         center.taskResult();
       },
       knownTask: () => (opts.task ? opts.task() : "t1"),
@@ -170,9 +173,12 @@ test("報告なし: その run の間に done があれば再開しない。前�
     f.observer.finished("worker", "w1", { ok: true, lost: false, startedAt: T0 });
     assert.equal(f.resumes.length, 1);
     assert.match(f.resumes[0]!.prompt, new RegExp(`最後の report: ${T1} progress（この run の report 1 件）`));
+    f.watcher.reported("w1", "ask", "2026-11-20T00:15:00.000Z");
+    f.observer.finished("worker", "w1", { ok: true, lost: false, startedAt: T0 });
+    assert.equal(f.resumes.length, 2, "ask だけでは再開する（done のみが再開しない条件）");
     f.watcher.reported("w1", "done", "2026-11-20T00:20:00.000Z");
     f.observer.finished("worker", "w1", { ok: true, lost: false, startedAt: T0 });
-    assert.equal(f.resumes.length, 1, "done があれば再開しない");
+    assert.equal(f.resumes.length, 2, "done があれば再開しない");
   });
 });
 
@@ -202,6 +208,7 @@ test("上限 0: 再開しない。worker の failed の activity と task_result
     assert.equal(f.resumes.length, 0);
     assert.equal(f.fails.length, 1);
     assert.equal(f.center.c.completions, 1, f.center.c.events.join(","));
+    assert.deepEqual(f.center.c.completedAs, ["failed"], `完了が成功扱いで先に届いた: ${f.center.c.events.join(",")}`);
   });
 });
 

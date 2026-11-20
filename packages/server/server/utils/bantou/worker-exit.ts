@@ -167,7 +167,12 @@ export function createWorkerExitWatcher(deps: WorkerExitDeps): WorkerExitWatcher
         `worker ${info.worker_id} が ${CAUSE_TEXT[info.cause]}したが、この task での cap の再開が上限（${deps.maxResumes} 回）に達したため再開しない` +
         `${info.error !== undefined ? `（error: ${oneLine(info.error, 200)}）` : ""}`;
       log(`worker 終了の再開を打ち切り: cap_id=${capId} worker_id=${info.worker_id} cause=${info.cause} count=${c.count}/${deps.maxResumes} task=${task}`);
-      void deps.failTask(capId, msg).catch((e: unknown) => log(`上限超過の通知失敗: cap_id=${capId} ${e instanceof Error ? e.message : String(e)}`));
+      // 順序: cap を running にする → task_result(failed) を先に送る → 送り終えたら idle に戻す（worker の activity はその間に出る。center が成功扱いで先に完了にしない）
+      deps.holdCap(capId);
+      void deps
+        .failTask(capId, msg)
+        .catch((e: unknown) => log(`上限超過の通知失敗: cap_id=${capId} ${e instanceof Error ? e.message : String(e)}`))
+        .finally(() => deps.releaseCap(capId));
       return false;
     }
     c.count++;
@@ -181,11 +186,11 @@ export function createWorkerExitWatcher(deps: WorkerExitDeps): WorkerExitWatcher
     return true;
   }
 
-  /** その run の間の report。done / ask / approve があれば、cap は既に report で再開されている。 */
+  /** その run の間の report。 */
   const reportsDuring = (workerId: string, startedAt: string | undefined): Array<{ at: string; kind: ReportKind }> =>
     (seen.get(workerId) ?? []).filter((r) => startedAt === undefined || r.at >= startedAt);
 
-  const answered = (rs: Array<{ kind: ReportKind }>): boolean => rs.some((r) => r.kind === "done" || r.kind === "ask" || r.kind === "approve");
+  const answered = (rs: Array<{ kind: ReportKind }>): boolean => rs.some((r) => r.kind === "done");
 
   function onFinished(kind: AgentKind, id: string, o: Parameters<RunObserver["finished"]>[2]): void {
     if (kind !== "worker" || o.stopped === true || o.error === STOP_MSG) return;
