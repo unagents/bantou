@@ -130,6 +130,8 @@ export interface RemoteControlSupervisor {
   setOutputStyle(name: string, outputStyle: string): void;
   /** 外部記憶を差し替える（次の起動から効く。undefined で無し）。 */
   setMemory(name: string, memory: MemorySetting | undefined): void;
+  /** 統括の session の名前を差し替える（全 session に共通。次の起動の指示文から効く。null で無し）。 */
+  setCoordinator(session: string | null): void;
   stop(project: string): Promise<RcStatus>;
   status(project: string): RcStatus;
   list(): RcStatus[];
@@ -356,9 +358,9 @@ export function createRemoteControlSupervisor(opts: {
    * （利用者の追加指示は空行を挟んでその後ろ）。省略時は付けない。
    */
   systemInstructions?: {
-    build: (ctx: { session: string; memory?: boolean }) => string;
+    build: (ctx: { session: string; memory?: boolean; coordinator?: boolean }) => string;
     /** 付けた部品の `<id>@<version>`。関数なら起動ごとの文脈（memory の有無）で決める。 */
-    labels: string[] | ((ctx: { session: string; memory?: boolean }) => string[]);
+    labels: string[] | ((ctx: { session: string; memory?: boolean; coordinator?: boolean }) => string[]);
   };
   /** 認証状態（auth / loginUrl / loginError）が変わった時の通知。 */
   onAuthChange?: (project: string, status: RcStatus) => void;
@@ -372,6 +374,8 @@ export function createRemoteControlSupervisor(opts: {
   const claude: ResolvedClaude =
     opts.claude ?? (rc.claude ? { path: rc.claude, source: "config" } : { path: "claude", source: "PATH" });
   const entries = new Map<string, Entry>();
+  /** 統括の session の名前（center 共通の設定 coordinator.session）。無ければ null。 */
+  let coordinatorSession: string | null = null;
   /** add() で足した project の名前（remove できるのはこれだけ）。 */
   const dynamic = new Set<string>();
   const newEntry = (p: ProjectConfig, wrapper = false, instructions = "", addDirs: string[] = [], outputStyle = "", memory: MemorySetting | null = null): Entry => ({
@@ -461,7 +465,7 @@ export function createRemoteControlSupervisor(opts: {
       wd.core.register(name);
       const mcpUrl = wd.mcpUrl();
       if (!mcpUrl) log(`session 向け MCP 窓口が無いので bantou の MCP を付けない（messenger のみ）: project=${name}`);
-      const sysCtx = { session: name, memory: e.memory !== null };
+      const sysCtx = { session: name, memory: e.memory !== null, coordinator: coordinatorSession === name };
       const system = opts.systemInstructions?.build(sysCtx) ?? "";
       const appendSystemPrompt = [system, e.instructions].filter((t) => t !== "").join("\n\n");
       // 出力スタイルは project の .claude/output-styles/ に書いて名前で選ぶ。書けなくても起動は止めない（style 無しで起動）
@@ -513,7 +517,7 @@ export function createRemoteControlSupervisor(opts: {
       args: shownArgs,
       instructions: e.wrapper && !!e.instructions,
       ...(e.wrapper && opts.systemInstructions
-        ? { systemInstructions: typeof opts.systemInstructions.labels === "function" ? opts.systemInstructions.labels({ session: name, memory: e.memory !== null }) : [...opts.systemInstructions.labels] }
+        ? { systemInstructions: typeof opts.systemInstructions.labels === "function" ? opts.systemInstructions.labels({ session: name, memory: e.memory !== null, coordinator: coordinatorSession === name }) : [...opts.systemInstructions.labels] }
         : {}),
     };
     delete e.status.lastError;
@@ -858,6 +862,9 @@ export function createRemoteControlSupervisor(opts: {
   const setOutputStyle = (name: string, outputStyle: string): void => {
     get(name).outputStyle = outputStyle;
   };
+  const setCoordinator = (session: string | null): void => {
+    coordinatorSession = session;
+  };
   const setMemory = (name: string, memory: MemorySetting | undefined): void => {
     get(name).memory = memory ? { ...memory } : null;
   };
@@ -882,6 +889,7 @@ export function createRemoteControlSupervisor(opts: {
     setAddDirs,
     setOutputStyle,
     setMemory,
+    setCoordinator,
     stop,
     status: (name) => snapshot(get(name)),
     list: () => [...entries.values()].map(snapshot),

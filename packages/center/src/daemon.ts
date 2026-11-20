@@ -216,7 +216,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     }
     http = await startHttpServer({
       createServer: makeServer,
-      createSessionServer: (owner) => createSessionMcpServer({ remotes, owner }),
+      createSessionServer: (owner) => createSessionMcpServer({ remotes, owner, coordinator: { session: () => sessions.coordinatorOf(), sessions: () => sessions.list() } }),
       sessionAuth: sessionTokens,
       onStatusLine: (name, payload) => {
         const s = sessions.list().find((x) => x.name === name);

@@ -19,6 +19,8 @@ export interface SystemInstructionContext {
   session: string;
   /** 外部記憶（settings.memory）がある session か。省略 = false。 */
   memory?: boolean;
+  /** 統括の session（center 共通の設定 coordinator.session で指定した 1 つ）か。省略 = false。 */
+  coordinator?: boolean;
 }
 
 export interface SystemInstructionPart {
@@ -111,8 +113,28 @@ export const MEMORY_USAGE: SystemInstructionPart = {
     ].join("\n"),
 };
 
+/**
+ * 統括の session だけに付く部品。文面はその時点で出す道具だけを書く（今は session_brief）。
+ * 道具を足すまとまり（発言の記録・指示を渡す道具）が、足した道具の分だけ文面を足す。
+ */
+export const COORDINATOR_USAGE: SystemInstructionPart = {
+  id: "coordinator",
+  version: 1,
+  title: "統括の session（設定で指定した 1 つ）だけ: 各 session の状態を session_brief で読む",
+  when: (ctx) => ctx.coordinator === true,
+  text: () =>
+    [
+      "[統括の session]",
+      "- この session は、他の session の状態を見渡す統括の session に指定されている。自分の project の master-cap でもある。",
+      "- 使える道具は session_brief（mcp__bantou__session_brief）だけ。各 session の状態（起動の状態・作業状態・context の使用量・remote の件数）を 1 行ずつ読む。件数だけで、report や結果の本文は入らない。",
+      "- 他の session の作業の中身には踏み込まない。各 project の進め方はその session の master-cap が決める。他の session の remote-cap や worker に直接は指示しない。",
+      "- remote_list の include_shared は使わない（旧共有の cap は owner に関係なく返るため、他の project の結果が流れ込む）。",
+      "- 他の session の作業 dir と、center の状態 dir の file は Read しない。",
+    ].join("\n"),
+};
+
 /** 付ける部品の一覧（この順）。足す・外す・直すのはここ。`when` を持つ部品は文脈に合う session だけに付く。 */
-export const SYSTEM_INSTRUCTION_PARTS: readonly SystemInstructionPart[] = [MASTER_CAP_ROLE, MASTER_CAP_AVAILABILITY, MEMORY_USAGE];
+export const SYSTEM_INSTRUCTION_PARTS: readonly SystemInstructionPart[] = [MASTER_CAP_ROLE, MASTER_CAP_AVAILABILITY, MEMORY_USAGE, COORDINATOR_USAGE];
 
 /** 文脈に合う部品（`when` が無いか true を返すもの）。順は元のまま。 */
 export const applicableParts = (ctx: SystemInstructionContext, parts: readonly SystemInstructionPart[] = SYSTEM_INSTRUCTION_PARTS): SystemInstructionPart[] =>

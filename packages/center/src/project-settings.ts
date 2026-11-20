@@ -106,6 +106,23 @@ const memorySchema = z
   })
   .strict();
 
+/** 統括にする session の名前の上限（session 名の規則は英数字と _ -）。 */
+export const COORDINATOR_SESSION_MAX = 64;
+const COORDINATOR_SESSION_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+/** 統括の session（center 共通の設定 `coordinator`。null / 無し = 無効）。 */
+export const coordinatorSchema = z
+  .object({
+    session: z.string().min(1).max(COORDINATOR_SESSION_MAX, `session は ${COORDINATOR_SESSION_MAX} 文字以内`).regex(COORDINATOR_SESSION_PATTERN, "session は英数字と _ - のみ"),
+  })
+  .strict();
+
+/** 保存済みの値から統括の session 名を取り出す（壊れていれば null = 無効）。 */
+export function readCoordinator(raw: unknown): string | null {
+  const r = coordinatorSchema.safeParse(raw);
+  return r.success ? r.data.session : null;
+}
+
 /** 更新の入力。項目ごとに省略可。null はその項目を削除する。未知の項目は素通しする。 */
 export const projectSettingsPatchSchema = z
   .object({
@@ -123,7 +140,7 @@ export type ProjectSettingsPatch = z.infer<typeof projectSettingsPatchSchema>;
  * center 共通の設定の更新の入力。session の設定から `servers` を除いたもの（servers は session ごとの設定だけで持つ）。
  * `servers` の指定は null（削除。無害）以外は受け付けない（updateCenterSettings がエラーにする）。
  */
-export const centerSettingsPatchSchema = projectSettingsPatchSchema.omit({ servers: true }).passthrough();
+export const centerSettingsPatchSchema = projectSettingsPatchSchema.omit({ servers: true }).extend({ coordinator: coordinatorSchema.nullable().optional() }).passthrough();
 export type CenterSettingsPatch = z.infer<typeof centerSettingsPatchSchema>;
 
 /** center 共通の設定に `servers` を入れようとした時のエラー文。 */
@@ -133,6 +150,8 @@ export const CENTER_SERVERS_ERROR = "servers は center 共通の設定では持
 export function readCenterSettings(raw: unknown): ProjectSettings {
   const out = readSettings(raw);
   delete out.servers;
+  // 壊れた coordinator は無効にする（別の session を統括にしない）
+  if (out.coordinator !== undefined && readCoordinator(out.coordinator) === null) delete out.coordinator;
   return out;
 }
 

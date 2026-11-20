@@ -16,7 +16,7 @@ function fakeSupervisor(initial: ProjectConfig[]) {
   const calls: string[] = [];
   /** start が投げる名前。 */
   const failStart = new Set<string>();
-  const opts: { add: Record<string, unknown>; start: Record<string, unknown>; setInstr: Record<string, string>; setDirs: Record<string, string[]>; setStyle: Record<string, string>; setMem: Record<string, unknown> } = { add: {}, start: {}, setInstr: {}, setDirs: {}, setStyle: {}, setMem: {} };
+  const opts: { add: Record<string, unknown>; start: Record<string, unknown>; setInstr: Record<string, string>; setDirs: Record<string, string[]>; setStyle: Record<string, string>; setMem: Record<string, unknown>; setCoord: (string | null)[] } = { add: {}, start: {}, setInstr: {}, setDirs: {}, setStyle: {}, setMem: {}, setCoord: [] };
   const mk = (p: ProjectConfig): RcStatus => ({
     project: p.name, path: p.path, state: "stopped", pid: null, sessionUrl: null, environmentUrl: null,
     restarts: 0, lastExit: null, startedAt: null, args: null, instructions: false, claude: { path: "claude", source: "PATH" },
@@ -54,6 +54,9 @@ function fakeSupervisor(initial: ProjectConfig[]) {
     },
     setMemory: (n: string, v: unknown) => {
       opts.setMem[n] = v;
+    },
+    setCoordinator: (v: string | null) => {
+      opts.setCoord.push(v);
     },
     status: (n: string) => ({ ...map.get(n)! }),
     list: () => [...map.values()].map((s) => ({ ...s })),
@@ -718,4 +721,17 @@ test("memory: session の値があれば共通は使わない（項目ごとに�
   assert.ok((await readFile(join(dir, "sessions.json"), "utf8")).includes("B-SECRET"));
   for (const l of logs) assert.ok(!/SECRET/.test(l), l);
   assert.ok(!JSON.stringify(mgr.list()).includes("SECRET")); // session_list
+});
+
+test("coordinator: 起動の時と center 共通の設定の更新で supervisor に渡り、coordinatorOf は呼ぶたびに今の設定を返す", async () => {
+  const { mgr, opts } = setup();
+  assert.equal(mgr.coordinatorOf(), null);
+  await mgr.updateCenterSettings({ coordinator: { session: "main" } });
+  assert.equal(mgr.coordinatorOf(), "main");
+  assert.deepEqual(opts.setCoord, ["main"]);
+  await mgr.updateCenterSettings({ coordinator: null });
+  assert.equal(mgr.coordinatorOf(), null);
+  assert.deepEqual(opts.setCoord, ["main", null]);
+  await mgr.updateCenterSettings({ instructions: "x" });
+  assert.equal(mgr.coordinatorOf(), null);
 });
