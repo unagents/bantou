@@ -422,6 +422,32 @@ describe("鍵の名前と値の取り違え・prototype の名前", () => {
     assert.match((await run(["secret", "list"])).out, /relay\.sess-sess-/);
   });
 
+  const TAIL_VALUE_LIKE = ["a.ghp_abcdefghijklmnop1234", "a.sk-abcdefgh12", "x.correcthorsebatterystaple"];
+
+  test("`<接続名>.<session 名>` の session 名の部分に値を書いても、--secret / --stdin とも値を出さずに断る", async () => {
+    for (const v of TAIL_VALUE_LIKE) {
+      const a = await run(["set", "c1", "--url", "https://relay.example/mcp", "--secret", v]);
+      const b = await run(["secret", "set", v, "--stdin"], "x-other-value");
+      for (const r of [a, b]) {
+        assert.equal(r.code, 2, v);
+        assert.match(r.err, /鍵の名前の形でない/);
+        assert.ok(!r.out.includes(v) && !r.err.includes(v), "断る文に値が出ない");
+      }
+    }
+    await noFile("mcp-connections.json");
+    await noFile("mcp-secrets.json");
+    for (const l of transcript) for (const v of TAIL_VALUE_LIKE) assert.ok(!l.includes(v));
+  });
+
+  test("値らしい session 名でも、既に file にある名前は消せる", async () => {
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    await mkdir(join(dir, "state"), { recursive: true });
+    const n = TAIL_VALUE_LIKE[2];
+    await writeFile(state("mcp-secrets.json"), JSON.stringify({ version: 1, secrets: { [n]: { value: SECRET, rev: 1, updatedAt: "2026-11-21T00:00:00.000Z" } } }));
+    assert.match((await run(["secret", "list"])).out, /correcthorse/);
+    assert.match((await run(["secret", "unset", n])).out, /消した/);
+  });
+
   test("手書きの file の長い名前（70 文字・日付つき）は読める。list / set / secret list が動く", async () => {
     const { mkdir, writeFile } = await import("node:fs/promises");
     await mkdir(join(dir, "state"), { recursive: true });
