@@ -82,11 +82,26 @@ export type SpawnImpl = (
   options: { cwd: string; env: NodeJS.ProcessEnv; stdio: ["pipe", "pipe", "pipe"]; detached: boolean },
 ) => ChildLike;
 
-/** `--append-system-prompt` の値を「<N 文字>」に置き換えた引数列（status / log 用）。 */
-export function redactAppendSystemPrompt(args: string[]): string[] {
-  const i = args.indexOf("--append-system-prompt");
-  if (i < 0 || i + 1 >= args.length) return [...args];
-  return [...args.slice(0, i + 1), `<${args[i + 1].length} 文字>`, ...args.slice(i + 2)];
+/** `--mcp-config` の値（JSON）を接続の名前だけにした表示。読めない時も値は出さない。 */
+function redactMcpConfig(value: string): string {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    const servers = typeof parsed === "object" && parsed !== null ? (parsed as { mcpServers?: unknown }).mcpServers : undefined;
+    if (typeof servers !== "object" || servers === null || Array.isArray(servers)) return "<mcp: ?>";
+    return `<mcp: ${Object.keys(servers).join(", ")}>`;
+  } catch {
+    return "<mcp: ?>";
+  }
+}
+
+/** status / log 用の引数列。`--append-system-prompt` は「<N 文字>」、`--mcp-config` は接続の名前だけに置き換える。 */
+export function redactSessionArgs(args: string[]): string[] {
+  const out = [...args];
+  for (let i = 0; i + 1 < out.length; i++) {
+    if (out[i] === "--append-system-prompt") out[i + 1] = `<${out[i + 1].length} 文字>`;
+    else if (out[i] === "--mcp-config") out[i + 1] = redactMcpConfig(out[i + 1]);
+  }
+  return out;
 }
 
 /** 子へ signal を送る。既定は process group ごと（孫まで止める）。 */
@@ -519,7 +534,7 @@ export function createRemoteControlSupervisor(opts: {
       args = buildRcArgs(e.project, rc, { continue: useContinue });
     }
     // 追加指示の本文は status にも log にも出さない（長さだけ）
-    const shownArgs = redactAppendSystemPrompt(args);
+    const shownArgs = redactSessionArgs(args);
     e.stopRequested = false;
     const gen = ++e.gen;
     e.status = {

@@ -320,6 +320,14 @@ test("memory: the web policy refuses settings with a memory key for the 3 settin
   await mcp.call("center_settings_update", { settings: { instructions: "i" } });
   assert.equal(mock.count("tools/call"), 2);
   assert.equal(webToolArgsRefusal("rc_list", { settings: { memory: 1 } }), undefined);
+  for (const k of ["mcp", "mcpConnections", "mcpSecrets"]) {
+    for (const v of [{ url: "http://x/?q=SECRETVAL" }, null]) {
+      for (const tool of ["session_create", "session_settings_update", "center_settings_update"]) {
+        const r = webToolArgsRefusal(tool, { settings: { [k]: v } });
+        assert.ok(r && !r.includes("SECRETVAL"), `${tool} ${k} ${v}`);
+      }
+    }
+  }
 });
 
 test("5.3 a tool outside allowTool is refused before anything is sent; no policy allows every tool", async () => {

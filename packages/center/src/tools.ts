@@ -3,7 +3,7 @@ import { AGENT_ID_PATTERN } from "@agent-hand/bantou-protocol";
 import { z } from "zod";
 import { ACK_TIMEOUT_MS, OWNER_HEADER, OWNER_PATTERN, OWNER_QUERY, remoteSendSchema, remoteWaitSchema, workerReplySchema, WAIT_DEFAULT_SEC, peerOfRec, type RemoteManager, type RemoteSendInput, type RemoteView } from "./remotes.js";
 import type { RemoteControlSupervisor } from "./remote-control.js";
-import { assertNoMemory, centerSettingsPatchSchema, projectSettingsPatchSchema } from "./project-settings.js";
+import { assertCenterOnly, centerSettingsPatchSchema, projectSettingsPatchSchema } from "./project-settings.js";
 import { LOGIN_CODE, type LoginFlow } from "./login.js";
 import { sessionCreateSchema, sessionUpdateSchema, SESSION_NAME, type SessionManager } from "./sessions.js";
 import type { Follow } from "./follow.js";
@@ -101,7 +101,7 @@ export function registerTools(
     },
     (args) =>
       guard(async () => {
-        assertNoMemory(args.settings);
+        assertCenterOnly(args.settings);
         return json(await sessions.create(args));
       }),
   );
@@ -144,7 +144,7 @@ export function registerTools(
     },
     ({ name, settings }) =>
       guard(async () => {
-        assertNoMemory(settings);
+        assertCenterOnly(settings);
         return json(await sessions.updateSettings(name, settings));
       }),
   );
@@ -167,7 +167,7 @@ export function registerTools(
     },
     ({ settings }) =>
       guard(async () => {
-        assertNoMemory(settings);
+        assertCenterOnly(settings);
         return json(await sessions.updateCenterSettings(settings));
       }),
   );

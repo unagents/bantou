@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { assertNoMemory, memorySchema, composeAddDirs, composeInstructions, composeOutputStyle, mergeSettings, projectSettingsPatchSchema, readSettings } from "../src/project-settings.js";
+import { assertCenterOnly, memorySchema, composeAddDirs, composeInstructions, composeOutputStyle, mergeSettings, projectSettingsPatchSchema, readSettings } from "../src/project-settings.js";
 
 test("mergeSettings: 省略は変えない・値は上書き・null は削除・instructions の空文字は削除・未知項目は保持。元は変えない", () => {
   const cur = { instructions: "a", x: 1, y: { z: 2 } };
@@ -160,9 +160,13 @@ test("readSettings は memory を読み捨てる（外部記憶は memory-settin
   assert.deepEqual(readSettings({ instructions: "i", memory: { url: "http://a/mcp", token: "T" } }), { instructions: "i" });
 });
 
-test("assertNoMemory: memory のキーがあれば（null も）理由つきで断る。無ければ通す", () => {
-  assert.throws(() => assertNoMemory({ memory: { url: "http://a/mcp", token: "SECRET" } }), (e: Error) => /center の側だけ/.test(e.message) && !e.message.includes("SECRET"));
-  assert.throws(() => assertNoMemory({ memory: null }), /MCP からは変えられない/);
-  assert.doesNotThrow(() => assertNoMemory({ instructions: "x" }));
-  assert.doesNotThrow(() => assertNoMemory(undefined));
+test("assertCenterOnly: memory のキーがあれば（null も）理由つきで断る。無ければ通す", () => {
+  assert.throws(() => assertCenterOnly({ memory: { url: "http://a/mcp", token: "SECRET" } }), (e: Error) => /center の側だけ/.test(e.message) && !e.message.includes("SECRET"));
+  assert.throws(() => assertCenterOnly({ memory: null }), /MCP からは変えられない/);
+  for (const k of ["mcp", "mcpConnections", "mcpSecrets"]) {
+    assert.throws(() => assertCenterOnly({ [k]: { url: "http://x/?q=SECRETVAL" } }), (e: Error) => /center の側だけ/.test(e.message) && !e.message.includes("SECRETVAL"), k);
+    assert.throws(() => assertCenterOnly({ [k]: null }), /MCP からは変えられない/, `${k}: null`);
+  }
+  assert.doesNotThrow(() => assertCenterOnly({ instructions: "x" }));
+  assert.doesNotThrow(() => assertCenterOnly(undefined));
 });

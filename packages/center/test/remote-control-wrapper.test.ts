@@ -7,7 +7,7 @@ import { PassThrough, Writable } from "node:stream";
 import { afterEach, beforeEach, test } from "node:test";
 import { parseConfig, type Config, type ProjectConfig } from "../src/config.js";
 import { createCore, type CoreEvent } from "../src/core.js";
-import { createRemoteControlSupervisor, type ChildLike, type SpawnImpl } from "../src/remote-control.js";
+import { createRemoteControlSupervisor, redactSessionArgs, type ChildLike, type SpawnImpl } from "../src/remote-control.js";
 import { createSessionTokens } from "../src/session-auth.js";
 import { applicableParts, buildSystemInstructions, partLabel } from "../src/system-instructions.js";
 import { bantouAllowRules, buildWrapperArgs, findSessionUrl, mcpConfigJson, parseWrapperLine, resolveWrapperPath, windowConnected } from "../src/wrapper.js";
@@ -823,6 +823,26 @@ test("fuzzyIndexOf / detectAuthEvent: TUI の差分描画で空白と一部の�
 
 const mcpOf = (args: string[]) => JSON.parse(valueOf(args, "--mcp-config")!) as { mcpServers: Record<string, { type?: string; url?: string; headers?: Record<string, string> }> };
 
+test("M0: status（list / start / status）と log の --mcp-config は接続の名前だけ。URL（query 込み）・agent の ID・${…} の参照は出ない。実際の引数は変えない", async () => {
+  const logs: string[] = [];
+  const { sup } = make({ memory: { url: "http://mem.local:3000/mcp?k=QUERYSECRET", token: "tok-X", agentId: "AGENTID-777" }, logs });
+  const st = await sup.start("pm1");
+  const shown = JSON.stringify([st, sup.status("pm1"), sup.list(), logs]);
+  for (const bad of ["QUERYSECRET", "AGENTID-777", "mem.local", "BANTOU_MEMORY_TOKEN", "BANTOU_SESSION_TOKEN", "${", "X-Agent-Id"]) assert.ok(!shown.includes(bad), bad);
+  const names = Object.keys(mcpOf(launches[0].args).mcpServers);
+  assert.ok(names.includes("memory"));
+  assert.equal(valueOf(sup.status("pm1").args!, "--mcp-config"), `<mcp: ${names.join(", ")}>`);
+  assert.ok(logs.some((x) => x.includes(`<mcp: ${names.join(", ")}>`)));
+  assert.ok(valueOf(launches[0].args, "--mcp-config")!.includes("QUERYSECRET")); // 子へ渡す実引数は変えない
+});
+
+test("M0: redactSessionArgs: JSON として読めない・形が違う --mcp-config も値を出さず <mcp: ?>。--append-system-prompt は <N 文字>", () => {
+  assert.deepEqual(redactSessionArgs(["--mcp-config", "{not json SECRETVAL"]), ["--mcp-config", "<mcp: ?>"]);
+  assert.deepEqual(redactSessionArgs(["--mcp-config", '["SECRETVAL"]']), ["--mcp-config", "<mcp: ?>"]);
+  assert.deepEqual(redactSessionArgs(["--mcp-config", '{"mcpServers":{"a":{"url":"SECRETVAL"},"b":{}}}', "--append-system-prompt", "abc"]), ["--mcp-config", "<mcp: a, b>", "--append-system-prompt", "<3 文字>"]);
+  assert.deepEqual(redactSessionArgs(["--x", "--mcp-config"]), ["--x", "--mcp-config"]);
+});
+
 test("memory: --mcp-config に memory（type http、Authorization は ${BANTOU_MEMORY_TOKEN}、X-Agent-Id は agentId か session 名）を足し、token は子の env だけで渡す。argv・mcp-config・status・log に token の実値は出ない。再起動・--continue でも同じ", async () => {
   const SECRET = "tok-SECRET-0123456789";
   const logs: string[] = [];
@@ -836,7 +856,7 @@ test("memory: --mcp-config に memory（type http、Authorization は ${BANTOU_M
   // token を探す: argv（mcp-config 含む）・status・list・log・wrapper への入力行
   const hay = JSON.stringify([l.args, st, sup.status("pm1"), sup.list(), logs, l.child.lines]);
   assert.ok(!hay.includes(SECRET));
-  assert.ok(hay.includes("BANTOU_MEMORY_TOKEN")); // placeholder は残る
+  assert.ok(JSON.stringify(l.args).includes("BANTOU_MEMORY_TOKEN")); // 実際の引数には placeholder が残る（status / log には出さない）
   await sup.stop("pm1");
   await sup.start("pm1", { resume: true });
   assert.equal(launches[1].env.BANTOU_MEMORY_TOKEN, SECRET);

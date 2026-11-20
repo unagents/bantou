@@ -124,13 +124,18 @@ export const projectSettingsPatchSchema = z
 
 export type ProjectSettingsPatch = z.infer<typeof projectSettingsPatchSchema>;
 
-/** 外部記憶（memory）の項目を MCP（画面・web・master-cap の設定更新）から受けた時のエラー文。 */
-export const MEMORY_MCP_ERROR =
-  "外部記憶（memory）の設定は MCP からは変えられない（url・token・agentId は center の側だけで扱う）。center を動かしている host で `bantou-center memory`（README の「外部記憶の設定」）を使う";
+/** center の側だけで扱う設定の項目名（画面・web・master-cap の設定更新からは受けない）。 */
+export const CENTER_ONLY_KEYS: readonly string[] = ["memory", "mcp", "mcpConnections", "mcpSecrets"];
 
-/** patch に memory の項目（null を含む）があれば投げる。黙って捨てない。 */
-export function assertNoMemory(patch: object | undefined): void {
-  if (patch !== undefined && Object.prototype.hasOwnProperty.call(patch, "memory")) throw new Error(MEMORY_MCP_ERROR);
+/** center の側だけの項目を MCP（画面・web・master-cap の設定更新）から受けた時のエラー文。項目の値は含めない。 */
+export const CENTER_ONLY_MCP_ERROR =
+  "外部記憶（memory）や MCP の接続の設定は MCP からは変えられない（url・token・agentId などは center の側だけで扱う）。center を動かしている host の command（README の「外部記憶の設定」の `bantou-center memory` など）を使う";
+export const MEMORY_MCP_ERROR = CENTER_ONLY_MCP_ERROR;
+
+/** patch に center の側だけの項目（null を含む）があれば投げる。黙って捨てない。 */
+export function assertCenterOnly(patch: object | undefined): void {
+  if (patch === undefined || patch === null) return;
+  if (CENTER_ONLY_KEYS.some((k) => Object.prototype.hasOwnProperty.call(patch, k))) throw new Error(CENTER_ONLY_MCP_ERROR);
 }
 
 /**

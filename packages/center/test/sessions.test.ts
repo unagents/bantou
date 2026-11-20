@@ -702,6 +702,13 @@ test("memory: MCP の設定更新（create / updateSettings / updateCenterSettin
   await assert.rejects(mgr.updateSettings("a", { memory: { url: "http://x/mcp", token: "NEW-SECRET" } } as never), /center の側だけ/);
   await assert.rejects(mgr.updateSettings("a", { instructions: "i", memory: null } as never), /MCP からは変えられない/);
   await assert.rejects(mgr.updateCenterSettings({ memory: { url: "http://x/mcp" } } as never), /MCP からは変えられない/);
+  for (const k of ["mcp", "mcpConnections", "mcpSecrets"]) {
+    for (const v of [{ url: "http://x/?q=S" }, null]) {
+      await assert.rejects(mgr.create({ name: "c", settings: { [k]: v } as never }), /MCP からは変えられない/, `create ${k}`);
+      await assert.rejects(mgr.updateSettings("a", { [k]: v } as never), /MCP からは変えられない/, `update ${k}`);
+      await assert.rejects(mgr.updateCenterSettings({ [k]: v } as never), /MCP からは変えられない/, `center ${k}`);
+    }
+  }
   await assert.rejects(mgr.updateCenterSettings({ instructions: "i", memory: null } as never), /MCP からは変えられない/);
   assert.deepEqual(mgr.getSettings("a"), { name: "a", settings: {} }, "断った更新の他の項目も入らない");
   assert.deepEqual(mgr.getCenterSettings(), { settings: {} });
