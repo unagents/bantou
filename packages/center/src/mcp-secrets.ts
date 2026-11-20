@@ -3,10 +3,29 @@
  * 入れるのは `bantou-center mcp secret` だけ（標準入力か file。引数には書けない）。値は表示・log・error に出さない。
  */
 import { join } from "node:path";
-import { createJsonFile, type JsonFile } from "./mcp-json-file.js";
+import { createJsonFile, own, setOwn, type JsonFile } from "./mcp-json-file.js";
 
 export const MCP_SECRETS_FILE = "mcp-secrets.json";
-export const SECRET_NAME = /^[A-Za-z0-9._-]{1,100}$/;
+export const SECRET_NAME_MAX = 64;
+export const SECRET_NAME = new RegExp(`^[A-Za-z0-9._-]{1,${SECRET_NAME_MAX}}$`);
+/** 値によくある接頭辞（鍵の値を名前の欄に書き間違えた時に断る）。 */
+const VALUE_PREFIX = /^(sk|pk|rk|ak|xox[a-z]?|gh[pousr]|github_pat|glpat|AKIA|ASIA|eyJ|Bearer|Basic|key|token|secret|pass)[-_.]?[A-Za-z0-9]{8,}/i;
+export const SECRET_NAME_ERROR = "鍵の名前の形でない（短い識別子にする。鍵の値は標準入力か file で渡す）";
+
+/**
+ * 鍵の「名前」の検査（値を名前の欄に取り違えて書くのを断る。値は出さない）。
+ * 英数字と . _ - の 64 文字以内、値らしい接頭辞（sk- / ghp_ / eyJ など）で始まる物、長い英数字の連続（24 文字以上、
+ * または 16 文字以上で英字と数字が混ざる物）は名前として認めない。名前として通る形の値は事前に区別できないので、これは保証でなく緩和。
+ */
+export function checkSecretName(name: string): string | undefined {
+  if (!SECRET_NAME.test(name)) return SECRET_NAME_ERROR;
+  if (VALUE_PREFIX.test(name)) return SECRET_NAME_ERROR;
+  for (const run of name.match(/[A-Za-z0-9]+/g) ?? []) {
+    if (run.length >= 24) return SECRET_NAME_ERROR;
+    if (run.length >= 16 && /[A-Za-z]/.test(run) && /[0-9]/.test(run)) return SECRET_NAME_ERROR;
+  }
+  return undefined;
+}
 export const SECRET_VALUE_MAX = 4096;
 const SECRET_VALUE = /^[\x21-\x7E]+$/;
 
@@ -37,7 +56,7 @@ export function parseSecrets(raw: unknown): { data: SecretsData; problem?: strin
   for (const [name, v] of Object.entries(s)) {
     const e = v as Partial<SecretEntry> | null;
     if (
-      SECRET_NAME.test(name) &&
+      checkSecretName(name) === undefined &&
       e !== null &&
       typeof e === "object" &&
       typeof e.value === "string" &&
@@ -45,7 +64,7 @@ export function parseSecrets(raw: unknown): { data: SecretsData; problem?: strin
       Number.isInteger(e.rev) &&
       typeof e.updatedAt === "string"
     )
-      data.secrets[name] = { value: e.value, rev: e.rev as number, updatedAt: e.updatedAt };
+      setOwn(data.secrets, name, { value: e.value, rev: e.rev as number, updatedAt: e.updatedAt });
     else dropped++;
   }
   return dropped ? { data, problem: `${dropped} 件が不正（捨てた）` } : { data };
@@ -65,19 +84,19 @@ export function createSecretsStore(stateDir: string, log: (m: string) => void = 
   const file = createJsonFile<SecretsData>(join(stateDir, MCP_SECRETS_FILE), parseSecrets, () => ({ version: 1, secrets: {} }), log);
   return {
     file,
-    get: (name) => file.load().data.secrets[name],
+    get: (name) => own(file.load().data.secrets, name),
     set(name, value, now = new Date()) {
       const { data, problem } = file.load();
       if (problem) throw new Error("鍵の file が壊れている（手で直すか消してから入れ直す）");
-      const rev = (data.secrets[name]?.rev ?? 0) + 1;
-      data.secrets[name] = { value, rev, updatedAt: now.toISOString() };
+      const rev = (own(data.secrets, name)?.rev ?? 0) + 1;
+      setOwn(data.secrets, name, { value, rev, updatedAt: now.toISOString() });
       file.write(data);
       return rev;
     },
     unset(name) {
       const { data, problem } = file.load();
       if (problem) throw new Error("鍵の file が壊れている（手で直すか消してから入れ直す）");
-      if (!(name in data.secrets)) return false;
+      if (!Object.hasOwn(data.secrets, name)) return false;
       delete data.secrets[name];
       file.write(data);
       return true;

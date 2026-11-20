@@ -9,8 +9,8 @@ import { createHash } from "node:crypto";
 import { isIP } from "node:net";
 import { join } from "node:path";
 import { z } from "zod";
-import { createJsonFile, type JsonFile } from "./mcp-json-file.js";
-import { SECRET_NAME } from "./mcp-secrets.js";
+import { createJsonFile, own, setOwn, type JsonFile } from "./mcp-json-file.js";
+import { checkSecretName, SECRET_NAME_ERROR } from "./mcp-secrets.js";
 import { memoryUrlSchema } from "./project-settings.js";
 import { SESSION_NAME } from "./sessions.js";
 
@@ -42,7 +42,7 @@ const authSchema = z
       .refine((v) => v.split("{secret}").length === 2, { message: "format は {secret} をちょうど 1 つ含む" })
       .refine((v) => !v.includes("${") && !/[\x00-\x1f\x7f]/.test(v), { message: "format に ${ ・制御文字・改行は使えない" })
       .optional(),
-    secret: z.string().regex(SECRET_NAME, "鍵の名前は英数字と . _ - の 100 文字以内").optional(),
+    secret: z.string().refine((v) => checkSecretName(v) === undefined, { message: SECRET_NAME_ERROR }).optional(),
   })
   .strict();
 
@@ -195,9 +195,9 @@ export function effectiveRaw(data: ConnectionsData, session?: string): Record<st
     for (const [n, c] of Object.entries(data.common)) out[n] = { ...c };
     return out;
   }
-  const ov = data.sessions[session] ?? {};
+  const ov = own(data.sessions, session) ?? {};
   for (const n of new Set([...Object.keys(data.common), ...Object.keys(ov)])) {
-    const c = composeConnection(data.common[n], ov[n]);
+    const c = composeConnection(own(data.common, n), own(ov, n));
     if (c) out[n] = c;
   }
   return out;
@@ -261,7 +261,7 @@ export function parseConnections(raw: unknown): { data: ConnectionsData; problem
           else dropped++;
         }
       }
-      data.sessions[s] = m;
+      setOwn(data.sessions, s, m);
     }
   } else if (o.sessions !== undefined) dropped++;
   return dropped ? { data, problem: `${dropped} 件の項目が不正（捨てた）` } : { data };

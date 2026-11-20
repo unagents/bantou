@@ -51,6 +51,16 @@ export function createJsonFile<T>(path: string, parse: (raw: unknown) => { data:
   };
 }
 
+/** 自分の property だけを見る（`constructor` / `toString` / `__proto__` などの名前で prototype を拾わない）。 */
+export function own<T>(o: Record<string, T> | undefined, k: string): T | undefined {
+  return o !== undefined && Object.hasOwn(o, k) ? o[k] : undefined;
+}
+
+/** 自分の property として書く（`__proto__` でも prototype を書き換えない）。 */
+export function setOwn<T>(o: Record<string, T>, k: string, v: T): void {
+  Object.defineProperty(o, k, { value: v, enumerable: true, writable: true, configurable: true });
+}
+
 /** 既にある状態 dir の権限が group / other に開いていれば true（警告用。直さない）。 */
 export function dirIsWide(dir: string): boolean {
   try {

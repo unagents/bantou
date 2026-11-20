@@ -16,9 +16,9 @@ import {
   type ConnOverride,
   type McpConnection,
 } from "./mcp-connections.js";
-import { dirIsWide } from "./mcp-json-file.js";
+import { dirIsWide, own, setOwn } from "./mcp-json-file.js";
 import { probeConnection, type ProbeResult } from "./mcp-probe.js";
-import { checkSecretValue, createSecretsStore, SECRET_NAME } from "./mcp-secrets.js";
+import { checkSecretName, checkSecretValue, createSecretsStore } from "./mcp-secrets.js";
 import { createStatusStore, statusKey } from "./mcp-status.js";
 import { displayUrl } from "./memory-settings.js";
 import { SESSION_NAME } from "./sessions.js";
@@ -40,6 +40,7 @@ export const MCP_USAGE = `usage:
   bantou-center mcp test  <名前> [--config <path>] [--session <name>] [--json]
 --session を省くと全 session 共通。--session を付けた set は項目ごとの上書き（--off はその session では付けない）。
 鍵は引数に書けない（--stdin は標準入力、--file は file の中身。末尾の改行は除く）。list / get は鍵の値を出さない。
+--secret は接続が使う鍵の「名前」の参照で、値ではない（短い識別子。値らしい形は断る）。鍵を入れるのは secret set <名前> --stdin|--file だけ。<名前> の位置に値を書かない。
 center が動いている間に変えてよい。この版の center は、この設定をまだ session にも外部記憶の書き込みにも使わない（今の外部記憶は bantou-center memory の設定）。
 test の終了 code: 0 = 道具の一覧が取れた、1 = 取れない、2 = 使い方の誤り。`;
 
@@ -176,7 +177,9 @@ export async function runMcpCli(argv: string[], defaultConfig: string, deps: Mcp
         return 0;
       }
       const sname = p.positional[1];
-      if (sname === undefined || !SECRET_NAME.test(sname)) return fail("鍵の名前は英数字と . _ - の 100 文字以内");
+      if (sname === undefined) return fail("鍵の名前が要る");
+      const nameErr = checkSecretName(sname);
+      if (nameErr) return fail(nameErr);
       if (sub === "unset") {
         warnDir();
         deps.out(secrets.unset(sname) ? `鍵 ${sname}: 消した` : `鍵 ${sname}: 元から無い`);
@@ -251,7 +254,7 @@ export async function runMcpCli(argv: string[], defaultConfig: string, deps: Mcp
         return true;
       };
       if (session !== undefined) {
-        const ov = data.sessions[session]?.[name];
+        const ov = own(own(data.sessions, session), name);
         deps.out(`session ${session}: ${ov === undefined ? "上書きなし" : ov === null ? "この session では付けない" : `上書きの項目 ${Object.keys(ov).join(",") || "なし"}`}`);
         if (!showEff(session)) deps.out(`有効な接続: なし`);
       } else if (!showEff(undefined)) deps.out(`${name}: 共通の接続なし`);
@@ -269,18 +272,19 @@ export async function runMcpCli(argv: string[], defaultConfig: string, deps: Mcp
       const data = ld.data;
       let existed: boolean;
       if (session === undefined) {
-        existed = name in data.common;
-        const stale = Object.entries(data.sessions).filter(([, per]) => per[name] && Object.keys(per[name] as object).length).map(([s]) => s);
+        existed = Object.hasOwn(data.common, name);
+        const stale = Object.entries(data.sessions).filter(([, per]) => { const o = own(per, name); return o && Object.keys(o).length; }).map(([s]) => s);
         if (existed && stale.length) {
           deps.err(`session の上書きが残っている（先に --session で unset する）: ${stale.join(", ")}`);
           return 1;
         }
         delete data.common[name];
       } else {
-        existed = data.sessions[session] !== undefined && name in data.sessions[session];
-        if (data.sessions[session]) {
-          delete data.sessions[session][name];
-          if (!Object.keys(data.sessions[session]).length) delete data.sessions[session];
+        const per = own(data.sessions, session);
+        existed = per !== undefined && Object.hasOwn(per, name);
+        if (per) {
+          delete per[name];
+          if (!Object.keys(per).length) delete data.sessions[session];
         }
       }
       conns.file.write(data);
@@ -300,12 +304,12 @@ export async function runMcpCli(argv: string[], defaultConfig: string, deps: Mcp
       if (has(p, "--off")) {
         if (session === undefined) return fail("--off は --session と一緒に使う");
         if ([...p.flags.keys()].some((k) => k !== "--off" && k !== "--session" && k !== "--config")) return fail("--off は他の項目と同時に使えない");
-        data.sessions[session] = { ...(data.sessions[session] ?? {}), [name]: null };
+        setOwn(data.sessions, session, { ...(own(data.sessions, session) ?? {}), [name]: null });
         conns.file.write(data);
         deps.out(`session ${session}: 接続 ${name} を付けない設定にした（次に起動する session から効く見込み。この版の center はまだ使わない）`);
         return 0;
       }
-      const base: Record<string, unknown> | undefined = session === undefined ? (data.common[name] as Record<string, unknown> | undefined) : effectiveRaw(data, session)[name];
+      const base: Record<string, unknown> | undefined = session === undefined ? (own(data.common, name) as Record<string, unknown> | undefined) : effectiveRaw(data, session)[name];
       type Obj = Record<string, unknown>;
       const patch: Obj = {};
       const url = one(p, "--url");
@@ -316,6 +320,10 @@ export async function runMcpCli(argv: string[], defaultConfig: string, deps: Mcp
         const h = one(p, "--auth-header");
         const f = one(p, "--auth-format");
         const s = one(p, "--secret");
+        if (s !== undefined) {
+          const e = checkSecretName(s);
+          if (e) return fail(e);
+        }
         if (h !== undefined) a.header = h;
         if (f !== undefined) a.format = f;
         if (s !== undefined) a.secret = s;
@@ -367,8 +375,9 @@ export async function runMcpCli(argv: string[], defaultConfig: string, deps: Mcp
         }
         next.common[name] = merged as McpConnection;
       } else {
-        const cur = next.sessions[session]?.[name];
-        next.sessions[session] = { ...(next.sessions[session] ?? {}), [name]: { ...(cur ?? {}), ...patch } as ConnOverride };
+        const per = own(next.sessions, session);
+        const cur = own(per, name);
+        setOwn(next.sessions, session, { ...(per ?? {}), [name]: { ...(cur ?? {}), ...patch } as ConnOverride });
       }
       // 触った接続の合成後の検査（形・追加の検査・平文の http）
       const touched = effectiveRaw(next, session)[name];
