@@ -71,3 +71,49 @@ README の節に同じ内容がある。要点:
 
 - `--value` などの拒否は、`REFUSED` に当たらなくても「不明な引数」で断られるので、値は出ない（二重の防御）。
 - `bun install` の後、per-package の `node_modules` に `.bin` ができる形だった（root の `node_modules/.bin` は無い）。`tsc` は `packages/*/node_modules/.bin/tsc` を直接呼んで確認した。
+
+---
+
+# review の反映（往復 1 回目）
+
+基点: `d7b7fa1b65e0a8bc3101dc18e6c40c93d2778d5d`（M1 の初回の先頭）。この上に commit した。
+
+## 直した 2 件
+
+### 1. 鍵の「名前」に値を書いてしまう取り違え（medium）
+
+- 状況: `--secret sk-live-…` や `secret set <値> --stdin` の `<値>` が、名前の正規表現に通って `mcp-connections.json` に保存され、set / get の表示にも出た。
+- 方針: 名前の形を絞り、名前らしくない物は**値を出さずに**断る（「鍵の名前の形でない（短い識別子にする。鍵の値は標準入力か file で渡す）」）。`checkSecretName`（`src/mcp-secrets.ts`）に集約し、次の 4 か所で使う: `set --secret`、`secret set <名前>`、`secret unset <名前>`、接続の file の `auth.secret` の検査（zod）と鍵の file の読み込み（値らしい名前の entry は捨てて「不正」と出す）。
+- 規則: 英数字と `. _ -` の **64 文字以内**（設計の名前の規則は 100 文字だった。`<接続名>.<session>` を許すため 32 より長くし、値としては長い方を落とす）。次のどれかなら名前として認めない: 値によくある接頭辞（`sk-` `pk-` `ghp_` `github_pat` `glpat` `xox*` `AKIA` `ASIA` `eyJ`（JWT）`Bearer` `Basic` `key-` `token-` `secret-` `pass-` の後に英数字 8 文字以上）、英数字の連続が 24 文字以上、または 16 文字以上で英字と数字が混ざる連続（高エントロピーの近似）。
+- 理由: 名前として通る形の値は事前に区別できない。なので「保証」でなく緩和として、現実の鍵（長い・接頭辞つき・英数字の混在）が通りにくい形にした。短い文字列の鍵（例: 10 文字の英数字）は名前として通りうる。この限界は残る。
+- usage に「`--secret` は名前の参照で値ではない。鍵を入れるのは `secret set <名前> --stdin|--file` だけ。`<名前>` の位置に値を書かない」と書いた。
+- 設計書との差: 設計の 2.2 は鍵の名前を `[A-Za-z0-9._-]{1,100}` としていた。実装は 64 文字以内 + 上の拒否に変えた。
+
+### 2. `constructor` / `toString` などの名前で prototype を拾う（low）
+
+- 状況: 鍵名・接続名・session 名が prototype の property と同名だと、「設定済み rev undefined」や誤った「消した」が出た。
+- 直し: 自分の property だけを見る `own()` と、`__proto__` でも prototype を書き換えない `setOwn()`（`src/mcp-json-file.ts`）を足し、鍵・接続・session の読み書きの全箇所で使った。`effectiveRaw` の結果は null prototype の object。`Object.hasOwn` を `unset` の存在確認に使った。
+
+## test（`test/mcp-connections.test.ts` に 4 件足した。全体は 28 件）
+
+- `--secret` に値らしい 7 種類（`sk-live-…`・`ghp_…`・JWT・`AKIA…`・混在の 20 文字・26 文字の英字・65 文字）を書くと exit 2、断る文と全出力に値が出ない、`mcp-connections.json` ができない。
+- `secret set / unset` の位置引数に同じ値を書くと exit 2、値も標準入力の値も出ない、`mcp-secrets.json` ができない。
+- 普通の名前（`relay`・`memory.alice`・`k-1_x`・`relay-prod.s_1`）は通る。鍵の file に手で入れた値らしい名前の entry は一覧に出ず「不正」と出る。
+- 鍵名 `constructor` / `toString` / `hasOwnProperty` / `valueOf` / `__proto__`、接続名 `constructor` / `valueof`、session 名 `constructor` / `toString` / `__proto__` で、「未設定」「元から無い」「共通の接続なし」が正しく出る・入れて消せる・`Object.prototype` が汚れない。
+
+## 確認
+
+- `packages/protocol` を build。`packages/center` の `tsc --noEmit`: 0 件。
+- center 全体: 707 件、706 pass、1 fail。落ちたのは既知の不安定「center を SIGKILL すると rc が孤児で残り…」だけ。
+- 変異（入れて落ちる事を確かめて戻した）:
+  - 値らしい名前の検査（接頭辞・長い連続・混在）を外す → 3 件が落ちる（`--secret`、位置引数、普通の名前と値らしい名前の読み込み）。
+  - `own()` を素の参照 `o[k]` に戻す → prototype の名前の test が落ちる。
+  - 戻した後の `git status` は変異の痕跡なし。
+
+## 直さない low（内容だけ残す）
+
+- `--allow '*'`（全許可）の書き方は未実装。`allow` は先頭一致の `prefix*` と完全一致だけ。
+- 平文 http の確認は `set` の時だけ（保存形に「許可済み」を残さない）。保存後に file を手で書き換えれば通る。`test` は確認しない。
+- `mcp-status.json` の書き込みに lock が無い。2 つの command が同時に `test` すると後勝ち（他の接続の結果が消えうる）。壊れた file は空として読み、次の `test` で上書きされる。
+- `--stdin` を端末で使うと入力が端末に表示される（echo off にしていない）。パイプか `--file` を使う前提。
+- status の key `<scope>/<名前>` は、session 名に `/` が入らない規則（`[A-Za-z0-9_-]`）なので衝突しないが、scope に `common` という名前の session があると共通と区別できない。
