@@ -1,5 +1,5 @@
 {
   "extends": "./.nuxt/tsconfig.server.json",
-  "compilerOptions": { "noUncheckedIndexedAccess": false },
+  "compilerOptions": { "noUncheckedIndexedAccess": false, "lib": ["ESNext", "DOM"] },
   "include": ["./.nuxt/types/nitro-nuxt.d.ts", "../center-client/src/ui-types-shim.d.ts", "./server/**/*", "./test/**/*"]
 }
