@@ -80,7 +80,9 @@ export function createCenterSettings(opts: CenterSettingsOptions): CenterSetting
     return { ...s, remote: t !== undefined ? { url: baseUrl, token: t } : { url: baseUrl } };
   }
 
-  const view = (s: CenterSettings) => (redact ? redactSettings(s) : s);
+  // Web (redact): the screen is told which items env fixes ("fixed by env"); desktop's answer is unchanged.
+  const view = (s: CenterSettings) =>
+    redact ? { ...redactSettings(s), envLocks: { remoteUrl: envUrl() !== undefined, remoteToken: envToken() !== undefined } } : s;
 
   return {
     envLocks: () => ({ remoteUrl: envUrl() !== undefined, remoteToken: envToken() !== undefined }),

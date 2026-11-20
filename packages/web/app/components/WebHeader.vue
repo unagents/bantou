@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // Header of the phone screens: no drag region, no window-control padding (the desktop AppHeader has both).
-defineProps<{ title: string; unreachable?: boolean; /** Where the back arrow leads (none: no arrow). */ back?: string }>();
+defineProps<{ title: string; unreachable?: boolean; /** Where the back arrow leads (none: no arrow). */ back?: string; /** Shows the settings button (the page that has a SettingsDialog passes it and listens to `settings`). */ settings?: boolean }>();
+defineEmits<{ settings: [] }>();
 </script>
 
 <template>
@@ -10,5 +11,16 @@ defineProps<{ title: string; unreachable?: boolean; /** Where the back arrow lea
     </NuxtLink>
     <h1 class="font-display truncate text-base font-semibold">{{ title }}</h1>
     <UBadge v-if="unreachable" class="ml-auto" color="warning" variant="subtle" label="つながらない" data-testid="web-unreachable" />
+    <UButton
+      v-if="settings"
+      :class="unreachable ? '' : 'ml-auto'"
+      size="md"
+      variant="ghost"
+      color="neutral"
+      icon="i-lucide-settings"
+      aria-label="設定"
+      data-testid="web-settings-open"
+      @click="$emit('settings')"
+    />
   </header>
 </template>

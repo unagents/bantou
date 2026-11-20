@@ -1,6 +1,8 @@
 <script setup lang="ts">
+import { getPlatform } from "~/tauri";
 import {
   centerCommonSettingsGet,
+  centerConnection,
   centerCommonSettingsUpdate,
   centerConnectSnippets,
   centerIpStatus,
@@ -13,10 +15,26 @@ import {
 } from "../api";
 import { isRemoteOnly } from "../composables/centerRole";
 import { draftError, draftOf, emptyDraft, toCenterUpdate, type SettingsDraft } from "../composables/sessionInstructions";
-import type { CenterConnectSnippets, CenterIpStatus, CenterParsedConnect, CenterSettings, CenterStatus } from "../types";
+import type { CenterConnectSnippets, CenterConnection, CenterIpStatus, CenterParsedConnect, CenterSettings, CenterStatus } from "../types";
 
 const open = defineModel<boolean>("open", { required: true });
 const toast = useToast();
+
+// Web mode: the shell cannot run a center of its own (platform.centerSidecar === false). Only the target center is shown
+// (url, whether a token is set, connection); the start switch, port, IP, status and snippets are not shown and their
+// commands are not called. A shell that says nothing (the desktop) is not in this mode.
+const webMode = getPlatform().centerSidecar === false;
+const connection = ref<CenterConnection | null>(null);
+async function refreshConnection() {
+  refreshing.value = true;
+  try {
+    connection.value = await centerConnection();
+  } catch (e) {
+    error.value = String(e);
+  } finally {
+    refreshing.value = false;
+  }
+}
 
 const settings = ref<CenterSettings | null>(null);
 // Saved state: off with a remote set (see `sidecarVisible`). Set once per open by load().
@@ -48,10 +66,16 @@ async function load() {
     settings.value = await centerGetSettings();
     baseline.value = snapshot(settings.value);
     remoteOnly.value = isRemoteOnly(settings.value);
+    if (webMode) {
+      await refreshConnection();
+      return;
+    }
     await showSavedRemote(settings.value);
   } catch (e) {
     error.value = String(e);
   }
+  // Web mode never calls the sidecar commands, a failed read included.
+  if (webMode) return;
   ipChoice.value = null;
   await Promise.all([refreshStatus(), loadLocalIps(), loadIpStatus(), loadCommon()]);
 }
@@ -338,9 +362,64 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
 </script>
 
 <template>
-  <UModal v-model:open="open" title="設定" :description="!sidecarVisible ? '接続先 center の設定' : 'center（sidecar）の起動、token、接続設定'" :ui="{ content: 'max-w-3xl' }">
+  <UModal v-model:open="open" title="設定" :description="webMode ? '接続先 center（表示のみ）' : !sidecarVisible ? '接続先 center の設定' : 'center（sidecar）の起動、token、接続設定'" :ui="{ content: 'max-w-3xl' }">
     <template #body>
-      <div v-if="settings" class="flex flex-col gap-4" data-testid="settings-dialog">
+      <div v-if="settings && webMode" class="flex flex-col gap-4" data-testid="settings-dialog">
+        <section class="flex flex-col gap-3" data-testid="web-center-section">
+          <span class="text-sm font-semibold">接続先 center</span>
+          <UFormField label="url">
+            <div class="flex items-center gap-2">
+              <UInput
+                :model-value="settings.remote?.url ?? ''"
+                placeholder="未設定"
+                disabled
+                class="flex-1 font-mono"
+                data-testid="web-center-url"
+              />
+              <UBadge v-if="settings.envLocks?.remoteUrl" color="neutral" variant="subtle" label="env で固定" data-testid="web-center-url-env" />
+            </div>
+          </UFormField>
+          <UFormField label="token">
+            <div class="flex items-center gap-2">
+              <UInput
+                :model-value="settings.remote?.tokenSet ? '設定済み' : '未設定'"
+                disabled
+                class="flex-1"
+                data-testid="web-center-token"
+              />
+              <UBadge v-if="settings.envLocks?.remoteToken" color="neutral" variant="subtle" label="env で固定" data-testid="web-center-token-env" />
+            </div>
+          </UFormField>
+          <div class="flex items-center gap-2 text-sm" data-testid="web-center-connection">
+            <span class="font-medium">状態</span>
+            <UBadge
+              v-if="connection"
+              :color="connection.connected ? 'success' : connection.url ? 'warning' : 'neutral'"
+              variant="subtle"
+              :label="connection.connected ? '接続中' : connection.url ? 'つながらない' : '接続先なし'"
+              data-testid="web-center-state"
+            />
+            <UButton
+              class="ml-auto"
+              size="xs"
+              variant="ghost"
+              color="neutral"
+              icon="i-lucide-refresh-cw"
+              :loading="refreshing"
+              aria-label="状態を更新"
+              @click="refreshConnection"
+            />
+          </div>
+          <p v-if="connection?.lastError" class="text-cork-danger-text text-xs whitespace-pre-wrap" data-testid="web-center-last-error">
+            {{ connection.lastError }}
+          </p>
+          <p class="text-cork-muted text-xs" data-testid="web-center-note">
+            この画面からは接続先を変えられない。変える時は設置者が設定 file か env を編集する。
+          </p>
+        </section>
+        <p v-if="error" class="text-cork-danger-text text-xs" data-testid="settings-error">{{ error }}</p>
+      </div>
+      <div v-else-if="settings" class="flex flex-col gap-4" data-testid="settings-dialog">
         <div
           v-if="ipBannerVisible"
           class="border-cork-border bg-cork-elevated flex flex-col gap-2 border p-3 text-xs"
