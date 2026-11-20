@@ -12,6 +12,8 @@ import type {
 } from "../types";
 
 const open = defineModel<boolean>("open", { required: true });
+// A shell that does not offer retiring a server (the web: `server_retire` is not an allowed tool there) hides the button. Default: shown, as on desktop.
+defineProps<{ hideRetire?: boolean }>();
 
 /** One server row: the discovered peer (`server_peers`: version) and the configured link (`server_list`: connection). Either may be missing. */
 interface ServerRow {
@@ -276,6 +278,7 @@ const serviceLabel = (s: NonNullable<CenterRetireResult["service"]>) =>
                   data-testid="center-server-link-badge"
                 />
                 <UButton
+                  v-if="!hideRetire"
                   class="ml-auto"
                   size="xs"
                   color="error"
