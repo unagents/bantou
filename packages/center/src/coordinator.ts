@@ -43,7 +43,7 @@ const minutesSince = (iso: string | null, now: number): number | null => {
 export function buildSessionBrief(sessions: readonly SessionInfo[], coordinator: string, now: number, filter?: { session?: string }): SessionBriefResult {
   const rows = sessions.filter((s) => filter?.session === undefined || s.name === filter.session);
   const lines: SessionBriefLine[] = [];
-  let chars = 0;
+  const at = new Date(now).toISOString();
   for (const s of rows) {
     const since = s.activity === "unknown" ? null : minutesSince(s.activityAt, now);
     const work = s.activity === "unknown" ? "作業状態 不明" : `${s.activity}${since === null ? "" : ` ${since} 分`}`;
@@ -61,12 +61,14 @@ export function buildSessionBrief(sessions: readonly SessionInfo[], coordinator:
       parts.push(`警告: 自分の project の作業が多い（remote 実行中 ${s.remote.running}・返答待ち ${s.remote.waitingReply}）`);
     }
     const line = clip(parts.join(" | "), SESSION_BRIEF_LINE_MAX);
-    if (lines.length >= SESSION_BRIEF_MAX_LINES || chars + line.length > SESSION_BRIEF_MAX_CHARS) break;
+    if (lines.length >= SESSION_BRIEF_MAX_LINES) break;
+    // 返り値全体（name の二重・構造・truncated / omitted も含む、整形ありの JSON）で測る。
+    const candidate: SessionBriefResult = { at, sessions: [...lines, { name: s.name, line }], truncated: true, omitted: rows.length };
+    if (JSON.stringify(candidate, null, 2).length > SESSION_BRIEF_MAX_CHARS) break;
     lines.push({ name: s.name, line });
-    chars += line.length;
   }
   const omitted = rows.length - lines.length;
-  return { at: new Date(now).toISOString(), sessions: lines, truncated: omitted > 0, omitted };
+  return { at, sessions: lines, truncated: omitted > 0, omitted };
 }
 
 /** 統括の道具が使う、center の中の情報の取得元。呼ばれるたびに今の値を返す（キャッシュしない）。 */

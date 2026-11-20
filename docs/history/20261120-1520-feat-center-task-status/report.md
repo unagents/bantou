@@ -33,3 +33,16 @@
 - 実 API に schema を通す確認（実 center・外部接続禁止のため）。
 ## 残った問題
 - `full` / `offset`（全文取得）が無い。上の食い違いの項のとおり。
+
+## 往復 1 回目の対応（review: medium 2 / low 3）
+### 直した物
+1. [medium] session 向け remote_list の上限が効かない → `limitRemoteList` を段階式に作り直した。(0) report 本文 300・result/summary 2000・pending の prompt 200・conversation の error 文 300 に切る → (1) 古い report から落とす → (2) result 200・prompt 20 に縮め、error 文を消す → (3) cap を古い順（createdAt）に落とし、配列の末尾に `{ omitted_remotes, note }` を 1 件足す。各段の後に note と印を含めた返り値全体（pretty JSON）を測り直し、収まった所で止める。(3) は cap を全部落としても残りが末尾 1 件だけになるので、上限を必ず守る。切った cap の `truncated` に `pending_prompts_cut`・`conversation_cut` を追加。
+2. [medium] fallback の後に note を付けて超える → note を最初から付けて測るので解消（後付けをやめた）。fallback の段を通る test を追加。
+3. [low] task_status の 6000 文字 → 返り値全体（at・task_id・remote_id・構造・truncated・omitted を含む JSON）で測る形に直した（40 行の上限は残す）。
+### 直さなかった物
+4. [low] `include_shared: true` は旧共有 cap（session 無し）を owner に関係なく返す。W2 で作った物ではなく既存の挙動。残課題。
+5. [low] task_status の「最後の報告」は worker_reports（cap ごと最新 20 件）の末尾から取るので、件数が多いと古い task の最後の報告が「なし」と出る。制約として残す。
+### test と変異
+- 追加 test: pending prompt 50000 文字の cap 1 つ、conversation の error 文が巨大、prompt 1000 文字の cap 30 個（上限 3000 で cap 落ちと omitted_remotes、古い順を確認。既定の上限でも収まる）、切る前が上限の直上で fallback の段を通る入力。いずれも返り値全体の JSON.stringify が上限以内を assert。
+- 変異（task-status.test.ts で確認、戻して clean）: cap 落としの段を外す → 「30 個」が落ちた。fallback の段を外す → 「fallback の段を通る」が落ちた。prompt の切りを外す → 「prompt 50000」と「fallback」が落ちた。測り直し（fits）を常に true にする → 「大量の入力」「30 個」「fallback」が落ちた。
+- 全体: 638 件。ただし http.test の mock が pending を持たず 1 件落ちたため mock に `pending: []` を足した（本物の RemoteView は必ず持つ）。それ以外は既知の不安定 1 件（SIGKILL で rc が孤児）のみ。外向けの remote_list は変えていない（全文のままの test が通る）。

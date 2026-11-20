@@ -63,7 +63,7 @@ test("task_status: 不通・lost・失敗の状態", () => {
 
 test("limitRemoteList: report の本文 300 文字・result 2000 文字で切り、印が付く", () => {
   const v = view("a", [], [report("t", "done", 1, "z".repeat(5000))], { result: "r".repeat(9000) });
-  const [o] = limitRemoteList([v]);
+  const [o] = limitRemoteList([v]) as (RemoteView & { truncated?: { report_texts_cut: number; result_cut: boolean; note: string } })[];
   assert.ok(o!.worker_reports[0]!.text.length < 400);
   assert.ok(o!.result!.length < 2100);
   assert.equal(o!.truncated?.report_texts_cut, 1);
@@ -76,11 +76,11 @@ test("limitRemoteList: 大量の入力でも 1 回 20000 文字以内。古い r
   const views = ["a", "b", "c", "d"].map((s) => view(s, [], reports, { result: "r".repeat(8000) }));
   const out = limitRemoteList(views);
   assert.ok(JSON.stringify(out, null, 2).length <= REMOTE_LIST_TOTAL_MAX, `size ${JSON.stringify(out, null, 2).length}`);
-  const dropped = out.reduce((n, v) => n + (v.truncated?.reports_dropped ?? 0), 0);
+  const dropped = out.reduce((n, v) => n + ((v as RemoteView & { truncated?: { reports_dropped: number } }).truncated?.reports_dropped ?? 0), 0);
   assert.ok(dropped > 0);
-  for (const v of out) if (v.truncated && v.worker_reports.length > 0) assert.ok(v.worker_reports[0]!.text.startsWith(`${20 - v.worker_reports.length}:`) || v.truncated.reports_dropped > 0);
+  for (const v of out as (RemoteView & { truncated?: { reports_dropped: number } })[]) if (v.truncated && v.worker_reports.length > 0) assert.ok(v.worker_reports[0]!.text.startsWith(`${20 - v.worker_reports.length}:`) || v.truncated.reports_dropped > 0);
   // 残るのは新しい report
-  const kept = out[0]!.worker_reports;
+  const kept = (out[0] as RemoteView).worker_reports;
   if (kept.length > 0) assert.ok(kept[kept.length - 1]!.text.startsWith("19:"));
 });
 
@@ -129,4 +129,56 @@ test("外向けの remote_list は切らない（返り値が変わらない）"
   assert.equal(out[0]!.result!.length, 9000);
   assert.equal((out[0] as { truncated?: unknown }).truncated, undefined);
   await client.close();
+});
+
+const lenOf = (x: unknown): number => JSON.stringify(x, null, 2).length;
+const withPrompt = (session: string, n: number, extra: Partial<RemoteView> = {}, id = session): RemoteView => {
+  const v = view(session, [{ id: `t-${id}`, minAgo: 1 }], [], { remote_id: `c-1-${id}`, ...extra });
+  v.pending[0]!.prompt = "p".repeat(n);
+  return v;
+};
+
+test("limitRemoteList: pending の prompt が 50000 文字の cap 1 つでも 20000 文字以内。prompt を切った印", () => {
+  const out = limitRemoteList([withPrompt("a", 50000)]);
+  assert.ok(lenOf(out) <= REMOTE_LIST_TOTAL_MAX, `size ${lenOf(out)}`);
+  const o = out[0] as RemoteView & { truncated?: { pending_prompts_cut: boolean } };
+  assert.equal(o.truncated?.pending_prompts_cut, true);
+  assert.ok(o.pending[0]!.prompt.length < 400);
+});
+
+test("limitRemoteList: conversation の error 文が巨大でも切る", () => {
+  const conv = { started_at: iso(1), tasks: 1, last_error_text: "e".repeat(40000) } as unknown as RemoteView["conversation"];
+  const out = limitRemoteList([withPrompt("a", 10, { conversation: conv })]);
+  assert.ok(lenOf(out) <= REMOTE_LIST_TOTAL_MAX);
+  assert.equal((out[0] as RemoteView & { truncated?: { conversation_cut: boolean } }).truncated?.conversation_cut, true);
+});
+
+test("limitRemoteList: prompt 1000 文字の cap 30 個 → 20000 文字以内。cap の件数が落ち、omitted_remotes の印が付く。古い cap から落ちる", () => {
+  const views = Array.from({ length: 30 }, (_, i) => withPrompt(`s${i}`, 1000, { createdAt: iso(1000 - i) }, `${i}`));
+  const out = limitRemoteList(views, 3000);
+  assert.ok(lenOf(out) <= 3000, `size ${lenOf(out)}`);
+  const last = out[out.length - 1] as { omitted_remotes?: number };
+  assert.ok((last.omitted_remotes ?? 0) > 0);
+  const keptIds = out.slice(0, -1).map((v) => (v as RemoteView).remote_id);
+  assert.ok(!keptIds.includes("c-1-0"), "最も古い cap は落ちる");
+  assert.ok(keptIds.includes("c-1-29"), "最も新しい cap は残る");
+  assert.equal(keptIds.length + (last.omitted_remotes ?? 0), 30);
+  // 既定の上限でも 30 個は収まる
+  assert.ok(lenOf(limitRemoteList(views)) <= REMOTE_LIST_TOTAL_MAX);
+});
+
+test("limitRemoteList: 切る前が 20010 文字付近で、report 落としでは足りず fallback（result 縮め）の段を通る。note を付けても 20000 文字以内", () => {
+  // report 無し・prompt 短し・result だけが 2000 文字で並ぶ cap を、上限の直上になるまで増やす。
+  const mk = (i: number): RemoteView => withPrompt(`s${i}`, 10, { result: "r".repeat(1990), createdAt: iso(500 - i) }, `${i}`);
+  let n = 1;
+  while (lenOf(limitRemoteList(Array.from({ length: n }, (_, i) => mk(i)), 1e9)) <= REMOTE_LIST_TOTAL_MAX + 0) n++;
+  const views = Array.from({ length: n }, (_, i) => mk(i));
+  const base = lenOf(limitRemoteList(views, 1e9));
+  assert.ok(base > REMOTE_LIST_TOTAL_MAX && base < REMOTE_LIST_TOTAL_MAX + 3000, `base ${base}`);
+  const out = limitRemoteList(views);
+  assert.ok(lenOf(out) <= REMOTE_LIST_TOTAL_MAX, `size ${lenOf(out)}`);
+  const first = out[0] as RemoteView & { truncated?: { result_cut: boolean; note: string } };
+  assert.equal(first.truncated?.result_cut, true);
+  assert.ok(first.result!.length < 400, "fallback で result が縮む");
+  assert.ok(out.length === views.length, "cap は落とさず result の縮めで収まる");
 });
