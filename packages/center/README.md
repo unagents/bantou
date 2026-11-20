@@ -258,7 +258,7 @@ center は wrapper 経由の session（master-cap）を起動するたび（新�
   3. 対応する server が見えない・識別を返さない記録は peer id のまま残す（`unknown` を悪化させない）。その server が後で `hello` / `status` を返し、peer id 等が一致した時に引き継ぐ。
   4. 制約（厳密化はしない）: 名前 + host だけで引き継ぐ場合（同じ host・同名の live が 1 つだけ）、元の server が廃止されて別の server が動いていると、その別の workspace / user に紐づき得る。peer id が一致する場合と、server_id が分かる記録は取り違えない。
   5. 冪等（読み替え済みは何も変えない）。読み替え中は保存せず、最後に 1 回だけ保存する。発見に失敗しても起動は止めない（発見に失敗した起動では、古い到達先の整理もしない）。
-- **互換と更新の順序**: center は protocol の版が**完全一致**する server にしか `task` / `status` を送らない（`gateOf`）。旧 server（protocol 1.6.0）は `hello` / `update_server` だけ通り、`task` / `status` は版違いエラーになる。旧 server の記録は peer id のまま残るだけで、新しい指示は送れない。移行は **server を 1.8.0 へ更新（follow が `update_server` で自動に指示）してから**。旧 center に新 server（1.7.0）を当てると、旧 center の follow が server を旧 pair の版へ戻す（巻き戻される）。
+- **互換と更新の順序**: center は protocol の版が**互換**（major と minor が同じ。patch の差は通す。`isProtocolCompatible`）な server にしか `task` / `status` を送らない（`gateOf`）。旧 server（protocol 1.6.0）は `hello` / `update_server` だけ通り、`task` / `status` は版違いエラーになる。旧 server の記録は peer id のまま残るだけで、新しい指示は送れない。移行は **server を 1.8.0 へ更新（follow が `update_server` で自動に指示）してから**。旧 center に新 server（1.7.0）を当てると、旧 center の follow が server を旧 pair の版へ戻す（巻き戻される）。
 - **downgrade**: 非推奨。必要なら `remotes.json.pre-server-id.bak` を `remotes.json` に戻す。退避は**最初の 1 回だけ**で上書きしない（最初の退避を守る）ので、移行後に新しく作った cap の記録は失われる。
 - **古い記録の整理**（`prune`。起動時と 10 分ごと。**消すのは center の記録だけ**。記録を消すために server へ stop_cap などは送らない。ただし発見した peer のうち識別が未取得のものへは、読み取りだけの `hello` を送り得る）:
   - 消す: (a) 同じ server_id・同じ cap の旧 peer id の重複記録（動いている記録、同順位なら最新を 1 件残す）。(b) `peer_seen_at` から 6 時間確認できず、今の発見にも居ない到達先（`peer` と `peer_seen_at` だけ消す）。
@@ -291,10 +291,12 @@ center は wrapper 経由の session（master-cap）を起動するたび（新�
 
 ## server の版合わせ
 
+互換の範囲（patch だけ違う）で版が違う間も、follow は今までどおり `update_server` で版を揃えにいく。門は通すので `task` / `status` は送れる。互換でない差は従来どおり断る。
+
 - 組の版: `pair.server` = 組になる server の npm `bantou` の版、`pair.protocol` = このバイナリに bundle した protocol `bantou` の版。server の版は desktop のビルド（`packages/desktop/scripts/build-sidecar.ts`）が `bun build --compile --env=BANTOU_PAIR_*` で env `BANTOU_PAIR_SERVER_VERSION` を埋め込む（値はビルド時に固定され、実行時の env では変わらない）。埋め込みが無い時は作業ツリーの `packages/server/package.json`（`npm run dev` / tsx / dist 用）、それも無ければ不明（版合わせは無効で、protocol の版の門だけ効く）。単体バイナリ（`build:bin`）は埋め込まないので、`BANTOU_PAIR_SERVER_VERSION` を付けてビルドしない限り不明になる。
 - 確認: 起動後（`connectAll` の後）と 30 秒ごと（更新中の server がいる間は 5 秒ごと）に、発見した server へ `hello` を送る。server の版が組と違えば `update_server {version: pair.server}` を送る（新旧は比べない）。server は peer の `summary`（`<host> <workspace>`）で同一視する（peer id は再登録で変わる）。
 - 状態: `ok` / `updating`（`update.running` = 待っている cap・worker の件数）/ `unsupported`（protocol 1.3.0 未満。自動更新できず、手動で起動し直す）/ `mismatch`（server の版は組と同じなのに protocol の版が違う）/ `failed`（更新指示が断られた・server が版を取得できなかった。失敗から 5 分おいて同じ版を再指示する。publish 直後の npm 反映待ちはこれで回復する）/ `lost`（更新中のまま 15 分戻らない）/ `unknown`（hello に答えない）。
-- 門: protocol の版が `pair.protocol` と違う server には、`hello` / `update_server` 以外（`task` / `worker_reply` / `kick_cap` / `stop_cap` / `status`）を送らず `error`（`code:"version_mismatch"`、`retryable:true`）を返す。版が分からない（名前宛てへのフォールバック）時は従来どおり送る。更新中の server への `task` / `kick_cap` は送らず `code:"updating"`（retryable）で断る。`remote_send` は断られたら記録を作らず isError で返すので、master-cap が後で再送できる。center は自動では再送しない。
+- 門: protocol の版が `pair.protocol` と互換でない（major か minor が違う、または形が崩れた）server には、`hello` / `update_server` 以外（`task` / `worker_reply` / `kick_cap` / `stop_cap` / `status`）を送らず `error`（`code:"version_mismatch"`、`retryable:true`）を返す。版が分からない（名前宛てへのフォールバック）時は従来どおり送る。更新中の server への `task` / `kick_cap` は送らず `code:"updating"`（retryable）で断る。`remote_send` は断られたら記録を作らず isError で返すので、master-cap が後で再送できる。center は自動では再送しない。
 - 更新中に server の broker が止まる構成（server の内蔵 broker に center もつなぐ）では、再起動中は接続が切れる。送信失敗で次の使用時に接続を作り直す。
 
 ## claude の解決

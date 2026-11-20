@@ -9,7 +9,7 @@ import {
   isHelloCommand, isUpdateServerCommand, isValidServerVersion, isErrorCode, ERROR_CODES,
   FOLLOW_MIN_PROTOCOL, SERVER_VERSION_PATTERN, SERVER_ID_PATTERN, MODEL_PATTERN, isValidModel,
   isTaskCommand, isWorkerReplyCommand, isWorkerRole, isWorkerReportKind,
-  isRetireServerCommand, supportsRetire, RETIRE_MIN_PROTOCOL, RETIRE_EXIT_CODE,
+  isRetireServerCommand, supportsRetire, isProtocolCompatible, RETIRE_MIN_PROTOCOL, RETIRE_EXIT_CODE,
 } from "../dist/index.js";
 
 const activityAgent = {
@@ -524,4 +524,25 @@ test("status_result: AgentStatus.conversation is optional and validated", () => 
   assert.ok(!isServerReply(st({ ...agent, conversation: { ...conversation, tasks: -1 } })));
   assert.ok(!isServerReply(st({ ...agent, conversation: { ...conversation, context_tokens: "x" } })));
   assert.ok(!isServerReply(st({ ...agent, conversation: "x" })));
+});
+
+test("isProtocolCompatible: 同じ版・patch だけ違う版は互換", () => {
+  assert.equal(isProtocolCompatible("1.8.1", "1.8.1"), true);
+  assert.equal(isProtocolCompatible("1.8.0", "1.8.1"), true);
+  assert.equal(isProtocolCompatible("1.8.12", "1.8.3"), true);
+});
+
+test("isProtocolCompatible: minor・major が違えば互換でない", () => {
+  assert.equal(isProtocolCompatible("1.7.1", "1.8.1"), false);
+  assert.equal(isProtocolCompatible("1.9.0", "1.8.1"), false);
+  assert.equal(isProtocolCompatible("2.8.1", "1.8.1"), false);
+  assert.equal(isProtocolCompatible("0.8.1", "1.8.1"), false);
+});
+
+test("isProtocolCompatible: 形が崩れた版は互換でない（どちらの引数でも）", () => {
+  for (const bad of ["", "abc", "1.8", "1", "1.8.", "v1.8.1", "1.x.1", "1.8.1-beta", "1.8.1.2", " 1.8.1", undefined, null, 1.81]) {
+    assert.equal(isProtocolCompatible(bad, "1.8.1"), false, String(bad));
+    assert.equal(isProtocolCompatible("1.8.1", bad), false, String(bad));
+  }
+  assert.equal(isProtocolCompatible("", ""), false);
 });
