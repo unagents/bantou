@@ -193,3 +193,85 @@ test("mcp: worker の header では worker_start を呼べない", async () => {
     await l.close();
   }
 });
+
+/** schema を再帰的に辿り、`pattern`（文字列）をすべて集める。 */
+function collectPatterns(node: unknown, path: string, out: { path: string; pattern: string }[]): void {
+  if (Array.isArray(node)) return node.forEach((v, i) => collectPatterns(v, `${path}[${i}]`, out));
+  if (node === null || typeof node !== "object") return;
+  for (const [k, v] of Object.entries(node)) {
+    if (k === "pattern" && typeof v === "string") out.push({ path, pattern: v });
+    else collectPatterns(v, `${path}.${k}`, out);
+  }
+}
+
+/**
+ * 文字 class の中にある escape の無い `[` の位置（無ければ -1）。`\[` は可。class の外の `[` は class の開始として扱う。
+ * Claude の API が tool の schema を「JSON schema is invalid」で弾く形を捉えるための検査。
+ * この基準は実測 2 例（`[A-Za-z0-9._[\]]` は弾かれ、`[A-Za-z0-9._\[\]]` は通った）から作った推測で、API の本当の基準ではない。
+ * 本当に通るかは実際の API で確かめる（docs/history/20261120-fix-tool-schema-pattern/report.md）。
+ */
+function unescapedBracketInClass(p: string): number {
+  let inClass = false;
+  for (let i = 0; i < p.length; i++) {
+    const c = p[i];
+    if (c === "\\") i++;
+    else if (!inClass) inClass = c === "[";
+    else if (c === "]") inClass = false;
+    else if (c === "[") return i;
+  }
+  return -1;
+}
+
+/** pattern のうち、`u` で compile できない物と、文字 class の中に escape の無い `[` を持つ物。 */
+function badPatterns(found: { path: string; pattern: string }[]): string[] {
+  const bad: string[] = [];
+  for (const f of found) {
+    try {
+      new RegExp(f.pattern, "u");
+    } catch (e) {
+      bad.push(`${f.path} /${f.pattern}/u: ${(e as Error).message}`);
+    }
+    const at = unescapedBracketInClass(f.pattern);
+    if (at >= 0) bad.push(`${f.path} /${f.pattern}/: 文字 class の中に escape の無い [（位置 ${at}）`);
+  }
+  return bad;
+}
+
+test("pattern の検査: 文字 class の中の escape の無い [ だけを不正とする", () => {
+  const bad = (p: string) => badPatterns([{ path: "x", pattern: p }]).length > 0;
+  assert.equal(bad("^[A-Za-z0-9._[\\]][A-Za-z0-9._[\\]-]*$"), true, "修正前の worker_start.model");
+  assert.equal(bad("^[A-Za-z0-9._\\[\\]][A-Za-z0-9._\\[\\]-]*$"), false, "[ ] だけ escape した形");
+  assert.equal(bad("^[A-Za-z0-9_-]+$"), false, "escape の無い - は可");
+  assert.equal(bad("^[+-]\\d{2}$"), false);
+  assert.equal(bad("^\\[[a-z]+\\]$"), false, "class の外の \\[");
+  assert.equal(bad("^[a-z][0-9]$"), false, "class が 2 つ");
+  assert.equal(bad("[a[b]"), true);
+  assert.equal(bad("(a"), true, "compile できない");
+});
+
+test("mcp: 全 tool の inputSchema の pattern は u で compile でき、文字 class の中に escape の無い [ を持たない（Claude の API に schema を弾かれない形）", async () => {
+  const app = createApp().use("/mcp", defineEventHandler((e) => handleMcpRequest(toWebRequest(e))));
+  const l = await startMcpListener(toNodeListener(app), { port: 0, bind: "127.0.0.1" });
+  try {
+    const url = `http://127.0.0.1:${l.port}/mcp`;
+    const found: { path: string; pattern: string }[] = [];
+    // cap・worker・header 無しのそれぞれに出る tool をすべて見る
+    for (const [label, headers] of [
+      ["cap", { "x-bantou-cap-id": "c1" }],
+      ["worker", { "x-bantou-cap-id": "c1", "x-bantou-worker-id": "w1" }],
+      ["none", {}],
+    ] as const) {
+      const r = (await (await rpc(url, { jsonrpc: "2.0", id: 1, method: "tools/list" }, headers)).json()) as {
+        result: { tools: Array<{ name: string; inputSchema: unknown }> };
+      };
+      assert.ok(r.result.tools.length > 0, label);
+      for (const t of r.result.tools) collectPatterns(t.inputSchema, `${label}:${t.name}`, found);
+    }
+    // worker_start の model まで辿れている事（辿り漏れの検出）
+    assert.ok(found.some((f) => f.path === "cap:worker_start.properties.model"), "worker_start.model");
+    if (process.env.PATTERN_DUMP) console.log("PATTERN_DUMP " + JSON.stringify(found));
+    assert.deepEqual(badPatterns(found), []);
+  } finally {
+    await l.close();
+  }
+});

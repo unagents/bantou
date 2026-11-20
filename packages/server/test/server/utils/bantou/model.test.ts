@@ -235,3 +235,12 @@ test("daemon: kick_cap の model / worker_model は manager.invoke にそのま�
   assert.deepEqual([seen[0]!.model, seen[0]!.worker_model], ["opus", "haiku"]);
   assert.deepEqual([seen[1]!.model, seen[1]!.worker_model], [undefined, undefined]);
 });
+
+test("model: MODEL_PATTERN は protocol の MODEL_PATTERN そのもの（[ ] を escape した形）", async () => {
+  const { MODEL_PATTERN: proto } = await import("@agent-hand/bantou-protocol");
+  const { MODEL_PATTERN: local } = await import("../../../../server/utils/bantou/model");
+  assert.equal(local, proto);
+  assert.equal(local.source, "^[A-Za-z0-9._\\[\\]][A-Za-z0-9._\\[\\]-]*$");
+  for (const ok of ["sonnet", "opus[1m]", "claude-fable-5-2", "a.b_c-d", "x-"]) assert.equal(local.test(ok), true, ok);
+  for (const ng of ["", "-x", "a b", "a/b"]) assert.equal(local.test(ng), false, ng);
+});

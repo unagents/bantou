@@ -1,10 +1,15 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { MODEL_PATTERN } from "@agent-hand/bantou-protocol";
 import { runLogDir } from "./paths";
 
-/** claude の --model にそのまま渡す値の形式。 */
-/** 先頭 - 不可（引数として解釈されるのを防ぐ）。protocol の MODEL_PATTERN と同じ。 */
-export const MODEL_PATTERN = /^[A-Za-z0-9._[\]][A-Za-z0-9._[\]-]*$/;
+/**
+ * claude の --model にそのまま渡す値の形式。先頭 - 不可（引数として解釈されるのを防ぐ）。
+ * protocol の MODEL_PATTERN をそのまま使う（`^[A-Za-z0-9._\[\]][A-Za-z0-9._\[\]-]*$`）。
+ * worker_start の inputSchema（Claude に渡る JSON Schema）の pattern にも出る。文字 class の中の `[` `]` を escape していない形
+ * （`[A-Za-z0-9._[\]]`）は Claude の API が「JSON schema is invalid」として弾くので、ここに別の書き方の正規表現を置かない。
+ */
+export { MODEL_PATTERN };
 
 /** model 文字列の検証。不正なら投げる。 */
 export function assertModel(v: unknown, field = "model"): string {
