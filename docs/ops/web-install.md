@@ -72,7 +72,7 @@
 | 設定 file | `WEB_SETTINGS_FILE` の path | backend が一時 file→rename で書く（`600`）。親 dir は**設置時に先に作る**（`install -d -m 700 -o <run-user> <settings-dir>`。`<run-user>` として `mkdir -m 700` でもよい） |
 | build 物 | `<install-dir>/packages/web/.output` | `<run-user>` が読める。他の user が書けない |
 
-- **env file の値は `[A-Za-z0-9._@,+/=:-]` の文字だけにする**（`:` は `CENTER_URL` の `http://<host>:<port>` のため。sh でも systemd でも安全）（空白・引用符・`$`・バッククォート・`;`・`#`・バックスラッシュを入れない）。systemd の `EnvironmentFile` と shell の `. <file>`（4.2 の script、3 章の手動起動）で読み方が違い、記号入りの値は片方で壊れたり、shell 側で別の command が走ったりするため。`PROXY_KEY` は `openssl rand -hex 32` の出力を使う。`ALLOWED_EMAILS` は email をカンマで繋ぐ（空白なし）。`CENTER_TOKEN` が制限外の文字を含む時は env に置かず、設定 file（JSON）の `remote.token` に置く（2.3）。
+- **env file の値は、次の文字だけにする**: 英数字（`A-Za-z0-9`）と `. _ @ , + / = : -`（`[A-Za-z0-9._@,+/=:-]`。sh でも systemd でも安全。`:` は `CENTER_URL` の `http://<host>:<port>` のため）。空白・引用符・`$`・バッククォート・`;`・`#`・バックスラッシュは入れない。`[` `]` も許可しないので、IPv6 の literal の url（`http://[::1]:<port>` など）は env に書けない。systemd の `EnvironmentFile` と shell の `. <file>`（4.2 の script、3 章の手動起動）で読み方が違い、記号入りの値は片方で壊れたり、shell 側で別の command が走ったりするため。`PROXY_KEY` は `openssl rand -hex 32` の出力を使う。`ALLOWED_EMAILS` は email をカンマで繋ぐ（空白なし）。`CENTER_TOKEN` が制限外の文字を含む時は env に置かず、設定 file（JSON）の `remote.token` に置く（2.3）。その時は **url も file の `remote.url` に置き、`CENTER_URL` は設定しない**（file の token は、file の url に向く時だけ使われる。`CENTER_URL` を設定すると、file の url と同じ接続先でない限り file の token は使われない）。
 - 鍵・token・JWT を、コマンドライン引数・unit file の `Environment=`・ログ・shell の履歴に出さない。`EnvironmentFile`（または 4.2 の script が shell で読む env file）だけに置く。
 - `WEB_SETTINGS_FILE` は env file に**絶対 path で明示する**（`HOME` の違いで別の場所に書かれるのを避ける）。
 - 同じ host の別 user が `/proc/<pid>/environ` を読めない事（一般の Linux の権限）と、`<run-user>` の HOME が `750` 以下である事を設置者が確かめる（8 章 0）。
@@ -239,7 +239,7 @@ KillMode=control-group
 WantedBy=default.target
 ```
 
-- `<run-dir>` は `<run-user>` だけが書ける dir（pid file 用）。`/tmp` を使わない。設置時に先に作る: `install -d -m 700 -o <run-user> <run-dir>`（親 dir も `<run-user>` 以外が書けない権限にする）。
+- `<run-dir>` は `<run-user>` だけが書ける dir（pid file 用）。`/tmp` を使わない。設置時に先に作る: `install -d -m 700 -o <run-user> <run-dir>`（`-o` で持ち主を変えるので **root か sudo で実行する**。`<run-user>` 自身では `-o` が通らないため、その場合は `mkdir -m 700` を使う）。GNU `install -d` は `-m` / `-o` を末端の dir にだけ適用し、途中の親 dir は既定の権限（root 持ちの `755` 程度）で作る。親 dir は root 所有で `755` 以下（`<run-user>` 以外が書けない）なら足りる。
 - `EnvironmentFile=` は使わない（env file は `<run-user>` 専用で `<unit-owner>` は読めない。読むのは `web-run.sh`）。
 - `<unit-owner>` の linger が有効である事（0.1 の 2）。`<unit-owner>` として `systemctl --user enable --now bantou-web`。
 - **sudo の経路が使えない時は、この形を取らず 4.1 にする**（unit の持ち主を `<run-user>` にする）。

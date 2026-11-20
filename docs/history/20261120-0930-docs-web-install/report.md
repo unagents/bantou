@@ -45,3 +45,8 @@
 ## 2 回目の review の反映（3 回目の commit）
 1. env 値の許可文字に `:` を追加（`CENTER_URL` の `http://<host>:<port>` 用）。`CENTER_TOKEN` が制限外の文字を含む時は env でなく設定 file の `remote.token` に置く旨を追記。
 2. 手動起動の例をサブシェル `( … exec … )` で包み、対話 shell を置き換えないようにした。`<run-dir>` の作り方（`install -d -m 700 -o <run-user>`、親 dir の権限）を 4.2 に追記。
+
+## 3 回目の review の反映（4 回目の commit）
+1. `CENTER_TOKEN` を設定 file の `remote.token` に置く時は、url も file の `remote.url` に置き `CENTER_URL` は設定しない旨を 2.2 に明記。実装（`packages/center-client/src/center-settings.ts` の `effective()`）と突き合わせ済み: env の url が無ければ file の url と file の token を使う。env の url がある時、file の token は正規化後の url が file の url と同じ時だけ使われる。
+2. 4.2 の `install -d -m 700 -o <run-user> <run-dir>` は root か sudo が前提である事と、GNU install -d は `-m` / `-o` を末端の dir にだけ適用する事、親 dir は root 所有の `755` 以下で足りる事を補足。
+3. env 値の許可文字の説明を読みやすくし、`[` `]` を許可しないので IPv6 literal の url は env に書けない旨を追記。
