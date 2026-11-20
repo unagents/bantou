@@ -182,3 +182,59 @@ test("limitRemoteList: 切る前が 20010 文字付近で、report 落としで�
   assert.ok(first.result!.length < 400, "fallback で result が縮む");
   assert.ok(out.length === views.length, "cap は落とさず result の縮めで収まる");
 });
+
+import type { ServerVersionInfo } from "../src/follow.js";
+
+const vinfo = (over: Partial<ServerVersionInfo> = {}): ServerVersionInfo => ({
+  center_protocol: "1.8.0", server_protocol: "1.7.0", server_version: "0.3.0", state: "updating",
+  detail: "更新中（0.3.0→0.3.1）: cap 2 / worker 3 の終了待ち", update: { to: "0.3.1", running: { caps: 2, workers: 3, reports: 0 } }, since: iso(5), ...over,
+});
+
+test("task_status: servers に server ごとの版の状態（center の版・server の版・状態・件数）が出る。他の session の cap の server は出ない", () => {
+  const mine = view("alpha", [{ id: "t-1", minAgo: 1 }], [], { server_version_state: vinfo() });
+  const other = view("beta", [{ id: "t-2", minAgo: 1 }], [], { server_version_state: vinfo({ detail: "OTHER-SESSION-SERVER" }), server_label: "host-b" });
+  const r = buildTaskStatus([mine, other], "alpha", NOW);
+  assert.equal(r.servers.length, 1);
+  assert.match(r.servers[0]!, /host-a .*center protocol 1\.8\.0.*server 0\.3\.0.*updating.*cap 2 \/ worker 3/);
+  assert.ok(!JSON.stringify(r).includes("OTHER-SESSION"));
+  assert.ok(!JSON.stringify(r).includes("host-b"));
+});
+
+test("task_status: 版の状態があっても 40 行・6000 文字の上限を守る（server 10 件・task 100 件・長い detail）", () => {
+  const views = Array.from({ length: 30 }, (_, i) =>
+    view("alpha", Array.from({ length: 5 }, (_, j) => ({ id: `t-${i}-${j}`, minAgo: j })), [], { remote_id: `c-${i}`, server_label: `host-${i}`, server_version_state: vinfo({ detail: "d".repeat(200) }) }));
+  const r = buildTaskStatus(views, "alpha", NOW);
+  assert.ok(JSON.stringify(r, null, 2).length <= TASK_STATUS_MAX_CHARS);
+  assert.ok(r.tasks.length <= TASK_STATUS_MAX_LINES);
+  assert.ok(r.servers.length <= 10);
+  assert.equal(r.truncated, true);
+  assert.ok(r.servers.every((l) => l.length <= 200));
+});
+
+test("remote_list: 版の状態が付いた cap が大量でも 20000 文字以内", () => {
+  const views = Array.from({ length: 60 }, (_, i) => view(`s${i}`, [], [], { createdAt: iso(1000 - i), server_version_state: vinfo({ detail: "d".repeat(200) }) }));
+  const out = limitRemoteList(views);
+  assert.ok(JSON.stringify(out, null, 2).length <= REMOTE_LIST_TOTAL_MAX);
+});
+
+test("session の MCP: follow があると remote_list の各 cap と task_status に server の版の状態が付く。follow が無ければ付かない", async () => {
+  const all = [view("alpha", [{ id: "t-mine", minAgo: 1 }], [], { server_id: "sv-aaaa", peer: "id-1" } as Partial<RemoteView>), view("beta", [{ id: "t-o", minAgo: 1 }], [], { server_id: "sv-bbbb", peer: "id-2" } as Partial<RemoteView>)];
+  const remotes = { list: (f: { owner: string }) => all.filter((v) => v.session === f.owner) } as Partial<RemoteManager> as RemoteManager;
+  const follow = { versionOf: (ref: { server_id?: string; peer?: string }) => (ref.peer === "id-1" ? vinfo() : vinfo({ detail: "OTHER" })) } as never;
+  const s = createSessionMcpServer({ remotes, follow, owner: "alpha" });
+  const [c, st] = InMemoryTransport.createLinkedPair();
+  const cl = new Client({ name: "ts", version: "0" });
+  await Promise.all([s.connect(st), cl.connect(c)]);
+  const rl = body(await cl.callTool({ name: "remote_list", arguments: {} })) as RemoteView[];
+  assert.equal(rl.length, 1);
+  assert.equal(rl[0]!.server_version_state?.server_version, "0.3.0");
+  assert.equal(rl[0]!.server_version_state?.state, "updating");
+  const ts = body(await cl.callTool({ name: "task_status", arguments: {} })) as { servers: string[] };
+  assert.equal(ts.servers.length, 1);
+  assert.ok(!JSON.stringify(ts).includes("OTHER"));
+  await cl.close();
+  const plain = await sessionClient({ list: () => all.filter((v) => v.session === "alpha") } as Partial<RemoteManager>, "alpha");
+  const rl2 = body(await plain.callTool({ name: "remote_list", arguments: {} })) as RemoteView[];
+  assert.equal(rl2[0]!.server_version_state, undefined);
+  await plain.close();
+});
