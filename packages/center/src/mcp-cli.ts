@@ -18,7 +18,7 @@ import {
 } from "./mcp-connections.js";
 import { dirIsWide, own, setOwn } from "./mcp-json-file.js";
 import { probeConnection, type ProbeResult } from "./mcp-probe.js";
-import { checkSecretName, checkSecretValue, createSecretsStore } from "./mcp-secrets.js";
+import { checkSecretNameNew, checkSecretValue, createSecretsStore } from "./mcp-secrets.js";
 import { createStatusStore, statusKey } from "./mcp-status.js";
 import { displayUrl } from "./memory-settings.js";
 import { SESSION_NAME } from "./sessions.js";
@@ -41,6 +41,7 @@ export const MCP_USAGE = `usage:
 --session を省くと全 session 共通。--session を付けた set は項目ごとの上書き（--off はその session では付けない）。
 鍵は引数に書けない（--stdin は標準入力、--file は file の中身。末尾の改行は除く）。list / get は鍵の値を出さない。
 --secret は接続が使う鍵の「名前」の参照で、値ではない（短い識別子。値らしい形は断る）。鍵を入れるのは secret set <名前> --stdin|--file だけ。<名前> の位置に値を書かない。
+名前の検査は値らしい形を断るだけの緩和で、短い値は名前として通りうる。値は必ず標準入力か file で渡す。
 center が動いている間に変えてよい。この版の center は、この設定をまだ session にも外部記憶の書き込みにも使わない（今の外部記憶は bantou-center memory の設定）。
 test の終了 code: 0 = 道具の一覧が取れた、1 = 取れない、2 = 使い方の誤り。`;
 
@@ -178,7 +179,8 @@ export async function runMcpCli(argv: string[], defaultConfig: string, deps: Mcp
       }
       const sname = p.positional[1];
       if (sname === undefined) return fail("鍵の名前が要る");
-      const nameErr = checkSecretName(sname);
+      // 新しく書く時は値らしさも見る。消す時は、既にある名前なら（値らしくても）消せる
+      const nameErr = sub === "unset" && secrets.get(sname) ? undefined : checkSecretNameNew(sname);
       if (nameErr) return fail(nameErr);
       if (sub === "unset") {
         warnDir();
@@ -321,7 +323,7 @@ export async function runMcpCli(argv: string[], defaultConfig: string, deps: Mcp
         const f = one(p, "--auth-format");
         const s = one(p, "--secret");
         if (s !== undefined) {
-          const e = checkSecretName(s);
+          const e = checkSecretNameNew(s);
           if (e) return fail(e);
         }
         if (h !== undefined) a.header = h;

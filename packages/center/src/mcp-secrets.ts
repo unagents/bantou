@@ -6,23 +6,46 @@ import { join } from "node:path";
 import { createJsonFile, own, setOwn, type JsonFile } from "./mcp-json-file.js";
 
 export const MCP_SECRETS_FILE = "mcp-secrets.json";
-export const SECRET_NAME_MAX = 64;
+export const SECRET_NAME_MAX = 100;
+/** 名前の形（設計の R-15: 英数字と . _ - の 100 文字以内）。file の読み込みはこの検査だけ。 */
 export const SECRET_NAME = new RegExp(`^[A-Za-z0-9._-]{1,${SECRET_NAME_MAX}}$`);
 /** 値によくある接頭辞（鍵の値を名前の欄に書き間違えた時に断る）。 */
 const VALUE_PREFIX = /^(sk|pk|rk|ak|xox[a-z]?|gh[pousr]|github_pat|glpat|AKIA|ASIA|eyJ|Bearer|Basic|key|token|secret|pass)[-_.]?[A-Za-z0-9]{8,}/i;
 export const SECRET_NAME_ERROR = "鍵の名前の形でない（短い識別子にする。鍵の値は標準入力か file で渡す）";
+/** `<接続名>.<session 名>` の形（session 名は 64 文字まで）。 */
+const CONN_SESSION = /^([a-z0-9][a-z0-9_-]{0,31})\.(.+)$/;
+
+/** 名前の形だけの検査（読み込み用。値らしさは見ない）。 */
+export function checkSecretNameShape(name: string): string | undefined {
+  return SECRET_NAME.test(name) ? undefined : SECRET_NAME_ERROR;
+}
+
+/** 文字種（小文字・大文字・数字）が切り替わる回数。乱数らしい文字列ほど多い。 */
+function classChanges(run: string): number {
+  const cls = (c: string): number => (c >= "0" && c <= "9" ? 0 : c >= "a" && c <= "z" ? 1 : 2);
+  let n = 0;
+  for (let i = 1; i < run.length; i++) if (cls(run[i]) !== cls(run[i - 1])) n++;
+  return n;
+}
 
 /**
- * 鍵の「名前」の検査（値を名前の欄に取り違えて書くのを断る。値は出さない）。
- * 英数字と . _ - の 64 文字以内、値らしい接頭辞（sk- / ghp_ / eyJ など）で始まる物、長い英数字の連続（24 文字以上、
- * または 16 文字以上で英字と数字が混ざる物）は名前として認めない。名前として通る形の値は事前に区別できないので、これは保証でなく緩和。
+ * 新しく書く時の鍵の「名前」の検査（値を名前の欄に取り違えて書くのを断る。値は出さない）。形（100 文字以内）に加えて:
+ * - 値によくある接頭辞（sk- / ghp_ / eyJ など）で始まる物は断る。
+ * - 区切り（. _ -）で分けた各部分の英数字の連続が、16 文字以上で文字種（小文字・大文字・数字）の切り替えが 6 回以上なら乱数らしいので断る。
+ * - 連続が 24 文字以上なら断る（ただし `<接続名>.<session 名>` の形の session 名の部分は、長い名前がありうるので長さだけでは断らない）。
+ * 名前として通る形の値は事前に区別できないので、これは保証でなく緩和。
  */
-export function checkSecretName(name: string): string | undefined {
-  if (!SECRET_NAME.test(name)) return SECRET_NAME_ERROR;
+export function checkSecretNameNew(name: string): string | undefined {
+  if (checkSecretNameShape(name)) return SECRET_NAME_ERROR;
   if (VALUE_PREFIX.test(name)) return SECRET_NAME_ERROR;
-  for (const run of name.match(/[A-Za-z0-9]+/g) ?? []) {
-    if (run.length >= 24) return SECRET_NAME_ERROR;
-    if (run.length >= 16 && /[A-Za-z]/.test(run) && /[0-9]/.test(run)) return SECRET_NAME_ERROR;
+  const m = CONN_SESSION.exec(name);
+  const head = m ? m[1] : name;
+  const tail = m ? m[2] : "";
+  for (const [part, longOk] of [[head, false], [tail, true]] as const) {
+    for (const run of part.match(/[A-Za-z0-9]+/g) ?? []) {
+      if (!longOk && run.length >= 24) return SECRET_NAME_ERROR;
+      if (run.length >= 16 && classChanges(run) >= 6) return SECRET_NAME_ERROR;
+    }
   }
   return undefined;
 }
@@ -56,7 +79,7 @@ export function parseSecrets(raw: unknown): { data: SecretsData; problem?: strin
   for (const [name, v] of Object.entries(s)) {
     const e = v as Partial<SecretEntry> | null;
     if (
-      checkSecretName(name) === undefined &&
+      checkSecretNameShape(name) === undefined &&
       e !== null &&
       typeof e === "object" &&
       typeof e.value === "string" &&

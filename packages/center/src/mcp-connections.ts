@@ -10,7 +10,7 @@ import { isIP } from "node:net";
 import { join } from "node:path";
 import { z } from "zod";
 import { createJsonFile, own, setOwn, type JsonFile } from "./mcp-json-file.js";
-import { checkSecretName, SECRET_NAME_ERROR } from "./mcp-secrets.js";
+import { checkSecretNameShape, SECRET_NAME_ERROR } from "./mcp-secrets.js";
 import { memoryUrlSchema } from "./project-settings.js";
 import { SESSION_NAME } from "./sessions.js";
 
@@ -42,7 +42,7 @@ const authSchema = z
       .refine((v) => v.split("{secret}").length === 2, { message: "format は {secret} をちょうど 1 つ含む" })
       .refine((v) => !v.includes("${") && !/[\x00-\x1f\x7f]/.test(v), { message: "format に ${ ・制御文字・改行は使えない" })
       .optional(),
-    secret: z.string().refine((v) => checkSecretName(v) === undefined, { message: SECRET_NAME_ERROR }).optional(),
+    secret: z.string().refine((v) => checkSecretNameShape(v) === undefined, { message: SECRET_NAME_ERROR }).optional(),
   })
   .strict();
 
