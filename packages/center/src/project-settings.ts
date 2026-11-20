@@ -58,7 +58,7 @@ const serverRefSchema = z
 
 const addDirSchema = z.string().min(1).refine((p) => isAbsolute(p), { message: "参照フォルダは絶対パスで指定する" });
 
-const memoryUrlSchema = z
+export const memoryUrlSchema = z
   .string()
   .max(MEMORY_URL_MAX, `url は ${MEMORY_URL_MAX} 文字以内`)
   // 空白・改行・タブ・制御文字は不可（new URL() は前後の空白や途中の改行を剥がして通すため、先に弾く。保存値は入力のまま）

@@ -32,6 +32,21 @@ if (process.argv[2] === "memory") {
   );
 }
 
+if (process.argv[2] === "mcp") {
+  // MCP の接続の設定・鍵・試す（center の側だけで扱う。MCP からは変えられない）。daemon は読み込まない
+  const { runMcpCli } = await import("./mcp-cli.js");
+  const { readFileSync } = await import("node:fs");
+  const { DEFAULT_CONFIG } = await import("./args.js");
+  process.exit(
+    await runMcpCli(process.argv.slice(3), DEFAULT_CONFIG, {
+      readStdin: () => readFileSync(0, "utf8"),
+      readFile: (p) => readFileSync(p, "utf8"),
+      out: (l) => console.log(l),
+      err: (l) => console.error(l),
+    }),
+  );
+}
+
 let args: CliArgs;
 try {
   args = parseArgs(process.argv.slice(2));

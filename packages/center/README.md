@@ -358,6 +358,31 @@ bantou-center memory unset [--config <path>] [--session <name>]
 - center が動いている間に変えてよい。center は session の起動のたびと memory への送信のたびに file を読むので、**次に起動する session から**効く（動いている session の `--mcp-config` は変わらない。書き込み先は次の hook から変わる）。center の再起動は要らない。
 - **desktop 同梱の center を使う人**: 同梱の center の config は `~/.local/share/bantou/center.json` なので、`bantou-center memory` に `--config ~/.local/share/bantou/center.json` を付ける（`memory-settings.json` は `~/.local/share/bantou/` に置かれる）。実行ファイルは同梱の `bantou-center`（アプリ内の単体バイナリ。`packages/desktop/README.md` の「center（sidecar）」）か、同じ版の `npx bantou-center`。`--config` を省くと既定の `~/.config/bantou/center.json` の dir を見てしまい、同梱の center には効かない。別の center（remote）につないでいる時は、その center が動く host で実行する（desktop の画面では変えられない）。
 
+## MCP の接続の設定（`bantou-center mcp`）
+
+center が持つ「MCP の接続」（1 つの URL の先に複数の MCP の server が並び、鍵 1 本で通る中継など）の設定。**この版は設定・鍵・試すだけ**で、session の `--mcp-config` にも center 自身の外部記憶への書き込みにもまだ使わない（今の外部記憶は上の `bantou-center memory` の設定。読みと書きの切り替えは後の版で同時に行う）。画面（desktop・web）と MCP からは読み書きできない（設定の更新に `mcp` などの項目が来ると断る）。
+
+保存先は center の状態 dir（`--config` の dir）。`mcp-connections.json`（接続の一覧。秘密を含まない）、`mcp-secrets.json`（鍵。別 file）、`mcp-status.json`（最後に試した結果。秘密を含まない）。どれも mode 0600、状態 dir は新しく作る時 0700。書くのは `bantou-center mcp` だけ（一時 file → rename）。
+
+```bash
+bantou-center mcp list  [--config <path>] [--session <name>]
+bantou-center mcp get   <名前> [--config <path>] [--session <name>]
+bantou-center mcp set   <名前> [--config <path>] [--session <name>] [--url <url>] [--auth-header <名前>] [--auth-format <形>] [--secret <鍵の名前>] [--no-auth]
+        [--header <名前>=<値>]... [--clear-headers] [--identity-header <名前>] [--identity <値>] [--no-identity]
+        [--tool-prefix <前置き> | --no-tool-prefix] [--allow <道具>]... [--deny <道具>]... [--clear-tools]
+        [--role memory | --no-role] [--expose-memory-write | --no-expose-memory-write] [--timeout-ms <n>] [--allow-plain-http] [--off]
+bantou-center mcp unset <名前> [--config <path>] [--session <name>]
+bantou-center mcp secret set <鍵の名前> (--stdin | --file <path>) [--config <path>]
+bantou-center mcp secret unset <鍵の名前> | secret list
+bantou-center mcp test  <名前> [--config <path>] [--session <name>] [--json]
+```
+
+- 名前は `[a-z0-9][a-z0-9_-]{0,31}`。`bantou`・`bantou-messenger`・`mcp`・`conn` は予約。`--session` を省くと全 session 共通、付けると項目ごとの上書き（`--off` はその session では付けない）。
+- 鍵は引数に書けない（`--value` などは値を出さずに断る）。`printf %s "$KEY" | bantou-center mcp secret set relay --stdin`。接続は `--secret <鍵の名前>`（省略時は接続の名前）で鍵を指し、複数の接続で 1 本を共有できる。`list` / `get` は鍵の値を出さず、設定済みか（rev）だけ出す。
+- 検証: url は http / https の絶対 URL（空白・`${`・`user:pass@`・鍵らしい query 名は不可。鍵を付ける接続で `http:` の公の host は `--allow-plain-http` が要る）、`--auth-format` は `{secret}` をちょうど 1 つ、固定の header は 10 個まで（鍵らしい名前・鍵や識別と同じ名前は不可）、役割 `memory` は合成後に 1 つまで。不正なら exit 2 で何も書かない。
+- `test` は `initialize` → `tools/list` で道具の一覧が取れるかを確かめ（道具は呼ばない）、分類（`ok` / `unreachable` / `timeout` / `auth` / `not-found` / `protocol` / `config-error`）・HTTP status・道具の数・session に見える名前を出して `mcp-status.json` に残す。終了 code は 0 = 取れた、1 = 取れない、2 = 使い方の誤り。command を動かした host から接続する。
+- center が動いている間に変えてよい。同梱の center を使う人は `memory` と同じく `--config ~/.local/share/bantou/center.json` を付ける。
+
 ## 開発
 
 ```bash
