@@ -90,7 +90,7 @@ test("limitRemoteList: 小さい入力は変わらない（印なし）", () => 
 });
 
 async function sessionClient(remotes: Partial<RemoteManager>, owner: string) {
-  const s = createSessionMcpServer({ remotes: remotes as RemoteManager, owner });
+  const s = createSessionMcpServer({ remotes: { scopeOf: () => ({ servers: undefined, out_of_scope: 0 }), ...remotes } as RemoteManager, owner });
   const [c, st] = InMemoryTransport.createLinkedPair();
   const cl = new Client({ name: "ts", version: "0" });
   await Promise.all([s.connect(st), cl.connect(c)]);
@@ -108,7 +108,7 @@ test("session の MCP: task_status が owner の task だけ返し、remote_list
   assert.deepEqual(ts.tasks.map((t) => t.task_id), ["t-mine"]);
   const rl = body(await cl.callTool({ name: "remote_list", arguments: {} })) as RemoteView[];
   assert.ok(rl[0]!.worker_reports[0]!.text.length < 400);
-  assert.deepEqual(calls[0], { owner: "alpha" });
+  assert.deepEqual(calls[0], { owner: "alpha", includeOutOfScope: true });
   const t = (await cl.listTools()).tools.find((x) => x.name === "task_status")!;
   assert.ok(!JSON.stringify(t.inputSchema).includes("pattern"));
   assert.ok(t.description && t.description.length > 0);
@@ -219,7 +219,7 @@ test("remote_list: 版の状態が付いた cap が大量でも 20000 文字以�
 
 test("session の MCP: follow があると remote_list の各 cap と task_status に server の版の状態が付く。follow が無ければ付かない", async () => {
   const all = [view("alpha", [{ id: "t-mine", minAgo: 1 }], [], { server_id: "sv-aaaa", peer: "id-1" } as Partial<RemoteView>), view("beta", [{ id: "t-o", minAgo: 1 }], [], { server_id: "sv-bbbb", peer: "id-2" } as Partial<RemoteView>)];
-  const remotes = { list: (f: { owner: string }) => all.filter((v) => v.session === f.owner) } as Partial<RemoteManager> as RemoteManager;
+  const remotes = { scopeOf: () => ({ servers: undefined, out_of_scope: 0 }), list: (f: { owner: string }) => all.filter((v) => v.session === f.owner) } as Partial<RemoteManager> as RemoteManager;
   const follow = { versionOf: (ref: { server_id?: string; peer?: string }) => (ref.peer === "id-1" ? vinfo() : vinfo({ detail: "OTHER" })) } as never;
   const s = createSessionMcpServer({ remotes, follow, owner: "alpha" });
   const [c, st] = InMemoryTransport.createLinkedPair();

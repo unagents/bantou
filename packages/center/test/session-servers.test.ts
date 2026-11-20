@@ -108,7 +108,8 @@ test("remote_delete / worker_reply: server 省略は範囲内の cap だけが�
   assert.deepEqual(stops.map((s) => s.peer), ["p-mac"]);
   // 範囲内の cap がもう無い: 省略でも範囲外の cap を消さない
   await assert.rejects(mgr.delete({ owner: "pm1" }), /この session の servers に無い/);
-  assert.equal(mgr.list({ owner: "pm1" }).length, 1);
+  assert.equal(mgr.list({ owner: "pm1" }).length, 0, "既定の list には範囲外の cap は出ない");
+  assert.equal(mgr.list({ owner: "pm1", includeOutOfScope: true }).length, 1);
   // 範囲を外せば消せる
   servers.pm1 = undefined;
   assert.equal((await mgr.delete({ owner: "pm1" })).deleted, true);
