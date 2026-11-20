@@ -45,7 +45,7 @@ export function guardFromEnv(env: NodeJS.ProcessEnv = process.env): Guard {
   return cached;
 }
 
-/** GET /api/me の本体。middleware が積んだ識別を返す */
+/** GET /api/me の本体。守り（plugins/00.guard.ts）が積んだ識別を返す */
 export const meHandler: EventHandler = defineEventHandler((event) => {
   const access = event.context.access;
   if (!access) throw createError({ statusCode: 401, statusMessage: "jwt_missing" });
