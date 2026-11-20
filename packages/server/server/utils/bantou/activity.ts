@@ -81,6 +81,13 @@ export function summarizeLine(line: string): { activity: string | null } | null 
 export interface ActivityTracker extends RunObserver {
   /** worker の report（kind=done で done 判定に使う）。 */
   reported(workerId: string, kind: ReportKind): void;
+  /**
+   * cap が再開される（queue に積まれた）ことを、cap の run が実際に始まる前から activity に出す。
+   * worker の終了を知らせる activity より前に呼ぶ（center が cap idle と見て完了にしないため）。
+   */
+  holdCap(capId: string): void;
+  /** holdCap の取り消し（run が始まらず終わった時）。run が始まっていれば何もしない。 */
+  releaseCap(capId: string): void;
   /** 掃除した worker を snapshot（activity の agents[]）から外す。 */
   forget(kind: AgentKind, id: string): void;
   /** 起動時の孤児回収で見つけた running を lost で登録する。 */
@@ -112,6 +119,8 @@ interface Entry {
   error?: string;
   /** 今の実行中に report kind=done を受けたか。 */
   reportedDone: boolean;
+  /** holdCap による running（run はまだ始まっていない）。started / finished で解く。 */
+  held?: boolean;
 }
 
 const isLive = (s: ActivityState): boolean => s === "running" || s === "stalled";
@@ -233,6 +242,7 @@ export function createActivityTracker(deps: ActivityTrackerDeps): ActivityTracke
       e.finishedAt = null;
       delete e.error;
       e.reportedDone = false;
+      delete e.held;
       entries.set(keyOf(kind, id), e);
       if (e.capId !== "") markDirty(e.capId);
     },
@@ -252,12 +262,52 @@ export function createActivityTracker(deps: ActivityTrackerDeps): ActivityTracke
     finished(kind, id, outcome) {
       const e = get(kind, id);
       if (!e) return;
+      delete e.held;
       if (outcome.ok) e.state = kind === "worker" && e.reportedDone ? "done" : "idle";
       else e.state = outcome.lost ? "lost" : "failed";
       if (outcome.ok) delete e.error;
       else e.error = oneLine(outcome.error ?? "失敗", ERROR_MAX);
       e.finishedAt = now();
       if (e.capId !== "") markDirty(e.capId);
+    },
+
+    holdCap(capId) {
+      const k = keyOf("cap", capId);
+      const e = entries.get(k);
+      if (e && isLive(e.state)) return;
+      if (e) {
+        e.state = "running";
+        e.held = true;
+        e.finishedAt = null;
+        e.startedAt = now();
+        e.lastOutputAt = null;
+        delete e.error;
+      } else {
+        entries.set(k, {
+          kind: "cap",
+          id: capId,
+          capId,
+          state: "running",
+          task: "",
+          model: null,
+          lastActivity: null,
+          lastOutputAt: null,
+          startedAt: null,
+          finishedAt: null,
+          reportedDone: false,
+          held: true,
+        });
+      }
+      markDirty(capId);
+    },
+
+    releaseCap(capId) {
+      const e = entries.get(keyOf("cap", capId));
+      if (!e || e.held !== true) return;
+      delete e.held;
+      e.state = "idle";
+      e.finishedAt = now();
+      markDirty(capId);
     },
 
     reported(workerId, kind) {

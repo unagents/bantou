@@ -24,6 +24,7 @@ import { setBashWorkspace } from "./bash";
 import { agentDir, runLogDir } from "./paths";
 import { CAP_GUIDE, WORKER_GUIDE, buildTaskPrompt, buildTaskResult } from "./prompts";
 import { createReportHub, setReportHandler } from "./reports";
+import { createWorkerExitWatcher } from "./worker-exit";
 import { EXIT_RETIRED, allowedWhileRetiring, createRetireController, detectService, retiringError } from "./retire";
 import { cliRunner } from "./runner";
 import {
@@ -267,7 +268,21 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
           : ["mcp__bantou__report", "mcp__bantou__bash"],
     };
   };
-  const manager = createAgentManager({ config, runner: cliRunner, log, observer: tracker, runExtras });
+  // worker の終了（失敗・時間切れ・done 無し）は、activity を出す前に cap の再開を積む（watcher が tracker を包む）。hub は後で作る
+  const exitWatcher = createWorkerExitWatcher({
+    workspace: config.workspace,
+    maxResumes: config.session.exitResumeMax,
+    recoverMs: config.session.exitRecoverMs,
+    resumeCap: (capId, prompt, reason) => hub.resumeCap(capId, prompt, reason),
+    failTask: (capId, message) => hub.failTask(capId, message),
+    knownTask: (capId) => hub.knownTask(capId),
+    taskId: (capId) => hub.taskId(capId),
+    holdCap: (capId) => tracker.holdCap(capId),
+    releaseCap: (capId) => tracker.releaseCap(capId),
+    capOf: (workerId) => tracker.snapshot().find((a) => a.kind === "worker" && a.id === workerId)?.cap_id,
+    log,
+  });
+  const manager = createAgentManager({ config, runner: cliRunner, log, observer: exitWatcher.wrap(tracker), runExtras });
   const cleaner = createWorkerCleaner({
     workspace: config.workspace,
     keepMs: config.session.workerKeepMs,
@@ -472,6 +487,7 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
   }
   setReportHandler((capId, workerId, kind, text) => {
     tracker.reported(workerId, kind);
+    exitWatcher.reported(workerId, kind, new Date().toISOString());
     return hub.report(capId, workerId, kind, text);
   });
   setWorkerHandler(workerHub);
@@ -481,6 +497,8 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
     const capId = r.kind === "cap" ? r.id : await readOwner(config.workspace, r.id);
     if (capId) tracker.seedLost(r.kind, r.id, capId, r.error);
   }
+  // 再起動前に終わっていて、cap に知らせていない worker の終了を 1 回だけ拾う
+  void exitWatcher.recover().then((n) => log(`終了した worker の回収: cap 再開=${n}`), (e: unknown) => log(`終了した worker の回収に失敗: ${e instanceof Error ? e.message : String(e)}`));
 
   const stop = async (): Promise<void> => {
     if (closing) return;

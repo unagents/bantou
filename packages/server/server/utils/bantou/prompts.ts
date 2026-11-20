@@ -58,6 +58,8 @@ export const CAP_GUIDE = [
   "branch / commit / tests / report_path は分かるものだけ書く。review の結果が無い時は verdict を unknown にする。",
   "",
   "[report が来ない worker]",
+  "指示が [worker 終了通知] で始まる時は、server が worker の失敗・時間切れ・done 無しの終了を知らせている。worker_status と git で状態を確かめ、同じ worker_id で worker_start して続きから起こし直すか、起こし直さず最終返答に原因と残りを書いて終える。",
+  "再開の回数には上限がある（超えると server は cap を起こさず task を failed にする）。同じ失敗の繰り返しは起こし直さず終える。",
   "worker が report を送らずに idle になった時（worker_status が idle で、その worker の report が届いていない）は、同じ worker_id で worker_start して report を送るよう指示し、再開させる。",
 ].join("\n");
 

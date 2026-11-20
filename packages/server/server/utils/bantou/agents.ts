@@ -54,7 +54,21 @@ export interface RunObserver {
   /** stdout の空でない 1 行ごと。 */
   line(kind: AgentKind, id: string, line: string): void;
   /** 最終 state を書いた後。lost = server 以外による signal 終了。 */
-  finished(kind: AgentKind, id: string, outcome: { ok: boolean; lost: boolean; error?: string }): void;
+  finished(
+    kind: AgentKind,
+    id: string,
+    outcome: {
+      ok: boolean;
+      lost: boolean;
+      error?: string;
+      /** 再試行（maxRetries）を使い切った後も時間切れで終わった。 */
+      timedOut?: boolean;
+      /** stop_cap / worker_stop / server 終了による中断（再開の対象にしない）。 */
+      stopped?: boolean;
+      /** この run を始めた時刻（ISO。再試行をまたいで同じ値）。 */
+      startedAt?: string;
+    },
+  ): void;
 }
 
 export type RunExtras = Pick<ClaudeRunOptions, "mcpConfigFile" | "appendSystemPromptFile" | "extraAllowedTools">;
@@ -307,7 +321,7 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
     const key = `${kind}:${id}`;
     const dir = agentDir(config.workspace, kind, id);
     if (stopRequests.has(key)) {
-      observe((o) => o.finished(kind, id, { ok: false, lost: false, error: STOP_MSG }));
+      observe((o) => o.finished(kind, id, { ok: false, lost: false, error: STOP_MSG, stopped: true }));
       return { session_id: (await readState(dir).catch(() => null))?.session_id ?? "", ok: false, result_text: "", error: STOP_MSG };
     }
     try {
@@ -445,7 +459,7 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
           retries: retriesUsed,
         });
         log(`claude 終了: kind=${kind} id=${id} session=${sessionId} ok=true ms=${r.durationMs} retries=${retriesUsed}`);
-        observe((o) => o.finished(kind, id, { ok: true, lost: false }));
+        observe((o) => o.finished(kind, id, { ok: true, lost: false, startedAt }));
         return { session_id: sessionId, ok: true, result_text: r.resultText };
       }
       const detail = shuttingDown ? SHUTDOWN_MSG : r.detail;
@@ -470,7 +484,8 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
           // 既に居ない
         }
       }
-      observe((o) => o.finished(kind, id, { ok: false, lost, error: lost ? lostError : detail }));
+      const stopped = shuttingDown || stopRequests.has(key);
+      observe((o) => o.finished(kind, id, { ok: false, lost, error: lost ? lostError : detail, timedOut: r.timedOut, stopped, startedAt }));
       return { session_id: sessionId, ok: false, result_text: "", error: detail };
     } catch (e) {
       await markFailed(dir, errMsg(e));
