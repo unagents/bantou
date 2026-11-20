@@ -91,6 +91,8 @@ export interface RemoteListCut {
   note: string;
 }
 
+const cutNote = (total: number): string => `大きさの上限（1 回 ${total} 文字、report の本文は ${REMOTE_LIST_REPORT_TEXT_MAX} 文字、result は ${REMOTE_LIST_RESULT_MAX} 文字）で切った。落とした report は古い順`;
+
 const size = (v: unknown): number => JSON.stringify(v, null, 2).length;
 
 /**
@@ -116,12 +118,12 @@ export function limitRemoteList(views: RemoteView[], total: number = REMOTE_LIST
     if (v.result !== undefined) next.result = cutText(v.result, REMOTE_LIST_RESULT_MAX);
     if (v.task_result !== undefined) next.task_result = { ...v.task_result, summary: cutText(v.task_result.summary, REMOTE_LIST_RESULT_MAX) };
     if (reportTextsCut > 0 || resultCut) {
-      next.truncated = { reports_total: v.worker_reports.length, reports_dropped: 0, report_texts_cut: reportTextsCut, result_cut: resultCut, note: "" };
+      next.truncated = { reports_total: v.worker_reports.length, reports_dropped: 0, report_texts_cut: reportTextsCut, result_cut: resultCut, note: cutNote(total) };
     }
     return next;
   });
   const mark = (v: RemoteView & { truncated?: RemoteListCut }, dropped: number, resultCut: boolean): void => {
-    const t = v.truncated ?? { reports_total: v.worker_reports.length + dropped, reports_dropped: 0, report_texts_cut: 0, result_cut: false, note: "" };
+    const t = v.truncated ?? { reports_total: v.worker_reports.length + dropped, reports_dropped: 0, report_texts_cut: 0, result_cut: false, note: cutNote(total) };
     t.reports_dropped += dropped;
     t.result_cut = t.result_cut || resultCut;
     v.truncated = t;
@@ -141,9 +143,6 @@ export function limitRemoteList(views: RemoteView[], total: number = REMOTE_LIST
       if (v.task_result !== undefined && v.task_result.summary.length > 200) { v.task_result = { ...v.task_result, summary: `${v.task_result.summary.slice(0, 200)}…` }; cut = true; }
       if (cut) mark(v, 0, true);
     }
-  }
-  for (const v of out) {
-    if (v.truncated) v.truncated.note = `大きさの上限（1 回 ${total} 文字、report の本文は ${REMOTE_LIST_REPORT_TEXT_MAX} 文字、result は ${REMOTE_LIST_RESULT_MAX} 文字）で切った。落とした report は古い順`;
   }
   return out;
 }

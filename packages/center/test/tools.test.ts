@@ -168,10 +168,10 @@ test("center_info は { workspace, systemInstructions } を返す。未設定は
   await b.close();
 });
 
-test("session 向けの tool は remote_send / remote_create（別名）/ remote_delete / remote_list / remote_wait / worker_reply の 6 つだけ", async () => {
+test("session 向けの tool は remote_send / remote_create（別名）/ remote_delete / remote_list / remote_wait / worker_reply / task_status の 7 つだけ", async () => {
   const { session, close } = await connect();
   const c = await session("pm1");
-  assert.deepEqual((await c.listTools()).tools.map((t) => t.name).sort(), ["remote_create", "remote_delete", "remote_list", "remote_send", "remote_wait", "worker_reply"]);
+  assert.deepEqual((await c.listTools()).tools.map((t) => t.name).sort(), ["remote_create", "remote_delete", "remote_list", "remote_send", "remote_wait", "task_status", "worker_reply"]);
   await c.close();
   await close();
 });
