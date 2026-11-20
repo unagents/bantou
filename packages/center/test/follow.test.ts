@@ -308,3 +308,44 @@ test("複数 server はそれぞれ独立に扱う", async () => {
   assert.deepEqual(states, { "id-1": "updating", "id-2": "ok" });
   assert.deepEqual(f.updates, [["id-1", "0.3.1"]]);
 });
+
+test("noteOf: 更新を指示済みの server は、待っている cap / worker の件数と更新先・いつからを文に出す", async () => {
+  const f = fake();
+  let t = Date.parse("2026-01-01T00:00:00Z");
+  const fl = mk(f, "0.3.1", { now: () => t });
+  await fl.check();
+  const note = fl.noteOf({ id: "id-1" });
+  assert.match(note, /更新を指示済み/);
+  assert.match(note, /cap 1 \/ worker 2/);
+  assert.match(note, /0\.3\.0→0\.3\.1/);
+  assert.match(note, /2026-01-01T00:00:00\.000Z/);
+});
+
+test("noteOf: 更新に失敗した server は、直近の失敗の内容を文に出す", async () => {
+  const f = fake();
+  f.updateReply = () => err("npm に 0.3.1 が無い");
+  const fl = mk(f);
+  await fl.check();
+  const note = fl.noteOf({ id: "id-1" });
+  assert.match(note, /更新に失敗/);
+  assert.match(note, /npm に 0\.3\.1 が無い/);
+});
+
+test("noteOf: まだ確かめていない peer は『未確認』", () => {
+  const fl = mk(fake());
+  assert.match(fl.noteOf({ id: "id-zzz" }), /未確認/);
+});
+
+test("versionOf: center の版・server の版・更新の状態を返す。server_id（無ければ peer id）で引き、別の server は引かない。detail は 200 文字に切る", async () => {
+  const f = fake();
+  f.updateReply = () => err("x".repeat(500));
+  const fl = mk(f);
+  await fl.check();
+  const i = fl.versionOf({ peer: "id-1" })!;
+  assert.equal(i.center_protocol, PV);
+  assert.equal(i.server_version, "0.3.0");
+  assert.equal(i.state, "failed");
+  assert.ok(i.detail.length <= 200);
+  assert.equal(fl.versionOf({ peer: "id-other" }), undefined);
+  assert.equal(fl.versionOf({ server_id: "nope" }), undefined);
+});

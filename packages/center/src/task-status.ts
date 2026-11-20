@@ -19,6 +19,8 @@ export interface TaskStatusLine {
 export interface TaskStatusResult {
   at: string;
   tasks: TaskStatusLine[];
+  /** この session の cap のある server ごとの版の状態（1 行ずつ。版が揃っていても出す）。 */
+  servers: string[];
   /** 行数・文字数の上限で落とした行があれば true。 */
   truncated: boolean;
   /** 落とした行の数。 */
@@ -28,6 +30,17 @@ export interface TaskStatusResult {
 const minutes = (ms: number): number => Math.max(0, Math.floor(ms / 60_000));
 
 const clip = (s: string, max: number): string => (s.length > max ? `${s.slice(0, max - 1)}…` : s);
+
+/** servers に載せる server の数・1 行の長さの上限（task の行数・文字数の上限の内側に収める）。 */
+export const TASK_STATUS_MAX_SERVERS = 10;
+
+/** 版の状態の 1 行。server の表示名 | center の protocol | server の版 | 状態 | 一言。 */
+function versionLine(v: RemoteView): string | undefined {
+  const i = v.server_version_state;
+  if (!i) return undefined;
+  const sv = `${i.server_version ?? "?"}${i.server_protocol !== undefined ? `（protocol ${i.server_protocol}）` : ""}`;
+  return clip(`${v.server_label} | center protocol ${i.center_protocol} | server ${sv} | ${i.state} | ${i.detail}`, TASK_STATUS_LINE_MAX);
+}
 
 const stateLabel = (v: RemoteView, openAsks: number): string => {
   if (v.cap_state === "lost") return "lost";
@@ -68,16 +81,23 @@ export function buildTaskStatus(views: RemoteView[], owner: string, now: number,
   }
   rows.sort((a, b) => a.at - b.at);
   const at = new Date(now).toISOString();
+  // server ごとの版の状態（owner の cap のある server だけ。同じ server は 1 行）
+  const servers: string[] = [];
+  for (const v of views) {
+    if (v.session !== owner || servers.length >= TASK_STATUS_MAX_SERVERS) continue;
+    const l = versionLine(v);
+    if (l !== undefined && !servers.includes(l)) servers.push(l);
+  }
   const tasks: TaskStatusLine[] = [];
   for (const r of rows) {
     if (tasks.length >= TASK_STATUS_MAX_LINES) break;
     // 返り値全体（task_id・remote_id・構造・truncated / omitted も含む JSON）で測る。
-    const candidate = { at, tasks: [...tasks, r.item], truncated: true, omitted: rows.length };
+    const candidate = { at, tasks: [...tasks, r.item], servers, truncated: true, omitted: rows.length };
     if (JSON.stringify(candidate, null, 2).length > TASK_STATUS_MAX_CHARS) break;
     tasks.push(r.item);
   }
   const omitted = rows.length - tasks.length;
-  return { at, tasks, truncated: omitted > 0, omitted };
+  return { at, tasks, servers, truncated: omitted > 0, omitted };
 }
 
 /** remote_list（session 向け）で、どこを切ったかの印。 */

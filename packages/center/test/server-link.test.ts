@@ -1153,3 +1153,17 @@ test("list: serverPeer が別 peer に変わって学習済みなら、新しい
   assert.equal(e.host, "mac");
   await link.close();
 });
+
+test("門: version_mismatch の error の文に、setVersionNote の更新の状態が入る。差し込まなければ今まで通り", async () => {
+  const peer = { id: "id-a", name: "s", version: "1.2.0" };
+  const { link } = setupNoServers([peerOf("id-a", "s", "1.2.0")]);
+  const before = (await link.kickCapOn(peer, { cap_id: "r-1", prompt: "go" })) as { message: string };
+  assert.ok(!before.message.includes("更新の状態"));
+  link.setVersionNote((p) => `更新の状態: テスト用 ${p.id}`);
+  const after = (await link.kickCapOn(peer, { cap_id: "r-1", prompt: "go" })) as { message: string; code?: string };
+  assert.equal(after.code, "version_mismatch");
+  assert.match(after.message, /更新の状態: テスト用 id-a/);
+  assert.match(after.message, /版が揃うまで指示を送らない/);
+  assert.equal(link.gate(peer, "hello"), undefined, "制御メッセージは断らない");
+  await link.close();
+});

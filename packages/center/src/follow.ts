@@ -42,6 +42,46 @@ export interface FollowEntry extends ServerIdentity {
   since: string;
 }
 
+/** session 向けの道具（remote_list / task_status）に載せる、server ごとの版の状態。server の事実だけで、他の session の情報は入らない。 */
+export interface ServerVersionInfo {
+  /** center の protocol の版。 */
+  center_protocol: string;
+  /** server が名乗った protocol の版（不明なら無い）。 */
+  server_protocol?: string;
+  /** server の版（hello に答えるまで無い）。 */
+  server_version?: string;
+  state: FollowState;
+  /** 更新の状態の一言（待っている cap / worker の件数・直近の失敗の内容を含む。長いものは切る）。 */
+  detail: string;
+  /** 更新先と待っている件数（updating の時）。 */
+  update?: { to: string; running?: UpdateRunning };
+  /** この state になった時刻（ISO 8601）。 */
+  since: string;
+}
+
+/** 版の状態の一言の長さの上限（server の error 文が長くても返り値を膨らませない）。 */
+export const VERSION_DETAIL_MAX = 200;
+
+const clipDetail = (s: string): string => (s.length > VERSION_DETAIL_MAX ? `${s.slice(0, VERSION_DETAIL_MAX - 1)}…` : s);
+
+/** state を人に読める語にする（error 文に載せる）。 */
+const STATE_WORD: Record<FollowState, string> = {
+  ok: "版は一致",
+  unsupported: "自動更新できない版",
+  updating: "更新を指示済み（実行中の cap / worker の終了待ち、または再起動中）",
+  mismatch: "ビルドの不整合",
+  failed: "更新に失敗（再指示待ち）",
+  lost: "更新後に戻らない",
+  unknown: "更新の状態を確認できない",
+};
+
+/** 版が合わず断る時に error の文へ足す、その server の更新の状態。 */
+export function versionNoteOf(info: ServerVersionInfo | undefined): string {
+  if (!info) return "更新の状態: 未確認（center はまだこの server の版を確かめていない）";
+  const word = STATE_WORD[info.state];
+  return `更新の状態: ${word}（${info.since} から）。${info.detail}`;
+}
+
 export interface FollowSnapshot {
   pair: { server: string | null; protocol: string };
   peers: FollowEntry[];
@@ -53,6 +93,10 @@ export interface Follow {
   /** 1 周する（発見 → hello → 必要なら update_server）。同時に 2 周は走らない。 */
   check(): Promise<void>;
   snapshot(): FollowSnapshot;
+  /** server の版の状態。server_id（無い旧 server は peer id）で引く。無ければ undefined。 */
+  versionOf(ref: { server_id?: string; peer?: string }): ServerVersionInfo | undefined;
+  /** 版が合わず断る error に足す一文（peer id で引く）。 */
+  noteOf(peer: { id: string }): string;
   /** link の門に差し込む。更新待ちの server への kick_cap / task を送る前に断る。 */
   gate(peer: { id: string }, command: ServerCommandType): ErrorReply | undefined;
 }
@@ -294,6 +338,16 @@ export function createFollow(opts: {
     lostCheck(present);
   }
 
+  const infoOf = (e: FollowEntry): ServerVersionInfo => ({
+    center_protocol: MESSENGER_PROTOCOL.version,
+    ...(e.protocol_version !== undefined ? { server_protocol: e.protocol_version } : {}),
+    ...(e.server_version !== undefined ? { server_version: e.server_version } : {}),
+    state: e.state,
+    detail: clipDetail(e.detail),
+    ...(e.update ? { update: { to: e.update.to, ...(e.update.running ? { running: e.update.running } : {}) } } : {}),
+    since: e.since,
+  });
+
   return {
     start() {
       stopped = false;
@@ -323,6 +377,19 @@ export function createFollow(opts: {
         pair: { server: pair.server ?? null, protocol: pair.protocol },
         peers: [...recs.values()].map((r) => ({ ...r.entry })),
       };
+    },
+    versionOf(ref) {
+      for (const rec of recs.values()) {
+        const e = rec.entry;
+        const hit = ref.server_id !== undefined && e.server_id !== undefined ? ref.server_id === e.server_id : ref.peer !== undefined && ref.peer === e.id;
+        if (hit) return infoOf(e);
+      }
+      return undefined;
+    },
+    noteOf(peer) {
+      const key = byId.get(peer.id);
+      const rec = key ? recs.get(key) : undefined;
+      return versionNoteOf(rec ? infoOf(rec.entry) : undefined);
     },
     gate(peer, command) {
       if (command !== "kick_cap" && command !== "task") return undefined;

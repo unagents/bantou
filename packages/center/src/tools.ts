@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { AGENT_ID_PATTERN } from "@agent-hand/bantou-protocol";
 import { z } from "zod";
-import { ACK_TIMEOUT_MS, OWNER_HEADER, OWNER_PATTERN, OWNER_QUERY, remoteSendSchema, remoteWaitSchema, workerReplySchema, WAIT_DEFAULT_SEC, type RemoteManager, type RemoteSendInput } from "./remotes.js";
+import { ACK_TIMEOUT_MS, OWNER_HEADER, OWNER_PATTERN, OWNER_QUERY, remoteSendSchema, remoteWaitSchema, workerReplySchema, WAIT_DEFAULT_SEC, peerOfRec, type RemoteManager, type RemoteSendInput, type RemoteView } from "./remotes.js";
 import type { RemoteControlSupervisor } from "./remote-control.js";
 import { centerSettingsPatchSchema, projectSettingsPatchSchema } from "./project-settings.js";
 import { LOGIN_CODE, type LoginFlow } from "./login.js";
@@ -361,8 +361,11 @@ export function registerTools(
  * session 向けの窓口（/mcp/session）の tool。owner は呼び出し元 session（認証済みの header X-Bantou-Session）で、
  * 引数では受けない（自己申告させない）。
  */
-export function registerSessionTools(server: McpServer, deps: { remotes: RemoteManager; owner: string }): void {
-  const { remotes, owner } = deps;
+export function registerSessionTools(server: McpServer, deps: { remotes: RemoteManager; owner: string; follow?: Follow }): void {
+  const { remotes, owner, follow } = deps;
+  /** この session の cap の server ごとの版の状態（server の事実だけ。他の session の情報は入らない）。 */
+  const withVersions = (views: RemoteView[]): RemoteView[] =>
+    follow ? views.map((v) => { const info = follow.versionOf({ ...(v.server_id !== undefined ? { server_id: v.server_id } : {}), ...(peerOfRec(v) !== undefined ? { peer: peerOfRec(v)! } : {}) }); return info ? { ...v, server_version_state: info } : v; }) : views;
 
   const sendHandler = (args: Omit<RemoteSendInput, "owner">): Promise<ToolResult> =>
     guard(async () => {
@@ -429,20 +432,20 @@ export function registerSessionTools(server: McpServer, deps: { remotes: RemoteM
     "remote_list",
     {
       title: "remote 一覧",
-      description: "この session の remote-cap（server ごとに 1 つ。remote_id = cap_id, session, server（server_id。旧形式の記録で server_id が分からないものは peer id）, server_id, peer（今の到達先。長く確認できないと消える）, serverHost / serverUser / serverWorkspace, server_label（host 名を主に server_id を添えた表示。同じ host 名の server が複数ある時は user と workspace 付き）, state, 時刻, 最新の結果, 最新の task_result, 直近の worker_reports（最大 20 件、到着順）, 未完了の指示 pending（各要素に送達状態 delivery: unsent / sent / observed）、server の到達性 reachability { reachable, last_ok_at, failures }、cap の server 側の状態 cap_state（running / idle / lost / unknown）、通知を受けたものは activity 付き、server の status が取れていれば conversation { started_at, tasks, context_tokens, context_window, context_percent, usage_at, last_error_text? }（cap の会話の開始時刻・run 数・直近の context 使用量と、直近の失敗の claude の error 文。例: Prompt is too long）と、cap が failed の時の cap_last_error）の一覧。server に届かない間、作業中の cap の state は unknown。include_shared: true で旧共有 cap（session 無し。新しい指示は送らない。remote_delete で消せる）も含める。返り値は大きさの上限つき（1 回 20000 文字。worker_reports の本文は 300 文字、result は 2000 文字で切り、越えたら古い report から落とす。切った cap には truncated { reports_total, reports_dropped, report_texts_cut, result_cut, note } が付く）。task ごとの状態だけ見たい時は task_status",
+      description: "この session の remote-cap（server ごとに 1 つ。remote_id = cap_id, session, server（server_id。旧形式の記録で server_id が分からないものは peer id）, server_id, peer（今の到達先。長く確認できないと消える）, serverHost / serverUser / serverWorkspace, server_label（host 名を主に server_id を添えた表示。同じ host 名の server が複数ある時は user と workspace 付き）, state, 時刻, 最新の結果, 最新の task_result, 直近の worker_reports（最大 20 件、到着順）, 未完了の指示 pending（各要素に送達状態 delivery: unsent / sent / observed）、server の到達性 reachability { reachable, last_ok_at, failures }、cap の server 側の状態 cap_state（running / idle / lost / unknown）、通知を受けたものは activity 付き、server の status が取れていれば conversation { started_at, tasks, context_tokens, context_window, context_percent, usage_at, last_error_text? }（cap の会話の開始時刻・run 数・直近の context 使用量と、直近の失敗の claude の error 文。例: Prompt is too long）と、cap が failed の時の cap_last_error、server の版の状態 server_version_state { center_protocol, server_protocol, server_version, state（ok / updating / failed / lost / mismatch / unsupported / unknown）, detail（更新を指示済みか・待たせている cap と worker の件数・直近の失敗）, since }）の一覧。server に届かない間、作業中の cap の state は unknown。include_shared: true で旧共有 cap（session 無し。新しい指示は送らない。remote_delete で消せる）も含める。返り値は大きさの上限つき（1 回 20000 文字。worker_reports の本文は 300 文字、result は 2000 文字で切り、越えたら古い report から落とす。切った cap には truncated { reports_total, reports_dropped, report_texts_cut, result_cut, note } が付く）。task ごとの状態だけ見たい時は task_status",
       inputSchema: { include_shared: z.boolean().optional() },
     },
-    ({ include_shared }) => guard(() => json(limitRemoteList(remotes.list({ owner, ...(include_shared ? { includeShared: true } : {}) })))),
+    ({ include_shared }) => guard(() => json(limitRemoteList(withVersions(remotes.list({ owner, ...(include_shared ? { includeShared: true } : {}) }))))),
   );
   server.registerTool(
     "task_status",
     {
       title: "task の状態確認",
       description:
-        "この session が送った task ごとに 1 行の状態確認（本文は入らない）。返り値 { at, tasks: [{ task_id, remote_id, line }], truncated, omitted }。line は `<task_id> | <server の表示名> | <状態: 実行中 / 返答待ち / 失敗 / 不明 / 不通 / lost> | 経過 <分> 分 | 最後の報告 <kind> <分> 分前 | 判断が要る <n>`（判断が要る = 返答が無い ask / approve の数）。未完了の task だけ（古い順）。1 回 40 行・6000 文字まで（越えたら truncated: true と omitted = 落とした行数）。他の session の task は見えない。remote_id で 1 つの cap に絞れる。report の中身は remote_list で見る",
+        "この session が送った task ごとに 1 行の状態確認（本文は入らない）。返り値 { at, tasks: [{ task_id, remote_id, line }], servers（この session の cap の server ごとの版の状態。1 行ずつ）, truncated, omitted }。line は `<task_id> | <server の表示名> | <状態: 実行中 / 返答待ち / 失敗 / 不明 / 不通 / lost> | 経過 <分> 分 | 最後の報告 <kind> <分> 分前 | 判断が要る <n>`（判断が要る = 返答が無い ask / approve の数）。未完了の task だけ（古い順）。1 回 40 行・6000 文字まで（越えたら truncated: true と omitted = 落とした行数）。他の session の task は見えない。remote_id で 1 つの cap に絞れる。report の中身は remote_list で見る",
       inputSchema: { remote_id: z.string().min(1).optional() },
     },
-    ({ remote_id }) => guard(() => json(buildTaskStatus(remotes.list({ owner }), owner, Date.now(), remote_id ? { remote_id } : undefined))),
+    ({ remote_id }) => guard(() => json(buildTaskStatus(withVersions(remotes.list({ owner })), owner, Date.now(), remote_id ? { remote_id } : undefined))),
   );
   server.registerTool(
     "remote_wait",

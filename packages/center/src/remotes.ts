@@ -16,6 +16,7 @@ import type { ActivityStore, RemoteActivity } from "./activity.js";
 import { loadConfigSync, type ServerConfig } from "./config.js";
 import type { Logger } from "./log.js";
 import { isTransportError, matchServerPeers, type ServerLink, type ServerPeer, type TaskInput } from "./server-link.js";
+import type { ServerVersionInfo } from "./follow.js";
 import { ambiguousServerMessage, describeServer, duplicateServerIdMessage, hostOf, type ServerRef } from "./server-identity.js";
 import type { JsonListStore } from "./store.js";
 import { sessionCapId } from "./center-id.js";
@@ -246,6 +247,8 @@ export type RemoteView = Omit<RemoteRecord, "worker_reports" | "pending"> & {
   cap_last_error?: string;
   /** 表示用の server。host 名を主にして server_id（無ければ peer id）を添える。同じ host 名の server が複数ある時は user と workspace も付く。 */
   server_label: string;
+  /** server の版の状態（center の protocol・server の版・更新の状態）。session 向けの道具（remote_list / task_status）が足す。remotes.list() は付けない。 */
+  server_version_state?: ServerVersionInfo;
 };
 
 /** 通知に載せる result の先頭の長さ。 */
