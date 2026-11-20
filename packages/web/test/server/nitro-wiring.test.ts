@@ -619,6 +619,31 @@ describe("Nitro build の配線", { timeout: 300_000 }, () => {
     });
   });
 
+  // ---- 5a: 静的 asset（SPA の HTML・/_nuxt/*）も守りの内側（Nitro の静的配信は middleware より先に応答する） ----
+  it("共有鍵なしでは / と /_nuxt/* の asset が取れない。鍵と JWT があれば取れる", async () => {
+    const ok = await fetch(base + "/", { headers: h(jwt()) });
+    assert.equal(ok.status, 200);
+    const html = await ok.text();
+    const assets = [...new Set([...html.matchAll(/["'(](\/_nuxt\/[^"')\s]+\.(?:js|css))/g)].map((m) => m[1]!))];
+    assert.ok(assets.length > 0, `SPA の HTML に /_nuxt/ の asset が無い: ${html.slice(0, 300)}`);
+    // 守りの外に出ると 200 で asset の中身が返る。何も返さない（403/401）ことを、鍵なし・JWT なしの両方で見る
+    for (const path of ["/", ...assets]) {
+      const pass = await fetch(base + path, { headers: h(jwt()) });
+      assert.equal(pass.status, 200, `${path}: 守りを通れば取れる`);
+      const content = (await pass.text()).slice(0, 120);
+      assert.ok(content.length > 20, `${path}: asset の中身が空`);
+      const noKey = await fetch(base + path, { headers: h(jwt(), null) });
+      assert.equal(noKey.status, 403, `${path}: 共有鍵なし`);
+      assert.ok(!(await noKey.text()).includes(content), `${path}: 拒否の応答に中身が出ている`);
+      assert.equal((await fetch(base + path)).status, 403, `${path}: 共有鍵も JWT も無し`);
+      const noJwt = await fetch(base + path, { headers: h() });
+      assert.equal(noJwt.status, 401, `${path}: JWT なし`);
+      assert.ok(!(await noJwt.text()).includes(content), `${path}: 拒否の応答に中身が出ている`);
+    }
+    // HEAD でも同じ
+    assert.equal((await fetch(base + assets[0]!, { method: "HEAD" })).status, 403);
+  });
+
   it("child の log に token と password が出ていない", () => {
     noSecret(childLog, "server の stdout/stderr");
     assert.ok(!childLog.includes(TERM_TOKEN), "端末用 token が server の log にある");

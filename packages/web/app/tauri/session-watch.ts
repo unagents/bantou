@@ -49,15 +49,21 @@ export function noteAuthFailure(): Promise<void> {
   return checking;
 }
 
-let watched: EventSource | null = null;
-
-/** Count the stream's failures; `open` / any message resets the count. */
-export function startSessionWatch(es: EventSource): void {
-  if (watched === es) return;
-  watched = es;
+/**
+ * Watch the event stream. Two kinds of failure:
+ * - the browser keeps retrying (a dropped connection): count them, ask `/api/me` after `SSE_FAILURES_BEFORE_CHECK`;
+ * - the browser gave up (`readyState` CLOSED: a non-200 answer or a redirect, which is what an expired Access session
+ *   gives): ask at once, then `onGaveUp` so the owner can open a new stream later (while the session is fine).
+ * `open` resets the count.
+ */
+export function startSessionWatch(es: EventSource, onGaveUp: () => void): void {
   let failures = 0;
   es.addEventListener("open", () => (failures = 0));
   es.addEventListener("error", () => {
+    if (es.readyState === EventSource.CLOSED) {
+      void noteAuthFailure().finally(onGaveUp);
+      return;
+    }
     failures++;
     if (failures >= SSE_FAILURES_BEFORE_CHECK) {
       failures = 0;
