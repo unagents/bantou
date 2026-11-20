@@ -92,7 +92,52 @@ function collectPatterns(node: unknown, path: string, out: { path: string; patte
   }
 }
 
-test("全 tool の inputSchema の pattern は RegExp の v / u の両方で compile できる（Claude の API に schema を弾かれない形）", async () => {
+/**
+ * 文字 class の中にある escape の無い `[` の位置（無ければ -1）。`\[` は可。class の外の `[` は class の開始として扱う。
+ * Claude の API が tool の schema を「JSON schema is invalid」で弾く形を捉えるための検査。
+ * この基準は実測 2 例（`[A-Za-z0-9._[\]]` は弾かれ、`[A-Za-z0-9._\[\]]` は通った）から作った推測で、API の本当の基準ではない。
+ * 本当に通るかは実際の API で確かめる（docs/history/20261120-fix-tool-schema-pattern/report.md）。
+ */
+function unescapedBracketInClass(p: string): number {
+  let inClass = false;
+  for (let i = 0; i < p.length; i++) {
+    const c = p[i];
+    if (c === "\\") i++;
+    else if (!inClass) inClass = c === "[";
+    else if (c === "]") inClass = false;
+    else if (c === "[") return i;
+  }
+  return -1;
+}
+
+/** pattern のうち、`u` で compile できない物と、文字 class の中に escape の無い `[` を持つ物。 */
+function badPatterns(found: { path: string; pattern: string }[]): string[] {
+  const bad: string[] = [];
+  for (const f of found) {
+    try {
+      new RegExp(f.pattern, "u");
+    } catch (e) {
+      bad.push(`${f.path} /${f.pattern}/u: ${(e as Error).message}`);
+    }
+    const at = unescapedBracketInClass(f.pattern);
+    if (at >= 0) bad.push(`${f.path} /${f.pattern}/: 文字 class の中に escape の無い [（位置 ${at}）`);
+  }
+  return bad;
+}
+
+test("pattern の検査: 文字 class の中の escape の無い [ だけを不正とする", () => {
+  const bad = (p: string) => badPatterns([{ path: "x", pattern: p }]).length > 0;
+  assert.equal(bad("^[A-Za-z0-9._[\\]][A-Za-z0-9._[\\]-]*$"), true, "修正前の worker_start.model");
+  assert.equal(bad("^[A-Za-z0-9._\\[\\]][A-Za-z0-9._\\[\\]-]*$"), false, "[ ] だけ escape した形");
+  assert.equal(bad("^[A-Za-z0-9_-]+$"), false, "escape の無い - は可");
+  assert.equal(bad("^[+-]\\d{2}$"), false);
+  assert.equal(bad("^\\[[a-z]+\\]$"), false, "class の外の \\[");
+  assert.equal(bad("^[a-z][0-9]$"), false, "class が 2 つ");
+  assert.equal(bad("[a[b]"), true);
+  assert.equal(bad("(a"), true, "compile できない");
+});
+
+test("全 tool の inputSchema の pattern は u で compile でき、文字 class の中に escape の無い [ を持たない（Claude の API に schema を弾かれない形）", async () => {
   const { client, session, close } = await connect();
   const c = await session("pm1");
   const found: { path: string; pattern: string }[] = [];
@@ -105,17 +150,7 @@ test("全 tool の inputSchema の pattern は RegExp の v / u の両方で com
   assert.ok(found.some((f) => f.path.startsWith("session:remote_send") && f.path.endsWith(".worker_model")), "worker_model");
   assert.ok(found.some((f) => f.path.startsWith("session:remote_send") && f.path.includes(".items.") && f.path.endsWith(".model")), "items[].model");
   if (process.env.PATTERN_DUMP) console.log("PATTERN_DUMP " + JSON.stringify(found));
-  const bad: string[] = [];
-  for (const f of found) {
-    for (const flag of ["v", "u"]) {
-      try {
-        new RegExp(f.pattern, flag);
-      } catch (e) {
-        bad.push(`${f.path} /${f.pattern}/${flag}: ${(e as Error).message}`);
-      }
-    }
-  }
-  assert.deepEqual(bad, []);
+  assert.deepEqual(badPatterns(found), []);
   await c.close();
   await close();
 });

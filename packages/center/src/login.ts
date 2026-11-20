@@ -54,7 +54,7 @@ export const DEFAULT_LOGIN_TIMINGS: LoginTimings = {
 };
 
 /** 認証コード。英数字と `#` `_` `-`（claude が表示するコードは `<code>#<state>`）。 */
-export const LOGIN_CODE = /^[A-Za-z0-9#_\-]{1,512}$/;
+export const LOGIN_CODE = /^[A-Za-z0-9#_-]{1,512}$/;
 
 const ESC = Buffer.from("\u001b");
 const ENTER = Buffer.from("\r");

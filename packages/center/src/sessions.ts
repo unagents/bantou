@@ -11,8 +11,7 @@ import type { ContextUsage } from "./context-usage.js";
 import type { SessionActivityView } from "./session-activity.js";
 import type { RemoteSummary } from "./remotes.js";
 
-/** tool の schema の pattern にも出るので、文字 class の中の `-` は escape する（schema-patterns.ts）。 */
-export const SESSION_NAME = /^[A-Za-z0-9_\-]+$/;
+export const SESSION_NAME = /^[A-Za-z0-9_-]+$/;
 
 /** center が自前で保存する session（config の projects には書かない）。 */
 export interface SavedSession {

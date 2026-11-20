@@ -9,17 +9,6 @@ const id128 = z.string().min(1).max(128).refine(noNul, "NUL 文字は使えな�
 const DAY_MS = 24 * 60 * 60 * 1000;
 const party = z.object({ session: id128.optional(), capId: id128.optional(), workerId: id128.optional() });
 
-/**
- * offset 付きの ISO 8601 の日時。検証は zod の `z.iso.datetime({ offset: true })` のまま。
- * zod が JSON Schema に出す pattern は、文字 class の中の `-` を escape していない（`[+-]`）。tool の schema は Claude の API に渡るので、
- * 同じ意味のまま escape した pattern（`[+\\-]`）を schema に出す（`new RegExp(p, "v")` と `"u"` の両方で compile できる形。test/tool-schema.test.ts）。
- */
-export function isoDatetime() {
-  const s = z.iso.datetime({ offset: true });
-  const pattern = (z.toJSONSchema(s) as { pattern?: string }).pattern;
-  return pattern === undefined ? s : s.meta({ pattern: pattern.replaceAll("[+-]", "[+\\-]") });
-}
-
 /** event tool の入力。agent_id は含めない（認証済みの X-Agent-Id から確定する） */
 export const eventShape = {
   eventId: id128.describe("冪等キー。同じ eventId の再送は無視される"),
@@ -29,7 +18,8 @@ export const eventShape = {
   taskId: id128.optional(),
   kind: z.enum(EVENT_KINDS),
   body: z.string().min(1).max(65536).refine(noNul, "NUL 文字は使えない"),
-  at: isoDatetime()
+  at: z.iso
+    .datetime({ offset: true })
     .refine((s) => Date.parse(s) <= Date.now() + DAY_MS, "at は現在から 1 日より先にできない")
     .describe("発生時刻（ISO 8601）"),
 };

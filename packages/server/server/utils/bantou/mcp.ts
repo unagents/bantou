@@ -11,8 +11,8 @@ import { getWorkerHandler } from "./workers";
 export const CAP_ID_HEADER = "x-bantou-cap-id";
 export const WORKER_ID_HEADER = "x-bantou-worker-id";
 
-/** worker_id の形式。tool の schema の pattern に出るので、文字 class の中の `-` は escape する（model.ts の MODEL_PATTERN と同じ理由）。 */
-const WORKER_ID_PATTERN = /^[A-Za-z0-9_\-]+$/;
+/** worker_id の形式（worker_start / worker_status / worker_stop で共通）。 */
+const WORKER_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 const text = (t: string, isError = false) => ({ content: [{ type: "text" as const, text: t }], ...(isError ? { isError } : {}) });
 

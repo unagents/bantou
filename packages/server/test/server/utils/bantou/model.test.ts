@@ -236,15 +236,11 @@ test("daemon: kick_cap の model / worker_model は manager.invoke にそのま�
   assert.deepEqual([seen[1]!.model, seen[1]!.worker_model], [undefined, undefined]);
 });
 
-test("model: MODEL_PATTERN は protocol の MODEL_PATTERN と同じ文字列を受け付ける（書き方だけが違う）", async () => {
+test("model: MODEL_PATTERN は protocol の MODEL_PATTERN そのもの（[ ] を escape した形）", async () => {
   const { MODEL_PATTERN: proto } = await import("@agent-hand/bantou-protocol");
   const { MODEL_PATTERN: local } = await import("../../../../server/utils/bantou/model");
-  // ASCII の全文字と範囲外の文字の、長さ 0〜2 の全ての組み合わせと、実際に使う形
-  const chars = [...Array.from({ length: 128 }, (_, i) => String.fromCharCode(i)), "é", "あ", "\u{1F600}"];
-  const samples = ["", "sonnet", "opus[1m]", "claude-fable-5-2", "a.b_c-d", "-x", "x-", "a b"];
-  for (const a of chars) {
-    samples.push(a);
-    for (const b of chars) samples.push(a + b);
-  }
-  for (const s of samples) assert.equal(local.test(s), proto.test(s), JSON.stringify(s));
+  assert.equal(local, proto);
+  assert.equal(local.source, "^[A-Za-z0-9._\\[\\]][A-Za-z0-9._\\[\\]-]*$");
+  for (const ok of ["sonnet", "opus[1m]", "claude-fable-5-2", "a.b_c-d", "x-"]) assert.equal(local.test(ok), true, ok);
+  for (const ng of ["", "-x", "a b", "a/b"]) assert.equal(local.test(ng), false, ng);
 });
