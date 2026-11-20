@@ -28,6 +28,29 @@ test.describe("session list (phone, level 1)", () => {
   });
 });
 
+test.describe("guard and target", () => {
+  test("without the shared key / JWT nothing is served (page and assets)", async ({ stack, browser }) => {
+    const ctx = await browser.newContext({ extraHTTPHeaders: {} }); // no Cloudflare headers
+    const page = await ctx.newPage();
+    const res = await page.goto(stack.base + "/");
+    expect(res?.status()).toBe(403);
+    expect(await page.content()).not.toContain("_nuxt");
+    const noJwt = await ctx.request.get(stack.base + "/api/me", { headers: { "x-bantou-proxy-key": stack.headers["x-bantou-proxy-key"]! } });
+    expect(noJwt.status()).toBe(401);
+    await ctx.close();
+  });
+
+  test("no target: says so", async ({ page, stack }) => {
+    stack.setTarget(false);
+    try {
+      await page.goto("/");
+      await expect(page.getByTestId("no-target")).toBeVisible();
+    } finally {
+      stack.setTarget(true);
+    }
+  });
+});
+
 test.describe("Access session expiry (design 5.2)", () => {
   // The first event stream ends by itself (a dropped connection); the browser reconnects after `retry` ms.
   const DROPPED = { status: 200, contentType: "text/event-stream", body: "retry: 200\n: hi\n\n" } as const;
