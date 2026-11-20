@@ -3,25 +3,31 @@
 ## 解釈
 変えるのは (a) Claude に渡す名前と (b) messenger の peer 名。(c) 内部の識別子は変えない。調べた結果、この解釈で成り立つ（内部 key まで変える必要は無い）。
 
-## session 名の使われ方
-| | 場所 | 名前 | 本 fix |
+## 利用者の意図（補足）
+remote の session 一覧で、center が起動した master-cap の session を見分けられるようにする。project 名そのものは変えず、「session の名前」だけに `<project>-cap` を当てる。project 名を key にした紐付けは変えない。名前が変わる影響は運用で補い、互換の別名・移行の処理は作らない。
+
+## 対象ごとの判断
+| 対象 | 場所 | 判断 | 理由 |
 |---|---|---|---|
-| (a) | `claude --remote-control <名>`（wrapper.ts buildWrapperArgs）、旧経路 `claude remote-control --name`（remote-control.ts buildRcArgs） | project 名 | `<project>-cap` |
-| (b) | `--mcp-config` の bantou-messenger の `AGENT_MESSENGER_NAME`（wrapper.ts mcpConfigJson）。center が決めており session の Claude が set_name で決める作りではない | project 名 | `<project>-cap` |
-| (b) | center が master-cap へ完了通知を push する宛先（daemon.ts notify → server-link notifyPeer が peer 名で引く） | project 名 | `<project>-cap`（旧名へ fallback） |
-| (b) | 起動時の指示文「session「…」」（system-instructions.ts master-cap-role） | project 名 | `<project>-cap`、role@3→@4 |
-| (c) | sessions の key、cap_id `c-<center-id>-<session>`、作業 dir、log 名、memory の X-Agent-Id、bantou MCP の X-Bantou-Session、session token、desktop の操作名、remote_send 等の session 引数 | project 名 | 変えない |
+| remote-control 一覧の名前 | `claude --remote-control <名>`（wrapper.ts buildWrapperArgs）、旧経路 `claude remote-control --name`（buildRcArgs） | **変えた** `<project>-cap` | 目的そのもの。表示名で、他の記録の key に使われていない |
+| messenger 登録名 | `--mcp-config` の `AGENT_MESSENGER_NAME`（mcpConfigJson） | **変えた** | center が起動時に決める session を指す名前。code を確かめた結果、remotes.json・sessions.json・cap_id・memory はどれも project 名（session）で持ち、messenger 名は保存されていない（通知のたびに導出）。project 名を key にした紐付けには当たらない |
+| daemon notify の宛先引き | daemon.ts notify → notifyPeer（peer 名で引く） | **変えた**（新名だけで引く。旧名への fallback は外した） | 宛先は messenger 名なので、登録名と同じ関数で導出する。owner（= session = project 名）自体は変えない |
+| 起動時の指示文 | system-instructions.ts master-cap-role「session「…」」 | **変えた**（`<project>-cap`、role@4） | session を指す所。実際に付く名前と一致させる。project を指す所は無い |
+| sessions.json の key / session 名 | sessions.ts, project-settings.ts | 変えない | project 名を key とする内部の識別子 |
+| remote の cap_id `c-<center-id>-<session>`、remotes.json の session | center-id.ts, remotes.ts | 変えない | server 側の cap の記録との対応が切れる |
+| 作業 dir・log 名 | remote-control.ts（`<project>.log`） | 変えない | 既存の file との対応 |
+| memory の agent ID（X-Agent-Id） | wrapper.ts mcpConfigJson | 変えない | 記憶との対応 |
+| bantou MCP の X-Bantou-Session・session token | wrapper.ts / session-auth.ts | 変えない | center の内部の識別子（tool の owner の特定） |
+| desktop の操作の引数・tool（remote_send 等）が受ける session 名 | desktop / tools.ts | 変えない | 内部の識別子 |
 
-## 実装
-- `src/session-name.ts` の `capSessionName(project)` が変換の唯一の場所。`-cap` で終わる名前は重ねない。
-- messenger の名前は center が起動時に env（AGENT_MESSENGER_NAME）で決めるので、指示文で Claude に set_name させる方式は採らない（Claude の判断に依存せず確実に決まるため）。指示文には実際に付く名前だけを書く。
-- 利用者や設定が別名を渡す経路は無い（name は project 名のみ）。変換は常に通る。
+変換は `src/session-name.ts` の `capSessionName(project)` 1 か所。`-cap` で終わる名前は重ねない。messenger 名は center が env で決めるので、Claude に set_name させる方式は採らない。
 
-## 既存 session への影響
-- center / app を再起動して session が再起動すると、remote-control 一覧の名前と messenger の peer 名が `bantou` → `bantou-cap` に変わる。再起動するまでは旧名のまま。
-- 他の session / peer が旧名を宛先にしていると、再起動後は届かない（宛先の更新が要る）。互換の別名登録は messenger 側の仕様に踏み込むので入れていない。
-- center → master-cap の完了通知は、新名で見つからなければ旧名へ送る fallback を入れた（再起動前の session に通知が届き続ける）。最小の移行処理で、sessions.json の移行は不要（key が不変のため）。
-- remote の cap の記録（cap_id）と memory の記憶との対応は変わらない。
+## 運用で補う事（互換の別名・移行は作っていない）
+- 変わる名前: remote-control 一覧の session 名と messenger の peer 名が `<project>` から `<project>-cap`（例 bantou → bantou-cap）になる。
+- いつ変わるか: center（または app）を更新して再起動した後、master-cap の session が次に起動された時（session の再起動・`session_create`・center 再起動で session を立て直す時）。起動済みの session は再起動するまで旧名のまま。
+- 古い名前を宛先にしている物: center が master-cap へ push する完了通知は、center 更新後は新名だけで引く。再起動前の旧名の session には届かない（center.log に「messenger に peer …-cap がいない」と出る）。この時は session を再起動して新名にするか、`remote_wait` / `remote_list` で結果を確かめる。他の session や peer が旧名で master-cap へ送っている場合も、再起動後は届かないので宛先を新名へ更新する。
+- 確認の仕方: Claude の remote-control の session 一覧で `<project>-cap` が見える事、`list_peers` で `<project>-cap` が見える事、center.log の通知の送信結果（`送れた／peer がいない`）。
+- 変わらない物: sessions.json、cap_id、remotes.json、作業 dir、log、memory の対応。移行は不要。
 
 ## test
 - packages/center typecheck: 通る。
