@@ -30,6 +30,8 @@ export interface Stack {
   headers: Record<string, string>;
   /** Set the center's session list (names only). */
   setSessions(names: string[]): void;
+  /** Point the backend at the fake center (default) or at nothing (settings file removed: "no target"). */
+  setTarget(on: boolean): void;
   /** Push a `sessions` event from the center to the web backend. */
   pushSessionsEvent(reason: string, name: string): Promise<void>;
   close(): Promise<void>;
@@ -41,11 +43,8 @@ export async function startStack(): Promise<Stack> {
   const center = await FakeCenter.start("e2e-center-token-0123456789");
   const dir = mkdtempSync(join(tmpdir(), "bantou-web-e2e-"));
   const settingsFile = join(dir, "settings.json");
-  writeFileSync(
-    settingsFile,
-    JSON.stringify({ enabled: false, port: 7910, workspace: "~/.bantou", token: "", remote: { url: center.url, token: "e2e-center-token-0123456789" } }),
-    { mode: 0o600 },
-  );
+  const settings = JSON.stringify({ enabled: false, port: 7910, workspace: "~/.bantou", token: "", remote: { url: center.url, token: "e2e-center-token-0123456789" } });
+  writeFileSync(settingsFile, settings, { mode: 0o600 });
   const conns: ServerResponse[] = [];
   center.onGet = (req, res) => {
     if (req.url !== "/events") return false;
@@ -98,6 +97,7 @@ export async function startStack(): Promise<Stack> {
     base,
     center,
     headers,
+    setTarget: (on) => (on ? writeFileSync(settingsFile, settings, { mode: 0o600 }) : rmSync(settingsFile, { force: true })),
     setSessions: (names) => center.tools.set("session_list", names.map((name) => ({ name, state: "running" }))),
     pushSessionsEvent: async (reason, name) => {
       for (let i = 0; i < 100 && conns.length === 0; i++) await new Promise((r) => setTimeout(r, 50));
