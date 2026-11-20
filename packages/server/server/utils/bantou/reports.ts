@@ -64,6 +64,17 @@ export interface ReportHub {
   rememberTask(capId: string, taskId: string): Promise<void>;
   /** worker の report を記録し、cap の resume を queue に積む。積んだ時点で戻る。 */
   report(capId: string, workerId: string, kind: ReportKind, text: string): Promise<void>;
+  /**
+   * worker の終了を理由に cap を再開する（server 内部の呼び出し。report と同じく manager の queue に乗り、cap が turn の途中なら順番待ちになる）。
+   * cap の invoke は同期で積む（戻る前に manager の queued に入る）。戻り値は cap の返信を出し切った時に解ける。
+   */
+  resumeCap(capId: string, prompt: string, reason: string): Promise<void>;
+  /** cap を再開せずに、task の結果（task が無ければ error 返信）として失敗を center へ送る。失敗は log のみ。 */
+  failTask(capId: string, message: string): Promise<void>;
+  /** cap の最新の task_id（メモリ → logs/task.json）。 */
+  taskId(capId: string): Promise<string | undefined>;
+  /** メモリにある cap の最新の task_id（同期）。 */
+  knownTask(capId: string): string | undefined;
   /** cap を依頼した center へ activity 通知を送る。center が不明なら何もしない。失敗は投げる。 */
   notify(capId: string, notice: ActivityNotice): Promise<void>;
   /** report 起因の実行がすべて終わる（返信を出し切る）のを待つ。 */
@@ -246,12 +257,17 @@ export function createReportHub(deps: ReportHubDeps): ReportHub {
     const n: Promise<void> = sendReportNotice(capId, notice).finally(() => notices.delete(n));
     notices.add(n);
 
-    const prompt = buildReportPrompt(workerId, kind, text);
+    void startResume(capId, buildReportPrompt(workerId, kind, text), `report from worker ${workerId}`, taskId);
+  }
+
+  /** cap の invoke を同期で積み、返信（task_result / cap_result / error）を center へ送る。 */
+  function startResume(capId: string, prompt: string, reason: string, knownTaskId: string | undefined): Promise<void> {
     const p: Promise<void> = deps
-      .invoke(capId, { prompt, reason: `report from worker ${workerId}`, keepTask: true })
+      .invoke(capId, { prompt, reason, keepTask: true })
       .then(
-        (r) => {
+        async (r) => {
           // task 指示中の cap が task_result の JSON で答えたら task_result、そうでなければ従来どおり cap_result
+          const taskId = knownTaskId ?? (await taskOf(capId));
           const tr = taskId !== undefined && r.ok ? extractTaskResult(capId, taskId, r.result_text) : undefined;
           return route(capId, tr ?? { bantou: PROTOCOL_VERSION, type: "cap_result", cap_id: capId, ...r });
         },
@@ -270,6 +286,33 @@ export function createReportHub(deps: ReportHubDeps): ReportHub {
       )
       .finally(() => pending.delete(p));
     pending.add(p);
+    return p;
+  }
+
+  function resumeCap(capId: string, prompt: string, reason: string): Promise<void> {
+    return startResume(capId, prompt, reason, tasks.get(capId));
+  }
+
+  async function failTask(capId: string, message: string): Promise<void> {
+    const taskId = await taskOf(capId);
+    const reply: ServerReply =
+      taskId !== undefined
+        ? {
+            bantou: PROTOCOL_VERSION,
+            type: "task_result",
+            cap_id: capId,
+            task_id: taskId,
+            state: "failed",
+            summary: message,
+            workers: [],
+            review: { verdict: "unknown", items: [], rounds: 0 },
+            remaining: [message],
+            error: message,
+          }
+        : { bantou: PROTOCOL_VERSION, type: "error", ok: false, message, command: "kick_cap", cap_id: capId };
+    const p = route(capId, reply).finally(() => notices.delete(p));
+    notices.add(p);
+    await p;
   }
 
   return {
@@ -277,6 +320,10 @@ export function createReportHub(deps: ReportHubDeps): ReportHub {
     noteCenter,
     rememberTask,
     report,
+    resumeCap,
+    failTask,
+    taskId: taskOf,
+    knownTask: (capId) => tasks.get(capId),
     notify,
     drain: async () => {
       await Promise.allSettled([...pending, ...notices]);

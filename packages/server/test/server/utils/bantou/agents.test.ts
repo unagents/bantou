@@ -477,7 +477,7 @@ test("agents: spawn 前（git 準備中など）の stop でも claude を起動
   });
 });
 
-type Obs = { ev: string[]; finished: Array<{ ok: boolean; lost: boolean; error?: string }>; started: Array<{ id: string; capId?: string; keepTask?: boolean }> };
+type Obs = { ev: string[]; finished: Array<{ ok: boolean; lost: boolean; error?: string; timedOut?: boolean; stopped?: boolean; startedAt?: string }>; started: Array<{ id: string; capId?: string; keepTask?: boolean }> };
 
 function observer(): { o: import("../../../../server/utils/bantou/agents").RunObserver; obs: Obs } {
   const obs: Obs = { ev: [], finished: [], started: [] };
@@ -512,7 +512,9 @@ test("agents: observer は started → line → finished(ok) を受け、runner 
     );
     await m.invoke("worker", "w1", { prompt: "p", capId: "c1", keepTask: true });
     assert.deepEqual(obs.ev, ["started:worker:w1", "line:worker:w1:a", "line:worker:w1:b", "finished:worker:w1"]);
-    assert.deepEqual(obs.finished, [{ ok: true, lost: false }]);
+    assert.equal(obs.finished.length, 1);
+    assert.deepEqual({ ok: obs.finished[0]!.ok, lost: obs.finished[0]!.lost }, { ok: true, lost: false });
+    assert.equal(typeof obs.finished[0]!.startedAt, "string");
     assert.deepEqual(obs.started, [{ id: "w1", capId: "c1", keepTask: true }]);
   });
 });
@@ -539,7 +541,7 @@ test("agents: server 以外による signal 終了は lost。timeout・stop は 
 
     const m2 = mgr(f, async () => ({ ...ng("タイムアウト (1ms)", { timedOut: true }), signal: "SIGKILL" }) as ClaudeRunResult, { observer: o });
     await m2.invoke("cap", "c2", { prompt: "p" });
-    assert.deepEqual(obs.finished[1], { ok: false, lost: false, error: "タイムアウト (1ms)" });
+    assert.deepEqual(obs.finished[1], { ok: false, lost: false, error: "タイムアウト (1ms)", timedOut: true, stopped: false, startedAt: obs.finished[1]!.startedAt });
   });
 });
 
@@ -563,7 +565,7 @@ test("agents: stop による signal 終了は lost にならず failed", async (
     release();
     await s;
     await p;
-    assert.deepEqual(obs.finished, [{ ok: false, lost: false, error: "stop_cap により停止" }]);
+    assert.deepEqual(obs.finished, [{ ok: false, lost: false, error: "stop_cap により停止", stopped: true, timedOut: false, startedAt: obs.finished[0]!.startedAt }]);
   });
 });
 

@@ -39,6 +39,8 @@ export const DEFAULT_SESSION = {
   extraArgs: [] as string[],
   capBashSandbox: false,
   workerKeepMs: 1_800_000,
+  exitResumeMax: 3,
+  exitRecoverMs: 3_600_000,
   env: {} as Record<string, string>,
 };
 
@@ -61,6 +63,10 @@ export interface SessionConfig {
   capBashSandbox: boolean;
   /** 終わった worker の dir を掃除するまでの待ち時間（ms）。0 は掃除しない。 */
   workerKeepMs: number;
+  /** 1 つの task で、worker の異常終了を理由に cap を再開する上限回数。超えたら再開せず task の結果に error を載せる。0 は再開しない。 */
+  exitResumeMax: number;
+  /** server 起動時に、直近この時間（ms）に終わった未通知の worker を拾う。0 は拾わない。 */
+  exitRecoverMs: number;
   /** spawn する claude に追加で渡す環境変数。自身の環境変数に上書きで合成する。 */
   env: Record<string, string>;
 }
@@ -174,6 +180,14 @@ function parseSession(v: unknown, path: string): SessionConfig {
   if (typeof workerKeepMs !== "number" || !Number.isInteger(workerKeepMs) || workerKeepMs < 0) {
     throw new Error(`config の session.workerKeepMs は 0 以上の整数（0 は掃除しない）: ${path}`);
   }
+  const exitResumeMax = v.exitResumeMax ?? DEFAULT_SESSION.exitResumeMax;
+  if (typeof exitResumeMax !== "number" || !Number.isInteger(exitResumeMax) || exitResumeMax < 0) {
+    throw new Error(`config の session.exitResumeMax は 0 以上の整数（0 は再開しない）: ${path}`);
+  }
+  const exitRecoverMs = v.exitRecoverMs ?? DEFAULT_SESSION.exitRecoverMs;
+  if (typeof exitRecoverMs !== "number" || !Number.isInteger(exitRecoverMs) || exitRecoverMs < 0) {
+    throw new Error(`config の session.exitRecoverMs は 0 以上の整数（0 は拾わない）: ${path}`);
+  }
   return {
     claude,
     permissionMode,
@@ -184,6 +198,8 @@ function parseSession(v: unknown, path: string): SessionConfig {
     extraArgs: parseStringList(v.extraArgs, "extraArgs", path),
     capBashSandbox,
     workerKeepMs,
+    exitResumeMax,
+    exitRecoverMs,
     env: parseEnv(v.env, path),
   };
 }
