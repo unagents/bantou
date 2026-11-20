@@ -163,6 +163,10 @@ test("readSettings は memory を読み捨てる（外部記憶は memory-settin
 test("assertCenterOnly: memory のキーがあれば（null も）理由つきで断る。無ければ通す", () => {
   assert.throws(() => assertCenterOnly({ memory: { url: "http://a/mcp", token: "SECRET" } }), (e: Error) => /center の側だけ/.test(e.message) && !e.message.includes("SECRET"));
   assert.throws(() => assertCenterOnly({ memory: null }), /MCP からは変えられない/);
+  for (const k of ["mcp", "mcpConnections", "mcpSecrets"]) {
+    assert.throws(() => assertCenterOnly({ [k]: { url: "http://x/?q=SECRETVAL" } }), (e: Error) => /center の側だけ/.test(e.message) && !e.message.includes("SECRETVAL"), k);
+    assert.throws(() => assertCenterOnly({ [k]: null }), /MCP からは変えられない/, `${k}: null`);
+  }
   assert.doesNotThrow(() => assertCenterOnly({ instructions: "x" }));
   assert.doesNotThrow(() => assertCenterOnly(undefined));
 });
