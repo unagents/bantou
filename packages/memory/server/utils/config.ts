@@ -1,6 +1,9 @@
 // 環境変数の読み取り。値（token 等）は log に出さない。
 import { DEFAULT_EMBED_BATCH, DEFAULT_EMBED_RUN_MS } from "./embed";
 
+/** MEMORY_EMBED_RUN_MS の上限。毎分の起動（60 秒）より短く保つ（run が 60 秒を越えると、次の起動が飛ぶ） */
+export const MAX_EMBED_RUN_MS = 55_000;
+
 export interface MemoryEnv {
   databaseUrl: string;
   embedModel: string;
@@ -18,7 +21,7 @@ export interface MemoryEnv {
   recallEmbedTimeoutMs: number;
   /** 1 回の /api/embed に送る件数 */
   embedBatch: number;
-  /** 1 回の run で埋め込みに使う時間の上限（毎分の起動が飛ばないよう、60 秒より短くする） */
+  /** 1 回の run で埋め込みに使う時間の上限（毎分の起動が飛ばないよう、MAX_EMBED_RUN_MS で頭打ちにする） */
   embedRunMs: number;
 }
 
@@ -41,6 +44,6 @@ export function readEnv(env: Record<string, string | undefined> = process.env): 
     embedTimeoutMs: int(env.MEMORY_EMBED_TIMEOUT_MS, 60000),
     recallEmbedTimeoutMs: int(env.MEMORY_RECALL_EMBED_TIMEOUT_MS, 60000),
     embedBatch: int(env.MEMORY_EMBED_BATCH, DEFAULT_EMBED_BATCH),
-    embedRunMs: int(env.MEMORY_EMBED_RUN_MS, DEFAULT_EMBED_RUN_MS),
+    embedRunMs: Math.min(int(env.MEMORY_EMBED_RUN_MS, DEFAULT_EMBED_RUN_MS), MAX_EMBED_RUN_MS),
   };
 }

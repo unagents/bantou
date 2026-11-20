@@ -2,7 +2,7 @@
 
 2026-11-20。`packages/memory` だけを変えた（center / protocol は無変更）。deploy はしていない（review の後、別の者が行う）。
 
-commit は 2 つ。1 つ目（ed29971）が最初の修正、2 つ目が review の指摘 14 件と test の穴への対応。この文書は 2 つ目の後の状態を書いている。review への対応の一覧は末尾の「review の指摘への対応」。
+commit は 3 つ。1 つ目（ed29971）が最初の修正、2 つ目（b2db9b2）が review の指摘 14 件と test の穴への対応、3 つ目が 2 回目の review（verdict は ok）で残った指摘と test の穴への対応。この文書は 3 つ目の後の状態を書いている。review への対応の一覧は末尾の「review の指摘への対応」と「2 回目の review への対応」。
 
 ## 原因（2026-11-20 の実測で確定していたもの）
 
@@ -14,12 +14,12 @@ commit は 2 つ。1 つ目（ed29971）が最初の修正、2 つ目が review 
 
 | 事 | 場所 |
 |---|---|
-| 小分け・並びの枠（新しい順 / 古い順 / 再試行）・1 件ずつへの fallback・失敗の後回し・時間上限・全滅した agent を外す・agent の交互と続きからの開始 | `packages/memory/server/utils/embed.ts`（`embedBacklog`） |
+| 小分け・並びの枠（新しい順 / 古い順 / 再試行）・1 件ずつへの fallback・失敗の後回し・時間上限・続けて失敗した agent を外す・agent の交互と続きからの開始 | `packages/memory/server/utils/embed.ts`（`embedBacklog`） |
 | recall の query を優先する門（`EmbedGate`）と query 用の embedder | `packages/memory/server/utils/embed.ts`（`createEmbedGate` / `createQueryEmbedder`）、`server/utils/runtime.ts`、`server/utils/tools.ts`（`handleRecall`） |
 | Ollama client: timeout を `EmbedTimeoutError` に、呼び出しごとの timeout、error に本文を入れない | `server/utils/embed.ts`（`createOllamaEmbedder`） |
 | recall が埋め込みを取れない時は `EmbedUnavailableError`（理由つき）で早く返す | `server/utils/recall.ts` |
 | timeout の設定を分けた、件数・時間上限の設定 | `server/utils/config.ts` |
-| 抽出と埋め込みを別の task に分けた。run ごとの log（同じ error は間引く）、process 内の重複実行の防止、直近の error の保持と解消 | `server/utils/worker.ts`（`runExtractCycle` / `runEmbedCycle` / `runTaskSafely`）、`server/tasks/memory/extract.ts`、`server/tasks/memory/embed.ts`、`nuxt.config.ts` |
+| 抽出と埋め込みを別の task に分けた。run ごとの log（同じ error は間引く）、process 内の重複実行の防止、直近の error の保持と解消 | `server/utils/worker.ts`（`runExtractCycle` / `runEmbedCycle` / `runTaskSafely`）、`server/utils/tasks.ts`（task の中身。`runEmbedTask` / `runExtractTask`）、`server/tasks/memory/extract.ts`、`server/tasks/memory/embed.ts`、`nuxt.config.ts` |
 | 状態を返す MCP tool `status` | `server/mcp/tools/status.ts`、`server/utils/status.ts`（`buildStatus`） |
 | 失敗管理の列 | `migrations/002_embed_retry.sql` |
 
@@ -28,7 +28,7 @@ commit は 2 つ。1 つ目（ed29971）が最初の修正、2 つ目が review 
 - **小分けの件数: 既定 1**（`MEMORY_EMBED_BATCH`。1 つ目の commit では 2）。Ollama は入力を順に計算するので、件数を増やしても全体の速さはほぼ変わらない。一方、送信済みの 1 回は止められないので、recall の query が待つ最長時間は小分け 1 回分になる。1 件なら待ちは 1 件分で、run の時間の刻みも細かくなる（下の表）。2 件以上にも設定できる。
 - **埋め込みの timeout: 既定 60 秒**（`MEMORY_EMBED_TIMEOUT_MS`）。chatp の timeout とは別の設定で、`MEMORY_HTTP_TIMEOUT_MS` は引き継がない（chatp に合わせて延ばした値で Ollama を長く待たないため）。`MEMORY_HTTP_TIMEOUT_MS` は chatp の timeout として残し、`CHATP_TIMEOUT_MS` があればそちらを使う。
   - 互換の注意: これまで `MEMORY_HTTP_TIMEOUT_MS` で Ollama の timeout も変えていた設置は、`MEMORY_EMBED_TIMEOUT_MS` を足す必要がある（memory の host の env には上書きが無いと聞いているので、影響しない）。
-- **1 回の run の時間上限: 既定 50 秒**（`MEMORY_EMBED_RUN_MS`。1 つ目の commit では 45 秒）。上限を過ぎたら新しい小分けを始めない。加えて、**その run で測った 1 件の所要（最大）から、始めると上限をまたぐと見込まれる小分けも始めない**。run は上限の内で終わるので、毎分の起動が飛ばない。
+- **1 回の run の時間上限: 既定 50 秒**（`MEMORY_EMBED_RUN_MS`。1 つ目の commit では 45 秒。3 つ目の commit から 55 秒で頭打ち: 60000 以上を入れると run が 60 秒を越え、毎分の起動が飛ぶため）。上限を過ぎたら新しい小分けを始めない。加えて、**その run で測った 1 件の所要（最大）から、始めると上限をまたぐと見込まれる小分けも始めない**。run は上限の内で終わるので、毎分の起動が飛ばない。
   - 1 つ目の commit は「上限の前に始めた小分けは最後まで待つ」だけだったので、1 件 15 秒・2 件ずつだと小分けが 0 秒と 30 秒に始まり 60 秒過ぎに終わって、毎分の起動が 1 回おきに捨てられていた（Nitro は実行中の task の起動を捨てる）。
   - 固定の短い上限（例: 25 秒）にする案は採らなかった。機械の速さによって「上限 + 小分け 1 回分」が 60 秒を超えるかどうかが変わり、遅い機械では使える時間を半分捨てるため。測った所要で決める方が、速さに依らず 60 秒に収まる。
   - 上限を超えるのは、送った 1 回が見込みより長くかかった時だけ（最悪は timeout まで = 50 + 60 秒）。その時は次の起動が 1 回飛ぶ。積み上がらない。
@@ -42,15 +42,20 @@ commit は 2 つ。1 つ目（ed29971）が最初の修正、2 つ目が review 
   - 枠の半分は新しい順のままなので、今入った記憶は数回の小分けの内に recall に出る（1 件 40 秒の機械で、最悪 3 分）。
   - 枠の対象が無い時は他の種類の item を取るので、枠を空費しない。
 - **失敗した 1 件の扱い: 記録して後回し**。失敗した item に `embed_attempts + 1` / `embed_failed_at` / `embed_error`。次に試せるのは 60 秒 × 2^(回数-1)（上限 1 時間）の後。成功すれば記録は消える。諦める上限は置いていない（最長でも 1 時間に 1 回の再試行で、Ollama 側が直れば自然に埋まる）。
-- **全滅した agent はその run から外す。run 全体を打ち切るのは Ollama の障害とみなせる時だけ**。
+- **続けて 2 件失敗した agent はその run から外す。run 全体を打ち切るのは Ollama の障害とみなせる時だけ**。
   - 1 つ目の commit は、どれか 1 つの agent の小分けが全滅すると run 全体を打ち切っていた。必ず失敗する item を持つ agent が id の若い側にあると、その item の間隔が明けるたびに、後ろの agent がその run で試されなかった。
-  - 今は、全滅した agent だけを外して他を続ける。打ち切るのは 2 通り: (1) **接続できない**（`ECONNREFUSED` / `EHOSTUNREACH` / `ENOTFOUND` など、接続の確立に失敗した時）。item の内容とは無関係なので **item に失敗を付けない**。Ollama が落ちていた間に入った item が、復帰後に後回しにならない。(2) **続けて 2 つの agent が全滅**。
+  - 2 つ目の commit は、全滅した agent だけを外して他を続けた。ただし既定の 1 回 1 件では「全滅」= 1 件の失敗なので、最新側に必ず失敗する item が数件あると、その agent は run ごとに 1 件失敗しただけで終わり、正常な item の消化が遅れた。
+  - 今（3 つ目の commit）は、**1 件の失敗では外さない**。その item を後回しにして、同じ agent の次の item へ進む。同じ agent で**続けて 2 件**失敗したら（間に 1 件でも通れば数え直す）、その run から外す。
+  - 打ち切るのは 2 通り: (1) **接続できない**（`ECONNREFUSED` / `EHOSTUNREACH` / `ENOTFOUND` など、接続の確立に失敗した時）。item の内容とは無関係なので **item に失敗を付けない**。Ollama が落ちていた間に入った item が、復帰後に後回しにならない。(2) **続けて 2 つの agent が外れた**（間に他の agent が 1 回でも進めば数え直す）。
+  - 失敗だけで 1 件も通らなかった run は `run=failing` と出す（agent が外れたかどうかに依らない）。
   - 応答の途中で切れた（`ECONNRESET` など）と timeout は、入力が原因の恐れがあるので item の失敗として数える（数えないと、その item が先頭を塞ぐ）。
-  - Ollama が応答しない（つながるが返らない）障害の間は、1 run で 1 件に失敗が付く（timeout の 60 秒で run の上限を過ぎるため）。復帰後、その item は再試行の枠で埋まる。
+  - Ollama が応答しない（つながるが返らない）障害の間は、1 run で 1 件に失敗が付く（timeout の 60 秒で run の上限を過ぎるため）。
+  - **つながるが失敗を返す障害（HTTP 5xx など）の間**は、失敗がすぐ返るので、1 run で agent ごとに 2 件まで（run 全体で 4 件まで）に失敗が付く。毎分繰り返され、再試行のたびに回数が増える。3 つ目の commit で、1 run あたりの件数は 2 つ目の commit の 2 倍になった（1 件で外さなくなった分）。
+  - 失敗が付いた item は、復帰後もその時点の間隔（60 秒 × 2^(回数-1)、最大 1 時間）が明けるまで埋まらない。**障害が 1 時間ほど続くと、一部の item は復帰から最大 1 時間遅れる**。失敗の付いていない item と新しい記憶は、復帰した次の run から進む。遅れている件数は `status` の `embeddingRetryWait` と log の `retry-wait`。
 - **小分けでは通らず 1 件ずつなら通る時**（2 件以上に設定していて、小分けが timeout に収まらない機械）。その run の残りと、以後 30 回の run を初めから 1 件ずつ送る（process の中に覚える）。1 つ目の commit は run の中だけの切り替えだったので、毎 run 60 秒の timeout を待っていた。30 回の後に設定の件数をもう一度試し、通れば戻る。
-- **query を塞がない仕組み**。recall の query は門を通し、query が実行中・待ち中の間は消化が次の小分けを送らない。query が待つのは最長で送信済みの 1 回分。1 件ずつに落とした時の 1 件目も、20 秒を上限に query へ譲ってから送る（譲り切れなくても送る。進む事の保証）。query の timeout は `MEMORY_RECALL_EMBED_TIMEOUT_MS`（既定 60 秒）。過ぎたら recall は `recall: query の埋め込みを取得できない（ollama embed timeout …）。時間を置いて再試行すること` の error を返す（MCP の `isError`）。以前は 120 秒固まった。
-- **状態の口は MCP tool**（`status`）にした。HTTP の口は足していない（middleware が `/mcp` 以外を 404 にしていて、認証と agent の制限が `/mcp` の中にあるため）。入力は無し。数えるのは認証済み agent の行だけ（SQL の条件 + RLS）。本文は返さない。worker の error は、次に成功した時に消える。SQL は 1 文 5 秒の上限つき（DB が遅い時は error で早く返る）。消化の SQL は 1 文 15 秒。
-- **log**。件数が動いた agent と error だけを 1 行ずつ。何も無い run は 0 行。agent ID・件数・item の ID・error の要旨（200 字まで）だけで、本文・token・URL は出さない。Ollama の error には応答の body も fetch の message も入れない（入力や URL が写っている恐れがあるため。接続の失敗は固定の文言 + error の code）。**同じ要旨の error が続く間は初回と 30 分ごとにだけ出し、解消した時に 1 行出す**。task は失敗を外へ throw しない（throw すると Nitro の scheduler が毎分 error を丸ごと出力する）。
+- **query を塞がない仕組み**。recall の query は門を通し、query が実行中・待ち中の間は消化が次の小分けを送らない。query が待つのは最長で送信済みの 1 回分。**run の最初の 1 回**と、1 件ずつに落とした時の 1 件目は、20 秒を上限に query へ譲ってから送る（譲り切れなくても送る。進む事の保証）。run の最初の 1 回の分は、run の上限の半分も越えない（譲った後に送る時間を残す）。2 つ目の commit では、この上限があるのは 1 件ずつに落とした時の 1 件目だけで、recall が重なり続けて query が途切れない間は、run が上限まで待って 1 件も送らずに終わっていた（2 つの呼び手が recall を続けて出す状態で 4 run とも 0 件）。今は 1 run に最低 1 回は送る。2 回目以降は query を優先する。query の timeout は `MEMORY_RECALL_EMBED_TIMEOUT_MS`（既定 60 秒）。過ぎたら recall は `recall: query の埋め込みを取得できない（ollama embed timeout …）。時間を置いて再試行すること` の error を返す（MCP の `isError`）。以前は 120 秒固まった。
+- **状態の口は MCP tool**（`status`）にした。HTTP の口は足していない（middleware が `/mcp` 以外を 404 にしていて、認証と agent の制限が `/mcp` の中にあるため）。入力は無し。数えるのは認証済み agent の行だけ（SQL の条件 + RLS）。本文は返さない。worker の error は、次に成功した時に消える。run 全体の error は、種類が分かる固定の文言 + error の code だけを載せる（例: `embed run failed: connection error (code ECONNREFUSED)`。pg の message には接続先の host と port が入るので、認証済みのどの agent にも見える `status` には通さない。詳しい要旨は log の `run error` の行に出す）。SQL は 1 文 5 秒の上限つき（DB が遅い時は error で早く返る）。消化の SQL は 1 文 15 秒。
+- **log**。件数が動いた agent と error だけを 1 行ずつ。何も無い run は 0 行。agent ID・件数・item の ID・error の要旨（200 字まで）だけで、本文・token・URL は出さない。Ollama の error には応答の body も fetch の message も入れない（入力や URL が写っている恐れがあるため。接続の失敗は固定の文言 + error の code）。**同じ要旨の error が続く間は初回と 30 分ごとにだけ出し、解消した時に 1 行出す**。「同じ要旨」は、item の ID・件数・所要時間のような毎回変わる値だけを潰して比べる（`HTTP 500` と `HTTP 404`、error の code の違いは別の error として出す。2 つ目の commit は数字を全部潰していた）。起動時の検査の失敗も、通った時に間引きの記録を消すので、直った後すぐの再発が log に出る。log に出す要旨は、URL の認証情報（`user:password@`）を伏せる。task は失敗を外へ throw しない（throw すると Nitro の scheduler が毎分 error を丸ごと出力する）。
 
 ## 既定値と所要の計算
 
@@ -58,13 +63,13 @@ commit は 2 つ。1 つ目（ed29971）が最初の修正、2 つ目が review 
 
 | 1 件の所要 | 1 run の始まり（秒） | 1 run の件数 | run の終わり | 毎分の起動 | 400 件の消化 | query が待つ最長 |
 |---|---|---|---|---|---|---|
-| 10 秒 | 0, 10, 20, 30,（40） | 4〜5 | 40〜50 秒 | 飛ばない | 80〜100 分 | 10 秒 |
+| 10 秒 | 0, 10, 20, 30 | 4 | 約 40 秒 | 飛ばない | 約 100 分 | 10 秒 |
 | 15 秒 | 0, 15, 30 | 3 | 45 秒 | 飛ばない | 約 134 分（2.2 時間） | 15 秒 |
 | 40 秒 | 0 | 1 | 40 秒 | 飛ばない | 400 分（6.7 時間） | 40 秒 |
 
-- 10 秒の機械の 5 件目は、測った所要がちょうど 10 秒以下の時だけ始まる（少しでも超えれば 4 件）。
+- 10 秒の機械でも 5 件目（40 秒に始めて 50 秒に終わる）は始まらない。1 件ごとに DB の時間（数ミリ秒〜数十ミリ秒）が足されるので、「経過 + 1 件の所要 ≤ 50 秒」を満たさない。実際は 4 件（400 件で約 100 分）。
 - 新しい記憶が入っている間は、その分も同じ枠を使う（表は溜まった分だけを消化する時）。agent が複数でも合計は同じ。
-- DB の時間（1 件あたり数ミリ秒〜数十ミリ秒）は入れていない。
+- 15 秒と 40 秒の行には、DB の時間（1 件あたり数ミリ秒〜数十ミリ秒）を入れていない（件数は変わらない）。
 
 参考: 1 つ目の commit の既定（2 件ずつ、上限 45 秒、見込み無し）での同じ計算。
 
@@ -79,13 +84,13 @@ commit は 2 つ。1 つ目（ed29971）が最初の修正、2 つ目が review 
 | 名前 | 既定 | 新旧 |
 |---|---|---|
 | `MEMORY_EMBED_BATCH` | 1 | 新 |
-| `MEMORY_EMBED_RUN_MS` | 50000 | 新 |
+| `MEMORY_EMBED_RUN_MS` | 50000 | 新。55000 で頭打ち（`MAX_EMBED_RUN_MS`。それより大きい値は 55000 として動く。60000 以上で動かすと毎分の起動が飛ぶため） |
 | `MEMORY_EMBED_TIMEOUT_MS` | 60000 | 新 |
 | `MEMORY_RECALL_EMBED_TIMEOUT_MS` | 60000 | 新 |
 | `CHATP_TIMEOUT_MS` | `MEMORY_HTTP_TIMEOUT_MS` の値 | 新 |
 | `MEMORY_HTTP_TIMEOUT_MS` | 120000 | 既存。chatp だけに効くようになった |
 
-定数（`server/utils/embed.ts` / `worker.ts` / `status.ts`）: 再試行の間隔 60 秒〜1 時間（`EMBED_RETRY_BASE_SEC` / `EMBED_RETRY_MAX_SEC`）、1 件ずつを覚える run の数 30（`EMBED_SINGLE_RUNS`）、1 件目の前に query へ譲る上限 20 秒（`EMBED_FIRST_YIELD_MS`）、並びの枠（`EMBED_LANES`）、SQL の上限 15 秒 / 5 秒（`EMBED_SQL_TIMEOUT_MS` / `STATUS_SQL_TIMEOUT_MS`）、同じ error を log に出し直す間隔 30 分（`LOG_REPEAT_MS`）。
+定数（`server/utils/embed.ts` / `worker.ts` / `status.ts`）: 再試行の間隔 60 秒〜1 時間（`EMBED_RETRY_BASE_SEC` / `EMBED_RETRY_MAX_SEC`）、1 件ずつを覚える run の数 30（`EMBED_SINGLE_RUNS`）、run の最初の 1 回と、1 件ずつの 1 件目の前に query へ譲る上限 20 秒（`EMBED_FIRST_YIELD_MS`）、agent を外す連続失敗の件数 2（`AGENT_FAILS_TO_DROP`）、並びの枠（`EMBED_LANES`）、SQL の上限 15 秒 / 5 秒（`EMBED_SQL_TIMEOUT_MS` / `STATUS_SQL_TIMEOUT_MS`）、同じ error を log に出し直す間隔 30 分（`LOG_REPEAT_MS`）。
 
 ## migration
 
@@ -108,16 +113,26 @@ commit は 2 つ。1 つ目（ed29971）が最初の修正、2 つ目が review 
 1. 作業用の Mac: `bun install --frozen-lockfile`（repo root）、`cd packages/memory && npm run build`。
 2. memory の host の repo を、この branch を含む版に更新する（`migrations/` と `bin/` が要る）。
 3. memory の host: migration 002 を当てる（上の「当て方」）。この時点では旧版の service が動いたままでよい。
-4. 作業用の Mac → memory の host: `packages/memory/.output/` を rsync する（`--delete` 付きで、配置先は unit の `WorkingDirectory` の下の `.output/`）。
-5. memory の host: `systemctl --user restart bantou-memory`。
-6. env の変更は不要（既定で動く）。調整する時だけ env file に上の設定を足して再起動する。1 つ目の commit の版を試していて `MEMORY_EMBED_BATCH` / `MEMORY_EMBED_RUN_MS` を env に書いていた場合は、消すか見直す（既定が 2 → 1、45000 → 50000 に変わった）。
+4. memory の host: 旧 `.output` を別名で退避する（戻す時に使う）。unit の `WorkingDirectory` で `rm -rf .output.prev && cp -a .output .output.prev`。`mv` ではなく copy にする（動いている旧 process が、まだ読み込んでいない file を元の場所から読むため）。
+5. 作業用の Mac → memory の host: `packages/memory/.output/` を rsync する（`--delete` 付きで、配置先は unit の `WorkingDirectory` の下の `.output/`）。
+6. memory の host: `systemctl --user restart bantou-memory`。**5 の後、すぐ行う**。配置から再起動までの間は、旧 process が新しい file の上で動く（server は一部の file を必要になった時に読み込むので、新旧が混ざる）。
+7. env の変更は不要（既定で動く）。調整する時だけ env file に上の設定を足して再起動する。1 つ目の commit の版を試していて `MEMORY_EMBED_BATCH` / `MEMORY_EMBED_RUN_MS` を env に書いていた場合は、消すか見直す（既定が 2 → 1、45000 → 50000 に変わった）。
 
 task が 2 つ（`memory:extract` と `memory:embed`）になったが、どちらも同じ service の中で動く。unit と起動の手順は変わらない。
+
+### 戻し方
+
+旧 `.output` を戻して service を再起動する。**migration は戻さない**。
+
+1. memory の host、unit の `WorkingDirectory` で: `rm -rf .output && mv .output.prev .output`。
+2. `systemctl --user restart bantou-memory`。
+
+旧 code は 002 で足した列（`embedded_at` / `embed_attempts` / `embed_failed_at` / `embed_error`）を見ないので、列が残っていても動く。新しい code が付けた失敗の記録は残るが、旧 code は無視する（もう一度新しい code に切り替えた時は、その記録の間隔から再開する）。
 
 ## deploy 後に確かめる事
 
 - **起動**: `journalctl --user -u bantou-memory -f`。1 分以内に `[memory] embed: agent=… embedded=N failed=0 remaining=M retry-wait=0 run=deadline` が出る（これまでは 0 行だった）。
-- **1 件の所要を測る**: 毎分の `embedded=N` と上の表を比べる（N が 4〜5 なら 1 件 10 秒前後、3 なら 15 秒前後、1 なら 25 秒以上）。`status` の `worker.embed.lastRunMs` が 60000 より小さい事（= 毎分の起動が飛んでいない）。
+- **1 件の所要を測る**: 毎分の `embedded=N` と上の表を比べる（N が 4 なら 1 件 10 秒前後、3 なら 15 秒前後、1 なら 25 秒以上）。`status` の `worker.embed.lastRunMs` が 60000 より小さい事（= 毎分の起動が飛んでいない）。
 - **溜まった 400 件が減っていく事**: 毎分の `[memory] embed:` の `remaining` が減る。または MCP の `status` tool（各 agent の token と `X-Agent-Id` で）: `memories.pendingEmbedding` が減り、`lastEmbeddedAt` が進み、`memories.embeddingRetryWait` が 0 のまま。残り時間は「remaining ÷ 1 run の件数」分。
 - **どの agent も進む事**: agent が複数ある時、`[memory] embed:` の行が同じ agent だけにならない（run ごとに始まる agent が替わる）。
 - **今日の記憶が recall に出る事**: 今日の話題で `recall` を呼び、今日作られた記憶が返る事。`status` の `memories.oldestPendingCreatedAt` も進む（4 回に 1 回は最古の item を埋めるため）。
@@ -127,8 +142,9 @@ task が 2 つ（`memory:extract` と `memory:embed`）になったが、どち�
   - `ollama embed failed: connection error (ECONNREFUSED)` など → Ollama に接続できない。`OLLAMA_URL` と Ollama の起動を見る。item に失敗は付かない（`retry-wait` は増えない）。
   - `ollama embed timeout (60000 ms, 1 texts)` が続く → 1 件が 60 秒に収まっていない。`MEMORY_EMBED_TIMEOUT_MS` を延ばす（`status` の `embeddingRetryWait` が増えていく）。
   - `batch of N failed (ollama embed timeout …); retried one by one`（`MEMORY_EMBED_BATCH` を 2 以上にした時だけ）→ 小分けが timeout に収まっていない。以後 30 回の run は自動で 1 件ずつになる。`MEMORY_EMBED_BATCH=1` に戻す。
+  - `ollama embed failed: HTTP 500` など（つながるが失敗を返す）→ Ollama 側の障害か、その item だけが通らない。`retry-wait` が毎分増えるなら障害（復帰後、失敗の付いた item は最大 1 時間遅れる）。数件で止まるなら、その item だけの問題。
   - `column "embed_attempts" does not exist` → migration 002 が当たっていない。
-- `[memory] extract error:` / `[memory] … run error:` が出ていない事（出ていれば `status` の `lastErrors` に同じ要旨がある）。
+- `[memory] extract error:` / `[memory] … run error:` が出ていない事（出ていれば `status` の `lastErrors` にも出る。run 全体の error は、`status` では種類と error の code だけ）。
 - Ollama の log で、`/api/embed` の 2 分打ち切りが出なくなっている事。
 
 ## test
@@ -136,7 +152,7 @@ task が 2 つ（`memory:extract` と `memory:embed`）になったが、どち�
 `packages/memory` で実行（並行には回していない）。
 
 - `npm run typecheck`: 通過。
-- `npm test`: 81 件中 81 件通過、失敗 0（変更前は 52 件、1 つ目の commit で 67 件）。docker が無い Mac なので `test/integration.pg.test.ts`（実 PostgreSQL）は skip（`docker unavailable`）。同じ筋書きは PGlite 版で回っている。
+- `npm test`: 90 件中 90 件通過、失敗 0（変更前は 52 件、1 つ目の commit で 67 件、2 つ目で 81 件）。docker が無い Mac なので `test/integration.pg.test.ts`（実 PostgreSQL）は skip（`docker unavailable`）。同じ筋書きは PGlite 版で回っている。
 - `npm run build`: 通過（`.output` に `status` tool と task `memory:embed` が入っている事を確認）。
 - `packages/center` は変えていないので回していない。
 
@@ -161,7 +177,28 @@ test の場所: 統合は `test/helpers/suite.ts`、unit は `test/unit.test.ts`
 - 統合で書き直した物: 順序（枠）、worker の log（task が 2 つ。抽出が長引いても埋め込みが進む）、status（RLS では見える他 agent の shared の行を置いた。worker の欄）、migration 002（index を作らない）、小分け（既定 1 件）。
 - unit: `errorSummary` の長さ切り / `rotateAgents` / task の配線（`nuxt.config.ts` に 2 つの task）。書き直し: 既定値、Ollama client（接続不能は `EmbedUnreachableError`、error に URL を写さない、途中で切れた接続は接続不能と扱わない）。
 
-### 変異の確認
+3 つ目の commit で足した test（統合 6 件、unit 3 件。既存の test も書き直した）:
+
+- 統合:
+  - recall の query が重なり続けても、1 run に最低 1 件は送る（前の query が終わる前に次が始まる状態で 4 run。どの run も 1 件）。直す前の code では 4 run とも 0 件で落ちる事を確かめた。
+  - 1 件の失敗では agent を外さない（最新の 1 件が必ず失敗しても、同じ run で残りが埋まる）。失敗・成功・失敗では外さない。続けて 2 件で外す。1 件ずつに落とした中で通った時も数え直す。agent が外れても、間に他の agent が進めば run を打ち切らない。
+  - 古い順の枠は未失敗の item を先に取る。再試行の枠は失敗の古い順。
+  - 1 件ずつに落とした時の 2 件目以降は、上限をまたぐ見込みなら始めない。1 件ずつの途中で 1 回だけ接続できなくても、進んだ分があれば run を続ける。
+  - task の中身（`runEmbedTask` / `runExtractTask`）を実際に呼ぶ: recall と同じ門を消化に渡している（query が居る間は譲る）、DB に届かない時も起動時の検査が失敗した時も throw しない。
+  - 抽出の全滅（通った batch が 1 つも無い）の行は、続く間は初回だけ出す。
+- 統合で書き直した物: query 優先（query が終わらなくても run の最初の 1 件は送る。譲る時間は run の上限の半分まで。上限 0 の run は送らない）、agent を外す規則（続けて 2 件）、worker の log（待ちが無くなった時に error が消える / run 全体の error が解消した後すぐの再発が出る / 起動時の検査の解消と再発 / status には接続先を出さない / 抽出の run 全体の error の間引き）、SQL の時間上限（worker が agent の一覧を時間上限つきで取る）。
+- unit: runtime の組み立て（`buildRuntime`。query 用の embedder は query 用の timeout を使い、消化に渡すのと同じ門を通る）/ `publicErrorSummary`（固定の文言 + code。message の host・port を写さない）/ log の間引きの要旨（`HTTP 500` と `HTTP 404` は別、ID・件数・所要時間だけが違う物は同じ）。書き直し: 設定（`MEMORY_EMBED_RUN_MS` の頭打ち）、`errorSummary`（URL の認証情報を伏せる）、task の配線（task の file は中身を呼ぶだけ）。
+
+### 変異の確認（3 つ目の commit）
+
+2 回目の review で生き残った変異と、3 つ目の commit で足した処理を外す変異、合わせて 34 個を 1 つずつ入れ、毎回 `npm test` を回した（入れた変異は全て戻し、戻した後の file の hash が入れる前と同じ事を確かめた）。**34 個とも落ちた（生き残り 0）**。
+
+- review で生き残っていた物（13 個）: task の `runTaskSafely` を外す（埋め込み / 抽出）/ task で門を渡さない / query 用の embedder に消化用の timeout を渡す / query 用に別の門を作る / 古い順の枠で失敗 item を後ろにする条件を外す / 1 件ずつの 2 件目以降の見込みの判定を外す / 進んだ時に連続失敗の数を戻さない / 再試行の枠の並びを逆にする / 1 件ずつの途中の接続不能で進んだ分を無視する / error を消す条件から「残り 0」を外す / run の error の解消時に間引きの記録を消さない / 抽出の全滅の行の間引きを外す。
+- 3 つ目の commit の処理（21 個）: run の最初の 1 回の譲りの上限を外す（= 直す前）/ 譲る時間を run の上限の半分で切らない / 2 回目以降も query を待たずに送る / 1 件の失敗で agent を外す（= 直す前）/ 3 件まで外さない / 小分けが通った時・1 件ずつで通った時に agent の連続失敗を戻さない（2 個）/ 1 件ずつの失敗を連続失敗に数えない / 続けて 2 agent が外れても打ち切らない / 失敗だけの run を failing にしない / 要旨で数字を全部潰す（= 直す前）/ 数字を潰さない / 起動時の検査の間引きを消さない（= 直す前）/ run の中の失敗の時に消さない / status に pg の message を通す（= 直す前）/ code が無い error の message を status に通す / agent の一覧の時間上限を外す / 素の query に戻す（= 直す前）/ `MEMORY_EMBED_RUN_MS` の頭打ちを外す / `errorSummary` で認証情報を伏せない / run 全体の error の間引きを外す。
+- 1 回目の実行で生き残り、test を足して落ちるようにした物: 1 件ずつで通った時に agent の連続失敗を戻さない。
+- 1 回目の実行では、時間に依る test 2 件（task の配線、1 件ずつの見込み）が無関係な変異でも落ちる事があった（余裕が 70〜150 ミリ秒しか無かった）。余裕を広げ、query の重なりを timer の順序で決まる形に直してから、34 個を全部やり直した。やり直しの中で、2 つ目の commit の test「上限をまたぐと見込まれる小分けは始めない」（1 件 200 ミリ秒・上限 700 ミリ秒の筋書き）が、無関係な変異で 1 回落ちた（1 回目の実行でも 1 回）。その test だけを 8 回続けて回すと全て通り、変異の無い `npm test` は 4 回続けて全て通った。機械が混んだ時の時間の余裕の問題とみて、この commit では触っていない。
+
+### 変異の確認（2 つ目の commit）
 
 主要な分岐を 1 つずつ外した変異 44 個を入れ、毎回 `npm test` を回した（入れた変異は全て戻し、戻した後の diff が入れる前と同じ事を hash で確かめた）。
 
@@ -211,10 +248,36 @@ test の場所: 統合は `test/helpers/suite.ts`、unit は `test/unit.test.ts`
 - **13**: 確かめて分かった事。Node の fetch は認証情報入りの URL を受け付けず、その error の message に URL がそのまま入る。指摘の恐れは実際に起きる形だった。
 - **`status` の出力の形が変わった**（task を分けたため）: `worker` は `{ extract, embed }`、`lastErrors.workerRun` は `workerExtractRun` / `workerEmbedRun`。`status` は 1 つ目の commit で足した tool で、まだ deploy していない。
 
+## 2 回目の review への対応（3 つ目の commit）
+
+2 回目の review の verdict は ok（deploy を止める物は無い）。残った指摘を、code を読んで正しい事を確かめた上で直した。直さなかった物は無い。
+
+| # | 指摘 | 直し方 | 場所 |
+|---|---|---|---|
+| N1 | recall が重なり続ける間、消化が 1 件も送られない（run をまたぐ保証が無い） | run の最初の 1 回も、20 秒（run の上限の半分まで）を上限に query へ譲ってから送る。2 回目以降は今までどおり query を優先 | `embed.ts` の `embedBacklog` の外側の loop（`firstYieldUntil`） |
+| N2 | 既定の 1 回 1 件では、1 件の失敗で agent がその run から外れる | 同じ agent で続けて 2 件失敗した時に外す（通れば数え直す）。接続不能と「続けて 2 agent」の打ち切りは保つ。「失敗だけで 1 件も通らなかった run は failing」は、agent が外れたかに依らず判定する | `embed.ts` の `AGENT_FAILS_TO_DROP` / `failRun` |
+| N3 | log の間引きが `HTTP 500` と `HTTP 404` を同じ error とみなす | 潰すのは UUID と、HTTP の status・error の code 以外の数字だけ | `worker.ts` の `gist` |
+| N4 | HTTP 5xx の障害の間の、復帰後の遅れが書かれていない | README と、この文書の「決めた事と理由」に明記 | 文書 |
+| N5 | 起動時の検査の失敗の間引きを消す所が無い | 検査が通った時（run が成功した時と、run の中で失敗した時）に消し、`[memory] run recovered` を 1 行出す | `worker.ts` の `runTaskSafely` |
+| N6 | `status` の run の error に DB の接続先が出うる | `status` と task の戻り値には「種類 + error の code」だけ。log には今までどおりの要旨（URL の認証情報は伏せる） | `embed.ts` の `publicErrorSummary` / `errorSummary`、`worker.ts` の `runOnce` |
+| N7 | 戻し方が書かれていない。配置から再起動までの注意が無い。所要の表の 4〜5 件。`MEMORY_EMBED_RUN_MS` に 60000 以上 | 「戻し方」の節、手順に退避の 1 行と注記、表を 4 件（約 100 分）に、設定は code で 55000 に頭打ち | 文書、`config.ts` の `MAX_EMBED_RUN_MS` |
+| 10 の残り | 埋め込みの run の `SELECT id FROM agents` に時間上限が無い | 他の SQL と同じく、transaction の先頭で `statement_timeout`（15 秒） | `worker.ts` の `runEmbedCycle` |
+| test の穴 | task の file の test が文字列の一致だけ。`getRuntime` の組み立てに test が無い | task の中身を `server/utils/tasks.ts`（`runEmbedTask` / `runExtractTask`）に、runtime の組み立てを `buildRuntime` に取り出し、実際に呼ぶ test にした（動きは変えていない） | `tasks.ts`、`runtime.ts`、`server/tasks/memory/*.ts` |
+
+変わった事（運用で気づく所）:
+
+- `[memory] embed:` の行の `failed` は、1 run で agent ごとに 2 まで増える（これまでは 1）。
+- `status` の `lastErrors.workerExtractRun` / `workerEmbedRun` の文言が `embed run failed: connection error (code ECONNREFUSED)` の形になった。詳しい要旨は log の `[memory] embed run error:` の行。
+- 起動時の検査の失敗が直ると `[memory] run recovered` が 1 行出る。
+- recall が途切れなく続いている間も、毎分 1 件は消化が Ollama に入る（その 1 件の間、query は最長 1 件分待つ）。
+
 ## 出来なかった事・確かめていない事
 
 - 実機（memory の host、実 Ollama、実 PostgreSQL）での確認。この作業は code・test・push まで。1 件あたりの実際の所要時間は未実測なので、上の表は計算。deploy 後の log で確かめる。
 - docker の実 PostgreSQL での統合 test（この Mac に docker が無い）。次の 2 つは PGlite では確かめられない: `statement_timeout` が実際に SQL を打ち切る事（設定している事だけを test で確かめた）、真の並行 transaction（抽出と埋め込みが同時に DB を使う事。別の行を書くので競合しない設計）。
 - build した server を起動して、2 つの task が毎分並行に動く事と `/mcp` から `status` を呼ぶ事の確認（DB が要る）。task の並行は Nitro の source を読んで確かめ、配線は test で確かめた。
-- `getRuntime`（実行時に embedder と門を組み立てる所）そのものの test。実 DB の接続が要るので、`handleRecall` が query 用の embedder を使う事までを test した。
-- Ollama が応答しない（つながるが返らない）障害の間は、1 run で 1 件に失敗が付く。復帰後は再試行の枠で埋まるが、その item は最大でその時点の間隔（60 秒〜1 時間）だけ遅れる。
+- `getRuntime` の、実 DB につなぐ部分（接続・role の検査・次元の検査の呼び出し）の test。組み立て（`buildRuntime`: 門の共有と 2 つの timeout）と task の中身（`runEmbedTask` / `runExtractTask`）は 3 つ目の commit で test した。`server/tasks/memory/*.ts` そのものは Nitro の実行時にしか読み込めない（`nitropack/runtime` を node から import できない）ので、「中身を呼んで結果を返すだけ」である事を文字列で確かめている。
+- Ollama の障害の間に失敗が付いた item は、復帰後、その時点の間隔（60 秒〜1 時間）が明けるまで埋まらない。timeout なら 1 run に 1 件、HTTP 5xx なら 1 run に agent ごとに 2 件まで（run 全体で 4 件まで）に失敗が付く。障害と「その item だけが通らない」を、失敗を返された時点で見分ける方法は無い。
+- 続けて 2 つの agent が外れた時の打ち切りは、その間に他の agent が進んでいなければ働く。1 巡目に他の agent が進んでいても、2 巡目に 2 つの agent が続けて外れれば打ち切る（残りの agent は次の run で、続きから進む）。
+- agent ごとの worker の error（`status` の `lastErrors.workerEmbed` / `workerExtract`）は、今も error の要旨をそのまま載せる。Ollama と chatp の error は固定の文言だが、run の途中で DB の接続が切れた時は、pg の message（接続先が入り得る）がここに出る。今回直したのは run 全体の error だけ（run の始めに DB に届かなければ、run 全体の error になる）。
+- 抽出の側の agent の一覧（`extractAll` の `SELECT id FROM agents`）には時間上限を付けていない（抽出の仕組みは変えない方針のため）。

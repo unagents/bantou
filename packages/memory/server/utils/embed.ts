@@ -16,10 +16,23 @@ export class EmbedUnreachableError extends Error {}
 /** 接続を確立できなかった事を表す error code（応答の途中で切れた ECONNRESET 等は含めない。入力が原因で落ちた恐れがあるため） */
 const UNREACHABLE_CODES = new Set(["ECONNREFUSED", "EHOSTUNREACH", "ENETUNREACH", "EHOSTDOWN", "ENOTFOUND", "EAI_AGAIN", "UND_ERR_CONNECT_TIMEOUT"]);
 
-/** error の要旨（log・状態の口・DB に残す分）。本文や token を含めない。長さを切る */
+/** error の要旨（log・状態の口・DB に残す分）。本文や token を含めない。URL の認証情報（user:password@）は伏せる。長さを切る */
 export function errorSummary(e: unknown, max = 200): string {
   const m = e instanceof Error ? e.message : String(e);
-  return m.replace(/\s+/g, " ").slice(0, max);
+  return m.replace(/\s+/g, " ").replace(/\/\/[^\s/@]*@/g, "//***@").slice(0, max);
+}
+
+/**
+ * 認証済みの agent に見せてよい error の要旨（status 用）: 種類が分かる固定の文言 + error の code だけ。
+ * message は写さない（pg の `connect ECONNREFUSED <host>:<port>` のように、接続先が入る事がある）
+ */
+export function publicErrorSummary(e: unknown): string {
+  const x = e as { code?: unknown; cause?: { code?: unknown }; errors?: { code?: unknown }[] } | null | undefined;
+  const raw = x?.code ?? x?.cause?.code ?? x?.errors?.[0]?.code;
+  const code = typeof raw === "string" && /^[A-Z0-9_]{2,40}$/.test(raw) ? raw : undefined;
+  if (code === undefined) return /timeout|timed out/i.test(e instanceof Error ? e.message : String(e)) ? "timeout" : "internal error";
+  // PostgreSQL の SQLSTATE は 5 文字で数字を含む（57014 / 53300 / 42P01 …）。それ以外は Node の接続の error（ECONNREFUSED / ENOTFOUND …）
+  return `${code.length === 5 && /\d/.test(code) ? "database error" : "connection error"} (code ${code})`;
 }
 
 /**
@@ -157,11 +170,16 @@ export const EMBED_RETRY_BASE_SEC = 60;
 export const EMBED_RETRY_MAX_SEC = 3600;
 /** 「小分けでは通らず 1 件ずつなら通った」を覚えておく run の数。過ぎたら設定の件数をもう一度試す */
 export const EMBED_SINGLE_RUNS = 30;
-/** 小分けが失敗した直後の 1 件目を送る前に、待っている recall の query へ譲る時間の上限（過ぎたら送る。進む事の保証） */
+/**
+ * run の最初の 1 回と、小分けが失敗した直後の 1 件目を送る前に、待っている recall の query へ譲る時間の上限（過ぎたら送る。進む事の保証）。
+ * run の最初の 1 回の分は、run の上限の半分も越えない（譲った後に送る時間を残す）
+ */
 export const EMBED_FIRST_YIELD_MS = 20_000;
 /** 消化の SQL 1 文の時間上限（lock 等で固まらない） */
 export const EMBED_SQL_TIMEOUT_MS = 15_000;
-/** 続けてこの数の agent が全滅したら、Ollama の障害とみなして run を打ち切る */
+/** 同じ agent で続けてこの件数の item が失敗したら、その agent をその run から外す（1 件の失敗では外さない） */
+const AGENT_FAILS_TO_DROP = 2;
+/** 続けてこの数の agent が外れたら、Ollama の障害とみなして run を打ち切る */
 const FAIL_STREAK_TO_STOP = 2;
 
 /**
@@ -227,7 +245,7 @@ export interface EmbedRunSummary {
   agents: EmbedAgentSummary[];
   /**
    * done: 今試せる分は全て済んだ / deadline: 時間の上限で打ち切り、残りは次の run /
-   * failing: Ollama の障害とみなして打ち切った（接続できない・続けて複数の agent が全滅・1 件も通らなかった）
+   * failing: Ollama の障害とみなして打ち切った（接続できない・続けて複数の agent が外れた）、または失敗だけで 1 件も通らなかった
    */
   stopped: "done" | "deadline" | "failing";
 }
@@ -260,9 +278,10 @@ export function rotateAgents(agentIds: string[], lastAgent: string | undefined):
  *    1 件ずつなら通った時は、以後 EMBED_SINGLE_RUNS 回の run は初めから 1 件ずつ送る（state.singleRuns）
  *  - 時間の上限（maxRunMs）: 過ぎたら新しい小分けを始めない。この run で測った 1 件の所要から、上限をまたぐと見込まれる小分けも始めない。
  *    小分けが失敗した直後の 1 件目だけは上限を過ぎていても試す（毎回同じ小分けで時間切れになって進まない、を防ぐ）。時間は単調な時計で測る
- *  - 全滅（1 件も通らない）した agent は、その run から外して他の agent を続ける。
- *    run を打ち切るのは Ollama の障害とみなせる時だけ: 接続できない（item に失敗を付けない）、または続けて 2 つの agent が全滅
- *  - gate があれば、小分けの合間（1 件ずつに落とした時の 1 件目の前も）に recall の query へ譲る
+ *  - 1 件の失敗では agent を外さない（後回しにして、同じ agent の次の item へ進む）。同じ agent で続けて 2 件失敗したら、その run から外して他の agent を続ける。
+ *    run を打ち切るのは Ollama の障害とみなせる時だけ: 接続できない（item に失敗を付けない）、または続けて 2 つの agent が外れた
+ *  - gate があれば、小分けの合間に recall の query へ譲る（query が続く間は送らない）。
+ *    ただし run の最初の 1 回と、1 件ずつに落とした時の 1 件目は、firstYieldMs まで譲ったら送る（query が重なり続けても、1 run に最低 1 回は送る）
  */
 export async function embedBacklog(db: Db, embedder: Embedder, agentIds: string[], opts: EmbedRunOptions = {}): Promise<EmbedRunSummary> {
   const now = () => performance.now();
@@ -275,6 +294,11 @@ export async function embedBacklog(db: Db, embedder: Embedder, agentIds: string[
   const remembered = configured > 1 && state.singleRuns > 0;
   let batchSize = remembered ? 1 : configured;
   let sent = false;
+  /** run の最初の 1 回を送る前に query へ譲るのは、この時刻まで（run の上限の半分も越えない） */
+  const firstYieldUntil = now() + Math.min(firstYieldMs, (deadline - now()) / 2);
+  /** agent ごとの、続けて失敗した item の数（1 件でも通れば 0 に戻す） */
+  const failRun = new Map<string, number>();
+  const itemFailed = (agentId: string) => failRun.set(agentId, (failRun.get(agentId) ?? 0) + 1);
   /** この run で測った、1 件あたりの所要の最大（ミリ秒）。0 = まだ測っていない */
   let itemMs = 0;
   const summaries = new Map<string, EmbedAgentSummary>(
@@ -328,7 +352,7 @@ export async function embedBacklog(db: Db, embedder: Embedder, agentIds: string[
   };
 
   type StepResult = "empty" | "deadline" | "progress" | "allfailed" | "unreachable";
-  /** 小分け 1 回。empty = 今試せる item が無い / deadline = 始めると上限をまたぐ / progress = 1 件以上埋めた / allfailed = 1 件も通らなかった / unreachable = Ollama に接続できない */
+  /** 小分け 1 回。empty = 今試せる item が無い / deadline = 始めると上限をまたぐ / progress = 1 件以上埋めた / allfailed = 送った分が 1 件も通らなかった / unreachable = Ollama に接続できない */
   const step = async (agentId: string, s: EmbedAgentSummary): Promise<StepResult> => {
     const turn = state.turns.get(agentId) ?? 0;
     const rows = await select(agentId, EMBED_LANES[turn % EMBED_LANES.length]!);
@@ -340,6 +364,7 @@ export async function embedBacklog(db: Db, embedder: Embedder, agentIds: string[
     if ("vecs" in batch) {
       await store(agentId, rows, batch.vecs);
       s.embedded += rows.length;
+      failRun.set(agentId, 0);
       return "progress";
     }
     if (batch.unreachable) {
@@ -349,6 +374,7 @@ export async function embedBacklog(db: Db, embedder: Embedder, agentIds: string[
     if (rows.length === 1) {
       await markFailed(agentId, rows[0]!, batch.error);
       s.failed++;
+      itemFailed(agentId);
       note(s, batch.error);
       return "allfailed";
     }
@@ -368,6 +394,7 @@ export async function embedBacklog(db: Db, embedder: Embedder, agentIds: string[
       if ("vecs" in one) {
         await store(agentId, [rows[i]!], one.vecs);
         s.embedded++;
+        failRun.set(agentId, 0);
         ok++;
       } else if (one.unreachable) {
         note(s, one.error);
@@ -375,6 +402,7 @@ export async function embedBacklog(db: Db, embedder: Embedder, agentIds: string[
       } else {
         await markFailed(agentId, rows[i]!, one.error);
         s.failed++;
+        itemFailed(agentId);
         note(s, `item ${rows[i]!.id}: ${one.error}`);
       }
     }
@@ -389,7 +417,6 @@ export async function embedBacklog(db: Db, embedder: Embedder, agentIds: string[
   let stopped: EmbedRunSummary["stopped"] = "done";
   let active = rotateAgents(agentIds, state.lastAgent);
   let failStreak = 0;
-  let failedAgents = 0;
   outer: while (active.length > 0) {
     const next: string[] = [];
     for (const agentId of active) {
@@ -397,9 +424,15 @@ export async function embedBacklog(db: Db, embedder: Embedder, agentIds: string[
         stopped = "deadline";
         break outer;
       }
-      if (opts.gate && !(await opts.gate.waitIdle(deadline - now()))) {
-        stopped = "deadline";
-        break outer;
+      if (opts.gate) {
+        if (!sent) {
+          // run の最初の 1 回: query へ譲るのは firstYieldUntil まで。過ぎたら送る（query が重なり続けても、1 run に最低 1 回は送る）
+          await opts.gate.waitIdle(firstYieldUntil - now());
+        } else if (!(await opts.gate.waitIdle(deadline - now()))) {
+          // 2 回目以降は query を優先する
+          stopped = "deadline";
+          break outer;
+        }
       }
       const s = summaries.get(agentId)!;
       let r: StepResult;
@@ -420,8 +453,12 @@ export async function embedBacklog(db: Db, embedder: Embedder, agentIds: string[
         break outer;
       }
       if (r === "allfailed") {
-        // 全滅した agent だけをこの run から外す。続けて全滅するなら Ollama の障害とみなして打ち切る
-        failedAgents++;
+        // 1 件の失敗では外さない（その item は後回しになり、次はこの agent の別の item）
+        if ((failRun.get(agentId) ?? 0) < AGENT_FAILS_TO_DROP) {
+          next.push(agentId);
+          continue;
+        }
+        // 続けて失敗した agent だけをこの run から外す。続けて外れるなら Ollama の障害とみなして打ち切る
         if (++failStreak >= FAIL_STREAK_TO_STOP) {
           stopped = "failing";
           break outer;
@@ -434,8 +471,13 @@ export async function embedBacklog(db: Db, embedder: Embedder, agentIds: string[
     active = next;
   }
   let total = 0;
-  for (const s of summaries.values()) total += s.embedded;
-  if (stopped === "done" && failedAgents > 0 && total === 0) stopped = "failing";
+  let totalFailed = 0;
+  for (const s of summaries.values()) {
+    total += s.embedded;
+    totalFailed += s.failed;
+  }
+  // 失敗だけで 1 件も通らなかった run
+  if (stopped === "done" && totalFailed > 0 && total === 0) stopped = "failing";
 
   for (const s of summaries.values()) {
     try {

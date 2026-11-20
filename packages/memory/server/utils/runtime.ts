@@ -1,4 +1,4 @@
-import { readEnv } from "./config";
+import { readEnv, type MemoryEnv } from "./config";
 import { createPgDb, type Db, type Queryable } from "./db";
 import { createEmbedGate, createOllamaEmbedder, createQueryEmbedder, type EmbedGate, type Embedder } from "./embed";
 import { createChatClient, type ChatClient } from "./extract";
@@ -49,6 +49,24 @@ export async function assertRlsEnforced(db: Queryable): Promise<void> {
   }
 }
 
+/**
+ * env と DB から runtime を組み立てる（接続はしない）。
+ * 消化用と query 用の embedder は同じ Ollama を使い、1 つの門を共有する（query が消化より先に通る）。timeout は別々
+ */
+export function buildRuntime(env: MemoryEnv, db: Db): Runtime {
+  const embedder = createOllamaEmbedder({ url: env.ollamaUrl, model: env.embedModel, dim: env.embedDim, timeoutMs: env.embedTimeoutMs });
+  const gate = createEmbedGate();
+  return {
+    db,
+    embedder,
+    queryEmbedder: createQueryEmbedder(embedder, gate, env.recallEmbedTimeoutMs),
+    gate,
+    chat: createChatClient({ url: env.chatpUrl, token: env.chatpToken, model: env.chatpModel, timeoutMs: env.chatTimeoutMs }),
+    extractBatch: env.extractBatch,
+    embed: { batchSize: env.embedBatch, maxRunMs: env.embedRunMs },
+  };
+}
+
 export function getRuntime(): Promise<Runtime> {
   if (current) return Promise.resolve(current);
   pending ??= (async () => {
@@ -57,17 +75,7 @@ export function getRuntime(): Promise<Runtime> {
     const db = createPgDb(env.databaseUrl);
     await assertRlsEnforced(db);
     await checkEmbeddingDim(db, env.embedDim);
-    const embedder = createOllamaEmbedder({ url: env.ollamaUrl, model: env.embedModel, dim: env.embedDim, timeoutMs: env.embedTimeoutMs });
-    const gate = createEmbedGate();
-    current = {
-      db,
-      embedder,
-      queryEmbedder: createQueryEmbedder(embedder, gate, env.recallEmbedTimeoutMs),
-      gate,
-      chat: createChatClient({ url: env.chatpUrl, token: env.chatpToken, model: env.chatpModel, timeoutMs: env.chatTimeoutMs }),
-      extractBatch: env.extractBatch,
-      embed: { batchSize: env.embedBatch, maxRunMs: env.embedRunMs },
-    };
+    current = buildRuntime(env, db);
     return current;
   })().catch((e) => {
     pending = undefined;

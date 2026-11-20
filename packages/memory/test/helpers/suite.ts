@@ -2,13 +2,14 @@
 // docs/design/memory-design.md §17 の A / B / D / H と、冪等・分離・埋め込み整合・SQL パラメータ化。
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { DIM, closedPortUrl, fakeChat, fakeEmbedder, ev, startFakeOllama, type TestDb } from "./fakes.ts";
+import { DIM, closedPortUrl, fakeChat, fakeEmbedder, fakeVector, ev, startFakeOllama, type TestDb } from "./fakes.ts";
 import { recordEvent } from "../../server/utils/events.ts";
 import { extractAll, extractForAgent } from "../../server/utils/extract.ts";
-import { EMBED_SINGLE_RUNS, EMBED_SQL_TIMEOUT_MS, createEmbedGate, createEmbedState, createOllamaEmbedder, createQueryEmbedder, embedBacklog, embedPending, type Embedder } from "../../server/utils/embed.ts";
+import { EMBED_SINGLE_RUNS, EMBED_SQL_TIMEOUT_MS, EmbedUnreachableError, createEmbedGate, createEmbedState, createOllamaEmbedder, createQueryEmbedder, embedBacklog, embedPending, type Embedder } from "../../server/utils/embed.ts";
 import { STATUS_SQL_TIMEOUT_MS, buildStatus } from "../../server/utils/status.ts";
 import { CycleError, resetWorkerState, runEmbedCycle, runExtractCycle, runTaskSafely, workerState } from "../../server/utils/worker.ts";
 import { handleRecall } from "../../server/utils/tools.ts";
+import { runEmbedTask, runExtractTask } from "../../server/utils/tasks.ts";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { buildContext, EmbedUnavailableError, explain, ForbiddenError, NotFoundError, recall, supersede } from "../../server/utils/recall.ts";
@@ -32,6 +33,7 @@ after(async () => {
 
 let agentSeq = 0;
 const newAgent = () => `agent-${++agentSeq}`;
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 type Cand = { memoryType: string; content: string; status: string; sourceEventIds: string[]; validFrom?: string | null };
 const cands = (...c: Cand[]) => ({ candidates: c.map((x) => ({ validFrom: null, ...x })) });
@@ -737,11 +739,11 @@ test("埋め込み: 小分けが失敗したら 1 件ずつ試し、失敗する
     assert.equal(await embedPending(t.db, a, e), 1);
     assert.deepEqual(srv.calls.slice(n), [["後から来た記憶"]]);
 
-    // 間隔が空けば再試行し、失敗回数が増える
+    // 間隔が空けば再試行し、失敗回数が増える（間隔 0 なのですぐもう一度試し、続けて 2 件の失敗でこの run から外れる）
     const r3 = await embedBacklog(t.db, e, [a], { retryBaseSec: 0 });
-    assert.deepEqual([r3.stopped, r3.agents[0]!.failed], ["failing", 1]);
+    assert.deepEqual([r3.stopped, r3.agents[0]!.failed], ["failing", 2]);
     rows = await embedState(a);
-    assert.equal(poison().attempts, 2);
+    assert.equal(poison().attempts, 3);
     // 直れば埋まり、失敗の記録は消える
     srv.behavior.fail = undefined;
     assert.equal(await embedPending(t.db, a, e, { retryBaseSec: 0 }), 1);
@@ -858,13 +860,28 @@ test("recall の query を優先: query が待っている間は消化の次の�
     assert.equal(order.length, 6);
     assert.equal(srv.maxInFlight <= 2, true);
 
-    // query が時間の上限まで終わらなければ、その run は何も送らずに終わる（次の run に回る）
+    // query が終わらない時: run の最初の 1 件だけは、上限つきで譲ってから送る（1 run に最低 1 件）。2 件目以降は query を待ち、時間の上限で終わる
     const d = newAgent();
-    await seedItems(d, ["待ちの記憶"]);
+    await seedItems(d, ["待ちの記憶 0", "待ちの記憶 1", "待ちの記憶 2"]);
     let release2!: () => void;
     const held2 = gate.runQuery(() => new Promise<void>((r) => (release2 = r)));
-    const r3 = await embedBacklog(t.db, base, [d], { gate, maxRunMs: 80 });
-    assert.deepEqual([r3.stopped, r3.agents[0]!.embedded, r3.agents[0]!.remaining], ["deadline", 0, 1]);
+    let n3 = srv.calls.length;
+    let t0 = performance.now();
+    const r3 = await embedBacklog(t.db, base, [d], { gate, maxRunMs: 400, firstYieldMs: 120 });
+    assert.deepEqual([r3.stopped, r3.agents[0]!.embedded, r3.agents[0]!.remaining], ["deadline", 1, 2]);
+    assert.equal(srv.calls.length - n3, 1);
+    assert.ok(performance.now() - t0 >= 380, "2 件目は query を待って上限まで");
+    // 譲る時間は run の上限の半分も越えない（既定の 20 秒より run の上限が短くても、譲った後に送る時間が残る）
+    n3 = srv.calls.length;
+    let firstAt = 0;
+    srv.behavior.fail = () => { firstAt ||= performance.now(); return undefined; };
+    t0 = performance.now();
+    const r4 = await embedBacklog(t.db, base, [d], { gate, maxRunMs: 300 });
+    assert.deepEqual([r4.stopped, r4.agents[0]!.embedded, r4.agents[0]!.remaining, srv.calls.length - n3], ["deadline", 1, 1, 1]);
+    assert.ok(firstAt - t0 >= 130, `譲ってから送る: ${Math.round(firstAt - t0)} ms`);
+    // 時間の上限 0 の run は、query が居ても何も送らない
+    const r5 = await embedBacklog(t.db, base, [d], { gate, maxRunMs: 0 });
+    assert.deepEqual([r5.stopped, r5.agents[0]!.embedded, srv.calls.length - n3], ["deadline", 0, 1]);
     release2();
     await held2;
   } finally {
@@ -892,9 +909,9 @@ test("recall: query の埋め込みが取れない時は、timeout で打ち切�
   }
 });
 
-/** 他の test が残した埋め込み待ちを、この後の run の対象から外す（1 時間の後回しにする）。全 agent を回す worker の test 用 */
+/** 他の test が残した埋め込み待ち（別 model で埋めた分を含む）を、この後の run の対象から外す（1 時間の後回しにする）。全 agent を回す worker の test 用 */
 const parkPending = () =>
-  t.asSuper((sq) => sq.query("UPDATE memory_items SET embed_failed_at = now(), embed_attempts = 20, embed_error = 'parked by test' WHERE embedding IS NULL AND (embed_failed_at IS NULL OR embed_attempts < 20)"));
+  t.asSuper((sq) => sq.query("UPDATE memory_items SET embed_failed_at = now(), embed_attempts = 20, embed_error = 'parked by test' WHERE (embedding IS NULL OR embed_model IS DISTINCT FROM 'fake-embed') AND (embed_failed_at IS NULL OR embed_attempts < 20)"));
 
 /** 埋め込み待ちの item を直接作る（抽出を通さない） */
 const insertItem = (agent: string, content: string) =>
@@ -927,7 +944,7 @@ test("埋め込み: 時間の上限で打ち切られても、次の run は続�
   }
 });
 
-test("埋め込み: 全滅した agent だけをその run から外し、他の agent は続ける。接続できない時・続けて 2 agent が全滅した時だけ run を打ち切る", async () => {
+test("埋め込み: 続けて 2 件失敗した agent だけをその run から外し、他の agent は続ける。接続できない時・続けて 2 agent が外れた時だけ run を打ち切る", async () => {
   const [a, b, c] = [newAgent(), newAgent(), newAgent()];
   await seedItems(a, ["POISON だけの agent"]);
   await seedItems(b, ["正常な agent 0", "正常な agent 1", "正常な agent 2"]);
@@ -937,23 +954,24 @@ test("埋め込み: 全滅した agent だけをその run から外し、他の
     // 必ず失敗する item を持つ agent が先にあっても、後ろの agent は同じ run で進む（間隔が明けるたびに、を retryBaseSec: 0 で再現）
     for (let i = 0; i < 2; i++) {
       const r = await embedBacklog(t.db, e, [a, b], { retryBaseSec: 0 });
-      assert.deepEqual(r.agents.map((s) => [s.embedded, s.failed]), i === 0 ? [[0, 1], [3, 0]] : [[0, 1], [0, 0]]);
+      assert.deepEqual(r.agents.map((s) => [s.embedded, s.failed]), i === 0 ? [[0, 2], [3, 0]] : [[0, 2], [0, 0]]);
       assert.equal(r.stopped, i === 0 ? "done" : "failing", "1 件も通らなかった run は failing");
     }
-    // 続けて 2 つの agent が全滅 → Ollama の障害とみなして打ち切る。3 つ目はこの run では試さない
-    await seedItems(c, ["後ろの正常な agent"]);
+    // 続けて 2 つの agent が外れた → Ollama の障害とみなして打ち切る。3 つ目の残りはこの run では試さない
+    await seedItems(c, ["後ろの正常な agent 0", "後ろの正常な agent 1", "後ろの正常な agent 2", "後ろの正常な agent 3"]);
     const a2 = newAgent();
     await seedItems(a2, ["二つ目の POISON だけの agent"]);
     const state = createEmbedState();
     const n = srv.calls.length;
     const r2 = await embedBacklog(t.db, e, [a, a2, c], { retryBaseSec: 0, state });
     assert.equal(r2.stopped, "failing");
-    assert.deepEqual(r2.agents.map((s) => [s.embedded, s.failed]), [[0, 1], [0, 1], [0, 0]]);
-    assert.equal(srv.calls.length - n, 2);
-    // 次の run は続きの agent（c）から始まるので、c は 1 run 遅れるだけで進む
+    // 1 巡目: a 失敗・a2 失敗・c 成功。2 巡目: a が外れ、続けて a2 も外れて打ち切り
+    assert.deepEqual(r2.agents.map((s) => [s.embedded, s.failed]), [[0, 2], [0, 2], [1, 0]]);
+    assert.equal(srv.calls.length - n, 5);
+    // 次の run は続きの agent（c）から始まる
     const r3 = await embedBacklog(t.db, e, [a, a2, c], { retryBaseSec: 0, state });
-    assert.equal(r3.agents[2]!.embedded, 1);
-    assert.deepEqual(srv.calls[n + 2], ["後ろの正常な agent"]);
+    assert.equal(r3.agents[2]!.embedded, 2);
+    assert.deepEqual(srv.calls[n + 5], ["後ろの正常な agent 2"]);
 
     // 接続できない（Ollama が落ちている）: すぐ打ち切り、item に失敗を付けない（復帰後に後回しにならない）
     const d = newAgent();
@@ -1169,6 +1187,228 @@ test("埋め込み: 上限をまたぐと見込まれる小分けは始めない
   }
 });
 
+test("埋め込み: recall の query が重なり続けても、1 run に最低 1 件は送る（消化が止まらない）", async () => {
+  const a = newAgent();
+  await seedItems(a, Array.from({ length: 8 }, (_, i) => `重なる query の記憶 ${i}`));
+  const srv = await startFakeOllama();
+  const gate = createEmbedGate();
+  // recall が重なり続ける: 前の query が終わる前に次の query が始まる（query が 1 つも無い瞬間が無い）
+  let stop = false;
+  const queries: Promise<void>[] = [];
+  const callers = (async () => {
+    while (!stop) {
+      queries.push(gate.runQuery(() => sleep(60)));
+      await sleep(20);
+    }
+  })();
+  try {
+    await sleep(5);
+    const state = createEmbedState();
+    const per: [string, number][] = [];
+    for (let i = 0; i < 4; i++) {
+      const r = await embedBacklog(t.db, ollama(srv.url), [a], { gate, maxRunMs: 250, firstYieldMs: 60, state });
+      per.push([r.stopped, r.agents[0]!.embedded]);
+    }
+    // どの run も、譲った後に 1 件だけ送る（2 件目以降は query を優先して、時間の上限で終わる）
+    assert.deepEqual(per, [["deadline", 1], ["deadline", 1], ["deadline", 1], ["deadline", 1]]);
+    assert.equal(await embeddedCount(a), 4);
+  } finally {
+    stop = true;
+    await callers;
+    await Promise.all(queries);
+    await srv.close();
+  }
+});
+
+test("埋め込み: 1 件の失敗では agent を外さない（最新側に必ず失敗する item があっても、同じ run で正常な item が進む）。続けて 2 件失敗したら外す", async () => {
+  const srv = await startFakeOllama({ fail: (input) => (input.some((x) => x.includes("POISON")) ? 500 : undefined) });
+  try {
+    const e = ollama(srv.url);
+    // 最新の 1 件が必ず失敗する
+    const a = newAgent();
+    await seedItems(a, ["正常 0", "正常 1", "正常 2", "POISON 最新"]);
+    const r1 = await embedBacklog(t.db, e, [a]);
+    assert.deepEqual([r1.stopped, r1.agents[0]!.embedded, r1.agents[0]!.failed, r1.agents[0]!.remaining], ["done", 3, 1, 1]);
+    assert.deepEqual(srv.calls.map((c) => c[0]), ["POISON 最新", "正常 2", "正常 0", "正常 1"]);
+    // 失敗の間に 1 件でも通れば、続けての失敗とは数えない（失敗・成功・失敗）
+    const b = newAgent();
+    await seedItems(b, ["POISON 最古", "間の正常 0", "間の正常 1", "間の正常 2", "POISON 最新"]);
+    let n = srv.calls.length;
+    const r2 = await embedBacklog(t.db, e, [b]);
+    assert.deepEqual(srv.calls.slice(n).map((c) => c[0]), ["POISON 最新", "間の正常 2", "POISON 最古", "間の正常 1", "間の正常 0"]);
+    assert.deepEqual([r2.stopped, r2.agents[0]!.embedded, r2.agents[0]!.failed], ["done", 3, 2]);
+    // 続けて 2 件失敗したら、その run から外す（3 件目は試さない）。次の run は別の item から進む
+    const c = newAgent();
+    await seedItems(c, ["後ろの正常 0", "後ろの正常 1", "POISON 1", "POISON 2", "POISON 3"]);
+    n = srv.calls.length;
+    const r3 = await embedBacklog(t.db, e, [c]);
+    assert.deepEqual([r3.stopped, r3.agents[0]!.embedded, r3.agents[0]!.failed, srv.calls.length - n], ["failing", 0, 2, 2]);
+    const r4 = await embedBacklog(t.db, e, [c]);
+    assert.deepEqual([r4.stopped, r4.agents[0]!.embedded, r4.agents[0]!.failed, r4.agents[0]!.retryWait], ["done", 2, 1, 3]);
+    // 1 件ずつに落とした中で通った時も、数え直す（小分け [失敗, 成功] の後の 1 件の失敗では外れない）
+    const d = newAgent();
+    await seedItems(d, ["落とした後 0", "落とした後 1", "POISON b", "落とした中の正常", "POISON a"]);
+    n = srv.calls.length;
+    const r6 = await embedBacklog(t.db, e, [d], { batchSize: 2 });
+    assert.deepEqual(srv.calls.slice(n).map((c) => c.join("+")), ["POISON a+落とした中の正常", "POISON a", "落とした中の正常", "POISON b", "落とした後 0", "落とした後 1"]);
+    assert.deepEqual([r6.stopped, r6.agents[0]!.embedded, r6.agents[0]!.failed], ["done", 3, 2]);
+    // agent が外れても、間に他の agent が進んでいれば「続けて外れた」とは数えない（run を打ち切らない）
+    const [p1, g1, p2, g2] = [newAgent(), newAgent(), newAgent(), newAgent()];
+    await seedItems(p1, ["POISON p1-0", "POISON p1-1"]);
+    await seedItems(g1, ["進む g1-0", "進む g1-1", "進む g1-2"]);
+    await seedItems(p2, ["POISON p2-0", "POISON p2-1"]);
+    await seedItems(g2, ["進む g2-0", "進む g2-1", "進む g2-2"]);
+    const r5 = await embedBacklog(t.db, e, [p1, g1, p2, g2]);
+    assert.deepEqual(r5.agents.map((s) => [s.embedded, s.failed]), [[0, 2], [3, 0], [0, 2], [3, 0]]);
+    assert.equal(r5.stopped, "done");
+  } finally {
+    await srv.close();
+  }
+});
+
+test("埋め込み: 古い順の枠は未失敗の item を先に取る。再試行の枠は失敗の古い順", async () => {
+  const srv = await startFakeOllama();
+  try {
+    const e = ollama(srv.url);
+    // 古い順の枠（通し回数 2）: 最古の item が失敗済み（間隔は明けている）でも、未失敗の最古を取る
+    const a = newAgent();
+    await seedItems(a, ["失敗済みの最古", "未失敗の古い方", "未失敗の新しい方"]);
+    await t.asSuper((sq) => sq.query("UPDATE memory_items SET embed_attempts = 1, embed_failed_at = now() - interval '10 minutes', embed_error = 'x' WHERE agent_id = $1 AND content = '失敗済みの最古'", [a]));
+    const sa = createEmbedState();
+    sa.turns.set(a, 2);
+    await embedBacklog(t.db, e, [a], { state: sa });
+    // 古い順 → 再試行 → 新しい順
+    assert.deepEqual(srv.calls.map((c) => c[0]), ["未失敗の古い方", "失敗済みの最古", "未失敗の新しい方"]);
+    // 再試行の枠（通し回数 3）: 先に失敗した方から（作られた順ではない）
+    const b = newAgent();
+    await seedItems(b, ["先に失敗した古い item", "後で失敗した新しい item", "未失敗の item"]);
+    await t.asSuper(async (sq) => {
+      await sq.query("UPDATE memory_items SET embed_attempts = 1, embed_failed_at = now() - interval '30 minutes', embed_error = 'x' WHERE agent_id = $1 AND content = '先に失敗した古い item'", [b]);
+      await sq.query("UPDATE memory_items SET embed_attempts = 1, embed_failed_at = now() - interval '10 minutes', embed_error = 'x' WHERE agent_id = $1 AND content = '後で失敗した新しい item'", [b]);
+    });
+    const sb = createEmbedState();
+    sb.turns.set(b, 3);
+    const n = srv.calls.length;
+    await embedBacklog(t.db, e, [b], { state: sb, maxRunMs: 5000 });
+    assert.deepEqual(srv.calls.slice(n).map((c) => c[0]), ["先に失敗した古い item", "未失敗の item", "後で失敗した新しい item"]);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("埋め込み: 1 件ずつに落とした時の 2 件目以降は、上限をまたぐ見込みなら始めない。途中で接続できなくなっても、進んだ分があれば run を続ける", async () => {
+  const a = newAgent();
+  await seedItems(a, ["見込みで止める 0", "見込みで止める 1", "見込みで止める 2"]);
+  const srv = await startFakeOllama();
+  try {
+    // 3 件の小分けはすぐ失敗し、1 件ずつは 200 ms かかる。上限 520 ms: 2 件目（終わりは 400 ms 過ぎ）は送り、3 件目（600 ms 過ぎ）は始めない
+    srv.behavior.fail = (input) => {
+      srv.behavior.delayMs = input.length > 1 ? 0 : 200;
+      return input.length > 1 ? 500 : undefined;
+    };
+    const r = await embedBacklog(t.db, ollama(srv.url), [a], { batchSize: 3, maxRunMs: 520 });
+    assert.deepEqual(srv.calls.map((c) => c.length), [3, 1, 1]);
+    assert.deepEqual([r.stopped, r.agents[0]!.embedded, r.agents[0]!.failed, r.agents[0]!.remaining], ["deadline", 2, 0, 1]);
+  } finally {
+    await srv.close();
+  }
+  // 1 件ずつの途中の 1 回だけ接続できない（一時的な切断）: 進んだ分があるので打ち切らず、次の小分けで続ける。item に失敗は付けない
+  const b = newAgent();
+  await seedItems(b, ["一時的な切断 0", "一時的な切断 1", "一時的な切断 2", "一時的な切断 3"]);
+  let calls = 0;
+  const flaky: Embedder = {
+    model: "fake-embed",
+    dim: DIM,
+    embed: async (texts) => {
+      calls++;
+      if (calls === 1) throw new Error("ollama embed failed: HTTP 500");
+      if (calls === 3) throw new EmbedUnreachableError("ollama embed failed: connection error (ECONNREFUSED)");
+      return texts.map(fakeVector);
+    },
+  };
+  const r2 = await embedBacklog(t.db, flaky, [b], { batchSize: 2 });
+  assert.deepEqual([r2.stopped, r2.agents[0]!.embedded, r2.agents[0]!.failed, r2.agents[0]!.remaining], ["done", 4, 0, 0]);
+  assert.ok((await embedState(b)).every((x) => x.embedded && x.attempts === 0));
+});
+
+test("task の配線: memory:embed / memory:extract の中身は throw せず、recall と同じ門を消化に渡す", async () => {
+  resetWorkerState();
+  await parkPending();
+  const a = newAgent();
+  await seedItems(a, ["task の配線の記憶 0", "task の配線の記憶 1"]);
+  const srv = await startFakeOllama();
+  const lines: string[] = [];
+  const log = { info: (l: string) => lines.push(l), warn: (l: string) => lines.push(`WARN ${l}`) };
+  const savedUrl = process.env.MEMORY_DATABASE_URL;
+  try {
+    const gate = createEmbedGate();
+    const base = ollama(srv.url);
+    const rt = { db: t.db, embedder: base, queryEmbedder: createQueryEmbedder(base, gate, 5000), gate, chat: fakeChat(() => cands()), extractBatch: 50, embed: { batchSize: 1, maxRunMs: 2000 } };
+    setRuntime(rt);
+    // recall の query が実行中: 消化は門を見て譲る（run の最初の 1 件は、run の上限の半分 = 1 秒まで譲ってから送る）。query は、消化の 1 件目が届いた所で終わる
+    let release!: () => void;
+    const held = gate.runQuery(() => new Promise<void>((r) => (release = r)));
+    let firstAt = 0;
+    srv.behavior.fail = () => {
+      firstAt ||= performance.now();
+      release();
+      return undefined;
+    };
+    const t0 = performance.now();
+    const r = await runEmbedTask(log);
+    release();
+    await held;
+    assert.ok(!("error" in r) && r.embed!.agents.find((s) => s.agentId === a)!.embedded === 2, JSON.stringify(r));
+    assert.ok(firstAt - t0 >= 900, `門を渡している（query へ譲ってから送る）: ${Math.round(firstAt - t0)} ms`);
+    // query が居なければ、譲らずに送る
+    await insertItem(a, "task の配線の記憶 2");
+    firstAt = 0;
+    const t1 = performance.now();
+    await runEmbedTask(log);
+    assert.ok(firstAt > 0 && firstAt - t1 < 700, `${Math.round(firstAt - t1)} ms`);
+    assert.equal(await embeddedCount(a), 3);
+    // DB に届かない: どちらの task も throw せず、要旨を返す
+    const fail = async (): Promise<never> => { throw new Error("db is down"); };
+    setRuntime({ ...rt, db: { ...t.db, query: fail, withAgent: fail } });
+    assert.deepEqual(await runEmbedTask(log), { error: "embed run failed: internal error" });
+    assert.deepEqual(await runExtractTask(log), { error: "extract run failed: internal error" });
+    // 起動時の検査の失敗（runtime が作れない）も throw しない
+    setRuntime(undefined);
+    delete process.env.MEMORY_DATABASE_URL;
+    lines.length = 0;
+    assert.deepEqual(await runEmbedTask(log), { error: "MEMORY_DATABASE_URL is not set" });
+    assert.deepEqual(await runExtractTask(log), { error: "MEMORY_DATABASE_URL is not set" });
+    assert.deepEqual(lines, ["WARN [memory] run error: MEMORY_DATABASE_URL is not set"]);
+  } finally {
+    if (savedUrl !== undefined) process.env.MEMORY_DATABASE_URL = savedUrl;
+    setRuntime(undefined);
+    await srv.close();
+    resetWorkerState();
+  }
+});
+
+test("worker の log: 抽出の全滅（通った batch が 1 つも無い）の行は、続く間は初回だけ出す", async () => {
+  resetWorkerState();
+  const a = newAgent();
+  for (let i = 1; i <= 2; i++) await recordEvent(t.db, a, ev({ eventId: `${a}-${i}`, body: `全滅の event ${i}` }));
+  const lines: string[] = [];
+  const log = { info: (l: string) => lines.push(l), warn: (l: string) => lines.push(`WARN ${l}`) };
+  const mine = () => lines.filter((l) => l.includes(`agent=${a} `) || l.endsWith(`agent=${a}`));
+  try {
+    const broken = { db: t.db, chat: fakeChat(() => ({ not: "the schema" })), extractBatch: 50 };
+    for (let i = 0; i < 3; i++) await runExtractCycle(broken, log);
+    assert.equal(mine().length, 1, mine().join("\n"));
+    assert.match(mine()[0]!, /^\[memory\] extract: .* systemic=2 /);
+    assert.match(workerState().agents.get(a)!.extractError!.message, /all 2 events failed/);
+    // 間隔が過ぎたら出し直す
+    lines.length = 0;
+    await runExtractCycle(broken, log, { logRepeatMs: 0 });
+    assert.match(mine()[0]!, /systemic=2 .*\(same error suppressed 2 times\)$/);
+  } finally {
+    resetWorkerState();
+  }
+});
+
 test("recall の配線: tool の recall は query 用の embedder（門 + query 用の timeout）を使い、消化用の embedder を使わない", async () => {
   const a = newAgent();
   const gate = createEmbedGate();
@@ -1305,26 +1545,68 @@ test("worker の log: 同じ error が続く間は初回と一定の間隔ごと
     assert.match(out[0]!, new RegExp(`^\\[memory\\] embed: agent=${b} embedded=0 failed=2 remaining=4 retry-wait=2 run=failing$`));
     assert.equal(out[1], `WARN [memory] embed error: agent=${b} batch of 2 failed (ollama embed failed: HTTP 500); retried one by one`);
     assert.match(out[2]!, new RegExp(`^WARN \\[memory\\] embed error: agent=${b} item [0-9a-f-]{36}: ollama embed failed: HTTP 500$`));
+    // 待ちが無くなった（この run では 1 件も埋めていない）時も、古い error は消え、解消を 1 行出す
+    assert.match(workerState().agents.get(b)!.embedError!.message, /HTTP 500/);
+    await t.asSuper((sq) => sq.query("UPDATE memory_items SET embedding = (SELECT embedding FROM memory_items WHERE embedding IS NOT NULL LIMIT 1), embed_model = 'fake-embed' WHERE agent_id = $1", [b]));
+    lines.length = 0;
+    const r0 = await runEmbedCycle(up, log);
+    assert.deepEqual([r0.embed!.agents.find((s) => s.agentId === b)!.embedded, r0.embed!.agents.find((s) => s.agentId === b)!.remaining], [0, 0]);
+    assert.equal(workerState().agents.get(b), undefined);
+    assert.deepEqual(lines, [`[memory] embed recovered: agent=${b}`]);
 
     // run 全体の失敗（DB に届かない等）: 記録して間引き、成功した run で消す。task の外へは throw しない
     lines.length = 0;
     // 数字だけが違う error は同じ要旨として絞る
     let conn = 0;
-    const brokenDb: Db = { ...t.db, query: async () => { throw new Error(`connection ${++conn} terminated\n  unexpectedly`); } };
+    const fail = async (): Promise<never> => { throw new Error(`connection ${++conn} terminated\n  unexpectedly`); };
+    const brokenDb: Db = { ...t.db, query: fail, withAgent: fail };
     await assert.rejects(runEmbedCycle({ ...up, db: brokenDb }, log), CycleError);
-    for (let i = 2; i <= 3; i++) assert.deepEqual(await runTaskSafely(() => runEmbedCycle({ ...up, db: brokenDb }, log), log), { error: `connection ${i} terminated unexpectedly` });
+    // status と task の戻り値には、種類が分かる固定の文言だけ（log には運用者向けの要旨）
+    for (let i = 2; i <= 3; i++) assert.deepEqual(await runTaskSafely(() => runEmbedCycle({ ...up, db: brokenDb }, log), log), { error: "embed run failed: internal error" });
     assert.deepEqual(lines, ["WARN [memory] embed run error: connection 1 terminated unexpectedly"]);
-    assert.equal(workerState().embed.lastRunError!.message, "connection 3 terminated unexpectedly");
+    assert.equal(workerState().embed.lastRunError!.message, "embed run failed: internal error");
     assert.equal(workerState().embed.running, false);
     lines.length = 0;
     await runEmbedCycle(up, log);
     assert.equal(workerState().embed.lastRunError, undefined);
     assert.deepEqual(lines, ["[memory] embed run recovered"]);
+    // 解消の後すぐに同じ error が再発したら、もう一度出す（間引きの記録は解消で消える）
+    lines.length = 0;
+    conn = 0;
+    await assert.rejects(runEmbedCycle({ ...up, db: brokenDb }, log), CycleError);
+    assert.deepEqual(lines, ["WARN [memory] embed run error: connection 1 terminated unexpectedly"]);
+    // DB の接続先（pg の message に入る host と port）は log にだけ出し、status には error の code までしか載せない
+    lines.length = 0;
+    const refuse = async (): Promise<never> => { throw Object.assign(new Error("connect ECONNREFUSED 192.0.2.10:5432"), { code: "ECONNREFUSED" }); };
+    assert.deepEqual(await runTaskSafely(() => runEmbedCycle({ ...up, db: { ...t.db, query: refuse, withAgent: refuse } }, log), log), { error: "embed run failed: connection error (code ECONNREFUSED)" });
+    assert.deepEqual(lines, ["WARN [memory] embed run error: connect ECONNREFUSED 192.0.2.10:5432"]);
+    const st = await buildStatus(t.db, a, "fake-embed", workerState());
+    assert.equal(st.lastErrors.workerEmbedRun!.message, "embed run failed: connection error (code ECONNREFUSED)");
+    assert.ok(!/192\.0\.2\.10|5432/.test(JSON.stringify(st)), "status に接続先を出さない");
+    // 抽出の run 全体の失敗も同じ（間引く。status には固定の文言）
+    lines.length = 0;
+    const xdeps = { db: { ...t.db, query: refuse, withAgent: refuse }, chat: fakeChat(() => cands()), extractBatch: 50 };
+    for (let i = 0; i < 3; i++) assert.deepEqual(await runTaskSafely(() => runExtractCycle(xdeps, log), log), { error: "extract run failed: connection error (code ECONNREFUSED)" });
+    assert.deepEqual(lines, ["WARN [memory] extract run error: connect ECONNREFUSED 192.0.2.10:5432"]);
+    assert.equal(workerState().extract.lastRunError!.message, "extract run failed: connection error (code ECONNREFUSED)");
+    await runEmbedCycle(up, log);
     // 起動時の検査の失敗（runtime が作れない）: 2 つの task で 1 行、同じ要旨は絞る
     lines.length = 0;
     const boot = () => Promise.reject(new Error("MEMORY_DATABASE_URL is not set"));
     for (let i = 0; i < 4; i++) assert.deepEqual(await runTaskSafely(boot, log), { error: "MEMORY_DATABASE_URL is not set" });
     assert.deepEqual(lines, ["WARN [memory] run error: MEMORY_DATABASE_URL is not set"]);
+    // 起動時の検査が通ったら解消を 1 行出し、間引きの記録を消す。すぐ再発しても log に出る
+    lines.length = 0;
+    assert.equal(await runTaskSafely(async () => "ok", log), "ok");
+    assert.equal(await runTaskSafely(async () => "ok", log), "ok");
+    assert.deepEqual(lines, ["[memory] run recovered"]);
+    lines.length = 0;
+    for (let i = 0; i < 2; i++) await runTaskSafely(boot, log);
+    assert.deepEqual(lines, ["WARN [memory] run error: MEMORY_DATABASE_URL is not set"]);
+    // run の中の失敗（CycleError）でも、起動時の検査は通っているので消す
+    lines.length = 0;
+    await runTaskSafely(() => runEmbedCycle({ ...up, db: brokenDb }, { info: () => {}, warn: () => {} }), log);
+    assert.deepEqual(lines, ["[memory] run recovered"]);
   } finally {
     await srv.close();
     resetWorkerState();
@@ -1411,6 +1693,16 @@ test("SQL の時間上限: status と消化の transaction は、最初に state
   assert.equal(await embedPending(spy, a, emb), 1);
   assert.ok(txs.length >= 3, "選ぶ・書く・数える");
   assert.ok(firstIsTimeout(EMBED_SQL_TIMEOUT_MS), JSON.stringify(txs.map((x) => x[0])));
+  // worker の run: agent の一覧も時間上限つきの transaction で取る（上限の無い素の query を使わない）
+  resetWorkerState();
+  await parkPending();
+  txs.length = 0;
+  const noBare: Db = { ...spy, query: async () => { throw new Error("時間上限の無い query"); } };
+  const cycle = await runEmbedCycle({ db: noBare, embedder: emb, embed: { batchSize: 1, maxRunMs: 5000 } }, { info: () => {}, warn: () => {} });
+  assert.ok(cycle.embed!.agents.some((s) => s.agentId === a));
+  assert.ok(txs.some((tx) => tx.some((x) => /FROM agents/.test(x.sql))));
+  assert.ok(firstIsTimeout(EMBED_SQL_TIMEOUT_MS), JSON.stringify(txs.map((x) => x[0])));
+  resetWorkerState();
   // 設定は transaction の中だけ（接続に残らない）
   const v = (await t.db.query<{ v: string }>("SELECT current_setting('statement_timeout') AS v")).rows[0]!.v;
   assert.ok(v === "0" || v === "0ms", v);

@@ -1,5 +1,5 @@
-import type { Db } from "./db";
-import { createEmbedState, embedBacklog, errorSummary, type EmbedGate, type Embedder, type EmbedRunOptions, type EmbedRunSummary, type EmbedState } from "./embed";
+import { setStatementTimeout, type Db } from "./db";
+import { EMBED_SQL_TIMEOUT_MS, createEmbedState, embedBacklog, errorSummary, publicErrorSummary, type EmbedGate, type Embedder, type EmbedRunOptions, type EmbedRunSummary, type EmbedState } from "./embed";
 import { extractAll, type ChatClient, type ExtractSummary } from "./extract";
 
 /**
@@ -34,7 +34,7 @@ export interface TaskRunState {
   /** 最後に終わった run の開始時刻と所要時間 */
   lastRunAt?: string;
   lastRunMs?: number;
-  /** run 全体の失敗（agent の一覧が取れない等）。次に成功した run で消える */
+  /** run 全体の失敗（agent の一覧が取れない等）。次に成功した run で消える。status で agent に見えるので、種類 + error の code だけ（接続先を含めない） */
   lastRunError?: ErrorNote;
 }
 
@@ -75,7 +75,7 @@ export const LOG_REPEAT_MS = 30 * 60_000;
 
 const state: WorkerState = { extract: { running: false }, embed: { running: false }, agents: new Map() };
 let embedState: EmbedState = createEmbedState();
-/** error の log の間引き。key = 種類 | agent | 要旨（数字と ID を潰したもの） */
+/** error の log の間引き。key = 種類 | agent | 要旨（毎回変わる値を潰したもの） */
 const logged = new Map<string, { at: number; suppressed: number }>();
 
 export function workerState(): WorkerState {
@@ -106,8 +106,14 @@ const clearAgentError = (id: string, key: keyof AgentWorkerState): void => {
   if (!s.extractError && !s.embedError) state.agents.delete(id);
 };
 
-/** 数字と ID を潰した要旨（item の ID や件数だけが違う error を同じものとして数える） */
-const gist = (m: string) => m.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "#").replace(/\d+/g, "#");
+/**
+ * 毎回変わる値（item の ID・件数・所要時間など）を潰した要旨。それだけが違う error を同じものとして数える。
+ * HTTP の status と error の code（`HTTP 500` / `code 57014`）は潰さない（違う error として出す）
+ */
+export const gist = (m: string) =>
+  m
+    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "#")
+    .replace(/\b(?:HTTP|status|code)[ =:]+\w+|\d+/g, (x) => (/^\d+$/.test(x) ? "#" : x));
 
 /**
  * 同じ key の行は、初回と repeatMs ごとにだけ出す。出す時は、その間に省いた回数を付ける。戻り値は「出すか」と付け足す文言
@@ -139,6 +145,7 @@ function clearLogged(prefix: string): boolean {
 /**
  * 1 回の run の枠: process の中で重ならない（実行中なら何もせず戻る。Nitro の runTask も同名 task の重複実行をまとめる）。
  * run 全体の失敗は記録して log に出し（同じ要旨は間引く）、成功した run で消す。
+ * log には運用者が原因を追える要旨を出し、status と task の戻り値には種類 + error の code だけを残す（agent に接続先を見せない）
  */
 async function runOnce<T>(name: "extract" | "embed", skipped: T, log: WorkerLog, repeatMs: number, fn: () => Promise<T>): Promise<T> {
   const st = state[name];
@@ -155,10 +162,11 @@ async function runOnce<T>(name: "extract" | "embed", skipped: T, log: WorkerLog,
     }
     return r;
   } catch (e) {
-    const message = errorSummary(e);
+    const detail = errorSummary(e);
+    const message = `${name} run failed: ${publicErrorSummary(e)}`;
     st.lastRunError = { at: at(), message };
-    const t = throttle(`${name}-run||${gist(message)}`, repeatMs);
-    if (t.emit) log.warn(`[memory] ${name} run error: ${message}${t.suffix}`);
+    const t = throttle(`${name}-run||${gist(detail)}`, repeatMs);
+    if (t.emit) log.warn(`[memory] ${name} run error: ${detail}${t.suffix}`);
     throw new CycleError(message);
   } finally {
     st.running = false;
@@ -206,7 +214,11 @@ export function runExtractCycle(deps: ExtractCycleDeps, log: WorkerLog = default
 export function runEmbedCycle(deps: EmbedCycleDeps, log: WorkerLog = defaultLog, opts: CycleOptions = {}): Promise<EmbedCycleResult> {
   const repeatMs = opts.logRepeatMs ?? LOG_REPEAT_MS;
   return runOnce<EmbedCycleResult>("embed", { skipped: true, embedErrors: [] }, log, repeatMs, async () => {
-    const agents = (await deps.db.query<{ id: string }>("SELECT id FROM agents ORDER BY id")).rows.map((r) => r.id);
+    // agent の一覧。他の SQL と同じく時間上限つき（agents に RLS は無いので、agent は設定しない）
+    const agents = await deps.db.withAgent("", async (q) => {
+      await setStatementTimeout(q, EMBED_SQL_TIMEOUT_MS);
+      return (await q.query<{ id: string }>("SELECT id FROM agents ORDER BY id")).rows.map((r) => r.id);
+    });
     const embed = await embedBacklog(deps.db, deps.embedder, agents, { ...deps.embed, gate: deps.gate, state: embedState });
     const embedErrors: { agentId: string; message: string }[] = [];
     for (const s of embed.agents) {
@@ -237,14 +249,23 @@ export function runEmbedCycle(deps: EmbedCycleDeps, log: WorkerLog = defaultLog,
 
 /**
  * task の入口で使う: 起動時の検査（DB 接続・role・次元）や run 全体の失敗を、task の外へ throw せずに要旨で返す。
- * throw すると Nitro の scheduler が毎分 error を丸ごと出力するため。起動時の失敗の log は 2 つの task で 1 行にまとめ、同じ要旨は間引く
+ * throw すると Nitro の scheduler が毎分 error を丸ごと出力するため。起動時の失敗の log は 2 つの task で 1 行にまとめ、同じ要旨は間引く。
+ * 起動時の検査を通った時（run が始まった時）に間引きの記録を消すので、直った後すぐの再発も log に出る
  */
 export async function runTaskSafely<T>(start: () => Promise<T>, log: WorkerLog = defaultLog, opts: CycleOptions = {}): Promise<T | { error: string }> {
+  const started = () => {
+    if (clearLogged("start||")) log.info("[memory] run recovered");
+  };
   try {
-    return await start();
+    const r = await start();
+    started();
+    return r;
   } catch (e) {
     const message = errorSummary(e);
-    if (!(e instanceof CycleError)) {
+    if (e instanceof CycleError) {
+      // run の中の失敗（記録と log は済み）。起動時の検査は通っている
+      started();
+    } else {
       const t = throttle(`start||${gist(message)}`, opts.logRepeatMs ?? LOG_REPEAT_MS);
       if (t.emit) log.warn(`[memory] run error: ${message}${t.suffix}`);
     }
