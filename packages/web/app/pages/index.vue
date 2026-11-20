@@ -38,7 +38,7 @@ const reason = computed(() => health.value?.reason ?? centerList.value.reason);
 
 <template>
   <div class="bg-default text-default flex h-dvh flex-col overflow-hidden">
-    <WebHeader title="bantou" :unreachable="loaded && !centerList.reachable && !noTarget" @settings="settingsOpen = true" />
+    <WebHeader title="bantou" :unreachable="loaded && !centerList.reachable && !noTarget" settings @settings="settingsOpen = true" />
     <SettingsDialog v-if="settingsOpen" v-model:open="settingsOpen" />
     <nav class="border-cork-border flex shrink-0 border-b text-sm" role="tablist" data-testid="web-tabs">
       <button

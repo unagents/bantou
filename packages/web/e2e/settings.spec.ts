@@ -95,6 +95,16 @@ test.describe("settings (web mode, design decision 14: view only)", () => {
     expect(seen.rpc.filter((c) => c.status === 404)).toEqual([]);
   });
 
+  test("the settings button is on the session list and not on the terminal page (nothing dead)", async ({ page, stack }) => {
+    stack.setSessions(["alpha"]);
+    await page.goto("/");
+    await expect(page.getByTestId("web-settings-open")).toHaveCount(1);
+    await page.goto("/s/alpha");
+    await expect(page.getByTestId("terminal-page")).toBeVisible();
+    await expect(page.getByTestId("web-back")).toBeVisible();
+    await expect(page.getByTestId("web-settings-open")).toHaveCount(0);
+  });
+
   test("a failed settings read shows the error and still calls no sidecar command (no 404)", async ({ page }) => {
     const seen = watch(page);
     await page.route("**/api/rpc/center_get_settings", (r) => r.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "settings read failed" }) }));
