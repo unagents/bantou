@@ -13,7 +13,7 @@ import { after, before, describe, it } from "node:test";
 import { FakeCenter } from "../../../center-client/test/helpers/fake-center";
 import { AUD, PROXY_KEY, goodClaims, makeKey, sign, startJwks, TEAM, type TestKey } from "./utils/guard/helpers";
 
-// 実ファイル (server/middleware/00.guard.ts, server/api/me.get.ts) を Nitro で build して実際に起動し、HTTP で確かめる。
+// 実ファイル (server/plugins/00.guard.ts, server/api/me.get.ts) を Nitro で build して実際に起動し、HTTP で確かめる。
 const pkg = fileURLToPath(new URL("../..", import.meta.url));
 
 // nuxt の bin は node_modules の hoist 先に依らず、解決した package.json の bin から求める
@@ -196,7 +196,7 @@ describe("Nitro build の配線", { timeout: 300_000 }, () => {
     assert.deepEqual(await r2.json(), { email: "bob@example.test" });
   });
 
-  it("middleware が実際に掛かる: 共有鍵なし 403、JWT なし 401、許可外 email 403", async () => {
+  it("守りが実際に掛かる: 共有鍵なし 403、JWT なし 401、許可外 email 403", async () => {
     assert.equal((await fetch(base + "/api/me", { headers: h(sign(key, goodClaims()), null) })).status, 403);
     assert.equal((await fetch(base + "/api/me", { headers: h() })).status, 401);
     const eve = sign(key, goodClaims({ email: "eve@example.test" }));
