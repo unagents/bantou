@@ -422,7 +422,7 @@ describe("鍵の名前と値の取り違え・prototype の名前", () => {
     assert.match((await run(["secret", "list"])).out, /relay\.sess-sess-/);
   });
 
-  const TAIL_VALUE_LIKE = ["a.ghp_abcdefghijklmnop1234", "a.sk-abcdefgh12", "x.correcthorsebatterystaple"];
+  const TAIL_VALUE_LIKE = ["a.ghp_abcdefghijklmnop1234", "a.sk-abcdefgh12", "x.correcthorsebatterystaple", "a.b.ghp_abcdefghijklmnop1234", "a.b.sk-abcdefgh12"];
 
   test("`<接続名>.<session 名>` の session 名の部分に値を書いても、--secret / --stdin とも値を出さずに断る", async () => {
     for (const v of TAIL_VALUE_LIKE) {
@@ -437,6 +437,13 @@ describe("鍵の名前と値の取り違え・prototype の名前", () => {
     await noFile("mcp-connections.json");
     await noFile("mcp-secrets.json");
     for (const l of transcript) for (const v of TAIL_VALUE_LIKE) assert.ok(!l.includes(v));
+  });
+
+  test("`.` を含む session 名の正当な名前は新規に書ける", async () => {
+    for (const n of ["a.passengers-view", "a.2026-11-21-keyboard-review", "a.b.c1"]) {
+      assert.equal((await run(["secret", "set", n, "--stdin"], SECRET)).code, 0, n);
+      assert.equal((await run(["set", "c1", "--url", "https://relay.example/mcp", "--secret", n])).code, 0, n);
+    }
   });
 
   test("値らしい session 名でも、既に file にある名前は消せる", async () => {

@@ -35,7 +35,7 @@ function classChanges(run: string): number {
  * - 値によくある接頭辞（sk- / ghp_ / eyJ など）で始まる物は断る。
  * - 区切り（. _ -）で分けた各部分の英数字の連続が、16 文字以上で文字種（小文字・大文字・数字）の切り替えが 6 回以上なら乱数らしいので断る。
  * - 連続が 24 文字以上なら断る（ただし `<接続名>.<session 名>` の形の session 名の部分は、長い名前がありうるので長さだけでは断らない）。
- * - `<接続名>.<session 名>` の session 名の部分にも、接頭辞・切り替え回数の検査と、英字だけ・数字だけの 20 文字以上の連続の検査を当てる。
+ * - `<接続名>.<session 名>` の session 名の部分にも（`.` で区切った各部分に）、接頭辞・切り替え回数の検査と、英字だけ・数字だけの 20 文字以上の連続の検査を当てる。
  * 名前として通る形の値は事前に区別できないので、これは保証でなく緩和。
  */
 export function checkSecretNameNew(name: string): string | undefined {
@@ -45,7 +45,7 @@ export function checkSecretNameNew(name: string): string | undefined {
   const head = m ? m[1] : name;
   const tail = m ? m[2] : "";
   // session 名の部分にも同じ値らしさの検査を当てる（先頭にしか当てないと `a.ghp_…` が通る）
-  if (tail && VALUE_PREFIX.test(tail)) return SECRET_NAME_ERROR;
+  if (tail.split(".").some((seg) => VALUE_PREFIX.test(seg))) return SECRET_NAME_ERROR;
   if (tail && tail.length >= TAIL_PLAIN_RUN) for (const run of tail.match(/[A-Za-z0-9]+/g) ?? []) if (run.length >= TAIL_PLAIN_RUN && /^(?:[A-Za-z]+|[0-9]+)$/.test(run)) return SECRET_NAME_ERROR;
   for (const [part, longOk] of [[head, false], [tail, true]] as const) {
     for (const run of part.match(/[A-Za-z0-9]+/g) ?? []) {
