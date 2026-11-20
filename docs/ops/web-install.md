@@ -72,7 +72,7 @@
 | 設定 file | `WEB_SETTINGS_FILE` の path | backend が一時 file→rename で書く（`600`）。親 dir は**設置時に先に作る**（`install -d -m 700 -o <run-user> <settings-dir>`。`<run-user>` として `mkdir -m 700` でもよい） |
 | build 物 | `<install-dir>/packages/web/.output` | `<run-user>` が読める。他の user が書けない |
 
-- **env file の値は `[A-Za-z0-9._@,+/=-]` の文字だけにする**（空白・引用符・`$`・バッククォート・`;`・`#`・バックスラッシュを入れない）。systemd の `EnvironmentFile` と shell の `. <file>`（4.2 の script、3 章の手動起動）で読み方が違い、記号入りの値は片方で壊れたり、shell 側で別の command が走ったりするため。`PROXY_KEY` は `openssl rand -hex 32` の出力を使う。`ALLOWED_EMAILS` は email をカンマで繋ぐ（空白なし）。
+- **env file の値は `[A-Za-z0-9._@,+/=:-]` の文字だけにする**（`:` は `CENTER_URL` の `http://<host>:<port>` のため。sh でも systemd でも安全）（空白・引用符・`$`・バッククォート・`;`・`#`・バックスラッシュを入れない）。systemd の `EnvironmentFile` と shell の `. <file>`（4.2 の script、3 章の手動起動）で読み方が違い、記号入りの値は片方で壊れたり、shell 側で別の command が走ったりするため。`PROXY_KEY` は `openssl rand -hex 32` の出力を使う。`ALLOWED_EMAILS` は email をカンマで繋ぐ（空白なし）。`CENTER_TOKEN` が制限外の文字を含む時は env に置かず、設定 file（JSON）の `remote.token` に置く（2.3）。
 - 鍵・token・JWT を、コマンドライン引数・unit file の `Environment=`・ログ・shell の履歴に出さない。`EnvironmentFile`（または 4.2 の script が shell で読む env file）だけに置く。
 - `WEB_SETTINGS_FILE` は env file に**絶対 path で明示する**（`HOME` の違いで別の場所に書かれるのを避ける）。
 - 同じ host の別 user が `/proc/<pid>/environ` を読めない事（一般の Linux の権限）と、`<run-user>` の HOME が `750` 以下である事を設置者が確かめる（8 章 0）。
@@ -112,9 +112,8 @@ cd packages/web && bun run build      # = nuxt build。出力は packages/web/.o
 - 起動 command（実物）: `node .output/server/index.mjs`。cwd は `<install-dir>/packages/web`。env は 2.1。
 - 手で動かして確かめる時も、env は 2.2 の file から読む（値を command line に書かない）:
   ```bash
-  # <run-user> として、cwd は <install-dir>/packages/web
-  set -a; . <env-dir>/web.env; set +a
-  exec node .output/server/index.mjs
+  # <run-user> として。サブシェルで包む（exec が対話 shell を置き換えて端末を閉じないように）
+  ( cd <install-dir>/packages/web && set -a && . <env-dir>/web.env && set +a && exec node .output/server/index.mjs )
   ```
   値の制限（2.2）を守れば、この読み方と systemd の `EnvironmentFile` で同じ値になる。
 
@@ -240,7 +239,7 @@ KillMode=control-group
 WantedBy=default.target
 ```
 
-- `<run-dir>` は `<run-user>` だけが書ける dir（pid file 用）。`/tmp` を使わない。
+- `<run-dir>` は `<run-user>` だけが書ける dir（pid file 用）。`/tmp` を使わない。設置時に先に作る: `install -d -m 700 -o <run-user> <run-dir>`（親 dir も `<run-user>` 以外が書けない権限にする）。
 - `EnvironmentFile=` は使わない（env file は `<run-user>` 専用で `<unit-owner>` は読めない。読むのは `web-run.sh`）。
 - `<unit-owner>` の linger が有効である事（0.1 の 2）。`<unit-owner>` として `systemctl --user enable --now bantou-web`。
 - **sudo の経路が使えない時は、この形を取らず 4.1 にする**（unit の持ち主を `<run-user>` にする）。
