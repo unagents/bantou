@@ -4,6 +4,7 @@ import {
   MESSENGER_PROTOCOL,
   PROTOCOL_VERSION,
   SERVER_NAME,
+  isProtocolCompatible,
   parseServerNotice,
   parseServerReply,
   type CapResultReply,
@@ -423,10 +424,10 @@ export function createServerLink(opts: {
     peerId: peer.id,
   });
 
-  /** 門。制御メッセージは通す。宣言された protocol の版が違えば断り、次に更新待ちの判定。版が不明（名前宛て）は通す。 */
+  /** 門。制御メッセージは通す。宣言された protocol の版が互換でなければ（major / minor が違う。patch の差は通す）断り、次に更新待ちの判定。版が不明（名前宛て）は通す。 */
   const gateOf = (peer: { id: string; version?: string }, command: ServerCommandType): ErrorReply | undefined => {
     if (CONTROL_COMMANDS.includes(command)) return undefined;
-    if (peer.version !== undefined && peer.version !== MESSENGER_PROTOCOL.version) return versionMismatchError(peer.version, command, versionNote?.(peer));
+    if (peer.version !== undefined && !isProtocolCompatible(peer.version, MESSENGER_PROTOCOL.version)) return versionMismatchError(peer.version, command, versionNote?.(peer));
     return extraGate?.(peer, command);
   };
 

@@ -780,6 +780,27 @@ test("門: protocol の版が違う server へは kick_cap / stop_cap / status �
   await link.close();
 });
 
+test("門: patch だけ違う版の server へは送れる（互換）。minor が違えば version_mismatch で断る", async () => {
+  const [maj, min] = MESSENGER_PROTOCOL.version.split(".");
+  const patchOnly = `${maj}.${min}.99`;
+  const otherMinor = `${maj}.${Number(min) + 1}.0`;
+  const ok = { id: "id-a", name: "s", version: patchOnly };
+  const { link, clients } = setupNoServers([peerOf("id-a", "s", patchOnly)]);
+  assert.equal(link.gate(ok, "kick_cap"), undefined);
+  assert.equal(link.gate(ok, "status"), undefined);
+  const p = link.kickCapOn(ok, { cap_id: "r-1", prompt: "go" });
+  await sleep(20);
+  assert.deepEqual(clients[0].sentTo, ["id-a"], "patch の差は送る");
+  assert.deepEqual(clients[0].sentMeta, [{ protocol: "bantou", version: patchOnly }]);
+  void p;
+  const ng = { id: "id-b", name: "t", version: otherMinor };
+  const r = link.gate(ng, "kick_cap");
+  assert.equal(r?.code, "version_mismatch");
+  assert.match(r?.message ?? "", new RegExp(otherMinor.replace(/\./g, "\\.")));
+  assert.equal(link.gate({ id: "id-c", name: "u", version: "garbage" }, "task")?.code, "version_mismatch");
+  await link.close();
+});
+
 test("門: 発見した peer の宣言が違えば、config の server 経由の指示（kickCap / status）も送らない", async () => {
   const { link, clients } = setupDiscovery({}, [peerOf("id-a", "bantou-server", "1.2.0")]);
   const r = (await link.status("s1")) as { code?: string };

@@ -40,6 +40,20 @@ export function supportsRetire(version: string | undefined): boolean {
 }
 
 /**
+ * Are two messenger protocol versions compatible? Same major and same minor = compatible (a patch difference is passed:
+ * a patch release does not change the wire shape). Anything else, or a malformed string (empty, non-numeric, missing
+ * part, leading "v", pre-release / build suffix) = false.
+ */
+export function isProtocolCompatible(a: string | undefined, b: string | undefined): boolean {
+  if (typeof a !== "string" || typeof b !== "string") return false;
+  const re = /^(\d+)\.(\d+)\.(\d+)$/;
+  const x = re.exec(a);
+  const y = re.exec(b);
+  if (!x || !y) return false;
+  return Number(x[1]) === Number(y[1]) && Number(x[2]) === Number(y[2]);
+}
+
+/**
  * hello / update_server (and their replies) exist from this protocol version. A server older than this
  * ignores them, so a center must not send them there. Their shape is fixed for good: they are the only way
  * to update a server whose protocol version differs from the center's.
