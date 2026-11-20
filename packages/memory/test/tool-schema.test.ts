@@ -8,12 +8,19 @@ import { contextShape, explainShape, recallShape } from "../server/utils/recall.
 
 const TOOLS_DIR = fileURLToPath(new URL("../server/mcp/tools/", import.meta.url));
 
-/** tool の定義 file（toolkit が file 名を tool 名にして登録する）と、その inputSchema。定義 file は nitro の runtime を読み込むので test では import しない。 */
+/** 入力の無い tool。定義 file には `inputSchema: {},`（空の shape）と書く。入力を足す時は shape に名前を付けて export し、ここを差し替える。 */
+const NO_INPUT: [string, ZodRawShape] = ["{}", {}];
+
+/**
+ * tool の定義 file（toolkit が file 名を tool 名にして登録する）と、その inputSchema（定義 file に書いてある式、その shape）。
+ * 定義 file は nitro の runtime を読み込むので test では import しない。入力の無い tool も NO_INPUT として載せる（載せない tool を作らない）。
+ */
 const SHAPES: Record<string, [string, ZodRawShape]> = {
   "context.ts": ["contextShape", contextShape],
   "event.ts": ["eventShape", eventShape],
   "explain.ts": ["explainShape", explainShape],
   "recall.ts": ["recallShape", recallShape],
+  "status.ts": NO_INPUT,
 };
 
 /** schema を再帰的に辿り、`pattern`（文字列）をすべて集める。 */
@@ -83,6 +90,10 @@ test("全 tool の inputSchema の pattern は u で compile でき、文字 cla
     tools.push({ name: f.replace(/\.ts$/, ""), inputSchema: z.toJSONSchema(z.object(shape), { io: "input" }) });
   }
   assert.equal(tools.length, files.length);
+  // 入力の無い tool（status）も schema を作って検査に通す。空の object になる
+  const status = tools.find((t) => t.name === "status")?.inputSchema as { type?: unknown; properties?: unknown } | undefined;
+  assert.equal(status?.type, "object", "status.type");
+  assert.deepEqual(status?.properties, {}, "status は入力無し");
   const found: { path: string; pattern: string }[] = [];
   for (const t of tools) collectPatterns(t.inputSchema, t.name, found);
   // explain の id（uuid）は pattern として出る。辿り漏れの検出
