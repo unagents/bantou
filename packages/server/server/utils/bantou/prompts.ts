@@ -18,12 +18,53 @@ import {
   type TaskResultWorker,
   type WorkerRole,
 } from "@agent-hand/bantou-protocol";
+import { COMMON_MD, REMOTE_CAP_MD, WORKER_MD } from "./instructions.generated";
 
-/** 本文の正本は docs/design/cap-orchestration.md。変える時は両方。 */
+/** md（`[見出し]` の行で始まる節の並び）を、見出し → 節の本文（見出し行を含む）に分ける。 */
+export function parseSections(md: string): Map<string, string> {
+  const out = new Map<string, string>();
+  let name: string | undefined;
+  let lines: string[] = [];
+  const flush = (): void => {
+    if (name !== undefined) out.set(name, lines.join("\n").trim());
+  };
+  for (const line of md.split("\n")) {
+    const m = /^\[(.+)\]$/.exec(line);
+    if (m) {
+      flush();
+      name = m[1]!;
+      lines = [line];
+    } else lines.push(line);
+  }
+  flush();
+  return out;
+}
+
+/** 基盤仕様の文面（instructions/*.md が正本。build の時に instructions.generated.ts へ取り込む。共通の文面は packages/center/instructions/common.md の 1 つだけ）。 */
+export const COMMON_TEXT = COMMON_MD.trim();
+export const REMOTE_CAP_SECTIONS = parseSections(REMOTE_CAP_MD);
+export const WORKER_TEXT = WORKER_MD.trim();
+
+/** remote-cap.md の節を 1 つ取る（extra を渡すと、その節の末尾に足す）。見出しが無ければ例外。 */
+function capSection(name: string, extra: readonly string[] = []): string {
+  const body = REMOTE_CAP_SECTIONS.get(name);
+  if (body === undefined) throw new Error(`remote-cap.md に節が無い: ${name}`);
+  return [body, ...extra].join("\n");
+}
+
+/** 本文の正本は docs/design/cap-orchestration.md。変える時は両方。基盤仕様の部分は instructions/*.md。 */
 export const CAP_GUIDE = [
   "あなたは bantou の remote-cap。作業を束ねるオーケストレーターで、自分では実装しない。",
   "作業は必ず worker にさせる。cap がするのは、分割・指示・結果の確認・次の指示・まとめだけ。",
   "「密結合だから worker は 1 体」と丸投げしない。",
+  "",
+  COMMON_TEXT,
+  "",
+  capSection("役割"),
+  "",
+  capSection("自分の層で直し切る"),
+  "",
+  capSection("完了の判定"),
   "",
   "[道具]",
   "worker の起動と続きの指示は mcp__bantou__worker_start を使う。worker_id を省けば新規、同じ worker_id を渡せば続きの指示になる。",
@@ -57,16 +98,25 @@ export const CAP_GUIDE = [
   '{"state":"done または failed","summary":"結果の要約","workers":[{"worker_id":"...","role":"implement|review|docs|test|other","state":"done|failed|idle|running|stalled|lost","branch":"...","commit":"...","tests":"回したテストと結果","report_path":"...","result":"worker の結果の先頭"}],"review":{"verdict":"ok|issues|unknown","items":[{"severity":"high|medium|low","text":"指摘","resolved":true}],"rounds":0},"remaining":["残った問題"]}',
   "branch / commit / tests / report_path は分かるものだけ書く。review の結果が無い時は verdict を unknown にする。",
   "",
-  "[report が来ない worker]",
-  "指示が [worker 終了通知] で始まる時は、server が worker の失敗・時間切れ・done 無しの終了を知らせている。worker_status と git で状態を確かめ、同じ worker_id で worker_start して続きから起こし直すか、起こし直さず最終返答に原因と残りを書いて終える。",
-  "再開の回数には上限がある（超えると server は cap を起こさず task を failed にする）。同じ失敗の繰り返しは起こし直さず終える。",
-  "worker が report を送らずに idle になった時（worker_status が idle で、その worker の report が届いていない）は、同じ worker_id で worker_start して report を送るよう指示し、再開させる。",
+  capSection("見張り", [
+    "指示が [worker 終了通知] で始まる時は、server が worker の失敗・時間切れ・done 無しの終了を知らせている。worker_status と git で状態を確かめ、同じ worker_id で worker_start して続きから起こし直すか、起こし直さず最終返答に原因と残りを書いて終える。",
+    "再開の回数には上限がある（超えると server は cap を起こさず task を failed にする）。同じ失敗の繰り返しは起こし直さず終える。",
+    "worker が report を送らずに idle になった時（worker_status が idle で、その worker の report が届いていない）は、同じ worker_id で worker_start して report を送るよう指示し、再開させる。",
+  ]),
+  "",
+  capSection("残った問題"),
+  "",
+  capSection("窓口を預かっている時"),
 ].join("\n");
 
 export const WORKER_GUIDE = [
   "あなたは bantou の worker。remote-cap から作業を任されている。",
-  "進捗・質問・承認依頼・完了は mcp__bantou__report で送る（kind: progress | ask | approve | done）。",
+  "進捗・完了は mcp__bantou__report で送る（kind: progress | done）。",
   "report はすぐ accepted を返す。送ったらターンを終える。",
+  "",
+  COMMON_TEXT,
+  "",
+  WORKER_TEXT,
   "",
   "[一時物]",
   "一時物は作業 dir の中に置く。$TMPDIR（自分の path の tmp/）を使い、/tmp 直書きはしない。一時物の削除は Bash の rm でなく mcp__bantou__bash の rm（action: rm、paths は自分の path からの相対、dir は recursive: true）を使う。",

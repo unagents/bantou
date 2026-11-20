@@ -18,10 +18,10 @@
     "protocol"
   ],
   "scripts": {
-    "build": "node scripts/copy-protocol.mjs && nuxt build",
-    "dev": "node scripts/copy-protocol.mjs && nuxt build && node bin/bantou.mjs",
-    "e2e": "node scripts/copy-protocol.mjs && nuxt build && node --import tsx scripts/e2e-launch.ts",
-    "prepack": "node scripts/copy-protocol.mjs && nuxt build",
+    "build": "node scripts/copy-protocol.mjs && node scripts/gen-instructions.mjs && nuxt build",
+    "dev": "node scripts/copy-protocol.mjs && node scripts/gen-instructions.mjs && nuxt build && node bin/bantou.mjs",
+    "e2e": "node scripts/copy-protocol.mjs && node scripts/gen-instructions.mjs && nuxt build && node --import tsx scripts/e2e-launch.ts",
+    "prepack": "node scripts/copy-protocol.mjs && node scripts/gen-instructions.mjs && nuxt build",
     "test": "node --import tsx --test \"test/**/*.test.ts\"",
     "typecheck": "nuxt prepare && tsc --noEmit -p tsconfig.json"
   },
