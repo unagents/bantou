@@ -409,17 +409,61 @@ describe("鍵の名前と値の取り違え・prototype の名前", () => {
     await noFile("mcp-secrets.json");
   });
 
-  test("普通の鍵の名前（接続名・<接続名>.<session>）は通る。保存済みの値らしい名前は読み込みで捨てる", async () => {
-    for (const n of ["relay", "memory.alice", "k-1_x", "relay-prod.s_1"]) {
+  const LONG_SESSION = `${"sess-".repeat(12)}abcd`; // 64 文字（session 名の上限）
+  const LEGIT = [`relay.${LONG_SESSION}`, "memory.alice20261121abcd", "relay", "memory.alice", "k-1_x", "relay-prod.s_1"];
+
+  test("設計が許す名前（長い session 名つき・日付つき）は新規に書いても断られない", async () => {
+    assert.equal(LONG_SESSION.length, 64);
+    assert.equal(LEGIT[0].length, 70);
+    for (const n of LEGIT) {
       assert.equal((await run(["secret", "set", n, "--stdin"], SECRET)).code, 0, n);
+      assert.equal((await run(["set", "c1", "--url", "https://relay.example/mcp", "--secret", n])).code, 0, n);
     }
-    const { writeFile } = await import("node:fs/promises");
-    const f = await readJson("mcp-secrets.json");
-    f.secrets["sk-live-AbCdEf0123456789xyz"] = { value: SECRET, rev: 1, updatedAt: "x" };
-    await writeFile(state("mcp-secrets.json"), JSON.stringify(f));
-    const list = await run(["secret", "list"]);
-    assert.ok(!list.out.includes("sk-live"), "値らしい名前は一覧に出さない");
-    assert.match(list.err, /不正/);
+    assert.match((await run(["secret", "list"])).out, /relay\.sess-sess-/);
+  });
+
+  test("手書きの file の長い名前（70 文字・日付つき）は読める。list / set / secret list が動く", async () => {
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    await mkdir(join(dir, "state"), { recursive: true });
+    const sec = (rev: number) => ({ value: SECRET, rev, updatedAt: "2026-11-21T00:00:00.000Z" });
+    await writeFile(state("mcp-secrets.json"), JSON.stringify({ version: 1, secrets: { relay: sec(1), [LEGIT[0]]: sec(2), [LEGIT[1]]: sec(3) } }));
+    const conn = (secret: string) => ({ transport: "http", url: "https://relay.example/mcp", auth: { secret } });
+    await writeFile(state("mcp-connections.json"), JSON.stringify({ version: 1, common: { a: conn("relay"), b: conn(LEGIT[0]), c: conn(LEGIT[1]) }, sessions: {} }));
+    const list = await run(["list"]);
+    assert.equal(list.code, 0);
+    for (const n of ["a", "b", "c"]) assert.match(list.out, new RegExp(`  ${n}: role=`), `接続 ${n} が見える`);
+    assert.doesNotMatch(list.out + list.err, /不正|問題/);
+    assert.match(list.out, /鍵 relay\.sess-.*設定済み rev 2/);
+    assert.match(list.out, /鍵 memory\.alice20261121abcd: 設定済み rev 3/);
+    const sl = await run(["secret", "list"]);
+    assert.equal(sl.out.split("\n").length, 3, "鍵 3 件とも読める");
+    assert.doesNotMatch(sl.err, /不正/);
+    assert.equal((await run(["set", "d", "--url", "https://relay.example/mcp"])).code, 0, "set が壊れた file 扱いにならない");
+    assert.equal((await run(["set", "b", "--timeout-ms", "5000"])).code, 0);
+    assert.equal((await run(["secret", "unset", LEGIT[1]])).code, 0);
+    assert.equal(JSON.parse(await readFile(state("mcp-connections.json"), "utf8")).common.d.url, "https://relay.example/mcp");
+  });
+
+  test("値らしい名前は新規の書き込みで断られ続ける（接頭辞だけで判る形も）", async () => {
+    const prefixOnly = ["sk-abcdefgh", "AKIAIOSFODNN7EXAMPLE", "ghp_abcdef1234", "Bearer-abcdefgh", "xoxb-abcdefghij"];
+    for (const v of [...VALUE_LIKE, ...prefixOnly]) {
+      assert.equal((await run(["secret", "set", v, "--stdin"], "x-other-value")).code, 2, v);
+      assert.equal((await run(["set", "c1", "--url", "https://relay.example/mcp", "--secret", v])).code, 2, v);
+    }
+    await noFile("mcp-secrets.json");
+    await noFile("mcp-connections.json");
+  });
+
+  test("接頭辞の検査単独: 他の規則に当たらない短い値らしい名前が断られる", async () => {
+    // 連続は 16 文字未満・文字種の切り替えも少ない。接頭辞の規則だけが判る
+    for (const v of ["sk-abcdefgh", "ghp_abcdef1234", "AKIAIOSFODNN7EXAMPLE", "github_pat_abcdefgh", "eyJhbGciOiJIUzI1"]) {
+      const r = await run(["secret", "set", v, "--stdin"], "x-other-value");
+      assert.equal(r.code, 2, v);
+      assert.match(r.err, /鍵の名前の形でない/);
+      assert.ok(!r.err.includes(v));
+    }
+    // 接頭辞に見えても短い・区切りの先が短い名前は通る
+    for (const ok of ["sk-1", "key-main", "token.s1", "pass-a"]) assert.equal((await run(["secret", "set", ok, "--stdin"], SECRET)).code, 0, ok);
   });
 
   test("prototype の名前（constructor / toString / hasOwnProperty / __proto__）を鍵名・接続名・session 名に使っても prototype を拾わない", async () => {
