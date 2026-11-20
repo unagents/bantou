@@ -80,14 +80,11 @@ export async function startStack(): Promise<Stack> {
     const m = /^\/sessions\/([^/]+)\/(input|resize)$/.exec(req.url ?? "");
     if (!m) return false;
     const session = decodeURIComponent(m[1]!);
-    let raw = "";
-    req.on("data", (d) => (raw += d));
-    req.on("end", () => {
-      const body = JSON.parse(raw) as { data?: string; cols?: number; rows?: number };
-      if (m[2] === "input") inputs.push({ session, data: Buffer.from(body.data ?? "", "base64").toString("utf8") });
-      else resizes.push({ session, cols: body.cols!, rows: body.rows! });
-      res.writeHead(200, { "content-type": "application/json" }).end("{}");
-    });
+    // the fake center has read and parsed the body already (it is the last logged request)
+    const body = (center.log.at(-1)?.body ?? {}) as { data?: string; cols?: number; rows?: number };
+    if (m[2] === "input") inputs.push({ session, data: Buffer.from(body.data ?? "", "base64").toString("utf8") });
+    else resizes.push({ session, cols: body.cols!, rows: body.rows! });
+    res.writeHead(200, { "content-type": "application/json" }).end("{}");
     return true;
   };
   const port = await freePort();

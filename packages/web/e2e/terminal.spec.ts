@@ -77,6 +77,7 @@ test.describe("server / cap tab", () => {
   test("an empty remote_list says so, and the server card opens the shared dialog without a retire button", async ({ page, stack }) => {
     stack.center.tools.set("remote_list", []);
     stack.center.tools.set("rc_list", []);
+    stack.center.tools.set("server_peers", { pair: { server: "1.0.0", protocol: "1" }, peers: [] });
     stack.center.tools.set("server_list", [{ name: "srv-1", host: "host-a.example.test", reachable: true, connected: true, server_id: "sid-1" }]);
     await page.goto("/");
     await page.getByTestId("tab-server").click();
