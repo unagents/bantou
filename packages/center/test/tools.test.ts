@@ -82,6 +82,44 @@ test("外向けの tool は 23 個。remote_create / remote_delete / remote_send
   await close();
 });
 
+/** schema を再帰的に辿り、`pattern`（文字列）をすべて集める。 */
+function collectPatterns(node: unknown, path: string, out: { path: string; pattern: string }[]): void {
+  if (Array.isArray(node)) return node.forEach((v, i) => collectPatterns(v, `${path}[${i}]`, out));
+  if (node === null || typeof node !== "object") return;
+  for (const [k, v] of Object.entries(node)) {
+    if (k === "pattern" && typeof v === "string") out.push({ path, pattern: v });
+    else collectPatterns(v, `${path}.${k}`, out);
+  }
+}
+
+test("全 tool の inputSchema の pattern は RegExp の v / u の両方で compile できる（Claude の API に schema を弾かれない形）", async () => {
+  const { client, session, close } = await connect();
+  const c = await session("pm1");
+  const found: { path: string; pattern: string }[] = [];
+  for (const [label, cl] of [["center", client], ["session", c]] as const) {
+    const tools = (await cl.listTools()).tools;
+    assert.ok(tools.length > 0, label);
+    for (const t of tools) collectPatterns(t.inputSchema, `${label}:${t.name}`, found);
+  }
+  // remote_send の worker_model / items[].model まで辿れている事（辿り漏れの検出）
+  assert.ok(found.some((f) => f.path.startsWith("session:remote_send") && f.path.endsWith(".worker_model")), "worker_model");
+  assert.ok(found.some((f) => f.path.startsWith("session:remote_send") && f.path.includes(".items.") && f.path.endsWith(".model")), "items[].model");
+  if (process.env.PATTERN_DUMP) console.log("PATTERN_DUMP " + JSON.stringify(found));
+  const bad: string[] = [];
+  for (const f of found) {
+    for (const flag of ["v", "u"]) {
+      try {
+        new RegExp(f.pattern, flag);
+      } catch (e) {
+        bad.push(`${f.path} /${f.pattern}/${flag}: ${(e as Error).message}`);
+      }
+    }
+  }
+  assert.deepEqual(bad, []);
+  await c.close();
+  await close();
+});
+
 test("center_info は { workspace, systemInstructions } を返す。未設定は null / []", async () => {
   const parts = [{ id: "master-cap-role", version: 1, title: "役割" }];
   const a = await connect({}, { workspace: "/w/ws", systemInstructions: parts });

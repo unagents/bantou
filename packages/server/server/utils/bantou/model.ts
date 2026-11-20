@@ -3,8 +3,13 @@ import { join } from "node:path";
 import { runLogDir } from "./paths";
 
 /** claude の --model にそのまま渡す値の形式。 */
-/** 先頭 - 不可（引数として解釈されるのを防ぐ）。protocol の MODEL_PATTERN と同じ。 */
-export const MODEL_PATTERN = /^[A-Za-z0-9._[\]][A-Za-z0-9._[\]-]*$/;
+/**
+ * 先頭 - 不可（引数として解釈されるのを防ぐ）。protocol の MODEL_PATTERN と同じ文字列を受け付ける。
+ * worker_start の inputSchema（Claude に渡る JSON Schema）の pattern にも出るので、文字 class の中の `[` `]` `-` はすべて escape する
+ * （`new RegExp(p, "v")` と `"u"` の両方で compile できる形）。escape の無い `[` を文字 class に持つ pattern は Claude の API が
+ * 「JSON schema is invalid」として弾き、cap が tool を 1 つも読み込めなくなる。
+ */
+export const MODEL_PATTERN = /^[A-Za-z0-9._\[\]][A-Za-z0-9._\[\]\-]*$/;
 
 /** model 文字列の検証。不正なら投げる。 */
 export function assertModel(v: unknown, field = "model"): string {

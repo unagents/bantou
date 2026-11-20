@@ -2,11 +2,12 @@ import { z } from "zod";
 import type { Db } from "./db";
 import type { Embedder } from "./embed";
 import { toVectorLiteral, checkVectors } from "./embed";
+import { isoDatetime } from "./events";
 
 export class ForbiddenError extends Error {}
 export class NotFoundError extends Error {}
 
-const iso = z.iso.datetime({ offset: true });
+const iso = isoDatetime();
 
 /** §8.1 の MemoryRecallRequest。memoryTypes 省略時は 4 種全て */
 export const recallShape = {

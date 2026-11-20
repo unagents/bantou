@@ -1,5 +1,5 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { AGENT_ID_PATTERN } from "@agent-hand/bantou-protocol";
+import { AGENT_ID_SCHEMA_PATTERN } from "./schema-patterns.js";
 import { z } from "zod";
 import { ACK_TIMEOUT_MS, OWNER_HEADER, OWNER_PATTERN, OWNER_QUERY, remoteSendSchema, remoteWaitSchema, workerReplySchema, WAIT_DEFAULT_SEC, type RemoteManager, type RemoteSendInput } from "./remotes.js";
 import type { RemoteControlSupervisor } from "./remote-control.js";
@@ -37,7 +37,7 @@ const workerReplyHandler =
 /** server の返信が失敗（error 返信または ok:false）か。 */
 const isFailure = (r: { type: string; ok?: boolean }): boolean => r.type === "error" || r.ok === false;
 
-const agentId = z.string().regex(AGENT_ID_PATTERN, "英数字と _ - のみ");
+const agentId = z.string().regex(AGENT_ID_SCHEMA_PATTERN, "英数字と _ - のみ");
 const notDash = (s: string): boolean => !s.startsWith("-");
 // server は NUL を含む指示を黙って無視する（返信が来ず待ち続ける）ので、ここで弾く
 const noNul = (s: string): boolean => !s.includes("\0");

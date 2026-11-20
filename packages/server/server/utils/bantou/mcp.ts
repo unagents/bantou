@@ -4,11 +4,15 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
 import { MAX_BASH_PATHS, MAX_BASH_PATH_LENGTH, getBashWorkspace, runBash, type BashCaller } from "./bash";
+import { MODEL_PATTERN } from "./model";
 import { MAX_REPORT_TEXT, REPORT_KINDS, getReportHandler } from "./reports";
 import { getWorkerHandler } from "./workers";
 
 export const CAP_ID_HEADER = "x-bantou-cap-id";
 export const WORKER_ID_HEADER = "x-bantou-worker-id";
+
+/** worker_id の形式。tool の schema の pattern に出るので、文字 class の中の `-` は escape する（model.ts の MODEL_PATTERN と同じ理由）。 */
+const WORKER_ID_PATTERN = /^[A-Za-z0-9_\-]+$/;
 
 const text = (t: string, isError = false) => ({ content: [{ type: "text" as const, text: t }], ...(isError ? { isError } : {}) });
 
@@ -103,10 +107,10 @@ function registerWorkerTools(server: McpServer, capId: string): void {
         "Returns {worker_id, accepted} immediately without waiting for the work; the worker reports back with its own report tool, which resumes you.",
       inputSchema: {
         prompt: z.string().min(1).refine(noNul, { message: "NUL 文字を含められない" }),
-        worker_id: z.string().regex(/^[A-Za-z0-9_-]+$/).optional(),
+        worker_id: z.string().regex(WORKER_ID_PATTERN).optional(),
         repo: z.string().min(1).refine((s) => !s.startsWith("-") && noNul(s), { message: "- で始められない / NUL 不可" }).optional(),
         branch: z.string().min(1).refine((s) => !s.startsWith("-") && noNul(s), { message: "- で始められない / NUL 不可" }).optional(),
-        model: z.string().regex(/^[A-Za-z0-9._[\]][A-Za-z0-9._[\]-]*$/).optional(),
+        model: z.string().regex(MODEL_PATTERN).optional(),
       },
     },
     async (args) => {
@@ -125,7 +129,7 @@ function registerWorkerTools(server: McpServer, capId: string): void {
       description:
         "State of your workers: {workers:[{id, state (running|stalled|idle|done|failed|lost), task, last_activity, last_output_at, silent_ms, ...}]}. " +
         "Give worker_id to see one.",
-      inputSchema: { worker_id: z.string().regex(/^[A-Za-z0-9_-]+$/).optional() },
+      inputSchema: { worker_id: z.string().regex(WORKER_ID_PATTERN).optional() },
     },
     async ({ worker_id }) => {
       const h = hub();
@@ -141,7 +145,7 @@ function registerWorkerTools(server: McpServer, capId: string): void {
     "worker_stop",
     {
       description: "Stop a running worker of yours (kills its claude process group). Returns {worker_id, stopped}.",
-      inputSchema: { worker_id: z.string().regex(/^[A-Za-z0-9_-]+$/) },
+      inputSchema: { worker_id: z.string().regex(WORKER_ID_PATTERN) },
     },
     async ({ worker_id }) => {
       const h = hub();

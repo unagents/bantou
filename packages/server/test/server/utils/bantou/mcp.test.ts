@@ -193,3 +193,50 @@ test("mcp: worker の header では worker_start を呼べない", async () => {
     await l.close();
   }
 });
+
+/** schema を再帰的に辿り、`pattern`（文字列）をすべて集める。 */
+function collectPatterns(node: unknown, path: string, out: { path: string; pattern: string }[]): void {
+  if (Array.isArray(node)) return node.forEach((v, i) => collectPatterns(v, `${path}[${i}]`, out));
+  if (node === null || typeof node !== "object") return;
+  for (const [k, v] of Object.entries(node)) {
+    if (k === "pattern" && typeof v === "string") out.push({ path, pattern: v });
+    else collectPatterns(v, `${path}.${k}`, out);
+  }
+}
+
+test("mcp: 全 tool の inputSchema の pattern は RegExp の v / u の両方で compile できる（Claude の API に schema を弾かれない形）", async () => {
+  const app = createApp().use("/mcp", defineEventHandler((e) => handleMcpRequest(toWebRequest(e))));
+  const l = await startMcpListener(toNodeListener(app), { port: 0, bind: "127.0.0.1" });
+  try {
+    const url = `http://127.0.0.1:${l.port}/mcp`;
+    const found: { path: string; pattern: string }[] = [];
+    // cap・worker・header 無しのそれぞれに出る tool をすべて見る
+    for (const [label, headers] of [
+      ["cap", { "x-bantou-cap-id": "c1" }],
+      ["worker", { "x-bantou-cap-id": "c1", "x-bantou-worker-id": "w1" }],
+      ["none", {}],
+    ] as const) {
+      const r = (await (await rpc(url, { jsonrpc: "2.0", id: 1, method: "tools/list" }, headers)).json()) as {
+        result: { tools: Array<{ name: string; inputSchema: unknown }> };
+      };
+      assert.ok(r.result.tools.length > 0, label);
+      for (const t of r.result.tools) collectPatterns(t.inputSchema, `${label}:${t.name}`, found);
+    }
+    // worker_start の model まで辿れている事（辿り漏れの検出）
+    assert.ok(found.some((f) => f.path === "cap:worker_start.properties.model"), "worker_start.model");
+    if (process.env.PATTERN_DUMP) console.log("PATTERN_DUMP " + JSON.stringify(found));
+    const bad: string[] = [];
+    for (const f of found) {
+      for (const flag of ["v", "u"]) {
+        try {
+          new RegExp(f.pattern, flag);
+        } catch (e) {
+          bad.push(`${f.path} /${f.pattern}/${flag}: ${(e as Error).message}`);
+        }
+      }
+    }
+    assert.deepEqual(bad, []);
+  } finally {
+    await l.close();
+  }
+});

@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { z } from "zod";
+import { AGENT_ID_SCHEMA_PATTERN, MODEL_SCHEMA_PATTERN } from "./schema-patterns.js";
 import {
   AGENT_ID_PATTERN,
   MODEL_PATTERN,
@@ -261,7 +262,7 @@ const serverArg = z
   .describe("server の指定。server_id、host 名、peer id のどれでもよい（server_id → peer id → host 名 → messenger の名前の順に探す）。host 名が複数の server に一致する時は error（候補を user と workspace 付きで返す。server_id で指定し直す）。省略時は protocol bantou で発見した先頭");
 
 export const remoteWaitSchema = {
-  remote_id: z.string().regex(AGENT_ID_PATTERN, "英数字と _ - のみ").optional().describe("待つ cap。省略時は owner（session）の cap のうち未完了の指示があるもののどれか（最初に終わったもの）"),
+  remote_id: z.string().regex(AGENT_ID_SCHEMA_PATTERN, "英数字と _ - のみ").optional().describe("待つ cap。省略時は owner（session）の cap のうち未完了の指示があるもののどれか（最初に終わったもの）"),
   server: serverArg.describe("cap のある server（複数の server に同じ remote_id がある時の絞り込み）"),
   timeout_sec: z.number().int().min(1).max(WAIT_MAX_SEC).optional().describe(`待つ秒数。既定 ${WAIT_DEFAULT_SEC}、上限 ${WAIT_MAX_SEC}。超えたら state=running のまま返す`),
 };
@@ -291,13 +292,13 @@ export function formatWorkerReportNotice(remoteId: string, n: WorkerReportNotice
 const newTaskId = (): string => `t-${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`;
 
 const modelArg = (what: string) =>
-  z.string().regex(MODEL_PATTERN, "英数字と . _ [ ] - のみ（先頭は - 不可）").optional().describe(what);
+  z.string().regex(MODEL_SCHEMA_PATTERN, "英数字と . _ [ ] - のみ（先頭は - 不可）").optional().describe(what);
 const noNul = (v: string): boolean => !v.includes("\0");
 const noNulMsg = { message: "NUL 文字を含められない" };
 const notDash = (v: string): boolean => !v.startsWith("-");
 const plain = z.string().refine(noNul, noNulMsg);
 const plainList = z.array(plain);
-const agentIdArg = z.string().regex(AGENT_ID_PATTERN, "英数字と _ - のみ");
+const agentIdArg = z.string().regex(AGENT_ID_SCHEMA_PATTERN, "英数字と _ - のみ");
 const branchArg = z.string().min(1).refine(notDash, { message: "- で始められない" }).refine(noNul, noNulMsg);
 
 /** remote_send（別名 remote_create）の入力。worker_model の既定は config の servers[]（送信のたびに読み直す）。 */
@@ -319,7 +320,7 @@ export const remoteSendSchema = {
             id: agentIdArg.optional(),
             role: z.enum(["implement", "review", "docs", "test", "other"]),
             scope: z.string().min(1).refine(noNul, noNulMsg),
-            model: z.string().regex(MODEL_PATTERN, "英数字と . _ [ ] - のみ（先頭は - 不可）").optional(),
+            model: z.string().regex(MODEL_SCHEMA_PATTERN, "英数字と . _ [ ] - のみ（先頭は - 不可）").optional(),
             depends_on: z.array(agentIdArg).optional(),
           }),
         )
@@ -332,8 +333,8 @@ export const remoteSendSchema = {
 };
 /** worker_reply の入力（desktop の center_call と /mcp/session で共通）。remote_id 省略時は記録が 1 件ならその cap。 */
 export const workerReplySchema = {
-  remote_id: z.string().regex(AGENT_ID_PATTERN, "英数字と _ - のみ").optional().describe("返答先の remote（cap）。省略時は呼び出し元 session の cap（server が複数なら server で絞る）。旧共有 cap へは remote_id で明示する"),
-  worker_id: z.string().regex(AGENT_ID_PATTERN, "英数字と _ - のみ").describe("返答する worker（worker_report の worker_id）"),
+  remote_id: z.string().regex(AGENT_ID_SCHEMA_PATTERN, "英数字と _ - のみ").optional().describe("返答先の remote（cap）。省略時は呼び出し元 session の cap（server が複数なら server で絞る）。旧共有 cap へは remote_id で明示する"),
+  worker_id: z.string().regex(AGENT_ID_SCHEMA_PATTERN, "英数字と _ - のみ").describe("返答する worker（worker_report の worker_id）"),
   text: z.string().min(1).refine(noNul, noNulMsg).describe("worker への返答（ask への回答、approve の承認・却下など）"),
   server: serverArg.describe("remote_id が複数の server にある時の絞り込み"),
 };

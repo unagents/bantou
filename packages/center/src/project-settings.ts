@@ -101,7 +101,7 @@ const memorySchema = z
     agentId: z
       .string()
       .max(MEMORY_AGENT_ID_MAX, `agentId は ${MEMORY_AGENT_ID_MAX} 文字以内`)
-      .regex(/^(|[A-Za-z0-9_-]+)$/, "agentId は英数字と _ - のみ")
+      .regex(/^(|[A-Za-z0-9_\-]+)$/, "agentId は英数字と _ - のみ")
       .optional(),
   })
   .strict();
