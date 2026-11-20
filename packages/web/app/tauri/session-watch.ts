@@ -23,28 +23,36 @@ export function planReload(stored: string | null, now: number): { reload: boolea
   return { reload: true, list: [...prev, now] };
 }
 
-const deniedListeners = new Set<() => void>();
+const deniedListeners = new Set<(denied: boolean) => void>();
 let denied = false;
 /** True once reloading did not help (the session is refused, not expired). */
 export const isAccessDenied = () => denied;
-/** Be told when `isAccessDenied()` becomes true. Returns the unsubscribe. */
-export function onAccessDenied(fn: () => void): () => void {
+/** Be told when `isAccessDenied()` changes (true: reloading did not help; false: the stream is back). Returns the unsubscribe. */
+export function onAccessDenied(fn: (denied: boolean) => void): () => void {
   deniedListeners.add(fn);
   return () => deniedListeners.delete(fn);
 }
 
-/** The stream (or a command) worked: the session is fine, forget the reload history. */
+/** The stream (or a command) worked: the session is fine. Forget the reload history and clear a "not allowed" shown before. */
 export function noteSessionOk(): void {
   try {
     sessionStorage.removeItem(RELOADS_KEY);
   } catch {
     // no storage: nothing to forget
   }
+  if (denied) {
+    denied = false;
+    for (const fn of deniedListeners) fn(false);
+  }
 }
 
 export type SessionState = "ok" | "gone" | "offline";
 
-/** Ask `/api/me`. "offline": the request did not get an answer at all (no network): not a reason to reload. */
+/**
+ * Ask `/api/me`. "gone": not our backend's answer because of the login: a redirect, 401, 403, or a 2xx that is not our JSON
+ * (the login page). "offline": no answer at all, or one that is not about the login (5xx while the backend restarts, other 4xx):
+ * not a reason to reload.
+ */
 export async function probeSession(fetchFn: typeof fetch = fetch): Promise<SessionState> {
   let res: Response;
   try {
@@ -52,7 +60,8 @@ export async function probeSession(fetchFn: typeof fetch = fetch): Promise<Sessi
   } catch {
     return "offline";
   }
-  if (res.type === "opaqueredirect" || !res.ok) return "gone";
+  if (res.type === "opaqueredirect" || res.status === 401 || res.status === 403) return "gone";
+  if (!res.ok) return "offline";
   try {
     const body = (await res.json()) as { email?: unknown };
     return typeof body.email === "string" ? "ok" : "gone";
@@ -66,7 +75,7 @@ function reload() {
   const plan = planReload(sessionStorage.getItem(RELOADS_KEY), Date.now());
   if (!plan.reload) {
     denied = true;
-    for (const fn of deniedListeners) fn();
+    for (const fn of deniedListeners) fn(true);
     return;
   }
   sessionStorage.setItem(RELOADS_KEY, JSON.stringify(plan.list));
