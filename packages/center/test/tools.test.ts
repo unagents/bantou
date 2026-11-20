@@ -473,6 +473,11 @@ test("session_settings_update / center_settings_update: memory を含む更新�
       assert.ok(!text(r as never).includes("tk"));
     }
   }
+  for (const coordinator of [{ session: "main" }, null]) {
+    const r = await client.callTool({ name: "center_settings_update", arguments: { settings: { instructions: "i", coordinator } } });
+    assert.equal(r.isError, true, JSON.stringify(coordinator));
+    assert.match(text(r as never), /bantou-center coordinator/);
+  }
   const tools = (await client.listTools()).tools;
   for (const n of ["session_settings_get", "session_settings_update", "center_settings_get", "center_settings_update"]) {
     const d = tools.find((t) => t.name === n)?.description ?? "";

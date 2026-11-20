@@ -2,7 +2,8 @@ import { mkdir, rename } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
 import { projectSchema, PERMISSION_MODES, type Config, type ProjectConfig } from "./config.js";
-import { assertNoMemory, CENTER_SERVERS_ERROR, composeAddDirs, composeInstructions, composeOutputStyle, composeServers, mergeSettings, projectSettingsPatchSchema, readCenterSettings, readCoordinator, readSettings, type CenterSettingsPatch, type MemorySetting, type ProjectSettings, type ProjectSettingsPatch } from "./project-settings.js";
+import { assertNoCoordinator, assertNoMemory, CENTER_SERVERS_ERROR, composeAddDirs, composeInstructions, composeOutputStyle, composeServers, mergeSettings, projectSettingsPatchSchema, readCenterSettings, readSettings, type CenterSettingsPatch, type MemorySetting, type ProjectSettings, type ProjectSettingsPatch } from "./project-settings.js";
+import type { CoordinatorFile } from "./coordinator-settings.js";
 import { parseMemoryFile, type MemoryFile, type MemoryFileData } from "./memory-settings.js";
 import type { Logger } from "./log.js";
 import type { RcStatus, RemoteControlSupervisor } from "./remote-control.js";
@@ -116,6 +117,8 @@ export function createSessionManager(opts: {
   centerStore?: JsonObjectStore<ProjectSettings>;
   /** 外部記憶の設定（memory-settings.json。CLI だけが書く）。省略時は外部記憶なし。 */
   memoryFile?: MemoryFile;
+  /** 統括の session の設定（coordinator-settings.json。CLI だけが書く）。省略時は統括なし。 */
+  coordinatorFile?: CoordinatorFile;
   log: Logger;
   /** create 後、接続（URL 取得）か失敗を待つ上限。0 で待たない。既定 15 秒。 */
   waitMs?: number;
@@ -277,7 +280,6 @@ export function createSessionManager(opts: {
         common = readCenterSettings(rawCommon);
         if (Object.keys(common).length) log(`center 共通の設定を読んだ (項目: ${Object.keys(common).join(",")})`);
       }
-      supervisor.setCoordinator(readCoordinator(common.coordinator));
       for (const s of list) {
         try {
           if (!SESSION_NAME.test(s.name) || !isAbsolute(s.path)) throw new Error("保存内容が不正");
@@ -378,11 +380,12 @@ export function createSessionManager(opts: {
 
     memoryOf: (name) => opts.memoryFile?.resolve(name),
 
-    coordinatorOf: () => readCoordinator(common.coordinator),
+    coordinatorOf: () => opts.coordinatorFile?.read() ?? null,
 
     updateCenterSettings: (patch) =>
       serial(async () => {
         assertNoMemory(patch);
+        assertNoCoordinator(patch);
         // servers は session の設定だけ。null（削除）は無害なので通し、それ以外は黙って捨てずに error にする
         if (patch.servers !== undefined && patch.servers !== null) throw new Error(CENTER_SERVERS_ERROR);
         const prev = common;
@@ -395,7 +398,6 @@ export function createSessionManager(opts: {
           }
         }
         common = next;
-        supervisor.setCoordinator(readCoordinator(common.coordinator));
         // 全 session の次の起動から効く（動いている session は起動し直さない）
         for (const rec of saved.values()) {
           supervisor.setInstructions(rec.name, composeInstructions(common, rec.settings));

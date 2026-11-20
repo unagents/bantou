@@ -1000,3 +1000,30 @@ test("coordinator: setCoordinator('a') の後に a と b を起動すると、la
   assert.ok(!sa2.systemInstructions!.includes("coordinator@2"));
   await sup2.shutdown();
 });
+
+test("coordinator: coordinatorOf があれば起動のたびに呼ぶ。起動し直すまで動いている session は変わらず、次の起動で付く／外れる", async () => {
+  let current: string | null = null;
+  const core = createCore();
+  const tokens = createSessionTokens();
+  const sup2 = createRemoteControlSupervisor({
+    config: cfg,
+    log: () => {},
+    spawnImpl,
+    wrapper: { core, tokens, path: "/fake/bantou-pty-wrapper", mcpUrl: () => "http://127.0.0.1:4567/mcp/session", statusLineSelf: ["/fake/bantou-center"] },
+    systemInstructions: { build: (ctx: { session: string; coordinator?: boolean }) => buildSystemInstructions(ctx), labels: (ctx: { session: string; coordinator?: boolean }) => applicableParts(ctx).map(partLabel) },
+    coordinatorOf: () => current,
+  });
+  sup2.add({ ...project, name: "a", path: "/tmp/a" }, { wrapper: true });
+  const s1 = await sup2.start("a");
+  assert.ok(!s1.systemInstructions!.includes("coordinator@2"));
+  current = "a";
+  assert.ok(!sup2.status("a").systemInstructions!.includes("coordinator@2"));
+  await sup2.stop("a");
+  const s2 = await sup2.start("a");
+  assert.ok(s2.systemInstructions!.includes("coordinator@2"));
+  await sup2.stop("a");
+  current = null;
+  const s3 = await sup2.start("a");
+  assert.ok(!s3.systemInstructions!.includes("coordinator@2"));
+  await sup2.shutdown();
+});

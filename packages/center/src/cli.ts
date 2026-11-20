@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 import { readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { DEFAULT_CONFIG, parseArgs, USAGE, type CliArgs } from "./args.js";
 import { runDaemon } from "./daemon.js";
 import { fatalLine } from "./log.js";
 // 静的 import にする（動的 import にしない）。daemon.ts / sessions.ts が静的に import している module を
 // ここで動的 import すると、bun build --compile がその依存（zod）を遅延初期化に包み、MCP SDK の
 // top-level が zod の初期化前に走って起動時に落ちる（0.1.54: TypeError: undefined is not a constructor）。
+import { runCoordinatorCli } from "./coordinator-settings.js";
+import { loadConfigSync } from "./config.js";
 import { runMemoryCli } from "./memory-settings.js";
 
 if (process.argv[2] === "status-line") {
@@ -26,6 +29,32 @@ if (process.argv[2] === "memory") {
     runMemoryCli(process.argv.slice(3), DEFAULT_CONFIG, {
       readStdin: () => readFileSync(0, "utf8"),
       readFile: (p) => readFileSync(p, "utf8"),
+      out: (l) => console.log(l),
+      err: (l) => console.error(l),
+    }),
+  );
+}
+
+if (process.argv[2] === "coordinator") {
+  // 統括の session の設定（center の側だけで扱う。MCP からは変えられない）。daemon は読み込まない
+  const rest = process.argv.slice(3);
+  const ci = rest.indexOf("--config");
+  const configPath = resolve(ci >= 0 && ci + 1 < rest.length ? rest[ci + 1] : DEFAULT_CONFIG);
+  process.exit(
+    runCoordinatorCli(rest, DEFAULT_CONFIG, {
+      sessionExists: (name) => {
+        try {
+          const list: unknown = JSON.parse(readFileSync(join(dirname(configPath), "sessions.json"), "utf8"));
+          if (Array.isArray(list) && list.some((s) => (s as { name?: unknown } | null)?.name === name)) return true;
+        } catch {
+          // sessions.json が無い・壊れていれば config の project だけで調べる
+        }
+        try {
+          return loadConfigSync(configPath).projects.some((p) => p.name === name);
+        } catch {
+          return false;
+        }
+      },
       out: (l) => console.log(l),
       err: (l) => console.error(l),
     }),

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 import { parseConfig, type Config, type ProjectConfig } from "../src/config.js";
 import type { RcStatus, RemoteControlSupervisor } from "../src/remote-control.js";
+import { createCoordinatorFile } from "../src/coordinator-settings.js";
 import { createSessionManager, type SavedSession } from "../src/sessions.js";
 import { createMemoryFile } from "../src/memory-settings.js";
 import { createJsonListStore, createJsonObjectStore } from "../src/store.js";
@@ -815,15 +816,19 @@ test("memory: 移行の書き込み失敗中に他項目を更新（updateSettin
   assert.ok(!/memory|SECRET/.test(await readFile(join(dir, "center-settings.json"), "utf8")));
 });
 
-test("coordinator: 起動の時と center 共通の設定の更新で supervisor に渡り、coordinatorOf は呼ぶたびに今の設定を返す", async () => {
-  const { mgr, opts } = setup();
+test("coordinator: coordinatorOf は coordinator-settings.json を呼ぶたびに読む。center_settings_update の coordinator は断り、保存しない", async () => {
+  const cf = createCoordinatorFile(dir);
+  const { mgr, centerStore } = setup({ coordinatorFile: cf });
   assert.equal(mgr.coordinatorOf(), null);
-  await mgr.updateCenterSettings({ coordinator: { session: "main" } });
+  cf.write("main");
   assert.equal(mgr.coordinatorOf(), "main");
-  assert.deepEqual(opts.setCoord, ["main"]);
-  await mgr.updateCenterSettings({ coordinator: null });
+  cf.write(null);
   assert.equal(mgr.coordinatorOf(), null);
-  assert.deepEqual(opts.setCoord, ["main", null]);
+  for (const coordinator of [{ session: "main" }, null]) {
+    await assert.rejects(mgr.updateCenterSettings({ coordinator } as never), /MCP からは変えられない/);
+  }
+  assert.equal(mgr.coordinatorOf(), null);
+  assert.equal(await centerStore.load(), undefined);
   await mgr.updateCenterSettings({ instructions: "x" });
   assert.equal(mgr.coordinatorOf(), null);
 });

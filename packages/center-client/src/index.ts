@@ -64,7 +64,7 @@ export {
   type ByteSource,
   type Saved,
 } from "./attachment.ts";
-export { MEMORY_REFUSAL, WEB_ALLOWED_TOOLS, allowWebTool, webToolArgsRefusal } from "./tool-policy.ts";
+export { COORDINATOR_REFUSAL, MEMORY_REFUSAL, WEB_ALLOWED_TOOLS, allowWebTool, webToolArgsRefusal } from "./tool-policy.ts";
 export {
   CALL_TIMEOUT_MS,
   CenterMcpError,

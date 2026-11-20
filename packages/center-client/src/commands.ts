@@ -6,7 +6,7 @@
 import type { Session, SessionList, SessionPathHints } from "../../ui/types/index.ts";
 import type { CenterSettingsHandle } from "./center-settings.ts";
 import { CenterMcpError, ToolArgsRefusedError, ToolNotAllowedError, type CenterMcp } from "./mcp.ts";
-import { MEMORY_REFUSAL } from "./tool-policy.ts";
+import { COORDINATOR_REFUSAL, MEMORY_REFUSAL } from "./tool-policy.ts";
 import type { SessionService } from "./sessions.ts";
 import { parseSession } from "./sessions.ts";
 import { CenterSettingsError } from "./settings.ts";
@@ -55,6 +55,7 @@ const nonBlank = (v: string | undefined) => (v === undefined || v.trim() === "" 
 export function normalizeSettings(settings: unknown): Record<string, unknown> {
   if (!isObj(settings)) return bad("設定はオブジェクトで渡す");
   if (Object.prototype.hasOwnProperty.call(settings, "memory")) return bad(MEMORY_REFUSAL);
+  if (Object.prototype.hasOwnProperty.call(settings, "coordinator")) return bad(COORDINATOR_REFUSAL);
   const out = { ...settings };
   const t = out.instructions;
   if (t === undefined || t === null) return out;

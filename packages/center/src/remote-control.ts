@@ -367,6 +367,11 @@ export function createRemoteControlSupervisor(opts: {
    * center は memory-settings.json を読む（CLI で変えた設定が次の起動から効く）。
    */
   memoryOf?: (name: string) => MemorySetting | undefined;
+  /**
+   * 統括の session の取得元。あれば起動のたびに（setCoordinator で渡した値でなく）これを呼んで使う。
+   * center は coordinator-settings.json を読む（CLI で変えた設定が次の起動から効く）。
+   */
+  coordinatorOf?: () => string | null;
   /** 認証状態（auth / loginUrl / loginError）が変わった時の通知。 */
   onAuthChange?: (project: string, status: RcStatus) => void;
 }): RemoteControlSupervisor {
@@ -480,7 +485,8 @@ export function createRemoteControlSupervisor(opts: {
       wd.core.register(name);
       const mcpUrl = wd.mcpUrl();
       if (!mcpUrl) log(`session 向け MCP 窓口が無いので bantou の MCP を付けない（messenger のみ）: project=${name}`);
-      const sysCtx = { session: name, memory: memory !== null, coordinator: coordinatorSession === name };
+      const coordinatorNow = opts.coordinatorOf ? opts.coordinatorOf() : coordinatorSession;
+      const sysCtx = { session: name, memory: memory !== null, coordinator: coordinatorNow === name };
       const system = opts.systemInstructions?.build(sysCtx) ?? "";
       const appendSystemPrompt = [system, e.instructions].filter((t) => t !== "").join("\n\n");
       // 出力スタイルは project の .claude/output-styles/ に書いて名前で選ぶ。書けなくても起動は止めない（style 無しで起動）
@@ -532,7 +538,7 @@ export function createRemoteControlSupervisor(opts: {
       args: shownArgs,
       instructions: e.wrapper && !!e.instructions,
       ...(e.wrapper && opts.systemInstructions
-        ? { systemInstructions: typeof opts.systemInstructions.labels === "function" ? opts.systemInstructions.labels({ session: name, memory: memory !== null, coordinator: coordinatorSession === name }) : [...opts.systemInstructions.labels] }
+        ? { systemInstructions: typeof opts.systemInstructions.labels === "function" ? opts.systemInstructions.labels({ session: name, memory: memory !== null, coordinator: coordinatorNow === name }) : [...opts.systemInstructions.labels] }
         : {}),
     };
     delete e.status.lastError;

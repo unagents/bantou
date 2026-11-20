@@ -358,6 +358,21 @@ bantou-center memory unset [--config <path>] [--session <name>]
 - center が動いている間に変えてよい。center は session の起動のたびと memory への送信のたびに file を読むので、**次に起動する session から**効く（動いている session の `--mcp-config` は変わらない。書き込み先は次の hook から変わる）。center の再起動は要らない。
 - **desktop 同梱の center を使う人**: 同梱の center の config は `~/.local/share/bantou/center.json` なので、`bantou-center memory` に `--config ~/.local/share/bantou/center.json` を付ける（`memory-settings.json` は `~/.local/share/bantou/` に置かれる）。実行ファイルは同梱の `bantou-center`（アプリ内の単体バイナリ。`packages/desktop/README.md` の「center（sidecar）」）か、同じ版の `npx bantou-center`。`--config` を省くと既定の `~/.config/bantou/center.json` の dir を見てしまい、同梱の center には効かない。別の center（remote）につないでいる時は、その center が動く host で実行する（desktop の画面では変えられない）。
 
+## 統括の session の設定
+
+統括の session（統括の道具 `coordinator_session_create` などと指示文の部品 `coordinator` を付ける 1 つの session）は center の側だけで扱う。画面（desktop・web）と MCP からは読み書きできない: `center_settings_update` の `settings` に `coordinator` を含める（`null` も）と、黙って捨てずに error を返し、他の項目も保存しない（web も同じ。`packages/center-client` が送る前に断る）。設定の場所は center の状態 dir（`--config` の dir）の `coordinator-settings.json`（`{ "session": "<名前>" }`）で、`bantou-center coordinator` だけが書く。
+
+```bash
+bantou-center coordinator get   [--config <path>]
+bantou-center coordinator set   <session 名> [--config <path>]
+bantou-center coordinator unset [--config <path>]
+```
+
+- `set` は存在する session（`sessions.json` の session か config の `projects`）だけ受け付ける。存在しない名前は exit 1 で断り、何も書かない。不正な使い方（名前なし・不正な名前・余計な引数）は exit 2。統括は 1 つだけで、`set` は今の設定を置き換える。
+- **効き方**（変更後の出力にも同じ文を出す）: 統括の道具は呼ばれた時に設定を見直すので、**次の呼び出しから**効く（center の再起動は要らない）。指示文の部品は **統括の session の次の起動から**付く／外れる（動いている session は起動し直さない。起動し直すまで古い指示文のまま）。
+- **desktop 同梱の center を使う人**: 外部記憶と同じく `--config ~/.local/share/bantou/center.json` を付ける（`coordinator-settings.json` は `~/.local/share/bantou/` に置かれる）。別の center（remote）につないでいる時は、その center が動く host で実行する。
+- 旧: center 共通の設定（`center-settings.json`）の `coordinator` は読み捨てる（効かない）。`bantou-center coordinator set` で入れ直す。
+
 ## 開発
 
 ```bash

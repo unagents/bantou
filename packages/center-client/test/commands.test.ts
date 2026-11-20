@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   CommandError,
+  COORDINATOR_REFUSAL,
   MEMORY_REFUSAL,
   SESSION_INSTRUCTIONS_MAX,
   createArgs,
@@ -52,6 +53,15 @@ test("S: update_args, settings_of, workspace_of", () => {
   assert.equal(workspaceOf({ workspace: "  " }), null);
   assert.equal(workspaceOf({ workspace: null }), null);
   assert.equal(workspaceOf(null), null);
+});
+
+test("coordinator: a settings object with a coordinator key (null too) is refused with the reason, not dropped", () => {
+  for (const coordinator of [{ session: "main" }, null]) {
+    assert.throws(
+      () => normalizeSettings({ instructions: "i", coordinator }),
+      (e: unknown) => e instanceof CommandError && e.message === COORDINATOR_REFUSAL && /bantou-center coordinator/.test(e.message),
+    );
+  }
 });
 
 test("memory: a settings object with a memory key (null too) is refused with the reason, not dropped", () => {

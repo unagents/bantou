@@ -322,6 +322,20 @@ test("memory: the web policy refuses settings with a memory key for the 3 settin
   assert.equal(webToolArgsRefusal("rc_list", { settings: { memory: 1 } }), undefined);
 });
 
+test("coordinator: the web policy refuses settings with a coordinator key for the 3 settings tools before anything is sent", async () => {
+  const mock = await start();
+  const mcp = createCenterMcp({ settings: { selectTarget: async () => ({ url: mock.url, source: "remote" }) } });
+  for (const [tool, args] of [
+    ["session_settings_update", { name: "a", settings: { coordinator: { session: "a" } } }],
+    ["center_settings_update", { settings: { instructions: "i", coordinator: null } }],
+    ["session_create", { name: "a", settings: { coordinator: { session: "a" } } }],
+  ] as const) {
+    await assert.rejects(mcp.call(tool, args), (e: Error) => e instanceof ToolArgsRefusedError && /bantou-center coordinator/.test(e.message), tool);
+  }
+  assert.equal(mock.count("tools/call"), 0);
+  assert.equal(webToolArgsRefusal("rc_list", { settings: { coordinator: 1 } }), undefined);
+});
+
 test("5.3 a tool outside allowTool is refused before anything is sent; no policy allows every tool", async () => {
   const mock = await start();
   const web = new McpClient({ policy: { allowTool: allowWebTool } });

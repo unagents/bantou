@@ -133,11 +133,20 @@ export function assertNoMemory(patch: object | undefined): void {
   if (patch !== undefined && Object.prototype.hasOwnProperty.call(patch, "memory")) throw new Error(MEMORY_MCP_ERROR);
 }
 
+/** 統括の session（coordinator）の項目を MCP（画面・web・master-cap の設定更新）から受けた時のエラー文。 */
+export const COORDINATOR_MCP_ERROR =
+  "統括の session（coordinator）の設定は MCP からは変えられない（center の側だけで扱う）。center を動かしている host で `bantou-center coordinator`（README の「統括の session の設定」）を使う";
+
+/** patch に coordinator の項目（null を含む）があれば投げる。黙って捨てない。 */
+export function assertNoCoordinator(patch: object | undefined): void {
+  if (patch !== undefined && Object.prototype.hasOwnProperty.call(patch, "coordinator")) throw new Error(COORDINATOR_MCP_ERROR);
+}
+
 /**
  * center 共通の設定の更新の入力。session の設定から `servers` を除いたもの（servers は session ごとの設定だけで持つ）。
  * `servers` の指定は null（削除。無害）以外は受け付けない（updateCenterSettings がエラーにする）。
  */
-export const centerSettingsPatchSchema = projectSettingsPatchSchema.omit({ servers: true }).extend({ coordinator: coordinatorSchema.nullable().optional() }).passthrough();
+export const centerSettingsPatchSchema = projectSettingsPatchSchema.omit({ servers: true }).passthrough();
 export type CenterSettingsPatch = z.infer<typeof centerSettingsPatchSchema>;
 
 /** center 共通の設定に `servers` を入れようとした時のエラー文。 */
@@ -147,8 +156,8 @@ export const CENTER_SERVERS_ERROR = "servers は center 共通の設定では持
 export function readCenterSettings(raw: unknown): ProjectSettings {
   const out = readSettings(raw);
   delete out.servers;
-  // 壊れた coordinator は無効にする（別の session を統括にしない）
-  if (out.coordinator !== undefined && readCoordinator(out.coordinator) === null) delete out.coordinator;
+  // 統括の session は coordinator-settings.json だけで持つ（ここに残っていても読み捨てる）
+  delete out.coordinator;
   return out;
 }
 
@@ -158,7 +167,7 @@ export function readCenterSettings(raw: unknown): ProjectSettings {
  * - null はその項目を削除する。`instructions` / `outputStyle` の空文字・`addDirs` の空配列も削除と同じ（保存しない）。
  * - `addDirs` は重複を除く（先勝ち）。
  * - `servers` は重複を除く（先勝ち）。空配列は保存する（= どの server も使わない。未設定と区別する）。削除は null。
- * - `memory` は扱わない（無視する。MCP の入口で assertNoMemory が断る。外部記憶は memory-settings.ts）。
+ * - `memory` / `coordinator` は扱わない（無視する。MCP の入口で assertNoMemory が断る。外部記憶は memory-settings.ts）。
  * - 未知の項目は値をそのまま入れる。
  */
 export function mergeSettings(current: ProjectSettings | undefined, patch: ProjectSettingsPatch): ProjectSettings {
@@ -171,7 +180,7 @@ export function mergeSettings(current: ProjectSettings | undefined, patch: Proje
       if (dirs.length) out.addDirs = dirs;
       else delete out.addDirs;
     } else if (k === "servers") out.servers = uniqueDirs(v);
-    else if (k === "memory") continue;
+    else if (k === "memory" || k === "coordinator") continue;
     else out[k] = v;
   }
   return out;

@@ -19,6 +19,7 @@ import { createRemoteControlSupervisor } from "./remote-control.js";
 import { createContextUsageTracker } from "./context-usage.js";
 import { createLoginFlow } from "./login.js";
 import { createSessionManager } from "./sessions.js";
+import { createCoordinatorFile } from "./coordinator-settings.js";
 import { createMemoryFile } from "./memory-settings.js";
 import { backupFileOnce, createJsonListStore, createJsonObjectStore } from "./store.js";
 import { applicableParts, buildSystemInstructions, partLabel } from "./system-instructions.js";
@@ -73,8 +74,11 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   const events = createEventHub();
   // 外部記憶の設定（CLI `bantou-center memory` だけが書く。session の起動のたびに読む）
   const memoryFile = createMemoryFile(dirname(resolve(configPath)), log);
+  // 統括の session の設定（CLI `bantou-center coordinator` だけが書く。道具の呼び出しと session の起動のたびに読む）
+  const coordinatorFile = createCoordinatorFile(dirname(resolve(configPath)), log);
   const supervisor = createRemoteControlSupervisor({
     memoryOf: (name) => memoryFile.resolve(name),
+    coordinatorOf: () => coordinatorFile.read(),
     systemInstructions: { build: (ctx) => buildSystemInstructions(ctx), labels: (ctx) => applicableParts(ctx).map(partLabel) },
     config,
     configPath,
@@ -138,6 +142,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     store: createJsonListStore(join(stateDir, "sessions.json"), log),
     centerStore: createJsonObjectStore(join(stateDir, "center-settings.json"), log),
     memoryFile,
+    coordinatorFile,
     // remotes は sessions の後に作るので、呼ばれる時に参照する
     renameRemoteSession: (oldName, newName) => remotes.renameSession(oldName, newName),
     remoteNameConflict: (name, mode, oldName) => remotes.conflictsWith(name, mode, oldName),

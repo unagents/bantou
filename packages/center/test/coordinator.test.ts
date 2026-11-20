@@ -14,7 +14,7 @@ import { createSessionVia, buildSessionBrief, SESSION_BRIEF_LINE_MAX, SESSION_BR
 import { createCore } from "../src/core.js";
 import { createEventHub } from "../src/events.js";
 import { startHttpServer } from "../src/http.js";
-import { centerSettingsPatchSchema, mergeSettings, readCenterSettings, readCoordinator, type ProjectSettingsPatch } from "../src/project-settings.js";
+import { assertNoCoordinator, coordinatorSchema, mergeSettings, readCenterSettings, readCoordinator, type ProjectSettingsPatch } from "../src/project-settings.js";
 import type { RemoteManager } from "../src/remotes.js";
 import { createSessionMcpServer } from "../src/server.js";
 import { createSessionTokens } from "../src/session-auth.js";
@@ -35,21 +35,24 @@ const isError = (r: unknown): boolean => (r as { isError?: boolean }).isError ==
 
 // ---- 設定の検査 ----
 
-test("coordinator.session: 不正な値は center 共通の設定の更新で断る。正しい値と null は通る", () => {
-  const ok = (v: unknown) => centerSettingsPatchSchema.safeParse({ coordinator: v }).success;
+test("coordinatorSchema: 不正な値は断る。正しい値は通る", () => {
+  const ok = (v: unknown) => coordinatorSchema.safeParse(v).success;
   assert.ok(ok({ session: "main-1_a" }));
-  assert.ok(ok(null));
-  assert.ok(centerSettingsPatchSchema.safeParse({}).success);
-  for (const bad of [{ session: "" }, { session: "a b" }, { session: "../x" }, { session: "a".repeat(65) }, { session: 1 }, {}, "main", { session: "a", extra: 1 }, []]) assert.equal(ok(bad), false, JSON.stringify(bad));
+  for (const bad of [{ session: "" }, { session: "a b" }, { session: "../x" }, { session: "a".repeat(65) }, { session: 1 }, {}, "main", { session: "a", extra: 1 }, [], null]) assert.equal(ok(bad), false, JSON.stringify(bad));
 });
 
-test("coordinator: 保存と読み込み。null で消える。壊れた保存値は無効（別の session を統括にしない）", () => {
-  const s = mergeSettings({}, { coordinator: { session: "main" } } as ProjectSettingsPatch);
-  assert.equal(readCoordinator(s.coordinator), "main");
-  assert.equal(readCoordinator(mergeSettings(s, { coordinator: null } as ProjectSettingsPatch).coordinator), null);
-  assert.equal(readCoordinator(readCenterSettings({ coordinator: { session: "bad name" } }).coordinator), null);
-  assert.ok(!("coordinator" in readCenterSettings({ coordinator: "x" })));
+test("coordinator: center 共通の設定には持たない（読み捨て・merge は無視）。壊れた値は無効", () => {
+  assert.ok(!("coordinator" in readCenterSettings({ instructions: "i", coordinator: { session: "main" } })));
+  assert.deepEqual(mergeSettings({ instructions: "i" }, { coordinator: { session: "main" } } as ProjectSettingsPatch), { instructions: "i" });
+  assert.equal(readCoordinator({ session: "main" }), "main");
+  assert.equal(readCoordinator({ session: "bad name" }), null);
   assert.equal(readCoordinator(undefined), null);
+});
+
+test("coordinator: assertNoCoordinator は coordinator のキーがあれば（null も）理由つきで断る。無ければ通す", () => {
+  assert.throws(() => assertNoCoordinator({ coordinator: { session: "main" } }), /center の側だけ/);
+  assert.throws(() => assertNoCoordinator({ coordinator: null }), /bantou-center coordinator/);
+  assertNoCoordinator({ instructions: "i" });
 });
 
 // ---- 指示文の部品 ----
