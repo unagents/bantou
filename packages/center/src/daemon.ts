@@ -1,4 +1,3 @@
-import { createSessionVia } from "./coordinator.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { CapResultReply, ErrorReply, TaskResultReply, WorkerReportNotice } from "@agent-hand/bantou-protocol";
 import type { CliArgs } from "./args.js";
@@ -7,6 +6,7 @@ import { resolveSessionPath } from "./path-env.js";
 import { createActivityStore } from "./activity.js";
 import { loadCapId } from "./center-id.js";
 import { loadConfig, MIN_TOKEN_LEN } from "./config.js";
+import { createSessionVia } from "./coordinator.js";
 import { SESSION_MCP_PATH, startHttpServer, type HttpHandle } from "./http.js";
 import { mkdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -223,7 +223,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     }
     http = await startHttpServer({
       createServer: makeServer,
-      createSessionServer: (owner) => createSessionMcpServer({ remotes, follow, owner, coordinator: { session: () => sessions.coordinatorOf(), sessions: () => sessions.list(), createSession: createSessionVia(sessions) } }),
+      createSessionServer: (owner) => createSessionMcpServer({ remotes, follow, owner, coordinator: { session: () => sessions.coordinatorOf(), sessions: () => sessions.list(), createSession: createSessionVia(sessions), log } }),
       sessionAuth: sessionTokens,
       onStatusLine: (name, payload) => {
         const s = sessions.list().find((x) => x.name === name);

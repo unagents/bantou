@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseConfig } from "../src/config.js";
@@ -171,6 +171,7 @@ async function createRig(coord: { v: string | null }) {
   const config = parseConfig({ workspace: join(dir, "ws"), projects: [] }, join(dir, "c.json"));
   const map = new Map<string, RcStatus>();
   const calls: string[] = [];
+  const logs: string[] = [];
   const instr: Record<string, unknown> = {};
   const mk = (p: { name: string; path: string }): RcStatus => ({ project: p.name, path: p.path, state: "stopped", pid: null, sessionUrl: null, environmentUrl: null, restarts: 0, lastExit: null, startedAt: null, args: null, instructions: false, claude: { path: "claude", source: "PATH" }, auth: "ok", loginUrl: null, loginError: null }) as RcStatus;
   const sup = {
@@ -181,11 +182,11 @@ async function createRig(coord: { v: string | null }) {
     list: () => [...map.values()].map((s) => ({ ...s })),
     setCoordinator: () => {}, setInstructions: () => {}, setAddDirs: () => {}, setOutputStyle: () => {}, setMemory: () => {},
   } as unknown as RemoteControlSupervisor;
-  const mgr = createSessionManager({ config, supervisor: sup, store: createJsonListStore<SavedSession>(join(dir, "sessions.json"), () => {}), log: () => {}, waitMs: 0 });
+  const mgr = createSessionManager({ config, supervisor: sup, store: createJsonListStore<SavedSession>(join(dir, "sessions.json"), () => {}), log: (m) => logs.push(m), waitMs: 0 });
   await mgr.restore();
-  const deps: CoordinatorDeps = { session: () => coord.v, sessions: () => mgr.list(), createSession: createSessionVia(mgr) };
+  const deps: CoordinatorDeps = { session: () => coord.v, sessions: () => mgr.list(), createSession: createSessionVia(mgr), log: (m) => logs.push(m) };
   const call = async (owner: string, args: Record<string, unknown>) => (await connectMem(owner, deps)).callTool({ name: "coordinator_session_create", arguments: args });
-  return { dir, ws: join(dir, "ws"), calls, instr, mgr, deps, call, clean: () => rm(dir, { recursive: true, force: true }) };
+  return { dir, ws: join(dir, "ws"), sup, logs, calls, instr, mgr, deps, call, clean: () => rm(dir, { recursive: true, force: true }) };
 }
 
 test("coordinator_session_create: 統括の session だけに出る。統括でない session・未設定には出ない", async () => {
@@ -250,6 +251,38 @@ test("coordinator_session_create: 同じ名前・形の崩れた名前・.. や 
     const res = await r.call("main", { name: "p2", path: "/etc/evil" });
     assert.equal(r.mgr.list().find((s) => s.name === "p2")?.path, join(r.ws, "p2"));
     assert.ok(!isError(res));
+  } finally { await r.clean(); }
+});
+
+test("coordinator_session_create: path の衝突・作業 dir を作れない時、返る文に path と別 project の名前が出ない（詳細は log にだけ）", async () => {
+  const r = await createRig({ v: "main" });
+  try {
+    // 別名の既存 session が、新しい名前の作業 dir と同じ path を持つ
+    (r.sup as unknown as { add: (p: { name: string; path: string }) => void }).add({ name: "secret-owner", path: join(r.ws, "target") });
+    const clash = await r.call("main", { name: "target" });
+    assert.ok(isError(clash));
+    for (const leak of [r.dir, r.ws, "secret-owner"]) assert.ok(!text(clash).includes(leak), `clash: ${leak}`);
+    assert.ok(r.logs.some((l) => l.includes("secret-owner") && l.includes("target")));
+    // 作業 dir を作れない（同名の通常 file がある）
+    await mkdir(r.ws, { recursive: true });
+    await writeFile(join(r.ws, "blocked"), "x");
+    const blocked = await r.call("main", { name: "blocked" });
+    assert.ok(isError(blocked));
+    for (const leak of [r.dir, r.ws, "EEXIST", "ENOTDIR"]) assert.ok(!text(blocked).includes(leak), `blocked: ${leak}`);
+    assert.ok(r.logs.some((l) => l.includes("coordinator_session_create 失敗: name=blocked")));
+    assert.ok(!r.mgr.list().some((s) => s.name === "blocked" || s.name === "target"));
+  } finally { await r.clean(); }
+});
+
+test("coordinator_session_create: name は 64 文字まで。65 文字は断られて何も作られない", async () => {
+  const r = await createRig({ v: "main" });
+  try {
+    await mkdir(r.ws, { recursive: true });
+    assert.ok(isError(await r.call("main", { name: "n".repeat(65) })));
+    assert.deepEqual(r.calls, []);
+    assert.deepEqual(await readdir(r.ws), []);
+    assert.ok(!isError(await r.call("main", { name: "n".repeat(64), start: false })));
+    assert.deepEqual(await readdir(r.ws), ["n".repeat(64)]);
   } finally { await r.clean(); }
 });
 
