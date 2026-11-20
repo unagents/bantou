@@ -43,4 +43,15 @@
 - 実の center の起動、desktop・web の確認（範囲外。実の center は起動しない約束）。
 
 ## 残った問題
-- なし（上の「作っていない物」を除く）。
+- 設計書 14.2 の「統括の session が見つからない / 停止中」を `center_info` と `session_brief` の先頭に出す件は作っていない（review も妥当と判断）。別の task で足す。
+- MCP の道具の一覧は session の接続時に決まる。`coordinator.session` を後から設定しても、既に動いている統括の session には `session_brief` が出ない。設定を付けたら統括の session を起動し直す旨の案内が要る（今は文書にも画面にも無い。P6 の設定の画面の task で扱うのが妥当）。外した時は、道具は残るが呼ぶと断られる。
+- `coordinator.warn`（警告のしきい値の設定）は作らず、既定値（実行中 2・返答待ち 1）を定数にした。変えたくなった時にスキーマを広げる。
+- daemon.ts の `createSessionServer` への `coordinator: { session, sessions }` の配線は test が無い。`runDaemon` が実の center（port・状態 dir・子 process）を起動する作りで、単体では呼べず、実の center の起動は範囲外のため。配線の形は supervisor の launch と session MCP の test（coordinator.test.ts の実 HTTP を含む）で、同じ依存の形を通して確かめている。
+- review の low 3（対応不要・妥当）: 上の「設計書との食い違い・判断」のとおりで、挙動の変更は無い。
+
+## 往復 1 回目の対応（review: HEAD 278c953f、medium 1 / low 3）
+- 基点の取り込み: feat/center-task-status の HEAD が 4dbb57d955baaf05bb3f8a64055cbe212a18c206（上限の測り直し）に進んだので、git merge で取り込んだ（衝突なし）。
+- M1: remote-control の test に、setCoordinator("a") の後に a と b を起動して、launch の ctx.coordinator が a だけ true、指示文と labels の `coordinator@1` も a だけ、解除で a からも消える test を足した。変異（`coordinator: coordinatorSession === name` を false に固定）でこの test が落ちる事を確かめて戻した。daemon の配線の test は上の理由で足していない。
+- L1: `session_brief` の上限を、返す形（整形あり JSON。name の二重・構造・truncated / omitted を含む）の全体で測り直す形にした（task_status の 4dbb57d と同じ考え方。次の行を足した時の全体を先に測り、6000 文字を越えるなら止める）。test は name 1・30・64 文字で 40 行を作り、返り値全体の文字数と、返した行 + omitted = 40 を assert する。変異（行の文字数だけで測る元の形）で落ちる事を確かめて戻した。
+- L2: 「残った問題」を上のとおり書き直した。
+- 確認: packages/center typecheck 通過。test は全体 651 件、650 通過、1 失敗（既知の「center を SIGKILL すると rc が孤児で残り…」のみ）。足した test は 2 本（remote-control-wrapper.test.ts に 1、coordinator.test.ts の既存 test に assert を追加）。
