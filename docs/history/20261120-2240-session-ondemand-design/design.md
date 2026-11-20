@@ -6,9 +6,11 @@
 - 書き方: 【事実】は code を読んで確かめた事（file:行。path は `packages/` からの相対）。【推測】は確かめていない解釈。【未確認】は実測か資料の確認が要る事。
 - 成果物は docs だけ。code は変えていない。
 - 改訂: 2026-11-20、review（verdict issues。high 3、medium 8、low 8）を反映した。反映の一覧は 13 節。
+- 改訂 2: 2026-11-20、利用者の決定（改善 3・4 の前に「暫定の段階」を挟む）を 14 節に足し、code で確かめた事（A〜D）を 15 節、実測の結果（R1〜R4・R6。別の host の worker の自己申告）を 12 節に反映した。改訂の一覧は 16 節。center と server の code は、基点（80bd939）から改訂 2 の時点の `develop` まで変わっていない事を確かめた（差分は web・ui・docs だけ）。
 
 ## 0. 要点
 
+- 改善 3・4 を全体に入れる前に、暫定の段階を挟む（14 節）。既存の master-cap の 1 つ（統括の session）だけに、他の session へ指示を渡す・直近の利用者の指示を読む・状態を 1 行で読む、の 3 つの道具を足す。個別の master-cap には何も足さない。設定で切ると今の動きに戻る。center だけで済み、protocol の版に影響しない。
 - 最初に出すのは 3a-1（server だけで、worker の失敗・時間切れ・報告なしの終了で cap を再開する。protocol の版は据え置き）。単独で「cap が待ち続ける」を消す。
 - 改善 2: center が session ごとに「休止」を持つ。無操作が続き、画面で見られておらず、session に届けるべき物も、未完了の指示も、claude の中の background の作業も無い時に止める。利用者の入力、画面を開く操作、判断が要る通知で起こす。起こす時は claude の会話 id を指定して復帰し、止まっている間に center が受けた物を短い「不在中の要約」1 通で渡す。文脈が戻るかは、作る前に spike（S0）で確かめる。2a〜2c は 1 つの release 単位で、既定は 2d の測定まで無効。
 - 改善 3: server からの報告（task_result、worker の report、新しく足す worker の終了通知）は、まず center の受け口（session ごとの file）に溜める。session には、判断が要る物だけを 1 行で知らせる。完了は短くまとめた 1 行で知らせる。本文は session が tool で取りに来た時だけ渡す。worker の終了の通知（3a-2）だけが protocol の版を上げる。
@@ -97,7 +99,7 @@
 | 条件 | 判定の元 | 既定 |
 |---|---|---|
 | 無操作が続いた | 作業状態が `idle` になってからの時間（hook の Stop / SessionStart）。`working` / `needs-input` の間は数えない | 30 分 |
-| claude の中で background の作業が動いていない | `idle`（Stop の hook）は「何も動いていない」と同じではない。master-cap は background の command やサブエージェントに作業を預け、`/loop` や schedule も claude の process の中で動く。休止は process group ごと止める（1.1）ので、これらを殺す。判定の方法は実測（12 節の R4）で決める。候補: (a) wrapper の子の process 木に、MCP の子（messenger・外部記憶など、center が付けた物）以外の process がある間は止めない、(b) hook（PreToolUse / PostToolUse の background の起動と完了）で数を持つ。決まるまで、判定できない時は止めない側に倒す | — |
+| claude の中で background の作業が動いていない | `idle`（Stop の hook）は「何も動いていない」と同じではない。master-cap は background の command やサブエージェントに作業を預け、`/loop` や schedule も claude の process の中で動く。休止は process group ごと止める（1.1）ので、これらを殺す。実測（12 節の R4。自己申告）では、background の shell は claude の直接の子として残り、独立した process group になる（process group の集計では漏れる）。判定は「claude の本体の process の直接の子に、center が付けた MCP の子（messenger・外部記憶・center の MCP。`--mcp-config` に書いた command から分かる）以外の process がある間は止めない」とする（wrapper の pid → claude の pid → その直接の子を見る）。background のサブエージェント・`/loop`・schedule が子 process を持つかは未確認なので、hook（PreToolUse / PostToolUse の background の起動と完了）でも数を持ち、どちらかが「ある」なら止めない。判定できない時は止めない側に倒す | — |
 | 画面で見られていない | 「最後に見た・入力した時刻」で決める。core の購読者の数だけでは決めない（desktop の terminal は開いたままだと自動で再接続し続ける。desktop/src-tauri/src/terminal.rs:281-321。web の tab も同じ）。画面は、表示されていて focus がある間だけ 60 秒ごとに「見ている」を center に送る（新しい command は作らず、`session_resize` と同じ口の軽い POST を足す。6 節）。`lifecycle.idleMinutes` の間、見ている知らせも入力も無ければ「見られていない」 | — |
 | 未完了の指示が無い | その session の `remote.running` と `remote.waitingReply` が 0。改善 3 の後もこの条件を残す（完了で起こさない設計なので、remote の作業が動いている master-cap を眠らせると、完了の後に次の task に進めず project の流れが止まる） | — |
 | session に届けるべき物が無い | 改善 3 の後: 受け口に「session に渡し済みでない判断が要る物」が無い | — |
@@ -106,6 +108,8 @@
 
 - 止め方は、center が休止を決めた時点で状態を `dormant` にし（以後の通知は messenger に通さず、2.5 の列に直接入れる）、その後に今の `stop`（wrapper へ stop、猶予の後 SIGKILL）を呼ぶ。止める直前の会話 id を記録しておく（2.4）。
 - 止めた時に `state` の event（新しい理由、6 節）を出す。
+- 止める時の確認の画面: 実測（R4。自己申告）では、background の作業がある状態で終了を送ると、claude は「Exit and stop tasks / Move to background and exit / Stay」の確認を出して止まる。止める条件で background を除いているので普通は出ないが、判定の漏れで出た時の扱いを決める。center は wrapper の出力の窓（今の接続の判定と同じ、center/src/wrapper.ts の `TEXT_WINDOW`）でこの確認の文を見つけたら、休止をやめて「Stay」を選ぶ入力を送り、状態を起きたままに戻し、無操作の時計を戻す。log と session_list に「background の作業があるので休止しなかった」を残す。確認を自動で「Exit and stop tasks」にする形は、預けた作業を消すので採らない。【未確認】確認の文の正確な文字列と、Stay を選ぶ key（R4 の追加の実測）。
+- 今の `stop` は猶予（`stopGraceMs`、既定 5000）の後に SIGKILL を process group に送る（center/src/remote-control.ts:812-840）。確認の画面で止まった時に猶予が切れると、claude は殺されるが、独立した process group の background の shell は残りうる【推測】。休止の stop は、確認の画面を見た時点で SIGKILL に進まない形にする（休止の stop と、利用者の rc_stop を分ける）。
 
 ### 2.3 起こす契機
 
@@ -122,7 +126,7 @@
 
 ### 2.4 起こした時に文脈を戻す
 
-1. claude の会話: hook の共通項目にある `session_id`（Claude Code の hook の入力。bantou は今は使っていない）を center が session ごとに覚え、起こす時は `--resume <session_id>` で起動する。`--resume` が使えない・失敗した時は今の `--continue`、それも失敗したら素の起動（今の fallback）。【未確認】対話型の `--remote-control` と `--resume <id>` を併用できるか、4 時間を越えた会話を `--resume` で戻せるか。休止は 30 分で眠らせて何日も後に起こすのが普通になるので、休止の価値はここにかかる。2a の前に spike（S0。12 節の R1）で確かめる。戻らないと分かった時は、記録の file と不在中の要約だけで続ける形になり、D1 の既定を有効にするかを測り直す。
+1. claude の会話: hook の共通項目にある `session_id`（Claude Code の hook の入力。bantou は今は使っていない）を center が session ごとに覚え、起こす時は `--resume <session_id>` で起動する。`--resume` が使えない・失敗した時は今の `--continue`、それも失敗したら素の起動（今の fallback）。実測（R1。自己申告、claude 2.1.329）では、`--resume <id>` と `--remote-control` の併用で文脈が戻り、`session_id` は変わらず同じ記録に追記された。記録の更新時刻を 5 時間前にしても戻った。`--continue` も戻ったが、その作業 dir で最新の会話を拾うので、同じ dir に別の会話があると取り違える恐れがある。そこで起床は `--resume <id>` を主にし、`--continue` は id を記録していない時だけに使う。center の session の dir は session ごとに専用なので取り違えは起きにくいが、利用者がその dir で別に claude を起動した場合に起きうる。【未確認】数日より古い会話が `--resume` で戻るか。戻らない時は、記録の file と不在中の要約だけで続ける形になる。
 2. 記録の file: 状態の正本は file（引継ぎ、決定と未決、今の窓口）。master-cap は始める時にそれを読む（基盤仕様の案の決まり）。休止は会話の途中でなく `idle` の時だけ行うので、休止の前に特別な書き出しは要らない。
 3. 不在中の要約: 起きた session への最初の入力として、center が「休止中に受けた物」の要約（改善 3 の受け口の、code で作った 1 行ずつ。上限 1500 文字）を 1 通だけ push する。改善 3 の前は、休止中に届かなかった完了通知・worker の report を center が session ごとの未配達の列に残し、同じ形で 1 通にまとめて渡す。
 4. 外部記憶: 今の system 指示（起動時に context / recall を呼ぶ）のまま。
@@ -135,7 +139,8 @@
 
 ### 2.6 起動にかかる時間と画面での見せ方
 
-- 見込み【推測】: messenger client の npx の起動、claude の起動、remote-control の接続で、数秒から 20 秒程度。今の `create` は接続を最大 15 秒待つ（1.1）。実測は 2b で行い、8 節の値として残す。
+- 実測（R3。自己申告）: 起動の command から入力欄が出るまで 2〜5 秒。remote-control の接続の表示までは、resume ありで 4〜7 秒、新規で 8〜10 秒。今の `create` は接続を最大 15 秒待つ（1.1）ので、その中に収まる。画面の「起動中」は、多くの場合 10 秒以内に消える見込み。messenger の peer の登録までの時間は測っていない。
+- 同じ実測で、接続の表示の前に送った入力が確定されず入力欄に残った事が 1 度あった。下の 409 の扱い（接続と `SessionStart` を見るまで入力を断る）はこの結果でも要る。
 - 画面:
   - サイドの行: 休止中は眠りの印（色は落とす）。起こしている間は「起動中」の印。
   - terminal: 休止中は「休止中。開くと起動します」を出し、開いた時点で起こす。起きるまで入力欄を止め、「起動中（n 秒）」を出す。起きたら core の `reset` で画面を出し直す（今の仕組み）。
@@ -284,11 +289,11 @@ server 側の変更は、版を上げない部分（3a-1）と上げる部分（
 - 方針を決めない: 利用者の答えは、そのまま master-cap に渡す。受付が案を選ばない。
 - 他の session に直接話さない: 受付に messenger の client を付けない。付けると、どの peer も push で受付の会話に本文を入れられ（4.5 の上限を迂回する）、受付も send_message で master-cap や remote-cap に直接指示できてしまう。受付から他への経路は center の受付用の tool だけにする。
 - source を読まない、作業しない、記録の本文を読まない: deny（拒む物を並べる）では足りない。Read / Grep / Glob / WebFetch が残り、Read で center の状態 dir の受け口や `remotes.json` の本文を読める。user scope の MCP（`remote_send` や `worker_reply` を持つ物を含む）、plugin、skill、user の CLAUDE.md も読み込まれる（今の `buildWrapperArgs` は `--strict-mcp-config` を付けていない。center/src/wrapper.ts:122-158）。そこで受付は allowlist 方式にする:
-  - 使える tool を受付用の MCP の tool だけにする（claude の起動の引数で使える tool を指定する。候補は `--tools` か `--allowedTools`）。組み込みの Read・Bash・Edit・Write・Grep・Glob・WebFetch・Agent は使えない。
-  - MCP は center が渡す物だけにする（`--strict-mcp-config`）。
-  - 設定の読み込みを絞る（`--setting-sources` で user / project の設定を読まない。plugin・skill・user の CLAUDE.md が入らない形）。
+  - 起動の引数の組は `--tools "" --strict-mcp-config --setting-sources "" --disable-slash-commands` に、受付用の MCP だけを書いた `--mcp-config` を足した物にする。
+  - 実測（R6。自己申告）: この組（`--mcp-config` 無し）で、組み込みの道具・MCP・skill が全部使えない状態になり、確認待ちは出なかった。`--tools ""` だけでは MCP が使えた。`--disallowedTools` の列挙では、列挙していない MCP が使えた。よって deny や列挙の方式は採らず、この組を使う。
+  - 【未確認】(1) この組に center の `--mcp-config` を足した時に、その MCP の tool だけが使えるか（実測は MCP を渡していない）。(2) 非対話（`-p`）での実測なので、対話型の `--remote-control` で同じに効くか、対話の許可の確認の経路が出ないか。(3) `--setting-sources ""` で center が `--settings` で渡す hook・statusLine が効くか（`--settings` は引数なので効く見込み【推測】）。4a の前に追加で実測する。
   - 受付の dir は code の無い専用の dir。
-  - 【未確認】これらの引数の組で、使えない tool が確認待ち（needs-input）にならずに拒否で返るか、user scope の MCP と plugin が消えるか、対話型の `--remote-control` と一緒に使えるか。4a の前に実測する（12 節の R6）。引数で絞りきれない物が残った時は、その物を設計に書き足し、受付の system 指示の決まりで補う（code で保証できない物として残る危険に載せる）。
+  - 引数で絞りきれない物が残った時は、その物を設計に書き足し、受付の system 指示の決まりで補う（code で保証できない物として残る危険に載せる）。
 
 ### 4.3 master-cap との受け渡し
 
@@ -345,6 +350,8 @@ server 側の変更は、版を上げない部分（3a-1）と上げる部分（
 
 ## 5. 以前の失敗が再発しない根拠と、残る危険
 
+（この節は全体へ切り替えた後の形。暫定の段階（統括の session）の根拠と残る危険は 14.6。）
+
 ### 5.1 原因と、それを消す仕組み
 
 | 以前の失敗の原因 | 消す仕組み | 改善 |
@@ -397,7 +404,13 @@ server 側の変更は、版を上げない部分（3a-1）と上げる部分（
 
 | 名前 | 作る物 | 変える package | 確かめ方 | protocol |
 |---|---|---|---|---|
-| S0 spike: 文脈と起床の実測 | code を出さない実測。12 節の R1（`--resume` と `--remote-control`、4 時間越え）、R2（stop の後に残る process と RSS）、R3（起床の秒数の内訳）。結果を docs に残す | docs | 12 節の確かめ方。R1 が否なら 2.4 と D1 を書き直してから 2a に入る | 変えない |
+| S0 spike: 文脈と起床の実測 | code を出さない実測。12 節の R1（`--resume` と `--remote-control`、4 時間越え）、R2（stop の後に残る process と RSS）、R3（起床の秒数の内訳）。結果を docs に残す | docs | 12 節の確かめ方。R1 が否なら 2.4 と D1 を書き直してから 2a に入る | 変えない。**R1〜R3 は自己申告の結果あり（12.2）。残りは異常終了の時の残り物（R2）、peer の登録までの秒数（R3）、数日より古い会話（R1）** |
+| P1 発言の記録 | 14.4 の `prompts/<session>.jsonl`（UserPromptSubmit の hook の本文と、統括の経由で渡した指示を時刻順に追記）。統括の方式が有効な時だけ記録する | center | 偽の hook の POST の列から、file の中身と順序、本文の上限、件数の上限での移し替え。同じ hook の再送が二重に載らない | 変えない |
+| P2 道具の出し分けと設定 | center 共通の設定 `coordinator.session`、`/mcp/session` の MCP server を作る時に owner が統括の session なら 3 つの道具を足す、system 指示の部品 `coordinator`（統括の session だけに付く） | center | 統括の session の token で `tools/list` に 3 つが出る。他の session の token では出ない。設定を消すと出ない。部品が統括の session だけに付く | 変えない |
+| P3 状態を 1 行で読む | `session_brief`（14.3 の (3)） | center | 偽の supervisor・活動・remote の集計から 1 行が作られる。大きさの上限 | 変えない |
+| P4 直近の指示を読む | `session_prompts`（14.3 の (2)） | center | P1 の記録から、時刻順・件数と大きさの上限・出所（direct / coordinator）が返る | 変えない |
+| P5 指示を渡す | `session_dispatch`（14.3 の (1)）。渡す先の状態ごとの扱い、`based_on` による食い違いの検出、送達の列、記録 | center | 偽の messenger の peer と偽の活動で、idle なら送る、working・needs-input・starting なら列に入れて idle で送る、停止なら断る。`based_on` より新しい直接の指示があれば渡さずに返す。列の上限と期限 | 変えない |
+| P6 統括の設定の画面（任意） | center 共通の設定の画面に「統括の session」の選択を足す | ui、desktop、center-client | ui の unit。設定は今の `center_settings_update` が未知の項目を保持するので、画面が無くても tool で設定できる | 変えない |
 | 3a-1 worker の終了で cap を再開 | 3.6 の 3a-1（実装の注意 1〜7 を含む） | server | server の unit: 時間切れ（再試行が尽きた後）・失敗・報告なしの終了で再開する。done の report があれば再開しない。再開の上限を越えたら error の task_result。偽の center（messenger の偽 peer）と組んだ e2e で、完了が 2 回届かない・0 回にならない事 | **変えない**（旧 center とも組める） |
 | 3f 後から届く結果の通知 | `completeIfIdle` の後に届いた task_result を通知に載せる（R8 で載らないと分かった時だけ） | center | 偽の server で「最初の turn の結果 → worker failed → 再開の task_result」の順を流し、通知が 1 回は最後の結果で出る | 変えない |
 | 2a 休止の芯 | `dormant` の状態、止める条件の判定（時計は注入。background の作業の判定は R4 の結果の方式）、`sessions.json` の休止の記録、`restore()` で休止中を起こさず `supervisor.add` はする、`rc_start` / `rc_stop` との関係（2.1 の表）、event の理由 `state` | center | 偽の supervisor と偽の時計で、条件の組み合わせごとに止まる・止まらない。background の作業がある時・判定できない時に止まらない。center の再起動で休止中が起きず、output の購読は 404 にならない | 変えない |
@@ -430,29 +443,38 @@ server 側の変更は、版を上げない部分（3a-1）と上げる部分（
 | 3a-2 | 3a-1、3b | 2d、3c、3d |
 | 3e | 2a、2b、3b、R5 | 3d、4a |
 | 4a | 2a（休止させない判定）、R6 | 3d、3e |
-| 4b | 2b（起床）、3b、3c、4a | 3e |
+| 4b | 2b（起床）、3b、3c、4a、P1（受付も発言の記録を使う） | 3e |
 | 4c | 4b、2c | — |
+| P1 | なし | 3a-1、S0、2a〜2c、3b |
+| P2 | なし | P1、3a-1、S0、2a〜2c、3b |
+| P3 | P2 | P1、P4 |
+| P4 | P1、P2 | P3 |
+| P5 | P1、P2、P4（`based_on` は P4 の返す id）、R9 | 2a〜2c、3b |
+| P6 | P2 | P3〜P5 |
 
 - 循環は無い。
+- 暫定の段階（P1〜P5）は、改善 2・3・4 のどのまとまりにも依存しない。改善 2 が先に入って休止が有効な時は、P5 の「停止中は断る」を「休止中なら起こしてから列に入れる」に変える（2b の後の小さな追加。P5 の時点では休止は既定で無効なので要らない）。
+- 全体へ切り替える時（4a〜4c）に、P2〜P5 は受付の道具に置き換える（14.8）。P1 は残し、受付の道具が使う。
 
 ### 7.3 release の単位と順
 
 | 順 | release | 中身 | 単独で出る価値 |
 |---|---|---|---|
 | 1 | server の release | 3a-1（後で必要なら 3f は center の次の release に乗せる） | worker の失敗・時間切れ・報告なしで cap が待ち続ける事が消える。版を変えないので server だけを出せる |
+| 1' | center の release（1 と並行してよい） | P1〜P5（P6 は任意で同じ release か次） | 統括の session 1 つから、どの project にも指示を渡せ、各 project の状態と直近の指示を読める。設定を切れば今の動き。center だけで、版は変わらない |
 | 2 | center と画面の release | 2a〜2c（既定は無効） | 設定で休止を有効にした利用者は memory の頭打ちが緩む。2a は単独では価値が出ない（起こせない）ので、2c まで揃えて出す |
 | 3 | 設定の既定の変更 | 2d | 既定で有効。4 の前に既定を有効にする時は、mobile から眠った project に届かない事を受け入れる判断が要る（D1） |
 | 4 | center と画面の release | 3b〜3d | master-cap の会話に本文が入らなくなる。3b と 3c は合わせて初めて価値が出る |
 | 5 | center と server の release（版が上がる） | 3a-2（版を上げる他の変更があれば同じ release に寄せる） | 受け口に時間切れ・報告なしの終了が直接載る。server を先に publish |
 | 6 | center と画面の release | 4a〜4c（3e は 5 か 6 に乗せる） | 利用者の前の窓口が 1 つになる |
 
-- protocol の版が変わるのは 3a-2 だけ。
+- protocol の版が変わるのは 3a-2 だけ。暫定の段階（P1〜P6）は版に影響しない。
 
 ## 8. 測り方
 
 | 値 | 測り方 | 比べ方 |
 |---|---|---|
-| session 1 つあたりの memory | wrapper の process group（claude、messenger client、MCP の子）の RSS の合計を、idle の状態で 10 分おきに 1 時間取る。【未確認】今の値は測っていない | 改善の前後で同じ project の構成 |
+| session 1 つあたりの memory | wrapper の process group（claude、messenger client、MCP の子）の RSS の合計を、idle の状態で 10 分おきに 1 時間取る。実測（R2。自己申告、1 回）: 起動中の process group は 19 個で合計約 1.6GB、うち claude の本体は約 370MB、残りは MCP の子 process。background の shell は別の process group になるので、claude の直接の子も足す（R4） | 改善の前後で同じ project の構成。MCP の子の大きさは改善 1 の範囲だが、休止で全部が空く |
 | 同時に持てる project の数 | center の host の空き memory を、起きている session 1 つあたりの RSS で割る。休止中の session の負担（center の記録だけ）も測る | 前: 保存済みの全部が常駐。後: 起きている数だけ |
 | 通知から利用者に見えるまで | server の `worker_report.at` → center の受け口の `at` → session への push の送達（notifyPeer の ok）→ 画面に出た時刻（event の受信）。休止中の場合は起床の秒数を含める | p50 / p95。前: push の送達の失敗の割合（ログの「通知を送れない」の数） |
 | master-cap の会話の大きさ | `contextUsage` の tokens を、task 1 つの完了ごとに記録する。hook の `SessionStart`（source=compact）の回数を圧縮の回数として数える | 同じ量の task を流して、前後の増え方と圧縮の回数 |
@@ -473,6 +495,9 @@ server 側の変更は、版を上げない部分（3a-1）と上げる部分（
 | D8 | 要約に model を使うか | A: center は code の要約だけ。意味の要約は master-cap が本文を読んでする。B: center か memory の LLM で要約を作る | A。center を決定的に保つ。memory が無い構成でも動く | A |
 | D9 | 休止中の peer の message | A: 3e で代理の登録を入れ、受け口に溜める。それまでは「休止中は届かない」と出す。B: peer の message がある session は休止させない | A。B だと messenger をつないでいる session が眠れなくなる。R5 で代理の登録ができないと分かった時は、broker が溜める物を起床後に読む形に変える | A |
 | D10 | 見込みの時刻の既定 | A: `remote_send` に `expect_minutes` を任意で足し、無ければ 90 分。B: server の時間の上限から計算する | A。center は server の時間の上限を知らない。server に問う口を足さずに済む | A |
+| D12 | 統括の session が渡す先が turn の途中・確認待ち・起動中の時 | A: center が列に入れ、idle になったら送る。統括にはすぐ「列に入れた」と返り、(3) の 1 行に「渡し待ち n」が出る。B: 断る。統括が後でやり直す。C: すぐ送る（messenger は turn の途中でも届く。確認待ちの画面に混ざる恐れ） | A。統括の turn を待たせず、個別の作業の途中に割り込まない。確認待ちの画面に文字が入る危険が無い（core の入力でなく messenger で、しかも idle の時だけ送る） | A |
+| D13 | 食い違いの扱い | A: 統括が (2) で読んだ後に、渡す先に新しい直接の指示が来ていたら、center が渡さずに新しい指示を返す（code の判定）。中身の食い違いは統括が読んで判断し、食い違えば渡さずに利用者に見せる。B: code の判定をせず、統括の判断だけに任せる | A。読んでから渡すまでの間に利用者が個別に直接指示した場合を、統括の注意に頼らず止められる | A |
+| D14 | 統括の session の選び方 | A: 既存の master-cap のうち、自分の project の作業が少ない物を選ぶ（自分の project の通知は今どおり統括の会話に届く）。B: 統括の役だけをする空の project の session を新しく作り、それを統括に指定する | 利用者の決定は「既存の 1 つの master-cap」なので A で進める。ただし自分の project の通知は統括の会話に入り続けるので（15 節の D）、作業の多い project の master-cap を統括にすると、以前の失敗に近づく。設定は任意の session 名を受けるので、B も同じ仕組みで選べる事を画面と指示文に書く | A（B を選べる事を明記） |
 | D11 | 受付への知らせ方 | A: pull 型。利用者が受付に話しかけた時に件数の 1 行が付く。話しかけていない間は画面の印で見る。B: push 型（messenger か pty への打ち込み）。受付が自分から「判断が要る物があります」と言う | A。受付の会話に外から本文が入る経路と、受付が他の session に直接話す経路を作らない（5.1）。B は 4c の後に、長く放置された時だけの形を検討する | A |
 
 ## 10. 基盤仕様の案との関係
@@ -485,13 +510,17 @@ server 側の変更は、版を上げない部分（3a-1）と上げる部分（
 
 ## 11. 確かめていない事
 
-- 12 節の R1〜R8 の全部（どれも実測していない）。
+- R1〜R4・R6 は別の host の worker の自己申告の結果で、この設計の担当は再実行していない。各項目の未確認の範囲は 12.2。
+- R5・R7・R8・R9 は未実施。
 - 「完了通知が届かない」の原因の候補（1.3 の 3 つと、止めた直後の古い登録への送信）のどれが起きているか。
 - center の follow が、版の違う center が同じ broker に並んだ時に server の版を取り合うか（3.6 の推測）。
-- 受付の allowlist の引数（`--tools` / `--allowedTools`、`--strict-mcp-config`、`--setting-sources`）が、この設計の通りに働くか（R6）。
+- 受付の引数の組に center の `--mcp-config` を足した時に、その MCP だけが使えるか。対話型で同じに効くか（R6 の残り）。
+- messenger の push が UserPromptSubmit の hook を起こすか、turn の途中に届いた push がどう扱われるか（R9。暫定の段階の P1・P5 の前提）。
 - web の設計書（code の注記にある design 5.x）は repo の中に見つからなかった。整合は code（center-client、tool-policy）で判断した。
 
 ## 12. 実装の前に実測が要る物
+
+### 12.1 項目
 
 | # | 何を | 確かめ方 | 前提にするまとまり |
 |---|---|---|---|
@@ -503,6 +532,21 @@ server 側の変更は、版を上げない部分（3a-1）と上げる部分（
 | R6 | 受付の tool の制限 | `permissions.deny` と、`--tools` / `--allowedTools`・`--strict-mcp-config`・`--setting-sources` の組で、(a) 使えない tool が確認待ちにならず拒否で返るか、(b) user scope の MCP・plugin・skill・user の CLAUDE.md が消えるか、(c) 対話型の `--remote-control` と一緒に使えるか、(d) UserPromptSubmit の sync の hook の `additionalContext` が claude.ai 側からの入力にも効くか | 4a |
 | R7 | 起床の頻度の見積もり | center の log と `remotes.json` から、project ごとの 1 日の「判断が要る物」の件数（3.4 の基準を当てはめる）と、hook から取れる idle の間隔の分布を出す。30 分の既定で 1 日に何回起きるかを見積もる | 2d（既定の値と D1） |
 | R8 | `completeIfIdle` の後に届く task_result の今の扱い | 偽の server で「最初の turn の task_result → worker の failed の activity → 再開の task_result」の順を流し、`applyLateReply` で記録が更新されるか、通知が出るか、pending が無い時に何が起きるかを見る | 3a-1（競合の確かめ）、3f（要るかどうか） |
+| R9 | messenger の push と hook・turn の関係 | 実 claude の session に messenger の push を送り、(a) UserPromptSubmit の hook が起きるか（起きるなら payload の `prompt` に push の本文が入るか）、(b) turn の途中に届いた push が、その turn の後に処理されるか・消えるか・turn に割り込むか、(c) 確認待ち（needs-input）の間に届いた push がどうなるか、を見る | P1（hook に push が混ざるなら出所の判定を足す）、P5（送ってよい状態の決め方） |
+
+### 12.2 実測の結果（自己申告）
+
+別の host の worker が claude 2.1.329 で行った結果の申告。この設計の担当は再実行していない。
+
+| # | 結果 | 未確認の範囲 | 設計で変えた所 |
+|---|---|---|---|
+| R1 | `--resume <id>` と `--remote-control` の併用で文脈が戻った。`session_id` は変わらず同じ記録に追記。記録の更新時刻を 5 時間前にしても戻った。`--continue` も同じ 2 通りで戻ったが、作業 dir の最新の会話を拾うので取り違えの恐れがある | 数日より古い会話。claude.ai 側の session URL が変わるか | 2.4（起床は `--resume <id>` を主に、`--continue` は id が無い時だけ） |
+| R2 | 起動中の process group は 19 個、合計約 1.6GB。claude の本体は約 370MB、残りは MCP の子。終了の後は group の中が 0 個で、MCP の子は残らなかった | 異常終了（SIGKILL・wrapper の異常終了）の時。background の shell がある時 | 8 節（memory の値と、background の分を足す事） |
+| R3 | 起動の command から入力欄まで 2〜5 秒。接続の表示まで resume ありで 4〜7 秒、新規で 8〜10 秒。接続の表示の前の入力が確定されず入力欄に残った事が 1 度 | messenger の peer の登録までの秒数。npx の取得が済んでいない時 | 2.6（見込みの秒数、409 の扱いを保つ） |
+| R4 | background の shell は claude の直接の子として残り、独立した process group になる（group の集計では漏れる）。画面にも「1 shell」と出る。この状態で終了を送ると「Exit and stop tasks / Move to background and exit / Stay」の確認が出て止まる | background のサブエージェント・`/loop`・schedule が子 process を持つか。確認の文の正確な文字列と Stay の key | 2.2（判定は claude の直接の子を見る、hook でも数える。確認の画面を見たら休止をやめて Stay） |
+| R5 | 未実施 | — | — |
+| R6 | `--tools "" --strict-mcp-config --setting-sources "" --disable-slash-commands` の組で、組み込みの道具・MCP・skill が全部使えず、確認待ちは出なかった。`--tools ""` だけでは MCP が使えた。`--disallowedTools` の列挙では列挙外の MCP が使えた | 非対話（`-p`）での実測。対話型と `--remote-control` での挙動、center の `--mcp-config` を足した時にその MCP だけが使えるか、`--settings` の hook が効くか | 4.2（引数の組を確定、deny・列挙の方式を捨てる） |
+| R7・R8・R9 | 未実施 | — | — |
 
 ## 13. review の反映
 
@@ -536,3 +580,192 @@ review（verdict issues。high 3、medium 8、low 8）の指摘ごとの扱い�
 | L8 focus の event の受け手 | 採った。受付を表示中で focus のある画面だけが受ける | 4.4、6、7.1（4c） |
 | まとまりの切り方（2a〜2c を 1 つの release、3a-1 を最初、3b・3c を合わせて） | 採った | 7.3 |
 | 実装の前に実測が要る物 8 項目 | 採った。確かめ方と前提のまとまりを対応づけた | 12 |
+
+## 14. 暫定の段階（統括の session）
+
+### 14.1 利用者の決定（2026-11-20）
+
+- 改善 3（center の受け口）と改善 4（窓口 1 つ）は、いきなり全体に入れず、まず暫定の段階を挟む。
+- 暫定の段階では、既存の master-cap の session のうち、設定で指定した 1 つ（以下「統括の session」）だけに、他の全 session を扱う仕様を入れる。方式は設定で切り替えられ、切ると今の動きに戻る。
+- 個別の master-cap は今までどおり。個別の側には何も足さない（指示文も道具も変えない）。利用者は今までどおり、個別の master-cap に直接指示もできる。
+- 統括の session に足す道具は 3 つだけ: (1) 指定した session に指示を渡す、(2) 各 session が直近に受けた利用者の指示を読む（統括の経由でない、個別への直接の指示も含む）、(3) 各 session の状態を 1 行で読む。
+- 「制御」の意味は、指示を渡す事と状態を答える事まで。各 project の進め方は個別の master-cap が決める。統括の session は、個別の作業の中身に踏み込まず、個別の判断を上書きしない。remote-cap や worker に直接は指示しない。
+- 各 project の結果や報告の本文を、統括の session に流し込まない。見せるのは件数だけで、中身は統括の session が要る時に読みに行く。
+- 同じ project に指示の出し手が 2 つ（利用者の直接の指示と、統括の経由）になる。統括の session は、渡す前に (2) で直近の指示を読み、渡そうとする内容と食い違う時は、渡さずに利用者に見せる。
+- 並べて見る画面は、暫定の段階の後、全体へ切り替える時に整える。新しい session を「受付」として足す 4 節の案は、全体へ切り替える段階の物として残す。
+
+### 14.2 仕組みの形
+
+- center 共通の設定に `coordinator: { session: "<session 名>" }` を足す（無い・null = 無効）。置き場は今の center 共通の設定（center/src/project-settings.ts）で、未知の項目を保持する今の仕組みに乗る。
+- 統括の session の `/mcp/session` だけに、3 つの道具を出す（15 節の B）。道具の許可は今の `mcp__bantou__*`（center/src/wrapper.ts:110-116）に含まれるので、許可の規則は変えない。
+- 統括の session だけに、system 指示の部品 `coordinator` を付ける（15 節の B）。個別の master-cap の system 指示は変えない。
+- center は、統括の方式が有効な間、全 session の利用者の発言と、統括の経由で渡した指示を、session ごとに時刻順で記録する（14.4。15 節の A）。
+- 統括の session は、自分の project の master-cap でもある（15 節の D）。
+
+### 14.3 道具 3 つの仕様
+
+全部、待たずに返る。返り値は JSON。大きさの上限を越える時は切り、切った事を返り値に書く。
+
+#### (3) `session_brief` — 各 session の状態を 1 行で読む
+
+- 引数: `session?`（省略時は全 session）。
+- 返り値: `{ at, sessions: [{ name, line }] , truncated }`。`line` は code で作る 1 行（上限 200 文字）:
+  `<name> | <起動の状態: 起動中 / 接続 / 停止 / error / 休止> | <作業状態: working / needs-input / idle / unknown と、その時刻からの分> | ctx <n>% | remote 実行中 <n>・返答待ち <n>・到達不能 <n>・lost <n> | 直近の利用者の指示 <分> 前（<direct / coordinator>） | 渡し待ち <n>`
+- 元: `session_list` と同じ集計（center/src/sessions.ts:145-161 の `info`、`remote` の集計 center/src/remotes.ts:122-131）と、14.4 の記録、14.3 (1) の列。
+- 上限: 1 回 40 行・6000 文字。報告の本文・result・worker の report の文は一切含めない（件数だけ）。
+
+#### (2) `session_prompts` — 直近の利用者の指示を読む
+
+- 引数: `session`（必須）、`limit?`（既定 5、上限 20）、`before?`（この id より前。続きを読む時）。
+- 返り値: `{ session, items: [{ id, at, source: "direct" | "coordinator", text, truncated }], latest_id, more }`。新しい順。
+  - `source`: `direct` = UserPromptSubmit の hook で受けた発言（desktop・web の terminal、claude.ai 側からの入力を区別しない）。`coordinator` = 統括が (1) で渡した物（center が渡した時に記録する）。
+  - `latest_id` は、その session の最新の記録の id。(1) の `based_on` に渡す。
+- 上限: 1 件の `text` は 1000 文字で切る。1 回の返り値は合計 8000 文字。
+- 読むのは center の時刻順の記録だけで、外部記憶の検索は使わない（順位づけで抜けるため）。
+- 利用者の発言だけを返す。master-cap の応答（Stop の `last_assistant_message`）は返さない（応答には作業の結果が入り、統括に本文を流し込む事になるため）。
+
+#### (1) `session_dispatch` — 指定した session に指示を渡す
+
+- 引数: `session`（必須。統括の session 自身は不可）、`text`（必須、上限 4000 文字）、`based_on`（必須。直前の (2) で得た `latest_id`。その session に記録が 1 件も無い時は `"none"`）。
+- center の処理（同期で、すぐ返る）:
+  1. 食い違いの検出（code）: その session の記録に、`based_on` より新しい `direct` の記録があれば、渡さずに `{ state: "stale", newer: [...] }` を返す（新しい指示の本文を 2 の上限の範囲で付ける）。統括は読み直して判断し直す。
+  2. 渡す先の状態で決める:
+
+| 渡す先の状態 | 扱い | 返り値の `state` |
+|---|---|---|
+| 接続済みで `idle` | すぐ messenger の push で送る（今の通知と同じ `notifyPeer`、center/src/server-link.ts:883-900） | `sent`（送達できなければ `queued` にして再送） |
+| `working`（turn の途中） | 列に入れ、作業状態が `idle` になった時に送る | `queued` |
+| `needs-input`（確認待ち） | 列に入れる。確認が済んで `idle` になった時に送る。(3) の 1 行に「渡し待ち」が出る | `queued` |
+| `starting`（起動中・再起動の予約中） | 列に入れ、接続と `SessionStart` を見て `idle` になった時に送る | `queued` |
+| `stopped` / `error` | 断る。統括が利用者に見せる | `refused`（理由つき） |
+| 休止（改善 2 が有効な時） | 起こしてから列に入れる（改善 2 が入った後の追加） | `queued` |
+
+  3. 送る形: `[統括から] <text>` の 1 通。core の入力（pty への打ち込み）は使わない（確認の画面に文字が入る危険があり、起動の直後は確定が効かない事がある。12.2 の R3）。
+  4. 送った時と列に入れた時に、14.4 の記録に `coordinator` として残す（送った時刻と送達の状態を付ける）。
+- 列: session ごとに最大 3 件。それを越えると `refused`（「渡し待ちが 3 件ある」）。列の物は 60 分で期限切れになり、記録に「期限切れで渡していない」を残す。統括は (3) の「渡し待ち」と (2) で気づく。
+- 列から送る直前にも 1 の判定をし直す。列に入れた後に `direct` の新しい指示が来ていたら、送らずに列から外し、記録に「直接の指示が後から来たので渡していない」を残す（統括は (2) で見る）。
+- 返り値: `{ dispatch_id, session, state: "sent" | "queued" | "stale" | "refused", reason?, newer? }`。上限 9000 文字（`newer` を含む）。
+- 【未確認】messenger の push が turn の途中・確認待ちに届いた時の claude の扱い（R9）。この設計は、idle の時だけ送るので、R9 の結果に依らず安全な側にある。R9 で「turn の途中の push は turn の後に処理される」と分かっても、列の形は変えない（作業の途中に割り込まない事を優先する）。
+
+### 14.4 発言の記録
+
+- 置き場: center の状態 dir（`sessions.json` と同じ dir）の `prompts/<session>.jsonl`。1 件 1 行で追記する。
+- 1 件: `{ id, at, source: "direct" | "coordinator", text, prompt_id?, dispatch?: { id, state, sent_at? } }`。`at` は hook の `bantou_ts`（hook の command が付ける発火時刻。center/src/status-line.ts:114）、無ければ受けた時刻。並びはこの時刻で決める。
+- 記録する契機: center の hook の受け口（center/src/daemon.ts:225-230 の `onHook`）で、`UserPromptSubmit` の `prompt` を受けた時。統括の (1) で送った・列に入れた時。
+- 同じ hook の再送は、外部記憶への受け渡しと同じく、session・`prompt_id`・時刻・本文の digest で同じ物と見なして 1 件にする（center/src/memory-events.ts:111-113 と同じ作り）。
+- `text` は 1 件 16000 文字で切る。session ごとに 200 件を越えたら、古い物を `prompts/<session>.<日付>.jsonl` に移す。統括の方式を無効にしたら、記録を止める（消さない）。
+- messenger の push が UserPromptSubmit の hook を起こすかは未確認（R9）。起こす場合、push の本文（center の通知、統括から渡した指示、他の peer の message）が `direct` に混ざる。その時は、messenger の push の目印（本文の先頭の `[bantou]`・`[統括から]`、agent-messenger が付ける見出し）で `direct` から外す。R9 の前は、外す規則を入れた形で実装する（外し過ぎても、統括から渡した物は `coordinator` として別に記録されている）。
+- 利用者の発言を disk に残す事になる。置き場は center の状態 dir（今も `sessions.json`・`remotes.json` があり、外部記憶の設定がある session は同じ発言を外部記憶にも送っている）なので、新しい種類の置き場は増えない。
+
+### 14.5 食い違いの判定
+
+| 範囲 | 誰が | 何を |
+|---|---|---|
+| 「読んだ後に、新しい直接の指示が来た」 | center（code） | (1) の `based_on` と記録の比較（14.3 の 1）。列から送る直前にも行う |
+| 「渡す先が今、別の作業をしている」 | center（code） | 作業状態と remote の集計を (3) と (1) の返り値に出す。working なら列に入れる |
+| 「渡そうとする内容が、直近の直接の指示と食い違う」（方針の逆転、同じ範囲への別の指示、取り消された事の再開など） | 統括の session（model） | (2) で読んで判断する。食い違う時は渡さずに、両方の要点を利用者に見せて、どちらにするかを 1 回だけ聞く |
+| 「個別の master-cap の判断を上書きしない」 | 統括の session（model） | system 指示の決まり。code では保証できない |
+
+### 14.6 以前の失敗が再発しない根拠と、残る危険
+
+統括の session の turn を長くする経路と、その抑え:
+
+| 経路 | 抑え | 保証の強さ |
+|---|---|---|
+| 他の project の完了通知・worker の report が統括の会話に届く | 届かない。center の通知の送り先は記録の owner（その project の session）だけ（center/src/remotes.ts:893-924、1886-1904）。統括の方式はこれを変えない | code |
+| 道具の返り値が大きい | (3) 6000 文字、(2) 8000 文字、(1) 9000 文字の上限。報告の本文を返す道具を統括に足さない | code |
+| 道具が待つ | 3 つとも待たずに返る。渡す先の起床や turn の終わりを待たない | code |
+| 統括が他の project の remote の記録を読む | `remote_list` は owner の記録しか返さない（center/src/tools.ts:428-434 → center/src/remotes.ts:1953）。他の project の結果の本文は今の道具からは読めない | code |
+| 統括の自分の project の通知 | 今どおり統括の会話に届く（15 節の D）。作業の多い project の master-cap を統括にすると、以前の失敗に近づく | 運用（D14） |
+| 統括が Read で他の session の dir や center の状態 dir の file を読む | 統括は普通の master-cap なので Read が使える。system 指示で「他の project の記録・報告の file を読まない。状態は (3)、指示は (2) だけで見る」と決める | 指示文だけ |
+| 統括が messenger の `send_message` で他の session・remote-cap に直接送る | 統括には今どおり messenger が付く（個別と同じ）。system 指示で「他の session には (1) でだけ渡す。remote-cap・worker には送らない」と決める | 指示文だけ |
+| 他の peer が統括に push で本文を送る | 今と同じ（全 master-cap が同じ）。暫定の段階では対策しない。全体へ切り替える時の受付は messenger を持たない（4.2） | なし（今と同じ） |
+| 統括が渡した先の結果を待つ・追う | system 指示で「渡したら turn を終える。結果は (3) の件数と、利用者が聞いた時に (2)・(3) で答える」と決める | 指示文だけ |
+
+- 以前の失敗の主な原因（全 project の報告が 1 つの会話に流れ込む）は、code の経路で消える（上の表の 1〜4 行目）。残るのは、統括の session が自分から読みに行く・送りに行く経路で、暫定の段階では指示文で抑える。全体へ切り替える時に、受付の allowlist（4.2）で code の保証に変える。
+
+### 14.7 切り替えと戻し方
+
+- 有効にする: center 共通の設定に `coordinator.session` を入れる（`center_settings_update`。画面は P6、任意）。統括の session を起動し直すと効く（道具の一覧は MCP の接続の時に決まり、system 指示は起動の時に付くため。15 節の B）。center はその session の起動し直しを促す表示を出すだけで、自動では起動し直さない（動いている作業を止めないため）。発言の記録は設定を入れた時から始める。
+- 無効にする（戻す）: 設定を消し、統括の session を起動し直す。道具と部品が消え、今の動きに戻る。列に残っていた渡し待ちは、記録に「無効にしたので渡していない」を残して捨てる。発言の記録の file は消さない（次に有効にした時に続きから使う）。
+- 統括を別の session に替える: 設定の名前を替え、前後の 2 つの session を起動し直す。
+- 個別の master-cap は、どの切り替えでも起動し直さない。
+
+### 14.8 暫定の段階で使わない物と、全体へ切り替える時に置き換える物
+
+| 物 | 暫定の段階 | 全体へ切り替える時 |
+|---|---|---|
+| 受け口（3b〜3d）、受付（4a〜4c） | 使わない | 入れる |
+| 改善 2（休止） | 独立。入っていれば (1) は休止中の session を起こす | 同じ |
+| 3a-1 | 独立（server だけ） | 同じ |
+| `session_dispatch` | 統括の session の道具 | 受付の `project_dispatch` に置き換える（受け渡しの列と `based_on` の判定は引き継ぐ） |
+| `session_brief` | 統括の session の道具 | 受付の `project_list` / `project_status` に置き換える |
+| `session_prompts` | 統括の session の道具 | 受付の道具に残す（利用者の発言だけなので、受付が報告の本文を読まない決まりと矛盾しない） |
+| 発言の記録（P1） | 統括の方式が有効な時に記録 | 受付がある時は常に記録 |
+| system 指示の部品 `coordinator` | 統括の session だけ | 消す。統括だった session は普通の master-cap に戻る |
+| 並べて見る画面 | 作らない | 4c で作る |
+
+### 14.9 基盤仕様の案との関係
+
+- 「利用者と対話する窓口は同時に 1 つ」: 暫定の段階では、利用者は統括の session と個別の master-cap のどちらとも話す。統括は個別の方針を決めず、利用者の指示を渡すだけなので、各 project の「窓口」（方針を持つ者）は個別の master-cap のまま、と読む（10 節と同じ読み方）。
+- 「指示は上から下へ、層を飛ばさない」: 統括は master-cap の層の中の横の受け渡しで、remote-cap・worker に直接指示しない。
+- 「master-cap は source を読まない」: 変えていない。統括も同じ。
+
+## 15. code で確かめた事（A〜D）
+
+基点のコード（center と server は改訂 2 の時点の `develop` と同じ）で確かめた。
+
+### A. 各 session の利用者の発言を、center は時刻順に保存しているか
+
+- 【事実】保存していない。center が利用者の発言を受けるのは hook の受け口だけで（center/src/daemon.ts:225-230 の `onHook`）、そこでは (a) 作業状態の判定（center/src/session-activity.ts:34-60。本文は見ない）と、(b) 外部記憶への受け渡し（center/src/memory-events.ts:101-125）に使うだけ。
+- 【事実】外部記憶への受け渡しは、その session に外部記憶の設定がある時だけ行い（設定が無ければ何もしない。center/src/memory-events.ts:79-99）、非同期の queue に積む（上限 1000 件。center/src/memory.ts:127）。center の中には残らない。
+- 【事実】外部記憶の道具は `recall`（検索）・`context`・`explain`・`status` で、時刻順に一覧する道具は無い（memory/README.md:21-23）。
+- 【事実】hook の UserPromptSubmit は async で送られ（Stop / StopFailure だけが sync。center/src/session-activity.ts:21-22、center/src/status-line.ts:47）、hook の command が発火時刻 `bantou_ts` を足す（center/src/status-line.ts:114）。center が落ちている間の hook は失われる。
+- 【事実】hook を受けるのは session が `starting` か `connected` の時だけ（center/src/daemon.ts:226-229）。
+- 足す物: `onHook` の中に、`UserPromptSubmit` の `prompt` を `prompts/<session>.jsonl` に追記する処理（14.4。まとまり P1）。読み出しは (2) の道具。並びは `bantou_ts`。
+- 【未確認】claude.ai 側（remote-control）から入れた発言で UserPromptSubmit の hook が起きるか。messenger の push で hook が起きるか（R9）。
+
+### B. session 向けの道具の公開を session ごとに変えられるか
+
+- 【事実】`/mcp/session` は、session ごとの使い捨て token（session の起動ごとに発行。center/src/session-auth.ts:3-28）と header `X-Bantou-Session` で認証し、その session 名を owner として決める（center/src/http.ts:398-406）。
+- 【事実】MCP の接続（initialize）ごとに `createSessionServer(owner)` で MCP server を作る（center/src/http.ts:505）。中身は `createSessionMcpServer` → `registerSessionTools(server, { remotes, owner })`（center/src/server.ts:45-49、center/src/tools.ts:363-）。道具の一覧はこの時に決まり、今は全 session で同じ。
+- 【事実】claude 側の許可は `--settings` の `permissions.allow` に `mcp__bantou__*` を入れている（center/src/wrapper.ts:110-116）。新しい道具も許可される。
+- 【事実】system 指示の部品は `SystemInstructionContext`（`session`・`memory`）で付け外しでき（center/src/system-instructions.ts:17-35、114-119）、文脈は `launch` で作る（center/src/remote-control.ts:464-465）。
+- 足す場所:
+  - `createSessionMcpServer` に「統括の session 名を返す関数」を渡し、`owner` が一致する時だけ 3 つの道具を `registerSessionTools` の後に登録する（まとまり P2）。
+  - `SystemInstructionContext` に `coordinator: boolean` を足し、部品 `coordinator`（`when: ctx.coordinator`）を足す。`launch` の `sysCtx` に設定から入れる。
+- 効く時機: 道具の一覧は MCP の接続の時、system 指示は起動の時に決まるので、設定を変えた後は統括の session の起動し直しで効く。【未確認】MCP の道具の一覧の変化の通知（list_changed）を claude が受けて一覧を取り直すか。取り直すとしても system 指示は変わらないので、起動し直しの方式を採る。
+
+### C. 渡す先が turn の途中・確認待ち・停止中の時、今の入力の口はどうなるか
+
+- 【事実】画面からの入力の口（`POST /sessions/<name>/input`）は `core.input` を呼び、wrapper が繋がっていれば作業状態に関係なく pty に書き込む。繋がっていなければ 409（「session が実行中でない」）（center/src/http.ts:360-367、center/src/core.ts:21-40）。
+  - 【推測】turn の途中は claude の入力欄に入り、Enter で次の入力として並ぶ。確認待ち（permission・AskUserQuestion）の間は、その画面の操作として解釈され、意図しない選択になりうる。
+  - 起動の直後は、接続の表示の前の入力が確定されず残った事がある（12.2 の R3、自己申告）。
+- 【事実】messenger の push（`notifyPeer`）は、peer がいれば作業状態に関係なく送る（center/src/server-link.ts:883-900）。center は push の前に作業状態を見ていない（center/src/remotes.ts:893-924）。push は claude の inbox socket から会話に入る（docs/design/master-cap-session.md の 6.1）。
+  - 【未確認】turn の途中・確認待ちに届いた push の扱い（R9）。
+- 【事実】作業状態（working / needs-input / idle / unknown）と起動の状態（stopped / starting / connected / error）は center が持っている（center/src/sessions.ts:38-44、center/src/session-activity.ts）。
+- 暫定の段階の扱い: 14.3 (1) の表（idle は送る、working・needs-input・starting は並べる、stopped・error は断る）。core の入力は使わず、messenger の push を idle の時だけ使う。分かれ目 D12。
+
+### D. 統括の session 自身が自分の project の指揮もしている時
+
+- 【事実】remote の完了通知と worker の report の送り先は、記録の owner（その cap を持つ session）だけ（center/src/remotes.ts:893-924、1886-1904。送り先の名前は `capSessionName(owner)`、center/src/daemon.ts:161）。
+- 【事実】統括の session の道具は今の `registerSessionTools` に足すだけなので、統括の session の `remote_send`・`remote_list`・`remote_wait`・`worker_reply` は今どおり自分の cap だけを扱う（center/src/tools.ts:363-446 の `owner`）。
+- よって、統括の方式を入れても、統括の session に元から届いていた自分の project の通知は今どおり届き、他の project の通知は届かない。統括の会話には「自分の project の通知」と「利用者からの全 project の話」が入る。
+- 【推測】統括の session の project の作業が多いと、統括の turn が自分の project の通知で埋まり、他の project の指示を受けにくくなる（以前の失敗に近い形）。抑えは分かれ目 D14（作業の少ない session を選ぶ、または統括の役だけの空の project の session を作って指定する）。統括の session 自身を (1) の渡す先にする事は断る（自分への指示は普通に会話でできるため）。
+
+## 16. 改訂 2 の記録
+
+| 項目 | 扱い | 直した節 |
+|---|---|---|
+| 利用者の決定（暫定の段階） | 14 節を新設。分かれ目 D12〜D14 を足した | 0、7.1、7.2、7.3、9、14 |
+| A（発言の記録の有無） | 確かめた。記録の file と道具 (2) を設計した | 14.4、15 |
+| B（道具の出し分け） | 確かめた。足す場所を書いた | 14.2、15 |
+| C（渡す先の状態ごとの扱い） | 確かめた。列で待つ形にした | 14.3、15、D12 |
+| D（統括の自分の project） | 確かめた。通知は今どおり届く。選び方を分かれ目にした | 14.6、15、D14 |
+| R1 | 起床は `--resume <id>` を主にした | 2.4、12.2 |
+| R2 | memory の値と、background の分を足す事を書いた | 8、12.2 |
+| R3 | 起床の秒数を書き、409 の扱いを保った | 2.6、12.2 |
+| R4 | background の判定を claude の直接の子と hook にした。止める時の確認の画面の扱いを足した | 2.2、12.2 |
+| R6 | 受付の引数の組を確定し、deny・列挙の方式を捨てた | 4.2、12.2 |
+| R9 を新設 | messenger の push と hook・turn の関係 | 11、12.1 |
+| 入れなかった物 | master-cap の待ち方の統一の是正案（利用者の承認前） | — |
