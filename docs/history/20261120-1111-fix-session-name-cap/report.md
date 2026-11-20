@@ -14,6 +14,7 @@ remote の session 一覧で、center が起動した master-cap の session を
 | messenger 登録名 | `--mcp-config` の `AGENT_MESSENGER_NAME`（mcpConfigJson） | **変えた** | center が起動時に決める session を指す名前。code を確かめた結果、remotes.json・sessions.json・cap_id・memory はどれも project 名（session）で持ち、messenger 名は保存されていない（通知のたびに導出）。project 名を key にした紐付けには当たらない |
 | daemon notify の宛先引き | daemon.ts notify → notifyPeer（peer 名で引く） | **変えた**（新名だけで引く。旧名への fallback は外した） | 宛先は messenger 名なので、登録名と同じ関数で導出する。owner（= session = project 名）自体は変えない |
 | 起動時の指示文 | system-instructions.ts master-cap-role「session「…」」 | **変えた**（`<project>-cap`、role@4） | session を指す所。実際に付く名前と一致させる。project を指す所は無い |
+| 孤児 rc の回収の照合 | reap.ts matchesRc（argv の `--name`） | **変えた**（`<project>-cap` と `<project>` のどちらの `--name` でも合う） | 旧経路が `--name <project>-cap` で起動するので、照合を今の起動引数に合わせた。旧名も許すのは、変更前に起動した孤児も回収するため（互換の別名ではなくプロセス照合の修正）。reap.test.ts・rc-orphan.test.ts で確認 |
 | sessions の key | sessions.ts, project-settings.ts | 変えない | project 名を key とする内部の識別子。変えると既存 session の記録との対応が切れる |
 | remote の cap_id `c-<center-id>-<session>`（remotes.json の session も） | center-id.ts, remotes.ts | 変えない | server 側の cap の記録との対応が切れる。cap_id が変わらない test あり |
 | 作業 dir | project の path | 変えない | 既存の dir との対応 |
@@ -36,7 +37,8 @@ remote の session 一覧で、center が起動した master-cap の session を
 
 ## test
 - packages/center typecheck: 通る。
-- packages/center test: 624 件中 623 pass・1 fail。fail は既知の不安定 test「center を SIGKILL すると rc が孤児で残り…」で、単独再実行では pass（1/1）。
+- packages/center test: __COUNT__
 - 追加・更新した test: `capSessionName`（session-name.test.ts。`-cap` を重ねない）、起動引数の `--remote-control <session>-cap` と `-cap` で終わる名前を重ねない事、messenger の `AGENT_MESSENGER_NAME`、X-Bantou-Session / X-Agent-Id / token / status が session 名のままである事（remote-control-wrapper.test.ts）、旧経路の `--name`、指示文の名前と role@4（system-instructions.test.ts）、cap_id が変わらない事。
+- 既知の制約: project 名 `x` と `x-cap` が両方あると、session の名前（`x-cap`）が衝突する（remote-control 一覧・messenger の peer 名・孤児の照合）。
 - desktop: 変更が無い（画面は session 名＝内部の識別子を使い続ける）ので typecheck・e2e は回していない。
 - daemon の notify（新名だけで引く）の単体 test は無い（daemon の組み立て内。`notifyPeer` 自体の test は既存）。

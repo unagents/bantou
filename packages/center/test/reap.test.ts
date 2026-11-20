@@ -33,6 +33,16 @@ test("matchesRc: --name は token 完全一致（foo と foobar を区別）", (
   assert.equal(matchesRc("claude remote-control --name", "proj-a"), false);
 });
 
+test("matchesRc: 新しい起動引数 --name <project>-cap も、変更前の --name <project> も合う。別 project は合わない", () => {
+  assert.equal(matchesRc("claude remote-control --name proj-a-cap", "proj-a"), true);
+  assert.equal(matchesRc("claude remote-control --name proj-a", "proj-a"), true);
+  assert.equal(matchesRc("claude remote-control --name proj-b-cap", "proj-a"), false);
+  assert.equal(matchesRc("claude remote-control --name proj-a-cap-cap", "proj-a"), false);
+  // project が -cap で終わる時は重ねない（--name x-cap）
+  assert.equal(matchesRc("claude remote-control --name x-cap", "x-cap"), true);
+  assert.equal(matchOrphan(proc({ command: "claude remote-control --name proj-a-cap" }), "proj-a"), true);
+});
+
 test("matchOrphan: ppid=1 のみ。自分・自分の子・ppid≠1 は除く", () => {
   assert.equal(matchOrphan(proc({ command: RC }), "proj-a"), true);
   assert.equal(matchOrphan(proc({ command: RC, ppid: 777 }), "proj-a"), false);
