@@ -2,6 +2,7 @@ import { isAbsolute } from "node:path";
 import { z } from "zod";
 import { SERVER_ID_PATTERN } from "@agent-hand/bantou-protocol";
 import { SESSION_INSTRUCTIONS_MAX } from "./config.js";
+import { memoryDefIssues, memoryDefOf, type McpServerDef } from "./mcp-server-def.js";
 
 /** 参照フォルダ（`--add-dir`）の最大数（1 つの設定あたり）。 */
 export const ADD_DIRS_MAX = 20;
@@ -20,7 +21,7 @@ export const MEMORY_AGENT_ID_MAX = 64;
 /** token は HTTP header の値に載るので、空白・制御文字・非 ASCII を含まない（空文字は「token 無し」）。 */
 const MEMORY_TOKEN_PATTERN = /^[\x21-\x7E]*$/;
 
-/** 外部記憶（memory の MCP endpoint）。保存済みの値。 */
+/** 旧形式の外部記憶（0.1.56 までの `{ url, token?, agentId? }`。memory-settings.json と旧い settings.memory）。今は普通の MCP の設定（McpServerDef）で持つ。 */
 export interface MemorySetting {
   /** memory の MCP endpoint（http/https の絶対 URL）。 */
   url: string;
@@ -50,10 +51,17 @@ export interface ProjectSettings {
    */
   servers?: string[];
   /**
-   * 追加の MCP の接続（名前 → 接続）。center 共通の設定では全 session に載り、session の設定ではその session だけに載る（null = 共通の接続をその session では外す）。
-   * center の側だけの項目（画面・web・MCP の更新では書けない。設定 file を直接書く）。形は mcp-connections.ts。鍵の値は書かず、auth.env に環境変数名を書く。
+   * 追加の MCP の server（名前 → Claude Code の mcp.json の mcpServers の値と同じ形。stdio・http・sse など。headers に Bearer などの値もそのまま書ける）。
+   * center 共通の設定では全 session に載り、session の設定ではその session だけに載る（同じ名前は共通を置き換える。null = 共通の server をその session では外す）。
+   * 統括の組み込みの接続 `{ transport: "builtin", builtin: "coordinator" }` と旧形式（transport: http + auth.env）も書ける（mcp-connections.ts）。
+   * 書けるのは center を起動した所（desktop の sidecar の設定の画面・stdio の起動元）と設定 file の直接の編集。
    */
   mcpServers?: Record<string, unknown>;
+  /**
+   * 外部記憶（memory）の MCP の server（Claude Code の mcp.json の mcpServers の値と同じ形。例 `{ type: "http", url, headers: { Authorization: "Bearer …" } }`）。
+   * session の値があれば共通の値は使わない。旧形式 `{ url, token?, agentId? }` は読み替える（mcp-server-def.ts の memoryDefOf）。
+   */
+  memory?: McpServerDef;
   [key: string]: unknown;
 }
 
@@ -127,23 +135,73 @@ export const projectSettingsPatchSchema = z
     addDirs: z.array(addDirSchema).max(ADD_DIRS_MAX, `参照フォルダは ${ADD_DIRS_MAX} 個以内`).nullable().optional(),
     outputStyle: z.string().max(OUTPUT_STYLE_MAX, `出力スタイルは ${OUTPUT_STYLE_MAX} 文字以内`).nullable().optional(),
     servers: z.array(serverRefSchema).max(SERVERS_MAX, `servers は ${SERVERS_MAX} 個以内`).nullable().optional(),
+    // 中身の検査は settingsIssues（共通と session で null の扱いが違う）
+    mcpServers: z.record(z.string(), z.unknown()).nullable().optional(),
+    memory: z.record(z.string(), z.unknown()).nullable().optional(),
   })
   .passthrough();
 
 export type ProjectSettingsPatch = z.infer<typeof projectSettingsPatchSchema>;
 
-/** center の側だけで扱う設定の項目名（画面・web・master-cap の設定更新からは受けない）。 */
-export const CENTER_ONLY_KEYS: readonly string[] = ["memory", "mcp", "mcpServers", "mcpConnections", "mcpSecrets", "coordinator"];
+/**
+ * center を起動した所（desktop の sidecar の設定の画面・stdio の起動元）だけが書ける項目。別 host の center に繋いでいる desktop・web・
+ * 他の MCP の呼び出し元からは読み書きしない（読みの応答からも除く）。
+ */
+export const LAUNCHER_KEYS: readonly string[] = ["memory", "mcpServers"];
+/** 旧設定の項目（どこからも MCP では書かない。旧 CLI・移行だけが扱う）。 */
+export const LEGACY_INTERNAL_KEYS: readonly string[] = ["mcp", "mcpConnections", "mcpSecrets", "coordinator"];
+/** center の側だけで扱う設定の項目名（起動元以外の設定更新からは受けない）。 */
+export const CENTER_ONLY_KEYS: readonly string[] = [...LAUNCHER_KEYS, ...LEGACY_INTERNAL_KEYS];
 
-/** center の側だけの項目を MCP（画面・web・master-cap の設定更新）から受けた時のエラー文。項目の値は含めない。 */
+/** center の側だけの項目を起動元以外（別 host の desktop・web・他の呼び出し元）から受けた時のエラー文。項目の値は含めない。 */
 export const CENTER_ONLY_MCP_ERROR =
-  "外部記憶（memory）や追加の MCP の接続（mcpServers）の設定は MCP からは変えられない（url・token・agentId・接続の割り当てなどは center の側だけで扱う）。center を動かしている host で、README の「外部記憶の設定」「追加の MCP の接続」の手順（`bantou-center memory`・設定 file の編集）を使う";
+  "外部記憶（memory）と追加の MCP の server（mcpServers）は、center を起動した所（sidecar の center を動かしている desktop の設定の画面）でだけ変えられる。別 host の center に繋いでいる desktop・web からは変えられない";
 export const MEMORY_MCP_ERROR = CENTER_ONLY_MCP_ERROR;
+/** 旧設定の項目を受けた時のエラー文。 */
+export const LEGACY_KEYS_ERROR = "mcp・mcpConnections・mcpSecrets・coordinator は旧設定の項目で、設定の更新では書けない（追加の MCP の server は mcpServers に書く）";
 
-/** patch に center の側だけの項目（null を含む）があれば投げる。黙って捨てない。 */
-export function assertCenterOnly(patch: object | undefined): void {
+const hasKey = (o: object, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k);
+
+/**
+ * patch の center の側だけの項目（null を含む）を検査する。黙って捨てない。
+ * launcher = 呼び出し元が center を起動した所（memory・mcpServers を書ける）。旧設定の項目は誰からも受けない。
+ */
+export function assertCenterOnly(patch: object | undefined, opts: { launcher?: boolean } = {}): void {
   if (patch === undefined || patch === null) return;
-  if (CENTER_ONLY_KEYS.some((k) => Object.prototype.hasOwnProperty.call(patch, k))) throw new Error(CENTER_ONLY_MCP_ERROR);
+  if (LEGACY_INTERNAL_KEYS.some((k) => hasKey(patch, k))) throw new Error(opts.launcher ? LEGACY_KEYS_ERROR : CENTER_ONLY_MCP_ERROR);
+  if (!opts.launcher && LAUNCHER_KEYS.some((k) => hasKey(patch, k))) throw new Error(CENTER_ONLY_MCP_ERROR);
+}
+
+/** 読みの応答から center の側だけの項目を除く（起動元以外へ返す時）。 */
+export function withoutLauncherKeys<T extends object>(settings: T): T {
+  const out = { ...settings } as Record<string, unknown>;
+  for (const k of LAUNCHER_KEYS) delete out[k];
+  return out as T;
+}
+
+/**
+ * patch の memory・mcpServers の中身の検査（誤りの文に値は含めない。名前は含める）。scope = "common"（center 共通）か "session"。
+ * - mcpServers: 名前ごとに、普通の MCP の設定（mcp-server-def.ts の serverDefIssues）・組み込み・旧形式のどれか。session では null（共通を外す）も可。
+ * - memory: 普通の MCP の設定（旧形式 { url, token?, agentId? } も可）。
+ */
+export function settingsIssues(patch: object | undefined, scope: "common" | "session", checkServer: (name: string, raw: unknown, scope: "common" | "session") => string[]): string[] {
+  if (patch === undefined || patch === null) return [];
+  const out: string[] = [];
+  const p = patch as { mcpServers?: unknown; memory?: unknown };
+  if (p.mcpServers !== undefined && p.mcpServers !== null) {
+    if (typeof p.mcpServers !== "object" || Array.isArray(p.mcpServers)) out.push("mcpServers は 名前 → MCP の server の設定 の object");
+    else
+      for (const [name, raw] of Object.entries(p.mcpServers as Record<string, unknown>)) {
+        if (raw === null && scope === "session") continue;
+        if (raw === null) {
+          out.push(`mcpServers.${name}: null は session の設定でだけ書ける（共通の server をその session で外す）`);
+          continue;
+        }
+        for (const i of checkServer(name, raw, scope)) out.push(`mcpServers.${name}: ${i}`);
+      }
+  }
+  if (p.memory !== undefined && p.memory !== null) for (const i of memoryDefIssues(p.memory)) out.push(`memory: ${i}`);
+  return out;
 }
 
 /**
@@ -171,7 +229,7 @@ export function readCenterSettings(raw: unknown): ProjectSettings {
  * - null はその項目を削除する。`instructions` / `outputStyle` の空文字・`addDirs` の空配列も削除と同じ（保存しない）。
  * - `addDirs` は重複を除く（先勝ち）。
  * - `servers` は重複を除く（先勝ち）。空配列は保存する（= どの server も使わない。未設定と区別する）。削除は null。
- * - `memory` は扱わない（無視する。MCP の入口で assertNoMemory が断る。外部記憶は memory-settings.ts）。
+ * - `memory` は普通の MCP の設定の形にして入れる（旧形式は読み替える）。
  * - 未知の項目は値をそのまま入れる。
  */
 export function mergeSettings(current: ProjectSettings | undefined, patch: ProjectSettingsPatch): ProjectSettings {
@@ -184,8 +242,12 @@ export function mergeSettings(current: ProjectSettings | undefined, patch: Proje
       if (dirs.length) out.addDirs = dirs;
       else delete out.addDirs;
     } else if (k === "servers") out.servers = uniqueDirs(v);
-    else if (k === "memory") continue;
-    else out[k] = v;
+    // 外部記憶は普通の MCP の設定の形で持つ（旧形式は読み替える）
+    else if (k === "memory") {
+      const d = memoryDefOf(v);
+      if (d) out.memory = d;
+      else delete out.memory;
+    } else out[k] = v;
   }
   return out;
 }
@@ -207,8 +269,10 @@ export function readSettings(raw: unknown): ProjectSettings {
   const dirs = uniqueDirs(out.addDirs);
   if (dirs.length) out.addDirs = dirs;
   else delete out.addDirs;
-  // 外部記憶は memory-settings.json だけで持つ（ここに残っていても読み捨てる。sessions.ts の restore が移し替える）
-  delete out.memory;
+  // 外部記憶: 普通の MCP の設定の形にする（旧形式 { url, token, agentId } は読み替える）。object でなければ未設定
+  const mem = memoryDefOf(out.memory);
+  if (mem) out.memory = mem;
+  else delete out.memory;
   // servers: 配列なら（空でも）残す。配列でなければ未設定（壊れた値で全 server を止めない）
   if (Array.isArray(out.servers)) out.servers = uniqueDirs(out.servers);
   else delete out.servers;

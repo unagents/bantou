@@ -45,9 +45,10 @@ test("coordinator: 旧設定の coordinator は center 共通の設定として�
   assert.equal(readCoordinator({ session: "main" }), "main");
   assert.equal(readCoordinator({ session: "bad name" }), null);
   assert.equal(readCoordinator(undefined), null);
-  // 設定の更新の入力は center の側だけの項目として断る（assertCenterOnly）
-  assert.throws(() => assertCenterOnly({ coordinator: { session: "main" } }), /MCP からは変えられない/);
-  assert.throws(() => assertCenterOnly({ coordinator: null }), /MCP からは変えられない/);
+  // 設定の更新の入力は旧設定の項目として誰からも断る（assertCenterOnly。起動元でも）
+  assert.throws(() => assertCenterOnly({ coordinator: { session: "main" } }), /center を起動した所/);
+  assert.throws(() => assertCenterOnly({ coordinator: null }), /center を起動した所/);
+  assert.throws(() => assertCenterOnly({ coordinator: { session: "main" } }, { launcher: true }), /旧設定の項目/);
 });
 
 // ---- 指示文の部品 ----

@@ -25,8 +25,11 @@ import {
   windowConnected,
 } from "./wrapper.js";
 import { OUTPUT_STYLE_NAME, syncOutputStyleSync } from "./output-style.js";
-import type { MemorySetting } from "./project-settings.js";
-import { MCP_KEY_ENV_PREFIX, MCP_SECRET_ENV_PREFIX, type SessionMcp } from "./mcp-session.js";
+import { MCP_KEY_ENV_PREFIX, MCP_SECRET_ENV_PREFIX, MEMORY_SECRET_ENV_PREFIX, memoryEntry, type SessionMcp } from "./mcp-session.js";
+import type { McpServerDef } from "./mcp-server-def.js";
+import { LAUNCHER_KEY_ENV } from "./launcher.js";
+/** 外部記憶の設定（普通の MCP の設定の形。Claude Code の mcp.json の mcpServers の値）。 */
+type MemorySetting = McpServerDef;
 import { hookCommand, hookUrl, statusLineCommand, statusLineSettings, statusLineUrl } from "./status-line.js";
 
 export type RcState = "stopped" | "starting" | "connected" | "error";
@@ -316,7 +319,7 @@ interface Entry {
   addDirs: string[];
   /** 出力スタイルの本文。起動のたびに project の `.claude/output-styles/bantou.md` に書き `--settings` で選ぶ。空なら書かず、古いファイルは消す。 */
   outputStyle: string;
-  /** 外部記憶（共通 + session の合成後）。あれば起動のたびに --mcp-config に memory を足し、token は env BANTOU_MEMORY_TOKEN で渡す。 */
+  /** 外部記憶（session の値か共通の値）。あれば起動のたびに --mcp-config に memory を足す（headers・env の値は env BANTOU_MEMORY_SECRET_n で渡す）。 */
   memory: MemorySetting | null;
 }
 
@@ -378,7 +381,7 @@ export function createRemoteControlSupervisor(opts: {
   };
   /**
    * 外部記憶の取得元。あれば起動のたびに（add / setMemory で渡した値でなく）これを呼んで使う。
-   * center は memory-settings.json を読む（CLI で変えた設定が次の起動から効く）。
+   * center は設定 file（center-settings.json / sessions.json の memory）を読む（画面や CLI で変えた設定が次の起動から効く）。
    */
   memoryOf?: (name: string) => MemorySetting | undefined;
   /**
@@ -495,6 +498,8 @@ export function createRemoteControlSupervisor(opts: {
     // 接続の鍵（auth.env の BANTOU_MCP_KEY_*）は center の環境にある。どの session の子にも継承させない
     // （割り当てた接続の鍵は、下で BANTOU_MCP_SECRET_n として子の env にだけ渡す。割り当てていない session から読めてはいけない）
     for (const k of Object.keys(env)) if (k.startsWith(MCP_KEY_ENV_PREFIX)) delete env[k];
+    // 起動元の鍵（desktop が sidecar に渡す）も子には渡さない（session から設定の口を起動元として呼ばせない）
+    delete env[LAUNCHER_KEY_ENV];
     if (e.wrapper) {
       if (!wd) {
         e.status.state = "error";
@@ -527,6 +532,16 @@ export function createRemoteControlSupervisor(opts: {
       } catch (err) {
         log(`出力スタイルを書けない（style 無しで起動）: project=${name} ${(err as Error).message}`);
       }
+      // 外部記憶の entry（値は env へ移す）。作れなければ付けない
+      let mem: { entry: McpServerDef; env: Record<string, string> } | undefined;
+      if (memory) {
+        try {
+          mem = memoryEntry(memory, name);
+        } catch (err) {
+          log(`外部記憶の設定を載せられない（付けずに起動）: project=${name} ${err instanceof Error ? err.name : "error"}`);
+          memory = null;
+        }
+      }
       const settings = {
         // statusLine は center のものを渡す（利用者の statusLine 設定より優先される）。窓口が無い（stdio）時は付けない
         // hooks（作業状態の通知）も同じ --settings で渡す。利用者の hooks は置き換わらず足し合わされる
@@ -542,7 +557,7 @@ export function createRemoteControlSupervisor(opts: {
         claudePath: claude.path,
         name,
         permissionMode: e.project.permissionMode,
-        mcpConfig: mcpConfigJson(mcpUrl, name, memory ?? undefined, mcp?.servers),
+        mcpConfig: mcpConfigJson(mcpUrl, name, mem?.entry, mcp?.servers),
         settings: Object.keys(settings).length ? JSON.stringify(settings) : null,
         resume: useContinue,
         ...(rc.model ? { model: rc.model } : {}),
@@ -552,9 +567,10 @@ export function createRemoteControlSupervisor(opts: {
       });
       command = wd.path ?? resolveWrapperPath();
       env = { ...env, BANTOU_SESSION_TOKEN: wd.tokens.issue(name) };
-      // 外部記憶の token は env だけで渡す（argv・--mcp-config・log・status には出さない）。token が無ければ継承分も消す
-      if (memory?.token) env[MEMORY_TOKEN_ENV] = memory.token;
-      else delete env[MEMORY_TOKEN_ENV];
+      // 外部記憶の値は env だけで渡す（argv・--mcp-config・log・status には出さない）。継承分の同名の変数は消してから入れる
+      delete env[MEMORY_TOKEN_ENV];
+      for (const k of Object.keys(env)) if (k.startsWith(MEMORY_SECRET_ENV_PREFIX)) delete env[k];
+      if (mem) Object.assign(env, mem.env);
       // 保存した接続の鍵も env だけ。継承分の同名の変数は消してから入れる
       for (const k of Object.keys(env)) if (k.startsWith(MCP_SECRET_ENV_PREFIX)) delete env[k];
       if (mcp) Object.assign(env, mcp.env);

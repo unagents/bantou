@@ -3,7 +3,7 @@ import { AGENT_ID_PATTERN } from "@agent-hand/bantou-protocol";
 import { z } from "zod";
 import { ACK_TIMEOUT_MS, OWNER_HEADER, OWNER_PATTERN, OWNER_QUERY, remoteSendSchema, remoteWaitSchema, workerReplySchema, WAIT_DEFAULT_SEC, peerOfRec, type RemoteManager, type RemoteSendInput, type RemoteView } from "./remotes.js";
 import type { RemoteControlSupervisor } from "./remote-control.js";
-import { assertCenterOnly, centerSettingsPatchSchema, projectSettingsPatchSchema } from "./project-settings.js";
+import { assertCenterOnly, centerSettingsPatchSchema, projectSettingsPatchSchema, withoutLauncherKeys } from "./project-settings.js";
 import { LOGIN_CODE, type LoginFlow } from "./login.js";
 import { sessionCreateSchema, sessionUpdateSchema, SESSION_NAME, type SessionManager } from "./sessions.js";
 import type { Follow } from "./follow.js";
@@ -84,9 +84,17 @@ export function registerTools(
     login?: LoginFlow;
     /** master-cap の起動時に付けるシステム埋め込み指示の一覧（center_info 用）。省略時は []。 */
     systemInstructions?: { id: string; version: number; title: string }[];
+    /**
+     * 呼び出し元が center を起動した所か（launcher.ts）。true なら外部記憶（memory）と追加の MCP の server（mcpServers）を読み書きできる。
+     * false（別 host の center に繋いでいる desktop・web・他の呼び出し元）は、含めた更新を断り、読みの応答から除く。
+     */
+    launcher?: boolean;
   },
 ): void {
   const { supervisor, link, sessions, remotes, follow, workspace, login } = deps;
+  const launcher = deps.launcher === true;
+  /** 読みの応答の settings（起動元以外には memory・mcpServers を出さない）。 */
+  const shown = <T extends { settings: object }>(r: T): T => (launcher ? r : { ...r, settings: withoutLauncherKeys(r.settings) });
   const log: Logger = deps.log ?? (() => {});
   const systemInstructions = deps.systemInstructions ?? [];
 
@@ -101,7 +109,7 @@ export function registerTools(
     },
     (args) =>
       guard(async () => {
-        assertCenterOnly(args.settings);
+        assertCenterOnly(args.settings, { launcher });
         return json(await sessions.create(args));
       }),
   );
@@ -132,20 +140,20 @@ export function registerTools(
         "session のプロジェクト設定 { name, settings } を返す。settings は { instructions?: string（--append-system-prompt に渡す追加指示）, addDirs?: string[]（--add-dir で渡す参照フォルダ。絶対パス）, outputStyle?: string（claude の output style の markdown 本文。session のフォルダの .claude/output-styles/bantou.md に書いて --settings {\"outputStyle\":\"bantou\"} で選ぶ）, servers?: string[]（この session が remote_send / remote_delete / worker_reply で使える server＝host 名か server_id。置き場は center の状態 dir の sessions.json の settings.servers（session ごと）。center 共通の設定 center-settings.json には無く、config の servers[]（server の接続・model の設定）とは別物。未設定は全部、空配列は使わない。master-cap には起動時の指示文・remote_list の先頭・変更時の push で知らされる）, …将来の項目 }。未設定は {}。config 由来の project も {}",
       inputSchema: { name: z.string().regex(SESSION_NAME, "英数字と _ - のみ") },
     },
-    ({ name }) => guard(async () => json(sessions.getSettings(name))),
+    ({ name }) => guard(async () => json(shown(sessions.getSettings(name)))),
   );
   server.registerTool(
     "session_settings_update",
     {
       title: "session の設定を更新",
       description:
-        "session のプロジェクト設定を項目ごとにマージ更新し、更新後の { name, settings } を返す。settings に書いた項目だけ変わる（省略した項目はそのまま）。null はその項目を削除。instructions は 16000 文字以内で、空文字は削除と同じ。addDirs は絶対パスの配列（20 個以内。空配列は削除と同じ。center 共通の addDirs と合わせて --add-dir に 1 つずつ付く）。outputStyle は 32000 文字以内で、空文字は削除と同じ（session の値があれば center 共通の outputStyle は使わない）。servers は host 名か server_id の配列（50 個以内。重複は除く。空配列は「どの server も使わない」として保存し、未設定＝全部と区別する。null で削除＝未設定（全部）に戻る。servers は session ごとの設定だけで、center 共通の設定は無い）。servers は次の呼び出しからすぐ効く（起動し直し不要）。置き場は sessions.json の settings.servers（config の servers[] とは別物）。範囲が変わると、その session の master-cap へ messenger で知らせる（指示文への反映は次の起動）。memory（外部記憶）は含められない（含めると error。MCP からは読み書きせず、center を動かす host で `bantou-center memory` を使う）。未知の項目は保持する。session_create で作った session のみ。動いている session には効かず、次の起動（再起動・--continue 含む）から効く",
+        "session のプロジェクト設定を項目ごとにマージ更新し、更新後の { name, settings } を返す。settings に書いた項目だけ変わる（省略した項目はそのまま）。null はその項目を削除。instructions は 16000 文字以内で、空文字は削除と同じ。addDirs は絶対パスの配列（20 個以内。空配列は削除と同じ。center 共通の addDirs と合わせて --add-dir に 1 つずつ付く）。outputStyle は 32000 文字以内で、空文字は削除と同じ（session の値があれば center 共通の outputStyle は使わない）。servers は host 名か server_id の配列（50 個以内。重複は除く。空配列は「どの server も使わない」として保存し、未設定＝全部と区別する。null で削除＝未設定（全部）に戻る。servers は session ごとの設定だけで、center 共通の設定は無い）。servers は次の呼び出しからすぐ効く（起動し直し不要）。置き場は sessions.json の settings.servers（config の servers[] とは別物）。範囲が変わると、その session の master-cap へ messenger で知らせる（指示文への反映は次の起動）。mcpServers（追加の MCP の server。名前 → Claude Code の mcp.json の mcpServers の値と同じ形: stdio は { command, args?, env? }、http / sse は { type, url, headers? }。headers に Authorization: Bearer <値> もそのまま書ける。session の設定では同じ名前で共通を置き換え、null で共通の server をその session では外す。統括の組み込みの接続 { transport: \"builtin\", builtin: \"coordinator\" }（名前 bantou-coordinator）も書ける）と memory（外部記憶の MCP の server。同じ形の 1 件。例 { type: \"http\", url, headers: { Authorization: \"Bearer …\" } }。session の値があれば共通は使わない）は center を起動した所（launcher）からだけ書ける（他からは error）。未知の項目は保持する。session_create で作った session のみ。動いている session には効かず、次の起動（再起動・--continue 含む）から効く",
       inputSchema: { name: z.string().regex(SESSION_NAME, "英数字と _ - のみ"), settings: projectSettingsPatchSchema },
     },
     ({ name, settings }) =>
       guard(async () => {
-        assertCenterOnly(settings);
-        return json(await sessions.updateSettings(name, settings));
+        assertCenterOnly(settings, { launcher });
+        return json(shown(await sessions.updateSettings(name, settings)));
       }),
   );
   server.registerTool(
@@ -153,22 +161,22 @@ export function registerTools(
     {
       title: "center 共通の設定を取得",
       description:
-        "center 共通の設定 { settings } を返す。settings は { instructions?: string（全 session の --append-system-prompt の先頭に付く共通の追加指示。session の追加指示は空行を挟んでその後ろ）, addDirs?: string[]（全 session に --add-dir で付く参照フォルダ。絶対パス。session の addDirs はその後ろ）, outputStyle?: string（全 session の claude の output style の markdown 本文。session に outputStyle があればそちらを使う）, …将来の項目 }。servers（使う server）は共通の設定には無い。session の設定（session_settings_get / session_settings_update）で指定する。未設定は {}。保存済みの共通設定に servers が残っていても読み捨てる",
+        "center 共通の設定 { settings } を返す。settings は { instructions?: string（全 session の --append-system-prompt の先頭に付く共通の追加指示。session の追加指示は空行を挟んでその後ろ）, addDirs?: string[]（全 session に --add-dir で付く参照フォルダ。絶対パス。session の addDirs はその後ろ）, outputStyle?: string（全 session の claude の output style の markdown 本文。session に outputStyle があればそちらを使う）, …将来の項目 }。servers（使う server）は共通の設定には無い。session の設定（session_settings_get / session_settings_update）で指定する。未設定は {}。保存済みの共通設定に servers が残っていても読み捨てる。mcpServers・memory は center を起動した所（応答の launcher が true）にだけ返す",
     },
-    () => guard(async () => json(sessions.getCenterSettings())),
+    () => guard(async () => json({ ...shown(sessions.getCenterSettings()), launcher })),
   );
   server.registerTool(
     "center_settings_update",
     {
       title: "center 共通の設定を更新",
       description:
-        "center 共通の設定を項目ごとにマージ更新し、更新後の { settings } を返す。settings に書いた項目だけ変わる。null はその項目を削除。instructions は 16000 文字以内で、空文字は削除と同じ。addDirs は絶対パスの配列（20 個以内。空配列は削除と同じ）。outputStyle は 32000 文字以内で、空文字は削除と同じ。servers は共通の設定では持てない（null 以外を渡すと error。session の設定 session_settings_update の settings.servers で指定する）。memory（外部記憶）は含められない（含めると error。`bantou-center memory` で設定する）。全 session の次の起動（再起動・--continue 含む）から効く。動いている session には効かない",
+        "center 共通の設定を項目ごとにマージ更新し、更新後の { settings } を返す。settings に書いた項目だけ変わる。null はその項目を削除。instructions は 16000 文字以内で、空文字は削除と同じ。addDirs は絶対パスの配列（20 個以内。空配列は削除と同じ）。outputStyle は 32000 文字以内で、空文字は削除と同じ。servers は共通の設定では持てない（null 以外を渡すと error。session の設定 session_settings_update の settings.servers で指定する）。mcpServers（全 session に載る追加の MCP の server。Claude Code の mcp.json の mcpServers と同じ形）と memory（外部記憶の MCP の server）は center を起動した所（launcher）からだけ書ける（他からは error）。応答の launcher は呼び出し元が起動元か。全 session の次の起動（再起動・--continue 含む）から効く。動いている session には効かない",
       inputSchema: { settings: centerSettingsPatchSchema },
     },
     ({ settings }) =>
       guard(async () => {
-        assertCenterOnly(settings);
-        return json(await sessions.updateCenterSettings(settings));
+        assertCenterOnly(settings, { launcher });
+        return json({ ...shown(await sessions.updateCenterSettings(settings)), launcher });
       }),
   );
   server.registerTool(
@@ -215,9 +223,9 @@ export function registerTools(
     {
       title: "center の情報",
       description:
-        "center の情報 { workspace: string | null, systemInstructions: [{ id, version, title }] } を返す。workspace は config の workspace（session_create で path を省いた時の置き場所の親。<workspace>/<name>）。未設定は null。systemInstructions は master-cap の起動時に --append-system-prompt の先頭に付けるシステム埋め込み指示の部品（利用者の追加指示とは別。center の版で決まる）。将来の項目はこの object に足す",
+        "center の情報 { workspace: string | null, systemInstructions: [{ id, version, title }], launcher: boolean } を返す。launcher は呼び出し元が center を起動した所か（外部記憶・追加の MCP の server を設定できる）。workspace は config の workspace（session_create で path を省いた時の置き場所の親。<workspace>/<name>）。未設定は null。systemInstructions は master-cap の起動時に --append-system-prompt の先頭に付けるシステム埋め込み指示の部品（利用者の追加指示とは別。center の版で決まる）。将来の項目はこの object に足す",
     },
-    () => guard(() => json({ workspace: workspace ?? null, systemInstructions })),
+    () => guard(() => json({ workspace: workspace ?? null, systemInstructions, launcher })),
   );
 
   // -- B. remote の読み取り（外向けは一覧だけ。作成・削除は session 向けの窓口 /mcp/session） --

@@ -10,7 +10,7 @@ import { createCore, type CoreEvent } from "../src/core.js";
 import { createRemoteControlSupervisor, redactSessionArgs, type ChildLike, type SpawnImpl } from "../src/remote-control.js";
 import { createSessionTokens } from "../src/session-auth.js";
 import type { ConnectionsData } from "../src/mcp-connections.js";
-import { buildSessionMcp, centerBaseOf } from "../src/mcp-session.js";
+import { buildSessionMcp, centerBaseOf, memoryEntry } from "../src/mcp-session.js";
 import { applicableParts, buildSystemInstructions, partLabel } from "../src/system-instructions.js";
 import { bantouAllowRules, buildWrapperArgs, findSessionUrl, mcpConfigJson, parseWrapperLine, resolveWrapperPath, windowConnected } from "../src/wrapper.js";
 
@@ -98,7 +98,7 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-function make(opts: { mcpUrl?: string | null; configPath?: string; logs?: string[]; instructions?: string; addDirs?: string[]; outputStyle?: string; path?: string; system?: string; memory?: { url: string; token?: string; agentId?: string }; realSystem?: boolean; memoryOf?: (name: string) => { url: string; token?: string; agentId?: string } | undefined } = {}) {
+function make(opts: { mcpUrl?: string | null; configPath?: string; logs?: string[]; instructions?: string; addDirs?: string[]; outputStyle?: string; path?: string; system?: string; memory?: Record<string, unknown>; realSystem?: boolean; memoryOf?: (name: string) => Record<string, unknown> | undefined } = {}) {
   const core = createCore();
   const tokens = createSessionTokens();
   const url = opts.mcpUrl === undefined ? "http://127.0.0.1:4567/mcp/session" : opts.mcpUrl;
@@ -572,16 +572,26 @@ test("wrapper.ts: 引数組み立て / プロトコル行の解釈 / 窓の照�
   assert.equal(JSON.parse(mcpConfigJson("http://h/mcp/session", "n")).mcpServers.bantou.headers["X-Bantou-Session"], "n");
   assert.equal(JSON.parse(mcpConfigJson("http://h/mcp/session", "n")).mcpServers["bantou-messenger"].env.AGENT_MESSENGER_NAME, "n-cap");
   assert.equal(JSON.parse(mcpConfigJson(null, "n")).mcpServers.bantou, undefined);
-  // memory: 無ければ従来どおり（キーが増えない）。あれば type http、token がある時だけ Authorization（${BANTOU_MEMORY_TOKEN} のまま）、X-Agent-Id は agentId か session 名
+  // memory: 無ければ従来どおり（キーが増えない）。あれば memoryEntry の entry をそのまま `memory` に載せる
   assert.deepEqual(Object.keys(JSON.parse(mcpConfigJson("http://h/mcp/session", "n")).mcpServers), ["bantou-messenger", "bantou"]);
   assert.equal(mcpConfigJson("http://h/mcp/session", "n", undefined), mcpConfigJson("http://h/mcp/session", "n"));
-  assert.deepEqual(JSON.parse(mcpConfigJson("http://h/mcp/session", "n", { url: "http://m/mcp", token: "SECRET" })).mcpServers.memory, {
-    type: "http",
-    url: "http://m/mcp",
-    headers: { Authorization: "Bearer ${BANTOU_MEMORY_TOKEN}", "X-Agent-Id": "n" },
-  });
-  assert.deepEqual(JSON.parse(mcpConfigJson(null, "n", { url: "http://m/mcp", agentId: "pm" })).mcpServers.memory.headers, { "X-Agent-Id": "pm" });
-  assert.ok(!mcpConfigJson("http://h/mcp/session", "n", { url: "http://m/mcp", token: "SECRET" }).includes("SECRET"));
+  // memoryEntry: 普通の MCP の設定の形。headers・env の値は ${BANTOU_MEMORY_SECRET_n} の参照にして実値は env。X-Agent-Id の既定は session 名。旧形式は読み替える
+  const m1 = memoryEntry({ type: "http", url: "http://m/mcp", headers: { Authorization: "Bearer SECRET" } }, "n");
+  assert.deepEqual(m1.entry, { type: "http", url: "http://m/mcp", headers: { Authorization: "${BANTOU_MEMORY_SECRET_0}", "X-Agent-Id": "${BANTOU_MEMORY_SECRET_1}" } });
+  assert.deepEqual(m1.env, { BANTOU_MEMORY_SECRET_0: "Bearer SECRET", BANTOU_MEMORY_SECRET_1: "n" });
+  assert.deepEqual(JSON.parse(mcpConfigJson("http://h/mcp/session", "n", m1.entry)).mcpServers.memory, m1.entry);
+  assert.ok(!mcpConfigJson("http://h/mcp/session", "n", m1.entry).includes("Bearer SECRET"));
+  const m2 = memoryEntry({ url: "http://m/mcp", token: "SECRET", agentId: "pm" }, "n");
+  assert.deepEqual(m2.entry, { type: "http", url: "http://m/mcp", headers: { Authorization: "${BANTOU_MEMORY_SECRET_0}", "X-Agent-Id": "${BANTOU_MEMORY_SECRET_1}" } });
+  assert.deepEqual(m2.env, { BANTOU_MEMORY_SECRET_0: "Bearer SECRET", BANTOU_MEMORY_SECRET_1: "pm" });
+  // 書いた X-Agent-Id は大文字小文字を問わず残す。${…} を含む値は利用者の環境変数の参照なのでそのまま
+  const m3 = memoryEntry({ type: "sse", url: "http://m/sse", headers: { "x-agent-id": "mine", Authorization: "Bearer ${MY_TOKEN}" } }, "n");
+  assert.deepEqual(m3.entry, { type: "sse", url: "http://m/sse", headers: { "x-agent-id": "${BANTOU_MEMORY_SECRET_0}", Authorization: "Bearer ${MY_TOKEN}" } });
+  assert.deepEqual(m3.env, { BANTOU_MEMORY_SECRET_0: "mine" });
+  // stdio は X-Agent-Id を足さない。env の値は参照にする
+  const m4 = memoryEntry({ command: "npx", args: ["-y", "mem"], env: { MEM_KEY: "KSECRET" } }, "n");
+  assert.deepEqual(m4.entry, { command: "npx", args: ["-y", "mem"], env: { MEM_KEY: "${BANTOU_MEMORY_SECRET_0}" } });
+  assert.deepEqual(m4.env, { BANTOU_MEMORY_SECRET_0: "KSECRET" });
   assert.deepEqual(parseWrapperLine('{"t":"started","pid":5}'), { t: "started", pid: 5 });
   assert.deepEqual(parseWrapperLine('{"t":"exit","code":null,"signal":"SIGTERM"}'), { t: "exit", code: null, signal: "SIGTERM" });
   assert.deepEqual(parseWrapperLine(`{"t":"output","data":"${Buffer.from("é").toString("base64")}"}`), { t: "output", data: Buffer.from("é") });
@@ -845,67 +855,86 @@ test("M0: redactSessionArgs: JSON として読めない・形が違う --mcp-con
   assert.deepEqual(redactSessionArgs(["--x", "--mcp-config"]), ["--x", "--mcp-config"]);
 });
 
-test("memory: --mcp-config に memory（type http、Authorization は ${BANTOU_MEMORY_TOKEN}、X-Agent-Id は agentId か session 名）を足し、token は子の env だけで渡す。argv・mcp-config・status・log に token の実値は出ない。再起動・--continue でも同じ", async () => {
+/** --mcp-config の ${VAR} を launch の env で展開する（claude が起動時にする展開と同じ）。 */
+const expandRefs = <T>(v: T, env: NodeJS.ProcessEnv): T => JSON.parse(JSON.stringify(v).replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (m, n: string) => (env[n] !== undefined ? JSON.stringify(env[n]).slice(1, -1) : m)));
+
+test("memory: --mcp-config に memory（普通の MCP の設定の形。Bearer などの header の値は ${BANTOU_MEMORY_SECRET_n} の参照、X-Agent-Id は書いた値か session 名）を足し、値は子の env だけで渡す。argv・mcp-config・status・log に実値は出ない。再起動・--continue でも同じ", async () => {
   const SECRET = "tok-SECRET-0123456789";
   const logs: string[] = [];
-  const { sup } = make({ memory: { url: "http://mem.local:3000/mcp", token: SECRET }, logs });
+  const { sup } = make({ memory: { type: "http", url: "http://mem.local:3000/mcp", headers: { Authorization: `Bearer ${SECRET}` } }, logs });
   const st = await sup.start("pm1");
   const l = launches[0];
   const mem = mcpOf(l.args).mcpServers.memory;
-  assert.deepEqual(mem, { type: "http", url: "http://mem.local:3000/mcp", headers: { Authorization: "Bearer ${BANTOU_MEMORY_TOKEN}", "X-Agent-Id": "pm1" } });
-  assert.equal(l.env.BANTOU_MEMORY_TOKEN, SECRET);
+  assert.deepEqual(mem, { type: "http", url: "http://mem.local:3000/mcp", headers: { Authorization: "${BANTOU_MEMORY_SECRET_0}", "X-Agent-Id": "${BANTOU_MEMORY_SECRET_1}" } });
+  // claude が展開すると、書いた値が server へ届く
+  assert.deepEqual(expandRefs(mem, l.env), { type: "http", url: "http://mem.local:3000/mcp", headers: { Authorization: `Bearer ${SECRET}`, "X-Agent-Id": "pm1" } });
+  assert.equal(l.env.BANTOU_MEMORY_SECRET_0, `Bearer ${SECRET}`);
+  assert.equal(l.env.BANTOU_MEMORY_TOKEN, undefined, "旧版の変数は使わない");
   assert.ok(l.env.BANTOU_SESSION_TOKEN); // session token と並ぶ
-  // token を探す: argv（mcp-config 含む）・status・list・log・wrapper への入力行
+  // 値を探す: argv（mcp-config 含む）・status・list・log・wrapper への入力行
   const hay = JSON.stringify([l.args, st, sup.status("pm1"), sup.list(), logs, l.child.lines]);
   assert.ok(!hay.includes(SECRET));
-  assert.ok(JSON.stringify(l.args).includes("BANTOU_MEMORY_TOKEN")); // 実際の引数には placeholder が残る（status / log には出さない）
   await sup.stop("pm1");
   await sup.start("pm1", { resume: true });
-  assert.equal(launches[1].env.BANTOU_MEMORY_TOKEN, SECRET);
+  assert.equal(launches[1].env.BANTOU_MEMORY_SECRET_0, `Bearer ${SECRET}`);
   assert.deepEqual(mcpOf(launches[1].args).mcpServers.memory, mem);
   assert.ok(launches[1].args.includes("--continue"));
-  // 差し替え: agentId 指定・token 無しなら Authorization を付けず env も渡さない（process の同名 env を継承しない）
-  const prev = process.env.BANTOU_MEMORY_TOKEN;
+  // 差し替え: X-Agent-Id を書いた・Authorization 無し（旧形式 agentId も読み替える）。process の同名 env は継承しない
+  const prev = { t: process.env.BANTOU_MEMORY_TOKEN, s: process.env.BANTOU_MEMORY_SECRET_5 };
   process.env.BANTOU_MEMORY_TOKEN = "INHERITED-SECRET";
+  process.env.BANTOU_MEMORY_SECRET_5 = "INHERITED-SECRET";
   try {
     await sup.stop("pm1");
     sup.setMemory("pm1", { url: "https://m2.example/mcp", agentId: "agent-9" });
     await sup.start("pm1");
     const l2 = launches[2];
-    assert.deepEqual(mcpOf(l2.args).mcpServers.memory, { type: "http", url: "https://m2.example/mcp", headers: { "X-Agent-Id": "agent-9" } });
+    assert.deepEqual(expandRefs(mcpOf(l2.args).mcpServers.memory, l2.env), { type: "http", url: "https://m2.example/mcp", headers: { "X-Agent-Id": "agent-9" } });
     assert.equal(l2.env.BANTOU_MEMORY_TOKEN, undefined);
+    assert.equal(l2.env.BANTOU_MEMORY_SECRET_5, undefined);
     assert.ok(!JSON.stringify([l2.args, sup.status("pm1")]).includes("INHERITED-SECRET"));
     // memory を外す: mcp-config に memory が無い
     await sup.stop("pm1");
     sup.setMemory("pm1", undefined);
     await sup.start("pm1");
     assert.equal(mcpOf(launches[3].args).mcpServers.memory, undefined);
-    assert.equal(launches[3].env.BANTOU_MEMORY_TOKEN, undefined);
+    assert.equal(launches[3].env.BANTOU_MEMORY_SECRET_0, undefined);
   } finally {
-    if (prev === undefined) delete process.env.BANTOU_MEMORY_TOKEN;
-    else process.env.BANTOU_MEMORY_TOKEN = prev;
+    if (prev.t === undefined) delete process.env.BANTOU_MEMORY_TOKEN;
+    else process.env.BANTOU_MEMORY_TOKEN = prev.t;
+    if (prev.s === undefined) delete process.env.BANTOU_MEMORY_SECRET_5;
+    else process.env.BANTOU_MEMORY_SECRET_5 = prev.s;
   }
   assert.throws(() => sup.setMemory("nope", undefined), /未定義の project/);
   await sup.shutdown();
 });
 
+test("memory: 旧形式の値（{ url, token }）が渡っても token は argv に出ず env だけ（memoryEntry が読み替える）", async () => {
+  const { sup } = make({ memory: { url: "http://old.local/mcp", token: "OLD-SECRET" } });
+  await sup.start("pm1");
+  const l = launches[0];
+  assert.ok(!JSON.stringify(l.args).includes("OLD-SECRET"));
+  assert.deepEqual(expandRefs(mcpOf(l.args).mcpServers.memory, l.env), { type: "http", url: "http://old.local/mcp", headers: { Authorization: "Bearer OLD-SECRET", "X-Agent-Id": "pm1" } });
+  await sup.shutdown();
+});
+
 test("memory: memoryOf があれば起動のたびにそれを呼ぶ（add の値は使わない）。変えた設定は次の起動から効き、取れなければ付けずに起動する", async () => {
-  let cur: { url: string; token?: string } | undefined = { url: "http://one.local/mcp", token: "ONE-SECRET" };
+  let cur: Record<string, unknown> | undefined = { type: "http", url: "http://one.local/mcp", headers: { Authorization: "Bearer ONE-SECRET" } };
   let boom = false;
   const logs: string[] = [];
-  const { sup } = make({ memory: { url: "http://added.local/mcp" }, memoryOf: () => {
+  const { sup } = make({ memory: { type: "http", url: "http://added.local/mcp" }, memoryOf: () => {
     if (boom) throw new Error("読めない SECRET");
     return cur;
   }, logs });
   await sup.start("pm1");
   assert.equal(mcpOf(launches[0].args).mcpServers.memory.url, "http://one.local/mcp");
-  assert.equal(launches[0].env.BANTOU_MEMORY_TOKEN, "ONE-SECRET");
-  cur = { url: "http://two.local/mcp" }; // 動いている間に CLI で変えた
+  assert.equal(launches[0].env.BANTOU_MEMORY_SECRET_0, "Bearer ONE-SECRET");
+  cur = { type: "http", url: "http://two.local/mcp" }; // 動いている間に設定の画面で変えた
   assert.equal(mcpOf(launches[0].args).mcpServers.memory.url, "http://one.local/mcp", "動いている session は変わらない");
   await sup.stop("pm1");
   await sup.start("pm1", { resume: true });
   assert.equal(mcpOf(launches[1].args).mcpServers.memory.url, "http://two.local/mcp");
-  assert.equal(launches[1].env.BANTOU_MEMORY_TOKEN, undefined);
+  assert.equal(launches[1].env.BANTOU_MEMORY_SECRET_0, "pm1", "Authorization が無ければ X-Agent-Id だけ");
+  assert.equal(launches[1].env.BANTOU_MEMORY_SECRET_1, undefined);
   cur = undefined;
   await sup.stop("pm1");
   await sup.start("pm1");
@@ -979,7 +1008,7 @@ test("session 名: claude の --remote-control と messenger の peer 名は <se
   const mcp = JSON.parse(valueOf(l.args, "--mcp-config")!).mcpServers;
   assert.equal(mcp["bantou-messenger"].env.AGENT_MESSENGER_NAME, "pm1-cap");
   assert.equal(mcp.bantou.headers["X-Bantou-Session"], "pm1");
-  assert.equal(mcp.memory.headers["X-Agent-Id"], "pm1");
+  assert.equal(expandRefs(mcp.memory, l.env).headers["X-Agent-Id"], "pm1");
   assert.equal(sup.status("pm1").project, "pm1");
   assert.equal(tokens.verify("pm1", l.env.BANTOU_SESSION_TOKEN!), true);
   await sup.shutdown();

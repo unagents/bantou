@@ -38,7 +38,12 @@ export interface MemoryTarget {
   url: string;
   token?: string;
   agentId: string;
+  /** The other headers of the memory server setting (`Authorization` etc.), values as written. Never logged. */
+  headers?: Record<string, string>;
 }
+
+/** The values a log line must not carry for this target (token and header values). */
+export const targetSecrets = (t: MemoryTarget): string[] => [t.token ?? "", ...Object.values(t.headers ?? {})].filter((v) => v.length >= 4);
 
 export const MEMORY_BODY_MAX = 65536;
 export const MEMORY_TRUNCATED_MARK = "\n…[truncated]";
@@ -129,9 +134,9 @@ export const MEMORY_BACKOFF_BASE_MS = 1000;
 export const MEMORY_BACKOFF_MAX_MS = 60_000;
 
 /** Reason text safe for a log line: token removed, single line, short. */
-export function redactReason(e: unknown, token?: string): string {
+export function redactReason(e: unknown, token?: string | string[]): string {
   let s = e instanceof Error ? e.message : String(e);
-  if (token) s = s.split(token).join("***");
+  for (const t of Array.isArray(token) ? token : [token]) if (t) s = s.split(t).join("***");
   s = s.replace(/(Bearer\s+)\S+/gi, "$1***").replace(/\s+/g, " ").trim();
   return s.length > 200 ? `${s.slice(0, 200)}…` : s;
 }
@@ -226,7 +231,7 @@ export function createMemoryQueue(opts: MemoryQueueOptions): MemoryQueue {
           remove();
           lane.failures = 0;
         } catch (e) {
-          const reason = redactReason(e, head.target.token);
+          const reason = redactReason(e, targetSecrets(head.target));
           if (e instanceof PermanentMemoryError) {
             remove();
             lane.failures = 0;
@@ -253,7 +258,7 @@ export function createMemoryQueue(opts: MemoryQueueOptions): MemoryQueue {
     enqueue(owner, target, event) {
       if (closed) return;
       try {
-        const key = `${owner}\u0000${target.url}\u0000${target.agentId}`;
+        const key = `${owner}\u0000${target.url}\u0000${target.agentId}\u0000${JSON.stringify(target.headers ?? {})}`;
         let lane = lanes.get(key);
         if (!lane) {
           lane = { items: [], running: false, failures: 0 };
@@ -267,7 +272,7 @@ export function createMemoryQueue(opts: MemoryQueueOptions): MemoryQueue {
         }
         if (!lane.running) void run(key, lane);
       } catch (e) {
-        safeLog(`${label}: enqueue に失敗: ${redactReason(e, target.token)}`);
+        safeLog(`${label}: enqueue に失敗: ${redactReason(e, targetSecrets(target))}`);
       }
     },
     drain(timeoutMs) {
@@ -321,7 +326,7 @@ export const MEMORY_CALL_TIMEOUT_MS = 15_000;
 export function createMcpEventSink(sdk: McpSdkLike, opts: { clientName: string; clientVersion?: string; timeoutMs?: number }): MemorySink {
   const clients = new Map<string, Promise<McpClientLike>>();
   const timeout = opts.timeoutMs ?? MEMORY_CALL_TIMEOUT_MS;
-  const keyOf = (t: MemoryTarget): string => `${t.url}\u0000${t.token ?? ""}\u0000${t.agentId}`;
+  const keyOf = (t: MemoryTarget): string => `${t.url}\u0000${t.token ?? ""}\u0000${t.agentId}\u0000${JSON.stringify(t.headers ?? {})}`;
 
   const connect = (t: MemoryTarget): Promise<McpClientLike> => {
     const key = keyOf(t);
@@ -329,7 +334,7 @@ export function createMcpEventSink(sdk: McpSdkLike, opts: { clientName: string; 
     if (!p) {
       p = (async () => {
         const client = new sdk.Client({ name: opts.clientName, version: opts.clientVersion ?? "1" });
-        const headers: Record<string, string> = { "X-Agent-Id": t.agentId };
+        const headers: Record<string, string> = { ...(t.headers ?? {}), "X-Agent-Id": t.agentId };
         if (t.token) headers.Authorization = `Bearer ${t.token}`;
         await client.connect(new sdk.StreamableHTTPClientTransport(new URL(t.url), { requestInit: { headers } }));
         return client;

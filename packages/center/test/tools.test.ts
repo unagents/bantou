@@ -9,6 +9,7 @@ import type { RemoteManager } from "../src/remotes.js";
 import { createCenterServer, createSessionMcpServer } from "../src/server.js";
 import type { SessionManager } from "../src/sessions.js";
 import { resolveOwner } from "../src/tools.js";
+import { CENTER_ONLY_MCP_ERROR, LEGACY_KEYS_ERROR } from "../src/project-settings.js";
 import type { ServerLink } from "../src/server-link.js";
 import type { Follow } from "../src/follow.js";
 import type { LoginFlow } from "../src/login.js";
@@ -20,7 +21,7 @@ const rc = (project: string): RcStatus => ({
   auth: "ok", loginUrl: null, loginError: null,
 });
 
-async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partial<SessionManager>; remotes?: Partial<RemoteManager>; follow?: Follow; login?: LoginFlow; workspace?: string; systemInstructions?: { id: string; version: number; title: string }[] } = {}) {
+async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partial<SessionManager>; remotes?: Partial<RemoteManager>; follow?: Follow; login?: LoginFlow; workspace?: string; systemInstructions?: { id: string; version: number; title: string }[]; launcher?: boolean } = {}) {
   const calls: unknown[] = [];
   const supervisor: RemoteControlSupervisor = {
     start: async (p) => rc(p),
@@ -46,7 +47,7 @@ async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partia
     close: async () => {},
     ...link,
   };
-  const sessions = { create: async (i: unknown) => ({ called: "create", i }), getSettings: (n: string) => ({ called: "get", n }), updateSettings: async (n: string, p: unknown) => ({ called: "update", n, p }), delete: async (n: string) => ({ name: n, deleted: true }), list: () => [], ...mgrs.sessions } as unknown as SessionManager;
+  const sessions = { create: async (i: unknown) => ({ called: "create", i }), getSettings: (n: string) => ({ called: "get", n, settings: {} }), updateSettings: async (n: string, p: unknown) => ({ called: "update", n, p, settings: {} }), delete: async (n: string) => ({ name: n, deleted: true }), list: () => [], ...mgrs.sessions } as unknown as SessionManager;
   const remotes = {
     send: async (i: unknown) => (calls.push({ remoteSend: i }), { remote_id: "c-1", server: "id", serverName: "n", state: "running", created: false, task_id: "t-1" }),
     workerReply: async (i: unknown) => (calls.push({ workerReply: i }), { remote_id: "c-1", server: "id", worker_id: "w-1", accepted: true }),
@@ -55,7 +56,7 @@ async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partia
     scopeOf: () => ({ servers: undefined, out_of_scope: 0 }),
     ...mgrs.remotes,
   } as unknown as RemoteManager;
-  const server = createCenterServer({ ...(mgrs.systemInstructions ? { systemInstructions: mgrs.systemInstructions } : {}), config: parseConfig(mgrs.workspace ? { workspace: mgrs.workspace } : {}, "/x/c.json"), supervisor, link: fullLink, sessions, remotes, follow: mgrs.follow, login: mgrs.login });
+  const server = createCenterServer({ ...(mgrs.systemInstructions ? { systemInstructions: mgrs.systemInstructions } : {}), config: parseConfig(mgrs.workspace ? { workspace: mgrs.workspace } : {}, "/x/c.json"), supervisor, link: fullLink, sessions, remotes, follow: mgrs.follow, login: mgrs.login, ...(mgrs.launcher !== undefined ? { launcher: mgrs.launcher } : {}) });
   const [ct, st] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "t", version: "0" });
   await Promise.all([server.connect(st), client.connect(ct)]);
@@ -156,16 +157,16 @@ test("全 tool の inputSchema の pattern は u で compile でき、文字 cla
   await close();
 });
 
-test("center_info は { workspace, systemInstructions } を返す。未設定は null / []", async () => {
+test("center_info は { workspace, systemInstructions, launcher } を返す。未設定は null / [] / false（launcher は呼び出し元が center を起動した所か）", async () => {
   const parts = [{ id: "master-cap-role", version: 1, title: "役割" }];
-  const a = await connect({}, { workspace: "/w/ws", systemInstructions: parts });
+  const a = await connect({}, { workspace: "/w/ws", systemInstructions: parts, launcher: true });
   const r = await a.client.callTool({ name: "center_info", arguments: {} });
   assert.notEqual(r.isError, true);
-  assert.deepEqual(JSON.parse(text(r)), { workspace: "/w/ws", systemInstructions: parts });
+  assert.deepEqual(JSON.parse(text(r)), { workspace: "/w/ws", systemInstructions: parts, launcher: true });
   await a.close();
   const b = await connect();
-  // 指定が無ければ center 組み込みの部品
-  assert.deepEqual(JSON.parse(text(await b.client.callTool({ name: "center_info", arguments: {} }))), { workspace: null, systemInstructions: describeSystemInstructions() });
+  // 指定が無ければ center 組み込みの部品。起動元の指定が無ければ launcher: false
+  assert.deepEqual(JSON.parse(text(await b.client.callTool({ name: "center_info", arguments: {} }))), { workspace: null, systemInstructions: describeSystemInstructions(), launcher: false });
   await b.close();
 });
 
@@ -428,9 +429,9 @@ test("center_settings_get / center_settings_update は SessionManager に委譲�
       updateCenterSettings: async (p) => { seen.push(p); return { settings: { ...p, instructions: "後" } }; },
     },
   });
-  assert.deepEqual(JSON.parse(text(await client.callTool({ name: "center_settings_get", arguments: {} }))), { settings: { instructions: "共通" } });
+  assert.deepEqual(JSON.parse(text(await client.callTool({ name: "center_settings_get", arguments: {} }))), { settings: { instructions: "共通" }, launcher: false });
   const u = await client.callTool({ name: "center_settings_update", arguments: { settings: { instructions: null, skills: ["a"] } } });
-  assert.deepEqual(JSON.parse(text(u)), { settings: { instructions: "後", skills: ["a"] } });
+  assert.deepEqual(JSON.parse(text(u)), { settings: { instructions: "後", skills: ["a"] }, launcher: false });
   assert.deepEqual(seen, [{ instructions: null, skills: ["a"] }]);
   for (const args of [{ settings: { instructions: "a".repeat(16_001) } }, { settings: { instructions: 1 } }, { settings: "x" }, {}]) {
     const r = await client.callTool({ name: "center_settings_update", arguments: args }).catch((e: unknown) => e);
@@ -442,9 +443,9 @@ test("center_settings_get / center_settings_update は SessionManager に委譲�
 test("session_settings_get / session_settings_update は SessionManager に委譲する。null と未知項目を通し、長すぎ・不正 name は拒否", async () => {
   const { client, close } = await connect();
   const g = await client.callTool({ name: "session_settings_get", arguments: { name: "pm1" } });
-  assert.deepEqual(JSON.parse(text(g)), { called: "get", n: "pm1" });
+  assert.deepEqual(JSON.parse(text(g)), { called: "get", n: "pm1", settings: {} });
   const u = await client.callTool({ name: "session_settings_update", arguments: { name: "pm1", settings: { instructions: null, skills: ["a"] } } });
-  assert.deepEqual(JSON.parse(text(u)), { called: "update", n: "pm1", p: { instructions: null, skills: ["a"] } });
+  assert.deepEqual(JSON.parse(text(u)), { called: "update", n: "pm1", p: { instructions: null, skills: ["a"] }, settings: {} });
   for (const args of [
     { name: "pm1", settings: { instructions: "a".repeat(16_001) } },
     { name: "a b", settings: {} },
@@ -457,28 +458,90 @@ test("session_settings_get / session_settings_update は SessionManager に委�
   await close();
 });
 
-test("session_settings_update / center_settings_update: memory を含む更新は（null も）理由つきの error で断り、manager を呼ばない。含まない更新は通る。説明に memory の入力は無い", async () => {
-  const { client, close } = await connect({}, { sessions: { updateCenterSettings: async (p) => ({ settings: p as never }) } });
-  const okU = await client.callTool({ name: "session_settings_update", arguments: { name: "pm1", settings: { instructions: "i" } } });
-  assert.deepEqual(JSON.parse(text(okU)), { called: "update", n: "pm1", p: { instructions: "i" } });
-  const okC = await client.callTool({ name: "center_settings_update", arguments: { settings: { instructions: "i" } } });
-  assert.notEqual(okC.isError, true);
-  for (const memory of [{ url: "https://mem.example/mcp", token: "tk", agentId: "pm-1" }, null, { url: "mem.local" }]) {
+test("起動元でない呼び出し元: memory・mcpServers を含む更新（session_create / session の設定 / center 共通の設定。null も）は理由つきの error で断り、manager を呼ばない。読みの応答から除く。含まない更新は通る", async () => {
+  const called: string[] = [];
+  const stored = { instructions: "i", memory: { type: "http", url: "https://m/mcp", headers: { Authorization: "Bearer MEMSECRET" } }, mcpServers: { s: { command: "npx", env: { K: "MCPSECRET" } } } };
+  const { client, close } = await connect({}, {
+    sessions: {
+      create: async () => (called.push("create"), { name: "x" }) as never,
+      getSettings: (n: string) => ({ name: n, settings: stored }),
+      updateSettings: async (n: string, p: unknown) => (called.push("update"), { name: n, settings: { ...stored, ...(p as object) } }),
+      getCenterSettings: () => ({ settings: stored }),
+      updateCenterSettings: async (p) => (called.push("center"), { settings: { ...stored, ...(p as object) } }),
+    },
+  });
+  const okU = await client.callTool({ name: "session_settings_update", arguments: { name: "pm1", settings: { instructions: "j" } } });
+  assert.deepEqual(JSON.parse(text(okU)), { name: "pm1", settings: { instructions: "j" } });
+  const okC = await client.callTool({ name: "center_settings_update", arguments: { settings: { instructions: "j" } } });
+  assert.deepEqual(JSON.parse(text(okC)), { settings: { instructions: "j" }, launcher: false });
+  assert.deepEqual(called, ["update", "center"]);
+  called.length = 0;
+  for (const [key, value] of [
+    ["memory", { url: "https://mem.example/mcp", token: "tk-SECRET", agentId: "pm-1" }],
+    ["memory", null],
+    ["memory", { type: "http", url: "https://m/mcp", headers: { Authorization: "Bearer tk-SECRET" } }],
+    ["mcpServers", { h: { type: "http", url: "https://h/mcp", headers: { Authorization: "Bearer tk-SECRET" } } }],
+    ["mcpServers", null],
+  ] as const) {
     for (const [tool, args] of [
-      ["session_settings_update", { name: "pm1", settings: { instructions: "i", memory } }],
-      ["center_settings_update", { settings: { instructions: "i", memory } }],
+      ["session_settings_update", { name: "pm1", settings: { instructions: "i", [key]: value } }],
+      ["center_settings_update", { settings: { instructions: "i", [key]: value } }],
+      ["session_create", { name: "pm2", settings: { instructions: "i", [key]: value } }],
     ] as const) {
       const r = await client.callTool({ name: tool, arguments: args }).catch((e: unknown) => e);
-      assert.ok(!(r instanceof Error) && (r as { isError?: boolean }).isError === true, tool + JSON.stringify(memory));
-      assert.match(text(r as never), /center の側だけ/);
-      assert.ok(!text(r as never).includes("tk"));
+      assert.ok(!(r instanceof Error) && (r as { isError?: boolean }).isError === true, tool + key + JSON.stringify(value));
+      assert.equal(JSON.parse(text(r as never)).error, CENTER_ONLY_MCP_ERROR);
+      assert.ok(!text(r as never).includes("SECRET"));
     }
   }
+  assert.deepEqual(called, []);
+  // 読みの応答から除く（値は出さない）
+  const g = text(await client.callTool({ name: "session_settings_get", arguments: { name: "pm1" } }));
+  assert.deepEqual(JSON.parse(g), { name: "pm1", settings: { instructions: "i" } });
+  const c = text(await client.callTool({ name: "center_settings_get", arguments: {} }));
+  assert.deepEqual(JSON.parse(c), { settings: { instructions: "i" }, launcher: false });
+  assert.ok(!g.includes("SECRET") && !c.includes("SECRET"));
   const tools = (await client.listTools()).tools;
   for (const n of ["session_settings_get", "session_settings_update", "center_settings_get", "center_settings_update"]) {
     const d = tools.find((t) => t.name === n)?.description ?? "";
     assert.ok(!d.includes("BANTOU_MEMORY_TOKEN") && !d.includes("tokenSet"), n);
   }
+  await close();
+});
+
+test("起動元（center を起動した所）: memory・mcpServers を含む更新（session_create / session の設定 / center 共通の設定）は manager に渡り、読みの応答にも出る（Bearer の値もそのまま）。旧設定の項目は断る", async () => {
+  const seen: unknown[] = [];
+  const mem = { type: "http", url: "https://m/mcp", headers: { Authorization: "Bearer MEMV" } };
+  const servers = { s: { command: "npx", args: ["-y", "pkg"], env: { K: "V1" } }, h: { type: "http", url: "https://h/mcp", headers: { Authorization: "Bearer HV" } } };
+  const { client, close } = await connect({}, {
+    launcher: true,
+    sessions: {
+      create: async (i: unknown) => (seen.push(["create", i]), { name: "pm2" }) as never,
+      getSettings: (n: string) => ({ name: n, settings: { memory: mem, mcpServers: servers } }),
+      updateSettings: async (n: string, p: unknown) => (seen.push(["update", n, p]), { name: n, settings: p as never }),
+      getCenterSettings: () => ({ settings: { memory: mem, mcpServers: servers } }),
+      updateCenterSettings: async (p) => (seen.push(["center", p]), { settings: p as never }),
+    },
+  });
+  const u = await client.callTool({ name: "session_settings_update", arguments: { name: "pm1", settings: { memory: mem, mcpServers: servers } } });
+  assert.deepEqual(JSON.parse(text(u)), { name: "pm1", settings: { memory: mem, mcpServers: servers } });
+  const cu = await client.callTool({ name: "center_settings_update", arguments: { settings: { memory: null, mcpServers: servers } } });
+  assert.deepEqual(JSON.parse(text(cu)), { settings: { memory: null, mcpServers: servers }, launcher: true });
+  const cr = await client.callTool({ name: "session_create", arguments: { name: "pm2", settings: { mcpServers: servers } } });
+  assert.notEqual(cr.isError, true);
+  assert.deepEqual(seen, [
+    ["update", "pm1", { memory: mem, mcpServers: servers }],
+    ["center", { memory: null, mcpServers: servers }],
+    ["create", { name: "pm2", settings: { mcpServers: servers } }],
+  ]);
+  assert.deepEqual(JSON.parse(text(await client.callTool({ name: "session_settings_get", arguments: { name: "pm1" } }))), { name: "pm1", settings: { memory: mem, mcpServers: servers } });
+  assert.deepEqual(JSON.parse(text(await client.callTool({ name: "center_settings_get", arguments: {} }))), { settings: { memory: mem, mcpServers: servers }, launcher: true });
+  for (const k of ["mcp", "mcpConnections", "mcpSecrets", "coordinator"]) {
+    const r = await client.callTool({ name: "center_settings_update", arguments: { settings: { [k]: { session: "pm1" } } } });
+    assert.equal(r.isError, true, k);
+    assert.equal(JSON.parse(text(r)).error, LEGACY_KEYS_ERROR, k);
+  }
+  assert.equal(seen.length, 3);
   await close();
 });
 
