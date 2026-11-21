@@ -236,6 +236,11 @@ test("events: both center events and session changes reach every listener; one c
   const want = [{ event: "center-sessions-changed", data: { reason: "created", name: "pm-a" } }];
   assert.deepEqual(a, want);
   assert.deepEqual(b, want);
+  conns[0]!.write('event: session-message\ndata: {"session":"pm-a","text":"done","at":"2026-11-09T00:00:00.000Z"}\n\n');
+  for (let i = 0; i < 100 && (a.length < 2 || b.length < 2); i++) await new Promise((r) => setTimeout(r, 20));
+  const msg = { event: "center-session-message", data: { session: "pm-a", text: "done", at: "2026-11-09T00:00:00.000Z" } };
+  assert.deepEqual(a[1], msg);
+  assert.deepEqual(b[1], msg);
   center.tools.set("session_list", [{ name: "z" }]);
   await c.sessions.refresh();
   assert.deepEqual(a.at(-1), { event: "bantou://sessions-changed", data: null });

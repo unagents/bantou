@@ -463,12 +463,16 @@ export async function startHttpServer(opts: {
       const unsub = opts.events.subscribe((ev) => {
         if (!res.writableEnded) res.write(`event: sessions\ndata: ${JSON.stringify(ev)}\n\n`);
       });
+      const unsubMessage = opts.events.subscribeMessage((m) => {
+        if (!res.writableEnded) res.write(`event: session-message\ndata: ${JSON.stringify(m)}\n\n`);
+      });
       const ka = setInterval(() => {
         if (!res.writableEnded) res.write(": ka\n\n");
       }, opts.keepAliveMs ?? SSE_KEEPALIVE_MS);
       ka.unref();
       res.once("close", () => {
         unsub();
+        unsubMessage();
         clearInterval(ka);
       });
       return;

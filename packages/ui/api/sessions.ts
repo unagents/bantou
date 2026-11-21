@@ -15,6 +15,9 @@ export const listSessions = () => getTransport().invoke<SessionList>("list_sessi
 /** The center's `GET /events` reported a session created / deleted / restored (forwarded by the Rust side). */
 export const CENTER_SESSIONS_CHANGED_EVENT = "center-sessions-changed";
 
+/** A session's last message of a turn (the center's `GET /events` `session-message`, forwarded by the Rust side / the web backend). */
+export const CENTER_SESSION_MESSAGE_EVENT = "center-session-message";
+
 /** Ask the center for `session_list` again. When it cannot be asked, the last list comes back with `reachable: false`. */
 export const refreshSessions = () => getTransport().invoke<SessionList>("refresh_sessions");
 

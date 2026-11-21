@@ -27,6 +27,7 @@ const {
   onLoggedIn,
 } = useSessionBoard(board);
 const toast = useToast();
+const { messages: drawerMessages } = useMessageDrawer();
 // --- pane widths (side | middle | right; drag the dividers) ---
 const paneRow = ref<HTMLElement | null>(null);
 const { width: paneRowWidth } = useElementSize(paneRow);
@@ -287,6 +288,7 @@ watch(modalOpen, (v) => {
       :login-error="selectedGroup.loginError"
       @done="onLoggedIn"
     />
+    <MessageDrawer v-if="loaded && dir" :messages="drawerMessages" @select="selectedName = $event" />
     <SettingsDialog v-if="settingsOpen" v-model:open="settingsOpen" />
     <CenterDialog v-if="centerOpen" v-model:open="centerOpen" />
   </div>

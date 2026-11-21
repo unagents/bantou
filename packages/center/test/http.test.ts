@@ -590,6 +590,25 @@ test("GET /events: token 必須。接続時に空の sessions イベント、増
   }
 });
 
+test("GET /events: 最後の応答は session-message イベントで session・text・at が流れる（sessions イベントとは別）", async () => {
+  const { h, events, base } = await boot();
+  try {
+    const res = await fetch(`${base}/events`, { headers: AUTH });
+    setTimeout(() => {
+      events.publishMessage({ session: "pm-a", text: "終わった", at: "2026-11-09T00:00:00.000Z" });
+      events.publishMessage({ session: "pm-b", text: "二つ目", at: "2026-11-09T00:00:01.000Z" });
+    }, 20);
+    const evs = await readSse(res, (e) => e.filter((x) => x.event === "session-message").length >= 2);
+    assert.deepEqual(evs.filter((e) => e.event === "session-message").map((e) => e.data), [
+      '{"session":"pm-a","text":"終わった","at":"2026-11-09T00:00:00.000Z"}',
+      '{"session":"pm-b","text":"二つ目","at":"2026-11-09T00:00:01.000Z"}',
+    ]);
+    assert.equal(evs.filter((e) => e.event === "sessions").length, 1, "sessions は接続時の 1 件だけ");
+  } finally {
+    await h.close();
+  }
+});
+
 test("GET /events: 切断後は購読が外れ、events を渡さなければ 404", async () => {
   const { h, events, base } = await boot();
   try {

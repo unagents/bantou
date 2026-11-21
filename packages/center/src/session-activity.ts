@@ -1,3 +1,5 @@
+import type { EventHub } from "./events.js";
+
 /** session（claude）の作業状態。 */
 export type SessionActivity = "working" | "needs-input" | "idle" | "unknown";
 
@@ -57,6 +59,21 @@ export function activityFromHook(payload: unknown): Exclude<SessionActivity, "un
     default:
       return null;
   }
+}
+
+/** Stop の hook payload から、turn の終わりの最後の応答の文を取る。Stop 以外・空の時は null。 */
+export function lastMessageFromHook(payload: unknown): string | null {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return null;
+  const p = payload as Record<string, unknown>;
+  if (str(p.hook_event_name) !== "Stop") return null;
+  const text = str(p.last_assistant_message);
+  return text !== undefined && text.trim() !== "" ? text : null;
+}
+
+/** Stop の最後の応答があれば、届いた時刻を付けて hub に流す（GET /events の session-message）。 */
+export function publishLastMessage(hub: Pick<EventHub, "publishMessage">, session: string, payload: unknown, now: () => number = Date.now): void {
+  const text = lastMessageFromHook(payload);
+  if (text !== null) hub.publishMessage({ session, text, at: new Date(now()).toISOString() });
 }
 
 export interface SessionActivityView {
