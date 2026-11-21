@@ -368,7 +368,7 @@ session の起動の `--mcp-config` に、bantou 自身の MCP のほかに**追
 
 - **全 session 共通**: center 共通の設定（状態 dir の `center-settings.json`）の `mcpServers`。全 session の起動に載る。
 - **session ごとの追加**: その session の設定（状態 dir の `sessions.json` の、その session の `settings.mcpServers`）。その session の起動にだけ載る。session の設定の中で `null` を書くと、共通の接続をその session では外す。同じ名前を書くと項目ごとに共通を上書きする。
-- `mcpServers` は **center の側だけの項目**。画面（desktop・web）と MCP（`session_create` の `settings`・`session_settings_update`・`center_settings_update`）からは読み書きできず、含めると断る（`memory` と同じ扱い）。center を動かしている host で、上の 2 つの file を直接書く。center は呼び出しの度に file を読むので、再起動は要らず、次に起動する session から載る（動いている session の `--mcp-config` は変わらない）。file が壊れて読めない間は割り当て無し（何も載せない）。center の保存（他項目の更新）が `mcpServers` を巻き戻すことはない。
+- `mcpServers` は **center の側だけの項目**。画面（desktop・web）と MCP（`session_create` の `settings`・`session_settings_update`・`center_settings_update`）からは読み書きできず、含めると断る（`memory` と同じ扱い）。center を動かしている host で、上の 2 つの file を直接書く。center は呼び出しの度に file を読むので、再起動は要らず、次に起動する session から載る（動いている session の `--mcp-config` は変わらない）。file が壊れて読めない間は割り当て無し（何も載せない）。center の保存（他項目の更新・session の改名）は file 側の `mcpServers` を取り込んでから書く（改名では新しい名前に引き継ぐ）ので、巻き戻さない。ただし取り込みから保存（一時 file → rename）までの間（ごく短い）に file を書き換えると、その書き換えは失われる。**障害時の挙動**: `center-settings.json` が消えると共通の接続は空になり、`sessions.json` が壊れて読めない間は全 session の割り当て（統括の口を含む）が外れる（仕様。直せば次の呼び出しから戻る）。
 - 接続の形（名前は `[a-z0-9][a-z0-9_-]{0,31}`。`bantou`・`bantou-messenger`・`mcp`・`conn` は予約）:
 
 ```jsonc
@@ -386,7 +386,7 @@ session の起動の `--mcp-config` に、bantou 自身の MCP のほかに**追
 { "settings": { "mcpServers": { "bantou-coordinator": { "transport": "builtin", "builtin": "coordinator" } } } }
 ```
 
-- **鍵の値は設定に書かない**。`auth.env` に環境変数の名前（`BANTOU_MCP_KEY_` で始まる大文字。center 自身の token を外へ送らせないため、この接頭だけ）を書き、center を起動する環境で値を渡す（`BANTOU_MCP_KEY_TOOLS=… bantou-center`）。center は session の子の env にだけ渡し、`--mcp-config` には `${…}` の参照だけを書く。値は status・log・画面に出ない。環境変数が無い接続は載せず、log に名前だけ出す。旧来の `bantou-center mcp secret set` の鍵（`auth.secret`）も使える（`auth` は `env` か `secret` のどちらか 1 つ）。
+- **鍵の値は設定に書かない**。`auth.env` に環境変数の名前（`BANTOU_MCP_KEY_` で始まる大文字。center 自身の token を外へ送らせないため、この接頭だけ）を書き、center を起動する環境で値を渡す（`BANTOU_MCP_KEY_TOOLS=… bantou-center`）。center は `BANTOU_MCP_KEY_*` をどの session の子 process にも継承させず、その session に載せた接続の鍵だけを別名（`BANTOU_MCP_SECRET_n`）で子の env に渡す。`--mcp-config` には `${…}` の参照だけを書く（割り当てていない session からは、他の接続の鍵を env から読めない）。値は status・log・画面に出ない。環境変数が無い接続は載せず、log に名前だけ出す。旧来の `bantou-center mcp secret set` の鍵（`auth.secret`）も使える（`auth` は `env` か `secret` のどちらか 1 つ）。
 - **統括の口 `bantou-coordinator`**: center の中の別の口 `/mcp/coordinator`（道具は `session_brief` と `coordinator_session_create` だけ）。session の設定に上の `{ "transport": "builtin", "builtin": "coordinator" }` を書いた session にだけ載り、道具が見える。他の session には道具が出ず、口を直接呼んでも 403。割り当てを外すと（設定から消す、または `null`）、開いている古い MCP session からの呼び出しも次の呼び出しから 403（呼び出しの度に判定する）。名前 `bantou-coordinator` は組み込みの接続だけが使える（http の接続を同じ名前では置けない）。共通の設定に書くと全 session に割り当てられるので、通常は session の設定に書く。
 - claude に直接渡せない設定（`toolPrefix`・`tools.allow`・`role`）の接続は載せない（log に名前と理由）。
 - **旧設定からの移行**（起動時に自動。冪等）: 旧 `center-settings.json` の `coordinator.session` は、その session の設定の `mcpServers` の `bantou-coordinator` に移して旧項目を消す。`mcp-connections.json`（下の CLI が書いていた file）の内容は、共通は `center-settings.json`、session ごとはその session の設定へ追記して（同じ名前が設定にあれば設定が勝つ）、file を `mcp-connections.json.migrated` に退ける。session が `session_create` で作った物の中に無い（config 由来・削除済み）等で移せない物は、旧設定を残して log に `移行失敗: …` を出し、次の起動で再度試す。

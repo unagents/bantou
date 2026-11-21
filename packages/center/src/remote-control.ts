@@ -26,7 +26,7 @@ import {
 } from "./wrapper.js";
 import { OUTPUT_STYLE_NAME, syncOutputStyleSync } from "./output-style.js";
 import type { MemorySetting } from "./project-settings.js";
-import { MCP_SECRET_ENV_PREFIX, type SessionMcp } from "./mcp-session.js";
+import { MCP_KEY_ENV_PREFIX, MCP_SECRET_ENV_PREFIX, type SessionMcp } from "./mcp-session.js";
 import { hookCommand, hookUrl, statusLineCommand, statusLineSettings, statusLineUrl } from "./status-line.js";
 
 export type RcState = "stopped" | "starting" | "connected" | "error";
@@ -492,6 +492,9 @@ export function createRemoteControlSupervisor(opts: {
     let assignedCoordinator = false;
     let args: string[];
     let env = childEnv(e.project, rc);
+    // 接続の鍵（auth.env の BANTOU_MCP_KEY_*）は center の環境にある。どの session の子にも継承させない
+    // （割り当てた接続の鍵は、下で BANTOU_MCP_SECRET_n として子の env にだけ渡す。割り当てていない session から読めてはいけない）
+    for (const k of Object.keys(env)) if (k.startsWith(MCP_KEY_ENV_PREFIX)) delete env[k];
     if (e.wrapper) {
       if (!wd) {
         e.status.state = "error";

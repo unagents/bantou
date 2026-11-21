@@ -14,6 +14,8 @@ import { BANTOU_SERVER_KEY, MEMORY_SERVER_KEY, MESSENGER_SERVER_KEY } from "./wr
 
 /** 鍵の実値を渡す env の変数名の接頭（`BANTOU_MCP_SECRET_<通し番号>`）。 */
 export const MCP_SECRET_ENV_PREFIX = "BANTOU_MCP_SECRET_";
+/** 設定の auth.env に書ける環境変数名の接頭（center の環境に置く鍵。子の process には継承させない）。 */
+export const MCP_KEY_ENV_PREFIX = "BANTOU_MCP_KEY_";
 /** center の中の組み込みの口の path（http.ts の window "coordinator"）。 */
 export const COORDINATOR_MCP_PATH = "/mcp/coordinator";
 /** center 自身が組み立てる entry 名。接続の名前がこれと同じ時は center のものを優先して接続の方を載せない。 */

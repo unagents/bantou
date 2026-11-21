@@ -993,6 +993,28 @@ test("mcpSource: 設定 file の mcpServers を呼び出しの度に読む（運
   assert.ok(mgr.mcpConnections().problems.length > 0);
 });
 
+test("改名（update）: session の mcpServers（bantou-coordinator の割り当て）は新しい名前に引き継がれ、割り当ては付いたまま。他の session には移らない", async () => {
+  const { createMcpSource } = await import("../src/mcp-source.js");
+  const { isAssigned } = await import("../src/mcp-session.js");
+  await writeFile(join(dir, "sessions.json"), JSON.stringify([rec("a", { instructions: "ia", mcpServers: { "bantou-coordinator": COORD } }), rec("b")]));
+  const source = createMcpSource(join(dir, "center-settings.json"), join(dir, "sessions.json"));
+  const { mgr } = setup({ mcpSource: source });
+  await mgr.restore();
+  assert.equal(isAssigned(mgr.mcpConnections().data, "a", "coordinator"), true);
+  await mgr.update({ name: "a", newName: "a2" });
+  const s = await readJson("sessions.json");
+  const a2 = s.find((r: { name: string }) => r.name === "a2");
+  assert.deepEqual(a2.settings, { instructions: "ia", mcpServers: { "bantou-coordinator": COORD } }, "mcpServers が消えない");
+  const d = mgr.mcpConnections().data;
+  assert.equal(isAssigned(d, "a2", "coordinator"), true);
+  assert.equal(isAssigned(d, "a", "coordinator"), false);
+  assert.equal(isAssigned(d, "b", "coordinator"), false);
+  assert.equal(s.find((r: { name: string }) => r.name === "b").settings, undefined);
+  // 改名の後にもう一度保存しても保たれる
+  await mgr.updateSettings("a2", { instructions: "ia2" });
+  assert.deepEqual((await readJson("sessions.json")).find((r: { name: string }) => r.name === "a2").settings.mcpServers, { "bantou-coordinator": COORD });
+});
+
 test("updateSettings: servers の範囲が変わった時だけ master-cap へ知らせる（新旧の範囲を載せる）。他の項目だけの更新・同じ範囲では知らせない。知らせに失敗しても更新は成功", async () => {
   const sent: { name: string; text: string }[] = [];
   const { mgr } = setup({ notifyServersChanged: async (name, text) => (sent.push({ name, text }), { ok: false, reason: "届かない" }) });

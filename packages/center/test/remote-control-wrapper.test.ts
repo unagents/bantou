@@ -1069,6 +1069,45 @@ test("接続の配線: 共通の接続は全 session の --mcp-config に載り�
   await sup2.shutdown();
 });
 
+test("接続の鍵（auth.env）: center の環境の BANTOU_MCP_KEY_* は子 process に継承されない。割り当てた接続の鍵だけが BANTOU_MCP_SECRET_n で渡り、割り当てていない session には他の接続の鍵が届かない", async () => {
+  const KEY_T = "TOOLS-KEY-VALUE-0123456789";
+  const KEY_A = "ONLYA-KEY-VALUE-0123456789";
+  const saved = { t: process.env.BANTOU_MCP_KEY_T, a: process.env.BANTOU_MCP_KEY_ONLYA };
+  process.env.BANTOU_MCP_KEY_T = KEY_T;
+  process.env.BANTOU_MCP_KEY_ONLYA = KEY_A;
+  try {
+    const data: ConnectionsData = {
+      version: 1,
+      common: { tool1: { transport: "http", url: "https://tools.example/mcp", auth: { env: "BANTOU_MCP_KEY_T" } } },
+      sessions: { a: { onlya: { transport: "http", url: "https://a.example/mcp", auth: { env: "BANTOU_MCP_KEY_ONLYA" } } } },
+    };
+    const sup2 = createRemoteControlSupervisor({
+      config: cfg,
+      log: () => {},
+      spawnImpl,
+      mcpOf: (name, mcpUrl) => buildSessionMcp(data, { get: () => undefined }, name, centerBaseOf(mcpUrl), process.env),
+      wrapper: { core: createCore(), tokens: createSessionTokens(), path: "/fake/bantou-pty-wrapper", mcpUrl: () => "http://127.0.0.1:4567/mcp/session", statusLineSelf: ["/fake/bantou-center"] },
+    });
+    sup2.add({ ...project, name: "a", path: "/tmp/a" }, { wrapper: true });
+    sup2.add({ ...project, name: "b", path: "/tmp/b" }, { wrapper: true });
+    const base = launches.length;
+    await sup2.start("a");
+    await sup2.start("b");
+    const envA = launches[base].env;
+    const envB = launches[base + 1].env;
+    for (const env of [envA, envB]) assert.deepEqual(Object.keys(env).filter((k) => k.startsWith("BANTOU_MCP_KEY_")), [], "BANTOU_MCP_KEY_* は継承させない");
+    assert.deepEqual(Object.values(envA).filter((v) => v === KEY_T || v === KEY_A).sort(), [KEY_A, KEY_T].sort(), "a は自分の接続の鍵だけ");
+    assert.deepEqual(Object.values(envB).filter((v) => v === KEY_T || v === KEY_A), [KEY_T], "b には a だけの接続の鍵は届かない");
+    for (const l of launches.slice(base)) assert.ok(!l.args.join("\0").includes(KEY_T) && !l.args.join("\0").includes(KEY_A));
+    await sup2.shutdown();
+  } finally {
+    if (saved.t === undefined) delete process.env.BANTOU_MCP_KEY_T;
+    else process.env.BANTOU_MCP_KEY_T = saved.t;
+    if (saved.a === undefined) delete process.env.BANTOU_MCP_KEY_ONLYA;
+    else process.env.BANTOU_MCP_KEY_ONLYA = saved.a;
+  }
+});
+
 test("接続の配線: 鍵が無い・claude に渡せない設定（toolPrefix・tools.allow・role）の接続は載せない（名前と理由だけ log）。center の名前（bantou・memory）は接続で上書きできない", async () => {
   const logs: string[] = [];
   const base = { transport: "http", url: "https://x.example/mcp" } as const;

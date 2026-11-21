@@ -175,12 +175,17 @@ export function createSessionManager(opts: {
     return pendingCoordinator !== undefined ? { ...o, coordinator: pendingCoordinator } : o;
   };
 
+  /** 改名の保存の間だけ持つ「記録の名前 → disk 上の名前」。adoptMcpFromDisk が disk の mcpServers を引くのに使う。 */
+  const diskAlias = new Map<string, string>();
+
   /** 設定 file の mcpServers（運用者が直接書いた物）を記録へ写す。保存が運用者の書き換えを巻き戻さないように、保存の前に呼ぶ。読めなければ何もしない。 */
   const adoptMcpFromDisk = (): void => {
     const src = opts.mcpSource?.();
     if (!src) return;
     for (const rec of saved.values()) {
-      const m = src.sessions.get(rec.name);
+      // 改名の保存中は disk がまだ旧い名前（巻き戻しの保存中は新しい名前）なので、diskAlias の名前でも引く（引けないと割り当てが消える）
+      const alias = diskAlias.get(rec.name);
+      const m = src.sessions.get(rec.name) ?? (alias !== undefined ? src.sessions.get(alias) : undefined);
       const st: Record<string, unknown> = { ...(rec.settings ?? {}) };
       if (m === undefined) delete st.mcpServers;
       else st.mcpServers = m;
@@ -616,9 +621,12 @@ export function createSessionManager(opts: {
           replaceSaved(name, newRec);
           swapped = true;
           try {
+            if (renaming) diskAlias.set(newName, name);
             await persist();
           } catch (e) {
             throw new Error(`状態ファイルに保存できない: ${(e as Error).message}`);
+          } finally {
+            diskAlias.delete(newName);
           }
           if (renaming) {
             moveMemory(name, newName);
@@ -650,7 +658,10 @@ export function createSessionManager(opts: {
           if (renamedRemotes) await undo("remotes の付け替え", () => opts.renameRemoteSession?.(newName, name));
           if (swapped) {
             replaceSaved(newName, oldRec);
+            // 保存が済んでいれば disk は新しい名前。旧い名前の mcpServers を新しい名前から引く
+            diskAlias.set(name, newName);
             await undo("状態ファイルの復元", persist);
+            diskAlias.delete(name);
           }
           if (moved) await undo("フォルダの移動を戻す", () => rename(newPath, oldRec.path));
           await undo("元の名前で起動", async () => {
