@@ -94,12 +94,24 @@ center から server を外す指示（protocol 1.8.0、`docs/protocol.md` の `
 | `session.capBashSandbox` | 任意 | `false` | cap の `claude -p` の Bash sandbox。`false` は `--settings {"sandbox":{"enabled":false}}` を付けて切る（新規・resume とも）。`true` は付けず claude の設定のまま（sandbox が有効だと worker が cap の終了で消える）。真偽値 |
 | `session.workerKeepMs` | 任意 | `1800000`（30 分） | 終わった worker の dir を掃除するまでの待ち時間。0 以上の整数。0 は掃除しない（下記「終わった worker の掃除」） |
 | `session.env` | 任意 | `{}` | spawn する claude に追加で渡す環境変数。文字列値のオブジェクト。bantou-server 自身の環境変数に上書きで合成する |
+| `extraMcp` | 任意 | `{}` | cap / worker に追加で載せる手元の stdio MCP の道具。`{ "<name>": { "command", "args", "env", "targets" } }`（下記「追加の MCP（extraMcp）」） |
 | `update.spec` | 任意 | `"bantou@{version}"` | 自己更新の取得元。`{version}` を更新先の版に置き換えて npx の `--package` に渡す。`{version}` 必須、`-` で始められない。テストでは `file:/path/bantou-{version}.tgz` で npm 未公開の tarball を指せる。本番は指定しない |
 
 - `broker` / `mcp` / `session` / `update` は省略可。書く場合はオブジェクト。
 - LAN に公開するには `broker.bind`（例 `0.0.0.0`）を明示する。その場合は `broker.token` の設定を推奨する。
 - 例: 204 の claudeAgent ユーザーは `"env": { "CLAUDE_CONFIG_DIR": "/home/vagrant/.claude-agent" }` を指定する。
 - 旧 `session.command` は廃止。残っていると起動時にエラーになる。`session.claude` を使う。
+
+### 追加の MCP（extraMcp）
+
+```json
+{ "extraMcp": { "fetch": { "command": "npx", "args": ["-y", "some-mcp-package"], "env": {}, "targets": ["worker"] } } }
+```
+
+- 手元で動く stdio の道具だけ。`command`（必須・空でない文字列）、`args`（文字列の配列、既定 `[]`）、`env`（文字列値のオブジェクト、既定 `{}`）、`targets`（`"cap"` / `"worker"` の重複なし非空配列、既定は両方）。`url` / `headers` など他のキーは拒否する。鍵を要する接続はここでは扱わない（center が持つ）。
+- `<name>` は英数字・`_`・`-` のみで `__` を含まない。`bantou`（server 自身の MCP）と同名は config の読込時に拒否する（既存を優先）。
+- `targets` に含めた側の `logs/mcp.json` にだけ載り、その側の `--allowedTools` に `mcp__<name>` を足す。含めない側には載らない。`env` を含みうるので `mcp.json` は mode 0600 で書く。
+- 設定を変えたら server の再起動で反映（次の cap / worker の起動から）。
 
 ## workspace レイアウト
 

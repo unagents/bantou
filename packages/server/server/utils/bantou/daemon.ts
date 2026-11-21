@@ -19,6 +19,7 @@ import { createWorkerCleaner } from "./cleanup";
 import { loadConfig } from "./config";
 import { buildIdentity, loadOrCreateServerId } from "./identity";
 import { log } from "./log";
+import { buildExtraMcp, writeMcpConfigFile } from "./extra-mcp";
 import { CAP_ID_HEADER, WORKER_ID_HEADER, type McpListener } from "./mcp";
 import { setBashWorkspace } from "./bash";
 import { agentDir, runLogDir } from "./paths";
@@ -257,15 +258,18 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
     await mkdir(logs, { recursive: true });
     const mcpConfigFile = join(logs, "mcp.json");
     const appendSystemPromptFile = join(logs, "system-prompt.md");
-    await writeFile(mcpConfigFile, JSON.stringify({ mcpServers: { bantou: { type: "http", url: mcpUrl, headers } } }) + "\n");
+    const extra = buildExtraMcp(config.extraMcp ?? {}, kind, log);
+    const mcpServers = { bantou: { type: "http", url: mcpUrl, headers }, ...extra.servers };
+    // extraMcp の env を含みうるので本人だけが読める mode で書く
+    await writeMcpConfigFile(mcpConfigFile, { mcpServers });
     await writeFile(appendSystemPromptFile, (kind === "cap" ? CAP_GUIDE : WORKER_GUIDE) + "\n");
     return {
       mcpConfigFile,
       appendSystemPromptFile,
       extraAllowedTools:
         kind === "cap"
-          ? ["mcp__bantou__worker_start", "mcp__bantou__worker_status", "mcp__bantou__worker_stop", "mcp__bantou__bash"]
-          : ["mcp__bantou__report", "mcp__bantou__bash"],
+          ? ["mcp__bantou__worker_start", "mcp__bantou__worker_status", "mcp__bantou__worker_stop", "mcp__bantou__bash", ...extra.allowedTools]
+          : ["mcp__bantou__report", "mcp__bantou__bash", ...extra.allowedTools],
     };
   };
   // worker の終了（失敗・時間切れ・done 無し）は、activity を出す前に cap の再開を積む（watcher が tracker を包む）。hub は後で作る

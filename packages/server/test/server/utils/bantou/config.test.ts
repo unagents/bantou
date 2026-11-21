@@ -36,6 +36,7 @@ test("config: 全項目指定はそのまま返る", async () => {
       env: { CLAUDE_CONFIG_DIR: "/c" },
     },
     update: { spec: "file:/x/bantou-{version}.tgz" },
+    extraMcp: { fs: { command: "npx", args: ["-y", "p"], env: { A: "b" }, targets: ["worker"] } },
   };
   assert.deepEqual(await load(full), full);
 });
