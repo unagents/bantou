@@ -14,9 +14,15 @@ export interface DrawerMessage {
 /** Width (px) of the opened panel. */
 export const DRAWER_WIDTH = 340;
 
+/** Width (px) of the grab strip that stays on the right edge while closed. The screen keeps this much free on its right. */
+export const DRAWER_HANDLE = 14;
+
+/** How many messages are kept. The app runs for days: past this the oldest ones are dropped so memory and the list stay bounded. */
+export const MAX_DRAWER_MESSAGES = 500;
+
 /**
- * The drawer's messages: every `center-session-message` is appended in the order it arrives (memory only).
- * Listening starts on mount and stops on unmount.
+ * The drawer's messages: every `center-session-message` is appended in the order it arrives (memory only, the newest
+ * `MAX_DRAWER_MESSAGES`). Listening starts on mount and stops on unmount.
  */
 export function useMessageDrawer() {
   const messages = ref<DrawerMessage[]>([]);
@@ -27,7 +33,8 @@ export function useMessageDrawer() {
   function push(m: { session?: unknown; text?: unknown; at?: unknown }) {
     if (typeof m.session !== "string" || typeof m.text !== "string") return;
     const at = typeof m.at === "string" ? m.at : new Date().toISOString();
-    messages.value = [...messages.value, { seq: seq++, session: m.session, text: m.text, at }];
+    const next = [...messages.value, { seq: seq++, session: m.session, text: m.text, at }];
+    messages.value = next.length > MAX_DRAWER_MESSAGES ? next.slice(next.length - MAX_DRAWER_MESSAGES) : next;
   }
 
   onMounted(async () => {

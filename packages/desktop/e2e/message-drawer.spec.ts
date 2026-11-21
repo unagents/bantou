@@ -21,9 +21,21 @@ const drawer = (page: Page) => page.getByTestId("message-drawer");
 const handle = (page: Page) => page.getByTestId("message-drawer-handle");
 const items = (page: Page) => page.getByTestId("message-drawer-item");
 
+/** The handle's box once the panel has stopped moving (it slides for a moment after a release). */
+async function settledBox(page: Page) {
+  let prev = "";
+  let box = (await handle(page).boundingBox())!;
+  for (let i = 0; i < 50 && JSON.stringify(box) !== prev; i++) {
+    prev = JSON.stringify(box);
+    await page.waitForTimeout(50);
+    box = (await handle(page).boundingBox())!;
+  }
+  return box;
+}
+
 /** Drag the handle by `dx` px (negative = left) with the mouse. */
 async function drag(page: Page, dx: number) {
-  const box = (await handle(page).boundingBox())!;
+  const box = await settledBox(page);
   const x = box.x + box.width / 2;
   const y = box.y + box.height / 2;
   await page.mouse.move(x, y);
@@ -41,13 +53,22 @@ test.describe("message drawer", () => {
     await pickSession(page, "stroke-board");
     await expect(drawer(page)).toHaveAttribute("data-open", "false");
     await expect(drawer(page)).toHaveAttribute("data-visible", "0");
+    // the closed strip covers nothing of the board (the terminal's right edge stays usable)
+    const strip = await settledBox(page);
+    const right = (await page.getByTestId("right-col").boundingBox())!;
+    expect(right.x + right.width).toBeLessThanOrEqual(strip.x + 0.5);
     await drag(page, -300);
     await expect(drawer(page)).toHaveAttribute("data-open", "true");
     await expect(drawer(page)).toHaveAttribute("data-visible", "340");
     await expect(page.getByText("最終メッセージ").first()).toBeVisible();
-    // a short pull back does not close it; a long one does
+    // a short push back does not close it; a long one does
     await drag(page, 60);
+    await expect(drawer(page)).toHaveAttribute("data-open", "true");
+    await expect(drawer(page)).toHaveAttribute("data-visible", "340");
+    await drag(page, 250);
     await expect(drawer(page)).toHaveAttribute("data-open", "false");
+    await expect(drawer(page)).toHaveAttribute("data-visible", "0");
+    await settledBox(page);
     await page.screenshot({ path: `${SHOT_DIR}/drawer-closed.png` });
     await drag(page, -300);
     await expect(drawer(page)).toHaveAttribute("data-open", "true");
@@ -85,6 +106,7 @@ test.describe("message drawer", () => {
     await message(page, "agent-messenger", "四つ目", "2026-11-09T10:03:00.000Z");
     await expect(items(page)).toHaveCount(4);
     await expect(items(page).last()).toHaveAttribute("data-session", "agent-messenger");
+    await settledBox(page);
     await page.screenshot({ path: `${SHOT_DIR}/drawer-open.png` });
   });
 
@@ -100,5 +122,30 @@ test.describe("message drawer", () => {
     await items(page).filter({ hasText: "agent-messenger の応答" }).click();
     await expect(page.locator("[aria-current=true]")).toContainText("agent-messenger");
     await expect(page.locator('section[aria-label="agent-messenger"]')).toBeVisible();
+    // a session that is no longer on the center: the current screen stays
+    await message(page, "gone-session", "消えた session の応答", "2026-11-09T10:02:00.000Z");
+    await items(page).filter({ hasText: "消えた session の応答" }).click();
+    await expect(page.getByText("gone-session は center に無い").first()).toBeVisible();
+    await expect(page.locator("[aria-current=true]")).toContainText("agent-messenger");
+    await expect(page.locator('section[aria-label="agent-messenger"]')).toBeVisible();
+  });
+
+  test("only the newest messages are kept (the oldest drop out past the cap); the newest stays in view", async ({ page }) => {
+    await page.goto("/");
+    await pickSession(page, "stroke-board");
+    await withMock(
+      page,
+      (m, n) => {
+        for (let i = 1; i <= n; i++) m.centerSessionMessage("careery", `応答 ${i}`, "2026-11-09T10:00:00.000Z");
+      },
+      501,
+    );
+    await drag(page, -300);
+    await expect(items(page)).toHaveCount(500);
+    await expect(page.getByTestId("message-drawer-text").first()).toHaveText("応答 2");
+    await message(page, "careery", "応答 502", "2026-11-09T10:01:00.000Z");
+    await expect(page.getByTestId("message-drawer-text").first()).toHaveText("応答 3");
+    await expect(page.getByTestId("message-drawer-text").last()).toHaveText("応答 502");
+    await expect(page.getByTestId("message-drawer-text").last()).toBeInViewport();
   });
 });

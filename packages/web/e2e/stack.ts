@@ -41,6 +41,8 @@ export interface Stack {
   resizes: { session: string; cols: number; rows: number }[];
   /** Push a `sessions` event from the center to the web backend. */
   pushSessionsEvent(reason: string, name: string): Promise<void>;
+  /** Push a `session-message` event (a session's last response of a turn) from the center to the web backend. */
+  pushSessionMessage(session: string, text: string, at: string): Promise<void>;
   /** What the backend process wrote to stdout / stderr so far. */
   logs(): string;
   close(): Promise<void>;
@@ -149,6 +151,10 @@ export async function startStack(extraEnv: (center: FakeCenter) => Record<string
     pushSessionsEvent: async (reason, name) => {
       for (let i = 0; i < 100 && conns.length === 0; i++) await new Promise((r) => setTimeout(r, 50));
       for (const c of conns) c.write(`event: sessions\ndata: ${JSON.stringify({ reason, name })}\n\n`);
+    },
+    pushSessionMessage: async (session, text, at) => {
+      for (let i = 0; i < 100 && conns.length === 0; i++) await new Promise((r) => setTimeout(r, 50));
+      for (const c of conns) c.write(`event: session-message\ndata: ${JSON.stringify({ session, text, at })}\n\n`);
     },
     logs: () => log,
     close,

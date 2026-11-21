@@ -1,15 +1,20 @@
 <script setup lang="ts">
-import { DRAWER_WIDTH, type DrawerMessage } from "../composables/useMessageDrawer";
+import { DRAWER_HANDLE as HANDLE, DRAWER_WIDTH, type DrawerMessage } from "../composables/useMessageDrawer";
 
 /**
  * Right-edge drawer: grab the strip on the right edge and pull it left to open, push it back to close
  * (a click on the strip or the close button toggles too). It lists the sessions' last messages in arrival order.
  */
-const props = defineProps<{ messages: DrawerMessage[] }>();
+const props = withDefaults(
+  defineProps<{
+    messages: DrawerMessage[];
+    /** Where the panel starts from the top (CSS length): below the app's header. */
+    top?: string;
+  }>(),
+  { top: "var(--cork-header-height, 0px)" },
+);
 const emit = defineEmits<{ select: [session: string] }>();
 
-/** Width (px) of the grab strip that stays visible while closed. */
-const HANDLE = 14;
 /** Moves shorter than this (px) count as a click on the strip. */
 const CLICK_SLOP = 3;
 
@@ -47,9 +52,9 @@ function onUp() {
 }
 
 const list = ref<HTMLElement | null>(null);
-// New messages stack at the bottom; keep the newest in view.
+// New messages stack at the bottom; keep the newest in view. (The newest seq, not the length: the length stops growing at the cap.)
 watch(
-  () => props.messages.length,
+  () => props.messages.at(-1)?.seq,
   async () => {
     await nextTick();
     if (list.value) list.value.scrollTop = list.value.scrollHeight;
@@ -67,7 +72,7 @@ const timeText = (iso: string) => {
     class="border-cork-border fixed right-0 z-30 flex bg-default shadow-lg"
     :class="dragging ? '' : 'transition-transform duration-150'"
     :style="{
-      top: 'var(--cork-header-height, 0px)',
+      top,
       bottom: '0',
       width: `${DRAWER_WIDTH + HANDLE}px`,
       transform: `translateX(${DRAWER_WIDTH - visible}px)`,
