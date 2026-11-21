@@ -291,11 +291,27 @@ export type ServerReplyType =
   | "retire_result"
   | "error";
 
-/** Runs still alive on the server. An update waits until all of them are 0. */
+/**
+ * Runs still alive on the server. An update waits until caps and workers are 0
+ * (only runs whose claude process is alive or is being prepared; a closed cap's workers are not counted).
+ * reports = worker reports being handled (informational; the wait does not depend on it).
+ */
 export interface UpdateRunning {
   caps: number;
   workers: number;
   reports: number;
+}
+
+/** One run an update waits for (optional detail; an older center ignores it). */
+export interface UpdateWaitRun {
+  kind: AgentKind;
+  id: string;
+  /** The owner cap of a worker. */
+  cap_id?: string;
+  /** ISO 8601, when this run started. */
+  started_at?: string;
+  /** preparing = before the claude process is spawned (clone etc.) or after it ended; running = the process is alive. */
+  phase: "preparing" | "running";
 }
 
 /** An update in progress. waiting = refusing kick_cap until the runs end; restarting = shutting down for the swap. */
@@ -304,7 +320,16 @@ export interface UpdateProgress {
   from: string;
   to: string;
   running: UpdateRunning;
+  /** ISO 8601, when the wait began (optional detail). */
+  since?: string;
+  /** ISO 8601, when the server restarts even if runs remain (optional detail). */
+  deadline?: string;
+  /** The runs counted in running (at most UPDATE_WAIT_RUNS_MAX; optional detail). */
+  runs?: UpdateWaitRun[];
 }
+
+/** Upper bound of UpdateProgress.runs. */
+export const UPDATE_WAIT_RUNS_MAX = 20;
 
 /** The last update that failed (kept by the server until the next attempt). */
 export interface UpdateFailure {
@@ -337,6 +362,10 @@ export interface UpdateResultReply {
   from: string;
   to: string;
   running: UpdateRunning;
+  /** The same optional details as UpdateProgress (while waiting / restarting). */
+  since?: string;
+  deadline?: string;
+  runs?: UpdateWaitRun[];
 }
 
 /** Outcome of one headless run. */
@@ -575,6 +604,8 @@ export interface ErrorReply {
   retryable?: boolean;
   /** true = the server is retiring (retire_server accepted) and refuses this command for good. Protocol 1.8.0; an older center ignores it. */
   retiring?: true;
+  /** With code "updating": what the update waits for (optional detail; an older center ignores it). */
+  update?: UpdateProgress;
 }
 
 /**
@@ -775,7 +806,21 @@ function isUpdateProgress(v: unknown): v is UpdateProgress {
     (v.state === "waiting" || v.state === "restarting") &&
     typeof v.from === "string" &&
     typeof v.to === "string" &&
-    isUpdateRunning(v.running)
+    isUpdateRunning(v.running) &&
+    (v.since === undefined || typeof v.since === "string") &&
+    (v.deadline === undefined || typeof v.deadline === "string") &&
+    (v.runs === undefined || (Array.isArray(v.runs) && v.runs.every(isUpdateWaitRun)))
+  );
+}
+
+function isUpdateWaitRun(v: unknown): v is UpdateWaitRun {
+  return (
+    isRecord(v) &&
+    (v.kind === "cap" || v.kind === "worker") &&
+    typeof v.id === "string" &&
+    (v.cap_id === undefined || typeof v.cap_id === "string") &&
+    (v.started_at === undefined || typeof v.started_at === "string") &&
+    (v.phase === "preparing" || v.phase === "running")
   );
 }
 
@@ -1080,7 +1125,8 @@ export function isServerReply(v: unknown): v is ServerReply {
         (v.task_id === undefined || isValidAgentId(v.task_id)) &&
         (v.code === undefined || isErrorCode(v.code)) &&
         (v.retryable === undefined || typeof v.retryable === "boolean") &&
-        (v.retiring === undefined || v.retiring === true)
+        (v.retiring === undefined || v.retiring === true) &&
+        (v.update === undefined || isUpdateProgress(v.update))
       );
     default:
       return false;

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createAgentManager } from "../../../../server/utils/bantou/agents";
+import { CLOSED_MSG, createAgentManager } from "../../../../server/utils/bantou/agents";
 import type { ClaudeRunOptions, ClaudeRunResult } from "../../../../server/utils/bantou/claude";
 import { DEFAULT_SESSION, type Config } from "../../../../server/utils/bantou/config";
 import type { AgentRunner } from "../../../../server/utils/bantou/runner";
@@ -752,5 +752,63 @@ test("agents: status の conversation は開始時刻・run 数・直近の使�
     assert.equal(cv.context_window, 1_000_000);
     assert.equal(cv.context_percent, 12);
     assert.match(cv.started_at ?? "", /^\d{4}-/);
+  });
+});
+
+test("agents: activeRuns は生きている子の run と準備中だけを数える。待ち行列・exit 済みで close の来ない run は数えない", async () => {
+  await withFixture(0, async (f) => {
+    // 生きている pid を持つ偽の子（exitCode を後から入れて「exit したが close が来ない」を作る）
+    const child = { pid: process.pid, exitCode: null as number | null, signalCode: null as string | null, kill: () => true, once: () => {} };
+    let releaseCap!: () => void;
+    let releaseWorker!: () => void;
+    const capGate = new Promise<void>((r) => (releaseCap = r));
+    const workerGate = new Promise<void>((r) => (releaseWorker = r));
+    const m = mgr(f, async (o) => {
+      if (o.cwd.includes("/caps/")) {
+        o.onSpawn?.(child as never);
+        await capGate;
+      } else {
+        // spawn 前（準備中）のまま止める
+        await workerGate;
+      }
+      return ok("r");
+    });
+    const a = m.invoke("cap", "c1", { prompt: "p" });
+    const b = m.invoke("cap", "c1", { prompt: "q" }); // 同じ cap の待ち（数えない）
+    const w = m.invoke("worker", "w1", { prompt: "p", capId: "c1" });
+    await new Promise((r) => setTimeout(r, 50));
+    const runs = m.activeRuns().map((r) => `${r.kind}:${r.id}:${r.phase}:${r.capId ?? "-"}`).sort();
+    assert.deepEqual(runs, ["cap:c1:running:-", "worker:w1:preparing:c1"]);
+    // activeCount（退役用）は従来どおり待ちも数える
+    assert.deepEqual(m.activeCount(), { caps: 2, workers: 1 });
+    // 子は exit したが close が来ない（stdout を握る孫が残る等）: run は返らないが、もう数えない
+    child.exitCode = 0;
+    assert.deepEqual(m.activeRuns().map((r) => `${r.kind}:${r.id}`), ["worker:w1"]);
+    releaseWorker();
+    await w;
+    assert.deepEqual(m.activeRuns(), []);
+    child.exitCode = null;
+    releaseCap();
+    await Promise.all([a, b]);
+    assert.deepEqual(m.activeRuns(), []);
+  });
+});
+
+test("agents: close した cap は worker の report / 終了による再開（keepTask）で起こさない。center の指示で閉じた印が外れる", async () => {
+  await withFixture(0, async (f) => {
+    const m = mgr(f, async () => ok("r"));
+    await m.invoke("cap", "c1", { prompt: "p" });
+    assert.equal(m.isClosed("c1"), false);
+    await m.close("cap", "c1");
+    assert.equal(m.isClosed("c1"), true);
+    await assert.rejects(m.invoke("cap", "c1", { prompt: "report", keepTask: true }), (e: unknown) => e instanceof Error && e.message === CLOSED_MSG);
+    assert.equal(f.calls.length, 1);
+    assert.equal(m.isActive("cap", "c1"), false);
+    // center からの次の task は通り、閉じた印が外れる
+    const r = await m.invoke("cap", "c1", { prompt: "next task" });
+    assert.equal(r.ok, true);
+    assert.equal(m.isClosed("c1"), false);
+    await m.invoke("cap", "c1", { prompt: "report", keepTask: true });
+    assert.equal(f.calls.length, 3);
   });
 });

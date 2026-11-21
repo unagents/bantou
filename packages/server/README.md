@@ -96,6 +96,7 @@ center から server を外す指示（protocol 1.8.0、`docs/protocol.md` の `
 | `session.env` | 任意 | `{}` | spawn する claude に追加で渡す環境変数。文字列値のオブジェクト。bantou-server 自身の環境変数に上書きで合成する |
 | `extraMcp` | 任意 | `{}` | cap / worker に追加で載せる手元の stdio MCP の道具。`{ "<name>": { "command", "args", "env", "targets" } }`（下記「追加の MCP（extraMcp）」） |
 | `update.spec` | 任意 | `"bantou@{version}"` | 自己更新の取得元。`{version}` を更新先の版に置き換えて npx の `--package` に渡す。`{version}` 必須、`-` で始められない。テストでは `file:/path/bantou-{version}.tgz` で npm 未公開の tarball を指せる。本番は指定しない |
+| `update.maxWaitMs` | 任意 | `1800000`（30 分） | 更新の待機の上限。待つのは claude の子が生きている cap / worker の run（と準備中の run）だけで、閉じた cap の worker・待ち行列・子が終わったのに返らない run は数えない。上限を越えたら残りの run を「server 終了により中断」で止めて再起動する（center へは失敗の結果として返り、会話は残るので再送で続けられる） |
 
 - `broker` / `mcp` / `session` / `update` は省略可。書く場合はオブジェクト。
 - LAN に公開するには `broker.bind`（例 `0.0.0.0`）を明示する。その場合は `broker.token` の設定を推奨する。

@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { prepareWorkspace } from "../../../../server/utils/bantou/workspace";
-import { REPLY_META, classifyMeta, commandCapId, describeCommand, execute, executeUpdate, maskUserinfo, updatingError } from "../../../../server/utils/bantou/daemon";
+import { REPLY_META, classifyMeta, commandCapId, describeCommand, describeUpdateWait, execute, executeUpdate, maskUserinfo, updatingError } from "../../../../server/utils/bantou/daemon";
 import { UpdateError, createUpdateController } from "../../../../server/utils/bantou/update";
 import type { AgentManager } from "../../../../server/utils/bantou/agents";
 
@@ -223,4 +223,33 @@ test("commandCapId: cap を指す命令は cap_id、status は cap_id 付きの�
   assert.equal(commandCapId({ bantou: 1, type: "update_server", version: "0.6.0" }), undefined);
   assert.equal(describeCommand({ bantou: 1, type: "status", cap_id: "c4" }), "cap_id=c4");
   assert.equal(describeCommand({ bantou: 1, type: "status" }), "");
+});
+
+test("updatingError: 更新の進行（UpdateProgress）を渡すと、待っている run・経過・上限を文と update 欄に載せる", () => {
+  const progress = {
+    state: "waiting" as const,
+    from: "0.6.8",
+    to: "0.6.9",
+    running: { caps: 1, workers: 1, reports: 0 },
+    since: new Date(Date.now() - 12 * 60_000).toISOString(),
+    deadline: "2026-11-21T05:40:00.000Z",
+    runs: [
+      { kind: "cap" as const, id: "c-other", started_at: new Date(Date.now() - 8 * 60_000).toISOString(), phase: "running" as const },
+      { kind: "worker" as const, id: "w-1", cap_id: "c-other", started_at: new Date(Date.now() - 3 * 60_000).toISOString(), phase: "running" as const },
+    ],
+  };
+  const r = updatingError({ cap_id: "c1", task_id: "t-1" }, progress);
+  assert.equal(r.type, "error");
+  if (r.type !== "error") return;
+  assert.equal(r.code, "updating");
+  assert.equal(r.retryable, true);
+  assert.deepEqual(r.update, progress);
+  assert.match(r.message, /^server 更新待ち（0\.6\.8→0\.6\.9）/);
+  assert.match(r.message, /cap 1 \/ worker 1/);
+  assert.match(r.message, /cap:c-other 実行 8 分/);
+  assert.match(r.message, /worker:w-1\[cap c-other\] 実行 3 分/);
+  assert.match(r.message, /待機 12 分/);
+  assert.match(r.message, /2026-11-21T05:40:00\.000Z（上限）に残りを止めて再起動/);
+  // 何も数えていない（restarting など）の時も件数は出る
+  assert.match(describeUpdateWait({ ...progress, running: { caps: 0, workers: 0, reports: 0 }, runs: [] }), /^待っている run: cap 0 \/ worker 0。/);
 });

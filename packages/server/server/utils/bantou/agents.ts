@@ -103,12 +103,34 @@ export interface AgentManager {
   close(kind: AgentKind, id: string, reason?: string): Promise<CloseResult>;
   status(): Promise<{ caps: AgentStatus[]; workers: AgentStatus[] }>;
   reapOrphans(): Promise<ReapSummary>;
-  /** invoke 中（待ち + 実行）の件数を kind 別に返す。server 更新の「全部終わった」判定に使う。 */
+  /** invoke 中（待ち + 実行）の件数を kind 別に返す（退役の停止件数に使う）。 */
   activeCount(): { caps: number; workers: number };
+  /**
+   * 本当に動いている run の一覧（server 更新の「全部終わった」判定に使う）。数えるのは実行中（execute に入った）の指示のうち、
+   * claude の子が生きているもの（running）と、子がまだ居ない準備中・後始末中のもの（preparing）。
+   * 待ち（queue の後ろ）は数えない（前の run が終われば準備中として数えに入る）。子が終了したのに run が返らない（stdout を握る孫が残る等）ものも数えない。
+   */
+  activeRuns(): ActiveRun[];
+  /** stop_cap（close）で閉じた cap か。次に center から指示（task / kick_cap）が来るまで閉じたまま。 */
+  isClosed(id: string): boolean;
   /** その agent に invoke 中（待ち + 実行）の指示があるか。 */
   isActive(kind: AgentKind, id: string): boolean;
   shutdown(): Promise<void>;
 }
+
+export interface ActiveRun {
+  kind: AgentKind;
+  id: string;
+  /** worker の持ち主 cap（invoke の capId。分からなければ無い）。 */
+  capId?: string;
+  /** この run を始めた時刻（ISO）。 */
+  startedAt: string;
+  phase: "preparing" | "running";
+  pid?: number;
+}
+
+/** 閉じた cap を worker の report / 終了で起こさない時の error 文言。 */
+export const CLOSED_MSG = "cap は stop_cap で閉じられている（worker の report / 終了による再開はしない）";
 
 export interface CloseResult {
   /** 実行中（または待ち）の指示を見つけて止めた。 */
@@ -125,6 +147,28 @@ export const STOP_MSG = "stop_cap により停止";
 const STOP_GRACE_MS = 3000;
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/** execute に入った run（activeRuns の元）。 */
+interface ExecutingRun {
+  kind: AgentKind;
+  id: string;
+  capId?: string;
+  startedAt: string;
+  /** 今の claude の子。spawn 前・run が返った後は undefined（準備中）。 */
+  child?: ChildProcess;
+}
+
+/** 子が生きているか。exit 済み（close 待ちを含む）や、pid が既に無いものは false。 */
+export function childAlive(child: Pick<ChildProcess, "pid" | "exitCode" | "signalCode">): boolean {
+  if (child.exitCode !== null || child.signalCode !== null) return false;
+  if (child.pid === undefined) return false;
+  try {
+    process.kill(child.pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
 
 /** SIGKILL を送り、signal 0 が通らなくなるまで 50ms × 100 回待つ。 */
 async function killAndConfirm(pid: number): Promise<boolean> {
@@ -197,6 +241,10 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
   const stopRequests = new Set<string>();
   let shuttingDown = false;
   const SHUTDOWN_MSG = "server 終了により中断";
+  /** execute に入った run。child は今の claude の子（spawn 前・run の後は undefined）。 */
+  const executing = new Set<ExecutingRun>();
+  /** stop_cap で閉じた cap。center からの次の指示（keepTask でない invoke）で外す。 */
+  const closedCaps = new Set<string>();
 
   /** dir が既にあれば state を failed にする。失敗は握りつぶす。 */
   async function markFailed(dir: string, message: string): Promise<void> {
@@ -307,16 +355,20 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
   }
 
   async function execute(kind: AgentKind, id: string, input: InvokeInput): Promise<RunOutcome> {
+    const run: ExecutingRun = { kind, id, ...(input.capId !== undefined ? { capId: input.capId } : {}), startedAt: new Date().toISOString() };
+    executing.add(run);
     try {
-      return await executeInner(kind, id, input);
+      return await executeInner(kind, id, input, run);
     } catch (e) {
       // 投げた場合（prepareDir 失敗など）も activity を終端にする
       observe((o) => o.finished(kind, id, { ok: false, lost: false, error: errMsg(e) }));
       throw e;
+    } finally {
+      executing.delete(run);
     }
   }
 
-  async function executeInner(kind: AgentKind, id: string, input: InvokeInput): Promise<RunOutcome> {
+  async function executeInner(kind: AgentKind, id: string, input: InvokeInput, run: ExecutingRun): Promise<RunOutcome> {
     if (shuttingDown) throw new Error("server 終了中");
     const key = `${kind}:${id}`;
     const dir = agentDir(config.workspace, kind, id);
@@ -401,6 +453,7 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
           onLine: (line) => observe((o) => o.line(kind, id, line)),
           onSpawn: (child) => {
             lastChild = child;
+            run.child = child;
             observe((o) => o.started(kind, id, input, child.pid));
             const entry = { child, dir, key };
             live.add(entry);
@@ -408,6 +461,8 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
             child.once("close", () => live.delete(entry));
           },
         });
+        // run が返った（子は終わった）。次の再試行の spawn までは準備中として数える
+        run.child = undefined;
         if (r.ok || shuttingDown) break;
         if (stopRequests.has(key)) {
           r = { ...r, detail: STOP_MSG };
@@ -548,6 +603,8 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
   }
 
   async function close(kind: AgentKind, id: string, reason = "stop_cap"): Promise<CloseResult> {
+    // 閉じた cap は、center が次に指示するまで worker の report / 終了で起こさない（stop の前に印を付け、止めている間の再開も断る）
+    if (kind === "cap" && isValidAgentId(id)) closedCaps.add(id);
     const { stopped } = await stop(kind, id);
     const key = `${kind}:${id}`;
     // 止めた実行が state を書き終えるまで待ち、同じ key の他の指示と並べて（chain に載せて）破棄する。
@@ -579,6 +636,11 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
       if (input.defaultModel !== undefined) assertModel(input.defaultModel, "model");
     } catch (e) {
       return Promise.reject(e);
+    }
+    if (kind === "cap") {
+      // worker の report / 終了による再開（keepTask）は閉じた cap を起こさない。center からの指示は閉じた印を外して新しい会話で始める
+      if (input.keepTask === true && closedCaps.has(id)) return Promise.reject(new Error(CLOSED_MSG));
+      if (input.keepTask !== true) closedCaps.delete(id);
     }
     const key = `${kind}:${id}`;
     inflight.set(key, (inflight.get(key) ?? 0) + 1);
@@ -745,5 +807,19 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
     return inflight.has(`${kind}:${id}`);
   }
 
-  return { invoke, stop, close, status, reapOrphans, activeCount, isActive, shutdown };
+  function activeRuns(): ActiveRun[] {
+    const out: ActiveRun[] = [];
+    for (const r of executing) {
+      const base = { kind: r.kind, id: r.id, ...(r.capId !== undefined ? { capId: r.capId } : {}), startedAt: r.startedAt };
+      if (r.child === undefined) {
+        out.push({ ...base, phase: "preparing" });
+        continue;
+      }
+      if (!childAlive(r.child)) continue;
+      out.push({ ...base, phase: "running", ...(r.child.pid !== undefined ? { pid: r.child.pid } : {}) });
+    }
+    return out;
+  }
+
+  return { invoke, stop, close, status, reapOrphans, activeCount, activeRuns, isClosed: (id) => closedCaps.has(id), isActive, shutdown };
 }

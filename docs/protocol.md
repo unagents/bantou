@@ -243,8 +243,9 @@ a center sends it after a restart to take its caps' notices back. A server older
 No other fields. Reply: `hello_result`
 `{"bantou":1,"type":"hello_result","ok":true,"server_version":"0.3.0","protocol_version":"1.8.0","server_id":"srv-0a1b2c3d4e","host":"lenovo","user":"bantou","workspace":"/home/bantou","update":null,"last_update":null}`.
 `server_version` is the npm `bantou` version of the running server. `server_id`, `host`, `user`, `workspace` are the server identity (1.7.0, all optional, see "Server identity" below). `update` is
-`{"state":"waiting"|"restarting","from","to","running":{"caps","workers","reports"}}` while an update is
-in progress. `last_update` is `{"to","ok":false,"error","at"}` for the last update that failed (kept until the
+`{"state":"waiting"|"restarting","from","to","running":{"caps","workers","reports"},"since"?,"deadline"?,"runs"?}` while an update is
+in progress. Optional details (no protocol change; an older center ignores them): `since` = when the wait began, `deadline` = when the
+server restarts even if runs remain, `runs` = the runs counted in `running` (`{"kind":"cap"|"worker","id","cap_id"?,"started_at"?,"phase":"preparing"|"running"}`, at most 20). `last_update` is `{"to","ok":false,"error","at"}` for the last update that failed (kept until the
 next attempt). Servers older than protocol `1.3.0` do not know `hello` and do not answer, so a center
 decides by the protocol version the peer declares and sends nothing there.
 
@@ -261,11 +262,17 @@ authentication), then replies `update_result`
 right away. It does **not** wait for the runs. `current` means it already runs that version. A failed fetch is
 an `error` with `code:"update_failed"` (the server keeps serving normally).
 
-While `waiting`, the server restarts itself only after every running cap and worker (and worker reports being
-handled) are done. Meanwhile:
+While `waiting`, the server restarts itself only after every running cap and worker is done. Counted are only runs
+whose `claude -p` process is alive, or that are being prepared (before the spawn, between retries, writing the result).
+Not counted: queued commands behind a run, a run whose process exited while its pipes stay open (a leftover grandchild),
+workers of a cap closed by `stop_cap` (a closed cap is not resumed by its workers' reports or exits until the center sends
+it a new `task` / `kick_cap`), and worker reports being handled (`reports` is informational). The wait is bounded by the
+server config `update.maxWaitMs` (default 30 minutes): past it the server restarts anyway, and the remaining runs end as
+`server 終了により中断` (their replies reach the center as failures; the conversations are kept, so a resend continues). Meanwhile:
 
 - `kick_cap` and `task` are refused with `error` `{"code":"updating","retryable":true,"command":"kick_cap" or "task","cap_id":...}` (`task` also carries `task_id`)
-  and a reason (`server 更新待ち（<from>→<to>）...再起動後に再送`). The center may send it again after the restart.
+  and a reason (`server 更新待ち（<from>→<to>）...再起動後に再送。待っている run: cap <n> / worker <n>（...）。待機 <m> 分、<deadline>（上限）に残りを止めて再起動`).
+  The error also carries `update` (the same object as `hello_result.update`). The center may send it again after the restart.
 - `stop_cap`, `status` and `hello` are still served. Worker `report` and `worker_start` over MCP are
   still accepted (they belong to the caps that are running).
 - `update_server` with the same version answers `waiting` again; another version is

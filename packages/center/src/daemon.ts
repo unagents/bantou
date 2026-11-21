@@ -128,7 +128,15 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   // desktop のビルドと組になる版。違う server には更新を指示し、版が揃うまで指示を送らない
   const pair = resolvePair({ warn: log });
   log(`組の版: server=${pair.server ?? "(不明、版合わせは無効)"} protocol=${pair.protocol}`);
-  const follow = createFollow({ link, pair, log, onReach: (peer, ok, message) => remotes.noteReach(peer, ok, message) });
+  // 更新待ちの run の cap_id から session 名を引く（この center の cap_id 接頭は後で読む）
+  let centerCapId: string | undefined;
+  const follow = createFollow({
+    link,
+    pair,
+    log,
+    onReach: (peer, ok, message) => remotes.noteReach(peer, ok, message),
+    sessionOfCap: (cid) => (centerCapId !== undefined && cid.startsWith(`${centerCapId}-`) ? cid.slice(centerCapId.length + 1) || undefined : undefined),
+  });
   link.setGate((peer, command) => follow.gate(peer, command));
   link.setVersionNote((peer) => follow.noteOf(peer));
   // session / remote の保存先は config と同じ dir（config の projects には書かない）
@@ -171,6 +179,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   // 外部記憶への書き込み（設定がある session だけ。非同期キュー。失敗しても session・hook・remote は止まらない）
   const memoryEvents = createCenterMemoryEvents({ memoryOf: (name) => sessions.memoryOf(name), log });
   const capId = await loadCapId(stateDir, log);
+  centerCapId = capId;
   log(`remote-cap の cap_id 接頭: ${capId}（center ごとに固定。session の cap_id は ${capId}-<session 名>）`);
   const remotes = createRemoteManager({
     link,

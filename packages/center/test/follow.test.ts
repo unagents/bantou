@@ -58,7 +58,11 @@ function fake(): Fake {
   return f;
 }
 
-function mk(f: Fake, pairServer: string | null = "0.3.1", extra: { now?: () => number; lostAfterMs?: number; retryAfterMs?: number } = {}): Follow {
+function mk(
+  f: Fake,
+  pairServer: string | null = "0.3.1",
+  extra: { now?: () => number; lostAfterMs?: number; retryAfterMs?: number; sessionOfCap?: (capId: string) => string | undefined } = {},
+): Follow {
   return createFollow({ link: f.link, pair: { server: pairServer ?? undefined, protocol: PV }, log: () => {}, ...extra });
 }
 
@@ -348,4 +352,76 @@ test("versionOf: center の版・server の版・更新の状態を返す。serv
   assert.ok(i.detail.length <= 200);
   assert.equal(fl.versionOf({ peer: "id-other" }), undefined);
   assert.equal(fl.versionOf({ server_id: "nope" }), undefined);
+});
+
+test("updating: server が返す待ちの中身（run・session・経過・上限）を detail・versionOf・gate の error に出す", async () => {
+  const f = fake();
+  const t = Date.parse("2026-11-21T05:22:00.000Z");
+  const fl = mk(f, "0.3.1", {
+    now: () => t,
+    sessionOfCap: (cid) => (cid.startsWith("c-0123456789-") ? cid.slice("c-0123456789-".length) : undefined),
+  });
+  f.helloReply = () =>
+    hello({
+      update: {
+        state: "waiting",
+        from: "0.3.0",
+        to: "0.3.1",
+        running: { caps: 1, workers: 1, reports: 0 },
+        since: "2026-11-21T05:10:00.000Z",
+        deadline: "2026-11-21T05:40:00.000Z",
+        runs: [
+          { kind: "cap", id: "c-0123456789-mflow", started_at: "2026-11-21T05:14:00.000Z", phase: "running" },
+          { kind: "worker", id: "w-1", cap_id: "c-9999999999-x", started_at: "2026-11-21T05:19:00.000Z", phase: "running" },
+        ],
+      },
+    });
+  await fl.check();
+  const e = only(fl);
+  assert.equal(e.state, "updating");
+  assert.match(e.detail, /cap 1 \/ worker 1/);
+  assert.match(e.detail, /session mflow の cap 実行 8 分/);
+  assert.match(e.detail, /cap c-9999999999-x の worker w-1 実行 3 分/);
+  assert.match(e.detail, /待機 12 分/);
+  assert.match(e.detail, /2026-11-21T05:40:00\.000Z（上限）/);
+  const info = fl.versionOf({ peer: "id-1" });
+  assert.equal(info?.update?.since, "2026-11-21T05:10:00.000Z");
+  assert.equal(info?.update?.deadline, "2026-11-21T05:40:00.000Z");
+  assert.deepEqual(info?.update?.runs?.map((r) => `${r.kind}:${r.id}:${r.session ?? "-"}`), ["cap:c-0123456789-mflow:mflow", "worker:w-1:-"]);
+  const g = fl.gate({ id: "id-1" }, "task");
+  assert.equal(g?.code, "updating");
+  assert.match(g?.message ?? "", /^server 更新待ち（0\.3\.0→0\.3\.1）。.*再送。待っている run: cap 1 \/ worker 1（session mflow の cap 実行 8 分/);
+  assert.equal(g?.update?.runs?.length, 2);
+  assert.equal(g?.update?.deadline, "2026-11-21T05:40:00.000Z");
+});
+
+test("updating: 旧 server（件数だけ）でも gate の error に件数と updating になった時刻を出す", async () => {
+  const f = fake();
+  const fl = mk(f);
+  await fl.check();
+  const g = fl.gate({ id: "id-1" }, "kick_cap");
+  assert.match(g?.message ?? "", /待っている run: cap 1 \/ worker 2/);
+  // update_conflict は待ちの中身が無い: detail と時刻を出す
+  const f2 = fake();
+  f2.updateReply = () => err("別の更新が進行中（0.3.0 -> 0.3.2）", { code: "update_conflict", retryable: true });
+  const fl2 = mk(f2);
+  await fl2.check();
+  assert.match(fl2.gate({ id: "id-1" }, "task")?.message ?? "", /別の更新が進行中.*から）$/);
+});
+
+test("updating のまま発見に残る server が hello に答えなければ、lostAfterMs 後に lost にして断るのをやめる", async () => {
+  const f = fake();
+  let t = 0;
+  const fl = mk(f, "0.3.1", { now: () => t, lostAfterMs: 60_000 });
+  await fl.check();
+  assert.equal(only(fl).state, "updating");
+  f.helloReply = () => err("応答なし");
+  t = 30_000;
+  await fl.check();
+  assert.equal(only(fl).state, "updating");
+  assert.equal(fl.gate({ id: "id-1" }, "task")?.code, "updating");
+  t = 61_000;
+  await fl.check();
+  assert.equal(only(fl).state, "lost");
+  assert.equal(fl.gate({ id: "id-1" }, "task"), undefined);
 });
