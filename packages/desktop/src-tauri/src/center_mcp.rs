@@ -17,7 +17,7 @@ use crate::terminal::clip_body;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tauri::Manager;
 
@@ -84,12 +84,41 @@ fn redact_url(url: &str) -> String {
 /// picked in the settings (`bind`) is only for the connection settings handed to others.
 const SIDECAR_HOST: &str = "127.0.0.1";
 
+/// Env var that hands our sidecar center the launcher key, and the header that carries it on calls to that sidecar.
+/// The center treats only those calls as coming from the place that started it (the center's `launcher.ts`): they may read
+/// and write the center-internal settings (extra MCP servers, external memory). A pasted remote center never gets the key.
+pub const LAUNCHER_KEY_ENV: &str = "BANTOU_CENTER_LAUNCHER_KEY";
+const LAUNCHER_HEADER: &str = "x-bantou-launcher";
+/// The URL our running sidecar answers on (set when it is started, cleared when it is stopped).
+static LAUNCHER_URL: Mutex<Option<String>> = Mutex::new(None);
+
+/// The launcher key of this app run (random, never stored).
+pub fn launcher_key() -> &'static str {
+    static KEY: OnceLock<String> = OnceLock::new();
+    KEY.get_or_init(crate::center::mint_token)
+}
+
+/// The MCP URL of our own sidecar on `port`.
+pub fn sidecar_url(port: u32) -> String {
+    format!("http://{}:{}{MCP_PATH}", SIDECAR_HOST, port)
+}
+
+/// Record (or clear) the URL of the sidecar we started: calls to it carry the launcher key.
+pub(crate) fn set_launcher_url(url: Option<String>) {
+    *LAUNCHER_URL.lock().unwrap() = url;
+}
+
+/// The launcher key when `url` is our running sidecar, else None.
+fn launcher_for(url: &str) -> Option<&'static str> {
+    (LAUNCHER_URL.lock().unwrap().as_deref() == Some(url)).then(launcher_key)
+}
+
 /// Where to connect: our own sidecar when the center is enabled (a stored `remote` is kept but
 /// ignored), else the stored `remote` if any, else nowhere.
 pub fn select_target(s: &CenterSettings) -> Option<Target> {
     if s.enabled {
         return Some(Target {
-            url: format!("http://{}:{}{MCP_PATH}", SIDECAR_HOST, s.port),
+            url: sidecar_url(s.port),
             token: Some(s.token.clone()).filter(|t| !t.is_empty()),
             source: TargetSource::Sidecar,
         });
@@ -241,6 +270,9 @@ impl CenterClient {
             .body(body.to_string());
         if let Some(t) = token {
             req = req.header("authorization", format!("Bearer {t}"));
+        }
+        if let Some(k) = launcher_for(url) {
+            req = req.header(LAUNCHER_HEADER, k);
         }
         if let Some(s) = session {
             if let Some(id) = &s.id {
@@ -857,6 +889,27 @@ mod tests {
         for r in &g.log {
             assert_eq!(r.headers.get("authorization").map(String::as_str), Some("Bearer tok-abcdefghij"));
         }
+    }
+
+    #[tokio::test]
+    async fn only_the_own_sidecar_gets_the_launcher_key() {
+        let own = Mock::start();
+        let other = Mock::start();
+        set_launcher_url(Some(own.url.clone()));
+        let client = CenterClient::default();
+        client.call_tool(&own.url, None, "center_settings_get", None).await.unwrap();
+        let client2 = CenterClient::default();
+        client2.call_tool(&other.url, None, "center_settings_get", None).await.unwrap();
+        set_launcher_url(None);
+        let key = launcher_key();
+        assert!(key.len() >= 16);
+        for r in &own.state.lock().unwrap().log {
+            assert_eq!(r.headers.get(LAUNCHER_HEADER).map(String::as_str), Some(key));
+        }
+        for r in &other.state.lock().unwrap().log {
+            assert_eq!(r.headers.get(LAUNCHER_HEADER), None);
+        }
+        assert_eq!(launcher_for(&own.url), None, "cleared when the sidecar stops");
     }
 
     #[tokio::test]

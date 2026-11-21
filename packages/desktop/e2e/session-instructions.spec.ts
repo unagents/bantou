@@ -559,7 +559,8 @@ test.describe("restart from the gear", () => {
   });
 });
 
-test.describe("external memory is not a screen setting", () => {
+// Only the place that started the center (the desktop running it as its sidecar) shows and writes them: see settings-mcp-servers.spec.ts.
+test.describe("external memory and extra MCP servers on a screen that did not start the center", () => {
   test.use({ seed: boardSeed });
   const URL_ = "http://mem.local:3000/mcp";
   const common = (page: Page) => mock(page, (m) => (m as unknown as { centerCommonSettings: Record<string, unknown> }).centerCommonSettings);
@@ -569,26 +570,28 @@ test.describe("external memory is not a screen setting", () => {
   test("the center-wide settings and a session's settings have no memory fields, and nothing of the stored memory is shown", async ({ page }) => {
     await page.goto("/");
     await mock(page, (m) => {
+      (m as unknown as { centerLauncher: boolean }).centerLauncher = false;
       (m as unknown as { centerCommonSettings: Record<string, unknown> }).centerCommonSettings = { memory: { url: "http://mem.local:3000/mcp", token: "SECRET-TOKEN-1", agentId: "pm_1" } };
       m.centerSettings.careery = { memory: { url: "http://mem.local:3000/mcp", token: "SESSION-SECRET" } };
     });
     await page.getByTestId("open-settings").click();
     const dlg = page.getByTestId("settings-dialog");
     await expect(page.getByTestId("center-common-section-instructions")).toBeVisible();
-    for (const id of ["center-common-section-memory", "center-common-memory-url", "center-common-memory-token", "center-common-memory-agent-id"]) await expect(dlg.getByTestId(id)).toHaveCount(0);
+    for (const id of ["center-common-section-memory", "center-common-memory", "center-common-section-mcp-servers", "center-common-mcp-servers"]) await expect(dlg.getByTestId(id)).toHaveCount(0);
     await expect(dlg.getByText("外部記憶")).toHaveCount(0);
     for (const secret of [URL_, "SECRET-TOKEN-1", "pm_1"]) expect(await dlg.innerHTML()).not.toContain(secret);
     await page.keyboard.press("Escape");
     await page.locator("[data-testid=session-settings-open][data-name=careery]").click();
     const sdlg = page.getByTestId("settings-dialog");
-    for (const id of ["settings-section-memory", "settings-memory-url", "settings-memory-token"]) await expect(sdlg.getByTestId(id)).toHaveCount(0);
+    for (const id of ["settings-section-memory", "settings-memory", "settings-section-mcp-servers", "settings-mcp-servers"]) await expect(sdlg.getByTestId(id)).toHaveCount(0);
     for (const secret of [URL_, "SESSION-SECRET"]) expect(await sdlg.innerHTML()).not.toContain(secret);
   });
 
   test("saving from the screen sends no memory and leaves the memory the center holds (common and per session)", async ({ page }) => {
     await page.goto("/");
-    const stored = { memory: { url: URL_, token: "SECRET-TOKEN-1", agentId: "pm_1" } };
+    const stored = { memory: { type: "http", url: URL_, headers: { Authorization: "Bearer SECRET-TOKEN-1", "X-Agent-Id": "pm_1" } } };
     await mock(page, (m) => {
+      (m as unknown as { centerLauncher: boolean }).centerLauncher = false;
       (m as unknown as { centerCommonSettings: Record<string, unknown> }).centerCommonSettings = { memory: { url: "http://mem.local:3000/mcp", token: "SECRET-TOKEN-1", agentId: "pm_1" } };
       m.centerSettings.careery = { memory: { url: "http://mem.local:3000/mcp", token: "SESSION-SECRET" } };
     });
@@ -601,10 +604,13 @@ test.describe("external memory is not a screen setting", () => {
     await page.getByTestId("settings-instructions").fill("個別");
     await page.getByTestId("settings-save").click();
     await expect(page.getByTestId("settings-dialog")).toBeHidden();
-    expect(await mock(page, (m) => m.centerSettings.careery)).toEqual({ memory: { url: "http://mem.local:3000/mcp", token: "SESSION-SECRET" }, instructions: "個別" });
+    expect(await mock(page, (m) => m.centerSettings.careery)).toEqual({ memory: { type: "http", url: "http://mem.local:3000/mcp", headers: { Authorization: "Bearer SESSION-SECRET" } }, instructions: "個別" });
     const sent = await updates(page);
     expect(sent.length).toBeGreaterThan(0);
-    for (const a of sent) expect(a).not.toContain("memory");
+    for (const a of sent) {
+      expect(a).not.toContain("memory");
+      expect(a).not.toContain("mcpServers");
+    }
   });
 
   test("the add dialog has no memory fields and session_create carries no memory", async ({ page }) => {

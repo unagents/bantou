@@ -487,6 +487,7 @@ impl Center {
     }
 
     async fn stop_locked(&self) {
+        crate::center_mcp::set_launcher_url(None);
         let pid = {
             let mut g = self.inner.lock().unwrap();
             // Cancels any scheduled restart, whether or not a process is alive.
@@ -539,8 +540,11 @@ impl Center {
             .shell()
             .sidecar(SIDECAR_NAME)
             .map_err(|e| e.to_string())?
-            .args(sidecar_args(s, &path));
+            .args(sidecar_args(s, &path))
+            // the center counts calls carrying this key as from the place that started it (center_mcp::launcher_key)
+            .env(crate::center_mcp::LAUNCHER_KEY_ENV, crate::center_mcp::launcher_key());
         let (mut rx, child) = cmd.spawn().map_err(|e| e.to_string())?;
+        crate::center_mcp::set_launcher_url(Some(crate::center_mcp::sidecar_url(s.port)));
         let generation = {
             let mut g = self.inner.lock().unwrap();
             g.generation += 1;

@@ -1,4 +1,4 @@
-import { centerGetSettings } from "../api";
+import { centerCommonSettingsGet, centerGetSettings } from "../api";
 import type { CenterSettings } from "../types";
 
 /**
@@ -25,4 +25,23 @@ export function useHideAddDirs() {
     }
   }
   return { hideAddDirs, refresh };
+}
+
+/**
+ * Whether this screen is the place that started the connected center (the desktop running it as its sidecar): only that
+ * place reads and writes the center-internal settings (extra MCP servers `mcpServers`, external memory `memory`). The center
+ * tells it (`launcher` of `center_settings_get`, from the key the desktop gives its sidecar); a desktop connected to another
+ * host's center and the web get false. False until read, and on a failed read (the fields stay hidden).
+ */
+export function useCenterLauncher() {
+  const launcher = ref(false);
+  async function refresh() {
+    launcher.value = false;
+    try {
+      launcher.value = (await centerCommonSettingsGet()).launcher === true;
+    } catch {
+      launcher.value = false;
+    }
+  }
+  return { launcher, refresh };
 }

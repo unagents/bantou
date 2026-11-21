@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { getSessionSettings, sessionPathHints, sessionRestart, updateSession, updateSessionSettings } from "../api";
-import { useHideAddDirs } from "../composables/centerRole";
+import { useCenterLauncher, useHideAddDirs } from "../composables/centerRole";
 import { draftError, draftOf, emptyDraft, toUpdate, type SettingsDraft } from "../composables/sessionInstructions";
 
 const open = defineModel<boolean>("open", { required: true });
@@ -20,6 +20,8 @@ const actionError = ref<string | null>(null);
 const canPick = ref(false);
 /** Reference folders are left out when this desktop runs no sidecar (they are paths on another host). */
 const { hideAddDirs, refresh: refreshHideAddDirs } = useHideAddDirs();
+/** The extra MCP servers and the external memory are shown only on the place that started the center. */
+const { launcher, refresh: refreshLauncher } = useCenterLauncher();
 const nameInput = ref("");
 const pathInput = ref("");
 const moveDir = ref(true);
@@ -34,6 +36,7 @@ watch(
     pathInput.value = props.path ?? "";
     moveDir.value = true;
     void refreshHideAddDirs();
+    void refreshLauncher();
     sessionPathHints().then((h) => (canPick.value = h.canPick)).catch(() => (canPick.value = false));
     try {
       saved.value = draftOf(await getSessionSettings(props.name));
@@ -66,7 +69,8 @@ const problem = computed(() => draftError(hideAddDirs.value ? { ...draft.value, 
 /** Save what changed. Returns the session's name afterwards (a rename changes it), or null when nothing was saved. */
 async function saveChanges(): Promise<{ name: string; restarted: boolean }> {
   if (settingsDirty.value) {
-    const body = toUpdate(draft.value);
+    // mcpServers / memory go only when changed (and only the launcher shows them; hidden, they equal the saved text)
+    const body = toUpdate(draft.value, { base: saved.value });
     if (hideAddDirs.value) delete body.addDirs;
     await updateSessionSettings(props.name, body);
   }
@@ -150,7 +154,7 @@ async function saveAndRestart() {
           description="OFF なら新しいフォルダを作るだけ（中身は移らない）。移動してもしなくても、以前の会話は引き継がれず新しい会話で始まる"
           data-testid="settings-path-move"
         />
-        <ProjectSettingsFields v-model="draft" id-prefix="settings" :can-pick="canPick" :hide-add-dirs="hideAddDirs" @error="actionError = $event" />
+        <ProjectSettingsFields v-model="draft" id-prefix="settings" :can-pick="canPick" :hide-add-dirs="hideAddDirs" :center-internal="launcher" session-scope @error="actionError = $event" />
         <p v-if="problem" class="text-cork-danger-text text-xs" data-testid="settings-problem">{{ problem }}</p>
         <div class="flex items-center justify-end gap-2">
           <p class="text-cork-muted mr-auto text-xs">{{ hideAddDirs ? "追加指示・出力スタイル" : "追加指示・参照フォルダ・出力スタイル" }}は次の起動から効く。「再起動」で会話を保ったまま（--continue）すぐ効かせる</p>

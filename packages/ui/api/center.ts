@@ -30,11 +30,11 @@ export const centerCall = (name: string, args?: Record<string, unknown>) =>
   getTransport().invoke<McpToolResult>("center_call", { name, arguments: args });
 
 /** The center-wide settings (`center_settings_get`): `{ settings }`, a session's project settings without `servers`. */
-export const centerCommonSettingsGet = () => centerTool<{ settings: CenterCommonSettings }>("center_settings_get");
+export const centerCommonSettingsGet = () => centerTool<{ settings: CenterCommonSettings; launcher?: boolean }>("center_settings_get");
 
 /** Merge `settings` into the center-wide settings (`center_settings_update`; `null` removes an item). Returns the whole settings after. */
 export const centerCommonSettingsUpdate = (settings: CenterCommonSettings) =>
-  centerTool<{ settings: CenterCommonSettings }>("center_settings_update", { settings });
+  centerTool<{ settings: CenterCommonSettings; launcher?: boolean }>("center_settings_update", { settings });
 
 /** Call a center tool and parse its JSON text result. */
 export async function centerTool<T>(name: string, args?: Record<string, unknown>): Promise<T> {
