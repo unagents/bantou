@@ -95,7 +95,7 @@ export interface Config {
   /** headless 実行（claude -p）の設定。 */
   session: SessionConfig;
   /** 自己更新の設定。 */
-  update: { spec: string };
+  update: { spec: string; maxWaitMs?: number };
   /** cap / worker に載せる追加の stdio MCP。name → 定義。 */
   extraMcp?: Record<string, ExtraMcpServer>;
 }
@@ -147,7 +147,11 @@ function parseUpdate(v: unknown, path: string): Config["update"] {
   if (typeof spec !== "string" || !spec.includes("{version}") || spec.startsWith("-") || spec.includes("\0")) {
     throw new Error(`config の update.spec は {version} を含む文字列（- で始められない）: ${path}`);
   }
-  return { spec };
+  const maxWaitMs = v.maxWaitMs;
+  if (maxWaitMs !== undefined && (typeof maxWaitMs !== "number" || !Number.isInteger(maxWaitMs) || maxWaitMs <= 0)) {
+    throw new Error(`config の update.maxWaitMs は正の整数: ${path}`);
+  }
+  return { spec, ...(maxWaitMs !== undefined ? { maxWaitMs } : {}) };
 }
 
 /** 名前の衝突判定用。- と _ を同一視し、大小を区別しない。 */

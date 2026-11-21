@@ -300,6 +300,19 @@ test("hello / update_server / hello_result / update_result", () => {
   assert.ok(isServerReply({ ...helloResult, update: null, last_update: null }));
   assert.equal(isServerReply({ ...helloResult, update: undefined }), false);
   assert.equal(isServerReply({ ...helloResult, update: { ...helloResult.update, state: "x" } }), false);
+  // 待っている run の phase は未知の値（後の版で足したもの）も受け入れる。hello_result 全体を捨てない。kind / id / 型の違う phase は不正
+  const run = { kind: "cap", id: "c-1", started_at: "2026-11-21T05:00:00.000Z", phase: "running" };
+  const withRuns = (runs) => ({ ...helloResult, update: { ...helloResult.update, since: "2026-11-21T05:00:00.000Z", deadline: "2026-11-21T05:30:00.000Z", runs } });
+  assert.ok(isServerReply(withRuns([run, { ...run, phase: "queued" }, { ...run, phase: "preparing" }])));
+  assert.ok(isServerReply(withRuns([{ ...run, phase: "suspended" }])), "未知の phase");
+  assert.deepEqual(parseServerReply(JSON.stringify(withRuns([{ ...run, phase: "suspended" }])))?.update?.runs?.[0]?.phase, "suspended");
+  assert.ok(isServerReply({ ...updateResult, runs: [{ ...run, phase: "suspended" }] }), "update_result も同じ");
+  assert.ok(isServerReply({ bantou: 1, type: "error", ok: false, message: "m", code: "updating", update: withRuns([{ ...run, phase: "suspended" }]).update }), "error の update も同じ");
+  assert.equal(isServerReply(withRuns([{ ...run, phase: 1 }])), false);
+  assert.equal(isServerReply(withRuns([{ ...run, phase: undefined }])), false);
+  assert.equal(isServerReply(withRuns([{ ...run, kind: "x" }])), false);
+  assert.equal(isServerReply(withRuns([{ ...run, id: 1 }])), false);
+  assert.equal(isServerReply(withRuns("x")), false);
   assert.equal(isServerReply({ ...helloResult, last_update: { ...helloResult.last_update, ok: true } }), false);
   assert.equal(isServerReply({ ...helloResult, server_version: 1 }), false);
   assert.ok(isServerReply(updateResult));

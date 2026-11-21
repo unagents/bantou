@@ -155,10 +155,6 @@ test("request: 実行中があれば waiting（すぐ返る）、全部終わっ
     h.running = { caps: 0, workers: 1, reports: 0 };
     await sleep(60);
     assert.deepEqual(h.exits, []);
-    // report 起因の処理が残る間も待つ
-    h.running = { caps: 0, workers: 0, reports: 1 };
-    await sleep(60);
-    assert.deepEqual(h.exits, []);
     h.running = { caps: 0, workers: 0, reports: 0 };
     await sleep(80);
     assert.deepEqual(h.exits, ["update"]);
@@ -275,6 +271,48 @@ test("update.json を書けなければ更新を中止し、update_failed を返
     await assert.rejects(c.request("0.3.1"), (e: unknown) => e instanceof UpdateError && e.code === "update_failed");
     assert.equal(c.isUpdating(), false);
     assert.deepEqual(h.exits, []);
+    c.close();
+  });
+});
+
+test("request: reports（report 起因の処理）だけが残っていても待たない（cap の run は caps に数えられる）", async () => {
+  await withDir(async (dir) => {
+    const h = harness(dir);
+    h.running = { caps: 1, workers: 0, reports: 1 };
+    const c = createUpdateController(h.deps);
+    assert.equal((await c.request("0.3.1")).state, "waiting");
+    h.running = { caps: 0, workers: 0, reports: 1 };
+    await sleep(80);
+    assert.deepEqual(h.exits, ["update"]);
+    c.close();
+  });
+});
+
+test("request: 待機に上限がある。越えたら残りがあっても再起動し、log に待っていた run を出す", async () => {
+  await withDir(async (dir) => {
+    let t = Date.parse("2026-11-21T05:10:00.000Z");
+    const h = harness(dir, {
+      maxWaitMs: 60_000,
+      now: () => new Date(t),
+      runs: () => [{ kind: "cap", id: "c-other", started_at: "2026-11-21T05:00:00.000Z", phase: "running" }],
+    });
+    h.running = { caps: 1, workers: 0, reports: 0 };
+    const c = createUpdateController(h.deps);
+    const r = await c.request("0.3.1");
+    assert.equal(r.state, "waiting");
+    assert.equal(r.since, "2026-11-21T05:10:00.000Z");
+    assert.equal(r.deadline, "2026-11-21T05:11:00.000Z");
+    assert.deepEqual(r.runs, [{ kind: "cap", id: "c-other", started_at: "2026-11-21T05:00:00.000Z", phase: "running" }]);
+    const p = c.progress();
+    assert.equal(p?.since, "2026-11-21T05:10:00.000Z");
+    assert.equal(p?.runs?.[0]?.id, "c-other");
+    await sleep(60);
+    assert.deepEqual(h.exits, []);
+    t += 60_000;
+    await sleep(60);
+    assert.deepEqual(h.exits, ["update"]);
+    assert.equal((await readUpdateFile(dir))?.state, "restart");
+    assert.ok(h.logs.some((l) => l.includes("上限") && l.includes("cap:c-other")), h.logs.join("\n"));
     c.close();
   });
 });

@@ -12,9 +12,11 @@ import {
   type ServerCommand,
   type ServerIdentityFields,
   type ServerReply,
+  type UpdateProgress,
+  type UpdateWaitRun,
 } from "@agent-hand/bantou-protocol";
 import { createActivityTracker } from "./activity";
-import { createAgentManager, type AgentManager, type RunExtras } from "./agents";
+import { createAgentManager, type ActiveRun, type AgentManager, type RunExtras } from "./agents";
 import { createWorkerCleaner } from "./cleanup";
 import { loadConfig } from "./config";
 import { buildIdentity, loadOrCreateServerId } from "./identity";
@@ -141,9 +143,11 @@ export async function execute(
         type: "stop_result",
         ok: true,
         cap_id: cmd.cap_id,
-        stopped: r.stopped,
+        // cap の run か、その cap の worker を 1 つでも止めたら true。worker の数は workers_stopped
+        stopped: r.stopped || r.workers_stopped > 0,
         session_cleared: r.session_cleared,
         previous_session_id: r.previous_session_id,
+        workers_stopped: r.workers_stopped,
       };
     }
     if (cmd.type === "resume_worker") {
@@ -171,18 +175,59 @@ export async function execute(
   }
 }
 
-/** 更新待機中に断る kick_cap / task の error。center は同じ指示を再送できる。 */
-export function updatingError(cmd: { cap_id: string; task_id?: string }, update: { from: string; to: string }): ServerReply {
+/** 待っている run を短く並べる上限。 */
+const WAIT_RUNS_IN_MESSAGE = 5;
+
+const minutesSince = (iso: string | undefined, nowMs: number): number | undefined => {
+  if (iso === undefined) return undefined;
+  const t = Date.parse(iso);
+  return Number.isNaN(t) ? undefined : Math.max(0, Math.floor((nowMs - t) / 60_000));
+};
+
+/**
+ * 更新が何を待っているかの一文（server の断りと center の表示で同じ形）。
+ * 例: 「待機 12 分、2026-11-21T14:40:00.000Z（上限）に残りを止めて再起動。待っている run: cap 1 / worker 2（cap:c-1 実行 8 分、worker:w-2[cap c-1] 実行 3 分）」
+ * 経過と上限を先に置く（表示で長さを切られても残るように）。
+ */
+export function describeUpdateWait(update: UpdateProgress, nowMs = Date.now()): string {
+  const r = update.running;
+  const runs = update.runs ?? [];
+  const items = runs.slice(0, WAIT_RUNS_IN_MESSAGE).map((x) => {
+    const m = minutesSince(x.started_at, nowMs);
+    const owner = x.kind === "worker" && x.cap_id ? `[cap ${x.cap_id}]` : "";
+    return `${x.kind}:${x.id}${owner} ${PHASE_WORD[x.phase] ?? String(x.phase)}${m !== undefined ? ` ${m} 分` : ""}`;
+  });
+  const more = runs.length > WAIT_RUNS_IN_MESSAGE ? ` ほか ${runs.length - WAIT_RUNS_IN_MESSAGE} 件` : "";
+  const head = `待っている run: cap ${r.caps} / worker ${r.workers}${items.length > 0 ? `（${items.join("、")}${more}）` : ""}`;
+  const waited = minutesSince(update.since, nowMs);
+  const tail = [
+    waited !== undefined ? `待機 ${waited} 分` : undefined,
+    update.deadline !== undefined ? `${update.deadline}（上限）に残りを止めて再起動` : undefined,
+  ].filter((x) => x !== undefined);
+  return `${tail.length > 0 ? `${tail.join("、")}。` : ""}${head}`;
+}
+
+const PHASE_WORD: Partial<Record<string, string>> & Record<UpdateWaitRun["phase"], string> = { running: "実行", preparing: "準備", queued: "待ち" };
+
+/** 更新待機中に断る kick_cap / task の error。center は同じ指示を再送できる。何を待っているか（update）を載せる。 */
+export function updatingError(
+  cmd: { cap_id: string; task_id?: string },
+  update: { from: string; to: string } | UpdateProgress,
+): ServerReply {
+  const progress = "running" in update ? update : undefined;
   return {
     bantou: PROTOCOL_VERSION,
     type: "error",
     ok: false,
-    message: `server 更新待ち（${update.from}→${update.to}）。実行中の cap/worker の終了後に再起動する。再起動後に再送`,
+    message:
+      `server 更新待ち（${update.from}→${update.to}）。実行中の cap/worker の終了後に再起動する。再起動後に再送` +
+      (progress ? `。${describeUpdateWait(progress)}` : ""),
     command: cmd.task_id !== undefined ? "task" : "kick_cap",
     cap_id: cmd.cap_id,
     ...(cmd.task_id !== undefined ? { task_id: cmd.task_id } : {}),
     code: "updating",
     retryable: true,
+    ...(progress ? { update: progress } : {}),
   };
 }
 
@@ -284,6 +329,7 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
     holdCap: (capId) => tracker.holdCap(capId),
     releaseCap: (capId) => tracker.releaseCap(capId),
     capOf: (workerId) => tracker.snapshot().find((a) => a.kind === "worker" && a.id === workerId)?.cap_id,
+    isClosed: (capId) => manager.isClosed(capId),
     log,
   });
   const manager = createAgentManager({ config, runner: cliRunner, log, observer: exitWatcher.wrap(tracker), runExtras });
@@ -298,6 +344,12 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
   const workerHub = createWorkerHub({ workspace: config.workspace, manager, activity: tracker, log, cleaner });
   const reaped = await manager.reapOrphans();
   log(`孤児回収: killed=${reaped.killed} failed=${reaped.failed} error=${reaped.errored}`);
+  // 閉じた cap の印（再起動をまたぐ）。worker の終了の回収（exitWatcher.recover）より前に読む
+  const closedCount = await manager.loadClosed().catch((e: unknown) => {
+    log(`閉じた cap の印を読めない: ${e instanceof Error ? e.message : String(e)}`);
+    return 0;
+  });
+  if (closedCount > 0) log(`閉じた cap: ${closedCount} 件（worker の report / 終了で起こさない）`);
 
   const { port: wantPort, bind, discovery, token } = config.broker;
   const broker = await startBroker({
@@ -325,16 +377,34 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
   log(`mcp 起動: url=${mcpUrl} bind=${config.mcp.bind}`);
 
   let closing = false;
-  /** kick_cap の受け付けから返信までの件数（manager に登録される前の隙間も含めて、更新の再起動を待たせる）。 */
-  let kicking = 0;
+  /**
+   * kick_cap / task の受け付けから返信までの件数（cap ごと）。更新の再起動を待たせるのは、manager にまだ載っていない
+   * （受け付けの直後・run の後の返信の送信中）の分だけ。載っている間は manager の activeRuns（生きている run）が決める。
+   */
+  const kicking = new Map<string, number>();
+  /** 更新が待つ run: 生きている（または準備中の）run のうち、閉じた cap の worker を除く（閉じた cap は起こさないので、その worker の結果を待つ者は居ない）。 */
+  const waitRuns = (): ActiveRun[] =>
+    manager.activeRuns().filter((r) => !(r.kind === "worker" && r.capId !== undefined && manager.isClosed(r.capId)));
   const serverVersion = deps.serverVersion ?? "unknown";
   const update = createUpdateController({
     workspace: config.workspace,
     serverVersion,
     identity,
     specTemplate: config.update.spec,
-    running: () => ({ ...manager.activeCount(), reports: hub.pendingCount() }),
-    extraBusy: () => kicking,
+    running: () => {
+      const runs = waitRuns();
+      return { caps: runs.filter((r) => r.kind === "cap").length, workers: runs.filter((r) => r.kind === "worker").length, reports: hub.pendingCount() };
+    },
+    runs: () =>
+      waitRuns().map((r) => ({
+        kind: r.kind,
+        id: r.id,
+        ...(r.capId !== undefined && r.kind === "worker" ? { cap_id: r.capId } : {}),
+        started_at: r.startedAt,
+        phase: r.phase,
+      })),
+    extraBusy: () => [...kicking.keys()].filter((capId) => !manager.isActive("cap", capId)).length,
+    maxWaitMs: config.update.maxWaitMs,
     fetch: deps.updateFetch,
     requestExit: (reason) => (deps.requestExit ?? (() => log("終了を頼む先が無いため再起動できない")))(reason),
     log,
@@ -395,7 +465,7 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
   const inflight = new Set<Promise<void>>();
 
   const handle = async (m: InboundMessage): Promise<void> => {
-    let counted = false;
+    let counted: string | undefined;
     try {
       if (m.mode === "ping") return;
       const from = `${m.from_name}(${m.from_id})`;
@@ -424,13 +494,13 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
       } else if ((cmd.type === "kick_cap" || cmd.type === "task") && update.isUpdating()) {
         // 更新待機中は新しい指示を受け付けず、理由付きで断る（center は再起動後に再送できる）
         const p = update.progress();
-        reply = updatingError(cmd.type === "task" ? { cap_id: cmd.cap_id, task_id: cmd.task_id } : cmd, { from: serverVersion, to: p?.to ?? "?" });
+        reply = updatingError(cmd.type === "task" ? { cap_id: cmd.cap_id, task_id: cmd.task_id } : cmd, p ?? { from: serverVersion, to: "?" });
         // 断っても、通知先は今の center にしておく（cap が動いていれば、その通知は今の center へ）
         await hub.noteCenter(cmd.cap_id, m.from_id, m.from_name || undefined);
       } else {
         if (cmd.type === "kick_cap" || cmd.type === "task") {
-          kicking++;
-          counted = true;
+          kicking.set(cmd.cap_id, (kicking.get(cmd.cap_id) ?? 0) + 1);
+          counted = cmd.cap_id;
           // 以降この cap の結果（report 起因の resume を含む）はこの center へ返す。名前で覚える（peer id は center の再起動で変わる）
           await hub.rememberCenter(cmd.cap_id, m.from_id, m.from_name || undefined);
           // 以降の worker_report と report 起因の task_result はこの task_id を付ける
@@ -453,7 +523,11 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
       log(`エラー: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       // 返信を出し切るまで更新の再起動を待たせる
-      if (counted) kicking--;
+      if (counted !== undefined) {
+        const n = (kicking.get(counted) ?? 1) - 1;
+        if (n > 0) kicking.set(counted, n);
+        else kicking.delete(counted);
+      }
     }
   };
 

@@ -13,7 +13,8 @@ Environment=BANTOU_HOME=@HOME@
 Environment=CLAUDE_CONFIG_DIR=@HOME@/.claude
 Environment=GIT_CONFIG_GLOBAL=@HOME@/.config/git/gitconfig
 Environment=PATH=@HOME@/.local/bin:@HOME@/.bun/bin:@NODE_BIN@:/usr/local/bin:/usr/bin:/bin
-ExecStart=@NPX@ -y bantou@@VERSION@ --config @HOME@/config.json
+# --prefer-online: npx の cache（~/.npm/_npx と packument の cache）にある古い版で起動しないよう、registry に版を問い直す（latest の時に効く）
+ExecStart=@NPX@ -y --prefer-online bantou@@VERSION@ --config @HOME@/config.json
 # 自己更新（supervisor の入れ替え）は launcher（この unit の main pid）の下で起きる。launcher が落ちたら OS が戻す
 Restart=always
 RestartSec=10

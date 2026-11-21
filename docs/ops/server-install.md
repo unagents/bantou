@@ -65,7 +65,7 @@ rm -rf "$WORK"
 
 - 既定: user=`bantou`、home=`/home/bantou`（macOS は `/Users/bantou`。`/var/lib/bantou` にしたい時は `--home`）、version=`latest`。**`--version` での固定は非推奨**（下記）。
 - やること: ユーザー作成（パスワードログイン不可。HOME が先にあって所有が違えば `chown` で bantou にする。**HOME 直下の 1 つだけで再帰しない**）→ bantou から node が実行できるか検査 → HOME 配下の雛形（`.claude` `.config/git` `.agent-messenger` `.local/bin`、`server.log` を bantou 所有・`640` で先に作成）→ `config.json` / `gitconfig` 生成 → unit（plist）配置 → enable・起動 → 「次に手でやること」を表示。
-- `latest` が既定なのは、`update_server` による自己更新と整合するため。unit の `ExecStart` は `npx -y bantou@<version>` で、restart / host 再起動のたびにこの版を起動する。`latest` なら自己更新後も追従する。`--version` で固定すると、自己更新で版を上げても **restart / host 再起動で固定版に戻る**。
+- `latest` が既定なのは、`update_server` による自己更新と整合するため。unit の `ExecStart` は `npx -y --prefer-online bantou@<version>` で（`--prefer-online` は npx の cache にある古い版で起動しないよう registry に問い直す。無いと restart で cache の古い版が起動することがある。既存の unit は script の再実行で入る。それまでは center の版合わせが組の版へ更新する）、restart / host 再起動のたびにこの版を起動する。`latest` なら自己更新後も追従する。`--version` で固定すると、自己更新で版を上げても **restart / host 再起動で固定版に戻る**。
 - 冪等: 既存のユーザー・config.json・gitconfig・認証は上書きしない。HOME が違う既存ユーザーには die する。unit は内容が変わった時だけ置き換えて **restart する**。内容が同じなら start のみ。
   - 特に **`--version` で固定して設置した後に、`--version` 無しで再実行すると unit が `latest` に変わり restart される**（逆に `--version` を付け直しても同じ）。script は設置の作業に入る**前**に「既存 unit の内容が変わる / restart する / `update_server` で上げた版は unit の版に戻る」を警告表示する。確認だけなら `--dry-run`。
   - restart で実行中の cap / worker は中断されるので、再実行は cap が空の時に行う。

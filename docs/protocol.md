@@ -216,12 +216,15 @@ failed, `state=error` or running. The cap directory, `logs/` (the raw output of 
 session, `reports.jsonl`, `closed.jsonl`) and the workers' directories are kept;
 the discarded session is appended to `logs/closed.jsonl`. Reply: `stop_result`
 `{"bantou":1,"type":"stop_result","ok":true,"cap_id":"cap-a","stopped":true,"session_cleared":true,"previous_session_id":"0b6f...-uuid"}`
-(`stopped` is false when the cap is not running; `session_cleared` is false when there was
+(`stopped` is false when neither the cap nor any of its workers was running; `session_cleared` is false when there was
 no session to discard; both optional fields are absent from a server that only stops, and a
 center must not read absence as "discarded") or `error`. The interrupted
-`kick_cap` gets its own `cap_result` with `ok:false`. Not stopped: queued
-commands behind the running one, and workers the cap started outside its own
-process group (see server README).
+`kick_cap` gets its own `cap_result` with `ok:false`. The cap's workers (running or queued, started by this cap
+with `worker_start`) are stopped too: `workers_stopped` is their number (absent from older servers, which leave
+the workers running). A closed cap is marked (in memory and `logs/closed-mark.json`, kept across server restarts):
+its workers' reports and exits do not resume it, and neither does the recovery of worker exits at server start.
+The next `task` / `kick_cap` from a center removes the mark. Not stopped: queued commands of the cap itself are
+answered with `STOP` (they do not run).
 
 ### `status` — list caps and workers
 
@@ -243,8 +246,9 @@ a center sends it after a restart to take its caps' notices back. A server older
 No other fields. Reply: `hello_result`
 `{"bantou":1,"type":"hello_result","ok":true,"server_version":"0.3.0","protocol_version":"1.8.0","server_id":"srv-0a1b2c3d4e","host":"lenovo","user":"bantou","workspace":"/home/bantou","update":null,"last_update":null}`.
 `server_version` is the npm `bantou` version of the running server. `server_id`, `host`, `user`, `workspace` are the server identity (1.7.0, all optional, see "Server identity" below). `update` is
-`{"state":"waiting"|"restarting","from","to","running":{"caps","workers","reports"}}` while an update is
-in progress. `last_update` is `{"to","ok":false,"error","at"}` for the last update that failed (kept until the
+`{"state":"waiting"|"restarting","from","to","running":{"caps","workers","reports"},"since"?,"deadline"?,"runs"?}` while an update is
+in progress. Optional details (no protocol change; an older center ignores them): `since` = when the wait began, `deadline` = when the
+server restarts even if runs remain, `runs` = the runs counted in `running` (`{"kind":"cap"|"worker","id","cap_id"?,"started_at"?,"phase":"queued"|"preparing"|"running"}`, at most 20). `last_update` is `{"to","ok":false,"error","at"}` for the last update that failed (kept until the
 next attempt). Servers older than protocol `1.3.0` do not know `hello` and do not answer, so a center
 decides by the protocol version the peer declares and sends nothing there.
 
@@ -261,11 +265,18 @@ authentication), then replies `update_result`
 right away. It does **not** wait for the runs. `current` means it already runs that version. A failed fetch is
 an `error` with `code:"update_failed"` (the server keeps serving normally).
 
-While `waiting`, the server restarts itself only after every running cap and worker (and worker reports being
-handled) are done. Meanwhile:
+While `waiting`, the server restarts itself only after every cap and worker command is done: running (the
+`claude -p` process is alive), preparing (before the spawn, between retries, or after the process exited until the
+result is written; a run whose pipes are held open by a leftover grandchild returns after a 5 s grace) and queued behind
+another command. Not counted: workers of a cap closed by `stop_cap` (`stop_cap` stops them; a closed cap is not resumed
+by its workers' reports or exits until the center sends it a new `task` / `kick_cap`), and worker reports being handled
+(`reports` is informational; the cap resume they cause is counted as a cap command). The wait is bounded by the
+server config `update.maxWaitMs` (default 30 minutes): past it the server restarts anyway, and the remaining runs end as
+`server 終了により中断` (their replies reach the center as failures; the conversations are kept, so a resend continues). Meanwhile:
 
 - `kick_cap` and `task` are refused with `error` `{"code":"updating","retryable":true,"command":"kick_cap" or "task","cap_id":...}` (`task` also carries `task_id`)
-  and a reason (`server 更新待ち（<from>→<to>）...再起動後に再送`). The center may send it again after the restart.
+  and a reason (`server 更新待ち（<from>→<to>）...再起動後に再送。待機 <m> 分、<deadline>（上限）に残りを止めて再起動。待っている run: cap <n> / worker <n>（...）`).
+  The error also carries `update` (the same object as `hello_result.update`). The center may send it again after the restart.
 - `stop_cap`, `status` and `hello` are still served. Worker `report` and `worker_start` over MCP are
   still accepted (they belong to the caps that are running).
 - `update_server` with the same version answers `waiting` again; another version is
@@ -669,7 +680,7 @@ a name outside it is refused with an error, never rewritten. Two sessions never 
 | `remote_send` | `goal`, `repo?`, `branch?`, `deliverables?`, `verify?`, `constraints?`, `workers?`, `server?`, `worker_model?` | `{ remote_id, server, serverName, state: "running", created, task_id, worker_model? }` |
 | `remote_create` | same | alias of `remote_send` (same handling) |
 | `worker_reply` | `remote_id?`, `worker_id`, `text`, `server?` | `{ remote_id, server, worker_id, accepted: true }` (sends `worker_reply`; also on `/mcp` for the desktop). Only the caller's cap (no `remote_id` = the caller's cap) |
-| `remote_delete` | `remote_id?`, `server?`, `force?` | `{ remote_id, deleted, stopped, session_cleared, previous_session_id?, warning? }` (`stop_cap` closes the cap on the server: stops the run and discards its conversation; then drop the record. `session_cleared` true = discarded, false = nothing to discard, null = not confirmed (only with `force`, with `warning`). Without `force` an unconfirmed close is an error and the record stays). Only the caller's cap, or the old shared cap named by `remote_id` |
+| `remote_delete` | `remote_id?`, `server?`, `force?` | `{ remote_id, deleted, stopped, session_cleared, previous_session_id?, workers_stopped?, warning? }` (`stop_cap` closes the cap on the server: stops the run and the cap's workers (`workers_stopped` = how many) and discards its conversation; then drop the record. `session_cleared` true = discarded, false = nothing to discard, null = not confirmed (only with `force`, with `warning`). Without `force` an unconfirmed close is an error and the record stays). Only the caller's cap, or the old shared cap named by `remote_id` |
 | `remote_list` | `include_shared?` | `RemoteView[]` of the caller's caps; `include_shared: true` adds the old shared cap (no session) |
 | `remote_wait` | `remote_id?`, `server?`, `timeout_sec?` | the finished `RemoteView`. Only the caller's caps (or the old shared cap named by `remote_id`) |
 

@@ -291,11 +291,30 @@ export type ServerReplyType =
   | "retire_result"
   | "error";
 
-/** Runs still alive on the server. An update waits until all of them are 0. */
+/**
+ * Runs still alive on the server. An update waits until caps and workers are 0
+ * (commands being run or queued; a closed cap's workers are not counted).
+ * reports = worker reports being handled (informational; the wait does not depend on it).
+ */
 export interface UpdateRunning {
   caps: number;
   workers: number;
   reports: number;
+}
+
+/** One run an update waits for (optional detail; an older center ignores it). */
+export interface UpdateWaitRun {
+  kind: AgentKind;
+  id: string;
+  /** The owner cap of a worker. */
+  cap_id?: string;
+  /** ISO 8601, when this run started. */
+  started_at?: string;
+  /**
+   * queued = behind an earlier command of the same agent; preparing = before the claude process is spawned (clone etc.), between retries, or after it ended until the result is written; running = the process is alive.
+   * A reader must accept other strings (a later server may add phases) and show them as they are; isServerReply does not reject them.
+   */
+  phase: "queued" | "preparing" | "running";
 }
 
 /** An update in progress. waiting = refusing kick_cap until the runs end; restarting = shutting down for the swap. */
@@ -304,7 +323,16 @@ export interface UpdateProgress {
   from: string;
   to: string;
   running: UpdateRunning;
+  /** ISO 8601, when the wait began (optional detail). */
+  since?: string;
+  /** ISO 8601, when the server restarts even if runs remain (optional detail). */
+  deadline?: string;
+  /** The runs counted in running (at most UPDATE_WAIT_RUNS_MAX; optional detail). */
+  runs?: UpdateWaitRun[];
 }
+
+/** Upper bound of UpdateProgress.runs. */
+export const UPDATE_WAIT_RUNS_MAX = 20;
 
 /** The last update that failed (kept by the server until the next attempt). */
 export interface UpdateFailure {
@@ -337,6 +365,10 @@ export interface UpdateResultReply {
   from: string;
   to: string;
   running: UpdateRunning;
+  /** The same optional details as UpdateProgress (while waiting / restarting). */
+  since?: string;
+  deadline?: string;
+  runs?: UpdateWaitRun[];
 }
 
 /** Outcome of one headless run. */
@@ -485,6 +517,8 @@ export interface StopResultReply {
   session_cleared?: boolean;
   /** The session_id that was discarded (null / absent when there was none). Servers that send session_cleared send this too. */
   previous_session_id?: string | null;
+  /** How many of the cap's workers (running or queued) were stopped with it. Absent from older servers, which do not stop workers. */
+  workers_stopped?: number;
 }
 
 /**
@@ -575,6 +609,8 @@ export interface ErrorReply {
   retryable?: boolean;
   /** true = the server is retiring (retire_server accepted) and refuses this command for good. Protocol 1.8.0; an older center ignores it. */
   retiring?: true;
+  /** With code "updating": what the update waits for (optional detail; an older center ignores it). */
+  update?: UpdateProgress;
 }
 
 /**
@@ -775,7 +811,22 @@ function isUpdateProgress(v: unknown): v is UpdateProgress {
     (v.state === "waiting" || v.state === "restarting") &&
     typeof v.from === "string" &&
     typeof v.to === "string" &&
-    isUpdateRunning(v.running)
+    isUpdateRunning(v.running) &&
+    (v.since === undefined || typeof v.since === "string") &&
+    (v.deadline === undefined || typeof v.deadline === "string") &&
+    (v.runs === undefined || (Array.isArray(v.runs) && v.runs.every(isUpdateWaitRun)))
+  );
+}
+
+function isUpdateWaitRun(v: unknown): v is UpdateWaitRun {
+  return (
+    isRecord(v) &&
+    (v.kind === "cap" || v.kind === "worker") &&
+    typeof v.id === "string" &&
+    (v.cap_id === undefined || typeof v.cap_id === "string") &&
+    (v.started_at === undefined || typeof v.started_at === "string") &&
+    // 未知の phase（後の版で足したもの）も受け入れる。厳しく見ると hello_result / update_result / error 全体を捨ててしまう
+    typeof v.phase === "string"
   );
 }
 
@@ -1008,7 +1059,8 @@ export function isServerReply(v: unknown): v is ServerReply {
         isValidAgentId(v.cap_id) &&
         typeof v.stopped === "boolean" &&
         (v.session_cleared === undefined || typeof v.session_cleared === "boolean") &&
-        (v.previous_session_id === undefined || strOrNull(v.previous_session_id))
+        (v.previous_session_id === undefined || strOrNull(v.previous_session_id)) &&
+        (v.workers_stopped === undefined || (typeof v.workers_stopped === "number" && Number.isInteger(v.workers_stopped) && v.workers_stopped >= 0))
       );
     case "status_result":
       return (
@@ -1080,7 +1132,8 @@ export function isServerReply(v: unknown): v is ServerReply {
         (v.task_id === undefined || isValidAgentId(v.task_id)) &&
         (v.code === undefined || isErrorCode(v.code)) &&
         (v.retryable === undefined || typeof v.retryable === "boolean") &&
-        (v.retiring === undefined || v.retiring === true)
+        (v.retiring === undefined || v.retiring === true) &&
+        (v.update === undefined || isUpdateProgress(v.update))
       );
     default:
       return false;

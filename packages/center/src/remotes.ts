@@ -224,6 +224,8 @@ export interface RemoteDeleteResult {
   stopped: boolean;
   session_cleared: boolean | null;
   previous_session_id?: string | null;
+  /** 止めた配下の worker の数（worker を止めない旧 server では無い）。 */
+  workers_stopped?: number;
   warning?: string;
 }
 
@@ -1834,6 +1836,7 @@ export function createRemoteManager(opts: {
       let stopped = false;
       let sessionCleared: boolean | null = null;
       let previousSession: string | null | undefined;
+      let workersStopped: number | undefined;
       let warning: string | undefined;
       try {
         const peer = await findPeer(rec);
@@ -1844,6 +1847,7 @@ export function createRemoteManager(opts: {
           if (reply.session_cleared === undefined) throw new Error("server が会話（session）を破棄したことを確認できない（旧版の server。次の指示が同じ会話を resume する）");
           sessionCleared = reply.session_cleared;
           previousSession = reply.previous_session_id;
+          workersStopped = reply.workers_stopped;
         } else throw new Error(reply.type === "error" ? reply.message : "不明な返信");
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -1855,8 +1859,16 @@ export function createRemoteManager(opts: {
       opts.activity?.forget(rec.remote_id, peerOfRec(rec) ?? rec.server);
       wake();
       await persist();
-      log(`remote 削除: ${rec.remote_id} server=${describeServer(refOf(rec))} stopped=${stopped} session_cleared=${sessionCleared}${warning ? ` warning=${warning}` : ""}`);
-      return { remote_id: rec.remote_id, deleted: true, stopped, session_cleared: sessionCleared, ...(previousSession !== undefined ? { previous_session_id: previousSession } : {}), ...(warning ? { warning } : {}) };
+      log(`remote 削除: ${rec.remote_id} server=${describeServer(refOf(rec))} stopped=${stopped}${workersStopped !== undefined ? ` workers_stopped=${workersStopped}` : ""} session_cleared=${sessionCleared}${warning ? ` warning=${warning}` : ""}`);
+      return {
+        remote_id: rec.remote_id,
+        deleted: true,
+        stopped,
+        session_cleared: sessionCleared,
+        ...(previousSession !== undefined ? { previous_session_id: previousSession } : {}),
+        ...(workersStopped !== undefined ? { workers_stopped: workersStopped } : {}),
+        ...(warning ? { warning } : {}),
+      };
     },
 
     async workerReply({ remote_id, server, worker_id, text, owner }) {

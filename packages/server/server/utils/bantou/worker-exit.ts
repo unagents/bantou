@@ -73,6 +73,8 @@ export interface WorkerExitDeps {
   releaseCap: (capId: string) => void;
   /** worker の持ち主 cap（tracker の記録。同期）。 */
   capOf: (workerId: string) => string | undefined;
+  /** stop_cap で閉じた cap か（閉じた cap は worker の終了で再開しない）。 */
+  isClosed?: (capId: string) => boolean;
   log: (msg: string) => void;
   now?: () => number;
 }
@@ -196,6 +198,12 @@ export function createWorkerExitWatcher(deps: WorkerExitDeps): WorkerExitWatcher
     if (kind !== "worker" || o.stopped === true || o.error === STOP_MSG) return;
     const capId = deps.capOf(id);
     if (capId === undefined || capId === "") return;
+    if (deps.isClosed?.(capId) === true) {
+      // 閉じた cap は起こさない。回収（recover）でも拾わないよう済みにする
+      log(`閉じた cap の worker の終了は再開しない: cap_id=${capId} worker_id=${id}`);
+      void markHandled(id, o.startedAt);
+      return;
+    }
     const rs = reportsDuring(id, o.startedAt);
     let cause: ExitCause;
     if (!o.ok) cause = o.timedOut === true ? "timeout" : o.lost ? "lost" : "failed";
@@ -272,6 +280,11 @@ export function createWorkerExitWatcher(deps: WorkerExitDeps): WorkerExitWatcher
         if ((await readHandled(id)) === st.last_started_at) continue;
         const capId = await readOwner(deps.workspace, id);
         if (capId === undefined) continue;
+        if (deps.isClosed?.(capId) === true) {
+          log(`回収: 閉じた cap の worker の終了は再開しない: cap_id=${capId} worker_id=${id}`);
+          await markHandled(id, st.last_started_at);
+          continue;
+        }
         const capSt = await readState(agentDir(deps.workspace, "cap", capId)).catch(() => null);
         if (capSt === null || capSt.session_id === null) continue; // cap が無い・会話が閉じている
         await loadCount(capId);

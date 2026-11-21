@@ -320,3 +320,38 @@ test("runClaude: 成功の result 行から usage を返す", async () => {
     if (r.ok) assert.deepEqual(r.usage, { contextTokens: 112198, contextWindow: 1_000_000 });
   });
 });
+
+test("runClaude: 終了した子の stdout を別 process group の孫が握っていても、猶予の後に結果を返す", async () => {
+  await withFake("", async (_exe, dir) => {
+    const pidFile = join(dir, "grandchild.pid");
+    const exe = join(dir, "fake-claude-orphan");
+    // 孫は detached（別 process group）で stdout / stderr を継ぎ、30 秒残る。子は結果を出してすぐ終わる
+    await writeFile(
+      exe,
+      `#!/usr/bin/env node
+const { spawn } = require("node:child_process");
+const g = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { detached: true, stdio: ["ignore", "inherit", "inherit"] });
+require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(g.pid));
+g.unref();
+process.stdout.write(JSON.stringify({type:"result",subtype:"success",is_error:false,session_id:"sid-1",result:"done"}) + "\\n");
+`,
+    );
+    await chmod(exe, 0o755);
+    const started = Date.now();
+    try {
+      const r = await runClaude({ ...base, claude: exe, cwd: dir, timeoutMs: 20_000, closeGraceMs: 300 });
+      assert.ok(r.ok, JSON.stringify(r));
+      if (r.ok) assert.equal(r.resultText, "done");
+      assert.ok(Date.now() - started < 10_000, `${Date.now() - started}ms`);
+    } finally {
+      const pid = Number(await readFile(pidFile, "utf8").catch(() => "0"));
+      if (pid > 0) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // 既に居ない
+        }
+      }
+    }
+  });
+});

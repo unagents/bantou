@@ -96,6 +96,7 @@ center から server を外す指示（protocol 1.8.0、`docs/protocol.md` の `
 | `session.env` | 任意 | `{}` | spawn する claude に追加で渡す環境変数。文字列値のオブジェクト。bantou-server 自身の環境変数に上書きで合成する |
 | `extraMcp` | 任意 | `{}` | cap / worker に追加で載せる手元の stdio MCP の道具。`{ "<name>": { "command", "args", "env", "targets" } }`（下記「追加の MCP（extraMcp）」） |
 | `update.spec` | 任意 | `"bantou@{version}"` | 自己更新の取得元。`{version}` を更新先の版に置き換えて npx の `--package` に渡す。`{version}` 必須、`-` で始められない。テストでは `file:/path/bantou-{version}.tgz` で npm 未公開の tarball を指せる。本番は指定しない |
+| `update.maxWaitMs` | 任意 | `1800000`（30 分） | 更新の待機の上限。待つのは cap / worker の指示（claude の子が生きている run、準備中や結果を書いている途中の run、待ち行列）で、stop_cap で閉じた cap の worker は数えない（stop_cap がその cap の worker も止める）。上限を越えたら残りの run を「server 終了により中断」で止めて再起動する（center へは失敗の結果として返り、会話は残るので再送で続けられる） |
 
 - `broker` / `mcp` / `session` / `update` は省略可。書く場合はオブジェクト。
 - LAN に公開するには `broker.bind`（例 `0.0.0.0`）を明示する。その場合は `broker.token` の設定を推奨する。
@@ -260,7 +261,7 @@ center から server を外す指示（protocol 1.8.0、`docs/protocol.md` の `
 ```
 
 - **cap を閉じる**: idle / failed / `state=error` / 実行中のどれでも受け付ける。実行中なら下の手順で止め、実行が state.json を書き終えるのを待ってから、cap の会話を破棄する（`state.json` を `session_id: null`・`state: idle`・`retries: 0`・`last_error` 無しに書き直す。`last_started_at` / `last_finished_at` は残す）。次の `task` / `kick_cap` は `--session-id` の新しい会話で始まる（`state=error` で起動を断られていた cap も、閉じると起動できる）。破棄した session は `logs/closed.jsonl` に 1 行追記する（`closed_at` / `session_id` / `reason` / 破棄時点の `conversation`）。
-- **残すもの**: cap の `logs/`（セッションごとの生出力 `<session_id>.jsonl`、`reports.jsonl`、`closed.jsonl`、`model.json`）は消さず、その場に残す。cap dir 直下の他のファイルも触らない。**配下の worker の dir（`workers/<id>/`）は閉じても消さず、止めもしない**（worker は cap の process group の外で動く。止めるなら `worker_stop`。溜まった dir は「終わった worker の掃除」の仕組みが掃除する）。
+- **残すもの**: cap の `logs/`（セッションごとの生出力 `<session_id>.jsonl`、`reports.jsonl`、`closed.jsonl`、`model.json`）は消さず、その場に残す。cap dir 直下の他のファイルも触らない。**配下の worker の dir（`workers/<id>/`）は閉じても消さない**（溜まった dir は「終わった worker の掃除」の仕組みが掃除する）。配下の動いている worker（実行中・待ち。worker は cap の process group の外で動く）は止める（数は `stop_result` の `workers_stopped`）。閉じた cap には印（メモリと `logs/closed-mark.json`。server の再起動をまたぐ）を付け、worker の report・終了、起動時の worker 終了の回収では起こさない。center の次の `task` / `kick_cap` で印を外す。
 - 閉じている間（stop 要求から破棄まで）に同じ cap へ届いた指示は実行されず、`stop_cap により停止` で返る。
 - 走っている `claude -p` を process group ごと SIGTERM し、3 秒以内に終わらなければ SIGKILL する。子は `detached`（setsid）で起動しているので、cap の Bash が起動した孫もこの group にいる限り止まる。
 - 中断された `kick_cap` は `cap_result`（`ok: false`, `error: "stop_cap により停止"`、再試行しない）で返り、state は `failed`。
@@ -284,7 +285,7 @@ center から server を外す指示（protocol 1.8.0、`docs/protocol.md` の `
 { "bantou": 1, "type": "error", "ok": false, "message": "git clone 失敗: ...", "command": "kick_cap" }
 ```
 
-- `stop_result`: `{ "bantou": 1, "type": "stop_result", "ok": true, "cap_id": "cap-a", "stopped": true, "session_cleared": true, "previous_session_id": "0b6f...-uuid" }`。`stopped` = 実行中（または待ち）の指示を止めた。`session_cleared` = 会話を破棄した（cap の dir が無い・session が無い時は false）。この 2 項目は後から足した任意項目（定義に入ったのは protocol 1.8.1。1.8.0 の定義には 2 つの hash があった）。stop_cap の失敗（`cap_id` が不正でない限り通常は無い）は `error`（`command: "stop_cap"`, `cap_id` 付き）。
+- `stop_result`: `{ "bantou": 1, "type": "stop_result", "ok": true, "cap_id": "cap-a", "stopped": true, "session_cleared": true, "previous_session_id": "0b6f...-uuid" }`。`stopped` = cap の実行中（または待ち）の指示か、配下の worker を止めた。`workers_stopped` = 止めた配下の worker の数（任意項目。worker を止めない旧 server には無い）。`session_cleared` = 会話を破棄した（cap の dir が無い・session が無い時は false）。この 2 項目は後から足した任意項目（定義に入ったのは protocol 1.8.1。1.8.0 の定義には 2 つの hash があった）。stop_cap の失敗（`cap_id` が不正でない限り通常は無い）は `error`（`command: "stop_cap"`, `cap_id` 付き）。
 - `cap_result` は claude の実行が終わってから返る。数分かかることがある。
 - 実行が失敗しても `cap_result` で返る（`ok: false` と `error`）。
 - `error` は実行に入る前の失敗（git 失敗、state が `running` / `error` で起動できない、state 破損など）。

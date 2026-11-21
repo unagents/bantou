@@ -36,7 +36,15 @@ export interface ClaudeRunOptions {
   appendSystemPromptFile?: string;
   /** allowedTools に足す。 */
   extraAllowedTools?: string[];
+  /** 子の exit から close（stdout / stderr が閉じる）を待つ上限 ms。既定 CLOSE_GRACE_MS。 */
+  closeGraceMs?: number;
 }
+
+/**
+ * 子が exit した後、close を待つ上限。claude が残した孫（別 process group のものを含む）が stdout / stderr を握ったままだと
+ * close が来ず run が返らない（更新待ち・同じ cap の後続の指示が止まる）。越えたら pipe を閉じて終わったものとして扱う。
+ */
+export const CLOSE_GRACE_MS = 5000;
 
 /** claude の result 行から読んだ、会話の大きさ。読めない項目は null。 */
 export interface ResultUsage {
@@ -280,7 +288,23 @@ export function runClaude(o: ClaudeRunOptions): Promise<ClaudeRunResult> {
       fail(`claude を起動できない: ${e.message}`);
     });
 
-    child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
+    let closeHandled = false;
+    child.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
+      const t = setTimeout(() => {
+        if (closeHandled) return;
+        // 孫が pipe を握っている: こちら側を閉じ、届いた分で結果を読む
+        take(pending);
+        pending = "";
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        onClosed(code, signal);
+      }, o.closeGraceMs ?? CLOSE_GRACE_MS);
+      t.unref?.();
+    });
+    child.on("close", (code: number | null, signal: NodeJS.Signals | null) => onClosed(code, signal));
+    function onClosed(code: number | null, signal: NodeJS.Signals | null): void {
+      if (closeHandled) return;
+      closeHandled = true;
       void (async () => {
         const ws = await logStream;
         if (ws) {
@@ -323,6 +347,6 @@ export function runClaude(o: ClaudeRunOptions): Promise<ClaudeRunResult> {
           ...(details.usage ? { usage: details.usage } : {}),
         });
       })();
-    });
+    }
   });
 }

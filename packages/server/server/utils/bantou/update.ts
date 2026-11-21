@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import {
   isValidServerVersion,
   MESSENGER_PROTOCOL,
+  UPDATE_WAIT_RUNS_MAX,
   PROTOCOL_VERSION,
   type HelloResultReply,
   type ServerIdentityFields,
@@ -11,6 +12,7 @@ import {
   type UpdateProgress,
   type UpdateResultReply,
   type UpdateRunning,
+  type UpdateWaitRun,
   type ErrorCode,
 } from "@agent-hand/bantou-protocol";
 
@@ -22,6 +24,11 @@ export const READY_FILE = "server.ready";
 export const FETCH_TIMEOUT_MS = 300_000;
 /** 待機中に「全部終わったか」を見る間隔。 */
 export const POLL_MS = 1000;
+/**
+ * 待機の上限の既定（ms）。越えたら動いている run が残っていても再起動する（run は「server 終了により中断」で終わり、center へ返る）。
+ * 既定は claude の 1 run の既定の上限（session.timeoutMs）と同じ 30 分。
+ */
+export const MAX_WAIT_MS = 1_800_000;
 
 /** update.json の中身。restart = 子を spec で入れ替える合図、failed = 直近の更新の失敗。 */
 export type UpdateFile =
@@ -138,10 +145,14 @@ export interface UpdateControllerDeps {
   identity?: ServerIdentityFields;
   /** config の update.spec。 */
   specTemplate: string;
-  /** 実行中の件数（cap / worker / report 起因）。 */
+  /** 実行中の件数（cap / worker / report 起因）。待つのは caps と workers（と extraBusy）。reports は表示のみ。 */
   running: () => UpdateRunning;
+  /** 待っている run の中身（cap / worker の id・持ち主 cap・開始時刻）。center へ返して何を待っているか見せる。 */
+  runs?: () => UpdateWaitRun[];
   /** running の件数に出ない、受け付け済みで未登録の指示の数（0 になるまで再起動しない）。 */
   extraBusy?: () => number;
+  /** 待機の上限 ms。越えたら残りがあっても再起動する。既定 MAX_WAIT_MS。 */
+  maxWaitMs?: number;
   /** 取得確認。既定は npx。 */
   fetch?: (spec: string, version: string) => Promise<void>;
   /** 再起動のための終了を頼む（plugin の shutdown）。 */
@@ -169,19 +180,32 @@ export function createUpdateController(deps: UpdateControllerDeps): UpdateContro
   const fetchFn = deps.fetch ?? ((spec: string, version: string) => verifyFetch(spec, version));
   const now = deps.now ?? (() => new Date());
   const pollMs = deps.pollMs ?? POLL_MS;
-  let state: { phase: "waiting" | "restarting"; to: string; spec: string } | null = null;
+  const maxWaitMs = deps.maxWaitMs ?? MAX_WAIT_MS;
+  let state: { phase: "waiting" | "restarting"; to: string; spec: string; since: number } | null = null;
   let fetching: { to: string; p: Promise<void> } | null = null;
   let lastFailure: UpdateFailure | null = null;
   let timer: ReturnType<typeof setInterval> | undefined;
 
   const currentState = (): typeof state => state;
 
-  const progress = (): UpdateProgress | null =>
-    state ? { state: state.phase, from: serverVersion, to: state.to, running: deps.running() } : null;
+  const progress = (): UpdateProgress | null => {
+    if (!state) return null;
+    const runs = deps.runs?.();
+    return {
+      state: state.phase,
+      from: serverVersion,
+      to: state.to,
+      running: deps.running(),
+      since: new Date(state.since).toISOString(),
+      deadline: new Date(state.since + maxWaitMs).toISOString(),
+      ...(runs !== undefined ? { runs: runs.slice(0, UPDATE_WAIT_RUNS_MAX) } : {}),
+    };
+  };
 
+  /** 本当に動いている run（caps / workers）と受け付け中の指示が無いか。reports（report 起因の処理）は cap の run として数えに入るので見ない。 */
   const idle = (): boolean => {
     const r = deps.running();
-    return r.caps === 0 && r.workers === 0 && r.reports === 0 && (deps.extraBusy?.() ?? 0) === 0;
+    return r.caps === 0 && r.workers === 0 && (deps.extraBusy?.() ?? 0) === 0;
   };
 
   const stopTimer = (): void => {
@@ -191,7 +215,15 @@ export function createUpdateController(deps: UpdateControllerDeps): UpdateContro
 
   /** 全部終わっていれば restart の合図を書いて終了を頼む。 */
   async function check(): Promise<void> {
-    if (!state || state.phase !== "waiting" || !idle()) return;
+    if (!state || state.phase !== "waiting") return;
+    if (!idle()) {
+      const waited = now().getTime() - state.since;
+      if (waited < maxWaitMs) return;
+      // 上限を越えた: 残りの run を待たずに再起動する（run は shutdown で「server 終了により中断」として center へ返る。会話は残るので再送で続けられる）
+      const r = deps.running();
+      const names = (deps.runs?.() ?? []).map((x) => `${x.kind}:${x.id}`).join(" ");
+      log(`更新待機の上限（${Math.round(maxWaitMs / 60_000)} 分）を越えたので再起動する: caps=${r.caps} workers=${r.workers} reports=${r.reports} extra=${deps.extraBusy?.() ?? 0}${names ? ` runs=${names}` : ""}`);
+    }
     state.phase = "restarting";
     stopTimer();
     const { to, spec } = state;
@@ -209,11 +241,18 @@ export function createUpdateController(deps: UpdateControllerDeps): UpdateContro
   }
 
   function startWaiting(to: string, spec: string): void {
-    state = { phase: "waiting", to, spec };
+    state = { phase: "waiting", to, spec, since: now().getTime() };
     lastFailure = null;
     timer = setInterval(() => void check(), pollMs);
     timer.unref?.();
   }
+
+  /** 進行中の更新の詳細（since / deadline / runs）。to の更新でなければ空。 */
+  const detailOf = (to: string): Pick<UpdateResultReply, "since" | "deadline" | "runs"> => {
+    const p = state && state.to === to ? progress() : null;
+    if (!p) return {};
+    return { since: p.since, deadline: p.deadline, ...(p.runs ? { runs: p.runs } : {}) };
+  };
 
   const result = (st: UpdateResultReply["state"], to: string): UpdateResultReply => ({
     bantou: PROTOCOL_VERSION,
@@ -223,6 +262,7 @@ export function createUpdateController(deps: UpdateControllerDeps): UpdateContro
     from: serverVersion,
     to,
     running: deps.running(),
+    ...detailOf(to),
   });
 
   async function request(version: string): Promise<UpdateResultReply> {
