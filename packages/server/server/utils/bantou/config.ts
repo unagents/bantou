@@ -150,20 +150,32 @@ function parseUpdate(v: unknown, path: string): Config["update"] {
   return { spec };
 }
 
+/** 名前の衝突判定用。- と _ を同一視し、大小を区別しない。 */
+export function normalizeMcpName(name: string): string {
+  return name.toLowerCase().replace(/-/g, "_");
+}
+
 const EXTRA_MCP_KEYS = ["command", "args", "env", "targets"];
 
 function parseExtraMcp(v: unknown, path: string): Record<string, ExtraMcpServer> {
   if (v === undefined) return {};
   if (!isRecord(v)) throw new Error(`config の extraMcp はオブジェクト: ${path}`);
   const out: Record<string, ExtraMcpServer> = {};
+  const seen = new Map<string, string>();
   for (const [name, def] of Object.entries(v)) {
     const where = `extraMcp.${name}`;
     if (!/^[A-Za-z0-9_-]+$/.test(name) || name.includes("__")) {
       throw new Error(`config の extraMcp の名前は英数字・_・- のみで "__" を含まない: ${name} (${path})`);
     }
-    if ((RESERVED_MCP_NAMES as readonly string[]).includes(name)) {
-      throw new Error(`config の extraMcp の名前 ${name} は server の MCP と衝突する（予約名）: ${path}`);
+    const norm = normalizeMcpName(name);
+    if (RESERVED_MCP_NAMES.some((r) => normalizeMcpName(r) === norm)) {
+      throw new Error(`config の extraMcp の名前 ${name} は server の MCP と衝突する（予約名。- と _ ・大小は同一視）: ${path}`);
     }
+    const clash = seen.get(norm);
+    if (clash !== undefined) {
+      throw new Error(`config の extraMcp の名前 ${name} は ${clash} と衝突する（- と _ ・大小は同一視）: ${path}`);
+    }
+    seen.set(norm, name);
     if (!isRecord(def)) throw new Error(`config の ${where} はオブジェクト: ${path}`);
     for (const k of Object.keys(def)) {
       if (!EXTRA_MCP_KEYS.includes(k)) {
@@ -174,15 +186,19 @@ function parseExtraMcp(v: unknown, path: string): Record<string, ExtraMcpServer>
     if (typeof command !== "string" || command.length === 0 || command.includes("\0")) {
       throw new Error(`config の ${where}.command は空でない文字列: ${path}`);
     }
-    const args = def.args ?? [];
+    // 省略（undefined）だけが既定。null は不正として拒否する
+    const args = def.args === undefined ? [] : def.args;
     if (!Array.isArray(args) || args.some((x) => typeof x !== "string" || x.includes("\0"))) {
       throw new Error(`config の ${where}.args は文字列の配列: ${path}`);
     }
-    const env = def.env ?? {};
-    if (!isRecord(env) || Object.entries(env).some(([k, x]) => k.length === 0 || k.includes("=") || typeof x !== "string")) {
+    const env = def.env === undefined ? {} : def.env;
+    if (
+      !isRecord(env) ||
+      Object.entries(env).some(([k, x]) => k.length === 0 || k.includes("=") || k.includes("\0") || typeof x !== "string" || x.includes("\0"))
+    ) {
       throw new Error(`config の ${where}.env は文字列値のオブジェクト: ${path}`);
     }
-    const targets = def.targets ?? ["cap", "worker"];
+    const targets = def.targets === undefined ? ["cap", "worker"] : def.targets;
     if (
       !Array.isArray(targets) ||
       targets.length === 0 ||

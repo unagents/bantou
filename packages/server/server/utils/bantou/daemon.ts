@@ -19,7 +19,7 @@ import { createWorkerCleaner } from "./cleanup";
 import { loadConfig } from "./config";
 import { buildIdentity, loadOrCreateServerId } from "./identity";
 import { log } from "./log";
-import { buildExtraMcp } from "./extra-mcp";
+import { buildExtraMcp, writeMcpConfigFile } from "./extra-mcp";
 import { CAP_ID_HEADER, WORKER_ID_HEADER, type McpListener } from "./mcp";
 import { setBashWorkspace } from "./bash";
 import { agentDir, runLogDir } from "./paths";
@@ -261,7 +261,7 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
     const extra = buildExtraMcp(config.extraMcp ?? {}, kind, log);
     const mcpServers = { bantou: { type: "http", url: mcpUrl, headers }, ...extra.servers };
     // extraMcp の env を含みうるので本人だけが読める mode で書く
-    await writeFile(mcpConfigFile, JSON.stringify({ mcpServers }) + "\n", { mode: 0o600 });
+    await writeMcpConfigFile(mcpConfigFile, { mcpServers });
     await writeFile(appendSystemPromptFile, (kind === "cap" ? CAP_GUIDE : WORKER_GUIDE) + "\n");
     return {
       mcpConfigFile,
