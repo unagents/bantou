@@ -17,7 +17,7 @@ function fakeSupervisor(initial: ProjectConfig[]) {
   const calls: string[] = [];
   /** start が投げる名前。 */
   const failStart = new Set<string>();
-  const opts: { add: Record<string, unknown>; start: Record<string, unknown>; setInstr: Record<string, string>; setDirs: Record<string, string[]>; setStyle: Record<string, string>; setMem: Record<string, unknown>; setCoord: (string | null)[] } = { add: {}, start: {}, setInstr: {}, setDirs: {}, setStyle: {}, setMem: {}, setCoord: [] };
+  const opts: { add: Record<string, unknown>; start: Record<string, unknown>; setInstr: Record<string, string>; setDirs: Record<string, string[]>; setStyle: Record<string, string>; setMem: Record<string, unknown>; setCoord: (string | null)[] } = { add: {}, start: {}, setInstr: {}, setDirs: {}, setStyle: {}, setMem: {} };
   const mk = (p: ProjectConfig): RcStatus => ({
     project: p.name, path: p.path, state: "stopped", pid: null, sessionUrl: null, environmentUrl: null,
     restarts: 0, lastExit: null, startedAt: null, args: null, instructions: false, claude: { path: "claude", source: "PATH" },
@@ -55,9 +55,6 @@ function fakeSupervisor(initial: ProjectConfig[]) {
     },
     setMemory: (n: string, v: unknown) => {
       opts.setMem[n] = v;
-    },
-    setCoordinator: (v: string | null) => {
-      opts.setCoord.push(v);
     },
     status: (n: string) => ({ ...map.get(n)! }),
     list: () => [...map.values()].map((s) => ({ ...s })),
@@ -822,17 +819,49 @@ test("memory: 移行の書き込み失敗中に他項目を更新（updateSettin
   assert.ok(!/memory|SECRET/.test(await readFile(join(dir, "center-settings.json"), "utf8")));
 });
 
-test("coordinator: 起動の時と center 共通の設定の更新で supervisor に渡り、coordinatorOf は呼ぶたびに今の設定を返す", async () => {
-  const { mgr, opts } = setup();
-  assert.equal(mgr.coordinatorOf(), null);
-  await mgr.updateCenterSettings({ coordinator: { session: "main" } });
-  assert.equal(mgr.coordinatorOf(), "main");
-  assert.deepEqual(opts.setCoord, ["main"]);
-  await mgr.updateCenterSettings({ coordinator: null });
-  assert.equal(mgr.coordinatorOf(), null);
-  assert.deepEqual(opts.setCoord, ["main", null]);
-  await mgr.updateCenterSettings({ instructions: "x" });
-  assert.equal(mgr.coordinatorOf(), null);
+test("coordinator 移行: 旧 center-settings.json の coordinator を割り当てへ移し（center 自身が書く）、旧設定から消す。他の項目（旧形式 memory も）は残す。冪等", async () => {
+  const assigned: string[] = [];
+  await writeFile(join(dir, "center-settings.json"), JSON.stringify({ instructions: "共通", coordinator: { session: "main" }, memory: { url: "http://old/mcp" } }));
+  const { mgr } = setup({ assignCoordinator: (s) => (assigned.push(s), true) });
+  await mgr.restore();
+  assert.deepEqual(assigned, ["main"]);
+  const after = JSON.parse(await readFile(join(dir, "center-settings.json"), "utf8")) as Record<string, unknown>;
+  assert.ok(!("coordinator" in after));
+  assert.equal(after.instructions, "共通");
+  assert.deepEqual(mgr.getCenterSettings().settings, { instructions: "共通" });
+  // 2 回目の起動: 旧設定が無いので移行は走らない
+  const { mgr: mgr2 } = setup({ assignCoordinator: (s) => (assigned.push(s), true) });
+  await mgr2.restore();
+  assert.deepEqual(assigned, ["main"]);
+});
+
+test("coordinator 移行: 割り当てを書けなかった時は旧設定を消さず、統括にもしない（次の起動でやり直す）。壊れた旧設定は捨てる", async () => {
+  const logs: string[] = [];
+  await writeFile(join(dir, "center-settings.json"), JSON.stringify({ coordinator: { session: "main" } }));
+  const { mgr } = setup({ assignCoordinator: () => false, log: (m) => logs.push(m) });
+  await mgr.restore();
+  const kept = JSON.parse(await readFile(join(dir, "center-settings.json"), "utf8")) as Record<string, unknown>;
+  assert.deepEqual(kept.coordinator, { session: "main" });
+  assert.ok(logs.some((l) => l.includes("移せなかった")));
+  assert.ok(!("coordinator" in mgr.getCenterSettings().settings));
+  // throw でも同じ
+  const { mgr: m2 } = setup({ assignCoordinator: () => { throw new Error("EACCES"); } });
+  await m2.restore();
+  assert.deepEqual((JSON.parse(await readFile(join(dir, "center-settings.json"), "utf8")) as Record<string, unknown>).coordinator, { session: "main" });
+  // 壊れた値は assign を呼ばずに捨てる
+  await writeFile(join(dir, "center-settings.json"), JSON.stringify({ coordinator: { session: "bad name" }, instructions: "i" }));
+  let called = 0;
+  const { mgr: m3 } = setup({ assignCoordinator: () => (called++, true) });
+  await m3.restore();
+  assert.equal(called, 0);
+  assert.deepEqual(JSON.parse(await readFile(join(dir, "center-settings.json"), "utf8")), { instructions: "i" });
+});
+
+test("coordinator: center 共通の設定の更新（画面・web・MCP の経路）では統括を指定できない。assertCenterOnly が断り、設定は変わらない", async () => {
+  const { mgr } = setup();
+  await assert.rejects(mgr.updateCenterSettings({ coordinator: { session: "main" } } as never), /MCP からは変えられない/);
+  await assert.rejects(mgr.updateCenterSettings({ mcpConnections: {} } as never), /MCP からは変えられない/);
+  assert.deepEqual(mgr.getCenterSettings().settings, {});
 });
 
 test("updateSettings: servers の範囲が変わった時だけ master-cap へ知らせる（新旧の範囲を載せる）。他の項目だけの更新・同じ範囲では知らせない。知らせに失敗しても更新は成功", async () => {

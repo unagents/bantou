@@ -43,10 +43,15 @@ export function createCenterServer(deps: {
 }
 
 /** session 向け窓口（/mcp/session）の MCP server。owner = 認証済みの呼び出し元 session 名。 */
-export function createSessionMcpServer(deps: { remotes: RemoteManager; follow?: Follow; owner: string; coordinator?: CoordinatorDeps }): McpServer {
+export function createSessionMcpServer(deps: { remotes: RemoteManager; follow?: Follow; owner: string }): McpServer {
   const server = new McpServer({ name: "bantou-center-session", version: packageVersion() });
   registerSessionTools(server, { remotes: deps.remotes, owner: deps.owner, ...(deps.follow ? { follow: deps.follow } : {}) });
-  // 統括の道具は、今の統括の session の MCP server にだけ足す（設定が無い・別の session には出ない）
-  if (deps.coordinator && deps.coordinator.session() === deps.owner) registerCoordinatorTools(server, { ...deps.coordinator, owner: deps.owner });
+  return server;
+}
+
+/** 統括の道具だけを出す口（/mcp/coordinator）の MCP server。割り当ての判定は口（http）と道具ごとの両方で行う。 */
+export function createCoordinatorMcpServer(deps: { owner: string; coordinator: CoordinatorDeps }): McpServer {
+  const server = new McpServer({ name: "bantou-center-coordinator", version: packageVersion() });
+  registerCoordinatorTools(server, { ...deps.coordinator, owner: deps.owner });
   return server;
 }

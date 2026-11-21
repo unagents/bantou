@@ -91,8 +91,6 @@ export interface SessionManager {
   serversOf(name: string): string[] | undefined;
   /** その session の外部記憶（共通 + session の合成後）。無ければ undefined。 */
   memoryOf(name: string): MemorySetting | undefined;
-  /** 統括の session の名前（center 共通の設定 coordinator.session。無効 = null）。呼ぶたびに今の設定を返す。 */
-  coordinatorOf(): string | null;
   /** center 共通の設定を項目ごとにマージして保存し、全 session の次の起動に反映する。更新後の全体を返す。servers（null 以外）は error。 */
   updateCenterSettings(patch: CenterSettingsPatch): Promise<{ settings: ProjectSettings }>;
   /**
@@ -116,6 +114,11 @@ export function createSessionManager(opts: {
   centerStore?: JsonObjectStore<ProjectSettings>;
   /** 外部記憶の設定（memory-settings.json。CLI だけが書く）。省略時は外部記憶なし。 */
   memoryFile?: MemoryFile;
+  /**
+   * 旧設定（center-settings.json の coordinator）の移行先: その session に統括の口を割り当てて保存する（mcp-connections.json）。
+   * 割り当てが保存できた（または運用者が明示的に外している）時だけ true。false なら旧設定を消さずに残す。省略時は移行しない（旧設定も残す）。
+   */
+  assignCoordinator?: (session: string) => boolean;
   log: Logger;
   /** create 後、接続（URL 取得）か失敗を待つ上限。0 で待たない。既定 15 秒。 */
   waitMs?: number;
@@ -156,7 +159,12 @@ export function createSessionManager(opts: {
     if (!legacyKeep.sessions.has(rec.name)) return rec;
     return { ...rec, settings: { ...(rec.settings ?? {}), memory: legacyKeep.sessions.get(rec.name) } as ProjectSettings };
   };
-  const withLegacyCommon = (s: ProjectSettings): ProjectSettings => ("common" in legacyKeep ? ({ ...s, memory: legacyKeep.common } as ProjectSettings) : s);
+  /** 割り当てへ移せなかった旧設定の coordinator（元の値のまま）。次の起動で移し直せるよう、保存のたびに書き戻す。 */
+  let pendingCoordinator: unknown;
+  const withLegacyCommon = (s: ProjectSettings): ProjectSettings => {
+    const o: ProjectSettings = "common" in legacyKeep ? ({ ...s, memory: legacyKeep.common } as ProjectSettings) : s;
+    return pendingCoordinator !== undefined ? { ...o, coordinator: pendingCoordinator } : o;
+  };
 
   const persist = (): Promise<void> => store.save([...saved.values()].map(withLegacy));
 
@@ -268,18 +276,48 @@ export function createSessionManager(opts: {
     return withKey.length > 0;
   };
 
+  /**
+   * 旧設定の統括の指定（center-settings.json の coordinator.session）を割り当てへ移す。冪等。
+   * 割り当てを保存できた時だけ旧設定を消す（保存できなければ残して log。その間は統括の口は割り当て無し = 道具は出ない）。
+   */
+  const migrateLegacyCoordinator = async (rawCommon: unknown): Promise<void> => {
+    if (!opts.centerStore || typeof rawCommon !== "object" || rawCommon === null || !Object.hasOwn(rawCommon, "coordinator")) return;
+    const legacy = readCoordinator((rawCommon as { coordinator?: unknown }).coordinator);
+    if (legacy !== null) {
+      let done = false;
+      try {
+        done = opts.assignCoordinator?.(legacy) === true;
+      } catch (e) {
+        log(`旧設定の統括の指定を割り当てへ移せない: ${e instanceof Error ? e.name : "error"}`);
+      }
+      if (!done) {
+        pendingCoordinator = (rawCommon as { coordinator?: unknown }).coordinator;
+        log("旧設定の統括の指定（center-settings.json の coordinator）を割り当てへ移せなかったので残す（統括の口は割り当て無しで動く）。mcp-connections.json を直すか `bantou-center mcp set bantou-coordinator --session <名> --builtin coordinator` で割り当てる");
+        return;
+      }
+      log(`旧設定の統括の指定を割り当て（mcp-connections.json）へ移した: session=${legacy}`);
+    } else log("旧設定の統括の指定が壊れているので捨てた");
+    try {
+      // coordinator だけを外す（他の項目は旧形式の memory も含めてそのまま。memory の移行は後続の migrateLegacyMemory が行う）
+      const { coordinator: _drop, ...rest } = rawCommon as Record<string, unknown>;
+      await opts.centerStore.save(rest as ProjectSettings);
+    } catch (e) {
+      log(`旧設定の統括の指定を消せない（次の起動でやり直す）: ${(e as Error).message}`);
+    }
+  };
+
   const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
   return {
     async restore() {
       const rawCommon = opts.centerStore ? await opts.centerStore.load() : undefined;
+      await migrateLegacyCoordinator(rawCommon);
       const list = await store.load();
       const migrated = await migrateLegacyMemory(rawCommon, list);
       if (opts.centerStore) {
         common = readCenterSettings(rawCommon);
         if (Object.keys(common).length) log(`center 共通の設定を読んだ (項目: ${Object.keys(common).join(",")})`);
       }
-      supervisor.setCoordinator(readCoordinator(common.coordinator));
       for (const s of list) {
         try {
           if (!SESSION_NAME.test(s.name) || !isAbsolute(s.path)) throw new Error("保存内容が不正");
@@ -390,8 +428,6 @@ export function createSessionManager(opts: {
 
     memoryOf: (name) => opts.memoryFile?.resolve(name),
 
-    coordinatorOf: () => readCoordinator(common.coordinator),
-
     updateCenterSettings: (patch) =>
       serial(async () => {
         assertCenterOnly(patch);
@@ -407,7 +443,6 @@ export function createSessionManager(opts: {
           }
         }
         common = next;
-        supervisor.setCoordinator(readCoordinator(common.coordinator));
         // 全 session の次の起動から効く（動いている session は起動し直さない）
         for (const rec of saved.values()) {
           supervisor.setInstructions(rec.name, composeInstructions(common, rec.settings));

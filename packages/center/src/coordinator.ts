@@ -75,8 +75,8 @@ export function buildSessionBrief(sessions: readonly SessionInfo[], coordinator:
 
 /** 統括の道具が使う、center の中の情報の取得元。呼ばれるたびに今の値を返す（キャッシュしない）。 */
 export interface CoordinatorDeps {
-  /** 今の統括の session 名（無効 = null）。 */
-  session: () => string | null;
+  /** この session に統括の口が今も割り当てられているか（呼び出しの度に判定。割り当ては mcp-connections.json の center の側の設定）。 */
+  assigned: (session: string) => boolean;
   /** 今の全 session。 */
   sessions: () => SessionInfo[];
   now?: () => number;
@@ -100,10 +100,16 @@ const json = (value: unknown, isError = false): ToolResult => ({ content: [{ typ
 
 /** 呼び出し元が今の統括の session でなければ断る結果（そうでなければ null）。MCP session は作り直しを待たずに設定が変わるので、道具ごとに呼ぶ。 */
 export function refuseUnlessCoordinator(deps: CoordinatorDeps, owner: string): ToolResult | null {
-  return deps.session() === owner ? null : json({ error: "この道具は統括の session だけが使える（coordinator.session の設定が無い、または別の session）" }, true);
+  let ok = false;
+  try {
+    ok = deps.assigned(owner);
+  } catch {
+    ok = false;
+  }
+  return ok ? null : json({ error: "この道具は割り当てた session だけが使える（統括の口の割り当てが無い）" }, true);
 }
 
-/** 統括の session だけに出す道具を登録する（呼び出し側が owner = 今の統括の時だけ呼ぶ。処理でも設定を見直す）。 */
+/** 統括の道具を登録する（/mcp/coordinator の口だけが呼ぶ。口が割り当てを見て、処理でも毎回見直す）。 */
 export function registerCoordinatorTools(server: McpServer, deps: CoordinatorDeps & { owner: string }): void {
   const { owner } = deps;
   server.registerTool(

@@ -106,7 +106,10 @@ export const coordinatorSchema = z
   })
   .strict();
 
-/** 保存済みの値から統括の session 名を取り出す（壊れていれば null = 無効）。 */
+/**
+ * 旧設定（center-settings.json の coordinator）から統括の session 名を取り出す（壊れていれば null）。
+ * 統括の指定はもう設定では持たない（mcp-connections.json の割り当てが正本）。旧設定の移行（sessions.ts の restore）だけが読む。
+ */
 export function readCoordinator(raw: unknown): string | null {
   const r = coordinatorSchema.safeParse(raw);
   return r.success ? r.data.session : null;
@@ -125,7 +128,7 @@ export const projectSettingsPatchSchema = z
 export type ProjectSettingsPatch = z.infer<typeof projectSettingsPatchSchema>;
 
 /** center の側だけで扱う設定の項目名（画面・web・master-cap の設定更新からは受けない）。 */
-export const CENTER_ONLY_KEYS: readonly string[] = ["memory", "mcp", "mcpConnections", "mcpSecrets"];
+export const CENTER_ONLY_KEYS: readonly string[] = ["memory", "mcp", "mcpConnections", "mcpSecrets", "coordinator"];
 
 /** center の側だけの項目を MCP（画面・web・master-cap の設定更新）から受けた時のエラー文。項目の値は含めない。 */
 export const CENTER_ONLY_MCP_ERROR =
@@ -142,7 +145,7 @@ export function assertCenterOnly(patch: object | undefined): void {
  * center 共通の設定の更新の入力。session の設定から `servers` を除いたもの（servers は session ごとの設定だけで持つ）。
  * `servers` の指定は null（削除。無害）以外は受け付けない（updateCenterSettings がエラーにする）。
  */
-export const centerSettingsPatchSchema = projectSettingsPatchSchema.omit({ servers: true }).extend({ coordinator: coordinatorSchema.nullable().optional() }).passthrough();
+export const centerSettingsPatchSchema = projectSettingsPatchSchema.omit({ servers: true }).passthrough();
 export type CenterSettingsPatch = z.infer<typeof centerSettingsPatchSchema>;
 
 /** center 共通の設定に `servers` を入れようとした時のエラー文。 */
@@ -152,8 +155,8 @@ export const CENTER_SERVERS_ERROR = "servers は center 共通の設定では持
 export function readCenterSettings(raw: unknown): ProjectSettings {
   const out = readSettings(raw);
   delete out.servers;
-  // 壊れた coordinator は無効にする（別の session を統括にしない）
-  if (out.coordinator !== undefined && readCoordinator(out.coordinator) === null) delete out.coordinator;
+  // 統括の指定は設定では持たない（旧設定の coordinator は読み捨てる。割り当てへの移行は sessions.ts の restore）
+  delete out.coordinator;
   return out;
 }
 

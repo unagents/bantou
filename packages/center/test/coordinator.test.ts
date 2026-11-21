@@ -14,9 +14,11 @@ import { createSessionVia, buildSessionBrief, SESSION_BRIEF_LINE_MAX, SESSION_BR
 import { createCore } from "../src/core.js";
 import { createEventHub } from "../src/events.js";
 import { startHttpServer } from "../src/http.js";
-import { centerSettingsPatchSchema, mergeSettings, readCenterSettings, readCoordinator, type ProjectSettingsPatch } from "../src/project-settings.js";
+import { assertCenterOnly, readCenterSettings, readCoordinator } from "../src/project-settings.js";
 import type { RemoteManager } from "../src/remotes.js";
-import { createSessionMcpServer } from "../src/server.js";
+import { createCoordinatorMcpServer, createSessionMcpServer } from "../src/server.js";
+import { createConnectionsStore } from "../src/mcp-connections.js";
+import { isAssigned } from "../src/mcp-session.js";
 import { createSessionTokens } from "../src/session-auth.js";
 import type { SessionInfo } from "../src/sessions.js";
 import { applicableParts, buildSystemInstructions, partLabel } from "../src/system-instructions.js";
@@ -35,35 +37,30 @@ const isError = (r: unknown): boolean => (r as { isError?: boolean }).isError ==
 
 // ---- 設定の検査 ----
 
-test("coordinator.session: 不正な値は center 共通の設定の更新で断る。正しい値と null は通る", () => {
-  const ok = (v: unknown) => centerSettingsPatchSchema.safeParse({ coordinator: v }).success;
-  assert.ok(ok({ session: "main-1_a" }));
-  assert.ok(ok(null));
-  assert.ok(centerSettingsPatchSchema.safeParse({}).success);
-  for (const bad of [{ session: "" }, { session: "a b" }, { session: "../x" }, { session: "a".repeat(65) }, { session: 1 }, {}, "main", { session: "a", extra: 1 }, []]) assert.equal(ok(bad), false, JSON.stringify(bad));
-});
-
-test("coordinator: 保存と読み込み。null で消える。壊れた保存値は無効（別の session を統括にしない）", () => {
-  const s = mergeSettings({}, { coordinator: { session: "main" } } as ProjectSettingsPatch);
-  assert.equal(readCoordinator(s.coordinator), "main");
-  assert.equal(readCoordinator(mergeSettings(s, { coordinator: null } as ProjectSettingsPatch).coordinator), null);
-  assert.equal(readCoordinator(readCenterSettings({ coordinator: { session: "bad name" } }).coordinator), null);
-  assert.ok(!("coordinator" in readCenterSettings({ coordinator: "x" })));
+test("coordinator: 旧設定の coordinator は center 共通の設定として読まない・受けない（割り当てが正本）", () => {
+  assert.ok(!("coordinator" in readCenterSettings({ coordinator: { session: "main" }, instructions: "x" })));
+  assert.equal(readCenterSettings({ coordinator: { session: "main" }, instructions: "x" }).instructions, "x");
+  // 旧設定の値を取り出せるのは移行だけ（readCoordinator）。壊れた値は null
+  assert.equal(readCoordinator({ session: "main" }), "main");
+  assert.equal(readCoordinator({ session: "bad name" }), null);
   assert.equal(readCoordinator(undefined), null);
+  // 設定の更新の入力は center の側だけの項目として断る（assertCenterOnly）
+  assert.throws(() => assertCenterOnly({ coordinator: { session: "main" } }), /MCP からは変えられない/);
+  assert.throws(() => assertCenterOnly({ coordinator: null }), /MCP からは変えられない/);
 });
 
 // ---- 指示文の部品 ----
 
-test("部品 coordinator: 統括の session だけに付く。未設定の時の指示文は今と同じ（部品が増えない）", () => {
+test("部品 coordinator: 統括の口を割り当てた session だけに付く。未設定の時の指示文は今と同じ（部品が増えない）", () => {
   const plain = { session: "a", memory: false };
   assert.deepEqual(applicableParts(plain).map(partLabel), ["base-spec@1", "master-cap-role@6", "master-cap-availability@2"]);
   assert.deepEqual(applicableParts({ ...plain, coordinator: false }).map(partLabel), ["base-spec@1", "master-cap-role@6", "master-cap-availability@2"]);
   assert.equal(buildSystemInstructions({ ...plain, coordinator: false }), buildSystemInstructions(plain));
   const co = buildSystemInstructions({ ...plain, coordinator: true });
-  assert.deepEqual(applicableParts({ ...plain, coordinator: true }).map(partLabel), ["base-spec@1", "master-cap-role@6", "master-cap-availability@2", "coordinator@2"]);
+  assert.deepEqual(applicableParts({ ...plain, coordinator: true }).map(partLabel), ["base-spec@1", "master-cap-role@6", "master-cap-availability@2", "coordinator@3"]);
   assert.ok(co.startsWith(buildSystemInstructions(plain)));
-  // 文面はその時点で出す道具（session_brief）だけ。まだ無い道具の名前は出ない
-  assert.match(co, /session_brief/);
+  // 文面はその時点で出す道具（session_brief と coordinator_session_create）だけ。まだ無い道具の名前は出ない
+  assert.match(co, /mcp__bantou-coordinator__session_brief/);
   for (const absent of ["session_dispatch", "session_prompts"]) assert.ok(!co.includes(absent), absent);
   assert.match(co, /include_shared/);
   assert.match(co, /Read しない/);
@@ -114,7 +111,7 @@ test("session_brief: 1 行 200 文字・40 行・6000 文字の上限。越え�
 // ---- 道具の出し分けと断り（in-memory） ----
 
 const connectMem = async (owner: string, coordinator: CoordinatorDeps | undefined): Promise<Client> => {
-  const s = createSessionMcpServer({ remotes: {} as RemoteManager, owner, ...(coordinator ? { coordinator } : {}) });
+  const s = coordinator ? createCoordinatorMcpServer({ owner, coordinator }) : createSessionMcpServer({ remotes: {} as RemoteManager, owner });
   const [ct, st] = InMemoryTransport.createLinkedPair();
   await s.connect(st);
   const c = new Client({ name: "t", version: "0" });
@@ -123,22 +120,17 @@ const connectMem = async (owner: string, coordinator: CoordinatorDeps | undefine
 };
 const names = async (c: Client): Promise<string[]> => (await c.listTools()).tools.map((t) => t.name);
 
-test("道具の出し分け: 統括の session だけに session_brief が出る。他の session・未設定・coordinator 引数なしでは出ない", async () => {
-  let coord: string | null = "main";
-  const deps: CoordinatorDeps = { session: () => coord, sessions: () => [info("main"), info("other")], now: () => NOW };
-  const baseline = await names(await connectMem("other", undefined));
-  assert.ok(!baseline.includes("session_brief"));
-  assert.ok((await names(await connectMem("main", deps))).includes("session_brief"));
-  assert.deepEqual(await names(await connectMem("other", deps)), baseline);
-  // 統括以外の道具の一覧は、統括の session でも session_brief を足しただけ
-  assert.deepEqual((await names(await connectMem("main", deps))).filter((n) => n !== "session_brief"), baseline);
-  coord = null;
-  assert.deepEqual(await names(await connectMem("main", deps)), baseline);
-  assert.deepEqual(await names(await connectMem("main", undefined)), baseline);
+test("道具の出し分け: session 向けの口（/mcp/session）には統括の道具が無い。統括の口には 2 つだけが出る", async () => {
+  const deps: CoordinatorDeps = { assigned: (s) => s === "main", sessions: () => [info("main"), info("other")], now: () => NOW, createSession: createSessionVia({ create: async () => info("x") }) };
+  const sessionNames = await names(await connectMem("main", undefined));
+  assert.ok(!sessionNames.includes("session_brief") && !sessionNames.includes("coordinator_session_create"));
+  assert.deepEqual((await names(await connectMem("main", deps))).sort(), ["coordinator_session_create", "session_brief"]);
+  // createSession が無ければ session_brief だけ
+  assert.deepEqual(await names(await connectMem("main", { ...deps, createSession: undefined })), ["session_brief"]);
 });
 
 test("session_brief: 統括の session が呼ぶと 1 行ずつ返る。session で絞れる。未定義の session は error", async () => {
-  const deps: CoordinatorDeps = { session: () => "main", sessions: () => [info("main"), info("other")], now: () => NOW };
+  const deps: CoordinatorDeps = { assigned: (s) => s === "main", sessions: () => [info("main"), info("other")], now: () => NOW };
   const c = await connectMem("main", deps);
   const r = JSON.parse(text(await c.callTool({ name: "session_brief", arguments: {} }))) as { sessions: { name: string; line: string }[]; truncated: boolean };
   assert.deepEqual(r.sessions.map((s) => s.name), ["main", "other"]);
@@ -150,13 +142,13 @@ test("session_brief: 統括の session が呼ぶと 1 行ずつ返る。session 
 
 test("session_brief: 設定を外した後・別の session に替えた後に、古い MCP session から呼ぶと断られる", async () => {
   let coord: string | null = "main";
-  const deps: CoordinatorDeps = { session: () => coord, sessions: () => [info("main")], now: () => NOW };
+  const deps: CoordinatorDeps = { assigned: (s) => s === coord, sessions: () => [info("main")], now: () => NOW };
   const c = await connectMem("main", deps);
   assert.ok(!isError(await c.callTool({ name: "session_brief", arguments: {} })));
   coord = null;
   const r1 = await c.callTool({ name: "session_brief", arguments: {} });
   assert.ok(isError(r1));
-  assert.match(text(r1), /統括の session だけ/);
+  assert.match(text(r1), /割り当てた session だけ/);
   assert.ok(!text(r1).includes("main |"));
   coord = "other";
   assert.ok(isError(await c.callTool({ name: "session_brief", arguments: {} })));
@@ -180,21 +172,21 @@ async function createRig(coord: { v: string | null }) {
     start: async (n: string) => { calls.push(`start:${n}`); const s = map.get(n)!; s.state = "connected"; s.sessionUrl = "u"; return { ...s }; },
     status: (n: string) => ({ ...map.get(n)! }),
     list: () => [...map.values()].map((s) => ({ ...s })),
-    setCoordinator: () => {}, setInstructions: () => {}, setAddDirs: () => {}, setOutputStyle: () => {}, setMemory: () => {},
+    setInstructions: () => {}, setAddDirs: () => {}, setOutputStyle: () => {}, setMemory: () => {},
   } as unknown as RemoteControlSupervisor;
   const mgr = createSessionManager({ config, supervisor: sup, store: createJsonListStore<SavedSession>(join(dir, "sessions.json"), () => {}), log: (m) => logs.push(m), waitMs: 0 });
   await mgr.restore();
-  const deps: CoordinatorDeps = { session: () => coord.v, sessions: () => mgr.list(), createSession: createSessionVia(mgr), log: (m) => logs.push(m) };
+  const deps: CoordinatorDeps = { assigned: (s) => s === coord.v, sessions: () => mgr.list(), createSession: createSessionVia(mgr), log: (m) => logs.push(m) };
   const call = async (owner: string, args: Record<string, unknown>) => (await connectMem(owner, deps)).callTool({ name: "coordinator_session_create", arguments: args });
   return { dir, ws: join(dir, "ws"), sup, logs, calls, instr, mgr, deps, call, clean: () => rm(dir, { recursive: true, force: true }) };
 }
 
-test("coordinator_session_create: 統括の session だけに出る。統括でない session・未設定には出ない", async () => {
+test("coordinator_session_create: 口に出る。割り当てが無い session が呼んでも作られない", async () => {
   const r = await createRig({ v: "main" });
   try {
     assert.ok((await names(await connectMem("main", r.deps))).includes("coordinator_session_create"));
-    assert.ok(!(await names(await connectMem("other", r.deps))).includes("coordinator_session_create"));
-    assert.ok(!(await names(await connectMem("main", { ...r.deps, session: () => null }))).includes("coordinator_session_create"));
+    assert.ok(isError(await (await connectMem("other", r.deps)).callTool({ name: "coordinator_session_create", arguments: { name: "zz" } })));
+    assert.deepEqual(r.calls, []);
   } finally { await r.clean(); }
 });
 
@@ -288,13 +280,16 @@ test("coordinator_session_create: name は 64 文字まで。65 文字は断ら�
 
 // ---- 実の HTTP: TTL と center の再起動 ----
 
-async function bootHttp(coordinator: CoordinatorDeps, ttl?: number) {
+async function bootHttp(assigned: (s: string) => boolean, ttl?: number) {
   const tokens = createSessionTokens();
+  const coordinator: CoordinatorDeps = { assigned, sessions: () => [info("main")], now: () => NOW };
   const h = await startHttpServer({
     createServer: () => {
       throw new Error("外向けは使わない");
     },
-    createSessionServer: (owner) => createSessionMcpServer({ remotes: {} as RemoteManager, owner, coordinator }),
+    createSessionServer: (owner) => createSessionMcpServer({ remotes: {} as RemoteManager, owner }),
+    createCoordinatorServer: (owner) => createCoordinatorMcpServer({ owner, coordinator }),
+    isCoordinatorAssigned: assigned,
     sessionAuth: tokens,
     core: createCore(),
     events: createEventHub(),
@@ -304,56 +299,67 @@ async function bootHttp(coordinator: CoordinatorDeps, ttl?: number) {
     token: "outer-token-0123456789",
     ...(ttl !== undefined ? { sessionIdleTtlMs: ttl, sweepIntervalMs: 20 } : {}),
   });
-  const connect = async (name: string): Promise<Client> => {
+  const connect = async (name: string, path = "/mcp/coordinator"): Promise<Client> => {
     const c = new Client({ name: "s", version: "0" });
-    await c.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${h.port}/mcp/session`), { requestInit: { headers: { authorization: `Bearer ${tokens.issue(name)}`, "X-Bantou-Session": name } } }));
+    await c.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${h.port}${path}`), { requestInit: { headers: { authorization: `Bearer ${tokens.issue(name)}`, "X-Bantou-Session": name } } }));
     return c;
   };
-  return { h, connect };
+  return { h, connect, tokens };
 }
 
-test("http: MCP session が TTL で閉じられた後の作り直しで、道具の一覧は今の設定を映す。古い session からの呼び出しは断られる", async () => {
-  let coord: string | null = "main";
-  const { h, connect } = await bootHttp({ session: () => coord, sessions: () => [info("main")], now: () => NOW }, 80);
+test("http: 割り当てた session だけが統括の口に入れる。他の session は 403 で、道具の一覧も出ない", async () => {
+  const { h, connect } = await bootHttp((s) => s === "main");
+  try {
+    assert.deepEqual((await names(await connect("main"))).sort(), ["session_brief"]);
+    await assert.rejects(connect("other"), /割り当てた session だけ/);
+    // /mcp/session には統括の道具が無い（割り当てた session でも）
+    const viaSession = await names(await connect("main", "/mcp/session"));
+    assert.ok(!viaSession.includes("session_brief") && !viaSession.includes("coordinator_session_create"));
+  } finally {
+    await h.close();
+  }
+});
+
+test("http: 割り当てを外すと、開いている古い MCP session からの呼び出しも（道具の手前の口で）断られる。付け直せば通る", async () => {
+  let on = true;
+  const { h, connect } = await bootHttp((s) => on && s === "main", 80);
   try {
     const old = await connect("main");
-    assert.ok((await names(old)).includes("session_brief"));
-    const other = await connect("other");
-    assert.ok(!(await names(other)).includes("session_brief"));
-    coord = null;
-    // 設定を外した後、まだ閉じていない古い MCP session から呼ぶと断られる
-    assert.ok(isError(await old.callTool({ name: "session_brief", arguments: {} })));
-    // TTL で閉じられた後、作り直した MCP session の一覧に出ない
-    await new Promise((r) => setTimeout(r, 300));
-    assert.ok(!(await names(await connect("main"))).includes("session_brief"));
-    coord = "main";
+    assert.ok(!isError(await old.callTool({ name: "session_brief", arguments: {} })));
+    on = false;
+    await assert.rejects(old.callTool({ name: "session_brief", arguments: {} }), /割り当てた session だけ/);
+    await assert.rejects(connect("main"), /割り当てた session だけ/);
+    on = true;
     assert.ok((await names(await connect("main"))).includes("session_brief"));
   } finally {
     await h.close();
   }
 });
 
-test("http: center の再起動の後（新しい server・同じ設定）も、統括の session だけに道具が出る", async () => {
-  const coord = "main";
-  const mk = () => bootHttp({ session: () => coord, sessions: () => [info("main")], now: () => NOW });
-  const a = await mk();
+test("http: 実際の割り当て（mcp-connections.json）を毎回読む。外す・付ける・file が壊れる・消えるで判定が変わり、他の session は常に断られる", async () => {
+  const dir = await mkdtemp(join(process.env.TMPDIR ?? tmpdir(), "coord-assign-"));
   try {
-    assert.ok((await names(await a.connect("main"))).includes("session_brief"));
+    const store = createConnectionsStore(dir);
+    const write = (o: unknown): Promise<void> => writeFile(join(dir, "mcp-connections.json"), JSON.stringify(o));
+    const assignedFor = (s: string): boolean => isAssigned(store.read(), s, "coordinator");
+    const { h, connect } = await bootHttp(assignedFor);
+    try {
+      await assert.rejects(connect("main"), /割り当てた session だけ/);
+      await write({ version: 1, common: {}, sessions: { main: { "bantou-coordinator": { transport: "builtin", builtin: "coordinator" } } } });
+      assert.ok((await names(await connect("main"))).includes("session_brief"));
+      await assert.rejects(connect("other"), /割り当てた session だけ/);
+      // 共通に置いても（誤って全 session に割り当てても）名前が違えば効かない
+      await write({ version: 1, common: { coordinator: { transport: "builtin", builtin: "coordinator" } }, sessions: {} });
+      await assert.rejects(connect("main"), /割り当てた session だけ/);
+      // 壊れた file は割り当て無し（fail closed）
+      await writeFile(join(dir, "mcp-connections.json"), "{ broken");
+      await assert.rejects(connect("main"), /割り当てた session だけ/);
+      await write({ version: 1, common: {}, sessions: { main: { "bantou-coordinator": null } } });
+      await assert.rejects(connect("main"), /割り当てた session だけ/);
+    } finally {
+      await h.close();
+    }
   } finally {
-    await a.h.close();
-  }
-  const b = await mk();
-  try {
-    assert.ok((await names(await b.connect("main"))).includes("session_brief"));
-    assert.ok(!(await names(await b.connect("other"))).includes("session_brief"));
-  } finally {
-    await b.h.close();
-  }
-  // 再起動の後に設定が消えていれば出ない
-  const c = await bootHttp({ session: () => null, sessions: () => [info("main")], now: () => NOW });
-  try {
-    assert.ok(!(await names(await c.connect("main"))).includes("session_brief"));
-  } finally {
-    await c.h.close();
+    await rm(dir, { recursive: true, force: true });
   }
 });

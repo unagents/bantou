@@ -17,6 +17,10 @@ import { SESSION_NAME } from "./sessions.js";
 export const MCP_CONNECTIONS_FILE = "mcp-connections.json";
 /** center が自分で組み立てる物と、口の path と重なる名前。 */
 export const RESERVED_NAMES: readonly string[] = ["bantou", "bantou-messenger", "mcp", "conn"];
+/** center の中に在る組み込みの接続の種類 → その接続名（claude の側の tool 名 mcp__<名>__*）。名前は種類ごとに固定。 */
+export const BUILTIN_KINDS = ["coordinator"] as const;
+export type BuiltinKind = (typeof BUILTIN_KINDS)[number];
+export const BUILTIN_NAMES: Record<BuiltinKind, string> = { coordinator: "bantou-coordinator" };
 export const CONNECTION_NAME = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 export const IDENTITY_VALUE = /^[A-Za-z0-9_-]{1,64}$/;
 export const TIMEOUT_MIN_MS = 1000;
@@ -84,10 +88,18 @@ export const connectionSchema = z
   .strict();
 export type McpConnection = z.infer<typeof connectionSchema>;
 
+/** center 自身が出す口（組み込み）の接続。url・鍵は持たない。割り当てた session にだけ載る。 */
+export const builtinConnectionSchema = z.object({ transport: z.literal("builtin"), builtin: z.enum(BUILTIN_KINDS) }).strict();
+export type BuiltinConnection = z.infer<typeof builtinConnectionSchema>;
+export type AnyConnection = McpConnection | BuiltinConnection;
+/** 保存してよい接続（外向けの http か、組み込み）。 */
+export const storedConnectionSchema = z.union([connectionSchema, builtinConnectionSchema]);
+
 /** session ごとの上書き（項目ごと。null = その項目を外す）。 */
 export const overrideSchema = z
   .object({
-    transport: baseShape.transport.optional(),
+    transport: z.enum(["http", "builtin"]).optional(),
+    builtin: z.enum(BUILTIN_KINDS).optional(),
     url: baseShape.url.optional(),
     auth: baseShape.auth.nullable().optional(),
     headers: baseShape.headers.nullable().optional(),
@@ -103,7 +115,7 @@ export type ConnOverride = z.infer<typeof overrideSchema>;
 
 export interface ConnectionsData {
   version: 1;
-  common: Record<string, McpConnection>;
+  common: Record<string, AnyConnection>;
   /** session 名 → 接続名 → 上書き（null = その session ではその接続を付けない）。 */
   sessions: Record<string, Record<string, ConnOverride | null>>;
 }
@@ -169,6 +181,22 @@ export function validateConnection(raw: unknown, opts: { allowPlainHttp?: boolea
   return extra.length ? { ok: false, issues: extra } : { ok: true, value: r.data };
 }
 
+export type ValidateAnyResult = { ok: true; value: AnyConnection } | { ok: false; issues: string[] };
+
+/** http でも組み込みでも検査する。組み込みは接続名が種類ごとの固定名であること。 */
+export function validateAny(raw: unknown, name?: string, opts: { allowPlainHttp?: boolean } = {}): ValidateAnyResult {
+  if (typeof raw === "object" && raw !== null && (raw as { transport?: unknown }).transport === "builtin") {
+    const r = builtinConnectionSchema.safeParse(raw);
+    if (!r.success) return { ok: false, issues: issuesOf(r.error) };
+    if (name !== undefined && name !== BUILTIN_NAMES[r.data.builtin]) return { ok: false, issues: [`組み込みの接続の名前は ${BUILTIN_NAMES[r.data.builtin]} だけ`] };
+    return { ok: true, value: r.data };
+  }
+  const r = validateConnection(raw, opts);
+  return r.ok ? r : { ok: false, issues: r.issues };
+}
+
+export const isBuiltin = (c: AnyConnection): c is BuiltinConnection => c.transport === "builtin";
+
 export function validateName(name: string): string | undefined {
   if (!CONNECTION_NAME.test(name)) return "名前は [a-z0-9][a-z0-9_-]{0,31}";
   if (RESERVED_NAMES.includes(name)) return "予約された名前（center が組み立てる物か口の path）";
@@ -178,7 +206,7 @@ export function validateName(name: string): string | undefined {
 // ---- 合成 ----
 
 /** common と session の上書きを項目ごとに合成する（1 段。入れ子の中身は丸ごと置き換え）。上書きが null なら undefined（付けない）。 */
-export function composeConnection(common: McpConnection | undefined, override: ConnOverride | null | undefined): Record<string, unknown> | undefined {
+export function composeConnection(common: AnyConnection | undefined, override: ConnOverride | null | undefined): Record<string, unknown> | undefined {
   if (override === null) return undefined;
   const out: Record<string, unknown> = { ...(common ?? {}) };
   for (const [k, v] of Object.entries(override ?? {})) {
@@ -221,9 +249,9 @@ export function validateAll(data: ConnectionsData): ScopeIssue[] {
     for (const [name, raw] of Object.entries(eff)) {
       const ne = validateName(name);
       if (ne) out.push({ scope, name, issue: ne });
-      const r = validateConnection(raw, { allowPlainHttp: true });
+      const r = validateAny(raw, name, { allowPlainHttp: true });
       if (!r.ok) for (const issue of r.issues) out.push({ scope, name, issue });
-      else if (r.value.role === "memory") roles.push(name);
+      else if (!isBuiltin(r.value) && r.value.role === "memory") roles.push(name);
     }
     if (roles.length > 1) out.push({ scope, issue: `role memory の接続が ${roles.length} 個ある（1 つまで: ${roles.join(", ")}）` });
   }
@@ -241,7 +269,7 @@ export function parseConnections(raw: unknown): { data: ConnectionsData; problem
   const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
   if (isObj(o.common)) {
     for (const [name, v] of Object.entries(o.common)) {
-      const r = connectionSchema.safeParse(v);
+      const r = storedConnectionSchema.safeParse(v);
       if (r.success && validateName(name) === undefined) data.common[name] = r.data;
       else dropped++;
     }

@@ -8,6 +8,9 @@ import { loadCapId } from "./center-id.js";
 import { loadConfig, MIN_TOKEN_LEN } from "./config.js";
 import { createSessionVia } from "./coordinator.js";
 import { SESSION_MCP_PATH, startHttpServer, type HttpHandle } from "./http.js";
+import { createConnectionsStore } from "./mcp-connections.js";
+import { createSecretsStore } from "./mcp-secrets.js";
+import { assignBuiltin, buildSessionMcp, centerBaseOf, isAssigned } from "./mcp-session.js";
 import { mkdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { log, setLogFile } from "./log.js";
@@ -22,7 +25,7 @@ import { createSessionManager } from "./sessions.js";
 import { createMemoryFile } from "./memory-settings.js";
 import { backupFileOnce, createJsonListStore, createJsonObjectStore } from "./store.js";
 import { applicableParts, buildSystemInstructions, partLabel } from "./system-instructions.js";
-import { createCenterServer, createSessionMcpServer } from "./server.js";
+import { createCenterServer, createCoordinatorMcpServer, createSessionMcpServer } from "./server.js";
 import { createCore } from "./core.js";
 import { createEventHub } from "./events.js";
 import { createSessionTokens } from "./session-auth.js";
@@ -73,8 +76,12 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   const events = createEventHub();
   // 外部記憶の設定（CLI `bantou-center memory` だけが書く。session の起動のたびに読む）
   const memoryFile = createMemoryFile(dirname(resolve(configPath)), log);
+  // MCP の接続の設定と鍵（`bantou-center mcp` の CLI だけが書く。起動のたび・口への呼び出しのたびに読む。画面・web・MCP の経路からは書けない）
+  const connections = createConnectionsStore(dirname(resolve(configPath)), log);
+  const mcpSecrets = createSecretsStore(dirname(resolve(configPath)), log);
   const supervisor = createRemoteControlSupervisor({
     memoryOf: (name) => memoryFile.resolve(name),
+    mcpOf: (name, mcpUrl) => buildSessionMcp(connections.read(), mcpSecrets, name, centerBaseOf(mcpUrl)),
     // sessions は supervisor の後に作るので、呼ばれる時に参照する
     serversOf: (name) => sessions.serversOf(name),
     systemInstructions: { build: (ctx) => buildSystemInstructions(ctx), labels: (ctx) => applicableParts(ctx).map(partLabel) },
@@ -140,6 +147,13 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     store: createJsonListStore(join(stateDir, "sessions.json"), log),
     centerStore: createJsonObjectStore(join(stateDir, "center-settings.json"), log),
     memoryFile,
+    // 旧設定の統括の指定の移行先（center 自身が mcp-connections.json に書く。壊れた file は上書きしない）
+    assignCoordinator: (session) => {
+      const { data, problem } = connections.file.load();
+      if (problem) return false;
+      if (assignBuiltin(data, session, "coordinator")) connections.file.write(data);
+      return true;
+    },
     // remotes は sessions の後に作るので、呼ばれる時に参照する
     renameRemoteSession: (oldName, newName) => remotes.renameSession(oldName, newName),
     remoteNameConflict: (name, mode, oldName) => remotes.conflictsWith(name, mode, oldName),
@@ -220,6 +234,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   process.stderr.on("error", () => {});
   process.stdout.on("error", () => {});
 
+  const assigned = (session: string): boolean => isAssigned(connections.read(), session, "coordinator");
   const makeServer = () => createCenterServer({ config, supervisor, link, sessions, remotes, follow, login, log });
   if (args.transport === "http") {
     if (!config.token || config.token.length < MIN_TOKEN_LEN) {
@@ -227,7 +242,10 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     }
     http = await startHttpServer({
       createServer: makeServer,
-      createSessionServer: (owner) => createSessionMcpServer({ remotes, follow, owner, coordinator: { session: () => sessions.coordinatorOf(), sessions: () => sessions.list(), createSession: createSessionVia(sessions), log } }),
+      createSessionServer: (owner) => createSessionMcpServer({ remotes, follow, owner }),
+      // 統括の口: 割り当てた session だけ（呼び出しの度に mcp-connections.json を見る。file が壊れていれば割り当て無し）
+      createCoordinatorServer: (owner) => createCoordinatorMcpServer({ owner, coordinator: { assigned, sessions: () => sessions.list(), createSession: createSessionVia(sessions), log } }),
+      isCoordinatorAssigned: assigned,
       sessionAuth: sessionTokens,
       onStatusLine: (name, payload) => {
         const s = sessions.list().find((x) => x.name === name);
