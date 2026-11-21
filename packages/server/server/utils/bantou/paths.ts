@@ -10,6 +10,20 @@ export function agentDir(workspace: string, kind: AgentKind, id: string): string
   return join(workspace, kind === "cap" ? "caps" : "workers", id);
 }
 
+/**
+ * cap の task ごとの指揮の会話（lane）の記録の置き場。cap の logs/ の中（cap 自身の bash の rm では消せない）。
+ * lane の claude は cap の dir を cwd にして動き、state.json・logs/（会話の生出力・mcp.json など）だけをここに持つ。
+ */
+export function laneRoot(capDir: string): string {
+  return join(runLogDir(capDir), "tasks");
+}
+
+/** task_id の lane の dir。task_id が不正なら投げる。 */
+export function laneDir(workspace: string, capId: string, taskId: string): string {
+  if (!isValidAgentId(taskId)) throw new Error(`task_id が不正: ${taskId}`);
+  return join(laneRoot(agentDir(workspace, "cap", capId)), taskId);
+}
+
 /** 状態ファイル。 */
 export function stateFile(dir: string): string {
   return join(dir, "state.json");
@@ -53,7 +67,13 @@ export async function ensureTmpDir(dir: string): Promise<string> {
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
   }
-  await mkdir(tmp, { mode: 0o700 });
+  try {
+    await mkdir(tmp, { mode: 0o700 });
+  } catch (e) {
+    // 同じ cap の task の指揮（lane）が同時に作った: dir なら使う（symlink などなら投げる）
+    if ((e as NodeJS.ErrnoException).code !== "EEXIST" || !(await lstat(tmp)).isDirectory()) throw e;
+    return tmp;
+  }
   await chmod(tmp, 0o700); // umask に左右されない
   return tmp;
 }

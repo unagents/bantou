@@ -12,7 +12,7 @@ import {
 import type { Config } from "./config";
 import { assertModel, readModelRecord, writeModelRecord, type WithModel } from "./model";
 import { killGroup, type ClaudeRunOptions, type ClaudeRunResult, type RunMode } from "./claude";
-import { agentDir, cleanedFile, ensureTmpDir, removeNonKept, runLogDir } from "./paths";
+import { agentDir, cleanedFile, ensureTmpDir, laneDir, laneRoot, removeNonKept, runLogDir } from "./paths";
 import { listLiveProcesses, matchesSession, type LiveProcess } from "./processes";
 import type { AgentRunner } from "./runner";
 import { readState, writeState, type AgentStateFile } from "./state";
@@ -37,22 +37,28 @@ export interface InvokeInput {
   defaultModel?: string;
   /** 実際に使うモデル（manager が解決して observer に渡す）。 */
   resolvedModel?: string;
+  /**
+   * task_id。cap なら、その task だけを受け持つ指揮の会話（lane。cap の logs/tasks/<task_id>/ に state.json と logs/ を持ち、
+   * cap の dir を cwd にする）で動かす。lane ごとに直列、別の lane・cap の本体（kick_cap）とは並行に動く。
+   * worker なら、その worker を起動した task（持ち主の cap の lane）。実行の場所は変わらない（activeRuns・observer に載るだけ）。
+   */
+  taskId?: string;
 }
 
 export interface ReapSummary {
   killed: number;
   failed: number;
   errored: number;
-  /** running から failed / error にした対象（activity の lost 登録用）。 */
-  reaped: Array<{ kind: AgentKind; id: string; error: string }>;
+  /** running から failed / error にした対象（activity の lost 登録用）。taskId = cap の task の lane。 */
+  reaped: Array<{ kind: AgentKind; id: string; error: string; taskId?: string }>;
 }
 
 /** 実行の観測口（activity 用）。 */
 export interface RunObserver {
   /** 子 spawn 時（retry ごと）。 */
   started(kind: AgentKind, id: string, input: InvokeInput, pid: number | undefined): void;
-  /** stdout の空でない 1 行ごと。 */
-  line(kind: AgentKind, id: string, line: string): void;
+  /** stdout の空でない 1 行ごと。taskId = invoke の taskId（cap なら lane）。 */
+  line(kind: AgentKind, id: string, line: string, taskId?: string): void;
   /** 最終 state を書いた後。lost = server 以外による signal 終了。 */
   finished(
     kind: AgentKind,
@@ -67,6 +73,8 @@ export interface RunObserver {
       stopped?: boolean;
       /** この run を始めた時刻（ISO。再試行をまたいで同じ値）。 */
       startedAt?: string;
+      /** invoke の taskId（cap なら lane、worker なら起動した task）。 */
+      taskId?: string;
     },
   ): void;
 }
@@ -86,6 +94,18 @@ export interface AgentManagerDeps {
   /** 実行ごとの追加引数（mcp 設定・system prompt のファイルを書いて返す）。 */
   runExtras?: (kind: AgentKind, id: string, input: InvokeInput) => Promise<RunExtras>;
   observer?: RunObserver;
+  /** invoke を受け付けた（activeRuns に載った）直後に同期で呼ぶ（task の lane の追跡用）。 */
+  onRunAdded?: (run: ActiveRunRef) => void;
+  /** invoke が終わった（activeRuns から外れた）直後に呼ぶ。outcome は成功・失敗の結果、投げた時は error。 */
+  onRunSettled?: (run: ActiveRunRef, result: { outcome?: RunOutcome; error?: string }) => void;
+}
+
+/** onRunAdded / onRunSettled に渡す run。capId = cap の run なら cap_id、worker の run なら持ち主の cap。 */
+export interface ActiveRunRef {
+  kind: AgentKind;
+  id: string;
+  capId?: string;
+  taskId?: string;
 }
 
 export interface AgentManager {
@@ -116,8 +136,10 @@ export interface AgentManager {
   isClosed(id: string): boolean;
   /** 閉じた印（logs/closed-mark.json）を読み込む（server 起動時。worker の終了の回収より前に呼ぶ）。読み込んだ件数を返す。 */
   loadClosed(): Promise<number>;
-  /** その agent に invoke 中（待ち + 実行）の指示があるか。 */
+  /** その agent に invoke 中（待ち + 実行）の指示があるか。cap は本体と全ての lane を見る。 */
   isActive(kind: AgentKind, id: string): boolean;
+  /** cap の task（lane）の run（指揮の run と、その task の worker の run。待ちを含む）が 1 つでもあるか。 */
+  laneBusy(capId: string, taskId: string): boolean;
   shutdown(): Promise<void>;
 }
 
@@ -126,6 +148,8 @@ export interface ActiveRun {
   id: string;
   /** worker の持ち主 cap（invoke の capId。分からなければ無い）。 */
   capId?: string;
+  /** cap の run なら lane の task_id、worker の run なら起動した task の task_id（無ければ無い）。 */
+  taskId?: string;
   /** この run を始めた時刻（ISO。待ちの間は invoke の時刻）。 */
   startedAt: string;
   phase: "queued" | "preparing" | "running";
@@ -158,6 +182,7 @@ interface RunEntry {
   kind: AgentKind;
   id: string;
   capId?: string;
+  taskId?: string;
   /** invoke の時刻（ISO）。 */
   queuedAt: string;
   /** execute に入った時刻（ISO）。入る前（待ち）は undefined。 */
@@ -256,6 +281,53 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
   const runs = new Set<RunEntry>();
   /** stop_cap で閉じた cap。center からの次の指示（keepTask でない invoke）で外す。 */
   const closedCaps = new Set<string>();
+  /** cap ごとの、最後に始めた lane の task_id（status の集計用。無ければ起動後に 1 度だけ dir から探す）。 */
+  const latestLanes = new Map<string, string>();
+  const scannedLanes = new Set<string>();
+
+  /** chain・inflight の key。cap の lane は `cap:<cap_id>/<task_id>`。worker は task に関わらず `worker:<id>`。 */
+  const keyOf = (kind: AgentKind, id: string, taskId?: string): string =>
+    kind === "cap" && taskId !== undefined ? `cap:${id}/${taskId}` : `${kind}:${id}`;
+  /** その cap の、invoke 中の key（本体と lane）。 */
+  const capKeys = (id: string): string[] => [...inflight.keys()].filter((k) => k === `cap:${id}` || k.startsWith(`cap:${id}/`));
+  /** run の持ち主の cap（cap の run は自分、worker の run は capId）。 */
+  const ownerCap = (r: Pick<RunEntry, "kind" | "id" | "capId">): string | undefined => (r.kind === "cap" ? r.id : r.capId);
+  const refOf = (r: RunEntry): ActiveRunRef => {
+    const cap = ownerCap(r);
+    return { kind: r.kind, id: r.id, ...(cap !== undefined ? { capId: cap } : {}), ...(r.taskId !== undefined ? { taskId: r.taskId } : {}) };
+  };
+  const hook = (f: () => void): void => {
+    try {
+      f();
+    } catch (e) {
+      log(`run の hook エラー: ${errMsg(e)}`);
+    }
+  };
+
+  /** cap の lane の task_id（dir のあるもの）。 */
+  async function listLanes(capId: string): Promise<string[]> {
+    try {
+      const entries = await readdir(laneRoot(agentDir(config.workspace, "cap", capId)), { withFileTypes: true });
+      return entries.filter((d) => d.isDirectory() && isValidAgentId(d.name)).map((d) => d.name).sort();
+    } catch {
+      return [];
+    }
+  }
+
+  /** 最後に始めた lane（メモリに無ければ dir の state から 1 度だけ探す）。 */
+  async function latestLane(capId: string): Promise<string | undefined> {
+    const known = latestLanes.get(capId);
+    if (known !== undefined || scannedLanes.has(capId)) return known;
+    scannedLanes.add(capId);
+    let best: { id: string; at: string } | undefined;
+    for (const t of await listLanes(capId)) {
+      const st = await readState(laneDir(config.workspace, capId, t)).catch(() => null);
+      const at = st?.last_started_at ?? "";
+      if (st && (best === undefined || at > best.at)) best = { id: t, at };
+    }
+    if (best !== undefined && !latestLanes.has(capId)) latestLanes.set(capId, best.id);
+    return latestLanes.get(capId);
+  }
 
   /** dir が既にあれば state を failed にする。失敗は握りつぶす。 */
   async function markFailed(dir: string, message: string): Promise<void> {
@@ -371,29 +443,36 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
       return await executeInner(kind, id, input, run);
     } catch (e) {
       // 投げた場合（prepareDir 失敗など）も activity を終端にする
-      observe((o) => o.finished(kind, id, { ok: false, lost: false, error: errMsg(e) }));
+      observe((o) => o.finished(kind, id, { ok: false, lost: false, error: errMsg(e), ...(input.taskId !== undefined ? { taskId: input.taskId } : {}) }));
       throw e;
     }
   }
 
   async function executeInner(kind: AgentKind, id: string, input: InvokeInput, run: RunEntry): Promise<RunOutcome> {
     if (shuttingDown) throw new Error("server 終了中");
-    const key = `${kind}:${id}`;
-    const dir = agentDir(config.workspace, kind, id);
+    // cap の lane: 記録（state.json・logs/）は lane の dir、claude の cwd は cap の dir
+    const lane = kind === "cap" ? input.taskId : undefined;
+    const key = keyOf(kind, id, lane);
+    const cwd = agentDir(config.workspace, kind, id);
+    const dir = lane !== undefined ? laneDir(config.workspace, id, lane) : cwd;
+    const taskTag = input.taskId !== undefined ? { taskId: input.taskId } : {};
     if (stopRequests.has(key)) {
-      observe((o) => o.finished(kind, id, { ok: false, lost: false, error: STOP_MSG, stopped: true }));
+      observe((o) => o.finished(kind, id, { ok: false, lost: false, error: STOP_MSG, stopped: true, ...taskTag }));
       return { session_id: (await readState(dir).catch(() => null))?.session_id ?? "", ok: false, result_text: "", error: STOP_MSG };
     }
     try {
-      if (await prepareDir(kind, dir, input)) input = { ...input, prompt: `${input.prompt}\n\n${EMPTIED_NOTE}` };
+      if (lane !== undefined) await mkdir(dir, { recursive: true });
+      else if (await prepareDir(kind, dir, input)) input = { ...input, prompt: `${input.prompt}\n\n${EMPTIED_NOTE}` };
     } catch (e) {
       await markFailed(dir, errMsg(e));
       throw e;
     }
     const st = await readState(dir);
-    if (st.state === "running") throw new Error(`${id} は実行中`);
-    // 指定があれば記録し、無ければ前回の記録を使う（resume / report 起因の再開でも同じモデルを使い続ける）
-    const rec0 = await readModelRecord(dir);
+    if (st.state === "running") throw new Error(`${lane !== undefined ? `${id} の task ${lane}` : id} は実行中`);
+    if (lane !== undefined) latestLanes.set(id, lane);
+    // 指定があれば記録し、無ければ前回の記録を使う（resume / report 起因の再開でも同じモデルを使い続ける）。
+    // lane は cap の記録（kick_cap の model・cap の既定の worker_model）を下敷きにする
+    const rec0 = lane !== undefined ? { ...(await readModelRecord(cwd)), ...(await readModelRecord(dir)) } : await readModelRecord(dir);
     const patch = {
       ...(input.model !== undefined ? { model: input.model } : rec0.model === undefined && input.defaultModel !== undefined ? { model: input.defaultModel } : {}),
       ...(input.worker_model !== undefined ? { worker_model: input.worker_model } : {}),
@@ -401,6 +480,10 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
     const rec = { ...rec0, ...patch };
     if (Object.keys(patch).length > 0) {
       await writeModelRecord(dir, patch).catch((e: unknown) => log(`model 記録失敗: kind=${kind} id=${id} ${errMsg(e)}`));
+      // task の worker_model は cap の既定としても残す（後の task が省いた時に使う。従来どおり）
+      if (lane !== undefined && input.worker_model !== undefined) {
+        await writeModelRecord(cwd, { worker_model: input.worker_model }).catch((e: unknown) => log(`model 記録失敗: kind=${kind} id=${id} ${errMsg(e)}`));
+      }
     }
     const model = rec.model;
     input = { ...input, ...(model !== undefined ? { resolvedModel: model } : {}) };
@@ -426,7 +509,7 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
     });
     try {
       await writeState(dir, base());
-      log(`claude 起動: kind=${kind} id=${id} mode=${mode} session=${sessionId} cwd=${dir}`);
+      log(`claude 起動: kind=${kind} id=${id}${lane !== undefined ? ` task=${lane}` : ""} mode=${mode} session=${sessionId} cwd=${cwd}`);
 
       let retriesUsed = 0;
       let switched = false;
@@ -439,15 +522,15 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
           break;
         }
         const extras = deps.runExtras ? await deps.runExtras(kind, id, input) : {};
-        // clone などの準備の後、起動のたび（resume でも）に tmp/ を用意する。在れば何もしない
-        const tmp = await ensureTmpDir(dir);
+        // clone などの準備の後、起動のたび（resume でも）に tmp/ を用意する。在れば何もしない（lane は cap の tmp/ を使う）
+        const tmp = await ensureTmpDir(cwd);
         r = await runner.run({
           ...extras,
           claude: config.session.claude,
           sessionId,
           mode,
           prompt: input.prompt,
-          cwd: dir,
+          cwd,
           permissionMode: config.session.permissionMode,
           allowedTools: config.session.allowedTools,
           disallowedTools: config.session.disallowedTools,
@@ -458,7 +541,7 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
           // TMPDIR は config.session.env でも上書きさせない（自分の path の tmp/ だけ）
           env: { ...process.env, ...config.session.env, TMPDIR: tmp },
           logFile: join(runLogDir(dir), `${sessionId}.jsonl`),
-          onLine: (line) => observe((o) => o.line(kind, id, line)),
+          onLine: (line) => observe((o) => o.line(kind, id, line, input.taskId)),
           onSpawn: (child) => {
             lastChild = child;
             run.child = child;
@@ -521,8 +604,8 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
           last_finished_at: finished,
           retries: retriesUsed,
         });
-        log(`claude 終了: kind=${kind} id=${id} session=${sessionId} ok=true ms=${r.durationMs} retries=${retriesUsed}`);
-        observe((o) => o.finished(kind, id, { ok: true, lost: false, startedAt }));
+        log(`claude 終了: kind=${kind} id=${id}${lane !== undefined ? ` task=${lane}` : ""} session=${sessionId} ok=true ms=${r.durationMs} retries=${retriesUsed}`);
+        observe((o) => o.finished(kind, id, { ok: true, lost: false, startedAt, ...taskTag }));
         return { session_id: sessionId, ok: true, result_text: r.resultText };
       }
       const detail = shuttingDown ? SHUTDOWN_MSG : r.detail;
@@ -534,7 +617,7 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
         last_error: detail,
         retries: retriesUsed,
       });
-      log(`claude 終了: kind=${kind} id=${id} session=${sessionId} ok=false ms=${r.durationMs} retries=${retriesUsed} error=${detail}`);
+      log(`claude 終了: kind=${kind} id=${id}${lane !== undefined ? ` task=${lane}` : ""} session=${sessionId} ok=false ms=${r.durationMs} retries=${retriesUsed} error=${detail}`);
       // server 自身の kill（timeout・stop・shutdown）でない signal 終了は lost
       const sig = r.ok ? null : (r.signal ?? null);
       const lost = sig !== null && !r.timedOut && !shuttingDown && !stopRequests.has(key);
@@ -548,7 +631,7 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
         }
       }
       const stopped = shuttingDown || stopRequests.has(key);
-      observe((o) => o.finished(kind, id, { ok: false, lost, error: lost ? lostError : detail, timedOut: r.timedOut, stopped, startedAt }));
+      observe((o) => o.finished(kind, id, { ok: false, lost, error: lost ? lostError : detail, timedOut: r.timedOut, stopped, startedAt, ...taskTag }));
       return { session_id: sessionId, ok: false, result_text: "", error: detail };
     } catch (e) {
       await markFailed(dir, errMsg(e));
@@ -568,11 +651,13 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
 
   async function stop(kind: AgentKind, id: string): Promise<{ stopped: boolean }> {
     if (!isValidAgentId(id)) throw new Error(kind === "cap" ? `cap_id が不正: ${id}` : `worker_id が不正: ${id}`);
-    const key = `${kind}:${id}`;
-    if (!inflight.has(key)) return { stopped: false };
-    stopRequests.add(key);
-    const targets = [...live].filter((t) => t.key === key);
-    log(`stop 要求: ${key} 実行中の子=${targets.length} 待ち=${waiting.get(key) ?? 0}`);
+    // cap は本体と全ての task の lane を止める
+    const keys = kind === "cap" ? capKeys(id) : inflight.has(`worker:${id}`) ? [`worker:${id}`] : [];
+    if (keys.length === 0) return { stopped: false };
+    for (const k of keys) stopRequests.add(k);
+    const targets = [...live].filter((t) => keys.includes(t.key));
+    const key = keys.join(" ");
+    log(`stop 要求: ${key} 実行中の子=${targets.length} 待ち=${keys.reduce((n, k) => n + (waiting.get(k) ?? 0), 0)}`);
     const closed = (c: ChildProcess): Promise<boolean> =>
       c.exitCode !== null || c.signalCode !== null
         ? Promise.resolve(true)
@@ -584,14 +669,13 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
     const results = await Promise.all(targets.map((t) => closed(t.child)));
     targets.forEach((t, i) => {
       if (results[i]) return;
-      log(`stop: SIGKILL ${key} pid=${t.child.pid ?? "?"}`);
+      log(`stop: SIGKILL ${t.key} pid=${t.child.pid ?? "?"}`);
       killGroup(t.child, "SIGKILL");
     });
     return { stopped: true };
   }
 
-  async function clearSession(kind: AgentKind, id: string, reason: string): Promise<{ cleared: boolean; previous: string | null }> {
-    const dir = agentDir(config.workspace, kind, id);
+  async function clearSession(dir: string, reason: string): Promise<{ cleared: boolean; previous: string | null }> {
     if (!(await exists(dir))) return { cleared: false, previous: null };
     // state.json が壊れていても閉じられるようにする（読めなければ session 無しとして作り直す）
     const st = await readState(dir).catch(() => null);
@@ -619,16 +703,37 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
     const [{ stopped }, workerStops] = await Promise.all([stop(kind, id), Promise.all(workerIds.map((w) => stop("worker", w).catch(() => ({ stopped: false }))))]);
     const workersStopped = workerStops.filter((r) => r.stopped).length;
     const key = `${kind}:${id}`;
+    // task の lane の会話も破棄する（会話のある lane だけ）。各 lane の chain に載せる
+    const lanes = kind === "cap" ? await listLanes(id) : [];
+    const laneClears = Promise.all(
+      lanes.map((t) =>
+        onChain(keyOf("cap", id, t), async () => {
+          const dir = laneDir(config.workspace, id, t);
+          const st = await readState(dir).catch(() => null);
+          if (st !== null && st.session_id === null) return { cleared: false, previous: null };
+          return clearSession(dir, reason);
+        }),
+      ),
+    );
     // 止めた実行が state を書き終えるまで待ち、同じ key の他の指示と並べて（chain に載せて）破棄する。
     // chain の間は stopRequests が残るので、閉じている間に来た指示は実行されず STOP で返る
+    const r = await onChain(key, async () => {
+      const main = await clearSession(agentDir(config.workspace, kind, id), reason);
+      const laneResults = await laneClears;
+      // 印はファイルにも残す（server の再起動後も、worker の終了の回収・report で起こさない）。chain の上で書くので、後に来た kick_cap が消す
+      if (kind === "cap" && closedCaps.has(id)) await writeClosedMark(id, reason);
+      const lanePrev = laneResults.find((x) => x.cleared)?.previous ?? null;
+      return { cleared: main.cleared || laneResults.some((x) => x.cleared), previous: main.previous ?? lanePrev, lanes: laneResults.filter((x) => x.cleared).length };
+    });
+    log(`close: ${key} stopped=${stopped} workers_stopped=${workersStopped} session_cleared=${r.cleared} previous=${r.previous ?? "-"} lanes_cleared=${r.lanes}`);
+    return { stopped, session_cleared: r.cleared, previous_session_id: r.previous, workers_stopped: workersStopped };
+  }
+
+  /** key の chain に fn を載せる（invoke 中として数え、前の指示の後に実行する）。 */
+  function onChain<T>(key: string, fn: () => Promise<T>): Promise<T> {
     inflight.set(key, (inflight.get(key) ?? 0) + 1);
     const prev = chains.get(key) ?? Promise.resolve();
-    const run = prev.then(async () => {
-      const r = await clearSession(kind, id, reason);
-      // 印はファイルにも残す（server の再起動後も、worker の終了の回収・report で起こさない）。chain の上で書くので、後に来た task が消す
-      if (kind === "cap" && closedCaps.has(id)) await writeClosedMark(id, reason);
-      return r;
-    });
+    const run = prev.then(fn);
     void run.then(
       () => settled(key),
       () => settled(key),
@@ -638,9 +743,7 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
     void tail.then(() => {
       if (chains.get(key) === tail) chains.delete(key);
     });
-    const r = await run;
-    log(`close: ${key} stopped=${stopped} workers_stopped=${workersStopped} session_cleared=${r.cleared} previous=${r.previous ?? "-"}`);
-    return { stopped, session_cleared: r.cleared, previous_session_id: r.previous, workers_stopped: workersStopped };
+    return run;
   }
 
   async function writeClosedMark(id: string, reason: string): Promise<void> {
@@ -669,6 +772,7 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
     if (!isValidAgentId(id)) {
       return Promise.reject(new Error(kind === "cap" ? `cap_id が不正: ${id}` : `worker_id が不正: ${id}`));
     }
+    if (input.taskId !== undefined && !isValidAgentId(input.taskId)) return Promise.reject(new Error(`task_id が不正: ${input.taskId}`));
     try {
       if (input.model !== undefined) assertModel(input.model, "model");
       if (input.worker_model !== undefined) assertModel(input.worker_model, "worker_model");
@@ -685,11 +789,18 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
         reopen = true;
       }
     }
-    const key = `${kind}:${id}`;
-    const entry: RunEntry = { kind, id, ...(input.capId !== undefined ? { capId: input.capId } : {}), queuedAt: new Date().toISOString() };
+    const key = keyOf(kind, id, kind === "cap" ? input.taskId : undefined);
+    const entry: RunEntry = {
+      kind,
+      id,
+      ...(input.capId !== undefined ? { capId: input.capId } : {}),
+      ...(input.taskId !== undefined ? { taskId: input.taskId } : {}),
+      queuedAt: new Date().toISOString(),
+    };
     runs.add(entry);
     inflight.set(key, (inflight.get(key) ?? 0) + 1);
     waiting.set(key, (waiting.get(key) ?? 0) + 1);
+    if (deps.onRunAdded) hook(() => deps.onRunAdded!(refOf(entry)));
     const prev = chains.get(key) ?? Promise.resolve();
     const run = prev.then(async () => {
       waiting.set(key, (waiting.get(key) ?? 1) - 1);
@@ -697,15 +808,14 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
       if (reopen) await rm(closedMarkFile(agentDir(config.workspace, "cap", id)), { force: true }).catch(() => {});
       return execute(kind, id, input, entry);
     });
+    const done = (result: { outcome?: RunOutcome; error?: string }): void => {
+      runs.delete(entry);
+      settled(key);
+      if (deps.onRunSettled) hook(() => deps.onRunSettled!(refOf(entry), result));
+    };
     void run.then(
-      () => {
-        runs.delete(entry);
-        settled(key);
-      },
-      () => {
-        runs.delete(entry);
-        settled(key);
-      },
+      (outcome) => done({ outcome }),
+      (e: unknown) => done({ error: errMsg(e) }),
     );
     const tail = run.catch(() => undefined);
     chains.set(key, tail);
@@ -730,7 +840,71 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
       .sort();
   }
 
+  /**
+   * cap の status: 本体（kick_cap の会話）と task の lane（invoke 中のものと、最後に始めたもの）をまとめる。
+   * state は 1 つでも running なら running。代表（session_id・model・conversation・last_error・retries の出所）は、
+   * running の中で最後に始めたもの、無ければ最後に終わったもの（本体が error なら本体）。queued は全ての待ちの合計。
+   */
+  async function capStatusOf(id: string): Promise<WithModel<AgentStatus>> {
+    const cwd = agentDir(config.workspace, "cap", id);
+    const keys = new Set([`cap:${id}`, ...capKeys(id)]);
+    const queued = [...keys].reduce((n, k) => n + (waiting.get(k) ?? 0), 0);
+    const laneIds = new Set(capKeys(id).filter((k) => k.startsWith(`cap:${id}/`)).map((k) => k.slice(`cap:${id}/`.length)));
+    const latest = await latestLane(id);
+    if (latest !== undefined) laneIds.add(latest);
+    try {
+      const main = { dir: cwd, s: await readState(cwd) };
+      const lanes: Array<{ dir: string; s: AgentStateFile }> = [];
+      for (const t of [...laneIds].sort()) {
+        const dir = laneDir(config.workspace, id, t);
+        const s = await readState(dir).catch(() => null);
+        if (s !== null && (s.last_started_at !== null || s.state !== "idle")) lanes.push({ dir, s });
+      }
+      const all = [main, ...lanes];
+      const running = all.filter((x) => x.s.state === "running");
+      const at = (x: { s: AgentStateFile }, k: "last_started_at" | "last_finished_at"): string => x.s[k] ?? "";
+      const pick = (xs: typeof all, by: (x: (typeof all)[number]) => string): (typeof all)[number] => xs.reduce((a, b) => (by(b) > by(a) ? b : a));
+      const rep =
+        running.length > 0
+          ? pick(running, (x) => at(x, "last_started_at"))
+          : main.s.state === "error"
+            ? main
+            : pick(all, (x) => at(x, "last_finished_at") || at(x, "last_started_at"));
+      const maxOf = (k: "last_started_at" | "last_finished_at"): string | null => all.map((x) => x.s[k]).reduce<string | null>((a, b) => (b !== null && (a === null || b > a) ? b : a), null);
+      const repModel = (await readModelRecord(rep.dir)).model ?? (rep.dir !== cwd ? (await readModelRecord(cwd)).model : undefined);
+      const out: WithModel<AgentStatus> = {
+        kind: "cap",
+        id,
+        path: cwd,
+        session_id: rep.s.session_id,
+        state: running.length > 0 ? "running" : rep.s.state,
+        last_started_at: maxOf("last_started_at"),
+        last_finished_at: maxOf("last_finished_at"),
+        retries: rep.s.retries,
+        queued,
+        model: repModel ?? null,
+        conversation: toConversationInfo(await readConversation(rep.dir)),
+      };
+      if (rep.s.last_error !== undefined) out.last_error = rep.s.last_error;
+      return out;
+    } catch (e) {
+      return {
+        kind: "cap",
+        id,
+        path: cwd,
+        session_id: null,
+        state: "error",
+        last_started_at: null,
+        last_finished_at: null,
+        last_error: errMsg(e),
+        retries: 0,
+        queued,
+      };
+    }
+  }
+
   async function statusOf(kind: AgentKind, id: string): Promise<WithModel<AgentStatus>> {
+    if (kind === "cap") return capStatusOf(id);
     const dir = agentDir(config.workspace, kind, id);
     const queued = waiting.get(`${kind}:${id}`) ?? 0;
     try {
@@ -778,61 +952,68 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
   async function reapOrphans(): Promise<ReapSummary> {
     const sum: ReapSummary = { killed: 0, failed: 0, errored: 0, reaped: [] };
     let procs: LiveProcess[] | null | undefined;
+    // 対象: cap の本体・cap の task の lane・worker
+    const targets: Array<{ kind: AgentKind; id: string; dir: string; taskId?: string }> = [];
     for (const kind of ["cap", "worker"] as const) {
       for (const id of await listIds(kind)) {
+        targets.push({ kind, id, dir: agentDir(config.workspace, kind, id) });
+        if (kind === "cap") for (const t of await listLanes(id)) targets.push({ kind, id, dir: laneDir(config.workspace, id, t), taskId: t });
+      }
+    }
+    for (const { kind, id, dir, taskId } of targets) {
+      const what = `kind=${kind} id=${id}${taskId !== undefined ? ` task=${taskId}` : ""}`;
+      const tag = taskId !== undefined ? { taskId } : {};
+      try {
+        let st: AgentStateFile;
         try {
-          const dir = agentDir(config.workspace, kind, id);
-          let st: AgentStateFile;
-          try {
-            st = await readState(dir);
-          } catch (e) {
-            log(`孤児回収: state を読めない kind=${kind} id=${id}: ${errMsg(e)}`);
-            sum.errored++;
-            continue;
-          }
-          if (st.state !== "running") continue;
-          const now = new Date().toISOString();
-          const next = (state: "failed" | "error", err: string): AgentStateFile => ({
-            ...st,
-            state,
-            last_finished_at: now,
-            last_error: err,
-          });
-          if (procs === undefined) procs = await listProcesses();
-          if (procs === null) {
-            await writeState(dir, next("error", "プロセス一覧を取れず孤児を判定できない"));
-            log(`孤児回収: ps 不可 kind=${kind} id=${id}`);
-            sum.errored++;
-            continue;
-          }
-          const hit = st.session_id
-            ? procs.filter((p) => p.pid !== process.pid && matchesSession(p.argv, st.session_id as string))
-            : [];
-          if (hit.length === 0) {
-            await writeState(dir, next("failed", "前回の実行が終了しないまま server が落ちた"));
-            sum.reaped.push({ kind, id, error: "前回の実行が終了しないまま server が落ちた" });
-            log(`孤児回収: プロセス無し kind=${kind} id=${id} → failed`);
-            sum.failed++;
-            continue;
-          }
-          let allDead = true;
-          for (const p of hit) {
-            const dead = await terminate(p.pid).catch(() => false);
-            log(`孤児回収: SIGKILL pid=${p.pid} kind=${kind} id=${id} dead=${dead}`);
-            if (!dead) allDead = false;
-          }
-          if (allDead) {
-            await writeState(dir, next("failed", "起動時に孤児プロセスを回収"));
-            sum.reaped.push({ kind, id, error: "起動時に孤児プロセスを回収" });
-            sum.killed++;
-          } else {
-            await writeState(dir, next("error", "孤児プロセスを止められない"));
-            sum.errored++;
-          }
+          st = await readState(dir);
         } catch (e) {
-          log(`孤児回収: 失敗 kind=${kind} id=${id}: ${errMsg(e)}`);
+          log(`孤児回収: state を読めない ${what}: ${errMsg(e)}`);
+          sum.errored++;
+          continue;
+        }
+        if (st.state !== "running") continue;
+        const now = new Date().toISOString();
+        const next = (state: "failed" | "error", err: string): AgentStateFile => ({
+          ...st,
+          state,
+          last_finished_at: now,
+          last_error: err,
+        });
+        if (procs === undefined) procs = await listProcesses();
+        if (procs === null) {
+          await writeState(dir, next("error", "プロセス一覧を取れず孤児を判定できない"));
+          log(`孤児回収: ps 不可 ${what}`);
+          sum.errored++;
+          continue;
+        }
+        const hit = st.session_id
+          ? procs.filter((p) => p.pid !== process.pid && matchesSession(p.argv, st.session_id as string))
+          : [];
+        if (hit.length === 0) {
+          await writeState(dir, next("failed", "前回の実行が終了しないまま server が落ちた"));
+          sum.reaped.push({ kind, id, error: "前回の実行が終了しないまま server が落ちた", ...tag });
+          log(`孤児回収: プロセス無し ${what} → failed`);
+          sum.failed++;
+          continue;
+        }
+        let allDead = true;
+        for (const p of hit) {
+          const dead = await terminate(p.pid).catch(() => false);
+          log(`孤児回収: SIGKILL pid=${p.pid} ${what} dead=${dead}`);
+          if (!dead) allDead = false;
+        }
+        if (allDead) {
+          await writeState(dir, next("failed", "起動時に孤児プロセスを回収"));
+          sum.reaped.push({ kind, id, error: "起動時に孤児プロセスを回収", ...tag });
+          sum.killed++;
+        } else {
+          await writeState(dir, next("error", "孤児プロセスを止められない"));
           sum.errored++;
         }
+      } catch (e) {
+        log(`孤児回収: 失敗 ${what}: ${errMsg(e)}`);
+        sum.errored++;
       }
     }
     return sum;
@@ -857,13 +1038,24 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
   }
 
   function isActive(kind: AgentKind, id: string): boolean {
-    return inflight.has(`${kind}:${id}`);
+    return kind === "cap" ? capKeys(id).length > 0 : inflight.has(`${kind}:${id}`);
+  }
+
+  function laneBusy(capId: string, taskId: string): boolean {
+    for (const r of runs) if (r.taskId === taskId && ownerCap(r) === capId) return true;
+    return false;
   }
 
   function activeRuns(): ActiveRun[] {
     const out: ActiveRun[] = [];
     for (const r of runs) {
-      const base = { kind: r.kind, id: r.id, ...(r.capId !== undefined ? { capId: r.capId } : {}), startedAt: r.startedAt ?? r.queuedAt };
+      const base = {
+        kind: r.kind,
+        id: r.id,
+        ...(r.capId !== undefined ? { capId: r.capId } : {}),
+        ...(r.taskId !== undefined ? { taskId: r.taskId } : {}),
+        startedAt: r.startedAt ?? r.queuedAt,
+      };
       if (r.startedAt === undefined) out.push({ ...base, phase: "queued" });
       else if (r.child !== undefined && childAlive(r.child)) out.push({ ...base, phase: "running", ...(r.child.pid !== undefined ? { pid: r.child.pid } : {}) });
       // spawn 前・再試行の間・子が exit した後（結果を書き終えて返るまで）は準備中として数える
@@ -872,5 +1064,5 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
     return out;
   }
 
-  return { invoke, stop, close, status, reapOrphans, activeCount, activeRuns, isClosed: (id) => closedCaps.has(id), loadClosed, isActive, shutdown };
+  return { invoke, stop, close, status, reapOrphans, activeCount, activeRuns, isClosed: (id) => closedCaps.has(id), loadClosed, isActive, laneBusy, shutdown };
 }

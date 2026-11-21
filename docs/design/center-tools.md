@@ -127,6 +127,11 @@
   - master-cap の接続に header を自動で載せる仕組みは入れていない。`claude remote-control` が `--mcp-config` / `--settings` を受けない（remote-control の前の global flag は spawn した session に引き継がれない）。`~/.claude.json` の書換えはユーザー設定の変更。`.mcp.json` の配置は承認プロンプト・未 trust・token 平文の問題がある。
   - 移行先: center が master-cap に道具を持たせる手段（remote-control 以外の起動、または master-cap 向けの MCP 設定を渡せる起動）が取れたら、session 名入りの header を center が付けて引数 `owner` は不要にする。
   - owner は自己申告で認証しない。
+- （2026-11-21）server が同じ cap の task を並行に動かす（`docs/design/cap-orchestration.md`「task の並行」）。center 側の扱い:
+  - 受付: status の cap に `tasks`（task を並行に動かす server は空でも載せる）があれば、自分の task_id が載ったかで確かめる（`delivery_basis: "status"`。負荷・`last_started_at` の変化からの推定は `tasks` の無い旧 server の時だけ）。
+  - 完了: server が `tasks` で done / failed と知らせた task は、その task の最初の返信（`task_result`）を受けていれば、task ごとに pending から外して owner に通知する（本文に `task_id`、結果はその task の最新の `task_result`。他の task が動いていても待たない）。cap 全体の完了（cap が idle かつ worker が動いていない）での一括の完了・`remote_wait` は従来どおり。
+  - 表示: `remote_list` の `pending[].server_task`（`state`・`waiting_for`・`branch`）、`pending[].last_result`（その task の最新の結果）。`task_status` は待っている task を「待ち（同じ branch … の前の task）」「待ち（同時実行の上限）」と出す。
+  - `worker_report.task_id` は、その worker を起動した task（旧 server は cap の最新の task）。
 
 ## C. server の運用（退役）
 

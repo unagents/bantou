@@ -10,6 +10,8 @@ import { getWorkerHandler } from "./workers";
 
 export const CAP_ID_HEADER = "x-bantou-cap-id";
 export const WORKER_ID_HEADER = "x-bantou-worker-id";
+/** cap の task の指揮（lane）の run に付く。worker_start で起動した worker はその task のものになる。 */
+export const TASK_ID_HEADER = "x-bantou-task-id";
 
 /** worker_id の形式（worker_start / worker_status / worker_stop で共通）。 */
 const WORKER_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
@@ -31,6 +33,7 @@ const noNul = (s: string): boolean => !s.includes("\0");
 export async function handleMcpRequest(req: Request): Promise<Response> {
   const capId = req.headers.get(CAP_ID_HEADER) ?? "";
   const workerId = req.headers.get(WORKER_ID_HEADER) ?? "";
+  const taskId = req.headers.get(TASK_ID_HEADER) ?? "";
   const server = new McpServer({ name: "bantou", version: "0.1.1" });
   server.registerTool(
     "report",
@@ -56,7 +59,7 @@ export async function handleMcpRequest(req: Request): Promise<Response> {
     },
   );
   if (capId) registerBashTool(server, workerId ? { kind: "worker", capId, workerId } : { kind: "cap", capId });
-  if (capId && !workerId) registerWorkerTools(server, capId);
+  if (capId && !workerId) registerWorkerTools(server, capId, taskId || undefined);
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true,
@@ -93,7 +96,7 @@ function registerBashTool(server: McpServer, caller: BashCaller): void {
   );
 }
 
-function registerWorkerTools(server: McpServer, capId: string): void {
+function registerWorkerTools(server: McpServer, capId: string, taskId: string | undefined): void {
   const hub = () => getWorkerHandler();
   const unavailable = () => json({ error: "server が起動中のため受け付けられない" }, true);
   server.registerTool(
@@ -117,7 +120,7 @@ function registerWorkerTools(server: McpServer, capId: string): void {
       const h = hub();
       if (!h) return unavailable();
       try {
-        return json(await h.start(capId, args));
+        return json(await h.start(capId, args, taskId));
       } catch (e) {
         return fail(e);
       }
@@ -128,14 +131,14 @@ function registerWorkerTools(server: McpServer, capId: string): void {
     {
       description:
         "State of your workers: {workers:[{id, state (running|stalled|idle|done|failed|lost), task, last_activity, last_output_at, silent_ms, ...}]}. " +
-        "Give worker_id to see one.",
+        "Without worker_id it lists the workers of your task. Give worker_id to see one.",
       inputSchema: { worker_id: z.string().regex(WORKER_ID_PATTERN).optional() },
     },
     async ({ worker_id }) => {
       const h = hub();
       if (!h) return unavailable();
       try {
-        return json(await h.status(capId, worker_id));
+        return json(await h.status(capId, worker_id, taskId));
       } catch (e) {
         return fail(e);
       }
@@ -151,7 +154,7 @@ function registerWorkerTools(server: McpServer, capId: string): void {
       const h = hub();
       if (!h) return unavailable();
       try {
-        return json(await h.stop(capId, worker_id));
+        return json(await h.stop(capId, worker_id, taskId));
       } catch (e) {
         return fail(e);
       }

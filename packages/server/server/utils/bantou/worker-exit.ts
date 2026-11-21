@@ -3,9 +3,9 @@ import { join } from "node:path";
 import { isValidAgentId, type AgentKind } from "@agent-hand/bantou-protocol";
 import type { RunObserver } from "./agents";
 import { STOP_MSG } from "./agents";
-import { agentDir, runLogDir } from "./paths";
+import { agentDir, laneDir, runLogDir } from "./paths";
 import { readState } from "./state";
-import { readOwner } from "./workers";
+import { readOwnerRecord } from "./workers";
 import type { ReportKind } from "./reports";
 
 /** worker の終わり方。 */
@@ -45,13 +45,15 @@ export function buildExitPrompt(info: WorkerExitInfo, n: number, max: number): s
   ].join("\n");
 }
 
-/** task ごとの再開の回数。cap の logs/exit-resumes.json。 */
+/** task ごとの再開の回数。cap の logs/exit-resumes.json（task の lane の worker は lane の logs/exit-resumes.json）。 */
 interface ResumeCount {
   task_id: string;
   count: number;
 }
 
 const countFile = (capDir: string): string => join(runLogDir(capDir), "exit-resumes.json");
+/** 回数の記録の key と置き場。lane の worker は `<cap_id>/<task_id>` で、lane の dir に置く。 */
+const countKey = (capId: string, lane: string | undefined): string => (lane === undefined ? capId : `${capId}/${lane}`);
 /** その worker の、どの run まで通知の判断を済ませたか。worker の logs/exit-handled.json。 */
 const handledFile = (workerDir: string): string => join(runLogDir(workerDir), "exit-handled.json");
 
@@ -61,16 +63,16 @@ export interface WorkerExitDeps {
   maxResumes: number;
   /** 起動時に拾う、worker の終了からの経過の上限（ms）。0 は拾わない。 */
   recoverMs: number;
-  /** cap の再開を同期で積む（hub.resumeCap）。 */
-  resumeCap: (capId: string, prompt: string, reason: string) => Promise<void>;
-  /** 上限超過を task の結果として知らせる（hub.failTask）。 */
-  failTask: (capId: string, message: string) => Promise<void>;
+  /** cap の再開を同期で積む（hub.resumeCap）。taskId = worker を起動した task の lane（あればその lane を再開する）。 */
+  resumeCap: (capId: string, prompt: string, reason: string, taskId?: string) => Promise<void>;
+  /** 上限超過を task の結果として知らせる（hub.failTask）。taskId = worker の task（あればその task を失敗にする）。 */
+  failTask: (capId: string, message: string, taskId?: string) => Promise<void>;
   /** cap の最新の task_id（同期。分からなければ undefined）。 */
   knownTask: (capId: string) => string | undefined;
   taskId: (capId: string) => Promise<string | undefined>;
-  /** cap を running として activity に出す／取り消す（tracker.holdCap / releaseCap）。 */
-  holdCap: (capId: string) => void;
-  releaseCap: (capId: string) => void;
+  /** cap を running として activity に出す／取り消す（tracker.holdCap / releaseCap）。taskId = 再開する lane。 */
+  holdCap: (capId: string, taskId?: string) => void;
+  releaseCap: (capId: string, taskId?: string) => void;
   /** worker の持ち主 cap（tracker の記録。同期）。 */
   capOf: (workerId: string) => string | undefined;
   /** stop_cap で閉じた cap か（閉じた cap は worker の終了で再開しない）。 */
@@ -108,27 +110,31 @@ export function createWorkerExitWatcher(deps: WorkerExitDeps): WorkerExitWatcher
     seen.set(workerId, l);
   }
 
-  async function loadCount(capId: string): Promise<void> {
-    if (counts.has(capId)) return;
+  const countDir = (capId: string, lane: string | undefined): string =>
+    lane === undefined ? agentDir(deps.workspace, "cap", capId) : laneDir(deps.workspace, capId, lane);
+
+  async function loadCount(capId: string, lane?: string): Promise<void> {
+    const key = countKey(capId, lane);
+    if (counts.has(key)) return;
     try {
-      const d = JSON.parse(await readFile(countFile(agentDir(deps.workspace, "cap", capId)), "utf8")) as Partial<ResumeCount>;
+      const d = JSON.parse(await readFile(countFile(countDir(capId, lane)), "utf8")) as Partial<ResumeCount>;
       if (typeof d.task_id === "string" && typeof d.count === "number" && Number.isInteger(d.count) && d.count >= 0) {
-        if (!counts.has(capId)) counts.set(capId, { task_id: d.task_id, count: d.count });
+        if (!counts.has(key)) counts.set(key, { task_id: d.task_id, count: d.count });
       }
     } catch {
       // 記録なし
     }
   }
 
-  async function persistCount(capId: string): Promise<void> {
-    const c = counts.get(capId);
+  async function persistCount(capId: string, lane?: string): Promise<void> {
+    const c = counts.get(countKey(capId, lane));
     if (!c) return;
     try {
-      const dir = agentDir(deps.workspace, "cap", capId);
+      const dir = countDir(capId, lane);
       await mkdir(runLogDir(dir), { recursive: true });
       await writeFile(countFile(dir), JSON.stringify(c) + "\n");
     } catch (e) {
-      log(`exit-resumes 記録失敗: cap_id=${capId} ${e instanceof Error ? e.message : String(e)}`);
+      log(`exit-resumes 記録失敗: cap_id=${capId}${lane !== undefined ? ` task_id=${lane}` : ""} ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
@@ -154,14 +160,16 @@ export function createWorkerExitWatcher(deps: WorkerExitDeps): WorkerExitWatcher
 
   /**
    * 再開するか決めて実行する（同期）。上限内なら cap を running にして再開を積み、超えたら task の結果に error を載せる。
+   * lane = worker を起動した task。あれば、その task の指揮（lane）を再開し、回数もその task で数える。
    * 戻り値は「再開を積んだ」。
    */
-  function dispatch(capId: string, info: WorkerExitInfo, startedAt: string | undefined): boolean {
-    const task = deps.knownTask(capId) ?? counts.get(capId)?.task_id ?? "-";
-    let c = counts.get(capId);
+  function dispatch(capId: string, lane: string | undefined, info: WorkerExitInfo, startedAt: string | undefined): boolean {
+    const key = countKey(capId, lane);
+    const task = lane ?? deps.knownTask(capId) ?? counts.get(key)?.task_id ?? "-";
+    let c = counts.get(key);
     if (!c || c.task_id !== task) {
       c = { task_id: task, count: 0 };
-      counts.set(capId, c);
+      counts.set(key, c);
     }
     void markHandled(info.worker_id, startedAt);
     if (c.count >= deps.maxResumes) {
@@ -170,21 +178,21 @@ export function createWorkerExitWatcher(deps: WorkerExitDeps): WorkerExitWatcher
         `${info.error !== undefined ? `（error: ${oneLine(info.error, 200)}）` : ""}`;
       log(`worker 終了の再開を打ち切り: cap_id=${capId} worker_id=${info.worker_id} cause=${info.cause} count=${c.count}/${deps.maxResumes} task=${task}`);
       // 順序: cap を running にする → task_result(failed) を先に送る → 送り終えたら idle に戻す（worker の activity はその間に出る。center が成功扱いで先に完了にしない）
-      deps.holdCap(capId);
+      deps.holdCap(capId, lane);
       void deps
-        .failTask(capId, msg)
+        .failTask(capId, msg, lane)
         .catch((e: unknown) => log(`上限超過の通知失敗: cap_id=${capId} ${e instanceof Error ? e.message : String(e)}`))
-        .finally(() => deps.releaseCap(capId));
+        .finally(() => deps.releaseCap(capId, lane));
       return false;
     }
     c.count++;
-    void persistCount(capId);
+    void persistCount(capId, lane);
     log(`worker 終了で cap を再開: cap_id=${capId} worker_id=${info.worker_id} cause=${info.cause} count=${c.count}/${deps.maxResumes} task=${task}`);
     // 順序: cap を running にする → 再開を積む（manager の queue。cap が turn の途中なら順番待ち）。worker の activity はこの後
-    deps.holdCap(capId);
+    deps.holdCap(capId, lane);
     void deps
-      .resumeCap(capId, buildExitPrompt(info, c.count, deps.maxResumes), `worker ${info.worker_id} exit (${info.cause})`)
-      .finally(() => deps.releaseCap(capId));
+      .resumeCap(capId, buildExitPrompt(info, c.count, deps.maxResumes), `worker ${info.worker_id} exit (${info.cause})`, lane)
+      .finally(() => deps.releaseCap(capId, lane));
     return true;
   }
 
@@ -215,6 +223,7 @@ export function createWorkerExitWatcher(deps: WorkerExitDeps): WorkerExitWatcher
     const last = rs[rs.length - 1];
     dispatch(
       capId,
+      o.taskId,
       {
         worker_id: id,
         cause,
@@ -278,16 +287,18 @@ export function createWorkerExitWatcher(deps: WorkerExitDeps): WorkerExitWatcher
         if (st.last_error === STOP_MSG) continue;
         if (now() - Date.parse(st.last_finished_at) > deps.recoverMs) continue;
         if ((await readHandled(id)) === st.last_started_at) continue;
-        const capId = await readOwner(deps.workspace, id);
-        if (capId === undefined) continue;
+        const owner = await readOwnerRecord(deps.workspace, id);
+        if (owner === undefined) continue;
+        const { capId, taskId: lane } = owner;
         if (deps.isClosed?.(capId) === true) {
           log(`回収: 閉じた cap の worker の終了は再開しない: cap_id=${capId} worker_id=${id}`);
           await markHandled(id, st.last_started_at);
           continue;
         }
-        const capSt = await readState(agentDir(deps.workspace, "cap", capId)).catch(() => null);
-        if (capSt === null || capSt.session_id === null) continue; // cap が無い・会話が閉じている
-        await loadCount(capId);
+        // cap（task の worker はその task の lane）が無い・会話が閉じている
+        const capSt = await readState(lane === undefined ? agentDir(deps.workspace, "cap", capId) : laneDir(deps.workspace, capId, lane)).catch(() => null);
+        if (capSt === null || capSt.session_id === null) continue;
+        await loadCount(capId, lane);
         await deps.taskId(capId);
         const rs = (await reportsOnDisk(capId, id)).filter((r) => r.at >= st.last_started_at!);
         if (st.state === "idle" && answered(rs)) {
@@ -302,7 +313,7 @@ export function createWorkerExitWatcher(deps: WorkerExitDeps): WorkerExitWatcher
           ...(last ? { last_report: last } : {}),
           report_count: rs.length,
         };
-        if (dispatch(capId, info, st.last_started_at)) resumed++;
+        if (dispatch(capId, lane, info, st.last_started_at)) resumed++;
       } catch (e) {
         log(`終了した worker の回収に失敗: worker_id=${id} ${e instanceof Error ? e.message : String(e)}`);
       }

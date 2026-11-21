@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { startBroker } from "@unagents/messenger-broker";
@@ -16,15 +16,15 @@ import {
   type UpdateWaitRun,
 } from "@agent-hand/bantou-protocol";
 import { createActivityTracker } from "./activity";
-import { createAgentManager, type ActiveRun, type AgentManager, type RunExtras } from "./agents";
+import { createAgentManager, type ActiveRun, type AgentManager, type CloseResult, type InvokeInput, type RunExtras } from "./agents";
 import { createWorkerCleaner } from "./cleanup";
 import { loadConfig } from "./config";
 import { buildIdentity, loadOrCreateServerId } from "./identity";
 import { log } from "./log";
 import { buildExtraMcp, writeMcpConfigFile } from "./extra-mcp";
-import { CAP_ID_HEADER, WORKER_ID_HEADER, type McpListener } from "./mcp";
+import { CAP_ID_HEADER, TASK_ID_HEADER, WORKER_ID_HEADER, type McpListener } from "./mcp";
 import { setBashWorkspace } from "./bash";
-import { agentDir, runLogDir } from "./paths";
+import { agentDir, laneDir, runLogDir } from "./paths";
 import { CAP_GUIDE, WORKER_GUIDE, buildTaskPrompt, buildTaskResult } from "./prompts";
 import { createReportHub, setReportHandler } from "./reports";
 import { createWorkerExitWatcher } from "./worker-exit";
@@ -38,7 +38,8 @@ import {
   writeReadyFile,
   type UpdateController,
 } from "./update";
-import { createWorkerHub, readOwner, setWorkerHandler, writeOwner, type WorkerHub } from "./workers";
+import { createTaskScheduler, type TaskScheduler } from "./tasks";
+import { createWorkerHub, readOwner, readOwnerRecord, setWorkerHandler, writeOwner, type WorkerHub } from "./workers";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { prepareWorkspace } from "./workspace";
@@ -106,6 +107,18 @@ export function describeCommand(cmd: ServerCommand): string {
 /** status_result に載せる identity と版。 */
 export type StatusIdentity = ServerIdentityFields & { server_version?: string; protocol_version?: string };
 
+/** task の最初の指揮の run の入力（task の lane で動かす）。 */
+export function taskInvokeInput(cmd: Extract<ServerCommand, { type: "task" }>): InvokeInput {
+  // goal 等から定型の文面を組み立てて cap の最初の指示にする（buildTaskPrompt）。
+  // repo / branch は cap には渡さない（cap は git を触らない。clone するのは worker）。文面に載せて cap から worker へ伝える
+  return {
+    prompt: buildTaskPrompt(cmd),
+    reason: `task ${cmd.task_id}`,
+    ...(cmd.worker_model ? { worker_model: cmd.worker_model } : {}),
+    taskId: cmd.task_id,
+  };
+}
+
 /** 指示を実行して返信内容を作る。失敗は ErrorReply にする。 */
 export async function execute(
   cmd: ServerCommand,
@@ -113,6 +126,11 @@ export async function execute(
   workers?: Pick<WorkerHub, "start">,
   /** status_result に載せる server の identity と版（protocol 1.7.0）。省略なら載せない（旧形式の返信）。 */
   identity?: StatusIdentity,
+  /**
+   * task の待ち行列。あれば task は task ごとの指揮（lane）で並行に動かし（上限・同じ branch は待たせる）、stop_cap は待っている task も止め、
+   * status の cap に tasks を載せる。省略時は従来どおり cap の本体で 1 つずつ。
+   */
+  tasks?: Pick<TaskScheduler, "submit" | "stopCap" | "snapshot" | "waitingCount">,
 ): Promise<ServerReply> {
   try {
     if (cmd.type === "kick_cap") {
@@ -120,13 +138,13 @@ export async function execute(
       return { bantou: PROTOCOL_VERSION, type: "cap_result", cap_id: cmd.cap_id, ...r };
     }
     if (cmd.type === "task") {
-      // goal 等から定型の文面を組み立てて cap の最初の指示にする（buildTaskPrompt）。同じ cap_id なら resume。
-      // repo / branch は cap には渡さない（cap は git を触らない。clone するのは worker）。文面に載せて cap から worker へ伝える
-      const r = await manager.invoke("cap", cmd.cap_id, {
-        prompt: buildTaskPrompt(cmd),
-        reason: `task ${cmd.task_id}`,
-        ...(cmd.worker_model ? { worker_model: cmd.worker_model } : {}),
-      });
+      if (tasks) {
+        // 返信を送り終えるまで task を終わりにしない（daemon が送った後に replied を呼ぶ）
+        const r = await tasks.submit(cmd, { deferReply: true });
+        return buildTaskResult(cmd.cap_id, cmd.task_id, r);
+      }
+      const { taskId: _lane, ...input } = taskInvokeInput(cmd);
+      const r = await manager.invoke("cap", cmd.cap_id, input);
       return buildTaskResult(cmd.cap_id, cmd.task_id, r);
     }
     if (cmd.type === "worker_reply") {
@@ -136,15 +154,17 @@ export async function execute(
       return { bantou: PROTOCOL_VERSION, type: "worker_reply_result", ok: true, cap_id: cmd.cap_id, worker_id: r.worker_id, accepted: true };
     }
     if (cmd.type === "stop_cap") {
-      // 止めるだけでなく会話（session_id）も破棄する。次の task は新しい会話で始まる
-      const r = await manager.close("cap", cmd.cap_id);
+      // 止めるだけでなく会話（session_id）も破棄する。次の task は新しい会話で始まる。
+      // task の待ち行列があれば、待っている task も止め、閉じ終わるまでその cap の task を始めない
+      const close = (): Promise<CloseResult> => manager.close("cap", cmd.cap_id);
+      const { result: r, dropped } = tasks ? await tasks.stopCap(cmd.cap_id, close) : { result: await close(), dropped: 0 };
       return {
         bantou: PROTOCOL_VERSION,
         type: "stop_result",
         ok: true,
         cap_id: cmd.cap_id,
-        // cap の run か、その cap の worker を 1 つでも止めたら true。worker の数は workers_stopped
-        stopped: r.stopped || r.workers_stopped > 0,
+        // cap の run（task の指揮を含む）・待っている task・その cap の worker を 1 つでも止めたら true。worker の数は workers_stopped
+        stopped: r.stopped || r.workers_stopped > 0 || dropped > 0,
         session_cleared: r.session_cleared,
         previous_session_id: r.previous_session_id,
         workers_stopped: r.workers_stopped,
@@ -159,7 +179,10 @@ export async function execute(
       throw new Error(`${cmd.type} は execute では処理しない`);
     }
     const st = await manager.status();
-    return { bantou: PROTOCOL_VERSION, type: "status_result", ok: true, ...(identity ?? {}), ...st };
+    // cap に task の状態（待ち・実行中・最近終わったもの。無ければ空）を載せ、まだ始まっていない task を queued に足す。
+    // 空でも載せる（center は tasks があれば task_id で受付を確かめる）
+    const caps = tasks ? st.caps.map((c) => ({ ...c, queued: c.queued + tasks.waitingCount(c.id), tasks: tasks.snapshot(c.id) })) : st.caps;
+    return { bantou: PROTOCOL_VERSION, type: "status_result", ok: true, ...(identity ?? {}), caps, workers: st.workers };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     log(`エラー: ${cmd.type}: ${message}`);
@@ -194,7 +217,7 @@ export function describeUpdateWait(update: UpdateProgress, nowMs = Date.now()): 
   const runs = update.runs ?? [];
   const items = runs.slice(0, WAIT_RUNS_IN_MESSAGE).map((x) => {
     const m = minutesSince(x.started_at, nowMs);
-    const owner = x.kind === "worker" && x.cap_id ? `[cap ${x.cap_id}]` : "";
+    const owner = (x.kind === "worker" && x.cap_id ? `[cap ${x.cap_id}]` : "") + (x.task_id ? `[task ${x.task_id}]` : "");
     return `${x.kind}:${x.id}${owner} ${PHASE_WORD[x.phase] ?? String(x.phase)}${m !== undefined ? ` ${m} 分` : ""}`;
   });
   const more = runs.length > WAIT_RUNS_IN_MESSAGE ? ` ほか ${runs.length - WAIT_RUNS_IN_MESSAGE} 件` : "";
@@ -284,17 +307,21 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
   const tracker = createActivityTracker({
     notify: (capId, notice) => hub.notify(capId, notice),
     log,
+    tasksOf: (capId) => scheduler.snapshot(capId),
   });
-  const runExtras = async (kind: "cap" | "worker", id: string, input: { capId?: string }): Promise<RunExtras> => {
+  const runExtras = async (kind: "cap" | "worker", id: string, input: { capId?: string; taskId?: string }): Promise<RunExtras> => {
     if (!mcpUrl) throw new Error("mcp が未起動");
-    const dir = agentDir(config.workspace, kind, id);
+    // cap の task の lane は、mcp 設定・system prompt を lane の logs/ に書く（lane ごとに header の task_id が違う）
+    const dir = kind === "cap" && input.taskId !== undefined ? laneDir(config.workspace, id, input.taskId) : agentDir(config.workspace, kind, id);
     const headers: Record<string, string> = {};
     if (kind === "cap") {
       headers[CAP_ID_HEADER] = id;
+      if (input.taskId !== undefined) headers[TASK_ID_HEADER] = input.taskId;
     } else {
-      const capId = input.capId ?? (await readOwner(config.workspace, id));
+      const owner = await readOwnerRecord(config.workspace, id);
+      const capId = input.capId ?? owner?.capId;
       if (!capId) throw new Error(`worker の持ち主 cap が分からない: ${id}`);
-      await writeOwner(config.workspace, id, capId);
+      await writeOwner(config.workspace, id, capId, input.taskId ?? (owner?.capId === capId ? owner.taskId : undefined));
       headers[CAP_ID_HEADER] = capId;
       headers[WORKER_ID_HEADER] = id;
     }
@@ -322,26 +349,70 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
     workspace: config.workspace,
     maxResumes: config.session.exitResumeMax,
     recoverMs: config.session.exitRecoverMs,
-    resumeCap: (capId, prompt, reason) => hub.resumeCap(capId, prompt, reason),
-    failTask: (capId, message) => hub.failTask(capId, message),
+    resumeCap: (capId, prompt, reason, taskId) => hub.resumeCap(capId, prompt, reason, taskId),
+    failTask: (capId, message, taskId) => {
+      // task の worker なら、その task を失敗で終える印も付ける（返信を送り終えてから終わりになる）
+      if (taskId !== undefined) scheduler.fail(capId, taskId, message);
+      return hub.failTask(capId, message, taskId);
+    },
     knownTask: (capId) => hub.knownTask(capId),
     taskId: (capId) => hub.taskId(capId),
-    holdCap: (capId) => tracker.holdCap(capId),
-    releaseCap: (capId) => tracker.releaseCap(capId),
+    holdCap: (capId, taskId) => tracker.holdCap(capId, taskId),
+    releaseCap: (capId, taskId) => tracker.releaseCap(capId, taskId),
     capOf: (workerId) => tracker.snapshot().find((a) => a.kind === "worker" && a.id === workerId)?.cap_id,
     isClosed: (capId) => manager.isClosed(capId),
     log,
   });
-  const manager = createAgentManager({ config, runner: cliRunner, log, observer: exitWatcher.wrap(tracker), runExtras });
+  const manager = createAgentManager({
+    config,
+    runner: cliRunner,
+    log,
+    observer: exitWatcher.wrap(tracker),
+    runExtras,
+    // task の run（指揮・worker）が載った・終わった: task の状態を追う
+    onRunAdded: (run) => {
+      if (run.taskId !== undefined && run.capId !== undefined) scheduler.touch(run.capId, run.taskId);
+    },
+    onRunSettled: (run, result) => {
+      if (run.kind === "cap" && run.taskId !== undefined) scheduler.noteOutcome(run.id, run.taskId, result);
+      scheduler.check();
+    },
+  });
+  /**
+   * task の待ち行列。task ごとに指揮（lane）を立てて並行に動かす。同時に動く数は session.maxParallelTasks まで、
+   * 同じ deliverables.branch の task は前の task が終わるまで待つ。task が終わる = 指揮・worker・report 起因の処理が全部無くなった時。
+   */
+  const scheduler: TaskScheduler = createTaskScheduler({
+    maxParallel: config.session.maxParallelTasks,
+    run: (cmd) => manager.invoke("cap", cmd.cap_id, taskInvokeInput(cmd)),
+    busy: (capId, taskId) => manager.laneBusy(capId, taskId) || hub.pendingFor(capId, taskId) > 0,
+    changed: (capId) => tracker.touch(capId),
+    saveMeta: async (capId, taskId, meta) => {
+      const dir = laneDir(config.workspace, capId, taskId);
+      await mkdir(dir, { recursive: true });
+      await writeFile(join(dir, "task.json"), JSON.stringify({ task_id: taskId, ...meta }) + "\n");
+    },
+    loadMeta: async (capId, taskId) => {
+      try {
+        const d = JSON.parse(await readFile(join(laneDir(config.workspace, capId, taskId), "task.json"), "utf8")) as { branch?: unknown };
+        return typeof d.branch === "string" && d.branch !== "" ? { branch: d.branch } : {};
+      } catch {
+        return undefined;
+      }
+    },
+    log,
+  });
+  log(`task の同時実行の上限: cap ごとに ${config.session.maxParallelTasks}（同じ deliverables.branch の task は順に）`);
   const cleaner = createWorkerCleaner({
     workspace: config.workspace,
     keepMs: config.session.workerKeepMs,
     snapshot: () => tracker.snapshot(),
+    capEntry: (capId, taskId) => tracker.capEntry(capId, taskId),
     isActive: (id) => manager.isActive("worker", id),
     forget: (id) => tracker.forget("worker", id),
     log,
   });
-  const workerHub = createWorkerHub({ workspace: config.workspace, manager, activity: tracker, log, cleaner });
+  const workerHub = createWorkerHub({ workspace: config.workspace, manager, activity: tracker, log, cleaner, taskActive: (capId, taskId) => scheduler.isActive(capId, taskId) });
   const reaped = await manager.reapOrphans();
   log(`孤児回収: killed=${reaped.killed} failed=${reaped.failed} error=${reaped.errored}`);
   // 閉じた cap の印（再起動をまたぐ）。worker の終了の回収（exitWatcher.recover）より前に読む
@@ -382,9 +453,14 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
    * （受け付けの直後・run の後の返信の送信中）の分だけ。載っている間は manager の activeRuns（生きている run）が決める。
    */
   const kicking = new Map<string, number>();
-  /** 更新が待つ run: 生きている（または準備中の）run のうち、閉じた cap の worker を除く（閉じた cap は起こさないので、その worker の結果を待つ者は居ない）。 */
-  const waitRuns = (): ActiveRun[] =>
-    manager.activeRuns().filter((r) => !(r.kind === "worker" && r.capId !== undefined && manager.isClosed(r.capId)));
+  /**
+   * 更新が待つ run: 生きている（または準備中の）run のうち、閉じた cap の worker を除く（閉じた cap は起こさないので、その worker の結果を待つ者は居ない）。
+   * task の待ち行列の、まだ始まっていない task（queued）と、最初の返信を送っている task（preparing）も cap の run として数える。
+   */
+  const waitRuns = (): ActiveRun[] => [
+    ...manager.activeRuns().filter((r) => !(r.kind === "worker" && r.capId !== undefined && manager.isClosed(r.capId))),
+    ...scheduler.waitRuns().map((t): ActiveRun => ({ kind: "cap", id: t.capId, taskId: t.taskId, startedAt: t.since, phase: t.phase })),
+  ];
   const serverVersion = deps.serverVersion ?? "unknown";
   const update = createUpdateController({
     workspace: config.workspace,
@@ -400,10 +476,11 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
         kind: r.kind,
         id: r.id,
         ...(r.capId !== undefined && r.kind === "worker" ? { cap_id: r.capId } : {}),
+        ...(r.taskId !== undefined ? { task_id: r.taskId } : {}),
         started_at: r.startedAt,
         phase: r.phase,
       })),
-    extraBusy: () => [...kicking.keys()].filter((capId) => !manager.isActive("cap", capId)).length,
+    extraBusy: () => [...kicking.keys()].filter((capId) => !manager.isActive("cap", capId) && !scheduler.has(capId)).length,
     maxWaitMs: config.update.maxWaitMs,
     fetch: deps.updateFetch,
     requestExit: (reason) => (deps.requestExit ?? (() => log("終了を頼む先が無いため再起動できない")))(reason),
@@ -416,6 +493,12 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
   const hub = createReportHub({
     workspace: config.workspace,
     invoke: (capId, input) => manager.invoke("cap", capId, input),
+    // report の worker の task（持ち主の記録）。その task の指揮を再開し、worker_report の task_id にする
+    laneOf: async (capId, workerId) => {
+      const owner = await readOwnerRecord(config.workspace, workerId);
+      return owner?.capId === capId ? owner.taskId : undefined;
+    },
+    onLaneSettled: () => scheduler.check(),
     send: async (to, reply) => {
       await client.send(to, JSON.stringify(reply), "pull", REPLY_META);
     },
@@ -430,7 +513,10 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
   const retire = createRetireController({
     workspace: config.workspace,
     identity,
-    count: () => manager.activeCount(),
+    count: () => {
+      const c = manager.activeCount();
+      return { caps: c.caps + scheduler.waitingCount(), workers: c.workers };
+    },
     cancelUpdate: () => update.close(),
     clearUpdateFile: () => removeUpdateFile(config.workspace),
     refuse: () => {
@@ -446,7 +532,10 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
         throw new Error("server は退役中のため report を受け付けない");
       });
     },
-    stopAll: () => manager.shutdown(),
+    stopAll: async () => {
+      scheduler.close("server は退役中のため止めた");
+      await manager.shutdown();
+    },
     finish: () => (deps.requestExit ?? (() => log("終了を頼む先が無いため終了できない")))("retire"),
     service: () => {
       let cgroup: string | undefined;
@@ -509,7 +598,7 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
         // cap を指す他の命令（status・stop_cap・worker_reply）の送信元も通知先にする（center の再起動後に通知先を取り戻す）
         const capId = commandCapId(cmd);
         if (capId !== undefined && cmd.type !== "kick_cap" && cmd.type !== "task") await hub.noteCenter(capId, m.from_id, m.from_name || undefined);
-        reply = await execute(cmd, manager, workerHub, { ...identity, server_version: serverVersion, protocol_version: MESSENGER_PROTOCOL.version });
+        reply = await execute(cmd, manager, workerHub, { ...identity, server_version: serverVersion, protocol_version: MESSENGER_PROTOCOL.version }, scheduler);
       }
       try {
         await client.send(m.from_id, JSON.stringify(reply), "pull", REPLY_META);
@@ -519,6 +608,8 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
       }
       // 退役の返信を出し終えた（失敗でも）。猶予の後に messenger を解除して終了する
       if (cmd.type === "retire_server") retire.replied();
+      // task の最初の返信を出し終えた（失敗でも）。以後、その task は指揮・worker が無くなった時に終わる
+      if (cmd.type === "task") scheduler.replied(cmd.cap_id, cmd.task_id);
     } catch (e) {
       log(`エラー: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
@@ -573,7 +664,7 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
   // 起動時に回収した running は lost として center へ知らせる
   for (const r of reaped.reaped) {
     const capId = r.kind === "cap" ? r.id : await readOwner(config.workspace, r.id);
-    if (capId) tracker.seedLost(r.kind, r.id, capId, r.error);
+    if (capId) tracker.seedLost(r.kind, r.id, capId, r.error, r.kind === "cap" ? r.taskId : undefined);
   }
   // 再起動前に終わっていて、cap に知らせていない worker の終了を 1 回だけ拾う
   void exitWatcher.recover().then((n) => log(`終了した worker の回収: cap 再開=${n}`), (e: unknown) => log(`終了した worker の回収に失敗: ${e instanceof Error ? e.message : String(e)}`));
@@ -587,6 +678,7 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
       setWorkerHandler(undefined);
       setBashWorkspace(undefined);
       hub.close();
+      scheduler.close("server 終了により中断");
       await manager.shutdown();
       await Promise.race([
         Promise.allSettled([...inflight, hub.drain()]),

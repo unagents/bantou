@@ -18,6 +18,7 @@ Bash で claude を直接起動しない。
 一時物は作業 dir の中に置く。$TMPDIR（自分の path の tmp/）を使い、/tmp 直書きはしない。一時物の削除は Bash の rm でなく mcp__bantou__bash の rm（action: rm、paths は自分の path からの相対。自分の worker は worker:<id>/<path>、dir は recursive: true）を使う。
 worker の報告は「worker <id> から <kind>: <text>」として届く。
 worker_start は完了を待たずに返る。起動したらターンを終えてよい。
+同じ cap の別の task は、別の会話の指揮が並行して受け持つ。worker_status（worker_id 省略）は自分の task の worker だけを返す。動いている別の task の worker は worker_start / worker_stop できない。
 
 [分担]
 最小の分担は 2 体。実装 worker と review worker。
@@ -95,6 +96,19 @@ worker_model: （worker_model）（worker_start で model を省く時の既定�
 cap は `task` 指示の最終返答を task_result の JSON 1 つで返す（形式は上の「決まり本文」の `[最終返答]`）。server は返答から次の順で JSON を探す: ```json コードブロック（複数なら最後）、無ければ本文中の最後の `{...}`。`summary`（文字列）を持つ JSON だけを採る。取れた JSON は `cap_id` / `task_id` を server が補い、形が崩れた項目は既定値で補う（worker の role は `other`、state は `idle`、review の severity は `medium`、verdict は `unknown`、rounds は 0）。取り出せない時は `summary` に生の返答、`workers` / `remaining` は空、`review.verdict` は `unknown`（実行の失敗は `state: "failed"` と `error`）。
 
 cap は worker の report のたびに再開するので、最終ではない返答（「worker を起動した、report 待ち」など）は取り出せず、verdict が `unknown` の `task_result` になる。center は完了を verdict ではなく従来どおり「cap が idle かつ配下の worker に running / stalled が無い」で判断する。report 起因の再開で cap が task_result の JSON で答えた時は `task_result`、そうでなければ従来の `cap_result` を center へ送る。
+
+## task の並行（task ごとの指揮）
+
+- 背景（2026-11-21）: cap は `task` を受けた順に 1 つずつ実行していた（cap の claude の会話が 1 つで、同じ会話の turn は同時に動かせない）。cap の turn が task の完了まで続くと、関係の無い別の task（別の branch の作業）も前の task が終わるまで始まらなかった。
+- 決定: **task ごとに別の指揮の run（lane）を立てる**。lane = その task だけを受け持つ cap の claude の会話（cwd は cap の dir、記録は `caps/<cap_id>/logs/tasks/<task_id>/` の `state.json`・`logs/`・`task.json`）。cap_id は変わらない（center から見て cap は session × server に 1 つのまま）。`kick_cap` は従来どおり cap 本体の会話で 1 つずつ。
+- 理由: (1) 1 つの claude の会話は同時に 2 つの turn を動かせない。1 つの指揮が複数の task を受け持つと turn が直列になり、1 つの task の長い turn が他の task を止める（今回の不具合そのもの）。(2) worker・report・結果の task への対応が会話で決まる（lane が起動した worker はその task のもの）ので、worker_report の task_id と report 起因の task_result の task_id を取り違えない。(3) task ごとに context が分かれ、別の task の制約を混ぜず、会話も肥大しない（2026-11-11 の Prompt is too long の再発を避ける）。代わりに、続けて送った task どうしで会話は引き継がれない（必要な成果物と決定は goal に書いて渡す。「cap のライフサイクル」の引き継ぎと同じ）。
+- 同時に動く数: cap ごとに config `session.maxParallelTasks`（既定 2。運用の「重い処理は同時 2 本まで」に合わせた）。超えた分は待つ。既存の設定に重い処理の上限は無かったので新設した。
+- 同じ branch: 先に来て終わっていない task と `deliverables.branch` が同じ task は、前の task が終わるまで待つ（同じ branch への同時の push を避ける）。branch の指定が無い task は上限の内で並行。待っている task は来た順に始める。見るのは同じ cap の task だけ（別の cap・別の session は従来どおり互いに待たない）。
+- task が終わる: その task の指揮の run・その task の worker の run・report 起因の再開と返信の送信が全部無くなり、最初の返信（task_result）を送り終えた時。指揮の最後の run が失敗、stop、worker の終了による再開の上限超過なら failed。終わったら待っている task を始める。
+- worker: lane が `worker_start` した worker は、その task のもの（`logs/owner.json` に `task_id`）。report はその task の lane を再開し、返答はその task の `task_result`（JSON が取れなければ summary に生の返答）。worker の終了による再開の回数も task ごと。center の `worker_reply` は worker の task のまま。lane の `worker_status`（worker_id 省略）はその task の worker だけを返し、動いている別の task の worker は `worker_start` / `worker_stop` できない。
+- `stop_cap`（`remote_delete`）: cap 本体と全ての lane の run、待っている task（`task_result` failed、error は `stop_cap により停止`）、cap の worker を止め、本体と lane の会話を破棄する。閉じ終わるまでその cap の task は始めない。
+- server の更新待ち: lane の run は cap の run として数え（`runs[].task_id`）、まだ始まっていない task も queued の cap の run として数える。退役の停止件数にも待っている task を数える。
+- status / activity: cap は本体と lane をまとめて 1 件（どれかが running なら running）。cap に `tasks`（task ごとの状態・待ちの理由）を載せる。center は `tasks` で受付を task_id で確かめ、終わった task を task ごとに完了にして通知する（他の task が動いていても待たない）。
 
 ## 終わった worker の掃除
 

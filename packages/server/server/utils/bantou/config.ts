@@ -41,6 +41,7 @@ export const DEFAULT_SESSION = {
   workerKeepMs: 1_800_000,
   exitResumeMax: 3,
   exitRecoverMs: 3_600_000,
+  maxParallelTasks: 2,
   env: {} as Record<string, string>,
 };
 
@@ -67,6 +68,11 @@ export interface SessionConfig {
   exitResumeMax: number;
   /** server 起動時に、直近この時間（ms）に終わった未通知の worker を拾う。0 は拾わない。 */
   exitRecoverMs: number;
+  /**
+   * 1 つの cap で同時に動かす task の上限（1 以上）。超えた分は前の task が終わるまで待つ。1 は従来どおり 1 つずつ。
+   * 同じ deliverables.branch の task は、上限に関わらず前の task が終わるまで待つ。
+   */
+  maxParallelTasks: number;
   /** spawn する claude に追加で渡す環境変数。自身の環境変数に上書きで合成する。 */
   env: Record<string, string>;
 }
@@ -275,6 +281,10 @@ function parseSession(v: unknown, path: string): SessionConfig {
   if (typeof exitRecoverMs !== "number" || !Number.isInteger(exitRecoverMs) || exitRecoverMs < 0) {
     throw new Error(`config の session.exitRecoverMs は 0 以上の整数（0 は拾わない）: ${path}`);
   }
+  const maxParallelTasks = v.maxParallelTasks ?? DEFAULT_SESSION.maxParallelTasks;
+  if (typeof maxParallelTasks !== "number" || !Number.isInteger(maxParallelTasks) || maxParallelTasks < 1) {
+    throw new Error(`config の session.maxParallelTasks は 1 以上の整数: ${path}`);
+  }
   return {
     claude,
     permissionMode,
@@ -287,6 +297,7 @@ function parseSession(v: unknown, path: string): SessionConfig {
     workerKeepMs,
     exitResumeMax,
     exitRecoverMs,
+    maxParallelTasks,
     env: parseEnv(v.env, path),
   };
 }

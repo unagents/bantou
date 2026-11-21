@@ -185,6 +185,8 @@ Not the work-session `task` envelope above (that one is a message to a work sess
 
 The server builds the cap's first instruction from the fields (text: `docs/design/cap-orchestration.md`, source of truth: `prompts.ts`) and runs it like `kick_cap`. Reply: `task_result` when the run finishes, or `error` (`command: "task"`, `cap_id`, `task_id`). While the server waits to update, `task` is refused like `kick_cap` (`error` `code:"updating"`, `command:"task"`, `retryable:true`).
 
+**Parallel tasks (server, no protocol version change).** The server runs each `task` in its own conductor conversation of the cap (a *lane*: a separate claude session of the cap, cwd = the cap's dir, records in `caps/<cap_id>/logs/tasks/<task_id>/`), so tasks of one cap run at the same time instead of one after another. Up to `session.maxParallelTasks` (server config, default 2) tasks of a cap run at once; more wait. A task whose `deliverables.branch` equals that of an earlier unfinished task of the same cap waits until that task has finished (no concurrent pushes to one branch); a task without `deliverables.branch` only waits for the limit. Waiting tasks start in arrival order. A task is finished when its conductor run, every worker it started and every report-driven resume of it have ended (and its first reply was sent). Workers started by a lane belong to its task (`logs/owner.json` `task_id`): their reports resume that lane, `worker_report.task_id` is that task, and the lane's answer is sent as a `task_result` of that task (no JSON = the raw answer as `summary`, as for the first reply). `kick_cap` keeps using the cap's own conversation, one at a time as before. `stop_cap` stops the cap's conversation, every lane, every waiting task (their `task` gets `task_result` `failed` with `error` `stop_cap により停止`) and the cap's workers, and discards the lanes' conversations too. A conductor of a lane sees (worker_status without `worker_id`) only its task's workers and cannot start or stop a worker of another task that is still waiting or running. The server sends the tasks it knows as `tasks` (`CapTaskInfo[]`, below) on the cap of `status_result` (always, possibly empty) and of `activity`. These are additive fields that the registered definition allows (`additionalProperties`); older peers ignore them.
+
 `task` and `worker_reply` exist from protocol 1.5.0. A server older than that does not know them, and a center does not send commands to a server whose protocol version differs (see below), so the server is updated first.
 
 ### `worker_reply` — answer a worker (1.5.0)
@@ -248,7 +250,7 @@ No other fields. Reply: `hello_result`
 `server_version` is the npm `bantou` version of the running server. `server_id`, `host`, `user`, `workspace` are the server identity (1.7.0, all optional, see "Server identity" below). `update` is
 `{"state":"waiting"|"restarting","from","to","running":{"caps","workers","reports"},"since"?,"deadline"?,"runs"?}` while an update is
 in progress. Optional details (no protocol change; an older center ignores them): `since` = when the wait began, `deadline` = when the
-server restarts even if runs remain, `runs` = the runs counted in `running` (`{"kind":"cap"|"worker","id","cap_id"?,"started_at"?,"phase":"queued"|"preparing"|"running"}`, at most 20). `last_update` is `{"to","ok":false,"error","at"}` for the last update that failed (kept until the
+server restarts even if runs remain, `runs` = the runs counted in `running` (`{"kind":"cap"|"worker","id","cap_id"?,"task_id"?,"started_at"?,"phase":"queued"|"preparing"|"running"}`, at most 20; `task_id` = the task of a lane run or of a worker, and a task that has not started yet is counted as a `queued` cap run). `last_update` is `{"to","ok":false,"error","at"}` for the last update that failed (kept until the
 next attempt). Servers older than protocol `1.3.0` do not know `hello` and do not answer, so a center
 decides by the protocol version the peer declares and sends nothing there.
 
@@ -429,6 +431,10 @@ the cap and all its workers. Messages carry the same `meta` as replies.
 | `error` | why the agent is `failed` / `lost` (at most 200 chars) |
 | `model` | model given with `--model`, or `null` when none was given. Absent from servers older than `1.4.0` |
 | `conversation` | optional `ConversationInfo` (below): size and health of the current claude session. Additive; absent from a server that does not send it (in the definition since 1.8.1) |
+| `task_id` | worker only, optional: the task whose conductor started the worker (parallel tasks). Additive |
+| `tasks` | cap only, optional: `CapTaskInfo[]` of the cap (parallel tasks). The cap's own conversation and its task lanes are merged into this one cap entry (`running` if any of them runs). Additive |
+
+`CapTaskInfo`: `task_id`; `state` = `waiting` (not started) / `running` (its conductor, a worker it started, or a report-driven resume is still going) / `done` / `failed` (the last conductor run failed, it was stopped, or the worker-exit resume limit was hit; `error` says why, at most 200 chars); `branch` (its `deliverables.branch`); `waiting_for` (waiting only: `limit` = the cap already runs `session.maxParallelTasks` tasks, `branch` = an earlier task with the same branch has not finished); `queued_at` / `started_at` / `finished_at` (ISO 8601 or `null`). Finished tasks stay listed for an hour (at most 20 per cap); the list is in memory and empty after a server restart. A reader must accept other `state` strings.
 
 `ConversationInfo` (all read from claude's own output; unreadable = `null`): `started_at` (ISO 8601, when the session started), `tasks` (runs in this session), `context_tokens` (input + cache creation + cache read of the last answer that reported usage; output excluded), `context_window` (claude's `contextWindow` of the main model), `context_percent` (`context_tokens / context_window`, one decimal), `usage_at` (ISO 8601), `last_error_text` (error text from claude's output of the last failed run, e.g. `Prompt is too long`; absent otherwise). A new session (after `stop_cap`, or a first run) starts with `tasks` 0 and no usage.
 
@@ -460,7 +466,7 @@ A notice, like `activity`: it is never matched with a pending command. Every tim
 | key | meaning |
 |---|---|
 | `cap_id` | the cap that owns the worker |
-| `task_id` | `task_id` of the latest `task` of the cap. Absent when the cap has had only `kick_cap` |
+| `task_id` | `task_id` of the task whose conductor started the worker (parallel tasks). For a worker of `kick_cap`, or one started before parallel tasks, `task_id` of the latest `task` of the cap. Absent when the cap has had only `kick_cap`. (The registered `PROTOCOL.md` still says "the latest task"; it is the same thing when tasks run one at a time) |
 | `worker_id` | the reporting worker |
 | `kind` | `progress`, `ask`, `approve` or `done` |
 | `text` | the report text as the worker sent it (1..20000 chars) |
@@ -533,8 +539,9 @@ The cap answers the `task` instruction with this JSON as its final answer; the s
 | `last_finished_at` | ISO 8601, or `null` |
 | `last_error` | failure reason. Absent on success |
 | `retries` | retries used by the latest run |
-| `queued` | commands waiting in this agent's queue (the running one excluded) |
+| `queued` | commands waiting in this agent's queue (the running one excluded). For a cap with parallel tasks: the waiting commands of its own conversation and of all its lanes, plus the tasks not started yet |
 | `model` | model given with `--model`, or `null` when none was given. Absent from servers older than `1.4.0` |
+| `tasks` | cap only (parallel tasks): `CapTaskInfo[]` (see `activity`). Always present on such a server, possibly empty. A cap's `state` is `running` when its conversation or any lane runs; `session_id` / `conversation` / `last_error` are those of the latest run (lane or not), `last_started_at` the latest start |
 
 `AgentState`:
 

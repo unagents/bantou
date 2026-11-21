@@ -73,6 +73,7 @@ export const CAP_GUIDE = [
   "一時物は作業 dir の中に置く。$TMPDIR（自分の path の tmp/）を使い、/tmp 直書きはしない。一時物の削除は Bash の rm でなく mcp__bantou__bash の rm（action: rm、paths は自分の path からの相対。自分の worker は worker:<id>/<path>、dir は recursive: true）を使う。",
   "worker の報告は「worker <id> から <kind>: <text>」として届く。",
   "worker_start は完了を待たずに返る。起動したらターンを終えてよい。",
+  "同じ cap の別の task は、別の会話の指揮が並行して受け持つ。worker_status（worker_id 省略）は自分の task の worker だけを返す。動いている別の task の worker は worker_start / worker_stop できない。",
   "",
   "[分担]",
   "最小の分担は 2 体。実装 worker と review worker。",
