@@ -60,7 +60,7 @@ export function toConversationInfo(c: ConversationRecord): ConversationInfo {
 }
 
 /** 閉じた会話を logs/closed.jsonl に 1 行足す（消さずに残す）。 */
-export async function appendClosed(dir: string, entry: { closed_at: string; session_id: string | null; reason: string; conversation: ConversationRecord; task_id?: string }): Promise<void> {
+export async function appendClosed(dir: string, entry: { closed_at: string; session_id: string | null; reason: string; conversation: ConversationRecord }): Promise<void> {
   await mkdir(runLogDir(dir), { recursive: true });
   await appendFile(closedFile(dir), JSON.stringify(entry) + "\n");
 }

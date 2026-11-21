@@ -1,4 +1,4 @@
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { startBroker } from "@unagents/messenger-broker";
@@ -26,7 +26,7 @@ import { CAP_ID_HEADER, TASK_ID_HEADER, WORKER_ID_HEADER, type McpListener } fro
 import { setBashWorkspace } from "./bash";
 import { agentDir, laneDir, runLogDir } from "./paths";
 import { CAP_GUIDE, WORKER_GUIDE, buildTaskPrompt, buildTaskResult } from "./prompts";
-import { createReportHub, setReportHandler } from "./reports";
+import { createReportHub, openAsksOfTask, setReportHandler } from "./reports";
 import { createWorkerExitWatcher } from "./worker-exit";
 import { EXIT_RETIRED, allowedWhileRetiring, createRetireController, detectService, retiringError } from "./retire";
 import { cliRunner } from "./runner";
@@ -39,6 +39,7 @@ import {
   type UpdateController,
 } from "./update";
 import { createTaskScheduler, type TaskScheduler } from "./tasks";
+import { readLaneMeta, writeLaneMeta } from "./lane-meta";
 import { createWorkerHub, readOwner, readOwnerRecord, setWorkerHandler, writeOwner, type WorkerHub } from "./workers";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -387,18 +388,10 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
     run: (cmd) => manager.invoke("cap", cmd.cap_id, taskInvokeInput(cmd)),
     busy: (capId, taskId) => manager.laneBusy(capId, taskId) || hub.pendingFor(capId, taskId) > 0,
     changed: (capId) => tracker.touch(capId),
-    saveMeta: async (capId, taskId, meta) => {
-      const dir = laneDir(config.workspace, capId, taskId);
-      await mkdir(dir, { recursive: true });
-      await writeFile(join(dir, "task.json"), JSON.stringify({ task_id: taskId, ...meta }) + "\n");
-    },
+    saveMeta: (cmd, meta) => writeLaneMeta(laneDir(config.workspace, cmd.cap_id, cmd.task_id), { task_id: cmd.task_id, ...meta, prompt: taskInvokeInput(cmd).prompt }),
     loadMeta: async (capId, taskId) => {
-      try {
-        const d = JSON.parse(await readFile(join(laneDir(config.workspace, capId, taskId), "task.json"), "utf8")) as { branch?: unknown };
-        return typeof d.branch === "string" && d.branch !== "" ? { branch: d.branch } : {};
-      } catch {
-        return undefined;
-      }
+      const m = await readLaneMeta(laneDir(config.workspace, capId, taskId));
+      return m === undefined ? undefined : m.branch !== undefined ? { branch: m.branch } : {};
     },
     // task が終わったら lane の mcp.json（extraMcp の env を含みうる）を消す。再開されたら run の前に書き直す
     onFinished: (capId, taskId) => {
@@ -406,7 +399,8 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
     },
     // 終わってから workerKeepMs（worker の掃除と同じ時機）再開されなかった lane は片付ける（0 は片付けない）
     retireMs: config.session.workerKeepMs,
-    retire: (capId, taskId) => manager.retireLane(capId, taskId),
+    // ask / approve に答えてもらっていない worker がいる task の lane は片付けない（答えた後、また終わってから数え直す）
+    retire: async (capId, taskId) => ((await openAsksOfTask(config.workspace, capId, taskId)).length > 0 ? false : manager.retireLane(capId, taskId)),
     forgetLane: (capId, taskId) => {
       tracker.forgetLane(capId, taskId);
       exitWatcher.forgetLane(capId, taskId);

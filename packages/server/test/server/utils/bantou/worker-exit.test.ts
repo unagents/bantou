@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ActivityNotice } from "@agent-hand/bantou-protocol";
@@ -284,5 +284,30 @@ test("閉じた cap: worker が kill（lost）・失敗で終わっても cap �
     // 印が外れた（center が次の task を送った）後でも、済みにした終了は拾わない
     closed.clear();
     assert.equal(await f.watcher.recover(), 0);
+  });
+});
+
+test("task の lane: 再開の回数は lane の記録に残り、片付け（forgetLane）でメモリから外れても読み直して上限を守る", async () => {
+  await withFx({ max: 1 }, async (f) => {
+    startWorker(f);
+    await mkdir(join(f.ws, "caps", "c1", "logs", "tasks", "t-1"), { recursive: true });
+    f.observer.finished("worker", "w1", { ok: false, lost: false, error: "boom", startedAt: T0, taskId: "t-1" });
+    await settle();
+    assert.equal(f.resumes.length, 1);
+    f.finishTurn();
+    // 回数の記録が lane の logs/ に書かれるのを待つ
+    for (let i = 0; i < 100; i++) {
+      try {
+        if (JSON.parse(await readFile(join(f.ws, "caps", "c1", "logs", "tasks", "t-1", "logs", "exit-resumes.json"), "utf8")).count === 1) break;
+      } catch {
+        // まだ
+      }
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    f.watcher.forgetLane("c1", "t-1");
+    f.observer.finished("worker", "w1", { ok: false, lost: false, error: "boom again", startedAt: T1, taskId: "t-1" });
+    await settle();
+    assert.equal(f.resumes.length, 1, "上限（1 回）を超えて再開しない");
+    assert.equal(f.fails.length, 1);
   });
 });

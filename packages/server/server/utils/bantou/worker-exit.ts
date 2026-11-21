@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isValidAgentId, type AgentKind } from "@agent-hand/bantou-protocol";
@@ -91,7 +92,7 @@ export interface WorkerExitWatcher {
   wrap(inner: RunObserver): RunObserver;
   /** server 起動時に、保存してある状態から、通知していない終了を 1 回だけ拾う。 */
   recover(): Promise<number>;
-  /** 終わった task の lane の再開の回数（メモリ）を外す（lane を片付けた時）。 */
+  /** 終わった task の lane の再開の回数（メモリ）を外す（lane を片付けた時。ファイルの記録は残り、次の終了で読み直す）。 */
   forgetLane(capId: string, taskId: string): void;
 }
 
@@ -167,6 +168,15 @@ export function createWorkerExitWatcher(deps: WorkerExitDeps): WorkerExitWatcher
    */
   function dispatch(capId: string, lane: string | undefined, info: WorkerExitInfo, startedAt: string | undefined): boolean {
     const key = countKey(capId, lane);
+    // 片付けで外した lane の回数は、lane の記録（exit-resumes.json）から読み直す（同期。ここは同期で積む決まり）
+    if (lane !== undefined && !counts.has(key)) {
+      try {
+        const d = JSON.parse(readFileSync(countFile(countDir(capId, lane)), "utf8")) as Partial<ResumeCount>;
+        if (typeof d.task_id === "string" && typeof d.count === "number" && Number.isInteger(d.count) && d.count >= 0) counts.set(key, { task_id: d.task_id, count: d.count });
+      } catch {
+        // 記録なし
+      }
+    }
     const task = lane ?? deps.knownTask(capId) ?? counts.get(key)?.task_id ?? "-";
     let c = counts.get(key);
     if (!c || c.task_id !== task) {

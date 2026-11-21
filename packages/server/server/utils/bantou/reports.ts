@@ -12,6 +12,8 @@ import {
 import type { InvokeInput } from "./agents";
 import { agentDir, runLogDir } from "./paths";
 import { buildTaskResult, extractTaskResult } from "./prompts";
+import { readState } from "./state";
+import { readOwnerRecord } from "./workers";
 
 export const REPORT_KINDS = ["progress", "ask", "approve", "done"] as const;
 export type ReportKind = (typeof REPORT_KINDS)[number];
@@ -379,6 +381,41 @@ export function createReportHub(deps: ReportHubDeps): ReportHub {
       closed = true;
     },
   };
+}
+
+/**
+ * task の worker のうち、ask / approve に答えてもらっていないもの（worker_id の並び）。cap の logs/reports.jsonl と worker の記録から決める
+ * （server の再起動をまたぐ）。worker の最後の report（progress を除く）が ask / approve で、その後にその worker の run が始まっていなければ未回答
+ * （center の worker_reply は同じ worker_id の worker_start なので、答えると run が始まる）。
+ */
+export async function openAsksOfTask(workspace: string, capId: string, taskId: string): Promise<string[]> {
+  let raw: string;
+  try {
+    raw = await readFile(reportsFile(agentDir(workspace, "cap", capId)), "utf8");
+  } catch {
+    return [];
+  }
+  const last = new Map<string, { kind: ReportKind; at: string }>();
+  for (const line of raw.split("\n")) {
+    if (line === "") continue;
+    try {
+      const d = JSON.parse(line) as { at?: unknown; worker_id?: unknown; kind?: unknown };
+      if (typeof d.at !== "string" || !isValidAgentId(d.worker_id) || !isReportKind(d.kind) || d.kind === "progress") continue;
+      last.set(d.worker_id, { kind: d.kind, at: d.at });
+    } catch {
+      // 壊れた行は無視
+    }
+  }
+  const out: string[] = [];
+  for (const [workerId, r] of last) {
+    if (r.kind !== "ask" && r.kind !== "approve") continue;
+    const owner = await readOwnerRecord(workspace, workerId);
+    if (owner?.capId !== capId || owner.taskId !== taskId) continue;
+    const st = await readState(agentDir(workspace, "worker", workerId)).catch(() => null);
+    if (st?.last_started_at != null && st.last_started_at > r.at) continue;
+    out.push(workerId);
+  }
+  return out.sort();
 }
 
 // -- /mcp route との橋渡し -------------------------------------------------------

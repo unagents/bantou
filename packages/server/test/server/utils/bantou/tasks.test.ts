@@ -8,7 +8,9 @@ import { STOP_MSG, createAgentManager, type AgentManager } from "../../../../ser
 import type { ClaudeRunOptions, ClaudeRunResult } from "../../../../server/utils/bantou/claude";
 import { DEFAULT_SESSION, type Config } from "../../../../server/utils/bantou/config";
 import { execute } from "../../../../server/utils/bantou/daemon";
-import { createReportHub, type ReportHub } from "../../../../server/utils/bantou/reports";
+import { createReportHub, openAsksOfTask, type ReportHub } from "../../../../server/utils/bantou/reports";
+import { writeLaneMeta } from "../../../../server/utils/bantou/lane-meta";
+import { LANE_RECAP_HEAD } from "../../../../server/utils/bantou/agents";
 import { readState } from "../../../../server/utils/bantou/state";
 import { createTaskScheduler, type TaskScheduler } from "../../../../server/utils/bantou/tasks";
 import { createWorkerHub, readOwnerRecord, type WorkerHub } from "../../../../server/utils/bantou/workers";
@@ -160,6 +162,15 @@ async function withSystem(maxParallel: number, fn: (s: Sys) => Promise<void>, op
       log,
       stopGraceMs: 50,
       observer: exitWatcher.wrap(tracker),
+      // daemon と同じく、lane は mcp 設定・system prompt を lane の logs/ に書く
+      runExtras: async (kind, id, input) => {
+        if (kind !== "cap" || input.taskId === undefined) return {};
+        const logs = join(laneDir(ws, id, input.taskId), "logs");
+        await mkdir(logs, { recursive: true });
+        await writeFile(join(logs, "mcp.json"), "{}\n");
+        await writeFile(join(logs, "system-prompt.md"), "guide\n");
+        return { mcpConfigFile: join(logs, "mcp.json"), appendSystemPromptFile: join(logs, "system-prompt.md") };
+      },
       onRunAdded: (run) => {
         if (run.taskId !== undefined && run.capId !== undefined) scheduler.touch(run.capId, run.taskId);
       },
@@ -185,7 +196,9 @@ async function withSystem(maxParallel: number, fn: (s: Sys) => Promise<void>, op
       busy: (capId, taskId) => manager.laneBusy(capId, taskId) || hub.pendingFor(capId, taskId) > 0,
       changed: (capId) => tracker.touch(capId),
       retireMs: opts.retireMs ?? 0,
-      retire: (capId, taskId) => manager.retireLane(capId, taskId),
+      // daemon と同じ: ask / approve に答えてもらっていない worker がいる task の lane は片付けない
+      retire: async (capId, taskId) => ((await openAsksOfTask(ws, capId, taskId)).length > 0 ? false : manager.retireLane(capId, taskId)),
+      saveMeta: (cmd, meta) => writeLaneMeta(laneDir(ws, cmd.cap_id, cmd.task_id), { task_id: cmd.task_id, ...meta, prompt: taskInvokeInput(cmd).prompt }),
       forgetLane: (capId, taskId) => {
         tracker.forgetLane(capId, taskId);
         exitWatcher.forgetLane(capId, taskId);
@@ -478,7 +491,7 @@ test("tasks: 旧 center の受付の見方（cap の負荷 = running なら 1 + 
   });
 });
 
-test("tasks: 終わった task の lane は retireMs の後に片付ける（生出力と閉じた会話の記録は cap の logs/ へ）。再開された lane は片付けない", async () => {
+test("tasks: 終わった task の lane は retireMs の後に片付ける（run のたびに作り直す mcp.json・system prompt だけ消し、会話・記録は残す）。再開された lane は片付けない", async () => {
   await withSystem(2, async (s) => {
     const p1 = s.send(task("t-1", "feat/a"));
     const p2 = s.send(task("t-2", "feat/b"));
@@ -487,12 +500,12 @@ test("tasks: 終わった task の lane は retireMs の後に片付ける（生
     await until("worker", () => s.call((c) => c.o.prompt === "w of t-2") !== undefined);
     s.call((c) => c.o.prompt === "w of t-2")!.release();
     const sid1 = laneCall(s, "t-1")!.o.sessionId;
-    laneCall(s, "t-1")!.release();
+    laneCall(s, "t-1")!.release({ ...ok("r"), usage: { contextTokens: 5000, contextWindow: 100_000 } } as ClaudeRunResult);
     laneCall(s, "t-2")!.release();
     await Promise.all([p1, p2]);
     await until("両方 done", () => tasksOf(s)["t-1"] === "done" && tasksOf(s)["t-2"] === "done");
     const lane1 = laneDir(s.ws, "c1", "t-1");
-    await stat(lane1);
+    await stat(join(lane1, "logs", "mcp.json"));
     assert.deepEqual(await s.scheduler.sweep(), [], "時間の前は片付けない");
     // t-2 は終わった後に worker が再開された（center の worker_reply など）: 片付けの対象から外れる
     await s.workers.start("c1", { worker_id: w2.worker_id, prompt: "again" });
@@ -500,14 +513,14 @@ test("tasks: 終わった task の lane は retireMs の後に片付ける（生
     assert.equal(tasksOf(s)["t-2"], "running");
     await sleep(80);
     assert.deepEqual(await s.scheduler.sweep(), ["c1/t-1"]);
-    await assert.rejects(stat(lane1));
-    await stat(laneDir(s.ws, "c1", "t-2"));
-    // 生出力は cap の logs/ へ移り、閉じた会話の記録に task_id が残る
-    const capLogs = join(s.ws, "caps", "c1", "logs");
-    assert.ok((await readdir(capLogs)).includes(`${sid1}.jsonl`));
-    const closed = (await readFile(join(capLogs, "closed.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l) as { task_id?: string; session_id: string });
-    assert.deepEqual(closed.map((c) => [c.task_id, c.session_id]), [["t-1", sid1]]);
-    // メモリの記録も外れる。tasks の一覧には残る
+    // 消えるのは mcp.json と system prompt だけ。会話（session_id）・会話の記録・task.json・生出力は残る
+    await assert.rejects(stat(join(lane1, "logs", "mcp.json")));
+    await assert.rejects(stat(join(lane1, "logs", "system-prompt.md")));
+    assert.equal((await readState(lane1)).session_id, sid1);
+    await stat(join(lane1, "task.json"));
+    await stat(join(lane1, "logs", `${sid1}.jsonl`));
+    await stat(join(laneDir(s.ws, "c1", "t-2"), "logs", "mcp.json"));
+    // メモリの記録（activity の lane）は外れる。tasks の一覧と、status の会話の情報は残る
     assert.equal(s.tracker.capEntry("c1", "t-1"), undefined);
     assert.equal(tasksOf(s)["t-1"], "done");
     // 再開された t-2 は worker が終わってまた終わり、時間の後に片付く
@@ -516,6 +529,93 @@ test("tasks: 終わった task の lane は retireMs の後に片付ける（生
     assert.deepEqual(await s.scheduler.sweep(), []);
     await sleep(80);
     assert.deepEqual(await s.scheduler.sweep(), ["c1/t-2"]);
+  }, { retireMs: 60 });
+});
+
+test("tasks: 片付けた lane の情報は status から消えない（会話の大きさ・session_id・開始時刻）", async () => {
+  await withSystem(2, async (s) => {
+    const p1 = s.send(task("t-1"));
+    await until("t-1", () => laneCall(s, "t-1") !== undefined);
+    const sid = laneCall(s, "t-1")!.o.sessionId;
+    laneCall(s, "t-1")!.release({ ...ok("r"), usage: { contextTokens: 5000, contextWindow: 100_000 } } as ClaudeRunResult);
+    await p1;
+    await until("done", () => tasksOf(s)["t-1"] === "done");
+    const before = (await s.status()).caps.find((c) => c.id === "c1")!;
+    await sleep(80);
+    assert.deepEqual(await s.scheduler.sweep(), ["c1/t-1"]);
+    const after = (await s.status()).caps.find((c) => c.id === "c1")!;
+    assert.equal(after.session_id, sid);
+    assert.equal(after.last_started_at, before.last_started_at);
+    assert.equal(after.conversation?.context_tokens, 5000);
+    assert.deepEqual(after.conversation, before.conversation);
+  }, { retireMs: 60 });
+});
+
+test("tasks: ask / approve に答えてもらっていない worker がいる task の lane は片付けない。答えた後、また終わってから数え直す", async () => {
+  await withSystem(2, async (s) => {
+    const p1 = s.send(task("t-1", "feat/a"));
+    await until("t-1", () => laneCall(s, "t-1") !== undefined);
+    const w = await s.workers.start("c1", { prompt: "implement" }, "t-1");
+    await until("worker", () => s.call((c) => c.o.prompt === "implement") !== undefined);
+    laneCall(s, "t-1")!.release();
+    await p1;
+    // worker が ask を出して run を終える。ask は指揮を再開する（答えは利用者から worker_reply で来る）
+    await s.hub.report("c1", w.worker_id, "ask", "push 先はどれか");
+    await until("ask の再開", () => s.calls.some((c) => c.lane === "t-1" && c.o.mode === "resume"));
+    s.calls.find((c) => c.lane === "t-1" && c.o.mode === "resume")!.release(ok("利用者の返答を待つ"));
+    s.call((c) => c.o.prompt === "implement")!.release();
+    await until("t-1 done", () => tasksOf(s)["t-1"] === "done");
+    assert.deepEqual(await openAsksOfTask(s.ws, "c1", "t-1"), [w.worker_id]);
+    await sleep(80);
+    assert.deepEqual(await s.scheduler.sweep(), [], "未回答の ask があるので片付けない");
+    assert.deepEqual(await s.scheduler.sweep(), []);
+    await stat(join(laneDir(s.ws, "c1", "t-1"), "logs", "mcp.json"));
+    // 利用者が答える（center の worker_reply = 同じ worker_id の worker_start）。task はまた動き、片付けの時機は数え直し
+    await s.workers.start("c1", { worker_id: w.worker_id, prompt: "feat/a へ" });
+    await until("答えを受けた worker", () => s.call((c) => c.o.prompt === "feat/a へ") !== undefined);
+    assert.deepEqual(await openAsksOfTask(s.ws, "c1", "t-1"), []);
+    assert.equal(tasksOf(s)["t-1"], "running");
+    s.call((c) => c.o.prompt === "feat/a へ")!.release();
+    await until("t-1 がまた done", () => tasksOf(s)["t-1"] === "done");
+    assert.deepEqual(await s.scheduler.sweep(), [], "終わり直してからの時間がまだ");
+    await sleep(80);
+    assert.deepEqual(await s.scheduler.sweep(), ["c1/t-1"]);
+  }, { retireMs: 60 });
+});
+
+test("tasks: 片付けた後の再開は同じ会話を resume する。会話が見つからなければ、新しい会話に task の最初の指示（goal）を再掲する", async () => {
+  await withSystem(2, async (s) => {
+    const p1 = s.send(task("t-1", "feat/a"));
+    await until("t-1", () => laneCall(s, "t-1") !== undefined);
+    const first = laneCall(s, "t-1")!;
+    const w = await s.workers.start("c1", { prompt: "implement" }, "t-1");
+    await until("worker", () => s.call((c) => c.o.prompt === "implement") !== undefined);
+    s.call((c) => c.o.prompt === "implement")!.release();
+    first.release();
+    await p1;
+    await until("t-1 done", () => tasksOf(s)["t-1"] === "done");
+    await sleep(80);
+    assert.deepEqual(await s.scheduler.sweep(), ["c1/t-1"]);
+    // 片付けの後に worker の report が来る: 同じ session を resume
+    await s.hub.report("c1", w.worker_id, "done", "finished late");
+    await until("再開", () => s.calls.filter((c) => c.lane === "t-1").length === 2);
+    const resumed = s.calls.filter((c) => c.lane === "t-1")[1]!;
+    assert.equal(resumed.o.mode, "resume");
+    assert.equal(resumed.o.sessionId, first.o.sessionId);
+    assert.ok(resumed.o.prompt.startsWith(`worker ${w.worker_id} から done`));
+    // claude に会話が見つからない: 新しい会話に切り替え、task の最初の指示（goal）を再掲する
+    resumed.release({ ok: false, sessionMissing: true, timedOut: false, detail: "No conversation found", durationMs: 1 });
+    await until("新しい会話", () => s.calls.filter((c) => c.lane === "t-1").length === 3);
+    const fresh = s.calls.filter((c) => c.lane === "t-1")[2]!;
+    assert.equal(fresh.o.mode, "new");
+    assert.ok(fresh.o.prompt.startsWith(LANE_RECAP_HEAD));
+    assert.ok(fresh.o.prompt.includes("[task t-1]"));
+    assert.ok(fresh.o.prompt.includes("goal of t-1"));
+    assert.ok(fresh.o.prompt.includes("push 先 branch: feat/a"));
+    assert.ok(fresh.o.prompt.includes(`worker ${w.worker_id} から done: finished late`));
+    fresh.release(ok('{"summary":"t-1 final"}'));
+    await s.hub.drain();
+    assert.equal(s.sent.filter((x): x is TaskResultReply => x.type === "task_result").at(-1)?.summary, "t-1 final");
   }, { retireMs: 60 });
 });
 

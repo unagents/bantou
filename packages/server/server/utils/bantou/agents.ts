@@ -17,6 +17,7 @@ import { listLiveProcesses, matchesSession, type LiveProcess } from "./processes
 import type { AgentRunner } from "./runner";
 import { readState, writeState, type AgentStateFile } from "./state";
 import { appendClosed, emptyConversation, readConversation, toConversationInfo, writeConversation, type ConversationRecord } from "./conversation";
+import { readLaneMeta } from "./lane-meta";
 
 const execFileAsync = promisify(execFile);
 
@@ -141,9 +142,9 @@ export interface AgentManager {
   /** cap の task（lane）の run（指揮の run と、その task の worker の run。待ちを含む）が 1 つでもあるか。 */
   laneBusy(capId: string, taskId: string): boolean;
   /**
-   * 終わった task の lane を片付ける: lane の会話の生出力（logs/<session>.jsonl）と閉じた会話の記録は cap の logs/ へ移し
-   * （cap の logs/ は消さずに残す決まり）、lane の dir（state.json・mcp.json など）を消す。run がある・実行中なら何もせず false。
-   * 後でその task の worker の report などで lane が再開されたら、新しい会話で始まる。
+   * 終わった task の lane を片付ける: run のたびに作り直す物（mcp.json・system-prompt.md）を消す。state.json（session_id）・
+   * 会話の記録・再開の回数・task.json・生出力は残す（後で再開されたら同じ会話を resume する。status の会話の情報も消えない）。
+   * run がある・実行中なら何もせず false。
    */
   retireLane(capId: string, taskId: string): Promise<boolean>;
   /** dir のある lane のうち実行中でないもの（server 起動時に、片付けの対象として拾う）。finishedAt = 最後に終わった（無ければ始めた）時刻。 */
@@ -198,6 +199,13 @@ interface RunEntry {
   /** 今の claude の子。spawn 前・run が返った後は undefined（準備中）。 */
   child?: ChildProcess;
 }
+
+/** lane の会話が失われて新しい会話で再開する時に、task の最初の指示を再掲する前後の文。 */
+export const LANE_RECAP_HEAD = "（server 注記: この task の指揮の前の会話が見つからないので、新しい会話で再開する。以下は task の最初の指示の再掲）";
+export const LANE_RECAP_TAIL = "（server 注記: 以下が今回の再開の理由）";
+
+/** lane の片付けで消す、run のたびに作り直す物（logs/ の中。mcp.json は extraMcp の env を含みうる）。 */
+export const LANE_RUN_FILES = ["mcp.json", "system-prompt.md"] as const;
 
 /** 閉じた印のファイル（cap の logs/ の中）。 */
 const closedMarkFile = (dir: string): string => join(runLogDir(dir), "closed-mark.json");
@@ -500,6 +508,10 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
     }
 
     let mode: RunMode = st.session_id ? "resume" : "new";
+    // lane の再開（worker の report など）が新しい会話で始まる時（会話が無い・claude に会話が見つからない）は、
+    // task の最初の指示を再掲する（goal・制約・最終返答の形を知らない指揮にしない）
+    const recap = lane !== undefined && input.keepTask === true ? (await readLaneMeta(dir))?.prompt : undefined;
+    const promptFor = (m: RunMode): string => (m === "new" && recap !== undefined ? `${LANE_RECAP_HEAD}\n\n${recap}\n\n${LANE_RECAP_TAIL}\n\n${input.prompt}` : input.prompt);
     let sessionId = st.session_id ?? randomUUID();
     const startedAt = new Date().toISOString();
     // 会話の記録（開始時刻・run 数・使用量）。補助情報なので書けなくても実行は止めない
@@ -537,7 +549,7 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
           claude: config.session.claude,
           sessionId,
           mode,
-          prompt: input.prompt,
+          prompt: promptFor(mode),
           cwd,
           permissionMode: config.session.permissionMode,
           allowedTools: config.session.allowedTools,
@@ -1065,29 +1077,16 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
     if (!isValidAgentId(capId) || !isValidAgentId(taskId)) return false;
     const key = keyOf("cap", capId, taskId);
     if (shuttingDown || inflight.has(key) || laneBusy(capId, taskId)) return false;
-    // lane の chain に載せる（片付けの間に来た再開は、片付けの後に新しい会話で動く）
+    // lane の chain に載せる（片付けの間に来た再開は、片付けの後に動く。mcp 設定・system prompt は run の前に書き直す）
     return onChain(key, async () => {
       if (laneBusy(capId, taskId)) return false;
-      const capDir = agentDir(config.workspace, "cap", capId);
       const dir = laneDir(config.workspace, capId, taskId);
       if (!(await exists(dir))) return false;
       const st = await readState(dir).catch(() => null);
       if (st?.state === "running") return false;
-      const capLogs = runLogDir(capDir);
-      await mkdir(capLogs, { recursive: true });
-      // 会話の生出力は cap の logs/ へ移す（main の会話の生出力と同じ置き場。session_id ごとに別のファイル）
-      for (const name of await readdir(runLogDir(dir)).catch(() => [] as string[])) {
-        if (!name.endsWith(".jsonl") || name === "closed.jsonl") continue;
-        await rename(join(runLogDir(dir), name), join(capLogs, name)).catch((e: unknown) => log(`lane の生出力を移せない: cap_id=${capId} task_id=${taskId} ${name} ${errMsg(e)}`));
-      }
-      // stop_cap で閉じた lane の会話の記録も cap の closed.jsonl へ足す
-      const closedLines = await readFile(join(runLogDir(dir), "closed.jsonl"), "utf8").catch(() => "");
-      if (closedLines !== "") await appendFile(join(capLogs, "closed.jsonl"), closedLines.endsWith("\n") ? closedLines : `${closedLines}\n`);
-      if (st?.session_id) {
-        await appendClosed(capDir, { closed_at: new Date().toISOString(), session_id: st.session_id, reason: `task ${taskId} の終了`, conversation: await readConversation(dir), task_id: taskId });
-      }
-      await rm(dir, { recursive: true, force: true });
-      if (latestLanes.get(capId) === taskId) latestLanes.delete(capId);
+      // 消すのは run のたびに作り直す物だけ。state.json（session_id）・会話の記録・再開の回数・task.json・生出力は残す
+      // （片付けの後の再開も同じ会話を resume し、status の会話の大きさも消えない）
+      for (const name of LANE_RUN_FILES) await rm(join(runLogDir(dir), name), { force: true });
       log(`lane を片付けた: cap_id=${capId} task_id=${taskId} session=${st?.session_id ?? "-"}`);
       return true;
     }).catch((e: unknown) => {

@@ -23,8 +23,8 @@ export interface TaskSchedulerDeps {
   busy: (capId: string, taskId: string) => boolean;
   /** cap の task の状態が変わった（activity を送る）。 */
   changed?: (capId: string) => void;
-  /** task の branch を lane の dir に残す（server の再起動の後、lane が再開された時に引き継ぐ）。 */
-  saveMeta?: (capId: string, taskId: string, meta: { branch?: string; queued_at: string }) => Promise<void>;
+  /** task の記録（branch・最初の指示）を lane の dir に残す（server の再起動の後の引き継ぎ・会話を失った lane の再開に使う）。 */
+  saveMeta?: (cmd: TaskCommand, meta: { branch?: string; queued_at: string }) => Promise<void>;
   loadMeta?: (capId: string, taskId: string) => Promise<{ branch?: string } | undefined>;
   log: (msg: string) => void;
   now?: () => number;
@@ -359,7 +359,7 @@ export function createTaskScheduler(deps: TaskSchedulerDeps): TaskScheduler {
       entries.set(key, e);
       if (deps.saveMeta) {
         void deps
-          .saveMeta(e.capId, e.taskId, { ...(branch !== undefined ? { branch } : {}), queued_at: e.queuedAt })
+          .saveMeta(cmd, { ...(branch !== undefined ? { branch } : {}), queued_at: e.queuedAt })
           .catch((err: unknown) => log(`task の記録に失敗: cap_id=${e.capId} task_id=${e.taskId} ${errMsg(err)}`));
       }
       pump();
