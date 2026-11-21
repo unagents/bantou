@@ -75,9 +75,14 @@ test("返信 meta は protocol.json の name / version と一致する", async (
 
 test("stop_cap: manager.close の結果（stopped / session_cleared / previous_session_id）を stop_result で返し、ログ概要は cap_id", async () => {
   const calls: unknown[] = [];
-  const manager = { close: async (k: string, id: string) => (calls.push([k, id]), { stopped: true, session_cleared: true, previous_session_id: "s-old" }) } as unknown as AgentManager;
+  const manager = { close: async (k: string, id: string) => (calls.push([k, id]), { stopped: true, session_cleared: true, previous_session_id: "s-old", workers_stopped: 0 }) } as unknown as AgentManager;
   const r = await execute({ bantou: 1, type: "stop_cap", cap_id: "c9" }, manager);
-  assert.deepEqual(r, { bantou: 1, type: "stop_result", ok: true, cap_id: "c9", stopped: true, session_cleared: true, previous_session_id: "s-old" });
+  assert.deepEqual(r, { bantou: 1, type: "stop_result", ok: true, cap_id: "c9", stopped: true, session_cleared: true, previous_session_id: "s-old", workers_stopped: 0 });
+  // cap は動いていなくても、配下の worker を止めたら stopped=true と数
+  const m2 = { close: async () => ({ stopped: false, session_cleared: true, previous_session_id: "s-old", workers_stopped: 2 }) } as unknown as AgentManager;
+  const r2 = await execute({ bantou: 1, type: "stop_cap", cap_id: "c9" }, m2);
+  assert.equal(r2.type === "stop_result" && r2.stopped, true);
+  assert.equal(r2.type === "stop_result" && r2.workers_stopped, 2);
   assert.deepEqual(calls, [["cap", "c9"]]);
   assert.equal(describeCommand({ bantou: 1, type: "stop_cap", cap_id: "c9" }), "cap_id=c9");
 });
@@ -244,12 +249,13 @@ test("updatingError: 更新の進行（UpdateProgress）を渡すと、待って
   assert.equal(r.code, "updating");
   assert.equal(r.retryable, true);
   assert.deepEqual(r.update, progress);
-  assert.match(r.message, /^server 更新待ち（0\.6\.8→0\.6\.9）/);
+  assert.match(r.message, /^server 更新待ち（0\.6\.8→0\.6\.9）。実行中の cap\/worker の終了後に再起動する。再起動後に再送。待機 12 分、2026-11-21T05:40:00\.000Z（上限）に残りを止めて再起動。待っている run: /);
   assert.match(r.message, /cap 1 \/ worker 1/);
   assert.match(r.message, /cap:c-other 実行 8 分/);
   assert.match(r.message, /worker:w-1\[cap c-other\] 実行 3 分/);
   assert.match(r.message, /待機 12 分/);
   assert.match(r.message, /2026-11-21T05:40:00\.000Z（上限）に残りを止めて再起動/);
   // 何も数えていない（restarting など）の時も件数は出る
-  assert.match(describeUpdateWait({ ...progress, running: { caps: 0, workers: 0, reports: 0 }, runs: [] }), /^待っている run: cap 0 \/ worker 0。/);
+  assert.match(describeUpdateWait({ ...progress, running: { caps: 0, workers: 0, reports: 0 }, runs: [] }), /^待機 12 分、.*。待っている run: cap 0 \/ worker 0$/);
+  assert.match(describeUpdateWait({ ...progress, runs: [{ kind: "cap", id: "c-q", phase: "queued" }] }), /cap:c-q 待ち/);
 });

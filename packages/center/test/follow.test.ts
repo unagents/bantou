@@ -390,7 +390,7 @@ test("updating: server が返す待ちの中身（run・session・経過・上�
   assert.deepEqual(info?.update?.runs?.map((r) => `${r.kind}:${r.id}:${r.session ?? "-"}`), ["cap:c-0123456789-mflow:mflow", "worker:w-1:-"]);
   const g = fl.gate({ id: "id-1" }, "task");
   assert.equal(g?.code, "updating");
-  assert.match(g?.message ?? "", /^server 更新待ち（0\.3\.0→0\.3\.1）。.*再送。待っている run: cap 1 \/ worker 1（session mflow の cap 実行 8 分/);
+  assert.match(g?.message ?? "", /^server 更新待ち（0\.3\.0→0\.3\.1）。.*再送。待機 12 分、2026-11-21T05:40:00\.000Z（上限）に残りを止めて再起動。待っている run: cap 1 \/ worker 1（session mflow の cap 実行 8 分/);
   assert.equal(g?.update?.runs?.length, 2);
   assert.equal(g?.update?.deadline, "2026-11-21T05:40:00.000Z");
 });
@@ -424,4 +424,42 @@ test("updating のまま発見に残る server が hello に答えなければ�
   await fl.check();
   assert.equal(only(fl).state, "lost");
   assert.equal(fl.gate({ id: "id-1" }, "task"), undefined);
+});
+
+test("updating の detail は経過と上限を先に書く（versionOf の 200 字で切っても残る）", async () => {
+  const f = fake();
+  const t = Date.parse("2026-11-21T05:22:00.000Z");
+  const fl = mk(f, "0.3.1", { now: () => t });
+  const runs = Array.from({ length: 12 }, (_, i) => ({ kind: "worker" as const, id: `w-long-worker-id-${i}-xxxxxxxxxxxx`, cap_id: `c-0123456789-session-${i}`, started_at: "2026-11-21T05:19:00.000Z", phase: "running" as const }));
+  f.helloReply = () =>
+    hello({ update: { state: "waiting", from: "0.3.0", to: "0.3.1", running: { caps: 0, workers: 12, reports: 0 }, since: "2026-11-21T05:10:00.000Z", deadline: "2026-11-21T05:40:00.000Z", runs } });
+  await fl.check();
+  const d = fl.versionOf({ peer: "id-1" })!.detail;
+  assert.ok(d.length <= 200);
+  assert.match(d, /^更新中（0\.3\.0→0\.3\.1）: 待機 12 分、2026-11-21T05:40:00\.000Z（上限）に残りを止めて再起動。待っている run: cap 0 \/ worker 12/);
+});
+
+test("lost は最後に hello に答えた時刻から測る: 長く正常に待った server を、再起動中の無応答 1 回で lost にしない", async () => {
+  const f = fake();
+  let t = 0;
+  const fl = mk(f, "0.3.1", { now: () => t, lostAfterMs: 60_000 });
+  f.helloReply = () => hello({ update: { state: "waiting", from: "0.3.0", to: "0.3.1", running } });
+  await fl.check();
+  assert.equal(only(fl).state, "updating");
+  // 3 分間、待機中として答え続ける（updating になってからは lostAfterMs を越える）
+  for (t = 30_000; t <= 180_000; t += 30_000) await fl.check();
+  // 再起動中: hello に答えない。最後の答え（180 秒）から 60 秒以内は updating のまま断り続ける
+  f.helloReply = () => err("応答なし");
+  t = 200_000;
+  await fl.check();
+  assert.equal(only(fl).state, "updating");
+  assert.equal(fl.gate({ id: "id-1" }, "task")?.code, "updating");
+  // 発見から消えた間も同じ（lostCheck）
+  f.peers = [];
+  t = 230_000;
+  await fl.check();
+  assert.equal(fl.snapshot().peers[0]?.state, "updating");
+  t = 241_000;
+  await fl.check();
+  assert.equal(fl.snapshot().peers[0]?.state, "lost");
 });

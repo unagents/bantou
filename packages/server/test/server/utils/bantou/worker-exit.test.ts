@@ -62,7 +62,10 @@ interface Fx {
   logs: string[];
 }
 
-async function withFx(opts: { max?: number; recoverMs?: number; task?: () => string | undefined }, fn: (f: Fx) => Promise<void>): Promise<void> {
+async function withFx(
+  opts: { max?: number; recoverMs?: number; task?: () => string | undefined; closed?: Set<string> },
+  fn: (f: Fx) => Promise<void>,
+): Promise<void> {
   const ws = await mkdtemp(join(tmpdir(), "bantou-exit-test-"));
   try {
     await mkdir(join(ws, "caps", "c1"), { recursive: true });
@@ -107,6 +110,7 @@ async function withFx(opts: { max?: number; recoverMs?: number; task?: () => str
       holdCap: (id) => tracker.holdCap(id),
       releaseCap: (id) => tracker.releaseCap(id),
       capOf: (w) => tracker.snapshot().find((a) => a.kind === "worker" && a.id === w)?.cap_id,
+      ...(opts.closed ? { isClosed: (id: string) => opts.closed!.has(id) } : {}),
       log: (m) => logs.push(m),
     });
     const observer = watcher.wrap({ ...tracker, finished: (k, i, o) => { order.push("inner.finished"); tracker.finished(k, i, o); } } as RunObserver);
@@ -255,4 +259,30 @@ test("再起動: 保存してある状態から、報告なしで終わった wo
 test("CAP_GUIDE に [worker 終了通知] を受けた時の動きがあり、prompt の先頭行と一致する", () => {
   assert.ok(CAP_GUIDE.includes("[worker 終了通知]"));
   assert.ok(buildExitPrompt({ worker_id: "w1", cause: "failed", report_count: 0 }, 1, 3).startsWith("[worker 終了通知]\n"));
+});
+
+test("閉じた cap: worker が kill（lost）・失敗で終わっても cap を再開しない。再起動後の回収でも拾わない", async () => {
+  const closed = new Set(["c1"]);
+  await withFx({ closed }, async (f) => {
+    startWorker(f);
+    await settle();
+    f.observer.finished("worker", "w1", { ok: false, lost: true, error: "signal SIGKILL で終了（server からの停止ではない）", startedAt: T0 });
+    f.observer.finished("worker", "w1", { ok: false, lost: false, error: "boom", startedAt: T1 });
+    await settle();
+    assert.equal(f.resumes.length, 0);
+    assert.ok(f.logs.some((l) => l.includes("閉じた cap の worker の終了は再開しない")));
+    // 再起動後の回収: cap に会話が残っていても（旧版で起き直していた等）、閉じた印があれば拾わない
+    await writeState(agentDir(f.ws, "cap", "c1"), { session_id: "cs", state: "idle", last_started_at: null, last_finished_at: null, retries: 0 });
+    await mkdir(agentDir(f.ws, "worker", "w9"), { recursive: true });
+    await writeOwner(f.ws, "w9", "c1");
+    await writeState(agentDir(f.ws, "worker", "w9"), {
+      session_id: "s", state: "failed", last_error: "前回の実行が終了しないまま server が落ちた",
+      last_started_at: new Date(Date.now() - 120_000).toISOString(), last_finished_at: new Date(Date.now() - 60_000).toISOString(), retries: 0,
+    });
+    assert.equal(await f.watcher.recover(), 0);
+    assert.equal(f.resumes.length, 0);
+    // 印が外れた（center が次の task を送った）後でも、済みにした終了は拾わない
+    closed.clear();
+    assert.equal(await f.watcher.recover(), 0);
+  });
 });

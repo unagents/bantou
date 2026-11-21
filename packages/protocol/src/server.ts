@@ -293,7 +293,7 @@ export type ServerReplyType =
 
 /**
  * Runs still alive on the server. An update waits until caps and workers are 0
- * (only runs whose claude process is alive or is being prepared; a closed cap's workers are not counted).
+ * (commands being run or queued; a closed cap's workers are not counted).
  * reports = worker reports being handled (informational; the wait does not depend on it).
  */
 export interface UpdateRunning {
@@ -310,8 +310,8 @@ export interface UpdateWaitRun {
   cap_id?: string;
   /** ISO 8601, when this run started. */
   started_at?: string;
-  /** preparing = before the claude process is spawned (clone etc.) or after it ended; running = the process is alive. */
-  phase: "preparing" | "running";
+  /** queued = behind an earlier command of the same agent; preparing = before the claude process is spawned (clone etc.), between retries, or after it ended until the result is written; running = the process is alive. */
+  phase: "queued" | "preparing" | "running";
 }
 
 /** An update in progress. waiting = refusing kick_cap until the runs end; restarting = shutting down for the swap. */
@@ -514,6 +514,8 @@ export interface StopResultReply {
   session_cleared?: boolean;
   /** The session_id that was discarded (null / absent when there was none). Servers that send session_cleared send this too. */
   previous_session_id?: string | null;
+  /** How many of the cap's workers (running or queued) were stopped with it. Absent from older servers, which do not stop workers. */
+  workers_stopped?: number;
 }
 
 /**
@@ -820,7 +822,7 @@ function isUpdateWaitRun(v: unknown): v is UpdateWaitRun {
     typeof v.id === "string" &&
     (v.cap_id === undefined || typeof v.cap_id === "string") &&
     (v.started_at === undefined || typeof v.started_at === "string") &&
-    (v.phase === "preparing" || v.phase === "running")
+    (v.phase === "queued" || v.phase === "preparing" || v.phase === "running")
   );
 }
 
@@ -1053,7 +1055,8 @@ export function isServerReply(v: unknown): v is ServerReply {
         isValidAgentId(v.cap_id) &&
         typeof v.stopped === "boolean" &&
         (v.session_cleared === undefined || typeof v.session_cleared === "boolean") &&
-        (v.previous_session_id === undefined || strOrNull(v.previous_session_id))
+        (v.previous_session_id === undefined || strOrNull(v.previous_session_id)) &&
+        (v.workers_stopped === undefined || (typeof v.workers_stopped === "number" && Number.isInteger(v.workers_stopped) && v.workers_stopped >= 0))
       );
     case "status_result":
       return (

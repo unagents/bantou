@@ -13,6 +13,7 @@ import {
   type ServerIdentityFields,
   type ServerReply,
   type UpdateProgress,
+  type UpdateWaitRun,
 } from "@agent-hand/bantou-protocol";
 import { createActivityTracker } from "./activity";
 import { createAgentManager, type ActiveRun, type AgentManager, type RunExtras } from "./agents";
@@ -142,9 +143,11 @@ export async function execute(
         type: "stop_result",
         ok: true,
         cap_id: cmd.cap_id,
-        stopped: r.stopped,
+        // cap の run か、その cap の worker を 1 つでも止めたら true。worker の数は workers_stopped
+        stopped: r.stopped || r.workers_stopped > 0,
         session_cleared: r.session_cleared,
         previous_session_id: r.previous_session_id,
+        workers_stopped: r.workers_stopped,
       };
     }
     if (cmd.type === "resume_worker") {
@@ -183,7 +186,8 @@ const minutesSince = (iso: string | undefined, nowMs: number): number | undefine
 
 /**
  * 更新が何を待っているかの一文（server の断りと center の表示で同じ形）。
- * 例: 「待っている run: cap 1 / worker 2（cap:c-1 実行 8 分、worker:w-2[cap c-1] 実行 3 分）。待機 12 分、2026-11-21T14:40:00.000Z（上限）に残りを止めて再起動」
+ * 例: 「待機 12 分、2026-11-21T14:40:00.000Z（上限）に残りを止めて再起動。待っている run: cap 1 / worker 2（cap:c-1 実行 8 分、worker:w-2[cap c-1] 実行 3 分）」
+ * 経過と上限を先に置く（表示で長さを切られても残るように）。
  */
 export function describeUpdateWait(update: UpdateProgress, nowMs = Date.now()): string {
   const r = update.running;
@@ -191,7 +195,7 @@ export function describeUpdateWait(update: UpdateProgress, nowMs = Date.now()): 
   const items = runs.slice(0, WAIT_RUNS_IN_MESSAGE).map((x) => {
     const m = minutesSince(x.started_at, nowMs);
     const owner = x.kind === "worker" && x.cap_id ? `[cap ${x.cap_id}]` : "";
-    return `${x.kind}:${x.id}${owner} ${x.phase === "running" ? "実行" : "準備"}${m !== undefined ? ` ${m} 分` : ""}`;
+    return `${x.kind}:${x.id}${owner} ${PHASE_WORD[x.phase]}${m !== undefined ? ` ${m} 分` : ""}`;
   });
   const more = runs.length > WAIT_RUNS_IN_MESSAGE ? ` ほか ${runs.length - WAIT_RUNS_IN_MESSAGE} 件` : "";
   const head = `待っている run: cap ${r.caps} / worker ${r.workers}${items.length > 0 ? `（${items.join("、")}${more}）` : ""}`;
@@ -200,8 +204,10 @@ export function describeUpdateWait(update: UpdateProgress, nowMs = Date.now()): 
     waited !== undefined ? `待機 ${waited} 分` : undefined,
     update.deadline !== undefined ? `${update.deadline}（上限）に残りを止めて再起動` : undefined,
   ].filter((x) => x !== undefined);
-  return `${head}${tail.length > 0 ? `。${tail.join("、")}` : ""}`;
+  return `${tail.length > 0 ? `${tail.join("、")}。` : ""}${head}`;
 }
+
+const PHASE_WORD: Record<UpdateWaitRun["phase"], string> = { running: "実行", preparing: "準備", queued: "待ち" };
 
 /** 更新待機中に断る kick_cap / task の error。center は同じ指示を再送できる。何を待っているか（update）を載せる。 */
 export function updatingError(
@@ -323,6 +329,7 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
     holdCap: (capId) => tracker.holdCap(capId),
     releaseCap: (capId) => tracker.releaseCap(capId),
     capOf: (workerId) => tracker.snapshot().find((a) => a.kind === "worker" && a.id === workerId)?.cap_id,
+    isClosed: (capId) => manager.isClosed(capId),
     log,
   });
   const manager = createAgentManager({ config, runner: cliRunner, log, observer: exitWatcher.wrap(tracker), runExtras });
@@ -337,6 +344,12 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
   const workerHub = createWorkerHub({ workspace: config.workspace, manager, activity: tracker, log, cleaner });
   const reaped = await manager.reapOrphans();
   log(`孤児回収: killed=${reaped.killed} failed=${reaped.failed} error=${reaped.errored}`);
+  // 閉じた cap の印（再起動をまたぐ）。worker の終了の回収（exitWatcher.recover）より前に読む
+  const closedCount = await manager.loadClosed().catch((e: unknown) => {
+    log(`閉じた cap の印を読めない: ${e instanceof Error ? e.message : String(e)}`);
+    return 0;
+  });
+  if (closedCount > 0) log(`閉じた cap: ${closedCount} 件（worker の report / 終了で起こさない）`);
 
   const { port: wantPort, bind, discovery, token } = config.broker;
   const broker = await startBroker({

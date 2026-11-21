@@ -98,7 +98,8 @@ export interface AgentManager {
   /**
    * agent を閉じる（stop_cap）。実行中なら止め（実行が終わるまで待つ）、会話（state.json の session_id）を破棄して、
    * 次の指示を新しい会話で始める。idle / failed / error / 実行中のどれでも閉じられる。logs/ と worker の dir は残す。
-   * 破棄した session は logs/closed.jsonl に追記する。
+   * 破棄した session は logs/closed.jsonl に追記する。cap なら、その cap の動いている（待ちを含む）worker も止め、
+   * 閉じた印（メモリと logs/closed-mark.json）を付ける。印のある cap は worker の report / 終了で起こさない。
    */
   close(kind: AgentKind, id: string, reason?: string): Promise<CloseResult>;
   status(): Promise<{ caps: AgentStatus[]; workers: AgentStatus[] }>;
@@ -106,13 +107,15 @@ export interface AgentManager {
   /** invoke 中（待ち + 実行）の件数を kind 別に返す（退役の停止件数に使う）。 */
   activeCount(): { caps: number; workers: number };
   /**
-   * 本当に動いている run の一覧（server 更新の「全部終わった」判定に使う）。数えるのは実行中（execute に入った）の指示のうち、
-   * claude の子が生きているもの（running）と、子がまだ居ない準備中・後始末中のもの（preparing）。
-   * 待ち（queue の後ろ）は数えない（前の run が終われば準備中として数えに入る）。子が終了したのに run が返らない（stdout を握る孫が残る等）ものも数えない。
+   * invoke 中の指示の一覧（server 更新の「全部終わった」判定と、何を待っているかの表示に使う）。phase は
+   * running = claude の子が生きている、preparing = 子がまだ居ない準備中・再試行の間・子が終わって結果を書いている途中
+   * （子が exit したのに run が返らない間も含む。claude.ts が close を待つのは猶予の間だけ）、queued = 同じ agent の前の指示の後ろで待っている。
    */
   activeRuns(): ActiveRun[];
-  /** stop_cap（close）で閉じた cap か。次に center から指示（task / kick_cap）が来るまで閉じたまま。 */
+  /** stop_cap（close）で閉じた cap か。次に center から指示（task / kick_cap）が来るまで閉じたまま（server の再起動をまたぐ）。 */
   isClosed(id: string): boolean;
+  /** 閉じた印（logs/closed-mark.json）を読み込む（server 起動時。worker の終了の回収より前に呼ぶ）。読み込んだ件数を返す。 */
+  loadClosed(): Promise<number>;
   /** その agent に invoke 中（待ち + 実行）の指示があるか。 */
   isActive(kind: AgentKind, id: string): boolean;
   shutdown(): Promise<void>;
@@ -123,9 +126,9 @@ export interface ActiveRun {
   id: string;
   /** worker の持ち主 cap（invoke の capId。分からなければ無い）。 */
   capId?: string;
-  /** この run を始めた時刻（ISO）。 */
+  /** この run を始めた時刻（ISO。待ちの間は invoke の時刻）。 */
   startedAt: string;
-  phase: "preparing" | "running";
+  phase: "queued" | "preparing" | "running";
   pid?: number;
 }
 
@@ -139,6 +142,8 @@ export interface CloseResult {
   session_cleared: boolean;
   /** 破棄した session_id（無ければ null）。 */
   previous_session_id: string | null;
+  /** cap を閉じた時に止めた、その cap の worker の数（実行中と待ちの worker_id の数）。 */
+  workers_stopped: number;
 }
 
 /** stop_cap で中断された指示の error 文言。 */
@@ -148,15 +153,21 @@ const STOP_GRACE_MS = 3000;
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-/** execute に入った run（activeRuns の元）。 */
-interface ExecutingRun {
+/** invoke 中の指示（activeRuns の元）。 */
+interface RunEntry {
   kind: AgentKind;
   id: string;
   capId?: string;
-  startedAt: string;
+  /** invoke の時刻（ISO）。 */
+  queuedAt: string;
+  /** execute に入った時刻（ISO）。入る前（待ち）は undefined。 */
+  startedAt?: string;
   /** 今の claude の子。spawn 前・run が返った後は undefined（準備中）。 */
   child?: ChildProcess;
 }
+
+/** 閉じた印のファイル（cap の logs/ の中）。 */
+const closedMarkFile = (dir: string): string => join(runLogDir(dir), "closed-mark.json");
 
 /** 子が生きているか。exit 済み（close 待ちを含む）や、pid が既に無いものは false。 */
 export function childAlive(child: Pick<ChildProcess, "pid" | "exitCode" | "signalCode">): boolean {
@@ -241,8 +252,8 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
   const stopRequests = new Set<string>();
   let shuttingDown = false;
   const SHUTDOWN_MSG = "server 終了により中断";
-  /** execute に入った run。child は今の claude の子（spawn 前・run の後は undefined）。 */
-  const executing = new Set<ExecutingRun>();
+  /** invoke 中の指示（待ち + 実行）。 */
+  const runs = new Set<RunEntry>();
   /** stop_cap で閉じた cap。center からの次の指示（keepTask でない invoke）で外す。 */
   const closedCaps = new Set<string>();
 
@@ -354,21 +365,18 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
     return false;
   }
 
-  async function execute(kind: AgentKind, id: string, input: InvokeInput): Promise<RunOutcome> {
-    const run: ExecutingRun = { kind, id, ...(input.capId !== undefined ? { capId: input.capId } : {}), startedAt: new Date().toISOString() };
-    executing.add(run);
+  async function execute(kind: AgentKind, id: string, input: InvokeInput, run: RunEntry): Promise<RunOutcome> {
+    run.startedAt = new Date().toISOString();
     try {
       return await executeInner(kind, id, input, run);
     } catch (e) {
       // 投げた場合（prepareDir 失敗など）も activity を終端にする
       observe((o) => o.finished(kind, id, { ok: false, lost: false, error: errMsg(e) }));
       throw e;
-    } finally {
-      executing.delete(run);
     }
   }
 
-  async function executeInner(kind: AgentKind, id: string, input: InvokeInput, run: ExecutingRun): Promise<RunOutcome> {
+  async function executeInner(kind: AgentKind, id: string, input: InvokeInput, run: RunEntry): Promise<RunOutcome> {
     if (shuttingDown) throw new Error("server 終了中");
     const key = `${kind}:${id}`;
     const dir = agentDir(config.workspace, kind, id);
@@ -605,13 +613,22 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
   async function close(kind: AgentKind, id: string, reason = "stop_cap"): Promise<CloseResult> {
     // 閉じた cap は、center が次に指示するまで worker の report / 終了で起こさない（stop の前に印を付け、止めている間の再開も断る）
     if (kind === "cap" && isValidAgentId(id)) closedCaps.add(id);
-    const { stopped } = await stop(kind, id);
+    // その cap の worker（実行中・待ち）も止める。閉じた cap は起こさないので、結果を待つ者が居ない
+    const workerIds = kind === "cap" ? [...new Set([...runs].filter((r) => r.kind === "worker" && r.capId === id).map((r) => r.id))] : [];
+    if (workerIds.length > 0) log(`close: cap:${id} の worker を止める: ${workerIds.join(" ")}`);
+    const [{ stopped }, workerStops] = await Promise.all([stop(kind, id), Promise.all(workerIds.map((w) => stop("worker", w).catch(() => ({ stopped: false }))))]);
+    const workersStopped = workerStops.filter((r) => r.stopped).length;
     const key = `${kind}:${id}`;
     // 止めた実行が state を書き終えるまで待ち、同じ key の他の指示と並べて（chain に載せて）破棄する。
     // chain の間は stopRequests が残るので、閉じている間に来た指示は実行されず STOP で返る
     inflight.set(key, (inflight.get(key) ?? 0) + 1);
     const prev = chains.get(key) ?? Promise.resolve();
-    const run = prev.then(() => clearSession(kind, id, reason));
+    const run = prev.then(async () => {
+      const r = await clearSession(kind, id, reason);
+      // 印はファイルにも残す（server の再起動後も、worker の終了の回収・report で起こさない）。chain の上で書くので、後に来た task が消す
+      if (kind === "cap" && closedCaps.has(id)) await writeClosedMark(id, reason);
+      return r;
+    });
     void run.then(
       () => settled(key),
       () => settled(key),
@@ -622,8 +639,30 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
       if (chains.get(key) === tail) chains.delete(key);
     });
     const r = await run;
-    log(`close: ${key} stopped=${stopped} session_cleared=${r.cleared} previous=${r.previous ?? "-"}`);
-    return { stopped, session_cleared: r.cleared, previous_session_id: r.previous };
+    log(`close: ${key} stopped=${stopped} workers_stopped=${workersStopped} session_cleared=${r.cleared} previous=${r.previous ?? "-"}`);
+    return { stopped, session_cleared: r.cleared, previous_session_id: r.previous, workers_stopped: workersStopped };
+  }
+
+  async function writeClosedMark(id: string, reason: string): Promise<void> {
+    const dir = agentDir(config.workspace, "cap", id);
+    if (!(await exists(dir))) return;
+    try {
+      await mkdir(runLogDir(dir), { recursive: true });
+      await writeFile(closedMarkFile(dir), JSON.stringify({ closed_at: new Date().toISOString(), reason }) + "\n");
+    } catch (e) {
+      log(`閉じた印を書けない: cap_id=${id} ${errMsg(e)}`);
+    }
+  }
+
+  async function loadClosed(): Promise<number> {
+    let n = 0;
+    for (const id of await listIds("cap")) {
+      if (await exists(closedMarkFile(agentDir(config.workspace, "cap", id)))) {
+        closedCaps.add(id);
+        n++;
+      }
+    }
+    return n;
   }
 
   function invoke(kind: AgentKind, id: string, input: InvokeInput): Promise<RunOutcome> {
@@ -637,22 +676,36 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
     } catch (e) {
       return Promise.reject(e);
     }
+    let reopen = false;
     if (kind === "cap") {
       // worker の report / 終了による再開（keepTask）は閉じた cap を起こさない。center からの指示は閉じた印を外して新しい会話で始める
       if (input.keepTask === true && closedCaps.has(id)) return Promise.reject(new Error(CLOSED_MSG));
-      if (input.keepTask !== true) closedCaps.delete(id);
+      if (input.keepTask !== true) {
+        closedCaps.delete(id);
+        reopen = true;
+      }
     }
     const key = `${kind}:${id}`;
+    const entry: RunEntry = { kind, id, ...(input.capId !== undefined ? { capId: input.capId } : {}), queuedAt: new Date().toISOString() };
+    runs.add(entry);
     inflight.set(key, (inflight.get(key) ?? 0) + 1);
     waiting.set(key, (waiting.get(key) ?? 0) + 1);
     const prev = chains.get(key) ?? Promise.resolve();
-    const run = prev.then(() => {
+    const run = prev.then(async () => {
       waiting.set(key, (waiting.get(key) ?? 1) - 1);
-      return execute(kind, id, input);
+      // 閉じた印のファイルは chain の上で消す（前の close が書いた後）。消せなくても実行は止めない
+      if (reopen) await rm(closedMarkFile(agentDir(config.workspace, "cap", id)), { force: true }).catch(() => {});
+      return execute(kind, id, input, entry);
     });
     void run.then(
-      () => settled(key),
-      () => settled(key),
+      () => {
+        runs.delete(entry);
+        settled(key);
+      },
+      () => {
+        runs.delete(entry);
+        settled(key);
+      },
     );
     const tail = run.catch(() => undefined);
     chains.set(key, tail);
@@ -809,17 +862,15 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
 
   function activeRuns(): ActiveRun[] {
     const out: ActiveRun[] = [];
-    for (const r of executing) {
-      const base = { kind: r.kind, id: r.id, ...(r.capId !== undefined ? { capId: r.capId } : {}), startedAt: r.startedAt };
-      if (r.child === undefined) {
-        out.push({ ...base, phase: "preparing" });
-        continue;
-      }
-      if (!childAlive(r.child)) continue;
-      out.push({ ...base, phase: "running", ...(r.child.pid !== undefined ? { pid: r.child.pid } : {}) });
+    for (const r of runs) {
+      const base = { kind: r.kind, id: r.id, ...(r.capId !== undefined ? { capId: r.capId } : {}), startedAt: r.startedAt ?? r.queuedAt };
+      if (r.startedAt === undefined) out.push({ ...base, phase: "queued" });
+      else if (r.child !== undefined && childAlive(r.child)) out.push({ ...base, phase: "running", ...(r.child.pid !== undefined ? { pid: r.child.pid } : {}) });
+      // spawn 前・再試行の間・子が exit した後（結果を書き終えて返るまで）は準備中として数える
+      else out.push({ ...base, phase: "preparing" });
     }
     return out;
   }
 
-  return { invoke, stop, close, status, reapOrphans, activeCount, activeRuns, isClosed: (id) => closedCaps.has(id), isActive, shutdown };
+  return { invoke, stop, close, status, reapOrphans, activeCount, activeRuns, isClosed: (id) => closedCaps.has(id), loadClosed, isActive, shutdown };
 }

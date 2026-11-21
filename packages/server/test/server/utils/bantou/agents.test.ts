@@ -656,7 +656,7 @@ test("agents: close は session_id を破棄し、次の指示は new の新し�
     await mkdir(join(dir, "logs"), { recursive: true });
     await writeFile(join(dir, "logs", "reports.jsonl"), '{"x":1}\n');
     const c = await m.close("cap", "c1");
-    assert.deepEqual(c, { stopped: false, session_cleared: true, previous_session_id: r1.session_id });
+    assert.deepEqual(c, { stopped: false, session_cleared: true, previous_session_id: r1.session_id, workers_stopped: 0 });
     const st = await readState(dir);
     assert.equal(st.session_id, null);
     assert.equal(st.state, "idle");
@@ -678,7 +678,7 @@ test("agents: close は session_id を破棄し、次の指示は new の新し�
 test("agents: close は無い cap / session が無い cap では session_cleared=false。不正 id は拒否", async () => {
   await withFixture(0, async (f) => {
     const m = mgr(f, async () => ok("r"));
-    assert.deepEqual(await m.close("cap", "nothing"), { stopped: false, session_cleared: false, previous_session_id: null });
+    assert.deepEqual(await m.close("cap", "nothing"), { stopped: false, session_cleared: false, previous_session_id: null, workers_stopped: 0 });
     await assert.rejects(m.close("cap", "a b"), /不正/);
   });
 });
@@ -729,7 +729,7 @@ test("agents: 実行中の cap の close は worker を止め、実行が終わ�
     await new Promise((r) => setTimeout(r, 10));
     release();
     const c = await cp;
-    assert.deepEqual(c, { stopped: true, session_cleared: true, previous_session_id: before });
+    assert.deepEqual(c, { stopped: true, session_cleared: true, previous_session_id: before, workers_stopped: 0 });
     assert.deepEqual(fc.sent, ["SIGTERM"]);
     assert.equal((await p).error, "stop_cap により停止");
     const st = await readState(dir);
@@ -755,9 +755,9 @@ test("agents: status の conversation は開始時刻・run 数・直近の使�
   });
 });
 
-test("agents: activeRuns は生きている子の run と準備中だけを数える。待ち行列・exit 済みで close の来ない run は数えない", async () => {
+test("agents: activeRuns は invoke 中の指示を全部出す（running = 子が生きている / preparing = spawn 前・子の exit 後に run が返るまで / queued = 待ち）", async () => {
   await withFixture(0, async (f) => {
-    // 生きている pid を持つ偽の子（exitCode を後から入れて「exit したが close が来ない」を作る）
+    // 生きている pid を持つ偽の子（exitCode を後から入れて「exit したが run がまだ返らない」を作る）
     const child = { pid: process.pid, exitCode: null as number | null, signalCode: null as string | null, kill: () => true, once: () => {} };
     let releaseCap!: () => void;
     let releaseWorker!: () => void;
@@ -774,23 +774,83 @@ test("agents: activeRuns は生きている子の run と準備中だけを数�
       return ok("r");
     });
     const a = m.invoke("cap", "c1", { prompt: "p" });
-    const b = m.invoke("cap", "c1", { prompt: "q" }); // 同じ cap の待ち（数えない）
+    const b = m.invoke("cap", "c1", { prompt: "q" }); // 同じ cap の待ち
     const w = m.invoke("worker", "w1", { prompt: "p", capId: "c1" });
     await new Promise((r) => setTimeout(r, 50));
-    const runs = m.activeRuns().map((r) => `${r.kind}:${r.id}:${r.phase}:${r.capId ?? "-"}`).sort();
-    assert.deepEqual(runs, ["cap:c1:running:-", "worker:w1:preparing:c1"]);
-    // activeCount（退役用）は従来どおり待ちも数える
+    const view = (): string[] => m.activeRuns().map((r) => `${r.kind}:${r.id}:${r.phase}:${r.capId ?? "-"}`).sort();
+    assert.deepEqual(view(), ["cap:c1:queued:-", "cap:c1:running:-", "worker:w1:preparing:c1"]);
     assert.deepEqual(m.activeCount(), { caps: 2, workers: 1 });
-    // 子は exit したが close が来ない（stdout を握る孫が残る等）: run は返らないが、もう数えない
+    // 子は exit したが run はまだ返らない（結果を書いている途中・孫が pipe を握っている猶予の間）: 準備中として数え続け、後ろの待ちも数える
     child.exitCode = 0;
-    assert.deepEqual(m.activeRuns().map((r) => `${r.kind}:${r.id}`), ["worker:w1"]);
+    assert.deepEqual(view(), ["cap:c1:preparing:-", "cap:c1:queued:-", "worker:w1:preparing:c1"]);
     releaseWorker();
     await w;
-    assert.deepEqual(m.activeRuns(), []);
+    assert.deepEqual(view(), ["cap:c1:preparing:-", "cap:c1:queued:-"]);
     child.exitCode = null;
     releaseCap();
     await Promise.all([a, b]);
     assert.deepEqual(m.activeRuns(), []);
+  });
+});
+
+test("agents: cap の close はその cap の worker（実行中・待ち）も止めて workers_stopped に数を返す。別の cap の worker は止めない", async () => {
+  await withFixture(0, async (f) => {
+    const kids = new Map<string, ReturnType<typeof fakeChild>>();
+    const releases = new Map<string, () => void>();
+    const m = mgr(f, (o) => {
+      const id = o.cwd.split("/").pop()!;
+      if (o.cwd.includes("/caps/")) return Promise.resolve(ok("r"));
+      const fc = fakeChild();
+      kids.set(id, fc);
+      o.onSpawn?.(fc.child as never);
+      return new Promise<ClaudeRunResult>((r) => {
+        releases.set(id, () => r(ng("終了コード null")));
+        // SIGTERM（fakeChild は close を呼ぶ）で run も終わる
+        fc.child.once("close", () => r(ng("signal SIGTERM で終了")));
+      });
+    });
+    await m.invoke("cap", "c1", { prompt: "p" });
+    const w1 = m.invoke("worker", "w1", { prompt: "p", capId: "c1" });
+    const w1b = m.invoke("worker", "w1", { prompt: "q", capId: "c1" }); // 同じ worker の待ち
+    const w2 = m.invoke("worker", "w2", { prompt: "p", capId: "c1" });
+    const w3 = m.invoke("worker", "w3", { prompt: "p", capId: "c-other" });
+    await new Promise((r) => setTimeout(r, 50));
+    const c = await m.close("cap", "c1");
+    assert.equal(c.workers_stopped, 2);
+    assert.equal(c.stopped, false, "cap 自体は動いていない（worker を待っていて idle）");
+    assert.deepEqual(kids.get("w1")!.sent, ["SIGTERM"]);
+    assert.deepEqual(kids.get("w2")!.sent, ["SIGTERM"]);
+    assert.equal((await w1).error, "stop_cap により停止");
+    assert.equal((await w1b).error, "stop_cap により停止");
+    assert.equal((await w2).error, "stop_cap により停止");
+    assert.deepEqual(kids.get("w3")!.sent, [], "別の cap の worker は止めない");
+    assert.equal(m.isActive("worker", "w3"), true);
+    releases.get("w3")!();
+    await w3;
+  });
+});
+
+test("agents: 閉じた印は logs/closed-mark.json に残り、server の再起動後（loadClosed）も keepTask の再開を断る。center の次の指示で消える", async () => {
+  await withFixture(0, async (f) => {
+    const m = mgr(f, async () => ok("r"));
+    await m.invoke("cap", "c1", { prompt: "p" });
+    await m.invoke("cap", "c2", { prompt: "p" });
+    await m.close("cap", "c1");
+    const mark = join(f.ws, "caps", "c1", "logs", "closed-mark.json");
+    assert.equal(JSON.parse(await readFile(mark, "utf8")).reason, "stop_cap");
+    // 再起動: 新しい manager はメモリに印が無い。loadClosed で読む
+    const m2 = mgr(f, async () => ok("r"));
+    assert.equal(m2.isClosed("c1"), false);
+    assert.equal(await m2.loadClosed(), 1);
+    assert.equal(m2.isClosed("c1"), true);
+    assert.equal(m2.isClosed("c2"), false);
+    await assert.rejects(m2.invoke("cap", "c1", { prompt: "worker exit", keepTask: true }), (e: unknown) => e instanceof Error && e.message === CLOSED_MSG);
+    // center の task: 印を外して動く（ファイルも消える）
+    assert.equal((await m2.invoke("cap", "c1", { prompt: "next" })).ok, true);
+    assert.equal(m2.isClosed("c1"), false);
+    await assert.rejects(readFile(mark, "utf8"));
+    const m3 = mgr(f, async () => ok("r"));
+    assert.equal(await m3.loadClosed(), 0);
   });
 });
 

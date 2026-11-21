@@ -2116,6 +2116,13 @@ test("remote_delete: session が無かった cap は session_cleared=false（破
   assert.deepEqual(r, { remote_id: CAP, deleted: true, stopped: false, session_cleared: false, previous_session_id: null });
 });
 
+test("remote_delete: server が配下の worker も止めたら workers_stopped をそのまま返す（cap が idle でも stopped=true）", async () => {
+  const { mgr } = setup({ stopCapOn: async (_p: ServerPeer, cmd: unknown) => ({ bantou: 1, type: "stop_result", ok: true, cap_id: (cmd as { cap_id: string }).cap_id, stopped: true, session_cleared: true, previous_session_id: "s-old", workers_stopped: 2 }) as never });
+  await mgr.send({ owner: "pm1", goal: "p" });
+  const r = await mgr.delete({});
+  assert.deepEqual(r, { remote_id: CAP, deleted: true, stopped: true, session_cleared: true, previous_session_id: "s-old", workers_stopped: 2 });
+});
+
 test("remote_list: failed（Prompt is too long）の cap は会話の使用量（conversation）と失敗の理由（cap_last_error）を出す。閉じて同じ cap_id で起こし直せる", async () => {
   const conversation = { started_at: "2026-11-04T00:00:00.000Z", tasks: 40, context_tokens: 1_000_000, context_window: 1_000_000, context_percent: 100, usage_at: "2026-11-11T00:00:00.000Z", last_error_text: "Prompt is too long" };
   let failed = true;

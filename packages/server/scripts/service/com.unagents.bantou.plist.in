@@ -10,6 +10,7 @@
   <array>
     <string>@NPX@</string>
     <string>-y</string>
+    <string>--prefer-online</string>
     <string>bantou@@VERSION@</string>
     <string>--config</string>
     <string>@HOME@/config.json</string>

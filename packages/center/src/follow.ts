@@ -54,8 +54,8 @@ const minutesSince = (iso: string | undefined, nowMs: number): number | undefine
 
 /**
  * 更新が何を待っているかの一文。例:
- * 「待っている run: cap 1 / worker 1（session mflow の cap 実行 8 分、session mflow の worker w-1 実行 3 分）。待機 12 分、2026-11-21T05:40:00.000Z（上限）に残りを止めて再起動」
- * 件数しか無い（旧 server）なら件数だけ。
+ * 「待機 12 分、2026-11-21T05:40:00.000Z（上限）に残りを止めて再起動。待っている run: cap 1 / worker 1（session mflow の cap 実行 8 分、session mflow の worker w-1 実行 3 分）」
+ * 経過と上限を先に置く（detail は 200 字で切るので、run の列が長くても残るように）。件数しか無い（旧 server）なら件数だけ。
  */
 export function describeWait(u: { running?: UpdateRunning; since?: string; deadline?: string; runs?: WaitRun[] }, nowMs: number): string {
   const parts: string[] = [];
@@ -64,16 +64,16 @@ export function describeWait(u: { running?: UpdateRunning; since?: string; deadl
     const owner = x.session !== undefined ? `session ${x.session} の ` : x.kind === "worker" && x.cap_id ? `cap ${x.cap_id} の ` : "";
     const what = x.kind === "cap" ? (x.session !== undefined ? "cap" : `cap ${x.id}`) : `worker ${x.id}`;
     const m = minutesSince(x.started_at, nowMs);
-    return `${owner}${what} ${x.phase === "running" ? "実行" : "準備"}${m !== undefined ? ` ${m} 分` : ""}`;
+    return `${owner}${what} ${x.phase === "running" ? "実行" : x.phase === "queued" ? "待ち" : "準備"}${m !== undefined ? ` ${m} 分` : ""}`;
   });
   const more = runs.length > WAIT_RUNS_IN_TEXT ? ` ほか ${runs.length - WAIT_RUNS_IN_TEXT} 件` : "";
-  if (u.running) parts.push(`待っている run: cap ${u.running.caps} / worker ${u.running.workers}${items.length > 0 ? `（${items.join("、")}${more}）` : ""}`);
   const waited = minutesSince(u.since, nowMs);
   const tail = [
     waited !== undefined ? `待機 ${waited} 分` : undefined,
     u.deadline !== undefined ? `${u.deadline}（上限）に残りを止めて再起動` : undefined,
   ].filter((x): x is string => x !== undefined);
   if (tail.length > 0) parts.push(tail.join("、"));
+  if (u.running) parts.push(`待っている run: cap ${u.running.caps} / worker ${u.running.workers}${items.length > 0 ? `（${items.join("、")}${more}）` : ""}`);
   return parts.join("。");
 }
 
@@ -214,8 +214,10 @@ interface Rec {
   entry: FollowEntry;
   /** 更新に失敗した後、次に同じ版を再指示してよい時刻（ms）。 */
   retryAt?: number;
-  /** updating になった時刻（lost 判定）。 */
+  /** updating になった時刻。 */
   updatingSince?: number;
+  /** 最後に hello に答えた時刻（lost 判定はここから測る。長く正常に待った server を、再起動の間の無応答 1 回で lost にしない）。 */
+  lastAnswerAt?: number;
 }
 
 export function createFollow(opts: {
@@ -246,6 +248,11 @@ export function createFollow(opts: {
   const fastMs = Math.min(intervalMs, UPDATING_INTERVAL_MS);
 
   const keyOf = (p: ServerPeer): string => p.summary || p.id;
+  /** updating の server が、最後に答えてから（答えた記録が無ければ updating になってから）lostAfterMs を越えて黙っているか。 */
+  const silentTooLong = (rec: Rec): boolean => {
+    const base = rec.lastAnswerAt ?? rec.updatingSince;
+    return base !== undefined && now() - base > lostAfterMs;
+  };
 
   /** server の更新の進行を、center の記録（session 名つき）にする。 */
   const infoOfProgress = (p: Pick<UpdateProgress, "to" | "running" | "since" | "deadline" | "runs">): UpdateInfo => ({
@@ -318,7 +325,7 @@ export function createFollow(opts: {
     if (hello.type !== "hello_result") {
       if (rec.entry.state === "updating") {
         // 再起動中の取りこぼしは更新中のまま。ただし答えないまま一定時間（lost と同じ）過ぎたら、発見に残っていても lost にする（updating のままだと task を断り続ける）
-        if (rec.updatingSince !== undefined && now() - rec.updatingSince > lostAfterMs) {
+        if (silentTooLong(rec)) {
           set(rec, { state: "lost", detail: `更新中のまま server が hello に答えない: ${hello.type === "error" ? hello.message : "不明な返信"}` });
         }
         return;
@@ -326,6 +333,7 @@ export function createFollow(opts: {
       set(rec, { state: "unknown", detail: `版を確認できない: ${hello.type === "error" ? hello.message : "不明な返信"}` });
       return;
     }
+    rec.lastAnswerAt = now();
     Object.assign(rec.entry, identityOfReply(hello));
     rec.entry.server_version = hello.server_version;
     rec.entry.protocol_version = hello.protocol_version;
@@ -391,7 +399,7 @@ export function createFollow(opts: {
   function lostCheck(present: Set<string>): void {
     for (const [key, rec] of recs) {
       if (present.has(key) || rec.entry.state !== "updating") continue;
-      if (rec.updatingSince !== undefined && now() - rec.updatingSince > lostAfterMs) {
+      if (silentTooLong(rec)) {
         set(rec, { state: "lost", detail: "更新後に server が戻らない（応答なし）" });
       }
     }
