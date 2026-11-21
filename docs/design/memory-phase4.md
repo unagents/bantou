@@ -41,11 +41,17 @@
 
 ## 2. Phase 4 の範囲
 
+> **仕様から外す・縮める物（利用者の判断が要る）**
+> 元の仕様の Phase 4（`memory-design.md:614-622`）には「Procedural Memory 生成」と「Shared Memory 昇格」がある。この設計では次のように扱う。
+> - **Shared Memory 昇格**: U9 の推奨では Phase 5 に回す（Phase 4 から外す）。
+> - **Procedural Memory 生成**: 候補（inferred）を作るまでに縮める（§4.6、U8）。
+> これは推奨であって決定ではない。Phase 4 に残すかは利用者が U9（と U8）で決める。
+
 元の仕様（`memory-design.md:510-522`、`:614-622`）の項目ごとに、今回の扱いを決める。
 
 | 元の項目 | 今回の扱い | 1〜3 との関係 |
 |---|---|---|
-| 重複記憶の検出・記憶の統合 | 範囲内 | 2 |
+| 重複記憶の検出・記憶の統合 | 一部が範囲内。統合は `inferred` の item だけ（§4.5）。`confirmed` 同士は、今ある完全一致の検査（`extract.ts:367-370`）で弾くだけにする。言い換えの関係は §4.4 の置き換えで扱う | 2 |
 | 古い情報の識別・新旧情報の関係付け | 範囲内（Graphiti の無効化を使う） | 1・2 |
 | 推測情報の再評価 | 範囲内 | 1・2 |
 | 不要な一時情報のアーカイブ | 範囲内 | 2 |
@@ -75,6 +81,8 @@
 
 R2 と「古い決定を置き換える（1.1）」はぶつかって見える。この設計では次のように読む。利用者の新しい発言（user_prompt）を出典とする confirmed の決定が、古い confirmed の決定を置き換えるのは、R1 の「決定の変更を新しい event として記録する」に当たる。整理の処理が自分の判断で決定を変える事ではない。ただし、何をもって「同じ事柄の新しい決定」と認めるかは U4 にする。
 
+U5（未回答から外す条件）の推奨は、仕様に無い規則を足す案である。元の仕様には「report の種別で未回答を区別する」「result で質問を閉じる」の規則が無い。README の今の context の定義（`README.md:33`）も変えることになる。そのため U5 は利用者が決める。
+
 ## 4. 整理の仕組み
 
 ### 4.1 全体
@@ -102,7 +110,11 @@ R2 と「古い決定を置き換える（1.1）」はぶつかって見える�
 ### 4.3 推測の昇格（問題 1 の後半。決定論）
 
 - `applyCandidate`（`extract.ts:363-408`）の重複の検査で、一致した既存の item が `inferred`、新しい候補が検証の後も `confirmed`（出典が全て user_prompt）である場合を分ける。この場合は却下しない。
-- やり方は U7 で決める。推奨は「新しい confirmed の item を作り、古い inferred を `superseded`（`superseded_by` = 新しい方）にする」こと。重複の unique index は `status <> 'superseded'` の部分 index なので（`001_init.sql:59`）、同じ transaction で古い方を先に superseded にすれば、新しい方を入れられる。
+- やり方は U7 で決める。推奨は「新しい confirmed の item を作り、古い inferred を `superseded`（`superseded_by` = 新しい方）にする」こと。同じ transaction の中で、次の順に行う。
+  1. 古い方の `status` だけを `superseded` に更新する。重複の unique index は `status <> 'superseded'` の部分 index なので（`001_init.sql:59`）、これで同じ本文の新しい item を入れられる。
+  2. 新しい item を INSERT する。
+  3. 古い方の `superseded_by` を、新しい item の id に更新する。`valid_until` も、今の `supersede()`（`recall.ts:131`）と同じくここで立てる。`superseded_by` は `memory_items(id)` への FK で（`001_init.sql:53`）、新しい item が無いうちは入れられない。そのため 1 と分けている。
+  - 代わりの案として、FK を `DEFERRABLE INITIALLY DEFERRED` にする migration を足し、1 で `superseded_by` まで入れる方法もある。schema の変更が要るので推奨しない。
 - `memory_candidates` には accepted として残す。`reason` に昇格の印を付ける。`decision` の CHECK は accepted / rejected だけなので（`001_init.sql:80`）、新しい値は足さない。
 - 変更の履歴は §5 の表に残す（R5）。
 - 本文が完全一致しない「言い換え」の確定は、ここでは扱わない。§4.4 の置き換え、または §4.5 の再評価に任せる。
@@ -131,6 +143,7 @@ Graphiti の無効化を使わない案（memory 側で、埋め込みの近傍�
   - 対象は `inferred` だけ。`confirmed` は LLM の答えでは変えない（R2）。
   - 統合先は同じ agent・同じ type の、見えている item に限る。
   - id は入力に存在する物に限る（今の出典の検査 `extract.ts:174-176` と同じ考え方）。
+- この統合は、Graphiti の重複除去と重ならない。対象が違うためである。Graphiti の重複除去は、Graphiti の中の entity と fact に掛かる（Graphiti の README）。この統合が扱うのは、PostgreSQL の `memory_items` の行である。Graphiti で entity がまとまっても、`memory_items` の inferred の行は減らない。recall も context も `memory_items` から返す（`recall.ts:100-122`、`:166-174`）。
 - 片付けの表し方（新しい status、列、`valid_until` のどれか）は U11。行は消さない（`memory_app` に DELETE が無い。`README.md:170`）。
 - recall の既定から片付けた物を外すか、`temporal` 指定の時だけ返すかも U11 で決める。今の superseded の扱い（`recall.ts:95-97`）に揃えるのが推奨。
 - 一定の期間で機械的に片付ける（TTL）案は、利用者が期間を決めていない。そのため U12 にする。
@@ -160,7 +173,7 @@ migration は 003 以降に足す。今の 002 と同じく、何度当てても
 | 対象 | 変更 | 根拠・関係 |
 |---|---|---|
 | `memory_items.status` の CHECK（`001_init.sql:49`） | U11 で新しい status を採る時だけ、値を足す | §4.5 |
-| 新しい表（名前は仮に `memory_revisions`） | item の状態の変更ごとに 1 行を書く。項目は item、変更前と変更後の status、相手の item、理由（promoted / superseded_by_graphiti / contradiction / archived / merged）、出典（Graphiti の fact の id、LLM の run）、時刻。RLS は他の表と同じ（`001_init.sql:116-134`） | R5。§6 の「memory_events = 記憶の更新履歴」は、今は原イベントの表の名前に使われている（`README.md:221`）。そのため別の名前にする。表を足すかは U14 |
+| 新しい表（名前は仮に `memory_revisions`） | item の状態の変更ごとに 1 行を書く。項目は item、変更前と変更後の status、変更前の `valid_until` と `superseded_by`、相手の item、理由（promoted / superseded_by_graphiti / contradiction / archived / merged）、出典（Graphiti の fact の id、LLM の run）、時刻。RLS は他の表と同じ（`001_init.sql:116-134`） | R5。§6 の「memory_events = 記憶の更新履歴」は、今は原イベントの表の名前に使われている（`README.md:221`）。そのため別の名前にする。表を足すかは U14 |
 | `outbox_events`（`001_init.sql:88-98`） | 列はそのまま使う。`last_error` を足すかは U6 | §4.4 ① |
 | Graphiti との対応（U3） | 案によって、`memory_items` に Graphiti の id の列を足す、または対応の表を足す | §4.4 ② |
 | `server/utils/extract.ts` `applyCandidate`（`:363-408`） | inferred → confirmed の昇格の分岐 | §4.3 |
@@ -180,9 +193,13 @@ migration は 003 以降に足す。今の 002 と同じく、何度当てても
 2. **推測の昇格**（問題 1 の後半）。`applyCandidate` の分岐と、U14 の履歴の表。
 3. **置き換えの土台**。`supersede()` を、履歴の表に書き、§4.4 の 3 の検査を持つ形にする。この段階では呼び出し元はまだ無い。test の B / C を、偽の「無効化の通知」で先に書ける。
 4. **Graphiti への反映**（Phase 2 の残り）。Outbox の消費。U1〜U3 が決まってから。
-5. **置き換えの自動化**（問題 1 の前半）。Graphiti の無効化から §4.4 の ②〜④ を動かす。
-6. **推測の再評価と片付け**（問題 2）。§4.5。U11〜U13 が決まってから。
-7. **手順と昇格の候補**。§4.6。U8・U9 次第。
+5. **Graphiti の無効化と対応付けの確認**。次の 2 つを、採用する Graphiti の版の実装で確かめる。
+   - 無効化が起きる条件（README に書かれていない。§0）。
+   - fact から memory の item への対応付け（U3）が実装できるか。
+   確かめられない時は、段階 6 を U4 の (c) に落とす。自動では置き換えず、矛盾の候補を利用者に見せる。
+6. **置き換えの自動化**（問題 1 の前半）。Graphiti の無効化から §4.4 の ②〜④ を動かす。段階 5 で確かめられなかった時は、上のとおり U4 (c) の形にする。
+7. **推測の再評価と片付け**（問題 2）。§4.5。U11〜U13 が決まってから。
+8. **手順と昇格の候補**。§4.6。U8・U9 次第。
 
 ## 7. 確かめ方
 
@@ -216,9 +233,9 @@ Graphiti は、今の chatp・Ollama と同じく決定論の fake にする（`
 4. 段階ごとに新しい版を入れた後、1〜3 を取り直して比べる。
    - 段階 1 の後: `openQuestions` に done / progress が 0 件。
    - 段階 2 の後: 利用者が確定した推測が confirmed になり、元の inferred が superseded になる。
-   - 段階 5 の後: 「DB」の既定の recall が 1 件になる。
-   - 段階 6 の後: `byStatus.inferred` が減る。片付けた物は、U11 の決め方に従い既定の recall に出ない。
-5. 誤りを数える。置き換え・片付けの全件を、履歴の表から `explain`（出典）付きで抜き出し、利用者が正しいかを見る。誤りがあれば、その段階の自動の処理を止めて戻す。戻し方は、履歴の表の変更前の status に戻す。
+   - 段階 6 の後: 「DB」の既定の recall が 1 件になる。
+   - 段階 7 の後: `byStatus.inferred` が減る。片付けた物は、U11 の決め方に従い既定の recall に出ない。
+5. 誤りを数える。置き換え・片付けの全件を、履歴の表から `explain`（出典）付きで抜き出し、利用者が正しいかを見る。誤りがあれば、その段階の自動の処理を止めて戻す。戻し方は、履歴の表に残した変更前の `status`・`valid_until`・`superseded_by` の 3 つを戻す。
 
 ## 8. 未決
 
