@@ -3,6 +3,8 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { after, before, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { createTestDb, ev, type TestDb } from "./helpers/fakes.ts";
@@ -97,6 +99,22 @@ describe("graphiti", () => {
     assert.equal(e.graphitiUrl, "");
     assert.deepEqual(e.graphitiTopics, ["graphiti.memory_item"]);
     assert.deepEqual(readEnv({ GRAPHITI_TOPICS: "graphiti.memory_item, graphiti.episode" }).graphitiTopics, ["graphiti.memory_item", "graphiti.episode"]);
+  });
+
+  test("config: GRAPHITI_MCP_URL は trim し、空白だけなら未設定。暫定値は環境変数で変えられる（不正な値は既定）", () => {
+    assert.equal(readEnv({ GRAPHITI_MCP_URL: "   " }).graphitiUrl, "");
+    assert.equal(readEnv({ GRAPHITI_MCP_URL: " http://127.0.0.1:7931/mcp/ \n" }).graphitiUrl, "http://127.0.0.1:7931/mcp/");
+    const d = readEnv({});
+    assert.deepEqual([d.graphitiInFlight, d.graphitiMaxAttempts, d.graphitiConfirmTimeoutMin, d.graphitiBodyMax], [20, 5, 30, 4000]);
+    const c = readEnv({ GRAPHITI_IN_FLIGHT: "7", GRAPHITI_MAX_ATTEMPTS: "3", GRAPHITI_CONFIRM_TIMEOUT_MIN: "90", GRAPHITI_BODY_MAX: "1000" });
+    assert.deepEqual([c.graphitiInFlight, c.graphitiMaxAttempts, c.graphitiConfirmTimeoutMin, c.graphitiBodyMax], [7, 3, 90, 1000]);
+    assert.equal(readEnv({ GRAPHITI_IN_FLIGHT: "x" }).graphitiInFlight, 20);
+  });
+
+  test("compose: profile 無しの起動を塞がない（graphiti の service は必須変数 `:?` を使わず、profile で隔離する）", () => {
+    const s = readFileSync(fileURLToPath(new URL("../deploy/compose.yaml", import.meta.url)), "utf8");
+    assert.doesNotMatch(s.slice(s.indexOf("\n  neo4j:")), /\$\{[A-Z_0-9]+:\?/);
+    assert.equal((s.match(/profiles: \["graphiti"\]/g) ?? []).length, 2);
   });
 
   test("反映: 待ち → 送信済み（queue に受理）→ 反映済み（episode を確認）。確認できるまで再送しない", async () => {

@@ -15,7 +15,7 @@ export interface Runtime {
   extractBatch: number;
   embed: { batchSize: number; maxRunMs: number };
   /** Graphiti への反映。GRAPHITI_MCP_URL が無ければ undefined（Outbox は積むだけ） */
-  graphiti?: { client: GraphitiClient; topics: string[] };
+  graphiti?: { client: GraphitiClient; topics: string[]; inFlight: number; maxAttempts: number; confirmTimeoutMin: number; bodyMax: number };
 }
 
 let current: Runtime | undefined;
@@ -68,7 +68,7 @@ export function buildRuntime(env: MemoryEnv, db: Db): Runtime {
     extractBatch: env.extractBatch,
     embed: { batchSize: env.embedBatch, maxRunMs: env.embedRunMs },
     ...(env.graphitiUrl
-      ? { graphiti: { client: createGraphitiMcpClient({ url: env.graphitiUrl, timeoutMs: env.graphitiTimeoutMs }), topics: env.graphitiTopics } }
+      ? { graphiti: { client: createGraphitiMcpClient({ url: env.graphitiUrl, timeoutMs: env.graphitiTimeoutMs }), topics: env.graphitiTopics, inFlight: env.graphitiInFlight, maxAttempts: env.graphitiMaxAttempts, confirmTimeoutMin: env.graphitiConfirmTimeoutMin, bodyMax: env.graphitiBodyMax } }
       : {}),
   };
 }

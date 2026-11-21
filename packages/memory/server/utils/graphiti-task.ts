@@ -13,6 +13,10 @@ export interface GraphitiCycleDeps {
   db: Db;
   graphiti: GraphitiClient;
   topics: string[];
+  inFlight?: number;
+  maxAttempts?: number;
+  confirmTimeoutMin?: number;
+  bodyMax?: number;
 }
 export type GraphitiCycleResult = (SyncAllResult & { skipped?: undefined }) | { skipped: true; results: []; errors: [] } | { error: string };
 
@@ -31,7 +35,14 @@ export async function runGraphitiCycle(deps: GraphitiCycleDeps, log: WorkerLog =
   if (running) return { skipped: true, results: [], errors: [] };
   running = true;
   try {
-    const r = await syncAll(deps.db, { graphiti: deps.graphiti, topics: deps.topics });
+    const r = await syncAll(deps.db, {
+      graphiti: deps.graphiti,
+      topics: deps.topics,
+      inFlight: deps.inFlight,
+      maxAttempts: deps.maxAttempts,
+      confirmTimeoutMin: deps.confirmTimeoutMin,
+      bodyMax: deps.bodyMax,
+    });
     for (const s of r.results) {
       if (s.confirmed + s.sent + s.retried + s.failed > 0) {
         log.info(`[memory] graphiti: agent=${s.agentId} confirmed=${s.confirmed} sent=${s.sent} waiting=${s.waiting} retried=${s.retried} dead-letter=${s.failed}`);
@@ -67,7 +78,7 @@ export async function runGraphitiTask(log?: WorkerLog): Promise<GraphitiCycleRes
   try {
     const rt = await getRuntime();
     if (!rt.graphiti) return { disabled: true };
-    return await runGraphitiCycle({ db: rt.db, graphiti: rt.graphiti.client, topics: rt.graphiti.topics }, log);
+    return await runGraphitiCycle({ db: rt.db, graphiti: rt.graphiti.client, ...rt.graphiti }, log);
   } catch (e) {
     const message = errorSummary(e);
     const g = gist(message);

@@ -14,6 +14,8 @@ export const TOPIC_ITEM = "graphiti.memory_item";
 /** 既定で消費する topic（暫定。docs/design/memory-graphiti.md の未決 2）。他の topic の行は触らず、待ちのまま残る */
 export const DEFAULT_TOPICS = [TOPIC_ITEM];
 
+// 以下 4 つの既定は暫定値（設計書の未決。利用者が決めていない）。環境変数で変えられる
+// （GRAPHITI_MAX_ATTEMPTS / GRAPHITI_IN_FLIGHT / GRAPHITI_CONFIRM_TIMEOUT_MIN / GRAPHITI_BODY_MAX）。
 /** 失敗回数の上限。超えたら failed_at を立てる */
 export const SYNC_MAX_ATTEMPTS = 5;
 /** 1 agent が同時に持てる「送信済み・未確認」の行数（Graphiti の queue を溢れさせない） */
@@ -28,6 +30,8 @@ export interface SyncDeps {
   /** 消費する topic。省略時は DEFAULT_TOPICS */
   topics?: string[];
   inFlight?: number;
+  maxAttempts?: number;
+  bodyMax?: number;
   confirmTimeoutMin?: number;
   now?: () => Date;
 }
@@ -68,7 +72,7 @@ const rowKey = (row: OutboxRow): string => (row.topic === TOPIC_EVENT ? row.payl
 export const episodeName = (row: Pick<OutboxRow, "topic" | "payload" | "idempotency_key">): string => `${row.topic === TOPIC_EVENT ? "event" : "item"}:${rowKey(row as OutboxRow)}`;
 
 /** Outbox の行から add_memory の引数を作る。出典の行が無い・未対応の scope は Permanent（再試行しても直らない） */
-async function buildRequest(q: { query<T>(sql: string, p?: unknown[]): Promise<{ rows: T[] }> }, agentId: string, row: OutboxRow): Promise<AddMemoryRequest> {
+async function buildRequest(q: { query<T>(sql: string, p?: unknown[]): Promise<{ rows: T[] }> }, agentId: string, row: OutboxRow, bodyMax: number): Promise<AddMemoryRequest> {
   const groupId = graphitiGroupId(agentId);
   if (row.topic === TOPIC_EVENT) {
     const eventId = rowKey(row);
@@ -86,7 +90,7 @@ async function buildRequest(q: { query<T>(sql: string, p?: unknown[]): Promise<{
     const to = party(e.recipient_session, e.recipient_cap_id, e.recipient_worker_id);
     return {
       name: episodeName(row),
-      episodeBody: `[${e.kind}] ${from} -> ${to}\n${clip(e.body, SYNC_BODY_MAX)}`,
+      episodeBody: `[${e.kind}] ${from} -> ${to}\n${clip(e.body, bodyMax)}`,
       groupId,
       source: "text",
       sourceDescription: `bantou event kind=${e.kind}${e.task_id ? ` task=${e.task_id}` : ""}`,
@@ -117,6 +121,8 @@ async function buildRequest(q: { query<T>(sql: string, p?: unknown[]): Promise<{
 export async function syncForAgent(db: Db, deps: SyncDeps, agentId: string): Promise<SyncSummary> {
   const topics = deps.topics ?? DEFAULT_TOPICS;
   const inFlight = deps.inFlight ?? SYNC_IN_FLIGHT;
+  const maxAttempts = deps.maxAttempts ?? SYNC_MAX_ATTEMPTS;
+  const bodyMax = deps.bodyMax ?? SYNC_BODY_MAX;
   const confirmMs = (deps.confirmTimeoutMin ?? SYNC_CONFIRM_TIMEOUT_MIN) * 60_000;
   const now = deps.now ?? (() => new Date());
   const groupId = graphitiGroupId(agentId);
@@ -130,7 +136,7 @@ export async function syncForAgent(db: Db, deps: SyncDeps, agentId: string): Pro
                 failed_at = CASE WHEN $5::boolean OR attempts + 1 >= $4 THEN $6::timestamptz ELSE NULL END,
                 next_attempt_at = $6::timestamptz + make_interval(secs => LEAST(60 * power(2, attempts), 3600))
           WHERE agent_id = $1 AND id = $2 AND processed_at IS NULL RETURNING failed_at`,
-        [agentId, id, clip(message, 300), SYNC_MAX_ATTEMPTS, permanent, now().toISOString()],
+        [agentId, id, clip(message, 300), maxAttempts, permanent, now().toISOString()],
       )).rows[0];
       if (r?.failed_at) s.failed++;
       else s.retried++;
@@ -192,7 +198,7 @@ export async function syncForAgent(db: Db, deps: SyncDeps, agentId: string): Pro
     for (const row of pending) {
       let req: AddMemoryRequest;
       try {
-        req = await db.withAgent(agentId, (q) => buildRequest(q, agentId, row));
+        req = await db.withAgent(agentId, (q) => buildRequest(q, agentId, row, bodyMax));
       } catch (e) {
         if (e instanceof Permanent) {
           await recordFailure(row.id, e.message, true);
