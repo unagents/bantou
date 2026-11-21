@@ -6,7 +6,7 @@ import { assertCenterOnly, CENTER_SERVERS_ERROR, composeAddDirs, composeInstruct
 import { connectionsFromSettings, emptyConnections, serverEntryIssues, type ConnectionsData } from "./mcp-connections.js";
 import type { McpSource } from "./mcp-source.js";
 import { memoryDefOf, validMemoryDef, type McpServerDef } from "./mcp-server-def.js";
-import type { MemoryFile, MemorySetting } from "./memory-settings.js";
+import type { MemoryFile, MemoryFileData, MemorySetting } from "./memory-settings.js";
 import type { Logger } from "./log.js";
 import type { RcStatus, RemoteControlSupervisor } from "./remote-control.js";
 import type { EventHub } from "./events.js";
@@ -267,7 +267,8 @@ export function createSessionManager(opts: {
    * - 設定の memory の旧形式 `{ url, token?, agentId? }` は普通の MCP の設定の形 `{ type: "http", url, headers }` に書き換える。
    * - memory-settings.json（0.1.56 までの CLI が書いた物）は、設定に memory が無い範囲へ移し（設定にある物が勝つ）、保存できたら .migrated に退ける。
    *   config の projects 由来の session（sessions.json に記録が無い）の値は center 共通の設定の `projectMemory` へ移す。
-   *   どちらでもない session の値は移さず、file を退けずに残す（値を失わない。名前を log に出し、この起動の間は file の値も使う）。
+   *   どちらでもない session の値は移さず、file にはその session の分だけを残す（値を失わない。移せた分は file から除くので、
+   *   画面などで消した値が次の起動で戻らない）。名前を log に出し、その session にだけ file の値を使う。全部移せたら .migrated に退ける。
    * 保存できなければ file を残し、この起動の間は file の値も使う（次の起動で移し直す）。rawCommon（書き換えた後）と、session の設定を変えたかを返す。
    */
   const migrateLegacyMemory = async (rawCommon: unknown, list: SavedSession[]): Promise<{ raw: unknown; changed: boolean }> => {
@@ -333,18 +334,33 @@ export function createSessionManager(opts: {
       }
     }
     if (fromFile && f) {
-      if (ok && orphans.length === 0) {
+      /** 移す先の無い session の分（file に残す・その session にだけ使う）。 */
+      const rest: MemoryFileData = { sessions: Object.fromEntries(orphans.map((n) => [n, fromFile.sessions[n]])) };
+      /** 移せた分を file から除く（残りだけを書く）。書けなければ false。 */
+      const shrink = (): boolean => {
+        try {
+          f.write(rest);
+          return true;
+        } catch (e) {
+          log(`移行失敗: memory-settings.json から移せた分を除けない（次の起動で設定に無い範囲へまた移す）: ${(e as Error).message}`);
+          return false;
+        }
+      };
+      if (!ok) {
+        // 設定へ保存できなかった: file はそのまま残し、この起動の間は file の値も使う（設定の値が優先。次の起動で移し直す）
+        memoryFallback = fromFile;
+      } else if (orphans.length === 0) {
         try {
           f.retire();
           log(`memory-settings.json の外部記憶の設定を普通の設定（memory）へ移した（共通 ${fromFile.common ? 1 : 0} 件、session ${Object.keys(fromFile.sessions).length} 件。値は出さない。file は .migrated に退けた）`);
         } catch (e) {
-          log(`移行失敗: memory-settings.json を退けられない（次の起動でも移すが、設定にある物が勝つので重複しない）: ${(e as Error).message}`);
-          memoryFallback = fromFile;
+          log(`移行失敗: memory-settings.json を退けられない: ${(e as Error).message}`);
+          shrink();
         }
       } else {
-        // file を残し、この起動の間は file の値も使う（設定の値が優先）。移す先の無い session の値も失わない
-        if (orphans.length) log(`移行失敗: 外部記憶の設定の移す先が無い session（session_create で作った物にも config の projects にも無い）。memory-settings.json は退けずに残す: ${orphans.join(",")}`);
-        memoryFallback = fromFile;
+        log(`移行失敗: 外部記憶の設定の移す先が無い session（session_create で作った物にも config の projects にも無い）。memory-settings.json にはその分だけを残す: ${orphans.join(",")}`);
+        shrink();
+        memoryFallback = rest;
       }
     } else if (commonChanged || sessionsChanged) log("外部記憶の設定の旧形式（url・token・agentId）を普通の MCP の設定の形へ書き換えた（値は出さない）");
     return { raw, changed: sessionsChanged && ok };

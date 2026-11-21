@@ -807,6 +807,7 @@ test("memory 移行: config の projects 由来の session の値は center 共�
   assert.deepEqual(mgr.memoryOf("cfg"), cfgMem, "共通ではなく自分の値を使う");
   assert.deepEqual(mgr.memoryOf("gone"), { type: "http", url: "http://gone/mcp", headers: { "X-Agent-Id": "g1" } }, "移す先の無い session の値も失わない");
   assert.ok(existsSync(memoryFile.path) && !existsSync(`${memoryFile.path}.migrated`), "移せない物があれば file を退けない");
+  assert.deepEqual(JSON.parse(await readFile(memoryFile.path, "utf8")), { sessions: { gone: { url: "http://gone/mcp", agentId: "g1" } } }, "file には移せなかった分だけを残す");
   assert.ok(logs.some((l) => /移す先が無い/.test(l) && /gone/.test(l)), "名前を log に出す");
   for (const l of logs) assert.ok(!/SECRET|old-cfg/.test(l), l);
   // 設定の画面（起動元）からの共通の更新は projectMemory を書けず、読みからも消さない
@@ -818,6 +819,45 @@ test("memory 移行: config の projects 由来の session の値は center 共�
   await mgr2.restore();
   assert.deepEqual((await readJson("center-settings.json")).projectMemory, { cfg: cfgMem });
   assert.deepEqual(mgr2.memoryOf("gone"), mgr.memoryOf("gone"));
+});
+
+test("memory 移行: 移す先の無い session があっても、移せた分（共通・session・config の projects）を画面から消せば、その起動でも次の起動でも戻らない", async () => {
+  await mkdir(join(dir, "pa"), { recursive: true });
+  await writeFile(join(dir, "sessions.json"), JSON.stringify([{ name: "a", path: join(dir, "pa"), permissionMode: "auto", createdAt: "2026-01-01T00:00:00Z" }]));
+  const memoryFile = createMemoryFile(dir);
+  memoryFile.write({ common: { url: "http://old-common/mcp", token: "C" }, sessions: { a: { url: "http://old-a/mcp" }, cfg: { url: "http://old-cfg/mcp" }, gone: { url: "http://gone/mcp" } } });
+  const { mgr } = setup({ memoryFile, log: () => {} });
+  await mgr.restore();
+  assert.equal(mgr.memoryOf("a")?.url, "http://old-a/mcp");
+  // 画面（起動元）から共通と session の外部記憶を消す
+  await mgr.updateCenterSettings({ memory: null });
+  await mgr.updateSettings("a", { memory: null });
+  assert.equal(mgr.memoryOf("a"), undefined, "その起動の間も古い値を返さない");
+  assert.equal(mgr.memoryOf("zz"), undefined, "共通も戻らない");
+  assert.equal(mgr.memoryOf("cfg")?.url, "http://old-cfg/mcp");
+  assert.equal(mgr.memoryOf("gone")?.url, "http://gone/mcp");
+  // 次の起動
+  const { mgr: mgr2 } = setup({ memoryFile: createMemoryFile(dir), log: () => {} });
+  await mgr2.restore();
+  assert.equal(mgr2.memoryOf("a"), undefined, "次の起動で file から移し直さない");
+  assert.equal(mgr2.memoryOf("zz"), undefined);
+  assert.equal((await readJson("center-settings.json")).memory, undefined);
+  assert.equal((await readJson("sessions.json"))[0].settings?.memory, undefined);
+  assert.equal(mgr2.memoryOf("gone")?.url, "http://gone/mcp", "移せなかった分は残る");
+});
+
+test("memory 移行: 全部移せる時、config の projects 由来の session は projectMemory の自分の値を使う（共通の値ではない）。file は .migrated", async () => {
+  const memoryFile = createMemoryFile(dir);
+  memoryFile.write({ common: { url: "http://old-common/mcp" }, sessions: { cfg: { url: "http://old-cfg/mcp", token: "CFG" } } });
+  const { mgr } = setup({ memoryFile, log: () => {} });
+  await mgr.restore();
+  assert.ok(!existsSync(memoryFile.path) && existsSync(`${memoryFile.path}.migrated`));
+  assert.deepEqual(mgr.memoryOf("cfg"), { type: "http", url: "http://old-cfg/mcp", headers: { Authorization: "Bearer CFG" } });
+  assert.deepEqual(mgr.memoryOf("other"), { type: "http", url: "http://old-common/mcp" });
+  // 次の起動（file は退けた。設定 file の projectMemory だけから）
+  const { mgr: mgr2 } = setup({ memoryFile: createMemoryFile(dir), log: () => {} });
+  await mgr2.restore();
+  assert.deepEqual(mgr2.memoryOf("cfg"), mgr.memoryOf("cfg"));
 });
 
 test("memory 移行の失敗: 設定へ保存できなければ memory-settings.json を残し、この起動は file の値も使う。失敗を log に残し、値は出さない。書ける次の起動で移る", async () => {
