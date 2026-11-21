@@ -151,11 +151,13 @@ export function createSleepGate(opts: {
         if (cur && !cur.waking) {
           slots.delete(name);
           // 他の経路（desktop で開く・wake）で起きる時、身代わりが預かっていた message があれば起きた claude へ渡す
-          const kept = cur.pending.splice(0);
-          const markP = kept.length > 0 && opts.peerMark ? opts.peerMark(name) : Promise.resolve(null);
+          // 身代わりは止まる前に mailbox の残りを出し切る。release が済むまでに届く分も pending に入るよう、waking にして待つ
+          cur.waking = true;
+          const markP = opts.peerMark ? opts.peerMark(name) : Promise.resolve(null);
           void (async () => {
             const mark = (await markP) ?? undefined;
             await release(cur);
+            const kept = cur.pending.splice(0);
             if (kept.length > 0) await deliverAll(cur, kept, mark);
           })();
         }
