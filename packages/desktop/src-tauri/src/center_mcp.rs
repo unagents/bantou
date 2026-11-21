@@ -108,6 +108,16 @@ pub(crate) fn set_launcher_url(url: Option<String>) {
     *LAUNCHER_URL.lock().unwrap() = url;
 }
 
+/// Serialises the tests that set the process-wide launcher URL.
+#[cfg(test)]
+pub(crate) static LAUNCHER_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Whether `url` is the recorded sidecar URL (tests).
+#[cfg(test)]
+pub(crate) fn launcher_url_is(url: &str) -> bool {
+    LAUNCHER_URL.lock().unwrap().as_deref() == Some(url)
+}
+
 /// The launcher key when `url` is our running sidecar, else None.
 fn launcher_for(url: &str) -> Option<&'static str> {
     (LAUNCHER_URL.lock().unwrap().as_deref() == Some(url)).then(launcher_key)
@@ -893,6 +903,7 @@ mod tests {
 
     #[tokio::test]
     async fn only_the_own_sidecar_gets_the_launcher_key() {
+        let _g = LAUNCHER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let own = Mock::start();
         let other = Mock::start();
         set_launcher_url(Some(own.url.clone()));

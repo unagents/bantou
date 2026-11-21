@@ -25,7 +25,7 @@ import { createContextUsageTracker } from "./context-usage.js";
 import { createLoginFlow } from "./login.js";
 import { createSessionManager } from "./sessions.js";
 import { createMemoryFile } from "./memory-settings.js";
-import { LAUNCHER_KEY_ENV } from "./launcher.js";
+import { takeLauncherKey } from "./launcher.js";
 import { backupFileOnce, createJsonListStore, createJsonObjectStore } from "./store.js";
 import { applicableParts, buildSystemInstructions, partLabel } from "./system-instructions.js";
 import { createCenterServer, createCoordinatorMcpServer, createSessionMcpServer } from "./server.js";
@@ -45,6 +45,9 @@ const HARD_EXIT_MARGIN_MS = 5_000;
  * stdio では stdin EOF / 切断でも終了する。http では stdin を見ず（親が /dev/null を渡しても落ちない）、親プロセスの死亡で終了する。
  */
 export async function runDaemon(args: CliArgs): Promise<void> {
+  // center を起動した所の鍵（desktop が sidecar に渡す。launcher.ts）。最初に読んで自分の env から消す
+  // （login shell・claude の解決・session など、この後に起動するどの子 process にも渡さない。remote-control.ts でも消す）
+  const launcherKey = takeLauncherKey();
   const configPath = args.config;
   log("起動");
   const config = await loadConfig(configPath, log);
@@ -246,9 +249,6 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   // 割り当ての判定は呼び出しの度に今の設定（center 共通 + session の mcpServers）から行う
   const assigned = (session: string): boolean => isAssigned(sessions.mcpConnections().data, session, "coordinator");
   const makeServer = (launcher: boolean) => createCenterServer({ config, supervisor, link, sessions, remotes, follow, login, log, launcher });
-  // center を起動した所の鍵（desktop が sidecar に渡す。launcher.ts）。読んだら自分の env からも消す（子へ渡さないため。remote-control.ts でも消す）
-  const launcherKey = process.env[LAUNCHER_KEY_ENV];
-  delete process.env[LAUNCHER_KEY_ENV];
   if (args.transport === "http") {
     if (!config.token || config.token.length < MIN_TOKEN_LEN) {
       throw new Error(`http transport には config の token（${MIN_TOKEN_LEN} 文字以上）が必要: ${configPath}`);

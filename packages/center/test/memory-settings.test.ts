@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { writeFileSync } from "node:fs";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -97,6 +98,57 @@ test("set --json-stdin / --json-file: 普通の MCP の設定の 1 件（stdio�
   // --token-file
   assert.equal(run(["set", "--url", "http://m/mcp", "--token-file", "/t"], "", { "/t": "FILE-SECRET\n" }).code, 0);
   assert.deepEqual((await readJson(centerFile())).memory, { type: "http", url: "http://m/mcp", headers: { Authorization: "Bearer FILE-SECRET" } });
+});
+
+test("set --url: token の指定が無ければ今の Authorization を残す。--clear-token で消す。token の指定と --clear-token は一緒に使えない", async () => {
+  assert.equal(run(["set", "--url", "http://m/mcp", "--agent-id", "a1", "--token-stdin"], "KEEP-ME\n").code, 0);
+  assert.equal(run(["set", "--url", "http://m2/mcp"]).code, 0);
+  assert.deepEqual((await readJson(centerFile())).memory, { type: "http", url: "http://m2/mcp", headers: { Authorization: "Bearer KEEP-ME" } });
+  assert.equal(run(["set", "--url", "http://m3/mcp", "--clear-token"]).code, 0);
+  assert.deepEqual((await readJson(centerFile())).memory, { type: "http", url: "http://m3/mcp" });
+  const r = run(["set", "--url", "http://m3/mcp", "--clear-token", "--token-stdin"], "X");
+  assert.equal(r.code, 2);
+});
+
+test("--session: config の projects 由来の session（sessions.json に記録が無い）は center-settings.json の projectMemory に書く。どちらにも無い session は断る", async () => {
+  await writeFile(config, JSON.stringify({ projects: [{ name: "cfg", path: join(dir, "cfgp") }] }));
+  await writeFile(centerFile(), JSON.stringify({ instructions: "ic", memory: { type: "http", url: "http://common/mcp" } }));
+  assert.equal(run(["set", "--session", "cfg", "--url", "http://cfg/mcp", "--token-stdin"], "CFG-T").code, 0);
+  const c = await readJson(centerFile());
+  assert.deepEqual(c, { instructions: "ic", memory: { type: "http", url: "http://common/mcp" }, projectMemory: { cfg: { type: "http", url: "http://cfg/mcp", headers: { Authorization: "Bearer CFG-T" } } } });
+  const g = run(["get", "--session", "cfg"]);
+  assert.equal(g.code, 0);
+  assert.match(g.out, /http:\/\/cfg\/mcp/);
+  assert.match(g.out, /有効な設定: session の設定/);
+  assert.equal(run(["unset", "--session", "cfg"]).code, 0);
+  assert.deepEqual(await readJson(centerFile()), { instructions: "ic", memory: { type: "http", url: "http://common/mcp" } });
+  const r = run(["set", "--session", "nobody", "--url", "http://x/mcp"]);
+  assert.equal(r.code, 1);
+  assert.match(r.err, /config の projects にも無い/);
+});
+
+test("書く直前に file を読み直し、該当の項目だけを変える（読んだ後に他から書かれた記録・項目を巻き戻さない）", async () => {
+  await seedSessions(["a"]);
+  await writeFile(centerFile(), JSON.stringify({ instructions: "before" }));
+  // 標準入力を読む時（= 書く前）に、center が別の記録と項目を保存した
+  const r = runMemoryCli(["set", "--config", config, "--session", "a", "--url", "http://a/mcp", "--token-stdin"], "/nonexistent/default.json", {
+    readStdin: () => {
+      writeFileSync(sessionsFile(), JSON.stringify([
+        { name: "a", path: join(dir, "a"), permissionMode: "auto", settings: { instructions: "changed-by-center" }, createdAt: "2026-01-01T00:00:00Z" },
+        { name: "b", path: join(dir, "b"), permissionMode: "auto", createdAt: "2026-01-01T00:00:00Z" },
+      ]));
+      writeFileSync(centerFile(), JSON.stringify({ instructions: "after" }));
+      return "T-A";
+    },
+    readFile: () => "",
+    out: () => {},
+    err: () => {},
+  });
+  assert.equal(r, 0);
+  const list = await readJson(sessionsFile());
+  assert.deepEqual(list.map((x: { name: string }) => x.name), ["a", "b"], "読んだ後に足された記録が残る");
+  assert.deepEqual(list[0].settings, { instructions: "changed-by-center", memory: { type: "http", url: "http://a/mcp", headers: { Authorization: "Bearer T-A" } } });
+  assert.deepEqual(await readJson(centerFile()), { instructions: "after" }, "session の設定だけを書く時は共通の file に触れない");
 });
 
 test("不正な入力は exit 2 で、token の値を出さず、何も書かない", async () => {

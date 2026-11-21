@@ -389,6 +389,9 @@ impl Inner {
         if self.generation != generation {
             return TermOutcome::Ignored;
         }
+        // Our sidecar is gone: another process may listen on the same port now, so the launcher key goes nowhere
+        // until we start it again (start_locked records the URL again).
+        crate::center_mcp::set_launcher_url(None);
         self.child = None;
         self.started_with = None;
         self.pid = None;
@@ -1125,6 +1128,20 @@ mod tests {
         assert_eq!(i.state, RunState::Running);
         assert_eq!(i.pid, Some(1));
         assert_eq!(i.sup.failure_count(), 0);
+    }
+
+    #[test]
+    fn the_launcher_key_stops_when_the_current_sidecar_exits() {
+        let _g = crate::center_mcp::LAUNCHER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let url = crate::center_mcp::sidecar_url(7990);
+        crate::center_mcp::set_launcher_url(Some(url.clone()));
+        let mut i = running_inner(2);
+        // an old generation ending does not touch the running sidecar's URL
+        i.on_terminated(1, Some(1), None, Instant::now());
+        assert!(crate::center_mcp::launcher_url_is(&url));
+        // the running one ending (crash) clears it
+        i.on_terminated(2, Some(1), None, Instant::now());
+        assert!(!crate::center_mcp::launcher_url_is(&url));
     }
 
     #[test]

@@ -16,6 +16,8 @@ export interface McpSource {
   sessions: Map<string, unknown>;
   /** center 共通の設定の memory（無ければ undefined）。 */
   memory: unknown;
+  /** center 共通の設定の projectMemory（config の projects 由来の session 名 → 外部記憶。無ければ undefined）。 */
+  projectMemory: unknown;
   /** session 名 → その session の設定の memory。 */
   sessionMemory: Map<string, unknown>;
 }
@@ -50,13 +52,13 @@ function readCached<T>(path: string, parse: (raw: unknown) => T, empty: T, log: 
 
 /** center-settings.json と sessions.json から mcpServers と memory を読む関数を作る。どちらかが読めなければ undefined。 */
 export function createMcpSource(centerSettingsPath: string, sessionsPath: string, log: (m: string) => void = () => {}): () => McpSource | undefined {
-  const common = readCached<{ mcpServers: unknown; memory: unknown }>(
+  const common = readCached<{ mcpServers: unknown; memory: unknown; projectMemory: unknown }>(
     centerSettingsPath,
     (raw) => {
       if (!isRec(raw)) throw new Error("not object");
-      return { mcpServers: raw.mcpServers, memory: raw.memory };
+      return { mcpServers: raw.mcpServers, memory: raw.memory, projectMemory: raw.projectMemory };
     },
-    { mcpServers: undefined, memory: undefined },
+    { mcpServers: undefined, memory: undefined, projectMemory: undefined },
     log,
   );
   const sessions = readCached<{ mcp: Map<string, unknown>; memory: Map<string, unknown> }>(
@@ -78,6 +80,6 @@ export function createMcpSource(centerSettingsPath: string, sessionsPath: string
   return () => {
     const c = common();
     const s = sessions();
-    return c.ok && s.ok ? { common: c.value.mcpServers, sessions: s.value.mcp, memory: c.value.memory, sessionMemory: s.value.memory } : undefined;
+    return c.ok && s.ok ? { common: c.value.mcpServers, sessions: s.value.mcp, memory: c.value.memory, projectMemory: c.value.projectMemory, sessionMemory: s.value.memory } : undefined;
   };
 }

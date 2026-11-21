@@ -26,3 +26,10 @@ export function launcherMatches(header: string | string[] | undefined, key: stri
 }
 
 const h0 = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
+
+/** 鍵を env から取り出して消す（center の起動の最初に呼ぶ。以後に起動する子 process へ渡さない）。無ければ undefined。 */
+export function takeLauncherKey(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const key = env[LAUNCHER_KEY_ENV];
+  delete env[LAUNCHER_KEY_ENV];
+  return key === undefined || key === "" ? undefined : key;
+}

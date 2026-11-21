@@ -164,8 +164,10 @@ export function createSessionManager(opts: {
     return run;
   };
 
-  /** memory-settings.json を設定へ移せなかった起動の間だけ使う旧い値（file は残し、次の起動で移し直す）。設定の値が優先。 */
-  let memoryFallback: ((name: string) => MemorySetting | undefined) | undefined;
+  /** memory-settings.json を退けなかった（移し切れなかった）起動の間だけ使う旧い値（file は残し、次の起動で移し直す）。設定の値が優先。 */
+  let memoryFallback: { common?: MemorySetting; sessions: Record<string, MemorySetting> } | undefined;
+  /** config の projects 由来の session の名前（sessions.json に記録が無い。外部記憶は center 共通の設定の projectMemory に持つ）。 */
+  const configProjects = new Set(config.projects.map((p) => p.name));
   /** 割り当てへ移せなかった旧設定の coordinator（元の値のまま）。次の起動で移し直せるよう、保存のたびに書き戻す。 */
   let pendingCoordinator: unknown;
   const withLegacyCommon = (s: ProjectSettings): ProjectSettings => (pendingCoordinator !== undefined ? { ...s, coordinator: pendingCoordinator } : s);
@@ -196,6 +198,7 @@ export function createSessionManager(opts: {
     }
     put(common, "mcpServers", src.common);
     put(common, "memory", src.memory);
+    put(common, "projectMemory", src.projectMemory);
   };
 
   /** 記録を保存する。adopt = 先に設定 file の mcpServers / memory を写す（更新の保存では、更新の前に写してから false で呼ぶ）。 */
@@ -263,7 +266,8 @@ export function createSessionManager(opts: {
    * 旧設定の外部記憶を普通の設定（center 共通の設定 / session の設定の memory）へ移す。冪等。値は log に出さない。
    * - 設定の memory の旧形式 `{ url, token?, agentId? }` は普通の MCP の設定の形 `{ type: "http", url, headers }` に書き換える。
    * - memory-settings.json（0.1.56 までの CLI が書いた物）は、設定に memory が無い範囲へ移し（設定にある物が勝つ）、保存できたら .migrated に退ける。
-   *   session_create で作った物の中に無い session の値は移さずに log に名前を出す（退けた file に残る）。
+   *   config の projects 由来の session（sessions.json に記録が無い）の値は center 共通の設定の `projectMemory` へ移す。
+   *   どちらでもない session の値は移さず、file を退けずに残す（値を失わない。名前を log に出し、この起動の間は file の値も使う）。
    * 保存できなければ file を残し、この起動の間は file の値も使う（次の起動で移し直す）。rawCommon（書き換えた後）と、session の設定を変えたかを返す。
    */
   const migrateLegacyMemory = async (rawCommon: unknown, list: SavedSession[]): Promise<{ raw: unknown; changed: boolean }> => {
@@ -293,7 +297,17 @@ export function createSessionManager(opts: {
       for (const [name, m] of Object.entries(fromFile.sessions)) {
         const rec = list.find((r) => r.name === name);
         if (!rec) {
-          orphans.push(name);
+          if (!configProjects.has(name)) {
+            orphans.push(name);
+            continue;
+          }
+          // config の projects 由来: 共通の設定の projectMemory へ（そこにあれば設定が勝つ）
+          const base: Record<string, unknown> = isRec(raw) ? raw : {};
+          const pm: Record<string, unknown> = isRec(base.projectMemory) ? { ...base.projectMemory } : {};
+          if (Object.hasOwn(pm, name)) continue;
+          pm[name] = memoryDefOf(m);
+          raw = { ...base, projectMemory: pm };
+          commonChanged = true;
           continue;
         }
         if (isRec(rec.settings) && rec.settings.memory !== undefined) continue;
@@ -319,17 +333,18 @@ export function createSessionManager(opts: {
       }
     }
     if (fromFile && f) {
-      if (ok) {
+      if (ok && orphans.length === 0) {
         try {
           f.retire();
-          log(`memory-settings.json の外部記憶の設定を普通の設定（memory）へ移した（共通 ${fromFile.common ? 1 : 0} 件、session ${Object.keys(fromFile.sessions).length - orphans.length} 件。値は出さない。file は .migrated に退けた）`);
-          if (orphans.length) log(`移行しなかった外部記憶の設定（session_create で作った物の中に無い session。退けた file に残る）: ${orphans.join(",")}`);
+          log(`memory-settings.json の外部記憶の設定を普通の設定（memory）へ移した（共通 ${fromFile.common ? 1 : 0} 件、session ${Object.keys(fromFile.sessions).length} 件。値は出さない。file は .migrated に退けた）`);
         } catch (e) {
           log(`移行失敗: memory-settings.json を退けられない（次の起動でも移すが、設定にある物が勝つので重複しない）: ${(e as Error).message}`);
+          memoryFallback = fromFile;
         }
       } else {
-        // file を残し、この起動の間は file の値も使う（設定の値が優先）
-        memoryFallback = (name) => fromFile.sessions[name] ?? fromFile.common;
+        // file を残し、この起動の間は file の値も使う（設定の値が優先）。移す先の無い session の値も失わない
+        if (orphans.length) log(`移行失敗: 外部記憶の設定の移す先が無い session（session_create で作った物にも config の projects にも無い）。memory-settings.json は退けずに残す: ${orphans.join(",")}`);
+        memoryFallback = fromFile;
       }
     } else if (commonChanged || sessionsChanged) log("外部記憶の設定の旧形式（url・token・agentId）を普通の MCP の設定の形へ書き換えた（値は出さない）");
     return { raw, changed: sessionsChanged && ok };
@@ -566,10 +581,15 @@ export function createSessionManager(opts: {
     serversOf: (name) => composeServers(saved.get(name)?.settings),
 
     memoryOf: (name) => {
-      // 設定 file の今の値（session の値、無ければ共通の値）。file を読めなければメモリ上の値
+      // 設定 file の今の値（file を読めなければメモリ上の値）。順に session の値（sessions.json の記録の settings.memory、
+      // 記録の無い config の projects 由来の session は共通の設定の projectMemory）、移し切れていない旧 file の session の値、共通の値
       const src = opts.mcpSource?.();
-      const raw = src ? (src.sessionMemory.has(name) ? src.sessionMemory.get(name) : src.memory) : (saved.get(name)?.settings?.memory ?? common.memory);
-      return validMemoryDef(raw ?? memoryFallback?.(name));
+      const isRec = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+      const own = src ? src.sessionMemory.get(name) : saved.get(name)?.settings?.memory;
+      const pm = src ? src.projectMemory : common.projectMemory;
+      const proj = !saved.has(name) && isRec(pm) && Object.hasOwn(pm, name) ? pm[name] : undefined;
+      const com = src ? src.memory : common.memory;
+      return validMemoryDef(own ?? proj ?? memoryFallback?.sessions[name] ?? com ?? memoryFallback?.common);
     },
 
     mcpConnections: () => {

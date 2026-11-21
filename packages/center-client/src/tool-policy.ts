@@ -40,7 +40,7 @@ export const MEMORY_REFUSAL = CENTER_ONLY_REFUSAL;
  * started the center (the desktop running it as its sidecar; the center tells it by the launcher key, see the center's
  * `launcher.ts`); the web backend is never that place. The rest are old internal keys nobody writes through the tools.
  */
-export const CENTER_ONLY_KEYS: readonly string[] = ["memory", "mcpServers", "mcp", "mcpConnections", "mcpSecrets", "coordinator"];
+export const CENTER_ONLY_KEYS: readonly string[] = ["memory", "mcpServers", "projectMemory", "mcp", "mcpConnections", "mcpSecrets", "coordinator"];
 
 /** True when `settings` has a center-only key (null value included). */
 export const hasCenterOnlyKey = (settings: object): boolean => CENTER_ONLY_KEYS.some((k) => Object.prototype.hasOwnProperty.call(settings, k));

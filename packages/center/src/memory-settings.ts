@@ -121,11 +121,12 @@ export function createMemoryFile(stateDir: string, log: (m: string) => void = ()
 export const MEMORY_USAGE = `usage:
   bantou-center memory get   [--config <path>] [--session <name>]
   bantou-center memory set   [--config <path>] [--session <name>] (--json-stdin | --json-file <path>)
-  bantou-center memory set   [--config <path>] [--session <name>] --url <url> [--agent-id <id>] [--token-stdin | --token-file <path>]
+  bantou-center memory set   [--config <path>] [--session <name>] --url <url> [--agent-id <id>] [--token-stdin | --token-file <path> | --clear-token]
   bantou-center memory unset [--config <path>] [--session <name>]
 --session を省略すると全 session 共通の設定。--json-* は普通の MCP の設定の 1 件（例 {"type":"http","url":"…","headers":{"Authorization":"Bearer …"}}）。
 --url の形は { type: "http", url, headers: { Authorization: "Bearer <token>", X-Agent-Id: <id> } } を書く。token は引数に書けない（--token-stdin は標準入力、--token-file は file の中身。末尾の改行は除く）。
-書き先は center の状態 dir の center-settings.json（共通）/ sessions.json（session の設定）の memory。`;
+--url の set で token の指定が無ければ今の Authorization を残す。--clear-token で消す。
+書き先は center の状態 dir の center-settings.json（共通。config の projects 由来の session は projectMemory）/ sessions.json（session_create で作った session の設定）の memory。`;
 
 export interface MemoryCliDeps {
   /** 標準入力の全文（--token-stdin / --json-stdin の時だけ呼ぶ）。 */
@@ -171,9 +172,10 @@ export function runMemoryCli(argv: string[], defaultConfig: string, deps: Memory
     deps.err(MEMORY_USAGE);
     return 2;
   }
-  const o: { config: string; session?: string; url?: string; agentId?: string; tokenStdin: boolean; tokenFile?: string; jsonStdin: boolean; jsonFile?: string } = {
+  const o: { config: string; session?: string; url?: string; agentId?: string; tokenStdin: boolean; tokenFile?: string; clearToken: boolean; jsonStdin: boolean; jsonFile?: string } = {
     config: defaultConfig,
     tokenStdin: false,
+    clearToken: false,
     jsonStdin: false,
   };
   try {
@@ -189,6 +191,7 @@ export function runMemoryCli(argv: string[], defaultConfig: string, deps: Memory
       else if (k === "--agent-id" && action === "set") o.agentId = val();
       else if (k === "--token-file" && action === "set") o.tokenFile = val();
       else if (k === "--token-stdin" && action === "set") o.tokenStdin = true;
+      else if (k === "--clear-token" && action === "set") o.clearToken = true;
       else if (k === "--json-file" && action === "set") o.jsonFile = val();
       else if (k === "--json-stdin" && action === "set") o.jsonStdin = true;
       else if (k === "--token" || k.startsWith("--token=")) throw new Error("token は引数に書けない（--token-stdin か --token-file を使う）");
@@ -200,7 +203,8 @@ export function runMemoryCli(argv: string[], defaultConfig: string, deps: Memory
     }
     if (o.session !== undefined && !SESSION_NAME.test(o.session)) throw new Error("session は英数字と _ - のみ");
     const json = o.jsonStdin || o.jsonFile !== undefined;
-    if ([o.tokenStdin, o.tokenFile !== undefined, o.jsonStdin, o.jsonFile !== undefined].filter(Boolean).length > 1) throw new Error("--token-stdin / --token-file / --json-stdin / --json-file は 1 つだけ");
+    if ([o.tokenStdin, o.tokenFile !== undefined, o.clearToken, o.jsonStdin, o.jsonFile !== undefined].filter(Boolean).length > 1)
+      throw new Error("--token-stdin / --token-file / --clear-token / --json-stdin / --json-file は 1 つだけ");
     if (action === "set" && json && (o.url !== undefined || o.agentId !== undefined)) throw new Error("--json-* と --url / --agent-id は一緒に使えない");
     if (action === "set" && !json && o.url === undefined) throw new Error("set には --json-stdin / --json-file か --url が要る");
   } catch (e) {
@@ -212,26 +216,49 @@ export function runMemoryCli(argv: string[], defaultConfig: string, deps: Memory
   const stateDir = dirname(resolve(o.config));
   const commonPath = join(stateDir, "center-settings.json");
   const sessionsPath = join(stateDir, "sessions.json");
+  const settingsOf = (r: unknown): Record<string, unknown> => (isRec(r) && isRec(r.settings) ? r.settings : {});
   try {
-    const common = readJson(commonPath);
-    const sessions = readJson(sessionsPath);
-    const list: unknown[] = Array.isArray(sessions) ? sessions : [];
-    const rec = o.session === undefined ? undefined : list.find((r) => isRec(r) && r.name === o.session);
-    if (o.session !== undefined && !isRec(rec)) {
-      deps.err(`session ${o.session} は session_create で作った物の中に無い（sessions.json）`);
+    /**
+     * session の置き場: session_create で作った session は sessions.json の記録の settings.memory、config の projects 由来の session
+     * （記録が無い）は center-settings.json の projectMemory。どちらでもなければ undefined。
+     */
+    const placeOf = (name: string): "session" | "project" | undefined => {
+      const list = readJson(sessionsPath);
+      if (Array.isArray(list) && list.some((r) => isRec(r) && r.name === name)) return "session";
+      return configProjectNames(o.config).includes(name) ? "project" : undefined;
+    };
+    const place = o.session === undefined ? "common" : placeOf(o.session);
+    if (place === undefined) {
+      deps.err(`session ${o.session} は session_create で作った物（sessions.json）にも config の projects にも無い`);
       return 1;
     }
-    const settingsOf = (r: unknown): Record<string, unknown> => (isRec(r) && isRec(r.settings) ? r.settings : {});
-    const current = (): unknown => (o.session === undefined ? (isRec(common) ? common.memory : undefined) : settingsOf(rec).memory);
+    /** 今の値（書く直前にも読み直す）。 */
+    const currentOf = (): unknown => {
+      if (place === "common") {
+        const c = readJson(commonPath);
+        return isRec(c) ? c.memory : undefined;
+      }
+      if (place === "project") {
+        const c = readJson(commonPath);
+        return isRec(c) && isRec(c.projectMemory) && Object.hasOwn(c.projectMemory, o.session as string) ? c.projectMemory[o.session as string] : undefined;
+      }
+      const list = readJson(sessionsPath);
+      return settingsOf(Array.isArray(list) ? list.find((r) => isRec(r) && r.name === o.session) : undefined).memory;
+    };
     if (action === "get") {
       const show = (label: string, m: unknown): void => deps.out(`${label}: ${m === undefined ? "未設定" : JSON.stringify(memoryDefOf(m))}`);
+      const c = readJson(commonPath);
+      const common = isRec(c) ? c.memory : undefined;
       if (o.session !== undefined) {
-        show(`session ${o.session}`, current());
-        deps.out(`有効な設定: ${settingsOf(rec).memory !== undefined ? "session の設定" : isRec(common) && common.memory !== undefined ? "全 session 共通" : "なし"}`);
+        const own = currentOf();
+        show(`session ${o.session}`, own);
+        deps.out(`有効な設定: ${own !== undefined ? "session の設定" : common !== undefined ? "全 session 共通" : "なし"}`);
         return 0;
       }
-      show("共通", isRec(common) ? common.memory : undefined);
-      for (const r of list) if (isRec(r) && typeof r.name === "string" && settingsOf(r).memory !== undefined) show(`session ${r.name}`, settingsOf(r).memory);
+      show("共通", common);
+      const list = readJson(sessionsPath);
+      for (const r of Array.isArray(list) ? list : []) if (isRec(r) && typeof r.name === "string" && settingsOf(r).memory !== undefined) show(`session ${r.name}`, settingsOf(r).memory);
+      if (isRec(c) && isRec(c.projectMemory)) for (const [n, m] of Object.entries(c.projectMemory)) show(`session ${n}（config の projects）`, m);
       return 0;
     }
     let next: McpServerDef | undefined;
@@ -260,23 +287,49 @@ export function runMemoryCli(argv: string[], defaultConfig: string, deps: Memory
           deps.err(`設定が不正: ${[...new Set(parsed.error.issues.map((i) => `${i.path.join(".") || "(全体)"}: ${i.code === "custom" ? i.message : "形式が不正"}`))].join(" / ")}`);
           return 2;
         }
-        next = memoryDefOf(parsed.data);
+        next = memoryDefOf(parsed.data) as McpServerDef;
+        // token の指定が無ければ今の Authorization を残す（--clear-token で消す）
+        if (token === undefined && !o.clearToken) {
+          const cur = memoryDefOf(currentOf());
+          const auth = cur && isRec(cur.headers) ? Object.entries(cur.headers).find(([k, v]) => k.toLowerCase() === "authorization" && typeof v === "string") : undefined;
+          if (auth) next = { ...next, headers: { ...(isRec(next.headers) ? next.headers : {}), [auth[0]]: auth[1] } };
+        }
       }
     }
-    const had = current() !== undefined;
-    if (o.session === undefined) {
-      const c: Record<string, unknown> = isRec(common) ? { ...common } : {};
-      if (next === undefined) delete c.memory;
-      else c.memory = next;
-      writeJson(commonPath, c);
-    } else {
-      const r = rec as Record<string, unknown>;
+    // 書く直前に file を読み直し、該当の項目だけを変えて書く（一時 file → rename）。center の保存と重なっても他の記録を巻き戻さない
+    let had = false;
+    if (place === "session") {
+      const list = readJson(sessionsPath);
+      const arr: unknown[] = Array.isArray(list) ? list : [];
+      const r = arr.find((x) => isRec(x) && x.name === o.session);
+      if (!isRec(r)) {
+        deps.err(`session ${o.session} が sessions.json から消えた（何も書いていない）`);
+        return 1;
+      }
       const st: Record<string, unknown> = { ...settingsOf(r) };
+      had = st.memory !== undefined;
       if (next === undefined) delete st.memory;
       else st.memory = next;
       if (Object.keys(st).length) r.settings = st;
       else delete r.settings;
-      writeJson(sessionsPath, list);
+      writeJson(sessionsPath, arr);
+    } else {
+      const c = readJson(commonPath);
+      const out: Record<string, unknown> = isRec(c) ? { ...c } : {};
+      if (place === "common") {
+        had = out.memory !== undefined;
+        if (next === undefined) delete out.memory;
+        else out.memory = next;
+      } else {
+        const name = o.session as string;
+        const pm: Record<string, unknown> = isRec(out.projectMemory) ? { ...out.projectMemory } : {};
+        had = Object.hasOwn(pm, name);
+        if (next === undefined) delete pm[name];
+        else pm[name] = next;
+        if (Object.keys(pm).length) out.projectMemory = pm;
+        else delete out.projectMemory;
+      }
+      writeJson(commonPath, out);
     }
     const label = o.session === undefined ? "共通" : `session ${o.session}`;
     deps.out(next === undefined ? `${label}: 外部記憶の設定を消した${had ? "" : "（元から無い）"}` : `${label}: 外部記憶の設定を書いた（次に起動する session から効く）`);
@@ -285,4 +338,16 @@ export function runMemoryCli(argv: string[], defaultConfig: string, deps: Memory
     deps.err(`失敗: ${e instanceof Error ? e.message : String(e)}`);
     return 1;
   }
+}
+
+/** config の projects の名前（読めなければ空）。 */
+function configProjectNames(configPath: string): string[] {
+  let raw: unknown;
+  try {
+    raw = readJson(resolve(configPath));
+  } catch {
+    return [];
+  }
+  if (!isRec(raw) || !Array.isArray(raw.projects)) return [];
+  return raw.projects.flatMap((p) => (isRec(p) && typeof p.name === "string" ? [p.name] : []));
 }

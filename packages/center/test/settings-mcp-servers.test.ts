@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { request } from "node:http";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,7 +16,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { parseConfig, type Config } from "../src/config.js";
 import { createCore } from "../src/core.js";
 import { startHttpServer } from "../src/http.js";
-import { LAUNCHER_HEADER, LAUNCHER_KEY_ENV, launcherMatches } from "../src/launcher.js";
+import { LAUNCHER_HEADER, LAUNCHER_KEY_ENV, launcherMatches, takeLauncherKey } from "../src/launcher.js";
 import { createMcpSource } from "../src/mcp-source.js";
 import { buildSessionMcp, centerBaseOf } from "../src/mcp-session.js";
 import { createMemoryFile } from "../src/memory-settings.js";
@@ -378,4 +379,19 @@ test("起動元の鍵（BANTOU_CENTER_LAUNCHER_KEY）は session の子 process 
     if (prev === undefined) delete process.env[LAUNCHER_KEY_ENV];
     else process.env[LAUNCHER_KEY_ENV] = prev;
   }
+});
+
+test("起動元の鍵: center の起動の最初に env から取り出して消す（login shell・claude の解決などの子 process に渡さない）", () => {
+  const env: NodeJS.ProcessEnv = { [LAUNCHER_KEY_ENV]: "k".repeat(32), OTHER: "x" };
+  assert.equal(takeLauncherKey(env), "k".repeat(32));
+  assert.equal(env[LAUNCHER_KEY_ENV], undefined);
+  assert.equal(env.OTHER, "x");
+  assert.equal(takeLauncherKey(env), undefined);
+  // daemon.ts: 子 process を起こす最初の呼び出し（PATH の解決・claude の解決）より前に取り出している
+  const src = readFileSync(new URL("../src/daemon.ts", import.meta.url), "utf8");
+  const body = src.slice(src.indexOf("export async function runDaemon"));
+  const take = body.indexOf("takeLauncherKey()");
+  assert.ok(take > 0, "runDaemon が takeLauncherKey を呼ぶ");
+  for (const first of ["resolveSessionPath(", "resolveClaude(", "loadConfig("]) assert.ok(take < body.indexOf(first), `${first} より前`);
+  assert.ok(!/process\.env\[LAUNCHER_KEY_ENV\]/.test(src), "後から env を読み直さない");
 });

@@ -150,8 +150,13 @@ export type ProjectSettingsPatch = z.infer<typeof projectSettingsPatchSchema>;
 export const LAUNCHER_KEYS: readonly string[] = ["memory", "mcpServers"];
 /** 旧設定の項目（どこからも MCP では書かない。旧 CLI・移行だけが扱う）。 */
 export const LEGACY_INTERNAL_KEYS: readonly string[] = ["mcp", "mcpConnections", "mcpSecrets", "coordinator"];
+/**
+ * center 共通の設定の `projectMemory`（config の projects 由来の session = sessions.json に記録が無い session の名前 → 外部記憶）。
+ * 書くのは `bantou-center memory --session` と移行と設定 file の直接の編集だけ（MCP の設定の更新では受けない）。起動元以外の読みからは除く。
+ */
+export const FILE_ONLY_KEYS: readonly string[] = ["projectMemory"];
 /** center の側だけで扱う設定の項目名（起動元以外の設定更新からは受けない）。 */
-export const CENTER_ONLY_KEYS: readonly string[] = [...LAUNCHER_KEYS, ...LEGACY_INTERNAL_KEYS];
+export const CENTER_ONLY_KEYS: readonly string[] = [...LAUNCHER_KEYS, ...LEGACY_INTERNAL_KEYS, ...FILE_ONLY_KEYS];
 
 /** center の側だけの項目を起動元以外（別 host の desktop・web・他の呼び出し元）から受けた時のエラー文。項目の値は含めない。 */
 export const CENTER_ONLY_MCP_ERROR =
@@ -159,6 +164,8 @@ export const CENTER_ONLY_MCP_ERROR =
 export const MEMORY_MCP_ERROR = CENTER_ONLY_MCP_ERROR;
 /** 旧設定の項目を受けた時のエラー文。 */
 export const LEGACY_KEYS_ERROR = "mcp・mcpConnections・mcpSecrets・coordinator は旧設定の項目で、設定の更新では書けない（追加の MCP の server は mcpServers に書く）";
+/** projectMemory を設定の更新で受けた時のエラー文。 */
+export const PROJECT_MEMORY_ERROR = "projectMemory（config の projects 由来の session の外部記憶）は設定の更新では書けない。`bantou-center memory set --session <名前>` か center-settings.json の直接の編集で書く";
 
 const hasKey = (o: object, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k);
 
@@ -169,13 +176,14 @@ const hasKey = (o: object, k: string): boolean => Object.prototype.hasOwnPropert
 export function assertCenterOnly(patch: object | undefined, opts: { launcher?: boolean } = {}): void {
   if (patch === undefined || patch === null) return;
   if (LEGACY_INTERNAL_KEYS.some((k) => hasKey(patch, k))) throw new Error(opts.launcher ? LEGACY_KEYS_ERROR : CENTER_ONLY_MCP_ERROR);
+  if (FILE_ONLY_KEYS.some((k) => hasKey(patch, k))) throw new Error(opts.launcher ? PROJECT_MEMORY_ERROR : CENTER_ONLY_MCP_ERROR);
   if (!opts.launcher && LAUNCHER_KEYS.some((k) => hasKey(patch, k))) throw new Error(CENTER_ONLY_MCP_ERROR);
 }
 
 /** 読みの応答から center の側だけの項目を除く（起動元以外へ返す時）。 */
 export function withoutLauncherKeys<T extends object>(settings: T): T {
   const out = { ...settings } as Record<string, unknown>;
-  for (const k of LAUNCHER_KEYS) delete out[k];
+  for (const k of [...LAUNCHER_KEYS, ...FILE_ONLY_KEYS]) delete out[k];
   return out as T;
 }
 
