@@ -24,13 +24,13 @@
 
 | 項目 | 型 | 意味 |
 |---|---|---|
-| `memory` | `{ url: string, token?: string, agentId?: string } \| null` | memory の MCP endpoint。`url` は必須。`token` は `Authorization: Bearer`（master-cap へは環境変数で渡し、argv・ファイルには書かない）。`agentId` 省略時は session 名 |
+| `memory` | MCP の server の設定 1 件（Claude Code の mcp.json の `mcpServers` の値。例 `{ "type": "http", "url": …, "headers": { "Authorization": "Bearer …" } }`）\| null | memory の MCP endpoint。header の値（Bearer など）もそのまま書ける（master-cap へは `--mcp-config` に `${BANTOU_MEMORY_SECRET_n}` の参照を書き、実値は環境変数で渡す）。url の server で `X-Agent-Id` が無ければ session 名を足す。2026-11-21 に旧形式 `{ url, token?, agentId? }` から変更（起動時に移す） |
 
-desktop の設定ダイアログ（共通・歯車・追加）に「外部記憶」の欄（URL / token / agent ID）。
+center を起動した所（desktop の sidecar の設定の画面）の「全 session 共通の設定」と session の歯車のプロジェクト設定に「外部記憶」の欄（JSON。追加の MCP の server の欄とは別）。別 host の center に繋いでいる desktop と web には出ない。
 
 ## 読み込み（master-cap → memory）
 
-- center が session を起動するたび、設定があれば `--mcp-config` の `mcpServers` に `memory`（`type: "http"`, `url`, `headers: { Authorization: "Bearer ${BANTOU_MEMORY_TOKEN}", "X-Agent-Id": <agentId> }`）を足す。token は環境変数 `BANTOU_MEMORY_TOKEN` で渡す（`BANTOU_SESSION_TOKEN` と同じ扱い）。
+- center が session を起動するたび、設定があれば `--mcp-config` の `mcpServers` に `memory`（設定の MCP の server の設定。`headers` / `env` の値は `${BANTOU_MEMORY_SECRET_n}` の参照にして環境変数で渡す。url の server で `X-Agent-Id` が無ければ session 名）を足す。
 - master-cap は `mcp__memory__*`（recall / context / explain など、memory が公開する tool）を直接呼ぶ。center は中継しない。tool が増えても center は無変更。
 - system-instructions に部品 `memory@1` を足す（設定がある時だけ付く）: 起動時と判断の前に context / recall を呼ぶ運用の案内。書き込みは案内しない（下記のとおり bantou 側が自動で渡す）。
 

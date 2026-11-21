@@ -32,11 +32,15 @@ export const allowWebTool = (name: string): boolean => allowed.has(name);
 
 /** Why a call is refused although the tool itself is allowed (shown to the user). Holds no value of the item. */
 export const CENTER_ONLY_REFUSAL =
-  "外部記憶（memory）や MCP の接続の設定は web からは変えられない（url・token・agentId などは center の側だけで扱う）。center を動かしている host の command（`bantou-center memory` など）を使う";
+  "外部記憶（memory）と追加の MCP の server（mcpServers）は、center を起動した所（sidecar の center を動かしている desktop の設定の画面）でだけ変えられる。web からは変えられない";
 export const MEMORY_REFUSAL = CENTER_ONLY_REFUSAL;
 
-/** Setting keys only the center handles (a screen / the web cannot set or delete them; null too). */
-export const CENTER_ONLY_KEYS: readonly string[] = ["memory", "mcp", "mcpServers", "mcpConnections", "mcpSecrets", "coordinator"];
+/**
+ * Setting keys the web does not write (set or delete; null too). `memory` and `mcpServers` are written by the place that
+ * started the center (the desktop running it as its sidecar; the center tells it by the launcher key, see the center's
+ * `launcher.ts`); the web backend is never that place. The rest are old internal keys nobody writes through the tools.
+ */
+export const CENTER_ONLY_KEYS: readonly string[] = ["memory", "mcpServers", "projectMemory", "mcp", "mcpConnections", "mcpSecrets", "coordinator"];
 
 /** True when `settings` has a center-only key (null value included). */
 export const hasCenterOnlyKey = (settings: object): boolean => CENTER_ONLY_KEYS.some((k) => Object.prototype.hasOwnProperty.call(settings, k));
@@ -45,9 +49,9 @@ export const hasCenterOnlyKey = (settings: object): boolean => CENTER_ONLY_KEYS.
 const SETTINGS_TOOLS: ReadonlySet<string> = new Set(["session_create", "session_settings_update", "center_settings_update"]);
 
 /**
- * The reason a call is refused by its arguments, or undefined. The memory setting (url / token / agentId) is not
- * changed from a screen: a `settings` with a `memory` key (null too) is refused, not silently dropped. The center
- * refuses it as well; this refuses before anything is sent.
+ * The reason a call is refused by its arguments, or undefined. The center-internal settings (`memory`, `mcpServers`)
+ * are not changed from the web: a `settings` with such a key (null too) is refused, not silently dropped. The center
+ * refuses it as well (the web is not the launcher); this refuses before anything is sent.
  */
 export function webToolArgsRefusal(name: string, args: unknown): string | undefined {
   if (!SETTINGS_TOOLS.has(name)) return undefined;

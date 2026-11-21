@@ -141,6 +141,14 @@ export interface ProjectSettings {
   outputStyle?: string | null;
   /** Servers the session may use (host names or server_ids). Absent / null = all (or the center-wide value); `[]` = none. */
   servers?: string[] | null;
+  /**
+   * Extra MCP servers (name → one entry of Claude Code's mcp.json `mcpServers`: stdio `{ command, args?, env? }`, http / sse
+   * `{ type, url, headers? }`, …). Center-wide ones go to every session; a session's entry replaces the center-wide one of the same
+   * name, `null` drops it for that session. Read and written only by the place that started the center (`launcher`).
+   */
+  mcpServers?: Record<string, unknown> | null;
+  /** The external memory's MCP server (one entry of the same shape). A session's value replaces the center-wide one. Launcher only. */
+  memory?: Record<string, unknown> | null;
 }
 
 /** The center-wide settings (`center_settings_get`): a session's project settings without `servers` (the servers a session uses are set per session only). */

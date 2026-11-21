@@ -13,6 +13,7 @@ import { createJsonFile, own, setOwn, type JsonFile } from "./mcp-json-file.js";
 import { checkSecretNameShape, SECRET_NAME_ERROR } from "./mcp-secrets.js";
 import { memoryUrlSchema } from "./project-settings.js";
 import { SESSION_NAME } from "./sessions.js";
+import { CENTER_ENTRY_NAMES, SERVER_ENTRY_NAME, serverDefIssues, type McpServerDef } from "./mcp-server-def.js";
 
 export const MCP_CONNECTIONS_FILE = "mcp-connections.json";
 /** center が自分で組み立てる物と、口の path と重なる名前。 */
@@ -97,7 +98,17 @@ export type McpConnection = z.infer<typeof connectionSchema>;
 /** center 自身が出す口（組み込み）の接続。url・鍵は持たない。割り当てた session にだけ載る。 */
 export const builtinConnectionSchema = z.object({ transport: z.literal("builtin"), builtin: z.enum(BUILTIN_KINDS) }).strict();
 export type BuiltinConnection = z.infer<typeof builtinConnectionSchema>;
-export type AnyConnection = McpConnection | BuiltinConnection;
+/**
+ * 普通の MCP の設定（Claude Code の mcp.json の mcpServers の 1 件。stdio・http・sse など）。`transport` を持たない物。
+ * 書いた項目をそのまま claude の --mcp-config に載せる（mcp-server-def.ts）。
+ */
+export type PlainConnection = McpServerDef & { transport?: never };
+export type AnyConnection = McpConnection | BuiltinConnection | PlainConnection;
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+/** 普通の MCP の設定（旧形式でも組み込みでもない）か。 */
+export const isPlain = (c: unknown): c is PlainConnection => isRecord(c) && !Object.hasOwn(c, "transport");
+/** session の設定の中の 1 件が、共通を丸ごと置き換える普通の MCP の設定か（type か command を持ち transport を持たない）。旧形式の上書きは項目ごと。 */
+export const isPlainEntry = (c: unknown): c is PlainConnection => isPlain(c) && (Object.hasOwn(c, "type") || Object.hasOwn(c, "command"));
 /** 保存してよい接続（外向けの http か、組み込み）。 */
 export const storedConnectionSchema = z.union([connectionSchema, builtinConnectionSchema]);
 
@@ -122,8 +133,8 @@ export type ConnOverride = z.infer<typeof overrideSchema>;
 export interface ConnectionsData {
   version: 1;
   common: Record<string, AnyConnection>;
-  /** session 名 → 接続名 → 上書き（null = その session ではその接続を付けない）。 */
-  sessions: Record<string, Record<string, ConnOverride | null>>;
+  /** session 名 → 接続名 → 上書き（null = その session ではその接続を付けない。普通の MCP の設定は共通を丸ごと置き換える）。 */
+  sessions: Record<string, Record<string, ConnOverride | PlainConnection | null>>;
 }
 
 export const emptyConnections = (): ConnectionsData => ({ version: 1, common: {}, sessions: {} });
@@ -199,11 +210,22 @@ export function validateAny(raw: unknown, name?: string, opts: { allowPlainHttp?
   }
   // 組み込みの名前は組み込みの接続だけが使える（http の接続を同じ名前で置いて、道具の許可（mcp__<名>__*）を横取りさせない）
   if (name !== undefined && Object.values(BUILTIN_NAMES).includes(name)) return { ok: false, issues: [`${name} は組み込みの接続の名前（transport: builtin だけ）`] };
+  if (isPlain(raw)) {
+    const issues = [...(name !== undefined ? plainNameIssues(name) : []), ...serverDefIssues(raw)];
+    return issues.length ? { ok: false, issues } : { ok: true, value: raw };
+  }
   const r = validateConnection(raw, opts);
   return r.ok ? r : { ok: false, issues: r.issues };
 }
 
 export const isBuiltin = (c: AnyConnection): c is BuiltinConnection => c.transport === "builtin";
+
+/** 普通の MCP の設定の名前の検査（英数字と _ -。center が組み立てる名前・組み込みの名前は不可）。 */
+export function plainNameIssues(name: string): string[] {
+  if (!SERVER_ENTRY_NAME.test(name)) return ["名前は英数字と _ - のみ"];
+  if (CENTER_ENTRY_NAMES.includes(name)) return [`${name} は center が組み立てる名前（外部記憶は設定の memory に書く）`];
+  return [];
+}
 
 export function validateName(name: string): string | undefined {
   if (!CONNECTION_NAME.test(name)) return "名前は [a-z0-9][a-z0-9_-]{0,31}";
@@ -214,8 +236,10 @@ export function validateName(name: string): string | undefined {
 // ---- 合成 ----
 
 /** common と session の上書きを項目ごとに合成する（1 段。入れ子の中身は丸ごと置き換え）。上書きが null なら undefined（付けない）。 */
-export function composeConnection(common: AnyConnection | undefined, override: ConnOverride | null | undefined): Record<string, unknown> | undefined {
+export function composeConnection(common: AnyConnection | undefined, override: ConnOverride | PlainConnection | null | undefined): Record<string, unknown> | undefined {
   if (override === null) return undefined;
+  // session の普通の MCP の設定は共通を丸ごと置き換える（stdio と http の項目を混ぜない）
+  if (isPlainEntry(override)) return { ...override };
   const out: Record<string, unknown> = { ...(common ?? {}) };
   for (const [k, v] of Object.entries(override ?? {})) {
     if (v === null) delete out[k];
@@ -255,11 +279,11 @@ export function validateAll(data: ConnectionsData): ScopeIssue[] {
     const eff = effectiveRaw(data, s);
     const roles: string[] = [];
     for (const [name, raw] of Object.entries(eff)) {
-      const ne = validateName(name);
+      const ne = isPlain(raw) ? undefined : validateName(name);
       if (ne) out.push({ scope, name, issue: ne });
       const r = validateAny(raw, name, { allowPlainHttp: true });
       if (!r.ok) for (const issue of r.issues) out.push({ scope, name, issue });
-      else if (!isBuiltin(r.value) && r.value.role === "memory") roles.push(name);
+      else if (!isBuiltin(r.value) && !isPlain(r.value) && r.value.role === "memory") roles.push(name);
     }
     if (roles.length > 1) out.push({ scope, issue: `role memory の接続が ${roles.length} 個ある（1 つまで: ${roles.join(", ")}）` });
   }
@@ -276,6 +300,11 @@ function parseCommonMap(raw: unknown): { map: Record<string, AnyConnection>; dro
   const dropped: string[] = [];
   if (!isObj(raw)) return { map, dropped: raw === undefined ? [] : ["(全体)"] };
   for (const [name, v] of Object.entries(raw)) {
+    if (isPlain(v)) {
+      if (validateAny(v, name).ok) setOwn(map, name, { ...v });
+      else dropped.push(name);
+      continue;
+    }
     const r = storedConnectionSchema.safeParse(v);
     if (r.success && validateName(name) === undefined) setOwn(map, name, r.data);
     else dropped.push(name);
@@ -284,13 +313,18 @@ function parseCommonMap(raw: unknown): { map: Record<string, AnyConnection>; dro
 }
 
 /** session の接続の表（name → 上書き / null）を読む。 */
-function parseSessionMap(raw: unknown): { map: Record<string, ConnOverride | null>; dropped: string[] } {
-  const map: Record<string, ConnOverride | null> = {};
+function parseSessionMap(raw: unknown): { map: Record<string, ConnOverride | PlainConnection | null>; dropped: string[] } {
+  const map: Record<string, ConnOverride | PlainConnection | null> = {};
   const dropped: string[] = [];
   if (!isObj(raw)) return { map, dropped: raw === undefined ? [] : ["(全体)"] };
   for (const [name, v] of Object.entries(raw)) {
     if (v === null) {
-      if (validateName(name) === undefined || Object.values(BUILTIN_NAMES).includes(name)) setOwn(map, name, null);
+      if (SERVER_ENTRY_NAME.test(name)) setOwn(map, name, null);
+      else dropped.push(name);
+      continue;
+    }
+    if (isPlainEntry(v)) {
+      if (validateAny(v, name).ok) setOwn(map, name, { ...v });
       else dropped.push(name);
       continue;
     }
@@ -389,4 +423,23 @@ export function visibleToolNames(c: McpConnection, remoteNames: string[]): strin
 export function configHash(c: McpConnection): string {
   const j = JSON.stringify({ url: c.url, headers: c.headers ?? {}, toolPrefix: c.toolPrefix ?? null, tools: c.tools ?? null, role: c.role ?? null, expose: c.exposeMemoryWrite ?? false });
   return createHash("sha256").update(j).digest("hex").slice(0, 32);
+}
+
+/**
+ * 設定の更新で受けた mcpServers の 1 件の検査（project-settings.ts の settingsIssues が呼ぶ）。誤りの文に値は含めない。
+ * - 普通の MCP の設定（stdio・http・sse など）・組み込み・旧形式の接続のどれか。
+ * - session の設定では旧形式の項目ごとの上書き（`{ url }` など）も可。
+ */
+export function serverEntryIssues(name: string, raw: unknown, scope: "common" | "session"): string[] {
+  if (scope === "session" && isRecord(raw) && !isPlainEntry(raw) && !Object.hasOwn(raw, "transport")) {
+    if (overrideSchema.safeParse(raw).success && validateName(name) === undefined) return [];
+    return [...plainNameIssues(name), ...serverDefIssues(raw)];
+  }
+  const r = validateAny(raw, name, { allowPlainHttp: true });
+  if (!r.ok) return r.issues;
+  if (!isPlain(r.value) && !isBuiltin(r.value)) {
+    const ne = validateName(name);
+    if (ne) return [ne];
+  }
+  return [];
 }

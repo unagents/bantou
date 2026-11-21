@@ -139,24 +139,35 @@ test("CLI: 組み込みの割り当ては CLI では書かない（旧設定の 
   assert.equal(existsSync(join(stateDir(), "mcp-connections.json")), false);
 });
 
-test("center-only: 設定の更新の入力（画面・web・MCP の経路）は mcpServers・coordinator・mcp・mcpConnections・mcpSecrets・memory を断る", () => {
-  for (const k of ["mcpServers", "coordinator", "mcp", "mcpConnections", "mcpSecrets", "memory"]) {
-    assert.throws(() => assertCenterOnly({ [k]: { anything: 1 } }), /MCP からは変えられない/, k);
-    assert.throws(() => assertCenterOnly({ [k]: null }), /MCP からは変えられない/, k);
+test("center-only: 設定の更新の入力は、起動元以外（別 host の desktop・web・他の呼び出し元）からは mcpServers・memory を断る。起動元は通す。旧設定の項目（coordinator・mcp・mcpConnections・mcpSecrets）は誰からも断る", () => {
+  for (const k of ["mcpServers", "memory"]) {
+    assert.throws(() => assertCenterOnly({ [k]: { anything: 1 } }), /center を起動した所/, k);
+    assert.throws(() => assertCenterOnly({ [k]: null }), /center を起動した所/, k);
+    assert.doesNotThrow(() => assertCenterOnly({ [k]: { anything: 1 } }, { launcher: true }), k);
+  }
+  for (const k of ["coordinator", "mcp", "mcpConnections", "mcpSecrets"]) {
+    assert.throws(() => assertCenterOnly({ [k]: { anything: 1 } }), /center を起動した所/, k);
+    assert.throws(() => assertCenterOnly({ [k]: null }, { launcher: true }), /旧設定の項目/, k);
   }
   assert.doesNotThrow(() => assertCenterOnly({ instructions: "x" }));
 });
 
-test("center-only: mcpServers を書く module は無い。tools・http・server・coordinator は接続の設定に触れず、mcp-connections.json を書くのは mcp-cli.ts だけ", async () => {
+test("center-only: 設定の更新を受ける tool は必ず起動元の判定（assertCenterOnly(…, { launcher })）を通す。http・server・coordinator・core は mcpServers に触れない。mcp-connections.json を書くのは mcp-cli.ts だけ", async () => {
   const src = join(import.meta.dirname, "..", "src");
   const writers: string[] = [];
   for (const f of await readdir(src)) {
     if (!f.endsWith(".ts")) continue;
     const t = await readFile(join(src, f), "utf8");
-    // wrapper.ts の mcpServers は claude の --mcp-config の形（center の設定ではない）
-    if (/mcpServers/.test(t) && /^(tools|http|server|coordinator|core)\.ts$/.test(f)) writers.push(`${f}(mcpServers を扱う)`);
+    // wrapper.ts の mcpServers は claude の --mcp-config の形（center の設定ではない）。tools.ts は起動元の判定を通した更新だけが扱う（下で見る）
+    if (/mcpServers/.test(t) && /^(http|server|coordinator|core)\.ts$/.test(f)) writers.push(`${f}(mcpServers を扱う)`);
     if (/createConnectionsStore\(/.test(t) && !/^(mcp-cli|mcp-connections|daemon)\.ts$/.test(f)) writers.push(`${f}(store を作る)`);
     if (/\.file\.write\(|conns\.file\.write/.test(t) && !/^(mcp-cli|mcp-secrets|mcp-status|mcp-connections)\.ts$/.test(f)) writers.push(`${f}(書く)`);
   }
   assert.deepEqual(writers, []);
+  const tools = await readFile(join(src, "tools.ts"), "utf8");
+  const calls = tools.match(/assertCenterOnly\([^)]*\)/g) ?? [];
+  assert.equal(calls.length, 3, "session_create / session_settings_update / center_settings_update");
+  for (const c of calls) assert.match(c, /\{ launcher \}/, c);
+  // 読みの応答も起動元以外には memory・mcpServers を出さない
+  assert.match(tools, /withoutLauncherKeys/);
 });

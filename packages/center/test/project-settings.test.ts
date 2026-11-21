@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { assertCenterOnly, memorySchema, composeAddDirs, composeInstructions, composeOutputStyle, mergeSettings, projectSettingsPatchSchema, readSettings } from "../src/project-settings.js";
+import { assertCenterOnly, CENTER_ONLY_MCP_ERROR, LEGACY_KEYS_ERROR, memorySchema, composeAddDirs, composeInstructions, composeOutputStyle, mergeSettings, projectSettingsPatchSchema, readSettings, settingsIssues, withoutLauncherKeys } from "../src/project-settings.js";
+import { serverEntryIssues } from "../src/mcp-connections.js";
 
 test("mergeSettings: 省略は変えない・値は上書き・null は削除・instructions の空文字は削除・未知項目は保持。元は変えない", () => {
   const cur = { instructions: "a", x: 1, y: { z: 2 } };
@@ -151,22 +152,83 @@ test("memorySchema（CLI の検証）: url は http/https の絶対 URL（user:p
   assert.equal(ok({ url: "http://h/mcp?a=1%24%7BX%7D" }), true); // エンコード済みは展開されない
 });
 
-test("mergeSettings は memory を無視する（MCP の入口が先に断る）。既存の他の項目は変えない", () => {
-  assert.deepEqual(mergeSettings({ instructions: "i" }, { memory: { url: "http://b/mcp" } } as never), { instructions: "i" });
-  assert.deepEqual(mergeSettings({ instructions: "i" }, { memory: null } as never), { instructions: "i" });
+test("mergeSettings は memory を普通の MCP の設定の形で入れる（旧形式 { url, token, agentId } は読み替える）。null で消す。既存の他の項目は変えない", () => {
+  assert.deepEqual(mergeSettings({ instructions: "i" }, { memory: { url: "http://b/mcp" } } as never), { instructions: "i", memory: { type: "http", url: "http://b/mcp" } });
+  assert.deepEqual(mergeSettings({ instructions: "i" }, { memory: { url: "http://b/mcp", token: "T1", agentId: "ag" } } as never), {
+    instructions: "i",
+    memory: { type: "http", url: "http://b/mcp", headers: { Authorization: "Bearer T1", "X-Agent-Id": "ag" } },
+  });
+  const def = { type: "http", url: "http://m/mcp", headers: { Authorization: "Bearer M" } };
+  assert.deepEqual(mergeSettings({ instructions: "i" }, { memory: def } as never), { instructions: "i", memory: def });
+  assert.deepEqual(mergeSettings({ instructions: "i", memory: def }, { memory: null } as never), { instructions: "i" });
 });
 
-test("readSettings は memory を読み捨てる（外部記憶は memory-settings.json だけ）", () => {
-  assert.deepEqual(readSettings({ instructions: "i", memory: { url: "http://a/mcp", token: "T" } }), { instructions: "i" });
+test("readSettings は memory を普通の MCP の設定の形で読む（旧形式は読み替える。object でなければ落とす）", () => {
+  assert.deepEqual(readSettings({ instructions: "i", memory: { url: "http://a/mcp", token: "T" } }), {
+    instructions: "i",
+    memory: { type: "http", url: "http://a/mcp", headers: { Authorization: "Bearer T" } },
+  });
+  const stdio = { command: "npx", args: ["-y", "mem"], env: { KEY: "V" } };
+  assert.deepEqual(readSettings({ memory: stdio }), { memory: stdio });
+  assert.deepEqual(readSettings({ instructions: "i", memory: "x" }), { instructions: "i" });
 });
 
-test("assertCenterOnly: memory のキーがあれば（null も）理由つきで断る。無ければ通す", () => {
-  assert.throws(() => assertCenterOnly({ memory: { url: "http://a/mcp", token: "SECRET" } }), (e: Error) => /center の側だけ/.test(e.message) && !e.message.includes("SECRET"));
-  assert.throws(() => assertCenterOnly({ memory: null }), /MCP からは変えられない/);
-  for (const k of ["mcp", "mcpConnections", "mcpSecrets"]) {
-    assert.throws(() => assertCenterOnly({ [k]: { url: "http://x/?q=SECRETVAL" } }), (e: Error) => /center の側だけ/.test(e.message) && !e.message.includes("SECRETVAL"), k);
-    assert.throws(() => assertCenterOnly({ [k]: null }), /MCP からは変えられない/, `${k}: null`);
+test("assertCenterOnly: 起動元以外は memory・mcpServers（null も）を理由つきで断る。起動元は通す。旧設定の項目は誰からも断る。値は文に出さない", () => {
+  for (const k of ["memory", "mcpServers"]) {
+    assert.throws(() => assertCenterOnly({ [k]: { url: "http://a/mcp", token: "SECRET" } }), (e: Error) => e.message === CENTER_ONLY_MCP_ERROR && !e.message.includes("SECRET"), k);
+    assert.throws(() => assertCenterOnly({ [k]: null }), (e: Error) => e.message === CENTER_ONLY_MCP_ERROR, `${k}: null`);
+    assert.throws(() => assertCenterOnly({ [k]: {} }, { launcher: false }), (e: Error) => e.message === CENTER_ONLY_MCP_ERROR, `${k}: launcher false`);
+    assert.doesNotThrow(() => assertCenterOnly({ [k]: { url: "http://a/mcp" } }, { launcher: true }), k);
+    assert.doesNotThrow(() => assertCenterOnly({ [k]: null }, { launcher: true }), `${k}: null`);
+  }
+  assert.match(CENTER_ONLY_MCP_ERROR, /center を起動した所/);
+  for (const k of ["mcp", "mcpConnections", "mcpSecrets", "coordinator"]) {
+    assert.throws(() => assertCenterOnly({ [k]: { url: "http://x/?q=SECRETVAL" } }), (e: Error) => e.message === CENTER_ONLY_MCP_ERROR && !e.message.includes("SECRETVAL"), k);
+    assert.throws(() => assertCenterOnly({ [k]: null }), (e: Error) => e.message === CENTER_ONLY_MCP_ERROR, `${k}: null`);
+    assert.throws(() => assertCenterOnly({ [k]: { url: "http://x/?q=SECRETVAL" } }, { launcher: true }), (e: Error) => e.message === LEGACY_KEYS_ERROR && !e.message.includes("SECRETVAL"), `${k}: launcher`);
   }
   assert.doesNotThrow(() => assertCenterOnly({ instructions: "x" }));
   assert.doesNotThrow(() => assertCenterOnly(undefined));
+});
+
+test("withoutLauncherKeys: 読みの応答から memory・mcpServers を除く（他の項目は残す。元は変えない）", () => {
+  const s = { instructions: "i", memory: { type: "http", url: "u" }, mcpServers: { a: { command: "x" } } };
+  assert.deepEqual(withoutLauncherKeys(s), { instructions: "i" });
+  assert.ok("memory" in s && "mcpServers" in s);
+});
+
+test("settingsIssues: mcpServers は普通の MCP の設定・組み込み・旧形式。stdio は command、url の type は url、args は配列、env・headers は文字列の値。名前の予約・共通の null は不正。値は文に出さない", () => {
+  const issues = (patch: object, scope: "common" | "session" = "common") => settingsIssues(patch, scope, serverEntryIssues);
+  // 通るもの
+  assert.deepEqual(issues({ mcpServers: { s: { command: "npx", args: ["-y", "pkg"], env: { K: "SECRETV" } }, h: { type: "http", url: "https://h/mcp", headers: { Authorization: "Bearer SECRETV" } }, e: { type: "sse", url: "https://e/sse" } } }), []);
+  assert.deepEqual(issues({ mcpServers: { "bantou-coordinator": { transport: "builtin", builtin: "coordinator" } } }, "session"), []);
+  assert.deepEqual(issues({ mcpServers: { tools: { transport: "http", url: "https://t/mcp", auth: { env: "BANTOU_MCP_KEY_T" } } } }), []);
+  assert.deepEqual(issues({ mcpServers: { tools: null } }, "session"), []);
+  assert.deepEqual(issues({ mcpServers: { tools: { url: "https://t2/mcp" } } }, "session"), []); // 旧形式の項目ごとの上書き
+  assert.deepEqual(issues({ mcpServers: null, memory: null }), []);
+  assert.deepEqual(issues({ memory: { type: "http", url: "https://m/mcp", headers: { Authorization: "Bearer SECRETV" } } }), []);
+  assert.deepEqual(issues({ memory: { url: "https://m/mcp", token: "SECRETV" } }), []); // 旧形式
+  // 断るもの（値は出さない）
+  const bad: [object, RegExp, ("common" | "session")?][] = [
+    [{ mcpServers: { s: { args: ["SECRETV"] } } }, /mcpServers\.s: stdio の server には command/],
+    [{ mcpServers: { s: { args: ["x"] } } }, /mcpServers\.s: stdio の server には command/, "session"],
+    [{ mcpServers: { h: { type: "http", headers: { Authorization: "Bearer SECRETV" } } } }, /mcpServers\.h: type http の server には url/],
+    [{ mcpServers: { s: { command: "npx", args: "SECRETV" } } }, /mcpServers\.s: args は文字列の配列/],
+    [{ mcpServers: { s: { command: "npx", env: { K: 1 } } } }, /mcpServers\.s: env は文字列の値の object/],
+    [{ mcpServers: { h: { type: "http", url: "u", headers: { A: 2 } } } }, /mcpServers\.h: headers は文字列の値の object/],
+    [{ mcpServers: { s: "SECRETV" } }, /mcpServers\.s:/],
+    [{ mcpServers: { s: null } }, /null は session の設定でだけ/],
+    [{ mcpServers: { "bad name": { command: "x" } } }, /名前は英数字と _ - のみ/],
+    [{ mcpServers: { "bantou-coordinator": { command: "x" } } }, /組み込みの接続の名前/],
+    [{ memory: { type: "http", headers: { Authorization: "Bearer SECRETV" } } }, /memory: type http の server には url/],
+    [{ memory: { args: ["SECRETV"] } }, /memory: stdio の server には command/],
+    [{ mcpServers: [] }, /mcpServers は/],
+  ];
+  for (const name of ["bantou", "bantou-messenger", "memory"]) bad.push([{ mcpServers: { [name]: { command: "x" } } }, new RegExp(`mcpServers\\.${name}: ${name} は center が組み立てる名前`)]);
+  for (const [patch, re, scope] of bad) {
+    const out = issues(patch, scope ?? "common");
+    assert.ok(out.length > 0, JSON.stringify(patch));
+    assert.ok(out.some((i) => re.test(i)), `${JSON.stringify(patch)}: ${out.join(" / ")}`);
+    assert.ok(!out.join(" ").includes("SECRETV"), JSON.stringify(patch));
+  }
 });

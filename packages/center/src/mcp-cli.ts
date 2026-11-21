@@ -29,6 +29,10 @@ import { probeConnection, type ProbeResult } from "./mcp-probe.js";
 import { checkSecretNameNew, checkSecretValue, createSecretsStore } from "./mcp-secrets.js";
 import { createStatusStore, statusKey } from "./mcp-status.js";
 import { displayUrl } from "./memory-settings.js";
+import { isPlain } from "./mcp-connections.js";
+
+/** 普通の MCP の設定（設定の mcpServers に直接書いた物）の 1 行。中身は設定 file にある。 */
+const describePlain = (name: string, c: Record<string, unknown>): string => `  ${name}: 普通の MCP の設定（type ${typeof c.type === "string" ? c.type : "stdio"}。中身は設定 file の mcpServers）`;
 import { SESSION_NAME } from "./sessions.js";
 
 export const MCP_USAGE = `usage:
@@ -180,8 +184,8 @@ export async function runMcpCli(argv: string[], defaultConfig: string, deps: Mcp
         const cd = conns.read();
         const usedBy = (n: string): string[] => {
           const out: string[] = [];
-          for (const [name, c] of Object.entries(cd.common)) if (!isBuiltin(c) && c.auth && (c.auth.secret ?? name) === n) out.push(name);
-          for (const [s, per] of Object.entries(cd.sessions)) for (const [name, o] of Object.entries(per)) if (o?.auth && (o.auth.secret ?? name) === n) out.push(`${s}/${name}`);
+          for (const [name, c] of Object.entries(cd.common)) if (!isBuiltin(c) && !isPlain(c) && c.auth && (c.auth.secret ?? name) === n) out.push(name);
+          for (const [s, per] of Object.entries(cd.sessions)) for (const [name, o] of Object.entries(per)) if (o && !isPlain(o) && o.auth && (o.auth.secret ?? name) === n) out.push(`${s}/${name}`);
           return out;
         };
         const names = Object.keys(sd.data.secrets);
@@ -232,7 +236,7 @@ export async function runMcpCli(argv: string[], defaultConfig: string, deps: Mcp
         if (!names.length) deps.out("  （なし）");
         for (const n of names) {
           const v = validateAny(eff[n], n, { allowPlainHttp: true });
-          if (v.ok) deps.out(isBuiltin(v.value) ? describeBuiltin(n, v.value) : describeConn(n, v.value, secretInfo, statusLineOf(scope, n)));
+          if (v.ok) deps.out(isPlain(v.value) ? describePlain(n, v.value) : isBuiltin(v.value) ? describeBuiltin(n, v.value) : describeConn(n, v.value, secretInfo, statusLineOf(scope, n)));
           else deps.out(`  ${n}: 設定が不正（${v.issues.join(" / ")}）`);
         }
       };
@@ -264,7 +268,7 @@ export async function runMcpCli(argv: string[], defaultConfig: string, deps: Mcp
         const raw = effectiveRaw(data, scope)[name];
         if (!raw) return false;
         const v = validateAny(raw, name, { allowPlainHttp: true });
-        deps.out(v.ok ? (isBuiltin(v.value) ? describeBuiltin(name, v.value) : describeConn(name, v.value, secretInfo, statusLineOf(scope, name))).trimStart() : `${name}: 設定が不正（${v.issues.join(" / ")}）`);
+        deps.out(v.ok ? (isPlain(v.value) ? describePlain(name, v.value) : isBuiltin(v.value) ? describeBuiltin(name, v.value) : describeConn(name, v.value, secretInfo, statusLineOf(scope, name))).trimStart() : `${name}: 設定が不正（${v.issues.join(" / ")}）`);
         return true;
       };
       if (session !== undefined) {

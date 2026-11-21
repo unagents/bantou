@@ -14,6 +14,13 @@ const props = defineProps<{
   noServers?: boolean;
   /** Leave out the reference folders (paths on the center's host; meaningful for the own sidecar only). The draft's value is kept as it is. */
   hideAddDirs?: boolean;
+  /**
+   * Show the center-internal settings (extra MCP servers, external memory): only on the place that started the center
+   * (`useCenterLauncher`). Hidden, the draft's values are kept and not sent.
+   */
+  centerInternal?: boolean;
+  /** The form is a session's (an entry may be null: drops the center-wide server of that name for this session). */
+  sessionScope?: boolean;
 }>();
 const emit = defineEmits<{ error: [message: string] }>();
 
@@ -161,6 +168,37 @@ async function pickAdd() {
         :data-testid="`${idPrefix}-output-style`"
       />
       <p class="text-cork-muted text-xs" :data-testid="`${idPrefix}-output-style-note`">{{ INSTRUCTIONS_NOTE }}</p>
+    </section>
+    <section v-if="centerInternal" class="flex flex-col gap-1" :data-testid="`${idPrefix}-section-mcp-servers`">
+      <h3 class="text-sm font-semibold">追加の MCP の server</h3>
+      <p class="text-cork-muted text-xs">
+        {{ sessionScope ? 'この session の起動に載せる' : '全 session の起動に載せる' }} MCP の server。Claude Code の mcp.json と同じ形（{ "mcpServers": { 名前: 設定 } }）で書く。stdio は command・args・env、http / sse は type・url・headers（Authorization: Bearer … もそのまま書ける）。統括の組み込みの接続は "bantou-coordinator": { "transport": "builtin", "builtin": "coordinator" }{{ sessionScope ? '。共通と同じ名前はこちらで置き換え、null でこの session では外す' : '' }}。空なら無し
+      </p>
+      <UTextarea
+        v-model="draft.mcpServers"
+        :rows="6"
+        autoresize
+        :maxrows="24"
+        class="w-full font-mono text-xs"
+        placeholder='{ "mcpServers": { "tools": { "type": "http", "url": "https://tools.example/mcp", "headers": { "Authorization": "Bearer …" } } } }'
+        :data-testid="`${idPrefix}-mcp-servers`"
+      />
+      <p class="text-cork-muted text-xs" :data-testid="`${idPrefix}-mcp-servers-note`">{{ INSTRUCTIONS_NOTE }}</p>
+    </section>
+    <section v-if="centerInternal" class="flex flex-col gap-1" :data-testid="`${idPrefix}-section-memory`">
+      <h3 class="text-sm font-semibold">外部記憶</h3>
+      <p class="text-cork-muted text-xs">
+        外部記憶（memory）の MCP の server 1 件。追加の MCP の server と同じ形（例 { "type": "http", "url": "https://memory.example/mcp", "headers": { "Authorization": "Bearer …" } }）。session の起動に memory として載り、center が記録を書く{{ sessionScope ? '。書けば共通の外部記憶の代わりにこれを使う' : '' }}。空なら無し
+      </p>
+      <UTextarea
+        v-model="draft.memory"
+        :rows="5"
+        autoresize
+        :maxrows="18"
+        class="w-full font-mono text-xs"
+        :data-testid="`${idPrefix}-memory`"
+      />
+      <p class="text-cork-muted text-xs" :data-testid="`${idPrefix}-memory-note`">{{ INSTRUCTIONS_NOTE }}</p>
     </section>
     <section v-if="!noServers" class="flex flex-col gap-1" :data-testid="`${idPrefix}-section-servers`">
       <h3 class="text-sm font-semibold">使う server</h3>

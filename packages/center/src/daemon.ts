@@ -25,6 +25,7 @@ import { createContextUsageTracker } from "./context-usage.js";
 import { createLoginFlow } from "./login.js";
 import { createSessionManager } from "./sessions.js";
 import { createMemoryFile } from "./memory-settings.js";
+import { takeLauncherKey } from "./launcher.js";
 import { backupFileOnce, createJsonListStore, createJsonObjectStore } from "./store.js";
 import { applicableParts, buildSystemInstructions, partLabel } from "./system-instructions.js";
 import { createCenterServer, createCoordinatorMcpServer, createSessionMcpServer } from "./server.js";
@@ -44,6 +45,9 @@ const HARD_EXIT_MARGIN_MS = 5_000;
  * stdio では stdin EOF / 切断でも終了する。http では stdin を見ず（親が /dev/null を渡しても落ちない）、親プロセスの死亡で終了する。
  */
 export async function runDaemon(args: CliArgs): Promise<void> {
+  // center を起動した所の鍵（desktop が sidecar に渡す。launcher.ts）。最初に読んで自分の env から消す
+  // （login shell・claude の解決・session など、この後に起動するどの子 process にも渡さない。remote-control.ts でも消す）
+  const launcherKey = takeLauncherKey();
   const configPath = args.config;
   log("起動");
   const config = await loadConfig(configPath, log);
@@ -76,14 +80,15 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   };
   // session の増減・認証状態の変化を desktop へ知らせる（GET /events）
   const events = createEventHub();
-  // 外部記憶の設定（CLI `bantou-center memory` だけが書く。session の起動のたびに読む）
+  // 旧設定の外部記憶の file（memory-settings.json。起動時に普通の設定の memory へ移す）
   const memoryFile = createMemoryFile(dirname(resolve(configPath)), log);
-  // 追加の MCP の接続は普通の設定（center-settings.json と session の settings の mcpServers）に書く。画面・web・MCP の経路からは書けない。
+  // 追加の MCP の server は普通の設定（center-settings.json と session の settings の mcpServers）に書く。書けるのは center を起動した所の画面と設定 file の直接の編集。
   // connections は旧設定 mcp-connections.json（M1 の CLI）の移行元。鍵は環境変数（auth.env）か、旧来の鍵の file（CLI が書く）
   const connections = createConnectionsStore(dirname(resolve(configPath)), log);
   const mcpSecrets = createSecretsStore(dirname(resolve(configPath)), log);
   const supervisor = createRemoteControlSupervisor({
-    memoryOf: (name) => memoryFile.resolve(name),
+    // 外部記憶は普通の設定（center-settings.json / sessions.json の memory）。sessions は supervisor の後に作るので、呼ばれる時に参照する
+    memoryOf: (name) => sessions.memoryOf(name),
     mcpOf: (name, mcpUrl) => {
       const { data, problems } = sessions.mcpConnections();
       if (problems.length) log(`MCP の接続の設定に不正な項目がある（捨てた。名前だけ）: ${problems.join(", ")}`);
@@ -252,13 +257,14 @@ export async function runDaemon(args: CliArgs): Promise<void> {
 
   // 割り当ての判定は呼び出しの度に今の設定（center 共通 + session の mcpServers）から行う
   const assigned = (session: string): boolean => isAssigned(sessions.mcpConnections().data, session, "coordinator");
-  const makeServer = () => createCenterServer({ config, supervisor, link, sessions, remotes, follow, login, log });
+  const makeServer = (launcher: boolean) => createCenterServer({ config, supervisor, link, sessions, remotes, follow, login, log, launcher });
   if (args.transport === "http") {
     if (!config.token || config.token.length < MIN_TOKEN_LEN) {
       throw new Error(`http transport には config の token（${MIN_TOKEN_LEN} 文字以上）が必要: ${configPath}`);
     }
     http = await startHttpServer({
-      createServer: makeServer,
+      createServer: (launcher) => makeServer(launcher === true),
+      ...(launcherKey ? { launcherKey } : {}),
       createSessionServer: (owner) => createSessionMcpServer({ remotes, follow, owner }),
       // 統括の口: 割り当てた session だけ（呼び出しの度に mcp-connections.json を見る。file が壊れていれば割り当て無し）
       createCoordinatorServer: (owner) => createCoordinatorMcpServer({ owner, coordinator: { assigned, sessions: () => sessions.list(), createSession: createSessionVia(sessions), log } }),
@@ -285,7 +291,8 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     httpPort = http.port;
     watchParent({ onOrphan: (reason) => void shutdown(reason) });
   } else {
-    const server = makeServer();
+    // stdio は起動元（stdin / stdout の相手）だけが呼べる
+    const server = makeServer(true);
     const transport = new StdioServerTransport();
     transport.onclose = () => void shutdown("MCP stdio 切断");
     // SDK の stdio transport は stdin の EOF を検知しないので自前で見る

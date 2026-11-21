@@ -303,7 +303,7 @@ test("5.3 the web list is exactly the designed one", () => {
   for (const t of ["session_delete", "server_retire", "rc_status", "cap_kick", ""]) assert.equal(allowWebTool(t), false, t);
 });
 
-test("memory: the web policy refuses settings with a memory key for the 3 settings tools before anything is sent; other items go through", async () => {
+test("memory / mcpServers: the web policy refuses settings with a memory or mcpServers key for the 3 settings tools before anything is sent (only the place that started the center writes them); other items go through", async () => {
   const mock = await start();
   const mcp = createCenterMcp({ settings: { selectTarget: async () => ({ url: mock.url, source: "remote" }) } });
   const mem = { url: "http://m/mcp", token: "T-SECRET" };
@@ -312,15 +312,17 @@ test("memory: the web policy refuses settings with a memory key for the 3 settin
     ["session_settings_update", { name: "a", settings: { instructions: "i", memory: null } }],
     ["center_settings_update", { settings: { memory: mem } }],
     ["session_create", { name: "a", settings: { memory: mem } }],
+    ["session_settings_update", { name: "a", settings: { mcpServers: { t: { type: "http", url: "http://t/mcp", headers: { Authorization: "Bearer T-SECRET" } } } } }],
+    ["center_settings_update", { settings: { mcpServers: { s: { command: "npx", env: { KEY: "T-SECRET" } } } } }],
   ] as const) {
-    await assert.rejects(mcp.call(tool, args), (e: Error) => e instanceof ToolArgsRefusedError && /bantou-center memory/.test(e.message) && !e.message.includes("SECRET"), tool);
+    await assert.rejects(mcp.call(tool, args), (e: Error) => e instanceof ToolArgsRefusedError && /center を起動した所/.test(e.message) && /web からは変えられない/.test(e.message) && !e.message.includes("SECRET"), tool);
   }
   assert.equal(mock.count("tools/call"), 0);
   await mcp.call("session_settings_update", { name: "a", settings: { instructions: "i", addDirs: ["/x"], outputStyle: "o", servers: [] } });
   await mcp.call("center_settings_update", { settings: { instructions: "i" } });
   assert.equal(mock.count("tools/call"), 2);
   assert.equal(webToolArgsRefusal("rc_list", { settings: { memory: 1 } }), undefined);
-  for (const k of ["mcp", "mcpServers", "coordinator", "mcpConnections", "mcpSecrets"]) {
+  for (const k of ["mcp", "mcpServers", "projectMemory", "coordinator", "mcpConnections", "mcpSecrets"]) {
     for (const v of [{ url: "http://x/?q=SECRETVAL" }, null]) {
       for (const tool of ["session_create", "session_settings_update", "center_settings_update"]) {
         const r = webToolArgsRefusal(tool, { settings: { [k]: v } });

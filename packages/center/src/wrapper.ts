@@ -56,7 +56,7 @@ export const MESSENGER_SERVER_KEY = "bantou-messenger";
 /** --mcp-config 内の外部記憶の entry 名（tool は mcp__memory__*）。 */
 export const MEMORY_SERVER_KEY = "memory";
 
-/** 外部記憶の token を claude の env に渡す変数名（--mcp-config の headers が ${…} で参照する）。 */
+/** 旧版で外部記憶の token を claude の env に渡していた変数名（今は使わない。継承分を消すためだけに残す）。 */
 export const MEMORY_TOKEN_ENV = "BANTOU_MEMORY_TOKEN";
 
 /**
@@ -66,10 +66,10 @@ export const MEMORY_TOKEN_ENV = "BANTOU_MEMORY_TOKEN";
  *   broker は client が自分で解決する（env → config → UDP 発見）ので指名しない。
  * - bantou: token は ${BANTOU_SESSION_TOKEN} のまま（claude が環境変数から展開する）。url が無い時は付けない。
  * - extra: 保存した MCP の接続（共通 + その session の追加。鍵は ${…} の参照だけ）。名前が上の物と重なれば上の物が勝つ。
- * - memory: 外部記憶の設定がある時だけ付ける（type: "http"）。X-Agent-Id は agentId、無ければ session 名。
- *   token がある時だけ Authorization: Bearer ${BANTOU_MEMORY_TOKEN}（実値はファイル・argv に書かず、env で渡す）。
+ * - memory: 外部記憶の設定がある時だけ付ける（mcp-session.ts の memoryEntry が作った entry。普通の MCP の設定の形のまま、
+ *   headers・env の値は ${…} の参照にして実値は env で渡す）。
  */
-export function mcpConfigJson(url: string | null, session: string, memory?: { url: string; token?: string; agentId?: string }, extra: Record<string, unknown> = {}): string {
+export function mcpConfigJson(url: string | null, session: string, memory?: Record<string, unknown>, extra: Record<string, unknown> = {}): string {
   // 保存した接続（mcp-session.ts）。center の組み立てる entry と同じ名前は center の側が勝つ（下で上書きする）
   const mcpServers: Record<string, unknown> = {
     ...extra,
@@ -87,16 +87,7 @@ export function mcpConfigJson(url: string | null, session: string, memory?: { ur
       headers: { Authorization: "Bearer ${BANTOU_SESSION_TOKEN}", "X-Bantou-Session": session },
     };
   }
-  if (memory) {
-    mcpServers[MEMORY_SERVER_KEY] = {
-      type: "http",
-      url: memory.url,
-      headers: {
-        ...(memory.token ? { Authorization: "Bearer ${" + MEMORY_TOKEN_ENV + "}" } : {}),
-        "X-Agent-Id": memory.agentId || session,
-      },
-    };
-  }
+  if (memory) mcpServers[MEMORY_SERVER_KEY] = memory;
   return JSON.stringify({ mcpServers });
 }
 

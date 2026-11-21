@@ -2,6 +2,7 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { LAUNCHER_HEADER, launcherMatches } from "./launcher.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { MIN_TOKEN_LEN } from "./config.js";
@@ -53,6 +54,8 @@ interface Session {
   window: "external" | "session" | "coordinator";
   /** session 窓口の呼び出し元 session 名。 */
   owner?: string;
+  /** 外向けの窓口で、center を起動した所（launcher.ts）が作った MCP session か。 */
+  launcher?: boolean;
   /** 最後にリクエストを受けた／処理が終わった時刻。 */
   lastActive: number;
   /** 処理中のリクエスト数（開きっぱなしの SSE ストリームを含む）。 */
@@ -153,7 +156,10 @@ function readJson(req: IncomingMessage): Promise<unknown> {
  * McpServer は transport を 1 つしか持てないので、MCP session ごとに McpServer と transport を作る。
  */
 export async function startHttpServer(opts: {
-  createServer: () => McpServer;
+  /** /mcp 用の MCP server。launcher = 呼び出し元が center を起動した所（header の鍵が launcherKey と一致。launcher.ts）。 */
+  createServer: (launcher?: boolean) => McpServer;
+  /** center を起動した所の鍵（launcher.ts）。省略時は /mcp の呼び出し元を起動元として扱わない。 */
+  launcherKey?: string;
   /** /mcp/session 用の MCP server。owner = 認証済みの呼び出し元 session 名。省略時は /mcp/session を提供しない。 */
   createSessionServer?: (owner: string) => McpServer;
   /**
@@ -397,12 +403,14 @@ export async function startHttpServer(opts: {
     const hookMatch = opts.onHook && opts.sessionAuth ? HOOK_PATH.exec(path) : null;
     let window: "external" | "session" | "coordinator";
     let owner: string | undefined;
+    let launcher = false;
     if (path === MCP_PATH) {
       window = "external";
       if (!bearerMatches(req.headers.authorization, token)) {
         sendJson(res, 401, { error: "unauthorized" }, { "www-authenticate": "Bearer" });
         return;
       }
+      launcher = launcherMatches(req.headers[LAUNCHER_HEADER], opts.launcherKey);
     } else if (path === SESSION_MCP_PATH && opts.createSessionServer && opts.sessionAuth) {
       window = "session";
       // token はその session 名に発行された現在のものだけ通す（外向け token・他 session の token は 401）
@@ -495,7 +503,8 @@ export async function startHttpServer(opts: {
 
     if (sid) {
       const s = sessions.get(sid);
-      if (!s || s.window !== window || s.owner !== owner) {
+      // 起動元の MCP session は起動元の鍵を付けた呼び出しだけが使える（鍵の無い呼び出しが session id だけで起動元の口を使えない）
+      if (!s || s.window !== window || s.owner !== owner || (s.launcher === true) !== launcher) {
         rpcError(res, 404, "session が存在しない");
         return;
       }
@@ -532,7 +541,7 @@ export async function startHttpServer(opts: {
     }
     pending++;
     try {
-      const server = window === "session" ? opts.createSessionServer!(owner!) : window === "coordinator" ? opts.createCoordinatorServer!(owner!) : opts.createServer();
+      const server = window === "session" ? opts.createSessionServer!(owner!) : window === "coordinator" ? opts.createCoordinatorServer!(owner!) : opts.createServer(launcher);
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         // DNS rebinding 対策: Host（ポート込み）と、Origin があればそれも自分宛のものだけ通す
@@ -540,7 +549,7 @@ export async function startHttpServer(opts: {
           ? { enableDnsRebindingProtection: true, allowedHosts: allowed.hosts, allowedOrigins: allowed.origins }
           : {}),
         onsessioninitialized: (id) => {
-          sessions.set(id, { transport, server, window, ...(owner ? { owner } : {}), lastActive: Date.now(), inflight: 0 });
+          sessions.set(id, { transport, server, window, ...(owner ? { owner } : {}), ...(launcher ? { launcher } : {}), lastActive: Date.now(), inflight: 0 });
           log(`MCP session 開始: ${id} (計 ${sessions.size})`);
         },
       });

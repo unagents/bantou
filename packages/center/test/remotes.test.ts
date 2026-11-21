@@ -2014,7 +2014,8 @@ test("memory: task の送信で task event を session の記憶へ積む", asyn
   assert.equal(sent[0].event.kind, "task");
   assert.equal(sent[0].event.eventId, `c1:pm1:task:${r.task_id}`);
   assert.deepEqual(sent[0].event.recipient, { capId: CAP });
-  assert.deepEqual(sent[0].target, { url: "http://mem/mcp", token: "TKN", agentId: "pm1" });
+  // 旧形式 { url, token } は普通の MCP の設定の形（headers の Authorization: Bearer）に読み替えて送る
+  assert.deepEqual(sent[0].target, { url: "http://mem/mcp", headers: { Authorization: "Bearer TKN" }, agentId: "pm1" });
   memoryEvents.close();
 });
 

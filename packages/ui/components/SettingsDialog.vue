@@ -91,20 +91,26 @@ const commonDirty = computed(() => commonBaseline.value !== null && JSON.stringi
 const commonProblem = computed(() => draftError(remoteOnly.value ? { ...common.value, addDirs: [] } : common.value));
 // The folder dialog picks on this PC: right for the own sidecar, not for a pasted remote center.
 const commonCanPick = computed(() => !!settings.value?.enabled);
+// The extra MCP servers and the external memory: only the place that started the center (the center says so) shows and
+// saves them. A desktop connected to another host's center and the web do not.
+const commonLauncher = ref(false);
 async function loadCommon() {
   commonError.value = null;
   commonBaseline.value = null;
   try {
     const r = await centerCommonSettingsGet();
+    commonLauncher.value = r.launcher === true;
     common.value = draftOf(r.settings);
     commonBaseline.value = { ...common.value, addDirs: [...common.value.addDirs], servers: common.value.servers && [...common.value.servers] };
   } catch (e) {
+    commonLauncher.value = false;
     commonError.value = String(e);
   }
 }
 // Throws on failure (save() names which part failed).
 async function saveCommon() {
-  const body = toCenterUpdate(common.value);
+  // mcpServers / memory go only when changed (hidden, they equal the saved text)
+  const body = toCenterUpdate(common.value, commonBaseline.value ? { base: commonBaseline.value } : {});
   // Not sent while hidden: an item left out is unchanged on the center (null would remove it).
   if (remoteOnly.value) delete body.addDirs;
   const r = await centerCommonSettingsUpdate(body);
@@ -604,10 +610,10 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
         <section class="border-cork-border flex flex-col gap-2 border-t pt-3" data-testid="center-common-section">
           <span class="text-sm font-semibold">全 session 共通の設定</span>
           <p class="text-cork-muted text-xs">
-            つないでいる center が起動する全 session に効く。追加指示は各 session の追加指示の前に、参照フォルダは各 session のものと合わせて渡す。center に保存する
+            つないでいる center が起動する全 session に効く。追加指示は各 session の追加指示の前に、参照フォルダは各 session のものと合わせて渡す。center に保存する{{ commonLauncher ? "。追加の MCP の server と外部記憶は center を起動したこの画面でだけ設定できる" : "" }}
           </p>
           <fieldset :disabled="commonBaseline === null" class="min-w-0">
-            <ProjectSettingsFields v-model="common" id-prefix="center-common" :rows="4" no-servers :can-pick="commonCanPick" :hide-add-dirs="remoteOnly" @error="commonError = $event" />
+            <ProjectSettingsFields v-model="common" id-prefix="center-common" :rows="4" no-servers :can-pick="commonCanPick" :hide-add-dirs="remoteOnly" :center-internal="commonLauncher" @error="commonError = $event" />
           </fieldset>
           <p v-if="commonProblem" class="text-cork-danger-text text-xs" data-testid="center-common-problem">{{ commonProblem }}</p>
           <p v-if="commonError" class="text-cork-danger-text text-xs whitespace-pre-wrap" data-testid="center-common-error">

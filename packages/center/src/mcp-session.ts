@@ -3,12 +3,15 @@
  *
  * - 全 session に共通の接続（common）と、その session だけの追加（sessions[session]）を合成した物（effectiveRaw）が載る。
  *   他の session の追加は載らない。
- * - 鍵の値は --mcp-config・argv・log・status に入れない。headers には `${BANTOU_MCP_SECRET_n}` の参照だけを書き、実値は子の env にだけ渡す。
+ * - 普通の MCP の設定（Claude Code の mcp.json の形。stdio・http・sse など）は書いた項目をそのまま載せる。headers と env の値は
+ *   `${BANTOU_MCP_SECRET_n}` の参照に置き換えて実値は子の env にだけ渡す（claude が展開するので server へ届く値は同じ。argv・log・status に値を出さない）。
+ * - 旧形式（transport: http + auth.env / auth.secret）の鍵の値も同じく env で渡す。
  * - 組み込みの接続（coordinator）は center 自身の口 `/mcp/coordinator` を指す。載るのは割り当てた session だけ。
  * - claude に渡せない設定（toolPrefix・tools.allow・role）の接続は、設定より多く見せてしまうので載せない（名前だけを log に出す）。
  * - 載せない理由は名前と理由の種類だけを返す（値・url・header は出さない）。
  */
-import { BUILTIN_NAMES, effectiveRaw, isBuiltin, validateAny, type BuiltinKind, type ConnectionsData, type McpConnection } from "./mcp-connections.js";
+import { BUILTIN_NAMES, effectiveRaw, isBuiltin, isPlain, validateAny, type BuiltinKind, type ConnectionsData, type McpConnection } from "./mcp-connections.js";
+import { createSecretAlloc, headerOf, isStdioDef, memoryDefOf, toClaudeEntry, type McpServerDef, type SecretAlloc } from "./mcp-server-def.js";
 import type { SecretsStore } from "./mcp-secrets.js";
 import { BANTOU_SERVER_KEY, MEMORY_SERVER_KEY, MESSENGER_SERVER_KEY } from "./wrapper.js";
 
@@ -48,7 +51,8 @@ export function buildSessionMcp(
 ): SessionMcp {
   const out: SessionMcp = { servers: {}, env: {}, allow: [], deny: [], builtins: [], attached: [], skipped: [] };
   const skip = (name: string, reason: string): void => void out.skipped.push({ name, reason });
-  let n = 0;
+  const alloc = createSecretAlloc(MCP_SECRET_ENV_PREFIX);
+  out.env = alloc.env;
   for (const [name, raw] of Object.entries(effectiveRaw(data, session))) {
     if (OWN_KEYS.includes(name)) {
       skip(name, "center の組み立てる名前と重なる");
@@ -60,6 +64,12 @@ export function buildSessionMcp(
       continue;
     }
     const c = v.value;
+    if (isPlain(c)) {
+      out.servers[name] = toClaudeEntry(c, alloc);
+      out.allow.push(`mcp__${name}__*`);
+      out.attached.push(name);
+      continue;
+    }
     if (isBuiltin(c)) {
       if (centerBase === null) {
         skip(name, "center の窓口が無い");
@@ -90,9 +100,8 @@ export function buildSessionMcp(
         skip(name, conn.auth.env !== undefined ? "鍵の環境変数が無い" : "鍵が無い");
         continue;
       }
-      const envName = `${MCP_SECRET_ENV_PREFIX}${n++}`;
-      out.env[envName] = sec;
-      headers[conn.auth.header ?? "Authorization"] = (conn.auth.format ?? "Bearer {secret}").replace("{secret}", () => "${" + envName + "}");
+      const ref = alloc.put(sec);
+      headers[conn.auth.header ?? "Authorization"] = (conn.auth.format ?? "Bearer {secret}").replace("{secret}", () => ref);
     }
     out.servers[name] = { type: "http", url: conn.url, ...(Object.keys(headers).length ? { headers } : {}) };
     out.allow.push(`mcp__${name}__*`);
@@ -119,4 +128,18 @@ export function centerBaseOf(sessionMcpUrl: string | null): string | null {
   } catch {
     return null;
   }
+}
+
+/** 外部記憶の値を渡す env の変数名の接頭（`BANTOU_MEMORY_SECRET_<通し番号>`）。 */
+export const MEMORY_SECRET_ENV_PREFIX = "BANTOU_MEMORY_SECRET_";
+
+/**
+ * 外部記憶（設定の memory。普通の MCP の設定の形）を --mcp-config の `memory` の entry にする。headers・env の値は env へ移す（toClaudeEntry）。
+ * url の server（http・sse など）で `X-Agent-Id` を書いていなければ session 名を足す（外部記憶の agent の既定）。
+ */
+export function memoryEntry(def: McpServerDef, session: string, alloc: SecretAlloc = createSecretAlloc(MEMORY_SECRET_ENV_PREFIX)): { entry: McpServerDef; env: Record<string, string> } {
+  // 旧形式 { url, token, agentId } も読み替える（token を argv に出さない）
+  const d: McpServerDef = { ...(memoryDefOf(def) ?? def) };
+  if (!isStdioDef(d) && headerOf(d.headers, "X-Agent-Id") === undefined) d.headers = { ...((d.headers as Record<string, string> | undefined) ?? {}), "X-Agent-Id": session };
+  return { entry: toClaudeEntry(d, alloc), env: alloc.env };
 }

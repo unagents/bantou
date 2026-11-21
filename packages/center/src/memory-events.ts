@@ -26,7 +26,7 @@ import {
 } from "./memory.js";
 import type { CapResultReply, TaskResultReply, WorkerReportNotice } from "@agent-hand/bantou-protocol";
 import { HOOK_TS_FIELD } from "./session-activity.js";
-import type { MemorySetting } from "./project-settings.js";
+import { expandEnvRefs, headerOf, memoryDefOf, type McpServerDef } from "./mcp-server-def.js";
 import type { Logger } from "./log.js";
 
 export const CENTER_EVENT_NS = "c1";
@@ -61,7 +61,7 @@ const str = (v: unknown): string | undefined => (typeof v === "string" && v.leng
 
 export function createCenterMemoryEvents(opts: {
   /** その session の外部記憶（共通 + session の合成後）。無ければ何もしない。 */
-  memoryOf: (session: string) => MemorySetting | undefined;
+  memoryOf: (session: string) => McpServerDef | undefined;
   log: Logger;
   sink?: MemorySink;
   queue?: MemoryQueue;
@@ -76,15 +76,33 @@ export function createCenterMemoryEvents(opts: {
       label: "memory",
     });
 
+  /** http 以外の外部記憶（stdio・sse など）を書けないと log に出した session（1 度だけ出す）。 */
+  const notHttp = new Set<string>();
   const targetOf = (session: string): MemoryTarget | undefined => {
-    let m: MemorySetting | undefined;
+    let m: McpServerDef | undefined;
     try {
-      m = opts.memoryOf(session);
+      // 旧形式 { url, token, agentId } も読み替える
+      m = memoryDefOf(opts.memoryOf(session));
     } catch {
       return undefined;
     }
     if (!m) return undefined;
-    return { url: m.url, ...(m.token ? { token: m.token } : {}), agentId: m.agentId ?? session };
+    // center が書けるのは MCP Streamable HTTP（type: "http"）の外部記憶だけ。他は session の claude の道具としてだけ載る
+    if (m.type !== "http" || typeof m.url !== "string") {
+      if (!notHttp.has(session)) {
+        notHttp.add(session);
+        opts.log(`memory: 外部記憶の type が http でないので、center からの書き込みはしない（session の道具としては載る）: session=${session}`);
+      }
+      return undefined;
+    }
+    notHttp.delete(session);
+    // ${VAR} は claude と同じく環境変数で展開する（center の環境）
+    const headers: Record<string, string> = {};
+    for (const [k, v] of Object.entries((m.headers as Record<string, unknown> | undefined) ?? {})) {
+      if (typeof v === "string" && k.toLowerCase() !== "x-agent-id") headers[k] = expandEnvRefs(v);
+    }
+    const agent = headerOf(m.headers, "X-Agent-Id");
+    return { url: expandEnvRefs(m.url), headers, agentId: agent !== undefined ? expandEnvRefs(agent) : session };
   };
 
   const push = (session: string, make: () => MemoryEvent | undefined): void => {

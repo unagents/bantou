@@ -114,6 +114,12 @@ export class MockBantou {
   centerSettings: Record<string, Record<string, unknown>> = {};
   /** The center-wide settings (`center_settings_get` / `_update`, merged; `null` removes an item). */
   centerCommonSettings: Record<string, unknown> = {};
+  /**
+   * Whether this desktop is the place that started the center (the center tells it by the launcher key the desktop gives its
+   * sidecar). null: as the Rust side decides it, i.e. the own sidecar is the target (center enabled). Only then the center reads
+   * and writes `memory` / `mcpServers`.
+   */
+  centerLauncher: boolean | null = null;
   /** When set, `center_settings_get` / `center_settings_update` fail with this message (center not reachable). */
   centerCommonSettingsError: string | null = null;
   /** When set, `session_settings_update` fails with this message (center isError / not reachable). */
@@ -279,6 +285,11 @@ export class MockBantou {
     this.emitter("bantou://os-network-changed", null);
   }
 
+  /** The center counts this desktop as its launcher (see `centerLauncher`). */
+  private isLauncher() {
+    return this.centerLauncher ?? this.center.enabled;
+  }
+
   /** Where the mocked desktop would connect: the same rule as `select_target`. */
   private hasCenterTarget() {
     return this.center.enabled || !!this.center.remote;
@@ -439,12 +450,15 @@ export class MockBantou {
         }
         return structuredClone(s);
       }
-      case "session_get_settings":
-        return stripMemory(this.centerSettings[(args.name as string).trim()] ?? {});
+      case "session_get_settings": {
+        const name = (args.name as string).trim();
+        if (this.centerSettings[name]) this.centerSettings[name] = migrateMemory(this.centerSettings[name]);
+        return shownSettings(this.centerSettings[name] ?? {}, this.isLauncher());
+      }
       case "session_update_settings": {
         if (this.centerSettingsUpdateError) throw new Error(this.centerSettingsUpdateError);
         const name = (args.name as string).trim();
-        refuseMemory(args.settings);
+        refuseCenterInternal(args.settings, this.isLauncher());
         const next = { ...(this.centerSettings[name] ?? {}) };
         for (const [k, v] of Object.entries(args.settings as Record<string, unknown>)) {
           if (v === null || v === "") delete next[k];
@@ -452,7 +466,7 @@ export class MockBantou {
         }
         if (Object.keys(next).length) this.centerSettings[name] = next;
         else delete this.centerSettings[name];
-        return stripMemory(next);
+        return shownSettings(next, this.isLauncher());
       }
       case "session_output_start":
         this.outputStarts.push({ session: args.session as string, after: (args.after as number | null) ?? null });
@@ -599,17 +613,18 @@ export class MockBantou {
             return text(this.fetchCenterList());
           case "center_settings_get":
             if (this.centerCommonSettingsError) throw new Error(this.centerCommonSettingsError);
-            return text({ settings: stripMemory(this.centerCommonSettings) });
+            this.centerCommonSettings = migrateMemory(this.centerCommonSettings);
+            return text({ settings: shownSettings(this.centerCommonSettings, this.isLauncher()), launcher: this.isLauncher() });
           case "center_settings_update": {
             if (this.centerCommonSettingsError) throw new Error(this.centerCommonSettingsError);
             const next = { ...this.centerCommonSettings };
-            refuseMemory((args.arguments as { settings: Record<string, unknown> }).settings);
+            refuseCenterInternal((args.arguments as { settings: Record<string, unknown> }).settings, this.isLauncher());
             for (const [k, v] of Object.entries((args.arguments as { settings: Record<string, unknown> }).settings)) {
               if (v === null || v === "") delete next[k];
               else next[k] = v;
             }
             this.centerCommonSettings = next;
-            return text({ settings: stripMemory(next) });
+            return text({ settings: shownSettings(next, this.isLauncher()), launcher: this.isLauncher() });
           }
           case "session_create":
             return text(this.createCenterSession((args.arguments as { name: string }).name));
@@ -700,19 +715,34 @@ export class MockBantou {
 /** This machine's addresses as `center_local_ips` returns them (IPv4 first, then IPv6). */
 /** Default IP as the backend picks it: first external IPv4 (private/LAN first), else 127.0.0.1. */
 /**
- * The center's `memory` handling: the center refuses an update that carries `memory`, and never returns it. A test may put a
- * `memory` into the stored settings by hand (the center's own file): a save that does not send it leaves it as it is.
+ * The center's `memory` / `mcpServers` handling: only the place that started the center (launcher) writes and reads them; an
+ * update from anyone else that carries one is refused, and they are left out of what others read. A test may put them into
+ * the stored settings by hand (the center's own file): a save that does not send them leaves them as they are.
  */
-function refuseMemory(settings: unknown): void {
-  if (typeof settings === "object" && settings !== null && "memory" in settings) {
-    throw new Error("外部記憶（memory）の設定は MCP からは変えられない（url・token・agentId は center の側だけで扱う）");
+function refuseCenterInternal(settings: unknown, launcher: boolean): void {
+  if (launcher || typeof settings !== "object" || settings === null) return;
+  if ("memory" in settings || "mcpServers" in settings) {
+    throw new Error("外部記憶（memory）と追加の MCP の server（mcpServers）は、center を起動した所（sidecar の center を動かしている desktop の設定の画面）でだけ変えられる。別 host の center に繋いでいる desktop・web からは変えられない");
   }
 }
 
-function stripMemory(settings: Record<string, unknown>): Record<string, unknown> {
+function shownSettings(settings: Record<string, unknown>, launcher: boolean): Record<string, unknown> {
   const out = structuredClone(settings);
-  delete out.memory;
+  if (!launcher) {
+    delete out.memory;
+    delete out.mcpServers;
+  }
   return out;
+}
+
+/** The center's migration of the old memory form `{ url, token?, agentId? }` to an MCP server entry (done when it starts). */
+function migrateMemory(settings: Record<string, unknown>): Record<string, unknown> {
+  const m = settings.memory as Record<string, unknown> | undefined;
+  if (!m || typeof m !== "object" || m.type !== undefined || m.command !== undefined || typeof m.url !== "string") return settings;
+  const headers: Record<string, string> = {};
+  if (typeof m.token === "string" && m.token) headers.Authorization = `Bearer ${m.token}`;
+  if (typeof m.agentId === "string" && m.agentId) headers["X-Agent-Id"] = m.agentId;
+  return { ...settings, memory: { type: "http", url: m.url, ...(Object.keys(headers).length ? { headers } : {}) } };
 }
 
 function defaultIp(ips: string[]): string {
