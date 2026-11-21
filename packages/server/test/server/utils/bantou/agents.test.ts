@@ -109,7 +109,9 @@ test("agents: server を起動した npx の npm_config_package などは claude
       f.config.session.env = { npm_config_yes: "false" };
       const m = mgr(f, async () => ok("r"));
       await m.invoke("cap", "c1", { prompt: "p" });
-      await m.invoke("worker", "w1", { prompt: "p" });
+      // task ごとの指揮（lane）と、その task の worker も同じ
+      await m.invoke("cap", "c1", { prompt: "p", taskId: "t-1" });
+      await m.invoke("worker", "w1", { prompt: "p", taskId: "t-1" });
       for (const call of f.calls) {
         const env = call.env ?? {};
         for (const k of ["npm_config_package", "npm_lifecycle_event", "npm_lifecycle_script", "npm_execpath", "npm_command"]) {
@@ -119,7 +121,8 @@ test("agents: server を起動した npx の npm_config_package などは claude
         assert.equal(env.npm_config_yes, "false", "session.env で明示した物は渡す");
         assert.equal(env.HOME, saved.HOME);
       }
-      assert.equal(f.calls.length, 2);
+      assert.equal(f.calls.length, 3);
+      assert.ok(f.calls[1].logFile?.includes("/logs/tasks/t-1/"), "2 つ目は lane の run");
       // server 自身の env（自動更新の npx が使う）は変えない
       for (const [k, v] of Object.entries(leaked)) assert.equal(process.env[k], v);
     });

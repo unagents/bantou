@@ -308,6 +308,8 @@ export interface UpdateWaitRun {
   id: string;
   /** The owner cap of a worker. */
   cap_id?: string;
+  /** The task of a cap run (its own conductor run) or of a worker. Additive. */
+  task_id?: string;
   /** ISO 8601, when this run started. */
   started_at?: string;
   /**
@@ -561,6 +563,36 @@ export interface AgentStatus {
   model?: string | null;
   /** Conversation size / health (additive; absent on servers that do not send it). */
   conversation?: ConversationInfo;
+  /**
+   * cap only: the tasks of this cap the server knows (waiting, running, and recently finished ones). Additive (not in the
+   * registered definition; agent_status allows additional properties); absent from a server that runs the tasks of a cap one by one.
+   */
+  tasks?: CapTaskInfo[];
+}
+
+/**
+ * State of one `task` of a cap. waiting = not started (see waiting_for); running = its own conductor run of the cap, or
+ * a worker it started, is still going; done / failed = finished (failed: the last conductor run failed, it was stopped, or
+ * the worker-exit resume limit was hit). A reader must accept other strings (a later server may add states).
+ */
+export type CapTaskState = "waiting" | "running" | "done" | "failed";
+
+/** One task of a cap (AgentStatus.tasks / the cap's AgentActivity.tasks). */
+export interface CapTaskInfo {
+  task_id: string;
+  state: CapTaskState;
+  /** `deliverables.branch` of the task. Tasks of a cap with the same branch run one after another. */
+  branch?: string;
+  /** waiting only. limit = the cap already runs as many tasks as the server allows at once; branch = an earlier task with the same branch has not finished. */
+  waiting_for?: "limit" | "branch";
+  /** ISO 8601, when the server received the task. */
+  queued_at: string;
+  /** ISO 8601, when its conductor run started (null while waiting). */
+  started_at: string | null;
+  /** ISO 8601, when it finished (null until then). */
+  finished_at: string | null;
+  /** Why it failed (at most 200 chars). */
+  error?: string;
 }
 
 /**
@@ -660,6 +692,10 @@ export interface AgentActivity {
   error?: string;
   /** Model the agent runs with (`--model`); null / absent = none given. Servers older than 1.4.0 omit it. */
   model?: string | null;
+  /** worker only: the task (task_id) whose conductor run started this worker. Additive; absent for a worker of a kick_cap. */
+  task_id?: string;
+  /** cap only: the cap's tasks (same as AgentStatus.tasks). Additive. */
+  tasks?: CapTaskInfo[];
 }
 
 /** Notice from server to center (not a reply: it is never matched with a pending command). */
@@ -824,6 +860,7 @@ function isUpdateWaitRun(v: unknown): v is UpdateWaitRun {
     (v.kind === "cap" || v.kind === "worker") &&
     typeof v.id === "string" &&
     (v.cap_id === undefined || typeof v.cap_id === "string") &&
+    (v.task_id === undefined || typeof v.task_id === "string") &&
     (v.started_at === undefined || typeof v.started_at === "string") &&
     // 未知の phase（後の版で足したもの）も受け入れる。厳しく見ると hello_result / update_result / error 全体を捨ててしまう
     typeof v.phase === "string"
@@ -988,7 +1025,27 @@ function isAgentStatus(v: unknown): v is AgentStatus {
     typeof v.retries === "number" &&
     typeof v.queued === "number" &&
     (v.model === undefined || strOrNull(v.model)) &&
-    (v.conversation === undefined || isConversationInfo(v.conversation))
+    (v.conversation === undefined || isConversationInfo(v.conversation)) &&
+    (v.tasks === undefined || isCapTaskList(v.tasks))
+  );
+}
+
+/** CapTaskInfo の並び。state / waiting_for は後の版で足されうるので文字列なら受ける。 */
+function isCapTaskList(v: unknown): v is CapTaskInfo[] {
+  return (
+    Array.isArray(v) &&
+    v.every(
+      (t) =>
+        isRecord(t) &&
+        isValidAgentId(t.task_id) &&
+        typeof t.state === "string" &&
+        optString(t.branch) &&
+        optString(t.waiting_for) &&
+        typeof t.queued_at === "string" &&
+        strOrNull(t.started_at) &&
+        strOrNull(t.finished_at) &&
+        optString(t.error)
+    )
   );
 }
 
@@ -1164,7 +1221,9 @@ function isAgentActivity(v: unknown): v is AgentActivity {
     strOrNull(v.started_at) &&
     strOrNull(v.finished_at) &&
     optString(v.error) &&
-    (v.model === undefined || strOrNull(v.model))
+    (v.model === undefined || strOrNull(v.model)) &&
+    (v.task_id === undefined || isValidAgentId(v.task_id)) &&
+    (v.tasks === undefined || isCapTaskList(v.tasks))
   );
 }
 

@@ -14,6 +14,8 @@ export interface WorkerCleanerDeps {
   keepMs: number;
   /** 全 agent の activity（tracker.snapshot）。 */
   snapshot: () => AgentActivity[];
+  /** task の lane の指揮の activity（tracker.capEntry）。task の worker は、cap 全体でなく自分の task の指揮が動いているかで見る。 */
+  capEntry?: (capId: string, taskId: string) => AgentActivity | undefined;
   /** manager が worker を invoke 中（待ち含む）か。 */
   isActive: (workerId: string) => boolean;
   /** 掃除した worker を activity から外す（tracker.forget）。 */
@@ -129,8 +131,9 @@ export function createWorkerCleaner(deps: WorkerCleanerDeps): WorkerCleaner {
     for (const w of all) {
       if (w.kind !== "worker" || !isValidAgentId(w.id) || cleaning.has(w.id)) continue;
       if (!isFinishedForCleanup(w) || deps.isActive(w.id)) continue;
-      const cap = caps.get(w.cap_id);
-      // cap の turn が続いている間は、worker を再開する指示が来うる
+      const lane = w.task_id !== undefined ? deps.capEntry?.(w.cap_id, w.task_id) : undefined;
+      const cap = lane ?? caps.get(w.cap_id);
+      // cap（task の worker はその task の指揮）の turn が続いている間は、worker を再開する指示が来うる
       if (cap !== undefined && isLive(cap.state)) continue;
       const base = Math.max(ms(w.finished_at), cap ? ms(cap.finished_at) : 0, touched.get(w.id) ?? 0);
       if (now() - base < deps.keepMs) continue;

@@ -6,7 +6,7 @@ import { isValidAgentId, type AgentActivity } from "@agent-hand/bantou-protocol"
 import type { AgentManager } from "./agents";
 import type { ActivityTracker } from "./activity";
 import type { WorkerCleaner } from "./cleanup";
-import { agentDir, runLogDir } from "./paths";
+import { agentDir, laneDir, runLogDir } from "./paths";
 import { readState } from "./state";
 import { assertModel, readModelRecord, type WithModel } from "./model";
 
@@ -19,10 +19,15 @@ export interface WorkerStartInput {
   model?: string;
 }
 
+/**
+ * taskId = 呼び出し元の指揮が受け持つ task（mcp の x-bantou-task-id）。指揮の run が task の lane なら付く。
+ * start: 新しい worker はその task のものになる。既存の worker は、別の task（まだ動いている）のものなら断る。
+ * status: worker_id を省くと、その task の worker だけを返す。stop: 別の task（まだ動いている）の worker は断る。
+ */
 export interface WorkerHub {
-  start(capId: string, input: WorkerStartInput): Promise<{ worker_id: string; accepted: true }>;
-  status(capId: string, workerId?: string): Promise<{ workers: Array<WithModel<AgentActivity>> }>;
-  stop(capId: string, workerId: string): Promise<{ worker_id: string; stopped: boolean }>;
+  start(capId: string, input: WorkerStartInput, taskId?: string): Promise<{ worker_id: string; accepted: true }>;
+  status(capId: string, workerId?: string, taskId?: string): Promise<{ workers: Array<WithModel<AgentActivity>> }>;
+  stop(capId: string, workerId: string, taskId?: string): Promise<{ worker_id: string; stopped: boolean }>;
 }
 
 export interface WorkerHubDeps {
@@ -34,25 +39,43 @@ export interface WorkerHubDeps {
   cleaner?: Pick<WorkerCleaner, "begin">;
   /** worker_id の採番（テスト用）。 */
   newId?: () => string;
+  /** その cap の task が待ちか実行中か（別の task の worker を触らせない判定）。省略時は常に false（task をまたいで触れる）。 */
+  taskActive?: (capId: string, taskId: string) => boolean;
 }
 
 /** 持ち主の記録先。state.json は agents.ts が丸ごと書き換えるので別ファイルにする（center.json と同じ流儀）。 */
 const ownerFile = (workerDir: string): string => join(runLogDir(workerDir), "owner.json");
 
-export async function readOwner(workspace: string, workerId: string): Promise<string | undefined> {
+/** 持ち主の記録。task_id = その worker を起動した task（cap の task の lane。kick_cap の worker・旧形式は無い）。 */
+export interface OwnerRecord {
+  capId: string;
+  taskId?: string;
+}
+
+export async function readOwnerRecord(workspace: string, workerId: string): Promise<OwnerRecord | undefined> {
   try {
-    const d = JSON.parse(await readFile(ownerFile(agentDir(workspace, "worker", workerId)), "utf8")) as { cap_id?: unknown };
-    return typeof d.cap_id === "string" && d.cap_id !== "" ? d.cap_id : undefined;
+    const d = JSON.parse(await readFile(ownerFile(agentDir(workspace, "worker", workerId)), "utf8")) as { cap_id?: unknown; task_id?: unknown };
+    if (typeof d.cap_id !== "string" || d.cap_id === "") return undefined;
+    return { capId: d.cap_id, ...(isValidAgentId(d.task_id) ? { taskId: d.task_id } : {}) };
   } catch {
     return undefined;
   }
 }
 
-/** 持ち主を記録する（冪等）。 */
-export async function writeOwner(workspace: string, workerId: string, capId: string): Promise<void> {
+export async function readOwner(workspace: string, workerId: string): Promise<string | undefined> {
+  return (await readOwnerRecord(workspace, workerId))?.capId;
+}
+
+/** worker を起動した task（無ければ undefined）。 */
+export async function readOwnerTask(workspace: string, workerId: string): Promise<string | undefined> {
+  return (await readOwnerRecord(workspace, workerId))?.taskId;
+}
+
+/** 持ち主を記録する（冪等）。taskId を省くと task 無し（kick_cap の worker）として書く。 */
+export async function writeOwner(workspace: string, workerId: string, capId: string, taskId?: string): Promise<void> {
   const dir = agentDir(workspace, "worker", workerId);
   await mkdir(runLogDir(dir), { recursive: true });
-  await writeFile(ownerFile(dir), JSON.stringify({ cap_id: capId }) + "\n");
+  await writeFile(ownerFile(dir), JSON.stringify({ cap_id: capId, ...(taskId !== undefined ? { task_id: taskId } : {}) }) + "\n");
 }
 
 const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
@@ -87,24 +110,39 @@ export function createWorkerHub(deps: WorkerHubDeps): WorkerHub {
     }
   }
 
-  async function start(capId: string, input: WorkerStartInput): Promise<{ worker_id: string; accepted: true }> {
+  /** 別の task（まだ動いている）の worker なら投げる。 */
+  function guardTask(capId: string, workerId: string, owner: OwnerRecord | undefined, taskId: string | undefined): void {
+    if (taskId === undefined || owner?.taskId === undefined || owner.taskId === taskId) return;
+    if (deps.taskActive?.(capId, owner.taskId) === true) throw new Error(`別の task（${owner.taskId}）の worker: ${workerId}`);
+  }
+
+  async function start(capId: string, input: WorkerStartInput, taskId?: string): Promise<{ worker_id: string; accepted: true }> {
     await requireCap(capId);
+    if (taskId !== undefined && !isValidAgentId(taskId)) throw new Error(`task_id が不正: ${taskId}`);
     const workerId = input.worker_id ?? newId();
     if (!isValidAgentId(workerId)) throw new Error(`worker_id が不正: ${workerId}`);
     if (typeof input.prompt !== "string" || input.prompt === "" || input.prompt.includes("\0")) {
       throw new Error("prompt は空でない文字列（NUL 不可）");
     }
     if (input.model !== undefined) assertModel(input.model, "model");
-    const owner = await readOwner(workspace, workerId);
+    const ownerRec = await readOwnerRecord(workspace, workerId);
+    const owner = ownerRec?.capId;
     if (owner !== undefined && owner !== capId) throw new Error(`別の cap の worker: ${workerId}`);
+    guardTask(capId, workerId, ownerRec, taskId);
+    // worker の task: 呼び出し元の task。無ければ（center の worker_reply・kick_cap の指揮）これまでの task のまま
+    const lane = taskId ?? ownerRec?.taskId;
     // 掃除中ならその完了を待つ（dir が消えた後は clone し直しで起動する）。持ち主の確認の後（他の cap が掃除を妨げられない）
     await deps.cleaner?.begin(workerId);
     const dir = agentDir(workspace, "worker", workerId);
     // repo 付きの初回は clone 先が存在してはいけないので、持ち主の記録は clone の後（runExtras）に任せる
-    if (!(input.repo && !(await exists(dir)))) await writeOwner(workspace, workerId, capId);
-    // 指定が無ければ cap の worker_model（manager が worker の前回記録を優先して使う）
-    const capModel = input.model === undefined ? (await readModelRecord(agentDir(workspace, "cap", capId))).worker_model : undefined;
-    log(`worker_start: cap_id=${capId} worker_id=${workerId} prompt=${oneLine(input.prompt, 80)}`);
+    if (!(input.repo && !(await exists(dir)))) await writeOwner(workspace, workerId, capId, lane);
+    // 指定が無ければ task の worker_model、無ければ cap の worker_model（manager が worker の前回記録を優先して使う）
+    let capModel: string | undefined;
+    if (input.model === undefined) {
+      if (lane !== undefined) capModel = (await readModelRecord(laneDir(workspace, capId, lane))).worker_model;
+      capModel ??= (await readModelRecord(agentDir(workspace, "cap", capId))).worker_model;
+    }
+    log(`worker_start: cap_id=${capId}${lane !== undefined ? ` task_id=${lane}` : ""} worker_id=${workerId} prompt=${oneLine(input.prompt, 80)}`);
     // 完了は待たない。失敗は activity と state.json に出る
     deps.manager
       .invoke("worker", workerId, {
@@ -115,6 +153,7 @@ export function createWorkerHub(deps: WorkerHubDeps): WorkerHub {
         ...(capModel !== undefined ? { defaultModel: capModel } : {}),
         reason: `worker_start from cap ${capId}`,
         capId,
+        ...(lane !== undefined ? { taskId: lane } : {}),
       })
       .then(
         (r) => log(`worker 終了: worker_id=${workerId} ok=${r.ok}`),
@@ -124,7 +163,7 @@ export function createWorkerHub(deps: WorkerHubDeps): WorkerHub {
   }
 
   /** tracker に無い worker（server 再起動前のもの等）を state.json から補う。 */
-  async function fromState(capId: string, workerId: string): Promise<WithModel<AgentActivity> | undefined> {
+  async function fromState(capId: string, workerId: string, taskId?: string): Promise<WithModel<AgentActivity> | undefined> {
     const dir = agentDir(workspace, "worker", workerId);
     const st = await readState(dir).catch(() => null);
     if (st === null) return undefined;
@@ -143,19 +182,26 @@ export function createWorkerHub(deps: WorkerHubDeps): WorkerHub {
       silent_ms: base ? Math.max(0, Date.now() - Date.parse(base)) : 0,
       started_at: st.last_started_at,
       finished_at: st.state === "running" ? null : st.last_finished_at,
+      ...(taskId !== undefined ? { task_id: taskId } : {}),
     };
     if (st.last_error !== undefined && state === "failed") a.error = oneLine(st.last_error, 200);
     return a;
   }
 
-  async function status(capId: string, workerId?: string): Promise<{ workers: Array<WithModel<AgentActivity>> }> {
+  async function status(capId: string, workerId?: string, taskId?: string): Promise<{ workers: Array<WithModel<AgentActivity>> }> {
     await requireCap(capId);
     if (workerId !== undefined) {
       if (!isValidAgentId(workerId)) throw new Error(`worker_id が不正: ${workerId}`);
       await requireOwned(capId, workerId);
     }
-    const tracked = deps.activity.snapshot(capId).filter((a) => a.kind === "worker" && (workerId === undefined || a.id === workerId));
-    const seen = new Set(tracked.map((a) => a.id));
+    // task の指揮が worker_id を省いた時は、その task の worker だけ
+    const onlyTask = workerId === undefined ? taskId : undefined;
+    const tracked0 = deps.activity.snapshot(capId).filter((a) => a.kind === "worker" && (workerId === undefined || a.id === workerId));
+    const tracked: typeof tracked0 = [];
+    for (const a of tracked0) {
+      if (onlyTask === undefined || (a.task_id ?? (await readOwnerTask(workspace, a.id))) === onlyTask) tracked.push(a);
+    }
+    const seen = new Set(tracked0.map((a) => a.id));
     const ids: string[] = [];
     if (workerId !== undefined) ids.push(workerId);
     else {
@@ -170,17 +216,20 @@ export function createWorkerHub(deps: WorkerHubDeps): WorkerHub {
     const extra: Array<WithModel<AgentActivity>> = [];
     for (const id of ids.sort()) {
       if (seen.has(id)) continue;
-      if ((await readOwner(workspace, id)) !== capId) continue;
-      const a = await fromState(capId, id);
+      const rec = await readOwnerRecord(workspace, id);
+      if (rec?.capId !== capId) continue;
+      if (onlyTask !== undefined && rec.taskId !== onlyTask) continue;
+      const a = await fromState(capId, id, rec.taskId);
       if (a) extra.push(a);
     }
     return { workers: [...tracked, ...extra].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)) };
   }
 
-  async function stop(capId: string, workerId: string): Promise<{ worker_id: string; stopped: boolean }> {
+  async function stop(capId: string, workerId: string, taskId?: string): Promise<{ worker_id: string; stopped: boolean }> {
     await requireCap(capId);
     if (!isValidAgentId(workerId)) throw new Error(`worker_id が不正: ${workerId}`);
     await requireOwned(capId, workerId);
+    guardTask(capId, workerId, await readOwnerRecord(workspace, workerId), taskId);
     const r = await deps.manager.stop("worker", workerId);
     log(`worker_stop: cap_id=${capId} worker_id=${workerId} stopped=${r.stopped}`);
     return { worker_id: workerId, stopped: r.stopped };

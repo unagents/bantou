@@ -93,6 +93,7 @@ center から server を外す指示（protocol 1.8.0、`docs/protocol.md` の `
 | `session.extraArgs` | 任意 | `[]` | `--` の前にそのまま付ける追加引数。文字列の配列。`--settings` の後ろに並ぶため、同じ指定が重なれば extraArgs が後勝ち |
 | `session.capBashSandbox` | 任意 | `false` | cap の `claude -p` の Bash sandbox。`false` は `--settings {"sandbox":{"enabled":false}}` を付けて切る（新規・resume とも）。`true` は付けず claude の設定のまま（sandbox が有効だと worker が cap の終了で消える）。真偽値 |
 | `session.workerKeepMs` | 任意 | `1800000`（30 分） | 終わった worker の dir を掃除するまでの待ち時間。0 以上の整数。0 は掃除しない（下記「終わった worker の掃除」） |
+| `session.maxParallelTasks` | 任意 | `2` | 1 つの cap で同時に動かす task の上限。1 以上の整数。1 は従来どおり 1 つずつ。超えた分と、先の task と同じ `deliverables.branch` の task は、前の task が終わるまで待つ（`docs/design/cap-orchestration.md`「task の並行」） |
 | `session.env` | 任意 | `{}` | spawn する claude に追加で渡す環境変数。文字列値のオブジェクト。bantou-server 自身の環境変数に上書きで合成する |
 | `extraMcp` | 任意 | `{}` | cap / worker に追加で載せる手元の stdio MCP の道具。`{ "<name>": { "command", "args", "env", "targets" } }`（下記「追加の MCP（extraMcp）」） |
 | `update.spec` | 任意 | `"bantou@{version}"` | 自己更新の取得元。`{version}` を更新先の版に置き換えて npx の `--package` に渡す。`{version}` 必須、`-` で始められない。テストでは `file:/path/bantou-{version}.tgz` で npm 未公開の tarball を指せる。本番は指定しない |
@@ -102,7 +103,7 @@ center から server を外す指示（protocol 1.8.0、`docs/protocol.md` の `
 - LAN に公開するには `broker.bind`（例 `0.0.0.0`）を明示する。その場合は `broker.token` の設定を推奨する。
 - 例: 204 の claudeAgent ユーザーは `"env": { "CLAUDE_CONFIG_DIR": "/home/vagrant/.claude-agent" }` を指定する。
 - 旧 `session.command` は廃止。残っていると起動時にエラーになる。`session.claude` を使う。
-- cap / worker の claude（とその子の extraMcp の道具・worker が叩く npx）には、server を起動した npx が自分の起動のために入れた変数を渡さない（`server/utils/bantou/child-env.ts`）。外すのは何を実行するか・どの npm が実行したかを表す物（`npm_config_package` / `call` / `yes` / `workspace` / `workspaces` / `include_workspace_root` / `user_agent` / `npm_version` / `node_gyp` / `global_prefix` / `local_prefix`、`npm_command` / `npm_execpath` / `npm_node_execpath` / `npm_lifecycle_*` / `npm_package_*`）。残すと子の `npx -y <pkg>@<版> ...` が `npm_config_package` を `--package` として読み、`<pkg>@<版>` をコマンドとして探して失敗する。registry（scope 別を含む）・認証・proxy・userconfig・cache・prefix など取得元と取得の仕方の設定、npm_ で始まらない変数は残す。`session.env` に書いた物はそのまま渡す。server 自身の env は変えない（自動更新の npx は従来どおり）。
+- cap（本体と task ごとの lane）/ worker の claude（とその子の extraMcp の道具・worker が叩く npx）には、server を起動した npx が自分の起動のために入れた変数を渡さない（`server/utils/bantou/child-env.ts`）。外すのは何を実行するか・どの npm が実行したかを表す物（`npm_config_package` / `call` / `yes` / `workspace` / `workspaces` / `include_workspace_root` / `user_agent` / `npm_version` / `node_gyp` / `global_prefix` / `local_prefix`、`npm_command` / `npm_execpath` / `npm_node_execpath` / `npm_lifecycle_*` / `npm_package_*`）。残すと子の `npx -y <pkg>@<版> ...` が `npm_config_package` を `--package` として読み、`<pkg>@<版>` をコマンドとして探して失敗する。registry（scope 別を含む）・認証・proxy・userconfig・cache・prefix など取得元と取得の仕方の設定、npm_ で始まらない変数は残す。`session.env` に書いた物はそのまま渡す。server 自身の env は変えない（自動更新の npx は従来どおり）。
 
 ### 追加の MCP（extraMcp）
 

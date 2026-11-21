@@ -1,5 +1,5 @@
 /**
- * cap / worker の claude に渡す env から、npx / npm が自分の起動のために入れた変数を外す。
+ * cap（本体と task ごとの lane）/ worker の claude に渡す env から、npx / npm が自分の起動のために入れた変数を外す。
  *
  * server は npx（`npx -y bantou@latest`、supervisor は `npx -y --package=<spec> -- bantou ...`）で起動されるので、
  * env に npm_config_package / npm_config_yes / npm_lifecycle_* などが入っている。これが claude とその子
