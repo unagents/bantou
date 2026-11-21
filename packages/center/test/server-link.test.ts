@@ -1188,3 +1188,23 @@ test("門: version_mismatch の error の文に、setVersionNote の更新の状
   assert.equal(link.gate(peer, "hello"), undefined, "制御メッセージは断らない");
   await link.close();
 });
+
+test("notifyPeer: exclude に入れた id（起床前から居た古い同名 peer）は宛先から外す。新しい peer が現れるまでは ok:false（古い peer へ送って消えない）", async () => {
+  const { link, clients } = setupDiscovery({}, [peerOf("srv", "bantou-server"), { id: "old-1", name: "pm1", registered_at: "2026-11-03T05:00:00.000Z" }]);
+  const r1 = await link.notifyPeer("pm1", "hello", { exclude: new Set(["old-1"]) });
+  assert.equal(r1.ok, false);
+  assert.deepEqual(clients[0].sentRaw, []);
+  assert.deepEqual(await link.peerIdsOf("pm1"), ["old-1"]);
+  await link.close();
+});
+
+test("notifyPeer: exclude があっても、それ以外の（新しい）peer へは送る", async () => {
+  const { link, clients } = setupDiscovery({}, [
+    peerOf("srv", "bantou-server"),
+    { id: "old-1", name: "pm1", registered_at: "2026-11-03T05:00:30.000Z" },
+    { id: "new-1", name: "pm1", registered_at: "2026-11-03T05:00:00.000Z" },
+  ]);
+  const r = await link.notifyPeer("pm1", "hello", { exclude: new Set(["old-1"]) });
+  assert.deepEqual(r, { ok: true, to: "new-1" });
+  await link.close();
+});

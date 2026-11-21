@@ -171,7 +171,9 @@ export interface ServerLink {
    * name の名前を持つ messenger peer（owner の session）へ text を push で送る。
    * peer が見つからない・送れない時は ok:false と理由を返す（投げない）。bantou protocol の指示ではないので版の門は通らない。
    */
-  notifyPeer(name: string, text: string): Promise<{ ok: true; to: string } | { ok: false; reason: string }>;
+  notifyPeer(name: string, text: string, opts?: { exclude?: ReadonlySet<string> }): Promise<{ ok: true; to: string } | { ok: false; reason: string }>;
+  /** 今 messenger にいる name の peer の id（自分以外）。失敗は null。起床前の古い登録を、起床後の宛先から外す（exclude）ために控える。 */
+  peerIdsOf(name: string): Promise<string[] | null>;
   /** 送る前の門（protocol の版と更新待ち）。断るなら error 返信、通すなら undefined。 */
   gate(peer: ServerPeer, command: ServerCommandType): ErrorReply | undefined;
   /** 追加の門（更新待ちの判定）を差し込む。protocol の版の門はこの前に常に効く。 */
@@ -884,7 +886,17 @@ export function createServerLink(opts: {
       request<HelloResultReply>(discoveryName, "hello_result", peer.id, {}, { target: peerTarget(peer), timeoutMs: FOLLOW_TIMEOUT_MS }),
     updateServer: (peer, version) =>
       request<UpdateResultReply>(discoveryName, "update_result", peer.id, { version }, { target: peerTarget(peer), timeoutMs: FOLLOW_TIMEOUT_MS }),
-    async notifyPeer(name, text) {
+    async peerIdsOf(name) {
+      try {
+        const client = await ensure(slotOf(discoveryName));
+        if (!client.listPeers) return null;
+        const own = client.peer?.id ?? null;
+        return (await client.listPeers("all")).filter((p) => p.name === name && p.id !== own).map((p) => p.id);
+      } catch {
+        return null;
+      }
+    },
+    async notifyPeer(name, text, opts) {
       let client: LinkClient;
       try {
         client = await ensure(slotOf(discoveryName));
@@ -894,8 +906,8 @@ export function createServerLink(opts: {
       if (!client.listPeers) return { ok: false, reason: "broker が peer の列挙に対応していない" };
       try {
         const own = client.peer?.id ?? null;
-        const hits = (await client.listPeers("all")).filter((p) => p.name === name && p.id !== own);
-        if (hits.length === 0) return { ok: false, reason: `messenger に peer ${name} がいない（session が agent-messenger につながっていない）` };
+        const hits = (await client.listPeers("all")).filter((p) => p.name === name && p.id !== own && !opts?.exclude?.has(p.id));
+        if (hits.length === 0) return { ok: false, reason: `messenger に peer ${name} がいない（session が agent-messenger につながっていない${opts?.exclude?.size ? `。除外した古い登録 ${opts.exclude.size} 件` : ""}）` };
         // session の再起動直後は、止まった client の古い登録が heartbeat 失効（60 秒）まで残り同名が並ぶ。最後に登録した peer を選ぶ
         hits.sort((a, b) => (b.registered_at ?? "").localeCompare(a.registered_at ?? ""));
         if (hits.length > 1) log(`通知先の peer が複数: name=${name} ${hits.map((p) => p.id).join(",")} -> ${hits[0].id}（最新の登録）`);

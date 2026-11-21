@@ -35,7 +35,12 @@ export function createSleepGate(opts: {
   /** session を起こす（SessionManager.wake。resume）。 */
   wake: (name: string) => Promise<unknown>;
   /** 起きた session の claude の peer へ text を push で渡す（link.notifyPeer）。 */
-  deliver: (name: string, text: string) => Promise<{ ok: boolean; reason?: string }>;
+  deliver: (name: string, text: string, exclude?: ReadonlySet<string>) => Promise<{ ok: boolean; reason?: string }>;
+  /**
+   * 今 messenger にいるその session の peer の id（失敗は null）。起こす前に控え、起きた後の宛先から外す。
+   * 眠らせた claude の登録は broker に最大約 60 秒残る。外さないと、起床直後の送りが新しい claude の登録前に古い peer へ届き（ok になり）消える。
+   */
+  peerIds?: (name: string) => Promise<string[] | null>;
   /** 起こせなかった後、まだ眠っているか（眠っているなら身代わりを置き直す）。省略時は置き直さない。 */
   isSleeping?: (name: string) => boolean;
   /** session 名 → messenger の peer 名（capSessionName）。 */
@@ -66,12 +71,12 @@ export function createSleepGate(opts: {
     if (c) await c.close().catch(() => {});
   };
 
-  const deliverAll = async (slot: Slot, messages: LinkInbound[]): Promise<void> => {
+  const deliverAll = async (slot: Slot, messages: LinkInbound[], exclude?: ReadonlySet<string>): Promise<void> => {
     for (const m of messages) {
       const deadline = Date.now() + deliverTimeoutMs;
       let last = "";
       for (;;) {
-        const r = await opts.deliver(slot.name, textOf(m));
+        const r = await opts.deliver(slot.name, textOf(m), exclude);
         if (r.ok) break;
         last = r.reason ?? "";
         if (Date.now() >= deadline || closed) {
@@ -97,11 +102,17 @@ export function createSleepGate(opts: {
         // 身代わりを先に外す（外さないと、起きた claude の peer と同名が並ぶ）
         await release(slot);
         slots.delete(slot.name);
+        const before = new Set((await opts.peerIds?.(slot.name)) ?? []);
         await opts.wake(slot.name);
-        await deliverAll(slot, slot.pending.splice(0));
+        await deliverAll(slot, slot.pending.splice(0), before);
       } catch (e) {
         log(`スリープ中の session を起こせなかった: session=${slot.name} ${e instanceof Error ? e.message : String(e)}`);
-        if (opts.isSleeping?.(slot.name)) gate.sync(slot.name, true);
+        if (opts.isSleeping?.(slot.name)) {
+          // 溜まった message は捨てず、置き直した身代わりへ引き継ぐ（次に起きた時に渡す）
+          const kept = slot.pending.splice(0);
+          gate.sync(slot.name, true);
+          slots.get(slot.name)?.pending.unshift(...kept);
+        }
       }
     })();
   };
@@ -135,7 +146,14 @@ export function createSleepGate(opts: {
       if (!sleeping) {
         if (cur && !cur.waking) {
           slots.delete(name);
-          void release(cur);
+          // 他の経路（desktop で開く・wake）で起きる時、身代わりが預かっていた message があれば起きた claude へ渡す
+          const kept = cur.pending.splice(0);
+          const before = kept.length > 0 && opts.peerIds ? opts.peerIds(name) : Promise.resolve(null);
+          void (async () => {
+            const ex = new Set((await before) ?? []);
+            await release(cur);
+            if (kept.length > 0) await deliverAll(cur, kept, ex);
+          })();
         }
         return;
       }

@@ -346,3 +346,123 @@ test("gate: 起こせなかった時、まだ眠っているなら身代わり�
   sleeping = false;
   await gate.close();
 });
+
+// ---- review 指摘（古い同名 peer・stop 失敗・pending の引き継ぎ） ----
+
+test("gate: 起床前から居た古い同名 peer（眠らせた claude の登録が broker に残る）へは渡さない。新しい claude の peer が現れてから渡す", async () => {
+  const fc = fakeClient();
+  // broker の模擬: 起こす前は古い peer old-1 だけ。起床の少し後に新しい claude の peer new-1 が登録される
+  const brokerPeers = ["old-1"];
+  const sentTo: string[] = [];
+  let polls = 0;
+  const gate = createSleepGate({
+    clientFactory: () => fc.client,
+    peerIds: async () => [...brokerPeers],
+    wake: async () => {},
+    deliver: async (_n, _t, exclude) => {
+      polls++;
+      if (polls === 3) brokerPeers.push("new-1");
+      const hit = brokerPeers.filter((id) => !exclude?.has(id)).pop();
+      if (!hit) return { ok: false, reason: "peer が居ない" };
+      sentTo.push(hit);
+      return { ok: true };
+    },
+    peerName: (n) => `${n}-cap`,
+    log: () => {},
+    deliverIntervalMs: 5,
+  });
+  gate.sync("pm1", true);
+  await tick();
+  fc.emit({ from_name: "a", text: "x" });
+  await tick(100);
+  assert.deepEqual(sentTo, ["new-1"]);
+  assert.ok(polls >= 3);
+  await gate.close();
+});
+
+test("gate: 起こせなかった時、溜まっていた message は捨てず、置き直した身代わりへ引き継ぎ、次に起きた時に渡す", async () => {
+  const fcs: ReturnType<typeof fakeClient>[] = [];
+  let failWake = true;
+  const delivered: string[] = [];
+  const gate = createSleepGate({
+    clientFactory: () => {
+      const fc = fakeClient();
+      fcs.push(fc);
+      return fc.client;
+    },
+    wake: async () => {
+      if (failWake) throw new Error("start 失敗");
+    },
+    deliver: async (_n, t) => {
+      delivered.push(t);
+      return { ok: true };
+    },
+    isSleeping: () => true,
+    peerName: (n) => `${n}-cap`,
+    log: () => {},
+    deliverIntervalMs: 5,
+  });
+  gate.sync("pm1", true);
+  await tick();
+  fcs[0].emit({ from_name: "a", text: "first" });
+  await tick(50);
+  assert.equal(fcs.length, 2); // 置き直し
+  assert.deepEqual(delivered, []);
+  failWake = false;
+  fcs[1].emit({ from_name: "b", text: "second" });
+  await tick(100);
+  assert.equal(delivered.length, 2);
+  assert.match(delivered[0], /first/);
+  assert.match(delivered[1], /second/);
+  await gate.close();
+});
+
+test("gate: message 無しで起きた（desktop で開く等）時、身代わりが預かっていた message があれば起きた claude へ渡す（起床前の古い peer は除く）", async () => {
+  const fcs: ReturnType<typeof fakeClient>[] = [];
+  let failWake = true;
+  const excludes: (ReadonlySet<string> | undefined)[] = [];
+  const delivered: string[] = [];
+  const gate = createSleepGate({
+    clientFactory: () => {
+      const fc = fakeClient();
+      fcs.push(fc);
+      return fc.client;
+    },
+    peerIds: async () => ["old-1"],
+    wake: async () => {
+      if (failWake) throw new Error("start 失敗");
+    },
+    deliver: async (_n, t, ex) => {
+      excludes.push(ex);
+      delivered.push(t);
+      return { ok: true };
+    },
+    isSleeping: () => true,
+    peerName: (n) => `${n}-cap`,
+    log: () => {},
+    deliverIntervalMs: 5,
+  });
+  gate.sync("pm1", true);
+  await tick();
+  fcs[0].emit({ from_name: "a", text: "kept" });
+  await tick(50);
+  failWake = false;
+  gate.sync("pm1", false); // sessions.wake が呼ぶ
+  await tick(100);
+  assert.equal(delivered.length, 1);
+  assert.match(delivered[0], /kept/);
+  assert.ok(excludes[0]?.has("old-1"));
+  await gate.close();
+});
+
+test("sleep: supervisor.stop が失敗したら、眠った事にしない（sleeping を戻して保存、身代わり通知なし、エラーを返す）", async () => {
+  const { mgr, sup, changes } = setup();
+  await mgr.create({ name: "pm1" });
+  (sup as unknown as { stop: () => Promise<never> }).stop = async () => {
+    throw new Error("stop できない");
+  };
+  await assert.rejects(mgr.sleep("pm1"), /stop できない/);
+  assert.deepEqual(changes, []);
+  assert.equal(mgr.list().find((s) => s.name === "pm1")?.sleeping, false);
+  assert.notEqual((await savedOf())[0].sleeping, true);
+});

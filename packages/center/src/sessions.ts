@@ -860,7 +860,16 @@ export function createSessionManager(opts: {
           delete rec.sleeping;
           throw new Error(`状態ファイルに保存できない: ${(e as Error).message}`);
         }
-        const st = await supervisor.stop(name);
+        let st: RcStatus;
+        try {
+          st = await supervisor.stop(name);
+        } catch (e) {
+          // 止められなかった（claude が残っているかもしれない）。眠った事にしない: フラグを戻し、身代わりは立てない（フラグと身代わりを食い違わせない）
+          delete rec.sleeping;
+          await persist().catch((pe) => log(`スリープの取り消しを保存できない: ${name} ${(pe as Error).message}`));
+          log(`session スリープ失敗（停止できない）: ${name} ${(e as Error).message}`);
+          throw e;
+        }
         notifySleep(name, true);
         opts.events?.publish({ reason: "sleep", name });
         log(`session スリープ: ${name}`);

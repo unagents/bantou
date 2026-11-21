@@ -192,7 +192,8 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   const sleepGate = createSleepGate({
     clientFactory: (peerName) => createProcessStandInClient(peerName, log),
     wake: (name) => sessions.wake(name),
-    deliver: (name, text) => link.notifyPeer(capSessionName(name), text),
+    deliver: (name, text, exclude) => link.notifyPeer(capSessionName(name), text, { exclude }),
+    peerIds: (name) => link.peerIdsOf(capSessionName(name)),
     isSleeping: (name) => sessions.list().some((s) => s.name === name && s.sleeping),
     peerName: capSessionName,
     log,
