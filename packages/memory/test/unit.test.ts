@@ -310,7 +310,8 @@ test("rotateAgents: 前回最後に送った agent の次から始める", () =>
 
 test("task の配線: 抽出と埋め込みは別の task で、どちらも毎分起動する（抽出が長引いても埋め込みを待たせない）", () => {
   const read = (p: string) => readFileSync(fileURLToPath(new URL(p, import.meta.url)), "utf8");
-  assert.match(read("../nuxt.config.ts"), /scheduledTasks:\s*\{\s*"\* \* \* \* \*":\s*\["memory:extract",\s*"memory:embed"\]/);
+  assert.match(read("../nuxt.config.ts"), /scheduledTasks:\s*\{\s*"\* \* \* \* \*":\s*\["memory:extract",\s*"memory:embed",\s*"memory:graphiti"\]/);
+  assert.match(read("../server/tasks/memory/graphiti.ts"), /return \{ result: await runGraphitiTask\(\) \};/);
   const embedTask = read("../server/tasks/memory/embed.ts");
   assert.match(embedTask, /name: "memory:embed"/);
   // task の file は中身（server/utils/tasks.ts。統合 test で実際に呼んで確かめる）を呼んで、その結果を返すだけ

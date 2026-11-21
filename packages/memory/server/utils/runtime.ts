@@ -2,6 +2,7 @@ import { readEnv, type MemoryEnv } from "./config";
 import { createPgDb, type Db, type Queryable } from "./db";
 import { createEmbedGate, createOllamaEmbedder, createQueryEmbedder, type EmbedGate, type Embedder } from "./embed";
 import { createChatClient, type ChatClient } from "./extract";
+import { createGraphitiMcpClient, type GraphitiClient } from "./graphiti";
 
 export interface Runtime {
   db: Db;
@@ -13,6 +14,8 @@ export interface Runtime {
   chat: ChatClient;
   extractBatch: number;
   embed: { batchSize: number; maxRunMs: number };
+  /** Graphiti への反映。GRAPHITI_MCP_URL が無ければ undefined（Outbox は積むだけ） */
+  graphiti?: { client: GraphitiClient; topics: string[] };
 }
 
 let current: Runtime | undefined;
@@ -64,6 +67,9 @@ export function buildRuntime(env: MemoryEnv, db: Db): Runtime {
     chat: createChatClient({ url: env.chatpUrl, token: env.chatpToken, model: env.chatpModel, timeoutMs: env.chatTimeoutMs }),
     extractBatch: env.extractBatch,
     embed: { batchSize: env.embedBatch, maxRunMs: env.embedRunMs },
+    ...(env.graphitiUrl
+      ? { graphiti: { client: createGraphitiMcpClient({ url: env.graphitiUrl, timeoutMs: env.graphitiTimeoutMs }), topics: env.graphitiTopics } }
+      : {}),
   };
 }
 

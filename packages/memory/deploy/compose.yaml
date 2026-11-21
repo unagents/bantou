@@ -34,6 +34,64 @@ services:
     volumes:
       - memory-ollama:/root/.ollama
 
+  # ---- Graphiti（docs/design/memory-graphiti.md）。profile `graphiti` を付けた時だけ起動する（付けなければ今まで通り postgres と ollama だけ）----
+  # 起動: docker compose --profile graphiti up -d neo4j graphiti-mcp（.env の MEMORY_NEO4J_PASSWORD を埋めてから）
+  neo4j:
+    profiles: ["graphiti"]
+    image: neo4j:5.26.0
+    container_name: ${MEMORY_NEO4J_CONTAINER:-memory-neo4j}
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: neo4j/${MEMORY_NEO4J_PASSWORD:?set in .env}
+      # 上限を切る（202 は RAM 16 GB で他の service と同居）
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 1G
+      NEO4J_server_memory_pagecache_size: 512m
+    ports:
+      # Bolt のみ。graphiti-mcp（host network）が 127.0.0.1 から繋ぐ。browser（7474）は出さない
+      - "127.0.0.1:${MEMORY_NEO4J_BOLT_PORT:-7687}:7687"
+    volumes:
+      - memory-neo4j-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:7474 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  graphiti-mcp:
+    profiles: ["graphiti"]
+    # 公式の MCP server（getzep/graphiti の mcp_server）。tag は graphiti-core 0.31.2 / MCP server 1.1.3 を固定
+    image: zepai/knowledge-graph-mcp:1.1.3-graphiti-0.31.2-standalone
+    container_name: ${MEMORY_GRAPHITI_CONTAINER:-memory-graphiti}
+    restart: unless-stopped
+    # host network: LLM（chatp）は 127.0.0.1:7920 だけで待ち受けているため、bridge の container からは届かない（chatp の設定を変えずに済ませる）。
+    # この server には認証が無い。listen は下の SERVER__HOST で 127.0.0.1 に固定する（image の既定は 0.0.0.0）
+    network_mode: host
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    environment:
+      SERVER__HOST: 127.0.0.1
+      CONFIG_PATH: /app/mcp/config/config.yaml
+      GRAPHITI_MCP_PORT: ${GRAPHITI_MCP_PORT:-7931}
+      NEO4J_URI: bolt://127.0.0.1:${MEMORY_NEO4J_BOLT_PORT:-7687}
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: ${MEMORY_NEO4J_PASSWORD:?set in .env}
+      GRAPHITI_LLM_URL: ${GRAPHITI_LLM_URL:-http://127.0.0.1:7920/v1}
+      GRAPHITI_LLM_API_KEY: ${GRAPHITI_LLM_API_KEY:-unused}
+      GRAPHITI_LLM_MODEL: ${GRAPHITI_LLM_MODEL:-claude}
+      GRAPHITI_LLM_STRUCTURED_OUTPUT_MODE: ${GRAPHITI_LLM_STRUCTURED_OUTPUT_MODE:-json_schema}
+      GRAPHITI_EMBED_URL: ${GRAPHITI_EMBED_URL:-http://127.0.0.1:11435/v1}
+      GRAPHITI_EMBED_MODEL: ${MEMORY_EMBED_MODEL:-nomic-embed-text}
+      GRAPHITI_EMBED_DIM: ${MEMORY_EMBED_DIM:-768}
+      # 同時に処理する episode 数。1 episode は LLM を数回呼ぶ。chatp（claude -p）は 1 回が重いので低く始める
+      SEMAPHORE_LIMIT: ${GRAPHITI_SEMAPHORE_LIMIT:-2}
+      GRAPHITI_TELEMETRY_ENABLED: "false"
+    volumes:
+      - ./graphiti/config.yaml:/app/mcp/config/config.yaml:ro
+
 volumes:
   memory-pgdata:
   memory-ollama:
+  memory-neo4j-data:

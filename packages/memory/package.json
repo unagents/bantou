@@ -16,6 +16,7 @@
     "node": ">=22"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@nuxtjs/mcp-toolkit": "~0.24.3",
     "node-pg-migrate": "^9.0.0",
     "nuxt": "~4.5.2",
