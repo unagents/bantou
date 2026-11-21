@@ -1,4 +1,5 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { MODEL_PATTERN } from "@agent-hand/bantou-protocol";
 import { runLogDir } from "./paths";
@@ -46,12 +47,35 @@ export async function readModelRecord(dir: string): Promise<ModelRecord> {
   }
 }
 
-/** 指定があった項目だけ上書きして保存する。 */
-export async function writeModelRecord(dir: string, patch: ModelRecord): Promise<ModelRecord> {
-  const next: ModelRecord = { ...(await readModelRecord(dir)) };
-  if (patch.model !== undefined) next.model = patch.model;
-  if (patch.worker_model !== undefined) next.worker_model = patch.worker_model;
-  await mkdir(runLogDir(dir), { recursive: true });
-  await writeFile(modelFile(dir), JSON.stringify(next) + "\n");
-  return next;
+/** 同じ記録への書き込みの順番待ち（path → 末尾）。cap の task の指揮（lane）が同時に cap の記録へ書いても、読んで書く間に他の書き込みが割り込まない。 */
+const writing = new Map<string, Promise<unknown>>();
+
+/** 指定があった項目だけ上書きして保存する（同じ記録への書き込みは 1 つずつ。tmp に書いて rename）。 */
+export function writeModelRecord(dir: string, patch: ModelRecord): Promise<ModelRecord> {
+  const file = modelFile(dir);
+  const run = (writing.get(file) ?? Promise.resolve()).catch(() => undefined).then(async () => {
+    const next: ModelRecord = { ...(await readModelRecord(dir)) };
+    if (patch.model !== undefined) next.model = patch.model;
+    if (patch.worker_model !== undefined) next.worker_model = patch.worker_model;
+    await mkdir(runLogDir(dir), { recursive: true });
+    const tmp = `${file}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`;
+    try {
+      await writeFile(tmp, JSON.stringify(next) + "\n");
+      await rename(tmp, file);
+    } catch (e) {
+      await unlink(tmp).catch(() => {});
+      throw e;
+    }
+    return next;
+  });
+  writing.set(file, run);
+  void run.then(
+    () => {
+      if (writing.get(file) === run) writing.delete(file);
+    },
+    () => {
+      if (writing.get(file) === run) writing.delete(file);
+    },
+  );
+  return run;
 }

@@ -11,7 +11,9 @@ import {
 } from "@agent-hand/bantou-protocol";
 import type { InvokeInput } from "./agents";
 import { agentDir, runLogDir } from "./paths";
-import { extractTaskResult } from "./prompts";
+import { buildTaskResult, extractTaskResult } from "./prompts";
+import { readState } from "./state";
+import { readOwnerRecord } from "./workers";
 
 export const REPORT_KINDS = ["progress", "ask", "approve", "done"] as const;
 export type ReportKind = (typeof REPORT_KINDS)[number];
@@ -46,6 +48,13 @@ export interface ReportHubDeps {
    * 省略時・失敗時は、覚えている peer id へそのまま送る。
    */
   resolvePeers?: (name: string) => Promise<ReadonlyArray<{ id: string; registered_at?: string }>>;
+  /**
+   * worker を起動した task（持ち主の cap の task の lane。logs/owner.json の task_id）。分かれば、report の worker_report の task_id と、
+   * 再開する指揮（その task の lane）に使う。無い（kick_cap の worker・旧形式）時は cap の最新の task と cap の本体。
+   */
+  laneOf?: (capId: string, workerId: string) => Promise<string | undefined>;
+  /** task の lane の report 起因の処理が 1 つ終わった（task の終わりの判定をやり直す）。 */
+  onLaneSettled?: (capId: string, taskId: string) => void;
   log: (msg: string) => void;
 }
 
@@ -62,15 +71,18 @@ export interface ReportHub {
   noteCenter(capId: string, centerId: string, centerName?: string): Promise<void>;
   /** cap の最新の task_id を記録する（メモリと logs/task.json）。worker_report と report 起因の task_result に使う。 */
   rememberTask(capId: string, taskId: string): Promise<void>;
-  /** worker の report を記録し、cap の resume を queue に積む。積んだ時点で戻る。 */
+  /** worker の report を記録し、cap の resume を queue に積む（worker の task の lane があればその lane）。積んだ時点で戻る。 */
   report(capId: string, workerId: string, kind: ReportKind, text: string): Promise<void>;
   /**
    * worker の終了を理由に cap を再開する（server 内部の呼び出し。report と同じく manager の queue に乗り、cap が turn の途中なら順番待ちになる）。
+   * taskId があればその task の lane（指揮の会話）を再開し、返信は task_result にする。
    * cap の invoke は同期で積む（戻る前に manager の queued に入る）。戻り値は cap の返信を出し切った時に解ける。
    */
-  resumeCap(capId: string, prompt: string, reason: string): Promise<void>;
-  /** cap を再開せずに、task の結果（task が無ければ error 返信）として失敗を center へ送る。失敗は log のみ。 */
-  failTask(capId: string, message: string): Promise<void>;
+  resumeCap(capId: string, prompt: string, reason: string, taskId?: string): Promise<void>;
+  /** cap を再開せずに、task の結果（task が無ければ error 返信）として失敗を center へ送る。taskId 省略時は cap の最新の task。失敗は log のみ。 */
+  failTask(capId: string, message: string, taskId?: string): Promise<void>;
+  /** その task の lane の report 起因の処理（再開と返信の送信、failTask の送信）の件数。 */
+  pendingFor(capId: string, taskId: string): number;
   /** cap の最新の task_id（メモリ → logs/task.json）。 */
   taskId(capId: string): Promise<string | undefined>;
   /** メモリにある cap の最新の task_id（同期）。 */
@@ -98,6 +110,25 @@ export function createReportHub(deps: ReportHubDeps): ReportHub {
   const centers = new Map<string, { id: string; name?: string }>();
   const tasks = new Map<string, string>();
   const pending = new Set<Promise<void>>();
+  /** task の lane ごとの report 起因の処理の件数（cap_id/task_id → 件数）。 */
+  const lanePending = new Map<string, number>();
+  const laneKey = (capId: string, taskId: string): string => `${capId}/${taskId}`;
+  const trackLane = <T>(capId: string, taskId: string | undefined, p: Promise<T>): Promise<T> => {
+    if (taskId === undefined) return p;
+    const k = laneKey(capId, taskId);
+    lanePending.set(k, (lanePending.get(k) ?? 0) + 1);
+    void p.finally(() => {
+      const n = (lanePending.get(k) ?? 1) - 1;
+      if (n > 0) lanePending.set(k, n);
+      else lanePending.delete(k);
+      try {
+        deps.onLaneSettled?.(capId, taskId);
+      } catch (e) {
+        log(`lane の後処理に失敗: cap_id=${capId} task_id=${taskId} ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }).catch(() => {});
+    return p;
+  };
   /** worker_report 通知の送信中。更新の再起動待ち（pendingCount）には数えず、drain だけが待つ。 */
   const notices = new Set<Promise<void>>();
   let closed = false;
@@ -243,7 +274,9 @@ export function createReportHub(deps: ReportHubDeps): ReportHub {
     log(`report 受信: cap_id=${capId} worker_id=${workerId} kind=${kind} text=${oneLine(text, 80)}`);
 
     // center へは cap の再開と並行して送る（worker_report 通知。失敗しても再開は止めない）
-    const taskId = await taskOf(capId);
+    // task_id は worker を起動した task（lane）。分からなければ cap の最新の task
+    const lane = await deps.laneOf?.(capId, workerId).catch(() => undefined);
+    const taskId = lane ?? (await taskOf(capId));
     const notice: WorkerReportNotice = {
       bantou: PROTOCOL_VERSION,
       type: "worker_report",
@@ -257,15 +290,24 @@ export function createReportHub(deps: ReportHubDeps): ReportHub {
     const n: Promise<void> = sendReportNotice(capId, notice).finally(() => notices.delete(n));
     notices.add(n);
 
-    void startResume(capId, buildReportPrompt(workerId, kind, text), `report from worker ${workerId}`, taskId);
+    void startResume(capId, buildReportPrompt(workerId, kind, text), `report from worker ${workerId}`, taskId, lane);
   }
 
-  /** cap の invoke を同期で積み、返信（task_result / cap_result / error）を center へ送る。 */
-  function startResume(capId: string, prompt: string, reason: string, knownTaskId: string | undefined): Promise<void> {
+  /**
+   * cap の invoke を同期で積み、返信（task_result / cap_result / error）を center へ送る。
+   * lane（task の指揮の会話）の再開: task_result の JSON で答えたらその task の task_result、失敗はその task の task_result（failed）。
+   * JSON でない返答（途中の返答・最終の JSON の後の余分な再開）は cap_result にする（task の最新の結果を生の返答で上書きしない）。
+   */
+  function startResume(capId: string, prompt: string, reason: string, knownTaskId: string | undefined, lane?: string): Promise<void> {
     const p: Promise<void> = deps
-      .invoke(capId, { prompt, reason, keepTask: true })
+      .invoke(capId, { prompt, reason, keepTask: true, ...(lane !== undefined ? { taskId: lane } : {}) })
       .then(
         async (r) => {
+          if (lane !== undefined) {
+            if (!r.ok) return route(capId, buildTaskResult(capId, lane, r));
+            const tr = extractTaskResult(capId, lane, r.result_text);
+            return route(capId, tr ?? { bantou: PROTOCOL_VERSION, type: "cap_result", cap_id: capId, ...r });
+          }
           // task 指示中の cap が task_result の JSON で答えたら task_result、そうでなければ従来どおり cap_result
           const taskId = knownTaskId ?? (await taskOf(capId));
           const tr = taskId !== undefined && r.ok ? extractTaskResult(capId, taskId, r.result_text) : undefined;
@@ -273,28 +315,33 @@ export function createReportHub(deps: ReportHubDeps): ReportHub {
         },
         (e: unknown) => {
           const message = e instanceof Error ? e.message : String(e);
-          log(`エラー: report 起因の resume: cap_id=${capId} ${message}`);
+          log(`エラー: report 起因の resume: cap_id=${capId}${lane !== undefined ? ` task_id=${lane}` : ""} ${message}`);
           return route(capId, {
             bantou: PROTOCOL_VERSION,
             type: "error",
             ok: false,
             message,
-            command: "kick_cap",
+            command: lane !== undefined ? "task" : "kick_cap",
             cap_id: capId,
+            ...(lane !== undefined ? { task_id: lane } : {}),
           });
         },
       )
       .finally(() => pending.delete(p));
     pending.add(p);
-    return p;
+    return trackLane(capId, lane, p);
   }
 
-  function resumeCap(capId: string, prompt: string, reason: string): Promise<void> {
-    return startResume(capId, prompt, reason, tasks.get(capId));
+  function resumeCap(capId: string, prompt: string, reason: string, taskId?: string): Promise<void> {
+    return startResume(capId, prompt, reason, taskId ?? tasks.get(capId), taskId);
   }
 
-  async function failTask(capId: string, message: string): Promise<void> {
-    const taskId = await taskOf(capId);
+  function failTask(capId: string, message: string, laneTask?: string): Promise<void> {
+    return trackLane(capId, laneTask, failTaskInner(capId, message, laneTask));
+  }
+
+  async function failTaskInner(capId: string, message: string, laneTask: string | undefined): Promise<void> {
+    const taskId = laneTask ?? (await taskOf(capId));
     const reply: ServerReply =
       taskId !== undefined
         ? {
@@ -322,6 +369,7 @@ export function createReportHub(deps: ReportHubDeps): ReportHub {
     report,
     resumeCap,
     failTask,
+    pendingFor: (capId, taskId) => lanePending.get(laneKey(capId, taskId)) ?? 0,
     taskId: taskOf,
     knownTask: (capId) => tasks.get(capId),
     notify,
@@ -333,6 +381,41 @@ export function createReportHub(deps: ReportHubDeps): ReportHub {
       closed = true;
     },
   };
+}
+
+/**
+ * task の worker のうち、ask / approve に答えてもらっていないもの（worker_id の並び）。cap の logs/reports.jsonl と worker の記録から決める
+ * （server の再起動をまたぐ）。worker の最後の report（progress を除く）が ask / approve で、その後にその worker の run が始まっていなければ未回答
+ * （center の worker_reply は同じ worker_id の worker_start なので、答えると run が始まる）。
+ */
+export async function openAsksOfTask(workspace: string, capId: string, taskId: string): Promise<string[]> {
+  let raw: string;
+  try {
+    raw = await readFile(reportsFile(agentDir(workspace, "cap", capId)), "utf8");
+  } catch {
+    return [];
+  }
+  const last = new Map<string, { kind: ReportKind; at: string }>();
+  for (const line of raw.split("\n")) {
+    if (line === "") continue;
+    try {
+      const d = JSON.parse(line) as { at?: unknown; worker_id?: unknown; kind?: unknown };
+      if (typeof d.at !== "string" || !isValidAgentId(d.worker_id) || !isReportKind(d.kind) || d.kind === "progress") continue;
+      last.set(d.worker_id, { kind: d.kind, at: d.at });
+    } catch {
+      // 壊れた行は無視
+    }
+  }
+  const out: string[] = [];
+  for (const [workerId, r] of last) {
+    if (r.kind !== "ask" && r.kind !== "approve") continue;
+    const owner = await readOwnerRecord(workspace, workerId);
+    if (owner?.capId !== capId || owner.taskId !== taskId) continue;
+    const st = await readState(agentDir(workspace, "worker", workerId)).catch(() => null);
+    if (st?.last_started_at != null && st.last_started_at > r.at) continue;
+    out.push(workerId);
+  }
+  return out.sort();
 }
 
 // -- /mcp route との橋渡し -------------------------------------------------------

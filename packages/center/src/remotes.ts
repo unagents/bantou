@@ -4,6 +4,7 @@ import {
   AGENT_ID_PATTERN,
   MODEL_PATTERN,
   type AgentStatus,
+  type CapTaskInfo,
   type ConversationInfo,
   type CapResultReply,
   type ErrorReply,
@@ -153,6 +154,16 @@ export interface PendingInstruction {
   fp?: string;
   /** 送る直前の cap の状態（server の status）。受付の判定は、後の status がこれから変わったかで見る（server と center の時計は比べない）。 */
   base?: AckBase;
+  /** この task の最新の結果（server が返した、この task_id の task_result）。task ごとの完了の通知に使う。 */
+  last_result?: { state: "done" | "failed"; summary: string; error?: string; at: string };
+}
+
+/** remote_list の pending に足す、server が知らせた task の状態（task を並行に動かす server の status / activity の tasks から。旧 server では無い）。 */
+export interface PendingServerTask {
+  state: CapTaskInfo["state"];
+  /** 待っている理由（limit = 同時に動かす数の上限 / branch = 同じ deliverables.branch の前の task が終わっていない）。 */
+  waiting_for?: CapTaskInfo["waiting_for"];
+  branch?: string;
 }
 
 /** task を送る直前の cap の状態。ahead = 送る時点で受付が未確認だった、この cap の先行する task の数（受付は ahead + 1 本分の増加を見るまで認めない）。 */
@@ -231,8 +242,8 @@ export interface RemoteDeleteResult {
 
 /** remote_list が返す 1 件。通知がまだ無ければ activity は無い。 */
 export type RemoteView = Omit<RemoteRecord, "worker_reports" | "pending"> & {
-  /** 未完了の指示。delivery は送達状態（旧形式の記録は sent）。 */
-  pending: (PendingInstruction & { delivery: DeliveryState })[];
+  /** 未完了の指示。delivery は送達状態（旧形式の記録は sent）。server_task は server が知らせたその task の状態（並行実行の server のみ）。 */
+  pending: (PendingInstruction & { delivery: DeliveryState; server_task?: PendingServerTask })[];
   /** server の到達性（server_id 単位。同じ server の cap は同じ値）。到達不能の間、作業中の cap の state は unknown。 */
   reachability: Reachability;
   /** cap の server 側の状態。 */
@@ -272,10 +283,10 @@ export const remoteWaitSchema = {
 };
 
 /** 通知の本文を作る。 */
-export function formatDoneNotice(r: { remote_id: string; state: string; result?: string; error?: string; instructions?: string[] }): string {
+export function formatDoneNotice(r: { remote_id: string; state: string; result?: string; error?: string; instructions?: string[]; task_id?: string }): string {
   const head = r.result === undefined ? "" : r.result.length > NOTIFY_RESULT_MAX ? `${r.result.slice(0, NOTIFY_RESULT_MAX)}…(省略。全文は remote_list)` : r.result;
   return [
-    `[bantou] remote 完了 remote_id=${r.remote_id} state=${r.state}`,
+    `[bantou] remote 完了 remote_id=${r.remote_id}${r.task_id !== undefined ? ` task_id=${r.task_id}` : ""} state=${r.state}`,
     ...(r.instructions?.length ? [`指示: ${r.instructions.map((p) => (p.length > NOTIFY_PROMPT_MAX ? `${p.slice(0, NOTIFY_PROMPT_MAX)}…` : p)).join(" / ")}`] : []),
     `result: ${head}`,
     ...(r.error ? [`error: ${r.error}`] : []),
@@ -400,7 +411,7 @@ export interface RemoteManager {
   /**
    * owner（session）の cap（remote_id = `c-<center-id>-<session>`）へ次の指示を送る。
    * server の status で cap の有無を確かめ（新規の cap の worker_model の既定は config の servers[]）、task を送る。task_id は center が採番。
-   * 返信（task_result）は待たず、running で返る。cap が実行中なら server 側で直列に待たされる。
+   * 返信（task_result）は待たず、running で返る。server は同じ cap の task を task ごとの指揮で並行に動かす（上限と同じ branch は server が待たせる）。
    */
   send(input: RemoteSendInput): Promise<RemoteSendResult>;
   /**
@@ -794,6 +805,8 @@ export function createRemoteManager(opts: {
   const observedBy = (st: StatusReply, r: RemoteRecord, p: PendingInstruction): boolean => {
     const cap = st.caps.find((c) => c.id === r.remote_id);
     if (!cap) return false;
+    // task を並行に動かす server は cap の tasks に受けた task を task_id で載せる（待ち・実行中・最近終わったもの）。あれば task_id で確かめる
+    if (Array.isArray(cap.tasks) && p.task_id !== undefined) return cap.tasks.some((t) => t.task_id === p.task_id);
     const b = p.base;
     if (!b) return cap.state === "running" || (cap.queued ?? 0) > 0;
     const ahead = b.ahead ?? 0;
@@ -820,6 +833,60 @@ export function createRemoteManager(opts: {
   /** 取れた status を、同じ server の記録に反映する（cap の状態）。受付の判定は awaitAck の直接の観測だけで行い、周期の status では pending を observed にしない（別の要因の変化を受付と取り違えるため）。 */
   const recordStatus = (key: string, st: StatusReply): void => {
     for (const x of recordsOfKey(key)) capSnap.set(x, { at: Date.now(), cap: st.caps.find((c) => c.id === x.remote_id) });
+    for (const x of recordsOfKey(key)) completeFinishedTasks(x);
+  };
+
+  /** server が知らせた cap の task の状態（activity と status の新しい方）。task を並行に動かす server でなければ undefined。 */
+  const serverTasksOf = (r: RemoteRecord): CapTaskInfo[] | undefined => {
+    const a = activityOf(r);
+    const fromActivity = a?.agents.find((x) => x.kind === "cap" && x.id === r.remote_id)?.tasks;
+    const snap = capSnap.get(r);
+    const fromStatus = snap?.cap?.tasks;
+    if (fromActivity !== undefined && fromStatus !== undefined) return a!.received_ms_ago <= Date.now() - snap!.at ? fromActivity : fromStatus;
+    return fromActivity ?? fromStatus;
+  };
+
+  /**
+   * server が終わった（done / failed）と知らせた task の指示を、task ごとに完了にする（他の task が動いていても待たない）。owner へ task ごとに通知する。
+   * 最初の返信（task_result）をまだ受けていない task は待つ（server は返信を送ってから task を終わりにする）。
+   */
+  const completeFinishedTasks = (r: RemoteRecord): void => {
+    if (!has(r) || r.pending.length === 0) return;
+    const tasks = serverTasksOf(r);
+    if (tasks === undefined) return;
+    const finished = new Map(tasks.filter((t) => t.state === "done" || t.state === "failed").map((t) => [t.task_id, t]));
+    const waitingReply = inflightTasks.get(r);
+    const done = r.pending.filter((p) => p.task_id !== undefined && finished.has(p.task_id) && waitingReply?.has(p.task_id) !== true);
+    if (done.length === 0) return;
+    r.pending = r.pending.filter((p) => !done.includes(p));
+    void persist();
+    for (const p of done) {
+      const t = finished.get(p.task_id!)!;
+      const owner = r.session ?? p.owner;
+      const error = t.state === "failed" ? (t.error ?? p.last_result?.error ?? "失敗") : undefined;
+      const text = formatDoneNotice({
+        remote_id: r.remote_id,
+        task_id: p.task_id,
+        state: t.state,
+        ...(p.last_result !== undefined ? { result: p.last_result.summary } : {}),
+        ...(error !== undefined ? { error } : {}),
+        instructions: [p.prompt],
+      });
+      log(`remote task 完了: ${r.remote_id} task_id=${p.task_id} state=${t.state}`);
+      if (!opts.notify) {
+        log(`remote 完了通知を送れない: ${r.remote_id} owner=${owner} 通知の送り先が無い`);
+        continue;
+      }
+      void opts.notify(owner, text).then(
+        (res) => res,
+        (e: unknown) => ({ ok: false as const, reason: e instanceof Error ? e.message : String(e) }),
+      ).then((res) => {
+        if (res.ok) log(`remote 完了通知: ${r.remote_id} owner=${owner} task_id=${p.task_id} state=${t.state}`);
+        else log(`remote 完了通知を送れない: ${r.remote_id} owner=${owner} ${res.reason}`);
+        wake();
+      });
+    }
+    wake();
   };
 
   /** cap の server 側の状態。通知（activity）と status の新しい方を使う。 */
@@ -878,7 +945,12 @@ export function createRemoteManager(opts: {
 
   const viewOf = (r: RemoteRecord): RemoteView => {
     const state = stateOf(r);
-    const base: RemoteView = { ...r, server_label: labelOf(r), reachability: reachOf(r), cap_state: capStateOf(r), pending: r.pending.map((p) => ({ ...p, delivery: p.delivery ?? ("sent" as const) })), owners: ownersOf(r), worker_reports: (r.worker_reports ?? []).map((w) => ({ ...w })), state };
+    const tasks = serverTasksOf(r);
+    const serverTask = (p: PendingInstruction): { server_task?: PendingServerTask } => {
+      const t = p.task_id !== undefined ? tasks?.find((x) => x.task_id === p.task_id) : undefined;
+      return t ? { server_task: { state: t.state, ...(t.waiting_for !== undefined ? { waiting_for: t.waiting_for } : {}), ...(t.branch !== undefined ? { branch: t.branch } : {}) } } : {};
+    };
+    const base: RemoteView = { ...r, server_label: labelOf(r), reachability: reachOf(r), cap_state: capStateOf(r), pending: r.pending.map((p) => ({ ...p, delivery: p.delivery ?? ("sent" as const), ...serverTask(p) })), owners: ownersOf(r), worker_reports: (r.worker_reports ?? []).map((w) => ({ ...w })), state };
     if (state === "running") delete base.finishedAt;
     const activity = activityOf(r);
     const snapCap = capSnap.get(r)?.cap;
@@ -941,7 +1013,12 @@ export function createRemoteManager(opts: {
     const now = new Date().toISOString();
     r.state = kind === "transport" ? "unknown" : res.ok ? "done" : "failed";
     r.finishedAt = now;
-    if (taskResult) r.task_result = taskResult;
+    if (taskResult) {
+      r.task_result = taskResult;
+      // task ごとの完了の通知に使う（その task の指示が残っていれば）
+      const p = r.pending.find((x) => x.task_id === taskResult.task_id);
+      if (p) p.last_result = { state: taskResult.state, summary: truncate(taskResult.summary), ...(taskResult.error !== undefined ? { error: taskResult.error } : {}), at: now };
+    }
     if (kind === "cap_result" && r.pending.length > 0) {
       settling.set(r, Date.now());
       schedule(r, graceMs);
@@ -962,6 +1039,7 @@ export function createRemoteManager(opts: {
       }
     }
     void persist();
+    completeFinishedTasks(r);
     completeIfIdle(r);
     wake();
   };
@@ -1486,6 +1564,8 @@ export function createRemoteManager(opts: {
     markOk(r);
     // 新しい activity が来たので、cap_result 後・再起動後の判定待ちは終わり。以後は activity で判定する
     settling.delete(r);
+    // 並行に動く task のうち、終わったものは task ごとに完了にする
+    completeFinishedTasks(r);
     const capAgent = activityOf(r)?.agents.find((x) => x.kind === "cap" && x.id === r.remote_id);
     if (capAgent?.state === "lost") {
       if (!r.cap_lost) {

@@ -33,6 +33,7 @@ test("config: 全項目指定はそのまま返る", async () => {
       workerKeepMs: 60000,
       exitResumeMax: 5,
       exitRecoverMs: 120000,
+      maxParallelTasks: 3,
       env: { CLAUDE_CONFIG_DIR: "/c" },
     },
     update: { spec: "file:/x/bantou-{version}.tgz" },
@@ -151,5 +152,14 @@ test("config: workspace 省略は config.json のある dir が root。CLAUDE_CO
     assert.deepEqual((await loadConfig(p)).session.env, {});
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("config: maxParallelTasks は既定 2（1 は従来どおり 1 つずつ）。0・負・小数・文字列は拒否", async () => {
+  assert.equal((await load({ workspace: "/w" })).session.maxParallelTasks, 2);
+  assert.equal((await load({ workspace: "/w", session: { maxParallelTasks: 1 } })).session.maxParallelTasks, 1);
+  assert.equal((await load({ workspace: "/w", session: { maxParallelTasks: 4 } })).session.maxParallelTasks, 4);
+  for (const bad of [0, -1, 1.5, "2"]) {
+    await assert.rejects(load({ workspace: "/w", session: { maxParallelTasks: bad } }), /maxParallelTasks/);
   }
 });

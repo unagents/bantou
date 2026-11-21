@@ -709,7 +709,7 @@ export function createServerLink(opts: {
     const chainKey = `${kind}:${key}`;
     const prev = slot.chains.get(chainKey) ?? Promise.resolve();
     const next = prev.then(run, run);
-    // task は返信（task_result = cap の完了）を待たずに次の task を送り出せる（server が cap ごとに直列に実行する）。他の指示は返信まで直列
+    // task は返信（task_result = 最初の指揮の turn の結果）を待たずに次の task を送り出せる（server が task ごとの指揮で並行に動かし、上限と同じ branch は server が待たせる）。他の指示は返信まで直列
     const tail: Promise<unknown> = opts.releaseOnSend ? sentP : next;
     slot.chains.set(chainKey, tail);
     void tail.finally(() => {

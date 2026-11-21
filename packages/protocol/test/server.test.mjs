@@ -559,3 +559,21 @@ test("isProtocolCompatible: 形が崩れた版は互換でない（どちらの�
   }
   assert.equal(isProtocolCompatible("", ""), false);
 });
+
+test("parallel tasks (additive): cap tasks on status_result / activity, task_id on a worker activity and on update runs", () => {
+  const cap = { kind: "cap", id: "c-1", path: "/w/caps/c-1", session_id: null, state: "running", last_started_at: null, last_finished_at: null, retries: 0, queued: 1 };
+  const t = (task_id, state, extra = {}) => ({ task_id, state, queued_at: "2026-11-21T00:00:00.000Z", started_at: null, finished_at: null, ...extra });
+  const tasks = [t("t-1", "running", { branch: "feat/a", started_at: "2026-11-21T00:00:01.000Z" }), t("t-2", "waiting", { branch: "feat/a", waiting_for: "branch" }), t("t-3", "failed", { error: "x", finished_at: "2026-11-21T00:01:00.000Z" })];
+  const st = (c) => ({ bantou: 1, type: "status_result", ok: true, caps: [c], workers: [] });
+  assert.equal(isServerReply(st({ ...cap, tasks })), true);
+  assert.equal(isServerReply(st({ ...cap, tasks: [] })), true);
+  // 後の版で足された state / waiting_for の文字列も受ける
+  assert.equal(isServerReply(st({ ...cap, tasks: [t("t-4", "paused", { waiting_for: "later" })] })), true);
+  for (const bad of [{ tasks: "x" }, { tasks: [t("bad id", "running")] }, { tasks: [{ task_id: "t-1", state: "running" }] }, { tasks: [t("t-1", 1)] }]) {
+    assert.equal(isServerReply(st({ ...cap, ...bad })), false, JSON.stringify(bad));
+  }
+  const capAgent = { ...activityAgent, kind: "cap", id: "r-1", cap_id: "r-1", tasks };
+  const workerAgent = { ...activityAgent, task_id: "t-1" };
+  assert.equal(isServerNotice({ ...activityNotice, agents: [capAgent, workerAgent] }), true);
+  assert.equal(isServerNotice({ ...activityNotice, agents: [{ ...activityAgent, task_id: "bad id" }] }), false);
+});
