@@ -10,7 +10,7 @@
  * - 載せない理由は名前と理由の種類だけを返す（値・url・header は出さない）。
  */
 import { effectiveRaw, isPlain, validateAny, type ConnectionsData, type McpConnection } from "./mcp-connections.js";
-import { COORDINATOR_CALLER_HEADER, isCoordinatorEntry } from "./coordinator-mcp.js";
+import { isCoordinatorEntry } from "./coordinator-mcp.js";
 import { createSecretAlloc, headerOf, isStdioDef, memoryDefOf, toClaudeEntry, type McpServerDef, type SecretAlloc } from "./mcp-server-def.js";
 import type { SecretsStore } from "./mcp-secrets.js";
 import { BANTOU_SERVER_KEY, MEMORY_SERVER_KEY, MESSENGER_SERVER_KEY } from "./wrapper.js";
@@ -62,12 +62,7 @@ export function buildSessionMcp(
     const c = v.value;
     if (isPlain(c)) {
       out.servers[name] = toClaudeEntry(c, alloc);
-      if (coordinator !== null && isCoordinatorEntry(c, coordinator)) {
-        out.coordinator = true;
-        // 統括の server が呼び手の session を知るための header（他の session を眠らせる道具で、自分自身を断るのに使う。書いてあればそのまま）
-        const e = out.servers[name] as { headers?: Record<string, string> };
-        if (!Object.keys(e.headers ?? {}).some((k) => k.toLowerCase() === COORDINATOR_CALLER_HEADER)) e.headers = { ...(e.headers ?? {}), "X-Bantou-Session": session };
-      }
+      if (coordinator !== null && isCoordinatorEntry(c, coordinator)) out.coordinator = true;
       out.allow.push(`mcp__${name}__*`);
       out.attached.push(name);
       continue;

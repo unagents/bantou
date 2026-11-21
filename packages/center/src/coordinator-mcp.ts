@@ -24,8 +24,6 @@ import type { SessionInfo } from "./sessions.js";
 export const COORDINATOR_MCP_FILE = "coordinator-mcp.json";
 export const COORDINATOR_MCP_PATH = "/mcp";
 export const COORDINATOR_MCP_HOST = "127.0.0.1";
-/** 呼び手の session 名を運ぶ header（小文字）。center が session の起動の設定の統括の項目に足す。無い呼び手は誰か分からない。 */
-export const COORDINATOR_CALLER_HEADER = "x-bantou-session";
 /** 子 process が center の token を受け取る env。 */
 export const CENTER_TOKEN_ENV = "BANTOU_CENTER_TOKEN";
 const KEY_MIN = 32;
@@ -224,9 +222,7 @@ export async function startCoordinatorHttp(opts: {
       return;
     }
     const server = new McpServer({ name: "bantou-coordinator", version: "0.1.0" });
-    const callerRaw = req.headers[COORDINATOR_CALLER_HEADER];
-    const caller = (Array.isArray(callerRaw) ? callerRaw[0] : callerRaw)?.trim();
-    registerCoordinatorTools(server, { ...opts.backend, log, ...(caller ? { caller } : {}), ...(opts.now ? { now: opts.now } : {}) });
+    registerCoordinatorTools(server, { ...opts.backend, log, ...(opts.now ? { now: opts.now } : {}) });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.once("close", () => {
       void transport.close();

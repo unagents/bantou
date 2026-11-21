@@ -1050,8 +1050,8 @@ test("統括の割り当て: 割り当てた session だけ launch の ctx.coord
   assert.equal(valueOf(launches[1].args, "--append-system-prompt"), buildSystemInstructions({ session: "b" }));
   const cfgA = JSON.parse(valueOf(launches[0].args, "--mcp-config")!).mcpServers;
   const cfgB = JSON.parse(valueOf(launches[1].args, "--mcp-config")!).mcpServers;
-  // 設定に書いた普通の 1 項目（type・url・headers）が載る（呼び手の session 名の header を足す）。鍵は env の参照にして実値は子の env にだけ渡す
-  assert.deepEqual(cfgA["bantou-coordinator"], { type: "http", url: "http://127.0.0.1:7911/mcp", headers: { Authorization: "${BANTOU_MCP_SECRET_0}", "X-Bantou-Session": "a" } });
+  // 設定に書いた普通の 1 項目（type・url・headers）がそのまま載る。鍵は env の参照にして実値は子の env にだけ渡す
+  assert.deepEqual(cfgA["bantou-coordinator"], { type: "http", url: "http://127.0.0.1:7911/mcp", headers: { Authorization: "${BANTOU_MCP_SECRET_0}" } });
   assert.equal(launches[0].env.BANTOU_MCP_SECRET_0, `Bearer ${COORD_KEY}`);
   assert.ok(!launches[0].args.join("\0").includes(COORD_KEY) && !launches[1].args.join("\0").includes(COORD_KEY));
   assert.ok(!("bantou-coordinator" in cfgB));

@@ -469,24 +469,15 @@ test("session_brief: スリープ中の session は状態が「スリープ」�
   assert.match(r.sessions[1].line, /^b \| 停止 \|/);
 });
 
-test("統括の道具 coordinator_session_sleep: 呼んだ session 自身（header X-Bantou-Session）は眠らせず断る。他の session は眠らせられる。header の無い呼び手は誰か分からないので断らない", async () => {
-  const slept: string[] = [];
-  const { h, connect } = await boot(fakeBackend({ sleepSession: async (name) => (slept.push(name), { name, state: "stopped", sleeping: true }) }));
+test("統括の道具 coordinator_session_sleep: 道具の説明に「他の session を指定する」と書く（自分自身かどうかは server 側では見ない）", async () => {
+  const { h, connect } = await boot();
   try {
-    const me = await connect({ Authorization: `Bearer ${KEY}`, "X-Bantou-Session": "main" });
-    const self = await me.callTool({ name: "coordinator_session_sleep", arguments: { name: "main" } });
-    assert.equal(isError(self), true);
-    assert.match(text(self), /自分自身はスリープさせられない/);
-    assert.deepEqual(slept, []);
-    const other = await me.callTool({ name: "coordinator_session_sleep", arguments: { name: "other" } });
-    assert.equal(isError(other), false);
-    assert.deepEqual(slept, ["other"]);
-    await me.close();
-    // header の無い呼び手（center を介さない直接の呼び出し）は誰か分からない
-    const anon = await connect();
-    const r = await anon.callTool({ name: "coordinator_session_sleep", arguments: { name: "main" } });
-    assert.equal(isError(r), false);
-    await anon.close();
+    const c = await connect();
+    const t = (await c.listTools()).tools.find((x) => x.name === "coordinator_session_sleep");
+    assert.ok(t);
+    assert.match(t!.description ?? "", /他の session を指定する/);
+    assert.match(t!.description ?? "", /自分自身を指定しない/);
+    await c.close();
   } finally {
     await h.close();
   }
