@@ -113,6 +113,9 @@ export function createSleepGate(opts: {
           const kept = slot.pending.splice(0);
           gate.sync(slot.name, true);
           slots.get(slot.name)?.pending.unshift(...kept);
+        } else {
+          // もう眠っていない（消えた等）。引き継ぎ先が無いので、捨てずに全文を log に残す
+          for (const m of slot.pending.splice(0)) log(`起こせず、渡せなかった message: session=${slot.name} from=${m.from_name} text=${JSON.stringify(m.text)}`);
         }
       }
     })();
