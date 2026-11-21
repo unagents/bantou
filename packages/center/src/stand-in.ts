@@ -48,6 +48,32 @@ export async function evictStaleSameName(post: BrokerPost, name: string, ownId: 
   return evicted;
 }
 
+/** 身代わりの終わり方の部品（テストで偽物に差し替える）。 */
+export interface StandInShutdown {
+  /** 登録を外す前に mailbox に残った message を受け取る（受けた分は emit に渡る）。受けた message の配列を返す。 */
+  drain: () => Promise<unknown[]>;
+  /** 登録を外す。 */
+  close: () => Promise<unknown>;
+  /** 外した後に broker に残っている、受け取り済みで未確認の message。 */
+  leftover: () => Promise<{ id: number }[]>;
+  /** 親へ渡す。同じ id は 1 度だけにするのは emit 側。 */
+  emit: (m: { id: number }) => void;
+}
+
+/**
+ * 身代わりを終える。登録を外すと broker は未受信の message を捨てるため、外す前に受け取り切り、外した後も残りを拾う（message を捨てない）。
+ * どの段の失敗も後の段を止めない。
+ */
+export async function shutdownStandIn(s: StandInShutdown): Promise<void> {
+  // 受信が落ち着くまで（空振りが 2 回続くまで）繰り返す。受信中の dispatch と重なっても取りこぼさない
+  for (let quiet = 0, n = 0; quiet < 2 && n < 20; n++) {
+    const got = await s.drain().catch(() => [] as unknown[]);
+    quiet = got.length > 0 ? 0 : quiet + 1;
+  }
+  await s.close().catch(() => {});
+  for (const m of await s.leftover().catch(() => [])) s.emit(m);
+}
+
 /** 子 process 側。登録できたら {"ready":true}、message が届くたびに {"message":{...}} を 1 行ずつ出す。 */
 export async function runStandIn(argv: string[], io: { out: (l: string) => void; err: (l: string) => void }): Promise<number | "serving"> {
   const i = argv.indexOf("--name");
@@ -62,10 +88,15 @@ export async function runStandIn(argv: string[], io: { out: (l: string) => void;
     autoStartBroker: false,
     log: (m) => io.err(m),
   });
-  client.onMessage((m) => {
-    const msg = m as unknown as LinkInbound;
+  const emitted = new Set<number>();
+  const emit = (m: unknown): void => {
+    const msg = m as unknown as LinkInbound & { id: number };
+    if (emitted.has(msg.id)) return;
+    emitted.add(msg.id);
     io.out(JSON.stringify({ message: { from_id: msg.from_id, from_name: msg.from_name, text: msg.text, mode: msg.mode, meta: msg.meta ?? null } }));
-  });
+  };
+  client.onMessage(emit);
+  let broker: ReturnType<typeof createBrokerClient> | null = null;
   try {
     await client.connect();
   } catch (e) {
@@ -75,15 +106,30 @@ export async function runStandIn(argv: string[], io: { out: (l: string) => void;
   // 古い同名の登録を外してから ready を出す（親は ready の後に名前宛ての message を受け付ける）
   try {
     const cfg = loadConfig(process.env);
-    const broker = createBrokerClient(cfg.token);
+    broker = createBrokerClient(cfg.token);
     await resolveBroker(cfg, broker, (m) => io.err(m));
-    await evictStaleSameName((path, body) => broker.post(path as "/unregister", body as { id: string }), name, client.peer.id, hostname(), (m) => io.err(m));
+    const b = broker;
+    await evictStaleSameName((path, body) => b.post(path as "/unregister", body as { id: string }), name, client.peer.id, hostname(), (m) => io.err(m));
   } catch (e) {
     io.err(`古い同名の登録の掃除に失敗: ${e instanceof Error ? e.message : String(e)}`);
   }
   io.out(JSON.stringify({ [READY]: true }));
+  let finishing = false;
   const done = (): void => {
-    void client.close().catch(() => {}).finally(() => process.exit(0));
+    if (finishing) return;
+    finishing = true;
+    const id = client.peer.id;
+    void shutdownStandIn({
+      // checkMessages は poll → handler（= emit）→ 確認まで行い、まだ確認されていない message を返す
+      drain: async () => {
+        const left = await client.checkMessages();
+        for (const m of left) emit(m);
+        return left;
+      },
+      close: () => client.close(),
+      leftover: async () => (broker && id ? ((await broker.post("/get-buffered-messages", { id })) as { messages: { id: number }[] }).messages : []),
+      emit,
+    }).finally(() => process.exit(0));
   };
   process.stdin.on("end", done);
   process.stdin.on("close", done);
@@ -101,12 +147,23 @@ export function createProcessStandInClient(
 ): LinkClient {
   let child: ChildProcess | null = null;
   const handlers = new Set<(m: LinkInbound) => void | Promise<void>>();
-  const stop = (): void => {
+  /** 子を止める。子は止まる前に mailbox の message を出し切る。子の stdio が閉じてから返す（上限あり）。 */
+  const stop = (): Promise<void> => {
     const c = child;
     child = null;
-    if (!c) return;
+    if (!c) return Promise.resolve();
+    const closed = new Promise<void>((r) => {
+      if (c.exitCode !== null || c.signalCode !== null) return r();
+      c.once("close", () => r());
+      const t = setTimeout(() => {
+        c.kill("SIGKILL");
+        r();
+      }, 10_000);
+      t.unref();
+    });
     c.stdin?.end();
     c.kill("SIGTERM");
+    return closed;
   };
   return {
     connect: () =>
@@ -120,7 +177,7 @@ export function createProcessStandInClient(
           settled = true;
           clearTimeout(timer);
           if (err) {
-            if (child === c) stop();
+            if (child === c) void stop();
             reject(err);
           } else resolve();
         };
@@ -147,7 +204,9 @@ export function createProcessStandInClient(
         });
       }),
     close: async () => {
-      stop();
+      await stop();
+      // 子が最後に出した行を readline が渡し終えるのを待つ
+      await new Promise<void>((r) => setImmediate(r));
     },
     send: async () => {
       throw new Error("身代わり peer は送信しない");
