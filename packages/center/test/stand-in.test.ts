@@ -1,4 +1,11 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { createServer } from "node:http";
+import { mkdtempSync, rmSync } from "node:fs";
+import { hostname, tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { createInterface } from "node:readline";
 import { test } from "node:test";
 import { createProcessStandInClient, evictStaleSameName } from "../src/stand-in.js";
 import type { LinkInbound } from "../src/server-link.js";
@@ -88,4 +95,59 @@ test("evictStaleSameName: broker の失敗は投げない（外せなければ�
   const r = await evictStaleSameName(async () => { throw new Error("down"); }, "alpha-cap", "me", "h1", (m) => logs.push(m));
   assert.deepEqual(r, []);
   assert.ok(logs.some((l) => l.includes("down")));
+});
+
+test("stand-in 子 process（実体）: 登録後・ready の前に、古い同名の peer を broker から外す（別名・別 host・自分は外さない）", async () => {
+  const host = hostname();
+  const requests: string[] = [];
+  const server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (d) => (raw += d));
+    req.on("end", () => {
+      const path = req.url ?? "";
+      const body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+      requests.push(path === "/unregister" ? `${path} ${String(body.id)}` : path);
+      res.setHeader("content-type", "application/json");
+      if (path === "/register") res.end(JSON.stringify({ id: "me" }));
+      else if (path === "/list-peers") {
+        // broker 0.10.0 の実際の形（配列）。古い同名 1 件（外す）、自分・別名・別 host の同名（外さない）
+        res.end(JSON.stringify([
+          { id: "old1", name: "alpha-cap", hostname: host },
+          { id: "me", name: "alpha-cap", hostname: host },
+          { id: "other", name: "beta-cap", hostname: host },
+          { id: "remote", name: "alpha-cap", hostname: `${host}-other` },
+        ]));
+      } else if (path === "/poll-messages") res.end(JSON.stringify({ messages: [] }));
+      else res.end(JSON.stringify({ ok: true, messages: [] }));
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const port = (server.address() as { port: number }).port;
+  const home = mkdtempSync(join(tmpdir(), "stand-in-evict-"));
+  const child = spawn(process.execPath, [...process.execArgv, fileURLToPath(new URL("../src/cli.ts", import.meta.url)), "stand-in", "--name", "alpha-cap"], {
+    // 実 broker・実 HOME に触れない（使い捨て HOME・env 固定、discovery 無効）
+    env: { PATH: process.env.PATH, HOME: home, TMPDIR: home, AGENT_MESSENGER_HOST: "127.0.0.1", AGENT_MESSENGER_PORT: String(port), AGENT_MESSENGER_DISCOVERY: "off", AGENT_MESSENGER_CONFIG: join(home, "none.json") },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  try {
+    const unregisteredAtReady = await new Promise<string[]>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`ready が来ない: ${requests.join(",")}`)), 20_000);
+      child.once("exit", (code) => reject(new Error(`ready の前に終了 code=${code}`)));
+      createInterface({ input: child.stdout! }).on("line", (l) => {
+        if (l.includes('"ready"')) {
+          clearTimeout(timer);
+          resolve(requests.filter((r) => r.startsWith("/unregister")));
+        }
+      });
+    });
+    // ready を出した時点で、古い同名だけが外されている
+    assert.deepEqual(unregisteredAtReady, ["/unregister old1"]);
+  } finally {
+    child.removeAllListeners("exit");
+    child.stdin?.end();
+    child.kill("SIGTERM");
+    await new Promise<void>((r) => (child.exitCode !== null || child.signalCode !== null ? r() : child.once("exit", () => r())));
+    await new Promise<void>((r) => server.close(() => r()));
+    rmSync(home, { recursive: true, force: true });
+  }
 });
