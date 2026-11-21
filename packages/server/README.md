@@ -103,6 +103,7 @@ center から server を外す指示（protocol 1.8.0、`docs/protocol.md` の `
 - LAN に公開するには `broker.bind`（例 `0.0.0.0`）を明示する。その場合は `broker.token` の設定を推奨する。
 - 例: 204 の claudeAgent ユーザーは `"env": { "CLAUDE_CONFIG_DIR": "/home/vagrant/.claude-agent" }` を指定する。
 - 旧 `session.command` は廃止。残っていると起動時にエラーになる。`session.claude` を使う。
+- cap（本体と task ごとの lane）/ worker の claude（とその子の extraMcp の道具・worker が叩く npx）には、server を起動した npx が自分の起動のために入れた変数を渡さない（`server/utils/bantou/child-env.ts`）。外すのは何を実行するか・どの npm が実行したかを表す物（`npm_config_package` / `call` / `yes` / `workspace` / `workspaces` / `include_workspace_root` / `user_agent` / `npm_version` / `node_gyp` / `global_prefix` / `local_prefix`、`npm_command` / `npm_execpath` / `npm_node_execpath` / `npm_lifecycle_*` / `npm_package_*`）。残すと子の `npx -y <pkg>@<版> ...` が `npm_config_package` を `--package` として読み、`<pkg>@<版>` をコマンドとして探して失敗する。registry（scope 別を含む）・認証・proxy・userconfig・cache・prefix など取得元と取得の仕方の設定、npm_ で始まらない変数は残す。`session.env` に書いた物はそのまま渡す。server 自身の env は変えない（自動更新の npx は従来どおり）。
 
 ### 追加の MCP（extraMcp）
 

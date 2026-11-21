@@ -12,6 +12,7 @@ import {
 import type { Config } from "./config";
 import { assertModel, readModelRecord, writeModelRecord, type WithModel } from "./model";
 import { killGroup, type ClaudeRunOptions, type ClaudeRunResult, type RunMode } from "./claude";
+import { stripNpxEnv } from "./child-env";
 import { agentDir, cleanedFile, ensureTmpDir, laneDir, laneRoot, removeNonKept, runLogDir } from "./paths";
 import { listLiveProcesses, matchesSession, type LiveProcess } from "./processes";
 import type { AgentRunner } from "./runner";
@@ -558,8 +559,9 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
           extraArgs: config.session.extraArgs,
           ...(model !== undefined ? { model } : {}),
           timeoutMs: config.session.timeoutMs,
+          // server を起動した npx の npm_config_package などは外す（子の npx が誤読する。child-env.ts）。session.env で明示した物は渡す
           // TMPDIR は config.session.env でも上書きさせない（自分の path の tmp/ だけ）
-          env: { ...process.env, ...config.session.env, TMPDIR: tmp },
+          env: { ...stripNpxEnv(process.env), ...config.session.env, TMPDIR: tmp },
           logFile: join(runLogDir(dir), `${sessionId}.jsonl`),
           onLine: (line) => observe((o) => o.line(kind, id, line, input.taskId)),
           onSpawn: (child) => {
