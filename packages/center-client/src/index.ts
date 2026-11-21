@@ -104,6 +104,7 @@ export {
 } from "./sessions.ts";
 export {
   CENTER_SESSIONS_CHANGED_EVENT,
+  CENTER_SESSION_MESSAGE_EVENT,
   READ_TIMEOUT_MS,
   SseParser,
   centerUrl,
@@ -113,6 +114,8 @@ export {
   retryDelayMs,
   streamOnce,
   toChanged,
+  toMessage,
+  type SessionMessage,
   type Changed,
   type CenterEvents,
   type CenterEventsOptions,

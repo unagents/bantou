@@ -16,6 +16,8 @@ use std::time::Duration;
 use tauri::Emitter;
 
 pub const CHANGED_EVENT: &str = "center-sessions-changed";
+/// A session's last message of a turn (the center's SSE event `session-message`), forwarded to the webview.
+pub const MESSAGE_EVENT: &str = "center-session-message";
 
 /// A center without `/events` (404) or a refused token (401) is asked again only rarely.
 const REJECTED_DELAY: Duration = Duration::from_secs(60);
@@ -29,6 +31,24 @@ const TARGET_POLL: Duration = Duration::from_secs(2);
 pub struct Changed {
     pub reason: Option<String>,
     pub name: Option<String>,
+}
+
+/// Payload of `center-session-message`: which session, its last response of the turn, and when the center got it (ISO).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SessionMessage {
+    pub session: String,
+    pub text: String,
+    pub at: String,
+}
+
+/// The payload to forward for a `session-message` SSE event, or None for other / unreadable / incomplete ones.
+pub fn to_message(ev: &SseEvent) -> Option<SessionMessage> {
+    if ev.event != "session-message" {
+        return None;
+    }
+    let v: Value = serde_json::from_str(&ev.data).ok()?;
+    let field = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
+    Some(SessionMessage { session: field("session")?, text: field("text")?, at: field("at")? })
 }
 
 pub fn events_url(mcp_url: &str) -> Result<reqwest::Url, String> {
@@ -82,6 +102,9 @@ async fn run(app: tauri::AppHandle) {
                     if let Some(c) = to_changed(&ev) {
                         let _ = app.emit(CHANGED_EVENT, c);
                     }
+                    if let Some(m) = to_message(&ev) {
+                        let _ = app.emit(MESSAGE_EVENT, m);
+                    }
                     true
                 });
                 tokio::select! {
@@ -132,6 +155,21 @@ mod tests {
     #[test]
     fn unreadable_data_still_triggers_a_refetch() {
         assert_eq!(to_changed(&ev("sessions", "not json")), Some(Changed { reason: None, name: None }));
+    }
+
+    #[test]
+    fn session_message_event_carries_session_text_and_time() {
+        let m = to_message(&ev("session-message", r#"{"session":"pm-a","text":"done","at":"2026-11-09T00:00:00.000Z"}"#)).unwrap();
+        assert_eq!(m, SessionMessage { session: "pm-a".into(), text: "done".into(), at: "2026-11-09T00:00:00.000Z".into() });
+    }
+
+    #[test]
+    fn session_message_ignores_other_unreadable_and_incomplete_events() {
+        assert!(to_message(&ev("sessions", r#"{"session":"a","text":"b","at":"c"}"#)).is_none());
+        assert!(to_message(&ev("session-message", "not json")).is_none());
+        assert!(to_message(&ev("session-message", r#"{"session":"a"}"#)).is_none());
+        // a session-message never causes a list re-read
+        assert!(to_changed(&ev("session-message", "{}")).is_none());
     }
 
     #[test]

@@ -271,6 +271,11 @@ export class MockBantou {
     this.emitter("center-sessions-changed", { reason, name });
   }
 
+  /** The center's `GET /events` reported a session's last message of a turn (forwarded by the Rust side). */
+  centerSessionMessage(session: string, text: string, at = new Date().toISOString()) {
+    this.emitter("center-session-message", { session, text, at });
+  }
+
   /** The own sidecar center was started (Rust `center::CENTER_RUNNING_EVENT`). */
   centerRunning() {
     this.emitter("bantou://center-running", "running");

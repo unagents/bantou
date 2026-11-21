@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { activityFromHook, createSessionActivityTracker, HOOK_EVENTS } from "../src/session-activity.js";
+import { createEventHub, type SessionMessage } from "../src/events.js";
+import { activityFromHook, createSessionActivityTracker, HOOK_EVENTS, lastMessageFromHook, publishLastMessage } from "../src/session-activity.js";
 import { addHookTimestamp, hookCommand, hookUrl, runHook, statusLineSettingsJson } from "../src/status-line.js";
 
 const ev = (hook_event_name: string, rest: Record<string, unknown> = {}) => ({ hook_event_name, ...rest });
@@ -84,4 +85,31 @@ test("addHookTimestamp / runHook: 発火時刻を足して Bearer token 付き�
   assert.equal(body.hook_event_name, "Stop");
   assert.equal(typeof body.bantou_ts, "number");
   assert.equal((calls[0].headers as Record<string, string>).authorization, "Bearer tok");
+});
+
+test("lastMessageFromHook: Stop の last_assistant_message だけ。他の event・空・壊れた入力は null", () => {
+  assert.equal(lastMessageFromHook(ev("Stop", { last_assistant_message: "終わった" })), "終わった");
+  assert.equal(lastMessageFromHook(ev("StopFailure", { last_assistant_message: "API Error" })), null);
+  assert.equal(lastMessageFromHook(ev("UserPromptSubmit", { last_assistant_message: "x" })), null);
+  assert.equal(lastMessageFromHook(ev("Stop")), null);
+  assert.equal(lastMessageFromHook(ev("Stop", { last_assistant_message: "  \n" })), null);
+  for (const v of [null, "x", [], 1]) assert.equal(lastMessageFromHook(v), null);
+});
+
+test("publishLastMessage: Stop が来るたびに session 名・本文・時刻つきで届いた順に流れる（状態が idle のままでも）", () => {
+  const hub = createEventHub();
+  const got: SessionMessage[] = [];
+  const un = hub.subscribeMessage((m) => got.push(m));
+  const at = (ms: number) => () => ms;
+  publishLastMessage(hub, "a", ev("Stop", { last_assistant_message: "一つ目" }), at(Date.parse("2026-11-09T00:00:00Z")));
+  publishLastMessage(hub, "b", ev("PostToolUse"), at(1)); // 流れない
+  publishLastMessage(hub, "b", ev("Stop", { last_assistant_message: "bの返事" }), at(Date.parse("2026-11-09T00:00:05Z")));
+  publishLastMessage(hub, "a", ev("Stop", { last_assistant_message: "二つ目" }), at(Date.parse("2026-11-09T00:00:09Z")));
+  un();
+  publishLastMessage(hub, "a", ev("Stop", { last_assistant_message: "解除後" }), at(0));
+  assert.deepEqual(got, [
+    { session: "a", text: "一つ目", at: "2026-11-09T00:00:00.000Z" },
+    { session: "b", text: "bの返事", at: "2026-11-09T00:00:05.000Z" },
+    { session: "a", text: "二つ目", at: "2026-11-09T00:00:09.000Z" },
+  ]);
 });

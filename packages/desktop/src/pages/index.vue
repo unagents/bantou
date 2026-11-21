@@ -29,6 +29,12 @@ const {
   openSession,
 } = useSessionBoard(board);
 const toast = useToast();
+const { messages: drawerMessages } = useMessageDrawer();
+// A drawer item may name a session that is gone (deleted / renamed): keep the current screen instead of an empty one.
+function selectFromDrawer(name: string) {
+  if (sessions.value.some((g) => g.name === name)) selectedName.value = name;
+  else toast.add({ title: `${name} は center に無い`, color: "warning" });
+}
 // --- pane widths (side | middle | right; drag the dividers) ---
 const paneRow = ref<HTMLElement | null>(null);
 const { width: paneRowWidth } = useElementSize(paneRow);
@@ -111,7 +117,8 @@ watch(modalOpen, (v) => {
     </div>
 
     <template v-else-if="dir">
-      <div ref="paneRow" class="flex min-h-0 flex-1 overflow-x-auto" data-testid="pane-row">
+      <!-- the right edge is left free for the closed message drawer's grab strip -->
+      <div ref="paneRow" class="flex min-h-0 flex-1 overflow-x-auto" :style="{ paddingRight: `${DRAWER_HANDLE}px` }" data-testid="pane-row">
       <div class="flex min-h-0 flex-1" :style="{ minWidth: `${PANE_ROW_MIN}px` }">
         <nav aria-label="セッション一覧" class="shrink-0 overflow-y-auto" :style="{ width: `${pane.side.value}px` }">
           <UTooltip v-if="!centerList.reachable" :text="centerList.reason ?? 'center に問い合わせられなかった'">
@@ -313,6 +320,7 @@ watch(modalOpen, (v) => {
       :login-error="selectedGroup.loginError"
       @done="onLoggedIn"
     />
+    <MessageDrawer v-if="loaded && dir" :messages="drawerMessages" @select="selectFromDrawer" />
     <SettingsDialog v-if="settingsOpen" v-model:open="settingsOpen" />
     <CenterDialog v-if="centerOpen" v-model:open="centerOpen" />
   </div>

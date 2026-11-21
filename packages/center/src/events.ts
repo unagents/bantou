@@ -5,14 +5,28 @@ export interface SessionsEvent {
   name: string;
 }
 
+/** session の turn の終わりの最後の応答（GET /events の SSE event `session-message`）。 */
+export interface SessionMessage {
+  /** どの session の物か。 */
+  session: string;
+  /** 最後の応答の文。 */
+  text: string;
+  /** 届いた時刻（ISO、center の時計）。 */
+  at: string;
+}
+
 export interface EventHub {
   publish(ev: SessionsEvent): void;
   /** 購読する。戻り値は解除。 */
   subscribe(listener: (ev: SessionsEvent) => void): () => void;
+  /** turn の終わりの最後の応答を流す。 */
+  publishMessage(m: SessionMessage): void;
+  subscribeMessage(listener: (m: SessionMessage) => void): () => void;
 }
 
 export function createEventHub(): EventHub {
   const listeners = new Set<(ev: SessionsEvent) => void>();
+  const messageListeners = new Set<(m: SessionMessage) => void>();
   return {
     publish(ev) {
       for (const l of [...listeners]) l(ev);
@@ -20,6 +34,13 @@ export function createEventHub(): EventHub {
     subscribe(listener) {
       listeners.add(listener);
       return () => void listeners.delete(listener);
+    },
+    publishMessage(m) {
+      for (const l of [...messageListeners]) l(m);
+    },
+    subscribeMessage(listener) {
+      messageListeners.add(listener);
+      return () => void messageListeners.delete(listener);
     },
   };
 }

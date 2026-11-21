@@ -9,7 +9,7 @@ import { createAttachments } from "./attachment.ts";
 import { MAX_BODY_BYTES } from "./body.ts";
 import { createCenterSettings, type CenterSettingsHandle } from "./center-settings.ts";
 import { CommandError, createCommands, toCommandError, type CommandTable } from "./commands.ts";
-import { createCenterEvents, type CenterEvents } from "./events.ts";
+import { CENTER_SESSION_MESSAGE_EVENT, createCenterEvents, type CenterEvents } from "./events.ts";
 import { createFileSettingsStore } from "./file-store.ts";
 import { createCenterMcp, NO_TARGET, type CenterMcp, type McpLogger } from "./mcp.ts";
 import { createRedactor, type Redactor } from "./redact.ts";
@@ -122,6 +122,7 @@ export function createCenterClient(opts: CenterClientOptions = {}): CenterClient
     }
   };
   events.subscribe((c) => emit({ event: "center-sessions-changed", data: { reason: c.reason ?? null, name: c.name ?? null } }));
+  events.subscribeMessage((m) => emit({ event: CENTER_SESSION_MESSAGE_EVENT, data: m }));
   sessions.onChanged(() => emit({ event: SESSIONS_CHANGED_EVENT, data: null }));
 
   const subscribe: CenterClient["subscribe"] = (l) => {

@@ -14,7 +14,9 @@ import {
   retryDelayMs,
   streamOnce,
   toChanged,
+  toMessage,
   type Changed,
+  type SessionMessage,
   type SseEvent,
   type Target,
 } from "../src/index.ts";
@@ -52,6 +54,15 @@ test("E:143 unreadable data still triggers a refetch", () => {
 test("E:148 other events are ignored", () => {
   assert.equal(toChanged(ev("output", "{}")), undefined);
   assert.equal(toChanged(ev("message", "{}")), undefined);
+});
+
+test("session-message event carries session, text and at; other / unreadable / incomplete ones are ignored", () => {
+  const ok = '{"session":"pm-a","text":"終わった","at":"2026-11-09T00:00:00.000Z"}';
+  assert.deepEqual(toMessage(ev("session-message", ok)), { session: "pm-a", text: "終わった", at: "2026-11-09T00:00:00.000Z" });
+  assert.equal(toMessage(ev("sessions", ok)), undefined);
+  assert.equal(toMessage(ev("session-message", "not json")), undefined);
+  assert.equal(toMessage(ev("session-message", '{"session":"a"}')), undefined);
+  assert.equal(toChanged(ev("session-message", ok)), undefined, "sessions の再読込を起こさない");
 });
 
 test("E:154 changed serializes with the event field names", () => {
@@ -208,6 +219,7 @@ function eventsHandler(center: FakeCenter) {
   };
   return {
     opened,
+    pushMessage: (data: object) => open.forEach((r) => r.write(`event: session-message\ndata: ${JSON.stringify(data)}\n\n`)),
     push: (data: object) => open.forEach((r) => r.write(`event: sessions\ndata: ${JSON.stringify(data)}\n\n`)),
     dropAll: () => open.forEach((r) => r.end()),
   };
@@ -245,6 +257,27 @@ test("one subscription feeds every listener; the token is sent; stop ends it", a
   const n = h.opened.length;
   await new Promise((r) => setTimeout(r, 100));
   assert.equal(h.opened.length, n);
+});
+
+test("session-message events reach message listeners in order, and do not look like a session change", async () => {
+  const mock = await FakeCenter.start("tok-abcdefghij");
+  centers.push(mock);
+  const h = eventsHandler(mock);
+  const events = mk({
+    settings: { selectTarget: async () => ({ url: mock.url, token: "tok-abcdefghij", source: "remote" as const }) },
+    ...fast,
+  });
+  const changed: Changed[] = [];
+  const got: SessionMessage[] = [];
+  events.subscribe((c) => changed.push(c));
+  events.subscribeMessage((m) => got.push(m));
+  events.start();
+  await until(() => changed.length === 1);
+  h.pushMessage({ session: "a", text: "one", at: "2026-11-09T00:00:00.000Z" });
+  h.pushMessage({ session: "b", text: "two", at: "2026-11-09T00:00:01.000Z" });
+  await until(() => got.length === 2);
+  assert.deepEqual(got.map((m) => m.text), ["one", "two"]);
+  assert.equal(changed.length, 1);
 });
 
 test("a closed connection is reopened and the first event after it is delivered", async () => {

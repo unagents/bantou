@@ -238,6 +238,31 @@ export function toChanged(ev: SseEvent): Changed | undefined {
   return { reason: field("reason"), name: field("name") };
 }
 
+/** Event name the webview listens to for a session's last message of a turn. Mirrors `center_events.rs`. */
+export const CENTER_SESSION_MESSAGE_EVENT = "center-session-message";
+
+/** Payload of `center-session-message`: which session, its last response of the turn, and when the center got it (ISO). */
+export interface SessionMessage {
+  session: string;
+  text: string;
+  at: string;
+}
+
+/** The payload to forward for a `session-message` SSE event, or undefined for other / unreadable events. (`to_message`) */
+export function toMessage(ev: SseEvent): SessionMessage | undefined {
+  if (ev.event !== "session-message") return undefined;
+  let v: unknown;
+  try {
+    v = JSON.parse(ev.data);
+  } catch {
+    return undefined;
+  }
+  if (v === null || typeof v !== "object") return undefined;
+  const o = v as Record<string, unknown>;
+  if (typeof o.session !== "string" || typeof o.text !== "string" || typeof o.at !== "string") return undefined;
+  return { session: o.session, text: o.text, at: o.at };
+}
+
 /** Wait before the next attempt, given how the last one ended (`Error` = it failed). (`retry_delay`) */
 export function retryDelayMs(last: StreamEnd | Error, failures: number, rejectedMs = REJECTED_DELAY_MS): number {
   if (!(last instanceof Error) && last.type === "rejected") return rejectedMs;
@@ -260,6 +285,8 @@ export interface CenterEventsOptions {
 export interface CenterEvents {
   /** Listen to `center-sessions-changed`. Returns the unsubscribe. */
   subscribe(listener: (c: Changed) => void): () => void;
+  /** Listen to `center-session-message`. Returns the unsubscribe. */
+  subscribeMessage(listener: (m: SessionMessage) => void): () => void;
   /** Start the single subscription (idempotent). */
   start(): void;
   /** Stop it and wait until it has ended (idempotent). */
@@ -271,6 +298,7 @@ const sameTarget = (a: Target | undefined, b: Target | undefined) =>
 
 export function createCenterEvents(opts: CenterEventsOptions): CenterEvents {
   const listeners = new Set<(c: Changed) => void>();
+  const messageListeners = new Set<(m: SessionMessage) => void>();
   const readTimeout = opts.readTimeoutMs ?? READ_TIMEOUT_MS;
   const pollMs = opts.targetPollMs ?? TARGET_POLL_MS;
   const noTargetMs = opts.noTargetWaitMs ?? NO_TARGET_WAIT_MS;
@@ -338,6 +366,14 @@ export function createCenterEvents(opts: CenterEventsOptions): CenterEvents {
             gotEvents = true;
             const c = toChanged(ev);
             if (c) emit(c);
+            const m = toMessage(ev);
+            if (m) for (const l of [...messageListeners]) {
+              try {
+                l(m);
+              } catch {
+                // a listener must not break the subscription
+              }
+            }
             return true;
           },
           { fetch: opts.fetch, readTimeoutMs: readTimeout, signal: conn.signal },
@@ -368,6 +404,10 @@ export function createCenterEvents(opts: CenterEventsOptions): CenterEvents {
     subscribe(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
+    },
+    subscribeMessage(listener) {
+      messageListeners.add(listener);
+      return () => messageListeners.delete(listener);
     },
     start() {
       if (running) return;

@@ -32,7 +32,7 @@ import { createCenterServer, createSessionMcpServer } from "./server.js";
 import { createCore } from "./core.js";
 import { createEventHub } from "./events.js";
 import { createSessionTokens } from "./session-auth.js";
-import { createSessionActivityTracker } from "./session-activity.js";
+import { createSessionActivityTracker, publishLastMessage } from "./session-activity.js";
 import { createServerLink } from "./server-link.js";
 import { createProcessStandInClient } from "./stand-in.js";
 import { createSleepGate } from "./sleep-gate.js";
@@ -290,6 +290,8 @@ export async function runDaemon(args: CliArgs): Promise<void> {
       onHook: (name, payload) => {
         const s = sessions.list().find((x) => x.name === name);
         if (s && (s.state === "starting" || s.state === "connected") && activityTracker.apply(name, payload, s.startedAt)) events.publish({ reason: "activity", name });
+        // turn の終わりの最後の応答を desktop へ（GET /events の session-message）
+        if (s && (s.state === "starting" || s.state === "connected")) publishLastMessage(events, name, payload);
         // 外部記憶へ（応答を待たない。キューに積むだけ）
         if (s && (s.state === "starting" || s.state === "connected")) memoryEvents.onHook(name, payload);
       },

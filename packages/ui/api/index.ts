@@ -37,6 +37,7 @@ export {
   wakeSession,
   updateSessionSettings,
 } from "./sessions";
+export { CENTER_SESSION_MESSAGE_EVENT } from "./sessions";
 export {
   CHECK_FOR_UPDATES_EVENT,
   checkForUpdate,
