@@ -67,12 +67,13 @@ test("evictStaleSameName: 同じ host の同名の自分以外の peer だけを
   const unregistered: string[] = [];
   const post = async (path: string, body: Record<string, unknown>): Promise<unknown> => {
     if (path === "/list-peers") {
-      return { peers: [
+      // broker 0.10.0 の実際の形（配列）
+      return [
         { id: "old1", name: "alpha-cap", hostname: "h1" },
         { id: "me", name: "alpha-cap", hostname: "h1" },
         { id: "other", name: "beta-cap", hostname: "h1" },
         { id: "remote", name: "alpha-cap", hostname: "h2" },
-      ] };
+      ];
     }
     unregistered.push(String(body.id));
     return { ok: true };

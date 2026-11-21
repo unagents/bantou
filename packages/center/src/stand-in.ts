@@ -29,8 +29,10 @@ export type BrokerPost = (path: "/list-peers" | "/unregister", body: Record<stri
 export async function evictStaleSameName(post: BrokerPost, name: string, ownId: string | null, host: string, log: (m: string) => void): Promise<string[]> {
   const evicted: string[] = [];
   try {
-    const r = (await post("/list-peers", { scope: "all", ...(ownId ? { exclude_id: ownId } : {}) })) as { peers?: Array<{ id: string; name?: string; hostname?: string }> };
-    for (const p of r.peers ?? []) {
+    type P = { id: string; name?: string; hostname?: string };
+    // broker 0.10.0 の /list-peers は peer の配列をそのまま返す
+    const r = (await post("/list-peers", { scope: "all", ...(ownId ? { exclude_id: ownId } : {}) })) as P[] | { peers?: P[] };
+    for (const p of Array.isArray(r) ? r : (r.peers ?? [])) {
       if (p.name !== name || p.id === ownId || (p.hostname !== undefined && p.hostname !== host)) continue;
       try {
         await post("/unregister", { id: p.id });
