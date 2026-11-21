@@ -204,15 +204,17 @@ watch(modalOpen, (v) => {
                 :data-name="g.name"
                 @click="openSettings(g.name)"
               />
+              <!-- center の config 由来の project は眠らせられない: 操作を出さない -->
               <UButton
+                v-if="!fromConfig(g.name)"
                 class="rounded-none"
                 variant="ghost"
                 color="neutral"
                 size="xs"
                 icon="i-lucide-moon"
                 :aria-label="`${g.name} をスリープさせる`"
-                :disabled="fromConfig(g.name) || g.sleeping"
-                :title="fromConfig(g.name) ? 'center の config 由来の project はスリープさせられない' : g.sleeping ? 'スリープ中（開くと起きる）' : 'スリープさせる（claude を止めて空ける。開くと元の会話のまま起きる）'"
+                :disabled="g.sleeping"
+                :title="g.sleeping ? 'スリープ中（開くと起きる）' : 'スリープさせる（claude を止めて空ける。開くと元の会話のまま起きる）'"
                 data-testid="session-sleep"
                 :data-name="g.name"
                 @click="sleep(g.name)"

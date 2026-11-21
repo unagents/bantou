@@ -58,6 +58,15 @@ export interface LinkInbound {
   meta?: LinkMeta | null;
 }
 
+/**
+ * 起床の直前の印。眠らせた claude の peer 登録は broker に最大約 60 秒残る。起床後に送る先は「印より後に登録された peer」だけにする（古い peer へ送ると ok になって消える）。
+ * since は broker が付けた registered_at の時刻（その時点で broker にいる peer の最新の登録時刻。broker の時計なので、center との時計のずれに影響されない）。exclude は印の時点にいた同名 peer の id。
+ */
+export interface PeerMark {
+  exclude: ReadonlySet<string>;
+  since?: string;
+}
+
 /** link が使う messenger client の最小形（テストで偽物に差し替える）。 */
 export interface LinkClient {
   connect(): Promise<void>;
@@ -171,9 +180,9 @@ export interface ServerLink {
    * name の名前を持つ messenger peer（owner の session）へ text を push で送る。
    * peer が見つからない・送れない時は ok:false と理由を返す（投げない）。bantou protocol の指示ではないので版の門は通らない。
    */
-  notifyPeer(name: string, text: string, opts?: { exclude?: ReadonlySet<string> }): Promise<{ ok: true; to: string } | { ok: false; reason: string }>;
-  /** 今 messenger にいる name の peer の id（自分以外）。失敗は null。起床前の古い登録を、起床後の宛先から外す（exclude）ために控える。 */
-  peerIdsOf(name: string): Promise<string[] | null>;
+  notifyPeer(name: string, text: string, opts?: { mark?: PeerMark }): Promise<{ ok: true; to: string } | { ok: false; reason: string }>;
+  /** 起床の直前に控える印（失敗は null）。起床後の送りを、新しい claude の peer（この印より後に登録された物）だけに絞るのに使う。 */
+  peerMarkOf(name: string): Promise<PeerMark | null>;
   /** 送る前の門（protocol の版と更新待ち）。断るなら error 返信、通すなら undefined。 */
   gate(peer: ServerPeer, command: ServerCommandType): ErrorReply | undefined;
   /** 追加の門（更新待ちの判定）を差し込む。protocol の版の門はこの前に常に効く。 */
@@ -334,6 +343,13 @@ export function createClient(s: ServerConfig, log: Logger): LinkClient {
     autoStartBroker: false,
     log: (m) => log(`messenger(${s.name}): ${m}`),
   }) as unknown as LinkClient;
+}
+
+/** 印が無ければ全部。あれば、印の時点にいなかった peer で、登録が印の since 以後の物だけ（registered_at の無い peer は id だけで見る）。 */
+function isNewerPeer(p: { id: string; registered_at?: string }, mark?: PeerMark): boolean {
+  if (!mark) return true;
+  if (mark.exclude.has(p.id)) return false;
+  return mark.since === undefined || p.registered_at === undefined || p.registered_at >= mark.since;
 }
 
 export function createServerLink(opts: {
@@ -886,12 +902,14 @@ export function createServerLink(opts: {
       request<HelloResultReply>(discoveryName, "hello_result", peer.id, {}, { target: peerTarget(peer), timeoutMs: FOLLOW_TIMEOUT_MS }),
     updateServer: (peer, version) =>
       request<UpdateResultReply>(discoveryName, "update_result", peer.id, { version }, { target: peerTarget(peer), timeoutMs: FOLLOW_TIMEOUT_MS }),
-    async peerIdsOf(name) {
+    async peerMarkOf(name) {
       try {
         const client = await ensure(slotOf(discoveryName));
         if (!client.listPeers) return null;
         const own = client.peer?.id ?? null;
-        return (await client.listPeers("all")).filter((p) => p.name === name && p.id !== own).map((p) => p.id);
+        const all = (await client.listPeers("all")).filter((p) => p.id !== own);
+        const since = all.map((p) => p.registered_at ?? "").sort().pop();
+        return { exclude: new Set(all.filter((p) => p.name === name).map((p) => p.id)), ...(since ? { since } : {}) };
       } catch {
         return null;
       }
@@ -906,8 +924,8 @@ export function createServerLink(opts: {
       if (!client.listPeers) return { ok: false, reason: "broker が peer の列挙に対応していない" };
       try {
         const own = client.peer?.id ?? null;
-        const hits = (await client.listPeers("all")).filter((p) => p.name === name && p.id !== own && !opts?.exclude?.has(p.id));
-        if (hits.length === 0) return { ok: false, reason: `messenger に peer ${name} がいない（session が agent-messenger につながっていない${opts?.exclude?.size ? `。除外した古い登録 ${opts.exclude.size} 件` : ""}）` };
+        const hits = (await client.listPeers("all")).filter((p) => p.name === name && p.id !== own && isNewerPeer(p, opts?.mark));
+        if (hits.length === 0) return { ok: false, reason: `messenger に peer ${name} がいない（session が agent-messenger につながっていない${opts?.mark?.exclude.size ? `。起床前からの古い登録 ${opts.mark.exclude.size} 件は除外` : ""}）` };
         // session の再起動直後は、止まった client の古い登録が heartbeat 失効（60 秒）まで残り同名が並ぶ。最後に登録した peer を選ぶ
         hits.sort((a, b) => (b.registered_at ?? "").localeCompare(a.registered_at ?? ""));
         if (hits.length > 1) log(`通知先の peer が複数: name=${name} ${hits.map((p) => p.id).join(",")} -> ${hits[0].id}（最新の登録）`);

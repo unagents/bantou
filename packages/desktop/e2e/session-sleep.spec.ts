@@ -66,4 +66,15 @@ test.describe("session sleep", () => {
     await expect(sideRow(page, "stroke-board").getByTestId("side-sleeping")).toHaveCount(0);
     expect(await calls(page, "session_wake")).toEqual([{ name: "stroke-board" }]);
   });
+  test("a project from the center config has no sleep button (it cannot be put to sleep); the others do", async ({ page }) => {
+    await page.goto("/");
+    await page.evaluate(() => {
+      const s = (window as unknown as { __BANTOU_MOCK__: Mock }).__BANTOU_MOCK__.centerSessions.find((x) => x.name === "careery");
+      if (s) s.source = "config";
+    });
+    await act(page);
+    await expect(sideRow(page, "careery")).toBeVisible();
+    await expect(sleepButton(page, "careery")).toHaveCount(0);
+    await expect(sleepButton(page, "stroke-board")).toBeEnabled();
+  });
 });

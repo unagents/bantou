@@ -6,7 +6,7 @@
  * 届いたら (1) 身代わりを外す (2) session を元の会話のまま起こす (3) 起きた claude の peer が現れるまで待って、届いた message を渡す。
  * 眠っていない session には身代わりを置かない（同名の peer が並ばない）。broker に繋がらない間は定期的に登録をやり直す。
  */
-import type { LinkClient, LinkInbound } from "./server-link.js";
+import type { LinkClient, LinkInbound, PeerMark } from "./server-link.js";
 import type { Logger } from "./log.js";
 
 export interface SleepGate {
@@ -35,12 +35,12 @@ export function createSleepGate(opts: {
   /** session を起こす（SessionManager.wake。resume）。 */
   wake: (name: string) => Promise<unknown>;
   /** 起きた session の claude の peer へ text を push で渡す（link.notifyPeer）。 */
-  deliver: (name: string, text: string, exclude?: ReadonlySet<string>) => Promise<{ ok: boolean; reason?: string }>;
+  deliver: (name: string, text: string, mark?: PeerMark) => Promise<{ ok: boolean; reason?: string }>;
   /**
-   * 今 messenger にいるその session の peer の id（失敗は null）。起こす前に控え、起きた後の宛先から外す。
-   * 眠らせた claude の登録は broker に最大約 60 秒残る。外さないと、起床直後の送りが新しい claude の登録前に古い peer へ届き（ok になり）消える。
+   * 起こす前の印（失敗は null）。起きた後の送りは、この印より後に登録された peer（新しい claude）だけに送る。
+   * 眠らせた claude の登録は broker に最大約 60 秒残る。絞らないと、起床直後の送りが新しい claude の peer の登録前に古い peer へ届き（ok になり）消える。
    */
-  peerIds?: (name: string) => Promise<string[] | null>;
+  peerMark?: (name: string) => Promise<PeerMark | null>;
   /** 起こせなかった後、まだ眠っているか（眠っているなら身代わりを置き直す）。省略時は置き直さない。 */
   isSleeping?: (name: string) => boolean;
   /** session 名 → messenger の peer 名（capSessionName）。 */
@@ -71,16 +71,17 @@ export function createSleepGate(opts: {
     if (c) await c.close().catch(() => {});
   };
 
-  const deliverAll = async (slot: Slot, messages: LinkInbound[], exclude?: ReadonlySet<string>): Promise<void> => {
+  const deliverAll = async (slot: Slot, messages: LinkInbound[], mark?: PeerMark): Promise<void> => {
     for (const m of messages) {
       const deadline = Date.now() + deliverTimeoutMs;
       let last = "";
       for (;;) {
-        const r = await opts.deliver(slot.name, textOf(m), exclude);
+        const r = await opts.deliver(slot.name, textOf(m), mark);
         if (r.ok) break;
         last = r.reason ?? "";
         if (Date.now() >= deadline || closed) {
-          log(`スリープ中に届いた message を渡せなかった: session=${slot.name} from=${m.from_name} ${last}`);
+          // 捨てずに log へ全文を残す（渡せなかった message をここから拾える）
+          log(`スリープ中に届いた message を渡せなかった（${Math.round(deliverTimeoutMs / 1000)} 秒待った）: session=${slot.name} from=${m.from_name} reason=${last} text=${JSON.stringify(m.text)}`);
           break;
         }
         await sleepMs(deliverIntervalMs);
@@ -102,9 +103,9 @@ export function createSleepGate(opts: {
         // 身代わりを先に外す（外さないと、起きた claude の peer と同名が並ぶ）
         await release(slot);
         slots.delete(slot.name);
-        const before = new Set((await opts.peerIds?.(slot.name)) ?? []);
+        const mark = (await opts.peerMark?.(slot.name)) ?? undefined;
         await opts.wake(slot.name);
-        await deliverAll(slot, slot.pending.splice(0), before);
+        await deliverAll(slot, slot.pending.splice(0), mark);
       } catch (e) {
         log(`スリープ中の session を起こせなかった: session=${slot.name} ${e instanceof Error ? e.message : String(e)}`);
         if (opts.isSleeping?.(slot.name)) {
@@ -148,11 +149,11 @@ export function createSleepGate(opts: {
           slots.delete(name);
           // 他の経路（desktop で開く・wake）で起きる時、身代わりが預かっていた message があれば起きた claude へ渡す
           const kept = cur.pending.splice(0);
-          const before = kept.length > 0 && opts.peerIds ? opts.peerIds(name) : Promise.resolve(null);
+          const markP = kept.length > 0 && opts.peerMark ? opts.peerMark(name) : Promise.resolve(null);
           void (async () => {
-            const ex = new Set((await before) ?? []);
+            const mark = (await markP) ?? undefined;
             await release(cur);
-            if (kept.length > 0) await deliverAll(cur, kept, ex);
+            if (kept.length > 0) await deliverAll(cur, kept, mark);
           })();
         }
         return;

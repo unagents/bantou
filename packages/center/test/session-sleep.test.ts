@@ -8,7 +8,7 @@ import { createEventHub, type SessionsEvent } from "../src/events.js";
 import type { RcStatus, RemoteControlSupervisor } from "../src/remote-control.js";
 import { createSessionManager, type SavedSession } from "../src/sessions.js";
 import { createSleepGate } from "../src/sleep-gate.js";
-import type { LinkClient, LinkInbound } from "../src/server-link.js";
+import type { LinkClient, LinkInbound, PeerMark } from "../src/server-link.js";
 import { createJsonListStore } from "../src/store.js";
 
 /** supervisor の偽物（stop を持つ）。 */
@@ -354,15 +354,16 @@ test("gate: 起床前から居た古い同名 peer（眠らせた claude の登�
   // broker の模擬: 起こす前は古い peer old-1 だけ。起床の少し後に新しい claude の peer new-1 が登録される
   const brokerPeers = ["old-1"];
   const sentTo: string[] = [];
+  const mark = { exclude: new Set(["old-1"]), since: "2026-11-21T00:00:00.000Z" };
   let polls = 0;
   const gate = createSleepGate({
     clientFactory: () => fc.client,
-    peerIds: async () => [...brokerPeers],
+    peerMark: async () => mark,
     wake: async () => {},
-    deliver: async (_n, _t, exclude) => {
+    deliver: async (_n, _t, m) => {
       polls++;
       if (polls === 3) brokerPeers.push("new-1");
-      const hit = brokerPeers.filter((id) => !exclude?.has(id)).pop();
+      const hit = brokerPeers.filter((id) => !m?.exclude.has(id)).pop();
       if (!hit) return { ok: false, reason: "peer が居ない" };
       sentTo.push(hit);
       return { ok: true };
@@ -420,7 +421,7 @@ test("gate: 起こせなかった時、溜まっていた message は捨てず�
 test("gate: message 無しで起きた（desktop で開く等）時、身代わりが預かっていた message があれば起きた claude へ渡す（起床前の古い peer は除く）", async () => {
   const fcs: ReturnType<typeof fakeClient>[] = [];
   let failWake = true;
-  const excludes: (ReadonlySet<string> | undefined)[] = [];
+  const marks: (PeerMark | undefined)[] = [];
   const delivered: string[] = [];
   const gate = createSleepGate({
     clientFactory: () => {
@@ -428,12 +429,12 @@ test("gate: message 無しで起きた（desktop で開く等）時、身代わ�
       fcs.push(fc);
       return fc.client;
     },
-    peerIds: async () => ["old-1"],
+    peerMark: async () => ({ exclude: new Set(["old-1"]), since: "2026-11-21T00:00:00.000Z" }),
     wake: async () => {
       if (failWake) throw new Error("start 失敗");
     },
-    deliver: async (_n, t, ex) => {
-      excludes.push(ex);
+    deliver: async (_n, t, m) => {
+      marks.push(m);
       delivered.push(t);
       return { ok: true };
     },
@@ -451,7 +452,8 @@ test("gate: message 無しで起きた（desktop で開く等）時、身代わ�
   await tick(100);
   assert.equal(delivered.length, 1);
   assert.match(delivered[0], /kept/);
-  assert.ok(excludes[0]?.has("old-1"));
+  assert.ok(marks[0]?.exclude.has("old-1"));
+  assert.equal(marks[0]?.since, "2026-11-21T00:00:00.000Z");
   await gate.close();
 });
 
@@ -465,4 +467,28 @@ test("sleep: supervisor.stop が失敗したら、眠った事にしない（sle
   assert.deepEqual(changes, []);
   assert.equal(mgr.list().find((s) => s.name === "pm1")?.sleeping, false);
   assert.notEqual((await savedOf())[0].sleeping, true);
+});
+
+test("gate: 新しい claude の peer が上限（deliverTimeoutMs）まで現れなかった時は、渡せなかった事を log に出し、message の全文（送り手・本文）を log に残す（捨てない）", async () => {
+  const fc = fakeClient();
+  const logs: string[] = [];
+  const gate = createSleepGate({
+    clientFactory: () => fc.client,
+    wake: async () => {},
+    deliver: async () => ({ ok: false, reason: "古い peer しか居ない" }),
+    peerName: (n) => `${n}-cap`,
+    log: (m) => logs.push(m),
+    deliverIntervalMs: 5,
+    deliverTimeoutMs: 40,
+  });
+  gate.sync("pm1", true);
+  await tick();
+  fc.emit({ from_name: "worker-x", text: "大事な連絡です" });
+  await tick(150);
+  const l = logs.find((x) => x.includes("渡せなかった"));
+  assert.ok(l, "log に出る");
+  assert.match(l!, /worker-x/);
+  assert.match(l!, /大事な連絡です/);
+  assert.match(l!, /古い peer しか居ない/);
+  await gate.close();
 });

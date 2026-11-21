@@ -74,7 +74,8 @@ test("--mcp-config: 統括の server の項目は普通の http の項目とし�
   const e = m("a").servers["bantou-coordinator"] as { type: string; url: string; headers: Record<string, string> };
   assert.equal(e.type, "http");
   assert.equal(e.url, CENTRY.url);
-  assert.deepEqual(e.headers, { Authorization: "${BANTOU_MCP_SECRET_0}" });
+  // 呼び手の session 名の header も足す（統括の server が、自分自身を眠らせるのを断るため）。実値の鍵は env の参照のまま
+  assert.deepEqual(e.headers, { Authorization: "${BANTOU_MCP_SECRET_0}", "X-Bantou-Session": "a" });
   assert.ok(!JSON.stringify(m("a").servers).includes(SECRET));
   assert.ok(Object.values(m("a").env).includes(`Bearer ${SECRET}`));
   assert.ok(m("a").allow.includes("mcp__bantou-coordinator__*"));
@@ -127,4 +128,19 @@ test("center-only: 設定の更新を受ける tool は必ず起動元の判定�
   for (const c of calls) assert.match(c, /\{ launcher \}/, c);
   // 読みの応答も起動元以外には memory・mcpServers を出さない
   assert.match(tools, /withoutLauncherKeys/);
+});
+
+test("統括の道具: 統括の項目には、呼び手の session 名の header（X-Bantou-Session）を足す（自分自身を眠らせるのを断るため）。書いてあればそのまま。他の項目には足さない", () => {
+  const d = fromSettings({ shared: { type: "http", url: "https://a.example/mcp" } }, { main: { "bantou-coordinator": CENTRY }, mine: { c: { ...CENTRY, headers: { Authorization: `Bearer ${SECRET}`, "x-bantou-session": "given" } } } });
+  const main = buildSessionMcp(d, secrets(), "main", COORD_AT);
+  const h = (main.servers["bantou-coordinator"] as { headers: Record<string, string> }).headers;
+  assert.equal(h["X-Bantou-Session"], "main");
+  assert.ok(Object.keys(h).includes("Authorization"));
+  const mine = buildSessionMcp(d, secrets(), "mine", COORD_AT);
+  const mh = (mine.servers.c as { headers: Record<string, string> }).headers;
+  assert.ok("x-bantou-session" in mh);
+  assert.ok(!("X-Bantou-Session" in mh));
+  // 統括でない項目には足さない
+  const shared = main.servers.shared as { headers?: Record<string, string> };
+  assert.equal(shared.headers?.["X-Bantou-Session"], undefined);
 });

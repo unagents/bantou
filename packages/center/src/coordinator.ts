@@ -84,6 +84,8 @@ export interface CoordinatorDeps {
   /** 他の session をスリープさせる（center の session_sleep）。 */
   sleepSession: (name: string) => Promise<{ name: string; state: string; sleeping: boolean }>;
   now?: () => number;
+  /** 呼び手の session 名（header X-Bantou-Session。center が session の統括の項目に足す。分からない呼び手は無し）。自分自身を眠らせるのを断るのに使う。 */
+  caller?: string;
   /** 失敗の詳細を残す先（log）。省略時は残さない。 */
   log?: (msg: string) => void;
 }
@@ -146,10 +148,12 @@ export function registerCoordinatorTools(server: McpServer, deps: CoordinatorDep
     {
       title: "他の session をスリープさせる",
       description:
-        "name の session をスリープさせる（claude の process を止めてメモリなどを空ける。会話・設定・remote の記録は残る）。眠った session は、利用者が desktop で開いた時と、messenger でその session が宛先になった時に、元の会話のまま自動で起き直す。session_brief には「スリープ」と出る。すでに眠っている session には何もしない。返り値 { name, state, sleeping }",
+        "name の session をスリープさせる（claude の process を止めてメモリなどを空ける。会話・設定・remote の記録は残る）。眠った session は、利用者が desktop で開いた時と、messenger でその session が宛先になった時に、元の会話のまま自動で起き直す。session_brief には「スリープ」と出る。すでに眠っている session には何もしない。呼んだ session 自身は眠らせられない（断る）。返り値 { name, state, sleeping }",
       inputSchema: { name: z.string().max(MAX_SESSION_NAME, `${MAX_SESSION_NAME} 文字以内`).regex(SESSION_NAME, "英数字と _ - のみ") },
     },
     async ({ name }) => {
+      // 眠らせるのは「他の session」。呼んだ session 自身は断る
+      if (deps.caller !== undefined && deps.caller === name) return json({ error: `自分自身はスリープさせられない（他の session だけ）: ${name}` }, true);
       try {
         const r = await deps.sleepSession(name);
         return json({ name: r.name, state: r.state, sleeping: r.sleeping });
