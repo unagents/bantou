@@ -884,14 +884,21 @@ test("memory 移行の失敗: 設定へ保存できなければ memory-settings.
   assert.deepEqual((await readJson("center-settings.json")).memory, { type: "http", url: "http://old-common/mcp", headers: { Authorization: "Bearer OLD-COMMON-SECRET" } });
 });
 
-const COORD = { transport: "builtin", builtin: "coordinator" };
+const COORD = { type: "http", url: "http://127.0.0.1:7911/mcp", headers: { Authorization: "Bearer COORD-KEY-0123456789" } };
+const LEGACY_COORD = { transport: "builtin", builtin: "coordinator" };
+const legacyMcp = { coordinatorEntry: () => ({ ...COORD, headers: { ...COORD.headers } }), env: () => ({ BANTOU_MCP_KEY_T: "ENV-KEY-VALUE" }) as Record<string, string | undefined> };
+const isAssigned = async (mgr: { mcpConnections: () => { data: any } }, session: string): Promise<boolean> => {
+  const { buildSessionMcp } = await import("../src/mcp-session.js");
+  const { createSecretsStore } = await import("../src/mcp-secrets.js");
+  return buildSessionMcp(mgr.mcpConnections().data, createSecretsStore(dir), session, { port: 7911 }).coordinator;
+};
 const rec = (name: string, settings?: unknown) => ({ name, path: join(dir, `p-${name}`), permissionMode: "auto", ...(settings ? { settings } : {}), createdAt: "2026-01-01T00:00:00Z" });
 const readJson = async (f: string): Promise<any> => JSON.parse(await readFile(join(dir, f), "utf8"));
 
 test("coordinator 移行: 旧 center-settings.json の coordinator を、その session の設定の mcpServers（bantou-coordinator）へ移し、旧設定から消す。他の項目は残す。冪等", async () => {
   await writeFile(join(dir, "center-settings.json"), JSON.stringify({ instructions: "共通", coordinator: { session: "main" } }));
   await writeFile(join(dir, "sessions.json"), JSON.stringify([rec("main", { instructions: "m" }), rec("other")]));
-  const { mgr } = setup();
+  const { mgr } = setup({ legacyMcp });
   await mgr.restore();
   const c = await readJson("center-settings.json");
   assert.ok(!("coordinator" in c));
@@ -904,7 +911,7 @@ test("coordinator 移行: 旧 center-settings.json の coordinator を、その 
   assert.deepEqual(data.common, {});
   // 2 回目の起動: 旧設定が無いので何も変わらない
   const before = await readFile(join(dir, "sessions.json"), "utf8");
-  const { mgr: mgr2 } = setup();
+  const { mgr: mgr2 } = setup({ legacyMcp });
   await mgr2.restore();
   assert.equal(await readFile(join(dir, "sessions.json"), "utf8"), before);
   assert.deepEqual(mgr2.mcpConnections().data.sessions.main, { "bantou-coordinator": COORD });
@@ -913,7 +920,7 @@ test("coordinator 移行: 旧 center-settings.json の coordinator を、その 
 test("coordinator 移行: 運用者が外した（null）割り当ては戻さない。既にある接続の設定が勝つ", async () => {
   await writeFile(join(dir, "center-settings.json"), JSON.stringify({ coordinator: { session: "main" } }));
   await writeFile(join(dir, "sessions.json"), JSON.stringify([rec("main", { mcpServers: { "bantou-coordinator": null } })]));
-  const { mgr } = setup();
+  const { mgr } = setup({ legacyMcp });
   await mgr.restore();
   assert.deepEqual(mgr.mcpConnections().data.sessions.main, { "bantou-coordinator": null });
   assert.ok(!("coordinator" in (await readJson("center-settings.json"))), "旧設定は消える");
@@ -923,7 +930,7 @@ test("coordinator 移行: 旧設定の session が無い・壊れた旧設定。
   const logs: string[] = [];
   await writeFile(join(dir, "center-settings.json"), JSON.stringify({ coordinator: { session: "gone" }, instructions: "i" }));
   await writeFile(join(dir, "sessions.json"), JSON.stringify([rec("main")]));
-  const { mgr } = setup({ log: (m: string) => void logs.push(m) });
+  const { mgr } = setup({ legacyMcp, log: (m: string) => void logs.push(m) });
   await mgr.restore();
   assert.deepEqual((await readJson("center-settings.json")).coordinator, { session: "gone" }, "移せなかった旧設定は残る");
   assert.ok(logs.some((l) => /移行失敗/.test(l) && /gone/.test(l)), "失敗を log に出す");
@@ -933,9 +940,56 @@ test("coordinator 移行: 旧設定の session が無い・壊れた旧設定。
   assert.deepEqual((await readJson("center-settings.json")).coordinator, { session: "gone" });
   // 壊れた値は捨てる
   await writeFile(join(dir, "center-settings.json"), JSON.stringify({ coordinator: { session: "bad name" }, instructions: "i" }));
-  const { mgr: m3 } = setup();
+  const { mgr: m3 } = setup({ legacyMcp });
   await m3.restore();
   assert.deepEqual(await readJson("center-settings.json"), { instructions: "i" });
+});
+
+test("旧設定の移行（起動時）: builtin は統括の MCP の server の 1 項目（type: http・url・headers）へ、auth.env は headers の値へ移る。独自の項目は残らない。移せない物は値を失わず log に名前と理由だけ出る。冪等", async () => {
+  const logs: string[] = [];
+  const legacyHttp = { transport: "http", url: "https://t.example/mcp", auth: { env: "BANTOU_MCP_KEY_T", header: "X-Api", format: "Key {secret}" }, identity: { header: "X-Who" } };
+  const noKey = { transport: "http", url: "https://n.example/mcp", auth: { env: "BANTOU_MCP_KEY_MISSING" } };
+  const withPrefix = { transport: "http", url: "https://p.example/mcp", auth: { env: "BANTOU_MCP_KEY_T" }, toolPrefix: "x" };
+  await writeFile(join(dir, "center-settings.json"), JSON.stringify({ mcpServers: { "bantou-coordinator": LEGACY_COORD, nokey: noKey, pre: withPrefix } }));
+  await writeFile(join(dir, "sessions.json"), JSON.stringify([rec("main", { mcpServers: { "bantou-coordinator": LEGACY_COORD, tool1: legacyHttp } }), rec("other")]));
+  const { mgr } = setup({ legacyMcp, log: (m: string) => void logs.push(m) });
+  await mgr.restore();
+  const c = await readJson("center-settings.json");
+  assert.deepEqual(c.mcpServers["bantou-coordinator"], COORD);
+  assert.deepEqual(c.mcpServers.nokey, noKey, "移せない物は値を失わず残る");
+  assert.deepEqual(c.mcpServers.pre, withPrefix);
+  const s = await readJson("sessions.json");
+  assert.deepEqual(s[0].settings.mcpServers["bantou-coordinator"], COORD);
+  assert.deepEqual(s[0].settings.mcpServers.tool1, { type: "http", url: "https://t.example/mcp", headers: { "X-Who": "main", "X-Api": "Key ENV-KEY-VALUE" } });
+  assert.ok(!JSON.stringify(s).includes('"builtin"') && !JSON.stringify(c.mcpServers["bantou-coordinator"]).includes("builtin"));
+  assert.ok(logs.some((l) => /移行失敗/.test(l) && /nokey/.test(l) && /BANTOU_MCP_KEY_MISSING/.test(l)));
+  assert.ok(logs.some((l) => /移行失敗/.test(l) && /pre/.test(l)));
+  assert.ok(!logs.join("\n").includes("ENV-KEY-VALUE"), "log に鍵の値を出さない");
+  // 冪等
+  const before = await readFile(join(dir, "sessions.json"), "utf8");
+  const { mgr: mgr2 } = setup({ legacyMcp });
+  await mgr2.restore();
+  assert.equal(await readFile(join(dir, "sessions.json"), "utf8"), before);
+});
+
+test("旧設定の移行（起動時）: 落とした項目（timeoutMs・exposeMemoryWrite・string 以外の header）は名前だけ log に出る（値は出さない）。BANTOU_MCP_KEY_ 接頭でない auth.env は center の環境変数を読まず移さない", async () => {
+  const logs: string[] = [];
+  const dropping = { transport: "http", url: "https://d.example/mcp", auth: { env: "BANTOU_MCP_KEY_T" }, timeoutMs: 12345, exposeMemoryWrite: true, headers: { "X-Num": 42, "X-Ok": "ok" } };
+  const anyEnv = { transport: "http", url: "https://a.example/mcp", auth: { env: "HOME" } };
+  const envLegacy = { ...legacyMcp, env: () => ({ BANTOU_MCP_KEY_T: "ENV-KEY-VALUE", HOME: "SECRET-HOME-VALUE" }) as Record<string, string | undefined> };
+  await writeFile(join(dir, "center-settings.json"), JSON.stringify({ mcpServers: { drop: dropping, anyenv: anyEnv } }));
+  await writeFile(join(dir, "sessions.json"), JSON.stringify([rec("main")]));
+  const { mgr } = setup({ legacyMcp: envLegacy, log: (m: string) => void logs.push(m) });
+  await mgr.restore();
+  const c = await readJson("center-settings.json");
+  assert.deepEqual(c.mcpServers.drop, { type: "http", url: "https://d.example/mcp", headers: { "X-Ok": "ok", Authorization: "Bearer ENV-KEY-VALUE" } });
+  const l = logs.find((m) => /drop/.test(m) && /timeoutMs/.test(m));
+  assert.ok(l, "落とした項目を log に出す");
+  for (const n of ["timeoutMs", "exposeMemoryWrite", "headers.X-Num"]) assert.ok(l.includes(n), n);
+  assert.ok(!l.includes("12345") && !l.includes("42"), "値は出さない");
+  assert.deepEqual(c.mcpServers.anyenv, anyEnv, "接頭の無い auth.env は移さず残る");
+  assert.ok(logs.some((m) => /移行失敗/.test(m) && /anyenv/.test(m)));
+  assert.ok(!logs.join("\n").includes("SECRET-HOME-VALUE") && !JSON.stringify(c).includes("SECRET-HOME-VALUE"), "他の環境変数の値は読まない");
 });
 
 test("mcp-connections.json 移行: common は center 共通の設定、session ごとはその session の設定へ移し、file は .migrated に退ける。設定にある物が勝つ。冪等", async () => {
@@ -1072,20 +1126,18 @@ test("mcpSource: 設定 file の mcpServers を呼び出しの度に読む（運
 
 test("改名（update）: session の mcpServers（bantou-coordinator の割り当て）は新しい名前に引き継がれ、割り当ては付いたまま。他の session には移らない", async () => {
   const { createMcpSource } = await import("../src/mcp-source.js");
-  const { isAssigned } = await import("../src/mcp-session.js");
   await writeFile(join(dir, "sessions.json"), JSON.stringify([rec("a", { instructions: "ia", mcpServers: { "bantou-coordinator": COORD } }), rec("b")]));
   const source = createMcpSource(join(dir, "center-settings.json"), join(dir, "sessions.json"));
   const { mgr } = setup({ mcpSource: source });
   await mgr.restore();
-  assert.equal(isAssigned(mgr.mcpConnections().data, "a", "coordinator"), true);
+  assert.equal(await isAssigned(mgr, "a"), true);
   await mgr.update({ name: "a", newName: "a2" });
   const s = await readJson("sessions.json");
   const a2 = s.find((r: { name: string }) => r.name === "a2");
   assert.deepEqual(a2.settings, { instructions: "ia", mcpServers: { "bantou-coordinator": COORD } }, "mcpServers が消えない");
-  const d = mgr.mcpConnections().data;
-  assert.equal(isAssigned(d, "a2", "coordinator"), true);
-  assert.equal(isAssigned(d, "a", "coordinator"), false);
-  assert.equal(isAssigned(d, "b", "coordinator"), false);
+  assert.equal(await isAssigned(mgr, "a2"), true);
+  assert.equal(await isAssigned(mgr, "a"), false);
+  assert.equal(await isAssigned(mgr, "b"), false);
   assert.equal(s.find((r: { name: string }) => r.name === "b").settings, undefined);
   // 改名の後にもう一度保存しても保たれる
   await mgr.updateSettings("a2", { instructions: "ia2" });

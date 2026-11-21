@@ -191,6 +191,18 @@ export function createCommands(deps: CommandDeps): CommandTable {
       await sessions.refresh();
       return s;
     },
+    async session_sleep(a) {
+      const v = await mcp.json("session_sleep", { name: reqStr(a, "name").trim() });
+      const s = sessionOf(v, "session_sleep");
+      await sessions.refresh();
+      return s;
+    },
+    async session_wake(a) {
+      const v = await mcp.json("session_wake", { name: reqStr(a, "name").trim() });
+      const s = sessionOf(v, "session_wake");
+      await sessions.refresh();
+      return s;
+    },
     async session_get_settings(a) {
       const v = await mcp.json("session_settings_get", { name: reqStr(a, "name").trim() });
       return settingsOf(v);

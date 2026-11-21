@@ -96,6 +96,8 @@ export interface Session {
   auth: CenterAuthState | null;
   loginUrl: string | null;
   loginError: string | null;
+  /** The session is asleep (its claude is stopped, the conversation is kept; it wakes when opened). false: awake, or an older center. */
+  sleeping: boolean;
 }
 
 /** The work state shown on the side menu (`unknown` is not shown). */
@@ -490,6 +492,7 @@ export interface CenterSession {
   auth: CenterAuthState;
   loginUrl: string | null;
   loginError: string | null;
+  sleeping?: boolean;
 }
 
 /** `session_login` result: the URL the user opens in a browser to get the code. */

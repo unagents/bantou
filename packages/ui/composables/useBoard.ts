@@ -35,6 +35,8 @@ export interface SessionGroup {
   remoteWaiting: number;
   /** Remote-caps in trouble (the tooltip of "remote-unreachable" / "remote-lost" names the servers). Empty while the center could not be asked. */
   remoteIssues: { unreachable: RemoteIssue[]; lost: RemoteIssue[] };
+  /** The session is asleep (the center's `sleeping`): its claude is stopped; opening it wakes it. */
+  sleeping: boolean;
   /** The claude's auth state as the center reports it (null: not reported). */
   auth: CenterAuthState | null;
   /** Why the last `/login` failed (center's `loginError`). */
@@ -150,6 +152,7 @@ export function useBoard(dir: Ref<string | null>) {
           activity: centerActivity(name),
           remoteWaiting: remoteWaiting(name),
           remoteIssues: remoteIssues(name),
+          sleeping: false,
           auth: null,
           loginError: null,
           working: [],
@@ -163,6 +166,7 @@ export function useBoard(dir: Ref<string | null>) {
     // The center's sessions are listed even without tasks.
     for (const r of centerList.value.sessions) {
       const g = group(r.name);
+      g.sleeping = r.sleeping === true;
       g.auth = r.auth ?? null;
       g.loginError = r.loginError ?? null;
     }

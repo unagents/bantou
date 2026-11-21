@@ -1188,3 +1188,45 @@ test("門: version_mismatch の error の文に、setVersionNote の更新の状
   assert.equal(link.gate(peer, "hello"), undefined, "制御メッセージは断らない");
   await link.close();
 });
+
+test("notifyPeer: 印（mark）の exclude に入れた id（起床前から居た古い同名 peer）は宛先から外す。新しい peer が現れるまでは ok:false（古い peer へ送って消えない）", async () => {
+  const { link, clients } = setupDiscovery({}, [peerOf("srv", "bantou-server"), { id: "old-1", name: "pm1", registered_at: "2026-11-03T05:00:00.000Z" }]);
+  const mark = await link.peerMarkOf("pm1");
+  assert.deepEqual([...(mark?.exclude ?? [])], ["old-1"]);
+  const r1 = await link.notifyPeer("pm1", "hello", { mark: mark ?? undefined });
+  assert.equal(r1.ok, false);
+  assert.deepEqual(clients[0].sentRaw, []);
+  await link.close();
+});
+
+test("notifyPeer: 印の後に登録された peer（登録時刻が印の since 以後）へだけ送る。古い登録は、id が印に無くても登録時刻が古ければ送らない", async () => {
+  const { link, clients } = setupDiscovery({}, [
+    { ...peerOf("srv", "bantou-server"), registered_at: "2026-11-03T05:00:00.000Z" },
+    { id: "old-1", name: "pm1", registered_at: "2026-11-03T05:00:10.000Z" },
+  ]);
+  const mark = { exclude: new Set<string>(), since: "2026-11-03T05:00:20.000Z" };
+  // 印より前の登録しか無い: 送らない
+  assert.equal((await link.notifyPeer("pm1", "hello", { mark })).ok, false);
+  assert.deepEqual(clients[0].sentRaw, []);
+  // 印より後の peer が現れたら、その peer にだけ送る
+  clients[0].peers!.push({ id: "new-1", name: "pm1", registered_at: "2026-11-03T05:00:25.000Z" });
+  const r = await link.notifyPeer("pm1", "hello", { mark });
+  assert.deepEqual(r, { ok: true, to: "new-1" });
+  assert.deepEqual(clients[0].sentRaw, [{ to: "new-1", text: "hello", delivery: "push" }]);
+  await link.close();
+});
+
+test("peerMarkOf: since は broker にいる全 peer の最新の登録時刻（broker の時計）。同名 peer の id が exclude に入る。列挙できなければ null", async () => {
+  const { link } = setupDiscovery({}, [
+    { ...peerOf("srv", "bantou-server"), registered_at: "2026-11-03T05:00:40.000Z" },
+    { id: "old-1", name: "pm1", registered_at: "2026-11-03T05:00:10.000Z" },
+    { id: "x-1", name: "other", registered_at: "2026-11-03T05:00:30.000Z" },
+  ]);
+  const m = await link.peerMarkOf("pm1");
+  assert.equal(m?.since, "2026-11-03T05:00:40.000Z");
+  assert.deepEqual([...(m?.exclude ?? [])], ["old-1"]);
+  await link.close();
+  const b = setupDiscovery({}, undefined);
+  assert.equal(await b.link.peerMarkOf("pm1"), null);
+  await b.link.close();
+});

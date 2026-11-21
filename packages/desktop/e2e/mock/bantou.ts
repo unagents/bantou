@@ -227,6 +227,7 @@ export class MockBantou {
       auth: (e.auth as Session["auth"] | undefined) ?? null,
       loginUrl: (e.loginUrl as string | undefined) ?? null,
       loginError: (e.loginError as string | undefined) ?? null,
+      sleeping: (e.sleeping as boolean | undefined) ?? false,
     };
   }
 
@@ -448,6 +449,17 @@ export class MockBantou {
         if (this.centerSessionUpdateDelayMs > 0) {
           return new Promise((done) => setTimeout(() => done(structuredClone(s)), this.centerSessionUpdateDelayMs));
         }
+        return structuredClone(s);
+      }
+      case "session_sleep":
+      case "session_wake": {
+        const name = (args.name as string).trim();
+        const e = this.centerSessions.find((x) => x.name === name);
+        if (!e) throw new Error(`未定義の session: ${name}`);
+        const sleeping = cmd === "session_sleep";
+        Object.assign(e, sleeping ? { sleeping: true, state: "stopped", pid: null } : { sleeping: false, state: "connected", pid: 4300 });
+        const s = this.toSession(e);
+        this.readList();
         return structuredClone(s);
       }
       case "session_get_settings": {

@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { SESSION_NAME, type SessionInfo, type SessionManager } from "./sessions.js";
+import { SESSION_NAME, type SessionInfo } from "./sessions.js";
 import { MAX_SESSION_NAME } from "./center-id.js";
 import { SESSION_INSTRUCTIONS_MAX } from "./config.js";
 
@@ -28,6 +28,8 @@ export interface SessionBriefResult {
 }
 
 const STATE_LABEL: Record<SessionInfo["state"], string> = { starting: "起動中", connected: "接続", stopped: "停止", error: "error" };
+/** スリープ中の session の状態ラベル（state は stopped のまま。停止と区別する）。 */
+export const SLEEP_LABEL = "スリープ";
 
 const clip = (s: string, max: number): string => (s.length > max ? `${s.slice(0, max - 1)}…` : s);
 
@@ -54,7 +56,7 @@ export function buildSessionBrief(sessions: readonly SessionInfo[], coordinator:
     const lost = s.remote.lost?.length ?? 0;
     const parts = [
       s.name,
-      STATE_LABEL[s.state],
+      s.sleeping ? SLEEP_LABEL : STATE_LABEL[s.state],
       work,
       `ctx ${ctx === null || ctx === undefined ? "?" : `${Math.round(ctx)}%`}`,
       `remote 実行中 ${s.remote.running}・返答待ち ${s.remote.waitingReply}・到達不能 ${unreachable}・lost ${lost}`,
@@ -73,70 +75,53 @@ export function buildSessionBrief(sessions: readonly SessionInfo[], coordinator:
   return { at, sessions: lines, truncated: omitted > 0, omitted };
 }
 
-/** 統括の道具が使う、center の中の情報の取得元。呼ばれるたびに今の値を返す（キャッシュしない）。 */
+/** 統括の道具が使う、center の情報の取得元。呼ばれるたびに今の値を取る（キャッシュしない）。 */
 export interface CoordinatorDeps {
-  /** この session に統括の口が今も割り当てられているか（呼び出しの度に判定。割り当ては mcp-connections.json の center の側の設定）。 */
-  assigned: (session: string) => boolean;
-  /** 今の全 session。 */
-  sessions: () => SessionInfo[];
+  /** 今の全 session（center の session_list）。 */
+  sessions: () => Promise<SessionInfo[]>;
+  /** 新しい session を作る（center の session_create。path は渡さない = center の workspace の下だけ）。 */
+  createSession: (input: { name: string; instructions?: string; start: boolean }) => Promise<{ name: string; state: string }>;
+  /** 他の session をスリープさせる（center の session_sleep）。 */
+  sleepSession: (name: string) => Promise<{ name: string; state: string; sleeping: boolean }>;
   now?: () => number;
-  /** 失敗の詳細を残す先（center の log）。省略時は残さない。 */
+  /** 失敗の詳細を残す先（log）。省略時は残さない。 */
   log?: (msg: string) => void;
-  /**
-   * 新しい session を作る（SessionManager.create と同じ経路。path は渡さない = center の workspace の下だけ）。
-   * 無ければ session_create の道具を出さない。
-   */
-  createSession?: (input: { name: string; instructions?: string; start: boolean }) => Promise<SessionInfo>;
 }
-
-/** 統括の道具 coordinator_session_create の実体: 既存の追加と同じ SessionManager.create。path は渡さない（workspace の下だけ）。 */
-export const createSessionVia =
-  (sessions: Pick<SessionManager, "create">): NonNullable<CoordinatorDeps["createSession"]> =>
-  (i) =>
-    sessions.create({ name: i.name, start: i.start, ...(i.instructions ? { settings: { instructions: i.instructions } } : {}) });
 
 type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean };
 const json = (value: unknown, isError = false): ToolResult => ({ content: [{ type: "text", text: JSON.stringify(value, null, 2) }], ...(isError ? { isError: true } : {}) });
 
-/** 呼び出し元が今の統括の session でなければ断る結果（そうでなければ null）。MCP session は作り直しを待たずに設定が変わるので、道具ごとに呼ぶ。 */
-export function refuseUnlessCoordinator(deps: CoordinatorDeps, owner: string): ToolResult | null {
-  let ok = false;
-  try {
-    ok = deps.assigned(owner);
-  } catch {
-    ok = false;
-  }
-  return ok ? null : json({ error: "この道具は割り当てた session だけが使える（統括の口の割り当てが無い）" }, true);
-}
+/** 同名の拒否の文（center の SessionManager.create の文言）。利用者が直せるのでそのまま返す。 */
+const nameTaken = (name: string, detail: string): boolean => detail.includes(`name が既に使われている: ${name}`);
 
-/** 統括の道具を登録する（/mcp/coordinator の口だけが呼ぶ。口が割り当てを見て、処理でも毎回見直す）。 */
-export function registerCoordinatorTools(server: McpServer, deps: CoordinatorDeps & { owner: string }): void {
-  const { owner } = deps;
+/** 統括の道具を登録する。呼び手の確認は server の入口（header の Bearer）で済んでいる。 */
+export function registerCoordinatorTools(server: McpServer, deps: CoordinatorDeps): void {
   server.registerTool(
     "session_brief",
     {
       title: "各 session の状態を 1 行で読む",
       description:
-        `各 session の状態を 1 行ずつ返す（統括の session だけが使える）。返り値 { at, sessions: [{ name, line }], truncated, omitted }。line は \`<name> | <起動の状態: 起動中 / 接続 / 停止 / error> | <作業状態: working / needs-input / idle と、その時刻からの分。不明の時は「作業状態 不明」> | ctx <n>% | remote 実行中 <n>・返答待ち <n>・到達不能 <n>・lost <n>\`（自分の project の作業が多い時は末尾に警告）。件数だけで、report・result・指示の本文は入らない。中身が要る時は各 session の担当に任せる。1 行 ${SESSION_BRIEF_LINE_MAX} 文字・1 回 ${SESSION_BRIEF_MAX_LINES} 行・${SESSION_BRIEF_MAX_CHARS} 文字まで（越えたら truncated: true と omitted = 落とした行数）。session で 1 つに絞れる`,
+        `各 session の状態を 1 行ずつ返す。返り値 { at, sessions: [{ name, line }], truncated, omitted }。line は \`<name> | <起動の状態: 起動中 / 接続 / 停止 / スリープ / error> | <作業状態: working / needs-input / idle と、その時刻からの分。不明の時は「作業状態 不明」> | ctx <n>% | remote 実行中 <n>・返答待ち <n>・到達不能 <n>・lost <n>\`。件数だけで、report・result・指示の本文は入らない。中身が要る時は各 session の担当に任せる。1 行 ${SESSION_BRIEF_LINE_MAX} 文字・1 回 ${SESSION_BRIEF_MAX_LINES} 行・${SESSION_BRIEF_MAX_CHARS} 文字まで（越えたら truncated: true と omitted = 落とした行数）。session で 1 つに絞れる`,
       inputSchema: { session: z.string().min(1).optional() },
     },
-    ({ session }) => {
-      // 呼ばれた時にも設定を見直す（MCP session は center の再起動・TTL の後も古いまま使われうる）
-      const refused = refuseUnlessCoordinator(deps, owner);
-      if (refused) return refused;
-      const all = deps.sessions();
+    async ({ session }) => {
+      let all: SessionInfo[];
+      try {
+        all = await deps.sessions();
+      } catch (e) {
+        deps.log?.(`session_brief 失敗: ${e instanceof Error ? e.message : String(e)}`);
+        return json({ error: "center から session の一覧を取れなかった。詳細は log" }, true);
+      }
       if (session !== undefined && !all.some((s) => s.name === session)) return json({ error: `未定義の session: ${session}` }, true);
-      return json(buildSessionBrief(all, owner, (deps.now ?? Date.now)(), session !== undefined ? { session } : undefined));
+      return json(buildSessionBrief(all, "", (deps.now ?? Date.now)(), session !== undefined ? { session } : undefined));
     },
   );
-  const { createSession } = deps;
-  if (!createSession) return;
   server.registerTool(
     "coordinator_session_create",
     {
       title: "新しい project の session を立てる",
       description:
-        "新しい project の session（master-cap）を center の workspace の下に作る（統括の session だけが使える）。name は英数字と _ - のみ・64 文字以内。同じ名前の session が在れば断る。作業 dir は <workspace>/<name> に決まり、path は指定できない。instructions はその session の最初の追加指示（省略可）。start = false で作るだけにする（既定は起動する）。center 共通の設定（追加の指示など）は desktop の追加と同じに効く。既存の session の削除・変更はできない。返り値 { name, state }",
+        "新しい project の session（master-cap）を center の workspace の下に作る。name は英数字と _ - のみ・64 文字以内。同じ名前の session が在れば断る。作業 dir は <workspace>/<name> に決まり、path は指定できない。instructions はその session の最初の追加指示（省略可）。start = false で作るだけにする（既定は起動する）。center 共通の設定（追加の指示など）は desktop の追加と同じに効く。既存の session の削除・変更はできない。返り値 { name, state }",
       inputSchema: {
         name: z.string().max(MAX_SESSION_NAME, `${MAX_SESSION_NAME} 文字以内`).regex(SESSION_NAME, "英数字と _ - のみ"),
         instructions: z.string().max(SESSION_INSTRUCTIONS_MAX, `${SESSION_INSTRUCTIONS_MAX} 文字以内`).optional(),
@@ -144,18 +129,36 @@ export function registerCoordinatorTools(server: McpServer, deps: CoordinatorDep
       },
     },
     async ({ name, instructions, start }) => {
-      // 呼ばれた時にも設定を見直す
-      const refused = refuseUnlessCoordinator(deps, owner);
-      if (refused) return refused;
       try {
-        const created = await createSession({ name, ...(instructions ? { instructions } : {}), start: start ?? true });
+        const created = await deps.createSession({ name, ...(instructions ? { instructions } : {}), start: start ?? true });
         return json({ name: created.name, state: created.state });
       } catch (e) {
         const detail = e instanceof Error ? e.message : String(e);
-        // 利用者が直せる同名の拒否だけ文を返す。それ以外（path の衝突・別 project の名前・mkdir の errno など）は一般化し、詳細は center の log にだけ残す
-        if (detail === `name が既に使われている: ${name}`) return json({ error: detail }, true);
+        // 利用者が直せる同名の拒否だけ文を返す。それ以外は一般化し、詳細は log にだけ残す
+        if (nameTaken(name, detail)) return json({ error: `name が既に使われている: ${name}` }, true);
         deps.log?.(`coordinator_session_create 失敗: name=${name} ${detail}`);
-        return json({ error: "session を作れなかった（名前の衝突、または作業 dir を作れない）。詳細は center の log" }, true);
+        return json({ error: "session を作れなかった（名前の衝突、または作業 dir を作れない）。詳細は log" }, true);
+      }
+    },
+  );
+  server.registerTool(
+    "coordinator_session_sleep",
+    {
+      title: "他の session をスリープさせる",
+      description:
+        "name の session をスリープさせる（claude の process を止めてメモリなどを空ける。会話・設定・remote の記録は残る）。眠った session は、利用者が desktop で開いた時と、messenger でその session が宛先になった時に、元の会話のまま自動で起き直す。session_brief には「スリープ」と出る。すでに眠っている session には何もしない。name には他の session を指定する（自分自身を指定しない）。返り値 { name, state, sleeping }",
+      inputSchema: { name: z.string().max(MAX_SESSION_NAME, `${MAX_SESSION_NAME} 文字以内`).regex(SESSION_NAME, "英数字と _ - のみ") },
+    },
+    async ({ name }) => {
+      try {
+        const r = await deps.sleepSession(name);
+        return json({ name: r.name, state: r.state, sleeping: r.sleeping });
+      } catch (e) {
+        const detail = e instanceof Error ? e.message : String(e);
+        // 利用者が直せる拒否（未定義・config 由来）だけ文を返す。それ以外は一般化し、詳細は log にだけ残す
+        if (detail.includes("未定義の session") || detail.includes("config 由来")) return json({ error: detail }, true);
+        deps.log?.(`coordinator_session_sleep 失敗: name=${name} ${detail}`);
+        return json({ error: "session をスリープさせられなかった。詳細は log" }, true);
       }
     },
   );

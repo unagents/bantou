@@ -33,6 +33,7 @@ const entry = (name: string, state: string): Session => ({
   auth: "ok" as Session["auth"],
   loginUrl: null,
   loginError: null,
+  sleeping: false,
 });
 const names = (l: SessionList) => l.sessions.map((s) => s.name);
 
@@ -277,4 +278,10 @@ test("a listener that throws neither stops the other listeners nor fails refresh
   assert.deepEqual(calls, ["bad", "good"]);
   // the cache was stored before the listeners ran
   assert.equal(svc.get().rev, 1);
+});
+
+test("parseSession reads `sleeping` (true only when the center says true; missing / other values are false)", () => {
+  assert.equal(parseSession({ name: "a", state: "stopped", sleeping: true }).sleeping, true);
+  assert.equal(parseSession({ name: "a", state: "stopped" }).sleeping, false);
+  assert.equal(parseSession({ name: "a", state: "stopped", sleeping: "yes" }).sleeping, false);
 });

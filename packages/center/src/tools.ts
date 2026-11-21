@@ -123,6 +123,25 @@ export function registerTools(
     ({ name }) => guard(async () => json(await sessions.delete(name))),
   );
   server.registerTool(
+    "session_sleep",
+    {
+      title: "session をスリープさせる",
+      description:
+        "session_create で作った session をスリープさせる（claude の process を止めてメモリなどを空ける。会話（resume できる状態）・設定・remote の記録は残す）。眠っている間は session_list の sleeping が true（state は stopped）。desktop でその session を開いた時と、messenger でその session が宛先になった時に、元の会話のまま自動で起き直す（session_wake でも起こせる）。眠っている session には何もしない。{ SessionInfo } を返す",
+      inputSchema: { name: z.string().regex(SESSION_NAME, "英数字と _ - のみ") },
+    },
+    ({ name }) => guard(async () => json(await sessions.sleep(name))),
+  );
+  server.registerTool(
+    "session_wake",
+    {
+      title: "スリープ中の session を起こす",
+      description: "スリープ中の session を元の会話のまま起こす（claude を --continue で起動し直す）。眠っていない session には何もしない。{ SessionInfo } を返す",
+      inputSchema: { name: z.string().regex(SESSION_NAME, "英数字と _ - のみ") },
+    },
+    ({ name }) => guard(async () => json(await sessions.wake(name))),
+  );
+  server.registerTool(
     "session_update",
     {
       title: "session の名前・path を変更",
@@ -147,7 +166,7 @@ export function registerTools(
     {
       title: "session の設定を更新",
       description:
-        "session のプロジェクト設定を項目ごとにマージ更新し、更新後の { name, settings } を返す。settings に書いた項目だけ変わる（省略した項目はそのまま）。null はその項目を削除。instructions は 16000 文字以内で、空文字は削除と同じ。addDirs は絶対パスの配列（20 個以内。空配列は削除と同じ。center 共通の addDirs と合わせて --add-dir に 1 つずつ付く）。outputStyle は 32000 文字以内で、空文字は削除と同じ（session の値があれば center 共通の outputStyle は使わない）。servers は host 名か server_id の配列（50 個以内。重複は除く。空配列は「どの server も使わない」として保存し、未設定＝全部と区別する。null で削除＝未設定（全部）に戻る。servers は session ごとの設定だけで、center 共通の設定は無い）。servers は次の呼び出しからすぐ効く（起動し直し不要）。置き場は sessions.json の settings.servers（config の servers[] とは別物）。範囲が変わると、その session の master-cap へ messenger で知らせる（指示文への反映は次の起動）。mcpServers（追加の MCP の server。名前 → Claude Code の mcp.json の mcpServers の値と同じ形: stdio は { command, args?, env? }、http / sse は { type, url, headers? }。headers に Authorization: Bearer <値> もそのまま書ける。session の設定では同じ名前で共通を置き換え、null で共通の server をその session では外す。統括の組み込みの接続 { transport: \"builtin\", builtin: \"coordinator\" }（名前 bantou-coordinator）も書ける）と memory（外部記憶の MCP の server。同じ形の 1 件。例 { type: \"http\", url, headers: { Authorization: \"Bearer …\" } }。session の値があれば共通は使わない）は center を起動した所（launcher）からだけ書ける（他からは error）。未知の項目は保持する。session_create で作った session のみ。動いている session には効かず、次の起動（再起動・--continue 含む）から効く",
+        "session のプロジェクト設定を項目ごとにマージ更新し、更新後の { name, settings } を返す。settings に書いた項目だけ変わる（省略した項目はそのまま）。null はその項目を削除。instructions は 16000 文字以内で、空文字は削除と同じ。addDirs は絶対パスの配列（20 個以内。空配列は削除と同じ。center 共通の addDirs と合わせて --add-dir に 1 つずつ付く）。outputStyle は 32000 文字以内で、空文字は削除と同じ（session の値があれば center 共通の outputStyle は使わない）。servers は host 名か server_id の配列（50 個以内。重複は除く。空配列は「どの server も使わない」として保存し、未設定＝全部と区別する。null で削除＝未設定（全部）に戻る。servers は session ごとの設定だけで、center 共通の設定は無い）。servers は次の呼び出しからすぐ効く（起動し直し不要）。置き場は sessions.json の settings.servers（config の servers[] とは別物）。範囲が変わると、その session の master-cap へ messenger で知らせる（指示文への反映は次の起動）。mcpServers（追加の MCP の server。名前 → Claude Code の mcp.json の mcpServers の値と同じ形: stdio は { command, args?, env? }、http / sse は { type, url, headers? }。headers に Authorization: Bearer <値> もそのまま書ける。session の設定では同じ名前で共通を置き換え、null で共通の server をその session では外す）と memory（外部記憶の MCP の server。同じ形の 1 件。例 { type: \"http\", url, headers: { Authorization: \"Bearer …\" } }。session の値があれば共通は使わない）は center を起動した所（launcher）からだけ書ける（他からは error）。未知の項目は保持する。session_create で作った session のみ。動いている session には効かず、次の起動（再起動・--continue 含む）から効く",
       inputSchema: { name: z.string().regex(SESSION_NAME, "英数字と _ - のみ"), settings: projectSettingsPatchSchema },
     },
     ({ name, settings }) =>
@@ -285,7 +304,12 @@ export function registerTools(
       description: "project の claude remote-control を起動する（起動済みなら現状を返す）。resume: true で前回の会話に復帰（--continue。復帰できなければ素の起動）",
       inputSchema: { project: projectName, resume: z.boolean().optional() },
     },
-    ({ project, resume }) => guard(async () => json(await supervisor.start(project, resume ? { resume: true } : {}))),
+    ({ project, resume }) =>
+      guard(async () => {
+        // スリープ中の session は、起動の前にスリープを解く（身代わり peer を外し、元の会話で起こす）
+        if (sessions.list().some((s) => s.name === project && s.sleeping)) return json(await sessions.wake(project));
+        return json(await supervisor.start(project, resume ? { resume: true } : {}));
+      }),
   );
   server.registerTool(
     "rc_stop",

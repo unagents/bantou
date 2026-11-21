@@ -2,6 +2,7 @@ import { mkdir, rename } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
 import { projectSchema, PERMISSION_MODES, type Config, type ProjectConfig } from "./config.js";
+import { isLegacyEntry, migrateEntry, type LegacyCtx } from "./mcp-legacy.js";
 import { assertCenterOnly, CENTER_SERVERS_ERROR, composeAddDirs, composeInstructions, composeOutputStyle, composeServers, mergeSettings, projectSettingsPatchSchema, readCenterSettings, readCoordinator, readSettings, settingsIssues, type CenterSettingsPatch, type ProjectSettings, type ProjectSettingsPatch } from "./project-settings.js";
 import { connectionsFromSettings, emptyConnections, serverEntryIssues, type ConnectionsData } from "./mcp-connections.js";
 import type { McpSource } from "./mcp-source.js";
@@ -25,12 +26,16 @@ export interface SavedSession {
   /** プロジェクトごとの設定（instructions など。未知の項目も保持）。無ければ未設定。 */
   settings?: ProjectSettings;
   createdAt: string;
+  /** スリープ中（claude の process を止めてある。会話・設定は残る）。起こすのは wake()。center 再起動でも眠ったまま。 */
+  sleeping?: boolean;
 }
 
 export interface SessionInfo {
   name: string;
   path: string;
   state: RcStatus["state"];
+  /** スリープ中か（claude の process は止まっていて state は stopped。会話は残り、開く・messenger の宛先になる・wake で元の会話のまま起き直す）。 */
+  sleeping: boolean;
   pid: number | null;
   sessionUrl: string | null;
   startedAt: string | null;
@@ -60,6 +65,7 @@ export const sessionCreateSchema = {
   name: z.string().regex(SESSION_NAME, "英数字と _ - のみ"),
   path: z.string().min(1).optional().describe("絶対パス。省略時は <workspace>/<name>（無ければ作る）"),
   permissionMode: z.enum(PERMISSION_MODES).optional().describe("省略時 auto"),
+  start: z.boolean().optional().describe("false = 作って保存するだけで起動しない。省略時は起動する"),
   settings: projectSettingsPatchSchema.optional().describe("プロジェクトごとの設定（{ instructions?: string, addDirs?: string[], outputStyle?: string, servers?: string[], … }）。instructions は --append-system-prompt、addDirs（絶対パス）は 1 つずつ --add-dir で渡す、outputStyle（claude の output style の markdown 本文）は session のフォルダの .claude/output-styles/bantou.md に書いて --settings で選ぶ（再起動・--continue でも付く）。servers（host 名か server_id）はこの session が使う server の範囲（未設定 = 全部、空配列 = 使わない）。mcpServers（追加の MCP の server。Claude Code の mcp.json の mcpServers と同じ形）と memory（外部記憶の MCP の server）は center を起動した所からだけ書ける（他からは error）"),
 };
 
@@ -104,6 +110,13 @@ export interface SessionManager {
    */
   update(input: SessionUpdateInput): Promise<SessionInfo>;
   delete(name: string): Promise<{ name: string; deleted: true }>;
+  /**
+   * session をスリープさせる（claude の process を止める。会話・設定・remote の記録は残す）。session_create で作った session のみ。眠っている session には何もしない。
+   * 起こすのは wake()（--continue で元の会話に復帰）。center の再起動後も眠ったまま。
+   */
+  sleep(name: string): Promise<SessionInfo>;
+  /** スリープ中の session を元の会話のまま起こす（resume）。眠っていなければ何もしない（今の状態を返す）。 */
+  wake(name: string): Promise<SessionInfo>;
   list(): SessionInfo[];
 }
 
@@ -133,6 +146,8 @@ export function createSessionManager(opts: {
    * 省略時はメモリ上の値。
    */
   mcpSource?: () => McpSource | undefined;
+  /** 旧設定の接続（builtin・auth.env）を普通の書き方へ移す時の材料（mcp-legacy.ts）。省略時は旧設定の接続を移さない。 */
+  legacyMcp?: LegacyCtx;
   log: Logger;
   /** create 後、接続（URL 取得）か失敗を待つ上限。0 で待たない。既定 15 秒。 */
   waitMs?: number;
@@ -150,6 +165,8 @@ export function createSessionManager(opts: {
   remoteNameConflict?: (name: string, mode: "create" | "rename", oldName?: string) => string | null;
   /** session の使う server の範囲（settings.servers）が変わった時に、その session の master-cap へ知らせる先（messenger の push）。省略時は知らせない。失敗しても更新は成功にする。 */
   notifyServersChanged?: (name: string, text: string) => Promise<{ ok: boolean; reason?: string }>;
+  /** スリープ状態が変わった時（sleeping = 今眠っているか。restore で眠ったままの session にも呼ぶ）。messenger の身代わり peer の登録・解除に使う。失敗しても本体は成功にする。 */
+  onSleepChange?: (name: string, sleeping: boolean) => void;
 }): SessionManager {
   const { config, supervisor, store, log } = opts;
   const waitMs = opts.waitMs ?? 15_000;
@@ -218,6 +235,7 @@ export function createSessionManager(opts: {
     name: s.project,
     path: s.path,
     state: s.state,
+    sleeping: s.state === "stopped" && saved.get(s.project)?.sleeping === true,
     pid: s.pid,
     sessionUrl: s.sessionUrl,
     startedAt: s.startedAt,
@@ -377,7 +395,11 @@ export function createSessionManager(opts: {
     if (legacyFile?.exists && legacyFile.problem)
       log(`移行失敗: mcp-connections.json を読めないので移さずに残す（${legacyFile.problem}）。直すか、中身を center-settings.json / sessions.json の mcpServers へ手で移す`);
     const fileData = legacyFile?.exists && !legacyFile.problem ? legacyFile.data : undefined;
-    if (!hasCoord && fileData === undefined) return rawCommon;
+    const legacyCtx = opts.legacyMcp;
+    const entriesOf = (st: unknown): [string, unknown][] => (isRec(st) && isRec(st.mcpServers) ? Object.entries(st.mcpServers) : []);
+    const hasLegacyEntries =
+      legacyCtx !== undefined && (entriesOf(rawCommon).some(([, v]) => isLegacyEntry(v)) || list.some((r) => entriesOf(r.settings).some(([, v]) => isLegacyEntry(v))));
+    if (!hasCoord && fileData === undefined && !hasLegacyEntries) return rawCommon;
     const raw: Record<string, unknown> = isRec(rawCommon) ? { ...rawCommon } : {};
     /** target.mcpServers に name が無ければ足す（設定にある物が勝つ = 冪等）。足したら true。 */
     const addTo = (target: Record<string, unknown>, name: string, v: unknown): boolean => {
@@ -403,29 +425,70 @@ export function createSessionManager(opts: {
       }
       return true;
     };
+    /** 旧設定の 1 項目を普通の書き方へ。移せない物は元のまま返し、名前と理由だけを log に出す（値は出さない）。 */
+    const conv = (where: string, name: string, v: unknown, session?: string): unknown => {
+      if (!legacyCtx || !isLegacyEntry(v)) return v;
+      const r = migrateEntry(v, legacyCtx, session !== undefined ? { session } : {});
+      if (r.kind === "moved") {
+        if (r.dropped.length) log(`移行: 旧設定の接続の一部の項目は普通の書き方に無いので移さなかった（名前だけ）: ${where}/${name}: ${r.dropped.join(", ")}`);
+        return r.value;
+      }
+      if (r.kind === "fail") log(`移行失敗: 旧設定の接続を普通の書き方へ移せない（そのまま残す）: ${where}/${name}: ${r.reason}`);
+      return v;
+    };
+    // 設定に既に在る旧設定の接続（builtin・auth.env）を普通の書き方へ
+    if (legacyCtx) {
+      const convMap = (st: Record<string, unknown>, where: string, session?: string): boolean => {
+        let changed = false;
+        const next: Record<string, unknown> = {};
+        for (const [n, v] of entriesOf(st)) {
+          const nv = conv(where, n, v, session);
+          if (nv !== v) changed = true;
+          Object.defineProperty(next, n, { value: nv, enumerable: true, writable: true, configurable: true });
+        }
+        if (changed) st.mcpServers = next;
+        return changed;
+      };
+      if (convMap(raw, "共通")) {
+        commonChanged = true;
+        log("設定の旧設定の接続を普通の書き方へ移した（center 共通）");
+      }
+      for (const rec of list) {
+        const st: Record<string, unknown> = { ...(rec.settings ?? {}) };
+        if (convMap(st, rec.name, rec.name)) {
+          rec.settings = st as ProjectSettings;
+          sessionsChanged = true;
+          touched.add(rec.name);
+        }
+      }
+    }
     let coordinatorRaw: unknown;
     if (hasCoord) {
       coordinatorRaw = raw.coordinator;
       const legacy = readCoordinator(coordinatorRaw);
+      const entry = legacyCtx?.coordinatorEntry() ?? null;
       if (legacy === null) {
         log("旧設定の統括の指定（center-settings.json の coordinator）が壊れているので捨てた");
         delete raw.coordinator;
         commonChanged = true;
         coordinatorRaw = undefined;
-      } else if (addSession(legacy, "bantou-coordinator", { transport: "builtin", builtin: "coordinator" })) {
+      } else if (entry === null) {
+        ok = false;
+        log(`移行失敗: 旧設定の統括の指定を移せない（統括の MCP の server の設定 coordinator-mcp.json が無い）。center-settings.json の coordinator は残す: session=${legacy}`);
+      } else if (addSession(legacy, "bantou-coordinator", entry)) {
         delete raw.coordinator;
         commonChanged = true;
-        log(`旧設定の統括の指定を session の設定（mcpServers の bantou-coordinator）へ移した: session=${legacy}`);
+        log(`旧設定の統括の指定を session の設定（mcpServers の bantou-coordinator。type: http の 1 項目）へ移した: session=${legacy}`);
       } else {
         ok = false;
-        log(`移行失敗: 旧設定の統括の指定の session が session_create で作った物の中に無い（${legacy}）。center-settings.json の coordinator は残す（統括の口は割り当て無しで動く）。その session の設定の mcpServers に bantou-coordinator を書く`);
+        log(`移行失敗: 旧設定の統括の指定の session が session_create で作った物の中に無い（${legacy}）。center-settings.json の coordinator は残す。その session の設定の mcpServers に統括の MCP の server の 1 項目を書く（README）`);
       }
     }
     if (fileData !== undefined) {
-      for (const [name, c] of Object.entries(fileData.common)) if (addTo(raw, name, c)) commonChanged = true;
+      for (const [name, c] of Object.entries(fileData.common)) if (addTo(raw, name, conv("mcp-connections.json 共通", name, c))) commonChanged = true;
       for (const [session, per] of Object.entries(fileData.sessions)) {
         for (const [name, ov] of Object.entries(per)) {
-          if (!addSession(session, name, ov)) {
+          if (!addSession(session, name, conv(`mcp-connections.json ${session}`, name, ov, session))) {
             ok = false;
             log(`移行失敗: mcp-connections.json の session が session_create で作った物の中に無い（${session}）。file は残す`);
             break;
@@ -468,6 +531,21 @@ export function createSessionManager(opts: {
 
   const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+  const notifySleep = (name: string, sleeping: boolean): void => {
+    try {
+      opts.onSleepChange?.(name, sleeping);
+    } catch (e) {
+      log(`スリープ状態の通知に失敗: ${name} ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const savedOrThrow = (name: string): SavedSession => {
+    const rec = saved.get(name);
+    if (rec) return rec;
+    const known = supervisor.list().some((s) => s.project === name);
+    throw new Error(known ? `session_create で作ったものではない（config 由来）: ${name}` : `未定義の session: ${name}`);
+  };
+
   return {
     async restore() {
       let rawCommon: unknown = opts.centerStore ? await opts.centerStore.load() : undefined;
@@ -487,6 +565,12 @@ export function createSessionManager(opts: {
           saved.set(s.name, s);
           opts.events?.publish({ reason: "restored", name: s.name });
           await mkdir(s.path, { recursive: true });
+          if (s.sleeping === true) {
+            // 眠っていた session は起こさない（messenger の宛先になるか、開かれたら起きる）
+            notifySleep(s.name, true);
+            log(`session スリープのまま復帰: ${s.name} (${s.path})`);
+            continue;
+          }
           await supervisor.start(s.name, { resume: true });
           log(`session 復帰: ${s.name} (${s.path})`);
         } catch (e) {
@@ -677,7 +761,10 @@ export function createSessionManager(opts: {
         if (!renaming && !moving) throw new Error("変更が無い: newName か今と違う path を指定する");
 
         const oldRec = rec;
+        // 名前・path の変更は止めて起動し直す操作なので、眠っていた session も起きる
+        const wasSleeping = rec.sleeping === true;
         const newRec: SavedSession = { ...rec, name: newName, path: newPath };
+        delete newRec.sleeping;
         const doMove = moving && input.move === true;
         let renamedRemotes = false;
         let moved = false;
@@ -711,6 +798,7 @@ export function createSessionManager(opts: {
           }
           supervisor.add(toProject(newRec), { wrapper: true, ...instrOpt(newRec.settings) });
           added = true;
+          if (wasSleeping) notifySleep(name, false);
           const st = await supervisor.start(newName, { resume: true });
           opts.events?.publish({ reason: "updated", name: newName });
           log(`session 更新: ${name} -> ${newName} (${oldRec.path} -> ${newPath}${doMove ? ", フォルダ移動" : ""})`);
@@ -737,7 +825,8 @@ export function createSessionManager(opts: {
           if (moved) await undo("フォルダの移動を戻す", () => rename(newPath, oldRec.path));
           await undo("元の名前で起動", async () => {
             supervisor.add(toProject(oldRec), { wrapper: true, ...instrOpt(oldRec.settings) });
-            await supervisor.start(name, { resume: true });
+            if (oldRec.sleeping === true) notifySleep(name, true);
+            else await supervisor.start(name, { resume: true });
           });
           throw new Error(`session を更新できない（元に戻した）: ${why}`);
         }
@@ -750,11 +839,60 @@ export function createSessionManager(opts: {
           throw new Error(known ? `session_create で作ったものではない（config 由来）: ${name}` : `未定義の session: ${name}`);
         }
         await supervisor.remove(name);
+        const wasSleeping = saved.get(name)?.sleeping === true;
         saved.delete(name);
         await persist();
+        if (wasSleeping) notifySleep(name, false);
         opts.events?.publish({ reason: "deleted", name });
         log(`session 削除: ${name}`);
         return { name, deleted: true as const };
+      }),
+
+    sleep: (name) =>
+      serial(async () => {
+        const rec = savedOrThrow(name);
+        if (rec.sleeping === true && supervisor.status(name).state === "stopped") return info(supervisor.status(name));
+        // 先にフラグを保存する（止めている途中で center が落ちても、次の起動で眠ったまま復帰する）
+        rec.sleeping = true;
+        try {
+          await persist();
+        } catch (e) {
+          delete rec.sleeping;
+          throw new Error(`状態ファイルに保存できない: ${(e as Error).message}`);
+        }
+        let st: RcStatus;
+        try {
+          st = await supervisor.stop(name);
+        } catch (e) {
+          // 止められなかった（claude が残っているかもしれない）。眠った事にしない: フラグを戻し、身代わりは立てない（フラグと身代わりを食い違わせない）
+          delete rec.sleeping;
+          await persist().catch((pe) => log(`スリープの取り消しを保存できない: ${name} ${(pe as Error).message}`));
+          log(`session スリープ失敗（停止できない）: ${name} ${(e as Error).message}`);
+          throw e;
+        }
+        notifySleep(name, true);
+        opts.events?.publish({ reason: "sleep", name });
+        log(`session スリープ: ${name}`);
+        return info(st);
+      }),
+
+    wake: (name) =>
+      serial(async () => {
+        const rec = savedOrThrow(name);
+        if (rec.sleeping !== true) return info(supervisor.status(name));
+        delete rec.sleeping;
+        try {
+          await persist();
+        } catch (e) {
+          rec.sleeping = true;
+          throw new Error(`状態ファイルに保存できない: ${(e as Error).message}`);
+        }
+        // 身代わりを先に外す（外さないと、起きた claude の peer と同名が並ぶ）
+        notifySleep(name, false);
+        const st = await supervisor.start(name, { resume: true });
+        opts.events?.publish({ reason: "sleep", name });
+        log(`session 起床: ${name}`);
+        return info(await settle(name, st));
       }),
 
     list: () => supervisor.list().map(info),

@@ -201,8 +201,10 @@ test("settingsIssues: mcpServers は普通の MCP の設定・組み込み・旧
   const issues = (patch: object, scope: "common" | "session" = "common") => settingsIssues(patch, scope, serverEntryIssues);
   // 通るもの
   assert.deepEqual(issues({ mcpServers: { s: { command: "npx", args: ["-y", "pkg"], env: { K: "SECRETV" } }, h: { type: "http", url: "https://h/mcp", headers: { Authorization: "Bearer SECRETV" } }, e: { type: "sse", url: "https://e/sse" } } }), []);
-  assert.deepEqual(issues({ mcpServers: { "bantou-coordinator": { transport: "builtin", builtin: "coordinator" } } }, "session"), []);
-  assert.deepEqual(issues({ mcpServers: { tools: { transport: "http", url: "https://t/mcp", auth: { env: "BANTOU_MCP_KEY_T" } } } }), []);
+  assert.deepEqual(issues({ mcpServers: { "bantou-coordinator": { type: "http", url: "http://127.0.0.1:7911/mcp", headers: { Authorization: "Bearer SECRETV" } } } }, "session"), []);
+  // 独自の書き方（transport: builtin・auth.env）は受けない
+  assert.notDeepEqual(issues({ mcpServers: { "bantou-coordinator": { transport: "builtin", builtin: "coordinator" } } }, "session"), []);
+  assert.notDeepEqual(issues({ mcpServers: { tools: { transport: "http", url: "https://t/mcp", auth: { env: "BANTOU_MCP_KEY_T" } } } }), []);
   assert.deepEqual(issues({ mcpServers: { tools: null } }, "session"), []);
   assert.deepEqual(issues({ mcpServers: { tools: { url: "https://t2/mcp" } } }, "session"), []); // 旧形式の項目ごとの上書き
   assert.deepEqual(issues({ mcpServers: null, memory: null }), []);
@@ -219,7 +221,6 @@ test("settingsIssues: mcpServers は普通の MCP の設定・組み込み・旧
     [{ mcpServers: { s: "SECRETV" } }, /mcpServers\.s:/],
     [{ mcpServers: { s: null } }, /null は session の設定でだけ/],
     [{ mcpServers: { "bad name": { command: "x" } } }, /名前は英数字と _ - のみ/],
-    [{ mcpServers: { "bantou-coordinator": { command: "x" } } }, /組み込みの接続の名前/],
     [{ memory: { type: "http", headers: { Authorization: "Bearer SECRETV" } } }, /memory: type http の server には url/],
     [{ memory: { args: ["SECRETV"] } }, /memory: stdio の server には command/],
     [{ mcpServers: [] }, /mcpServers は/],

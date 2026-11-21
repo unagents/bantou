@@ -33,6 +33,8 @@ export {
   refreshSessions,
   SESSIONS_CHANGED_EVENT,
   updateSession,
+  sleepSession,
+  wakeSession,
   updateSessionSettings,
 } from "./sessions";
 export {

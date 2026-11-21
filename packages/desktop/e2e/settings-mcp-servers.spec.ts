@@ -24,7 +24,7 @@ const mock = <T>(page: Page, fn: (m: Mock) => T) =>
 
 const STDIO = { command: "npx", args: ["-y", "@example/tools-mcp"], env: { TOOLS_KEY: "stdio-secret-123" } };
 const HTTP = { type: "http", url: "https://tools.example/mcp", headers: { Authorization: "Bearer http-secret-456" } };
-const COORD = { transport: "builtin", builtin: "coordinator" };
+const COORD = { type: "http", url: "http://127.0.0.1:7911/mcp", headers: { Authorization: "Bearer coord-secret-000" } };
 const MEMORY = { type: "http", url: "https://memory.example/mcp", headers: { Authorization: "Bearer mem-secret-789" } };
 
 const asText = (v: unknown) => JSON.stringify(v, null, 2);
@@ -63,7 +63,7 @@ test.describe("settings: extra MCP servers and external memory (the desktop that
     await expect(page.getByTestId("settings-save")).toBeDisabled();
   });
 
-  test("per session: stdio, Bearer http and the coordinator's builtin connection are saved and are there after reopening", async ({ page }) => {
+  test("per session: stdio, Bearer http and the coordinator MCP server entry (type http, url, headers) are saved and are there after reopening", async ({ page }) => {
     await page.goto("/");
     await openSession(page, "careery");
     await page.getByTestId("settings-mcp-servers").fill(asText({ mcpServers: { tools: STDIO, web: HTTP, "bantou-coordinator": COORD } }));

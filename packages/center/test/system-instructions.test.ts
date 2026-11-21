@@ -60,9 +60,9 @@ test("buildSystemInstructions: 出力で master-cap-availability の文面が ma
 });
 
 test("describeSystemInstructions: 既定は 5 件（base-spec, role, availability, memory, coordinator の順）。memory・coordinator は条件付きだと title で分かる", () => {
-  assert.deepEqual(describeSystemInstructions().map((d) => `${d.id}@${d.version}`), ["base-spec@1", "master-cap-role@6", "master-cap-availability@2", "memory@1", "coordinator@3"]);
+  assert.deepEqual(describeSystemInstructions().map((d) => `${d.id}@${d.version}`), ["base-spec@1", "master-cap-role@6", "master-cap-availability@2", "memory@1", "coordinator@4"]);
   assert.ok(describeSystemInstructions()[3]!.title.includes("設定がある session だけ"));
-  assert.ok(describeSystemInstructions()[4]!.title.includes("統括の口"));
+  assert.ok(describeSystemInstructions()[4]!.title.includes("統括の MCP の server"));
 });
 
 test("memory@1: memory 設定がある session だけに付く。context / recall を呼ぶ・書き込みは自動で自分では呼ばない旨がある。label は memory@1", () => {

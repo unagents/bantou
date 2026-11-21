@@ -100,6 +100,7 @@ export function parseSession(v: unknown): Session {
     auth: optStr(v, "auth") as Session["auth"],
     loginUrl: optStr(v, "loginUrl"),
     loginError: optStr(v, "loginError"),
+    sleeping: v.sleeping === true,
   };
 }
 

@@ -114,6 +114,8 @@ pub fn run() {
             session::refresh_sessions,
             session::create_session,
             session::session_update,
+            session::session_sleep,
+            session::session_wake,
             session::session_path_hints,
             session::session_get_settings,
             session::session_update_settings,

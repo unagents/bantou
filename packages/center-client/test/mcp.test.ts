@@ -296,7 +296,9 @@ test("5.3 the web list is exactly the designed one", () => {
       "session_login_code",
       "session_settings_get",
       "session_settings_update",
+      "session_sleep",
       "session_update",
+      "session_wake",
       "worker_reply",
     ].sort(),
   );
