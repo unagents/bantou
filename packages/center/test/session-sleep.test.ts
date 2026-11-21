@@ -536,3 +536,40 @@ test("gate: 起こせず、もう眠っていない時は、溜まっていた m
   assert.ok(logs.some((l) => l.includes("渡せなかった message") && l.includes("from=a") && l.includes("本文その1")));
   await gate.close();
 });
+
+test("gate: 他の経路で起きる時、身代わりが外れる間（close 中）に出し切られた message も捨てず、起きた claude へ渡す", async () => {
+  const fcs: ReturnType<typeof fakeClient>[] = [];
+  const delivered: string[] = [];
+  const gate = createSleepGate({
+    clientFactory: () => {
+      const fc = fakeClient();
+      const close = fc.client.close.bind(fc.client);
+      // 身代わりは止まる前に mailbox の残りを出し切る。close の間に 2 通が handler へ届く
+      fc.client.close = async () => {
+        fc.emit({ from_name: "a", text: "drained-1" });
+        fc.emit({ from_name: "a", text: "drained-2" });
+        await close();
+      };
+      fcs.push(fc);
+      return fc.client;
+    },
+    wake: async () => {},
+    deliver: async (_n, t) => {
+      delivered.push(t);
+      return { ok: true };
+    },
+    isSleeping: () => true,
+    peerName: (n) => `${n}-cap`,
+    log: () => {},
+    deliverIntervalMs: 5,
+  });
+  gate.sync("pm1", true);
+  await tick();
+  gate.sync("pm1", false); // message を受けずに起きる（desktop で開く・wake）
+  await tick(100);
+  assert.equal(fcs[0].state.closed, true);
+  assert.equal(delivered.length, 2);
+  assert.match(delivered[0], /drained-1/);
+  assert.match(delivered[1], /drained-2/);
+  await gate.close();
+});
