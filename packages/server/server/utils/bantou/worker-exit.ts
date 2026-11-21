@@ -91,6 +91,8 @@ export interface WorkerExitWatcher {
   wrap(inner: RunObserver): RunObserver;
   /** server 起動時に、保存してある状態から、通知していない終了を 1 回だけ拾う。 */
   recover(): Promise<number>;
+  /** 終わった task の lane の再開の回数（メモリ）を外す（lane を片付けた時）。 */
+  forgetLane(capId: string, taskId: string): void;
 }
 
 const isReportKind = (k: unknown): k is ReportKind => k === "progress" || k === "ask" || k === "approve" || k === "done";
@@ -238,7 +240,8 @@ export function createWorkerExitWatcher(deps: WorkerExitDeps): WorkerExitWatcher
   function wrap(inner: RunObserver): RunObserver {
     return {
       started: (k, id, input, pid) => inner.started(k, id, input, pid),
-      line: (k, id, line) => inner.line(k, id, line),
+      // taskId（cap の task の lane）を落とさない: 落とすと lane の出力が lane の activity に届かず、出力していても stalled に見える
+      line: (k, id, line, taskId) => inner.line(k, id, line, taskId),
       finished: (k, id, o) => {
         try {
           onFinished(k, id, o);
@@ -321,5 +324,5 @@ export function createWorkerExitWatcher(deps: WorkerExitDeps): WorkerExitWatcher
     return resumed;
   }
 
-  return { reported, wrap, recover };
+  return { reported, wrap, recover, forgetLane: (capId, taskId) => void counts.delete(countKey(capId, taskId)) };
 }

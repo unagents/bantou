@@ -33,6 +33,19 @@ export interface TaskSchedulerDeps {
   retainMax?: number;
   /** 終わりの判定を遅らせて 1 回にまとめる（既定 setImmediate。テストで差し替える）。 */
   defer?: (f: () => void) => void;
+  /** task が終わった（lane の mcp.json など、終わったら要らない物を消す）。 */
+  onFinished?: (capId: string, taskId: string) => void;
+  /**
+   * 終わった task の lane を片付けるまでの時間（ms。config の session.workerKeepMs と同じ値。0 は片付けない）。
+   * 終わってからこの時間、再開されなかった lane を retire で片付け、forgetLane でメモリの記録も外す。
+   */
+  retireMs?: number;
+  /** lane を片付ける（manager.retireLane）。片付けたら true（run がある等で見送ったら false。次の確認でやり直す）。 */
+  retire?: (capId: string, taskId: string) => Promise<boolean>;
+  /** lane のメモリの記録（activity・worker の終了の再開回数）を外す。片付けた時（片付けない設定なら tasks から落とす時）に 1 回呼ぶ。 */
+  forgetLane?: (capId: string, taskId: string) => void;
+  /** 片付けの確認の間隔（ms。既定 60 秒）。 */
+  sweepMs?: number;
 }
 
 /** 更新待ち（server の更新）が数える、task の待ち・返信の送信中。 */
@@ -73,8 +86,12 @@ export interface TaskScheduler {
   isActive(capId: string, taskId: string): boolean;
   /** その cap に待ちか実行中の task があるか。 */
   has(capId: string): boolean;
-  /** 以降の task を断り、待っている task を message で失敗にする（server の終了・退役）。 */
+  /** 以降の task を断り、待っている task を message で失敗にする（server の終了・退役）。片付けの確認も止める。 */
   close(message: string): void;
+  /** 片付けの時間が来た lane を片付ける（周期の確認。テスト用に公開）。片付けた `cap_id/task_id` を返す。 */
+  sweep(): Promise<string[]>;
+  /** server 起動時に、dir に残っている実行中でない lane を片付けの対象に入れる（finishedAt から retireMs 後）。 */
+  adoptIdle(lanes: Array<{ capId: string; taskId: string; finishedAt: string | null }>): void;
 }
 
 interface Entry {
@@ -120,6 +137,13 @@ export function createTaskScheduler(deps: TaskSchedulerDeps): TaskScheduler {
   let seq = 0;
   let closed = false;
   let checkScheduled = false;
+  const retireMs = deps.retireMs ?? 0;
+  /** 片付けを待っている lane（cap_id/task_id → 片付けてよい時刻 ms）。再開されたら外す。 */
+  const retireAt = new Map<string, number>();
+  let sweeping = false;
+  // 確認の間隔は 60 秒（片付けまでの時間がそれより短ければその時間。最短 100ms）
+  const timer = retireMs > 0 && deps.retire ? setInterval(() => void sweep(), deps.sweepMs ?? Math.max(100, Math.min(60_000, retireMs))) : undefined;
+  timer?.unref();
 
   const keyOf = (capId: string, taskId: string): string => `${capId}/${taskId}`;
   const iso = (): string => new Date(now()).toISOString();
@@ -206,6 +230,57 @@ export function createTaskScheduler(deps: TaskSchedulerDeps): TaskScheduler {
     e.finishedAt = iso();
     log(`task 終了: cap_id=${e.capId} task_id=${e.taskId} state=${e.state}${error !== undefined ? ` error=${oneLine(error, 120)}` : ""}`);
     changed(e.capId);
+    if (retireMs > 0 && deps.retire) retireAt.set(keyOf(e.capId, e.taskId), now() + retireMs);
+    if (deps.onFinished) {
+      try {
+        deps.onFinished(e.capId, e.taskId);
+      } catch (err) {
+        log(`task の終わりの後始末に失敗: cap_id=${e.capId} task_id=${e.taskId} ${errMsg(err)}`);
+      }
+    }
+  }
+
+  const forget = (capId: string, taskId: string): void => {
+    if (!deps.forgetLane) return;
+    try {
+      deps.forgetLane(capId, taskId);
+    } catch (err) {
+      log(`lane の記録を外せない: cap_id=${capId} task_id=${taskId} ${errMsg(err)}`);
+    }
+  };
+
+  async function sweep(): Promise<string[]> {
+    if (sweeping || !deps.retire) return [];
+    sweeping = true;
+    const done: string[] = [];
+    try {
+      const t = now();
+      for (const [key, at] of [...retireAt]) {
+        if (at > t) continue;
+        const e = entries.get(key);
+        if (e !== undefined && isLive(e)) {
+          retireAt.delete(key);
+          continue;
+        }
+        const i = key.indexOf("/");
+        const capId = key.slice(0, i);
+        const taskId = key.slice(i + 1);
+        let ok = false;
+        try {
+          ok = await deps.retire(capId, taskId);
+        } catch (err) {
+          log(`lane を片付けられない: cap_id=${capId} task_id=${taskId} ${errMsg(err)}`);
+        }
+        // 片付けの間に再開された（retireAt から外れた）・見送った lane は残す
+        if (!ok || !retireAt.has(key)) continue;
+        retireAt.delete(key);
+        forget(capId, taskId);
+        done.push(key);
+      }
+    } finally {
+      sweeping = false;
+    }
+    return done;
   }
 
   /** 終わった task を、時間と件数の上限で落とす。 */
@@ -216,15 +291,22 @@ export function createTaskScheduler(deps: TaskSchedulerDeps): TaskScheduler {
       if (isLive(e)) continue;
       const fin = e.finishedAt === null ? t : Date.parse(e.finishedAt);
       if (t - fin > retainMs) {
-        entries.delete(keyOf(e.capId, e.taskId));
+        drop(e);
         continue;
       }
       byCap.set(e.capId, [...(byCap.get(e.capId) ?? []), e]);
     }
     for (const list of byCap.values()) {
       if (list.length <= retainMax) continue;
-      for (const e of list.sort((a, b) => a.seq - b.seq).slice(0, list.length - retainMax)) entries.delete(keyOf(e.capId, e.taskId));
+      for (const e of list.sort((a, b) => a.seq - b.seq).slice(0, list.length - retainMax)) drop(e);
     }
+  }
+
+  /** 終わった task を tasks から落とす。lane を片付けない設定（片付けの待ちに無い）なら、ここでメモリの記録も外す。 */
+  function drop(e: Entry): void {
+    const key = keyOf(e.capId, e.taskId);
+    entries.delete(key);
+    if (!retireAt.has(key)) forget(e.capId, e.taskId);
   }
 
   function evaluate(): void {
@@ -257,6 +339,7 @@ export function createTaskScheduler(deps: TaskSchedulerDeps): TaskScheduler {
     const key = keyOf(cmd.cap_id, cmd.task_id);
     const prev = entries.get(key);
     if (prev && isLive(prev)) return Promise.reject(new Error(`同じ task_id の task が動いている: ${cmd.task_id}`));
+    retireAt.delete(key);
     return new Promise<RunOutcome>((resolve, reject) => {
       const branch = typeof cmd.deliverables?.branch === "string" && cmd.deliverables.branch !== "" ? cmd.deliverables.branch : undefined;
       const e: Entry = {
@@ -290,6 +373,8 @@ export function createTaskScheduler(deps: TaskSchedulerDeps): TaskScheduler {
 
   function touch(capId: string, taskId: string): void {
     const key = keyOf(capId, taskId);
+    // 再開された lane は片付けない（また終わったら数え直す）
+    retireAt.delete(key);
     const e = entries.get(key);
     if (e === undefined) {
       // server の再起動の後などで知らない task の run が来た: 動いている task として引き継ぐ（branch は記録から）
@@ -407,8 +492,19 @@ export function createTaskScheduler(deps: TaskSchedulerDeps): TaskScheduler {
       return e !== undefined && isLive(e);
     },
     has: (capId) => ofCap(capId).some(isLive),
+    sweep,
+    adoptIdle(lanes) {
+      if (retireMs <= 0 || !deps.retire) return;
+      for (const l of lanes) {
+        const key = keyOf(l.capId, l.taskId);
+        if (entries.has(key) || retireAt.has(key)) continue;
+        const fin = l.finishedAt === null ? NaN : Date.parse(l.finishedAt);
+        retireAt.set(key, (Number.isNaN(fin) ? now() : fin) + retireMs);
+      }
+    },
     close(message) {
       closed = true;
+      if (timer) clearInterval(timer);
       for (const e of entries.values()) {
         if (e.state !== "waiting") continue;
         e.state = "failed";

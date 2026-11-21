@@ -101,6 +101,8 @@ export interface ActivityTracker extends RunObserver {
   capEntry(capId: string, taskId?: string): WithModel<AgentActivity> | undefined;
   /** cap の task の状態が変わった（activity を送り直す）。 */
   touch(capId: string): void;
+  /** 終わった task の lane の記録を外す（lane を片付けた時）。動いている lane は外さない。 */
+  forgetLane(capId: string, taskId: string): void;
   close(): void;
 }
 
@@ -406,6 +408,11 @@ export function createActivityTracker(deps: ActivityTrackerDeps): ActivityTracke
     capEntry(capId, taskId) {
       const e = entries.get(keyOf("cap", capId, taskId));
       return e ? toActivity(e) : undefined;
+    },
+
+    forgetLane(capId, taskId) {
+      const e = entries.get(keyOf("cap", capId, taskId));
+      if (e && !isLive(e.state)) entries.delete(keyOf("cap", capId, taskId));
     },
 
     touch(capId) {

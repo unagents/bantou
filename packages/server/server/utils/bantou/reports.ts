@@ -293,14 +293,19 @@ export function createReportHub(deps: ReportHubDeps): ReportHub {
 
   /**
    * cap の invoke を同期で積み、返信（task_result / cap_result / error）を center へ送る。
-   * lane（task の指揮の会話）の再開なら、返答は常にその task の task_result（JSON が取れなければ summary に生の返答）にする。
+   * lane（task の指揮の会話）の再開: task_result の JSON で答えたらその task の task_result、失敗はその task の task_result（failed）。
+   * JSON でない返答（途中の返答・最終の JSON の後の余分な再開）は cap_result にする（task の最新の結果を生の返答で上書きしない）。
    */
   function startResume(capId: string, prompt: string, reason: string, knownTaskId: string | undefined, lane?: string): Promise<void> {
     const p: Promise<void> = deps
       .invoke(capId, { prompt, reason, keepTask: true, ...(lane !== undefined ? { taskId: lane } : {}) })
       .then(
         async (r) => {
-          if (lane !== undefined) return route(capId, buildTaskResult(capId, lane, r));
+          if (lane !== undefined) {
+            if (!r.ok) return route(capId, buildTaskResult(capId, lane, r));
+            const tr = extractTaskResult(capId, lane, r.result_text);
+            return route(capId, tr ?? { bantou: PROTOCOL_VERSION, type: "cap_result", cap_id: capId, ...r });
+          }
           // task 指示中の cap が task_result の JSON で答えたら task_result、そうでなければ従来どおり cap_result
           const taskId = knownTaskId ?? (await taskOf(capId));
           const tr = taskId !== undefined && r.ok ? extractTaskResult(capId, taskId, r.result_text) : undefined;

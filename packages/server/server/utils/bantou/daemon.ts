@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { startBroker } from "@unagents/messenger-broker";
@@ -400,8 +400,24 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
         return undefined;
       }
     },
+    // task が終わったら lane の mcp.json（extraMcp の env を含みうる）を消す。再開されたら run の前に書き直す
+    onFinished: (capId, taskId) => {
+      void removeLaneMcp(capId, taskId);
+    },
+    // 終わってから workerKeepMs（worker の掃除と同じ時機）再開されなかった lane は片付ける（0 は片付けない）
+    retireMs: config.session.workerKeepMs,
+    retire: (capId, taskId) => manager.retireLane(capId, taskId),
+    forgetLane: (capId, taskId) => {
+      tracker.forgetLane(capId, taskId);
+      exitWatcher.forgetLane(capId, taskId);
+    },
     log,
   });
+  /** lane の mcp.json を消す（無ければ何もしない）。 */
+  const removeLaneMcp = (capId: string, taskId: string): Promise<void> =>
+    rm(join(runLogDir(laneDir(config.workspace, capId, taskId)), "mcp.json"), { force: true }).catch((e: unknown) =>
+      log(`lane の mcp.json を消せない: cap_id=${capId} task_id=${taskId} ${e instanceof Error ? e.message : String(e)}`),
+    );
   log(`task の同時実行の上限: cap ごとに ${config.session.maxParallelTasks}（同じ deliverables.branch の task は順に）`);
   const cleaner = createWorkerCleaner({
     workspace: config.workspace,
@@ -421,6 +437,15 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
     return 0;
   });
   if (closedCount > 0) log(`閉じた cap: ${closedCount} 件（worker の report / 終了で起こさない）`);
+  // 前回までに終わった task の lane: mcp.json を消し、片付けの対象に入れる
+  try {
+    const idle = await manager.idleLanes();
+    for (const l of idle) await removeLaneMcp(l.capId, l.taskId);
+    scheduler.adoptIdle(idle);
+    if (idle.length > 0) log(`終わった task の lane: ${idle.length} 件（workerKeepMs の後に片付ける）`);
+  } catch (e) {
+    log(`終わった task の lane を拾えない: ${e instanceof Error ? e.message : String(e)}`);
+  }
 
   const { port: wantPort, bind, discovery, token } = config.broker;
   const broker = await startBroker({
@@ -552,6 +577,8 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
   // 実行中の指示。claude の実行は数分かかるので全体は直列にしない。
   // 同一 agent の直列化は manager の queue が担い、別 agent は並行して走る
   const inflight = new Set<Promise<void>>();
+  /** cap ごとの task の受け付けの順番（受けた順に待ち行列へ入れる）。 */
+  const accepting = new Map<string, Promise<void>>();
 
   const handle = async (m: InboundMessage): Promise<void> => {
     let counted: string | undefined;
@@ -587,18 +614,37 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
         // 断っても、通知先は今の center にしておく（cap が動いていれば、その通知は今の center へ）
         await hub.noteCenter(cmd.cap_id, m.from_id, m.from_name || undefined);
       } else {
-        if (cmd.type === "kick_cap" || cmd.type === "task") {
-          kicking.set(cmd.cap_id, (kicking.get(cmd.cap_id) ?? 0) + 1);
-          counted = cmd.cap_id;
-          // 以降この cap の結果（report 起因の resume を含む）はこの center へ返す。名前で覚える（peer id は center の再起動で変わる）
-          await hub.rememberCenter(cmd.cap_id, m.from_id, m.from_name || undefined);
-          // 以降の worker_report と report 起因の task_result はこの task_id を付ける
-          if (cmd.type === "task") await hub.rememberTask(cmd.cap_id, cmd.task_id);
+        // task は受けた順に待ち行列へ入れる（同じ branch の task は先に来た方から動く）。受け付けの記録（await）の間に後の task が追い越さないよう、cap ごとに順に通す
+        let accepted: (() => void) | undefined;
+        if (cmd.type === "task") {
+          const before = accepting.get(cmd.cap_id) ?? Promise.resolve();
+          const mine = new Promise<void>((r) => (accepted = r));
+          const tail = before.then(() => mine);
+          accepting.set(cmd.cap_id, tail);
+          void tail.then(() => {
+            if (accepting.get(cmd.cap_id) === tail) accepting.delete(cmd.cap_id);
+          });
+          await before;
         }
-        // cap を指す他の命令（status・stop_cap・worker_reply）の送信元も通知先にする（center の再起動後に通知先を取り戻す）
-        const capId = commandCapId(cmd);
-        if (capId !== undefined && cmd.type !== "kick_cap" && cmd.type !== "task") await hub.noteCenter(capId, m.from_id, m.from_name || undefined);
-        reply = await execute(cmd, manager, workerHub, { ...identity, server_version: serverVersion, protocol_version: MESSENGER_PROTOCOL.version }, scheduler);
+        try {
+          if (cmd.type === "kick_cap" || cmd.type === "task") {
+            kicking.set(cmd.cap_id, (kicking.get(cmd.cap_id) ?? 0) + 1);
+            counted = cmd.cap_id;
+            // 以降この cap の結果（report 起因の resume を含む）はこの center へ返す。名前で覚える（peer id は center の再起動で変わる）
+            await hub.rememberCenter(cmd.cap_id, m.from_id, m.from_name || undefined);
+            // 以降の worker_report と report 起因の task_result はこの task_id を付ける
+            if (cmd.type === "task") await hub.rememberTask(cmd.cap_id, cmd.task_id);
+          }
+          // cap を指す他の命令（status・stop_cap・worker_reply）の送信元も通知先にする（center の再起動後に通知先を取り戻す）
+          const capId = commandCapId(cmd);
+          if (capId !== undefined && cmd.type !== "kick_cap" && cmd.type !== "task") await hub.noteCenter(capId, m.from_id, m.from_name || undefined);
+          // execute は task を同期で待ち行列へ入れる（submit）。入れた所で次の task の受け付けを通す
+          const running = execute(cmd, manager, workerHub, { ...identity, server_version: serverVersion, protocol_version: MESSENGER_PROTOCOL.version }, scheduler);
+          accepted?.();
+          reply = await running;
+        } finally {
+          accepted?.();
+        }
       }
       try {
         await client.send(m.from_id, JSON.stringify(reply), "pull", REPLY_META);

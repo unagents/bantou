@@ -140,6 +140,14 @@ export interface AgentManager {
   isActive(kind: AgentKind, id: string): boolean;
   /** cap の task（lane）の run（指揮の run と、その task の worker の run。待ちを含む）が 1 つでもあるか。 */
   laneBusy(capId: string, taskId: string): boolean;
+  /**
+   * 終わった task の lane を片付ける: lane の会話の生出力（logs/<session>.jsonl）と閉じた会話の記録は cap の logs/ へ移し
+   * （cap の logs/ は消さずに残す決まり）、lane の dir（state.json・mcp.json など）を消す。run がある・実行中なら何もせず false。
+   * 後でその task の worker の report などで lane が再開されたら、新しい会話で始まる。
+   */
+  retireLane(capId: string, taskId: string): Promise<boolean>;
+  /** dir のある lane のうち実行中でないもの（server 起動時に、片付けの対象として拾う）。finishedAt = 最後に終わった（無ければ始めた）時刻。 */
+  idleLanes(): Promise<Array<{ capId: string; taskId: string; finishedAt: string | null }>>;
   shutdown(): Promise<void>;
 }
 
@@ -843,12 +851,18 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
   /**
    * cap の status: 本体（kick_cap の会話）と task の lane（invoke 中のものと、最後に始めたもの）をまとめる。
    * state は 1 つでも running なら running。代表（session_id・model・conversation・last_error・retries の出所）は、
-   * running の中で最後に始めたもの、無ければ最後に終わったもの（本体が error なら本体）。queued は全ての待ちの合計。
+   * running の中で最後に始めたもの、無ければ最後に終わったもの（本体が error なら本体）。
+   * queued は、この cap の run（本体と全ての lane。実行中・準備中・待ち）のうち、state の running が表す 1 つを除いた数。
+   * (running ? 1 : 0) + queued = 動いている run の数になる（1 つずつ動かしていた時と同じ見え方。tasks を読まない旧 center は、
+   * この数の増えで task の受付を判定するので、並行に始まった lane も 1 つずつ数える）。
    */
   async function capStatusOf(id: string): Promise<WithModel<AgentStatus>> {
     const cwd = agentDir(config.workspace, "cap", id);
     const keys = new Set([`cap:${id}`, ...capKeys(id)]);
-    const queued = [...keys].reduce((n, k) => n + (waiting.get(k) ?? 0), 0);
+    const waitingRuns = [...keys].reduce((n, k) => n + (waiting.get(k) ?? 0), 0);
+    let capRuns = 0;
+    for (const r of runs) if (r.kind === "cap" && r.id === id) capRuns++;
+    let queued = waitingRuns;
     const laneIds = new Set(capKeys(id).filter((k) => k.startsWith(`cap:${id}/`)).map((k) => k.slice(`cap:${id}/`.length)));
     const latest = await latestLane(id);
     if (latest !== undefined) laneIds.add(latest);
@@ -872,6 +886,7 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
             : pick(all, (x) => at(x, "last_finished_at") || at(x, "last_started_at"));
       const maxOf = (k: "last_started_at" | "last_finished_at"): string | null => all.map((x) => x.s[k]).reduce<string | null>((a, b) => (b !== null && (a === null || b > a) ? b : a), null);
       const repModel = (await readModelRecord(rep.dir)).model ?? (rep.dir !== cwd ? (await readModelRecord(cwd)).model : undefined);
+      queued = Math.max(waitingRuns, capRuns - (running.length > 0 ? 1 : 0));
       const out: WithModel<AgentStatus> = {
         kind: "cap",
         id,
@@ -1046,6 +1061,54 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
     return false;
   }
 
+  async function retireLane(capId: string, taskId: string): Promise<boolean> {
+    if (!isValidAgentId(capId) || !isValidAgentId(taskId)) return false;
+    const key = keyOf("cap", capId, taskId);
+    if (shuttingDown || inflight.has(key) || laneBusy(capId, taskId)) return false;
+    // lane の chain に載せる（片付けの間に来た再開は、片付けの後に新しい会話で動く）
+    return onChain(key, async () => {
+      if (laneBusy(capId, taskId)) return false;
+      const capDir = agentDir(config.workspace, "cap", capId);
+      const dir = laneDir(config.workspace, capId, taskId);
+      if (!(await exists(dir))) return false;
+      const st = await readState(dir).catch(() => null);
+      if (st?.state === "running") return false;
+      const capLogs = runLogDir(capDir);
+      await mkdir(capLogs, { recursive: true });
+      // 会話の生出力は cap の logs/ へ移す（main の会話の生出力と同じ置き場。session_id ごとに別のファイル）
+      for (const name of await readdir(runLogDir(dir)).catch(() => [] as string[])) {
+        if (!name.endsWith(".jsonl") || name === "closed.jsonl") continue;
+        await rename(join(runLogDir(dir), name), join(capLogs, name)).catch((e: unknown) => log(`lane の生出力を移せない: cap_id=${capId} task_id=${taskId} ${name} ${errMsg(e)}`));
+      }
+      // stop_cap で閉じた lane の会話の記録も cap の closed.jsonl へ足す
+      const closedLines = await readFile(join(runLogDir(dir), "closed.jsonl"), "utf8").catch(() => "");
+      if (closedLines !== "") await appendFile(join(capLogs, "closed.jsonl"), closedLines.endsWith("\n") ? closedLines : `${closedLines}\n`);
+      if (st?.session_id) {
+        await appendClosed(capDir, { closed_at: new Date().toISOString(), session_id: st.session_id, reason: `task ${taskId} の終了`, conversation: await readConversation(dir), task_id: taskId });
+      }
+      await rm(dir, { recursive: true, force: true });
+      if (latestLanes.get(capId) === taskId) latestLanes.delete(capId);
+      log(`lane を片付けた: cap_id=${capId} task_id=${taskId} session=${st?.session_id ?? "-"}`);
+      return true;
+    }).catch((e: unknown) => {
+      log(`lane を片付けられない: cap_id=${capId} task_id=${taskId} ${errMsg(e)}`);
+      return false;
+    });
+  }
+
+  async function idleLanes(): Promise<Array<{ capId: string; taskId: string; finishedAt: string | null }>> {
+    const out: Array<{ capId: string; taskId: string; finishedAt: string | null }> = [];
+    for (const capId of await listIds("cap")) {
+      for (const taskId of await listLanes(capId)) {
+        if (inflight.has(keyOf("cap", capId, taskId))) continue;
+        const st = await readState(laneDir(config.workspace, capId, taskId)).catch(() => null);
+        if (st === null || st.state === "running") continue;
+        out.push({ capId, taskId, finishedAt: st.last_finished_at ?? st.last_started_at });
+      }
+    }
+    return out;
+  }
+
   function activeRuns(): ActiveRun[] {
     const out: ActiveRun[] = [];
     for (const r of runs) {
@@ -1064,5 +1127,5 @@ export function createAgentManager(deps: AgentManagerDeps): AgentManager {
     return out;
   }
 
-  return { invoke, stop, close, status, reapOrphans, activeCount, activeRuns, isClosed: (id) => closedCaps.has(id), loadClosed, isActive, laneBusy, shutdown };
+  return { invoke, stop, close, status, reapOrphans, activeCount, activeRuns, isClosed: (id) => closedCaps.has(id), loadClosed, isActive, laneBusy, retireLane, idleLanes, shutdown };
 }
