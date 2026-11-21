@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createProcessStandInClient } from "../src/stand-in.js";
+import { createProcessStandInClient, evictStaleSameName } from "../src/stand-in.js";
 import type { LinkInbound } from "../src/server-link.js";
 
 const node = process.execPath;
@@ -61,4 +61,31 @@ test("stand-in 子 process: close すると子 process が消える", async () =
   await c.close();
   for (let i = 0; i < 50 && alive(pid); i++) await new Promise((r) => setTimeout(r, 50));
   assert.equal(alive(pid), false);
+});
+
+test("evictStaleSameName: 同じ host の同名の自分以外の peer だけを broker から外す（別名・別 host・自分は外さない）", async () => {
+  const unregistered: string[] = [];
+  const post = async (path: string, body: Record<string, unknown>): Promise<unknown> => {
+    if (path === "/list-peers") {
+      // broker 0.10.0 の実際の形（配列）
+      return [
+        { id: "old1", name: "alpha-cap", hostname: "h1" },
+        { id: "me", name: "alpha-cap", hostname: "h1" },
+        { id: "other", name: "beta-cap", hostname: "h1" },
+        { id: "remote", name: "alpha-cap", hostname: "h2" },
+      ];
+    }
+    unregistered.push(String(body.id));
+    return { ok: true };
+  };
+  const r = await evictStaleSameName(post, "alpha-cap", "me", "h1", () => {});
+  assert.deepEqual(r, ["old1"]);
+  assert.deepEqual(unregistered, ["old1"]);
+});
+
+test("evictStaleSameName: broker の失敗は投げない（外せなければ空）", async () => {
+  const logs: string[] = [];
+  const r = await evictStaleSameName(async () => { throw new Error("down"); }, "alpha-cap", "me", "h1", (m) => logs.push(m));
+  assert.deepEqual(r, []);
+  assert.ok(logs.some((l) => l.includes("down")));
 });

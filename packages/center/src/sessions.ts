@@ -889,7 +889,18 @@ export function createSessionManager(opts: {
         }
         // 身代わりを先に外す（外さないと、起きた claude の peer と同名が並ぶ）
         notifySleep(name, false);
-        const st = await supervisor.start(name, { resume: true });
+        let st: RcStatus;
+        try {
+          st = await supervisor.start(name, { resume: true });
+        } catch (e) {
+          // 起こせなかった。眠ったままに戻す（フラグと身代わりを元に戻す。身代わりが預かった message を引き継げるように）
+          rec.sleeping = true;
+          await persist().catch((pe) => log(`起床の取り消しを保存できない: ${name} ${(pe as Error).message}`));
+          notifySleep(name, true);
+          opts.events?.publish({ reason: "sleep", name });
+          log(`session 起床失敗（眠ったままに戻した）: ${name} ${(e as Error).message}`);
+          throw e;
+        }
         opts.events?.publish({ reason: "sleep", name });
         log(`session 起床: ${name}`);
         return info(await settle(name, st));

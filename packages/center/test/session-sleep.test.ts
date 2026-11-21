@@ -124,6 +124,25 @@ test("wake: スリープを解いて --continue（resume）で起動し直す。
   assert.equal(seen.filter((e) => e.reason === "sleep").length, 2);
 });
 
+test("wake: supervisor.start が失敗したら、眠ったままに戻す（sleeping を保存、身代わりを置き直す通知、エラーを返す）", async () => {
+  const { mgr, sup, changes } = setup();
+  await mgr.create({ name: "pm1" });
+  await mgr.sleep("pm1");
+  let fail = true;
+  const realStart = sup.start;
+  (sup as unknown as { start: unknown }).start = async (n: string, o?: { resume?: boolean }) => {
+    if (fail) throw new Error("start 失敗");
+    return realStart.call(sup, n, o);
+  };
+  await assert.rejects(() => mgr.wake("pm1"), /start 失敗/);
+  assert.equal(mgr.list().find((s) => s.name === "pm1")?.sleeping, true);
+  assert.equal((await savedOf())[0].sleeping, true);
+  assert.deepEqual(changes, ["pm1:true", "pm1:false", "pm1:true"]);
+  fail = false;
+  const r = await mgr.wake("pm1");
+  assert.equal(r.sleeping, false);
+});
+
 test("wake: 眠っていない session には何もしない（start しない）", async () => {
   const { mgr, calls } = setup();
   await mgr.create({ name: "pm1" });
@@ -490,5 +509,30 @@ test("gate: 新しい claude の peer が上限（deliverTimeoutMs）まで現�
   assert.match(l!, /worker-x/);
   assert.match(l!, /大事な連絡です/);
   assert.match(l!, /古い peer しか居ない/);
+  await gate.close();
+});
+
+test("gate: 起こせず、もう眠っていない時は、溜まっていた message の全文（送り手・本文）を log に残す", async () => {
+  const logs: string[] = [];
+  const fcs: ReturnType<typeof fakeClient>[] = [];
+  const gate = createSleepGate({
+    clientFactory: () => {
+      const fc = fakeClient();
+      fcs.push(fc);
+      return fc.client;
+    },
+    wake: async () => {
+      throw new Error("start 失敗");
+    },
+    deliver: async () => ({ ok: true }),
+    isSleeping: () => false,
+    peerName: (n) => `${n}-cap`,
+    log: (m) => logs.push(m),
+  });
+  gate.sync("pm1", true);
+  await tick();
+  fcs[0].emit({ from_name: "a", text: "本文その1" });
+  await tick(50);
+  assert.ok(logs.some((l) => l.includes("渡せなかった message") && l.includes("from=a") && l.includes("本文その1")));
   await gate.close();
 });

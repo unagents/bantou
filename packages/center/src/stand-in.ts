@@ -9,13 +9,44 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import { hostname } from "node:os";
-import { createMessengerClient } from "@unagents/messenger-client";
+import { createBrokerClient, createMessengerClient, loadConfig, resolveBroker } from "@unagents/messenger-client";
 import type { LinkClient, LinkInbound } from "./server-link.js";
 import type { Logger } from "./log.js";
 import { selfCommand } from "./status-line.js";
 
 export const STAND_IN_USAGE = "usage: bantou-center stand-in --name <peer name>";
 const READY = "ready";
+
+/** broker への POST の最小形（テストで偽物に差し替える）。 */
+export type BrokerPost = (path: "/list-peers" | "/unregister", body: Record<string, unknown>) => Promise<unknown>;
+
+/**
+ * 眠らせた claude の古い登録を broker から外す。
+ * claude が SIGKILL・強制終了などで止まると、その messenger client が登録を外せず、broker に約 60 秒残る。同名が並ぶと名前宛ての送信は
+ * `Name "<name>" is ambiguous` で失敗し、身代わりに届かない。身代わりは眠っている間だけ置くので、同じ host の同名の自分以外の peer はすべて古い登録。
+ * 外した peer の id の一覧を返す。失敗は投げない（外せなければ従来どおり、約 60 秒後の失効に任せる）。
+ */
+export async function evictStaleSameName(post: BrokerPost, name: string, ownId: string | null, host: string, log: (m: string) => void): Promise<string[]> {
+  const evicted: string[] = [];
+  try {
+    type P = { id: string; name?: string; hostname?: string };
+    // broker 0.10.0 の /list-peers は peer の配列をそのまま返す
+    const r = (await post("/list-peers", { scope: "all", ...(ownId ? { exclude_id: ownId } : {}) })) as P[] | { peers?: P[] };
+    for (const p of Array.isArray(r) ? r : (r.peers ?? [])) {
+      if (p.name !== name || p.id === ownId || (p.hostname !== undefined && p.hostname !== host)) continue;
+      try {
+        await post("/unregister", { id: p.id });
+        evicted.push(p.id);
+      } catch (e) {
+        log(`古い同名の登録を外せない: peer=${p.id} ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  } catch (e) {
+    log(`同名の登録を調べられない: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (evicted.length > 0) log(`眠らせた claude の古い同名の登録を外した: name=${name} peer=${evicted.join(",")}`);
+  return evicted;
+}
 
 /** 子 process 側。登録できたら {"ready":true}、message が届くたびに {"message":{...}} を 1 行ずつ出す。 */
 export async function runStandIn(argv: string[], io: { out: (l: string) => void; err: (l: string) => void }): Promise<number | "serving"> {
@@ -40,6 +71,15 @@ export async function runStandIn(argv: string[], io: { out: (l: string) => void;
   } catch (e) {
     io.err(`messenger に接続できない: ${e instanceof Error ? e.message : String(e)}`);
     return 1;
+  }
+  // 古い同名の登録を外してから ready を出す（親は ready の後に名前宛ての message を受け付ける）
+  try {
+    const cfg = loadConfig(process.env);
+    const broker = createBrokerClient(cfg.token);
+    await resolveBroker(cfg, broker, (m) => io.err(m));
+    await evictStaleSameName((path, body) => broker.post(path as "/unregister", body as { id: string }), name, client.peer.id, hostname(), (m) => io.err(m));
+  } catch (e) {
+    io.err(`古い同名の登録の掃除に失敗: ${e instanceof Error ? e.message : String(e)}`);
   }
   io.out(JSON.stringify({ [READY]: true }));
   const done = (): void => {
