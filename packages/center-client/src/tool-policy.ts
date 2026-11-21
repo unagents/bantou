@@ -36,7 +36,7 @@ export const CENTER_ONLY_REFUSAL =
 export const MEMORY_REFUSAL = CENTER_ONLY_REFUSAL;
 
 /** Setting keys only the center handles (a screen / the web cannot set or delete them; null too). */
-export const CENTER_ONLY_KEYS: readonly string[] = ["memory", "mcp", "mcpConnections", "mcpSecrets"];
+export const CENTER_ONLY_KEYS: readonly string[] = ["memory", "mcp", "mcpServers", "mcpConnections", "mcpSecrets", "coordinator"];
 
 /** True when `settings` has a center-only key (null value included). */
 export const hasCenterOnlyKey = (settings: object): boolean => CENTER_ONLY_KEYS.some((k) => Object.prototype.hasOwnProperty.call(settings, k));

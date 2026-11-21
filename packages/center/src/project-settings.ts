@@ -49,6 +49,11 @@ export interface ProjectSettings {
    * session の設定だけで持つ（center 共通の設定には無い）。
    */
   servers?: string[];
+  /**
+   * 追加の MCP の接続（名前 → 接続）。center 共通の設定では全 session に載り、session の設定ではその session だけに載る（null = 共通の接続をその session では外す）。
+   * center の側だけの項目（画面・web・MCP の更新では書けない。設定 file を直接書く）。形は mcp-connections.ts。鍵の値は書かず、auth.env に環境変数名を書く。
+   */
+  mcpServers?: Record<string, unknown>;
   [key: string]: unknown;
 }
 
@@ -108,7 +113,7 @@ export const coordinatorSchema = z
 
 /**
  * 旧設定（center-settings.json の coordinator）から統括の session 名を取り出す（壊れていれば null）。
- * 統括の指定はもう設定では持たない（mcp-connections.json の割り当てが正本）。旧設定の移行（sessions.ts の restore）だけが読む。
+ * 統括の指定はもう設定では持たない（mcpServers の bantou-coordinator の割り当てが正本）。旧設定の移行（sessions.ts の restore）だけが読む。
  */
 export function readCoordinator(raw: unknown): string | null {
   const r = coordinatorSchema.safeParse(raw);
@@ -128,11 +133,11 @@ export const projectSettingsPatchSchema = z
 export type ProjectSettingsPatch = z.infer<typeof projectSettingsPatchSchema>;
 
 /** center の側だけで扱う設定の項目名（画面・web・master-cap の設定更新からは受けない）。 */
-export const CENTER_ONLY_KEYS: readonly string[] = ["memory", "mcp", "mcpConnections", "mcpSecrets", "coordinator"];
+export const CENTER_ONLY_KEYS: readonly string[] = ["memory", "mcp", "mcpServers", "mcpConnections", "mcpSecrets", "coordinator"];
 
 /** center の側だけの項目を MCP（画面・web・master-cap の設定更新）から受けた時のエラー文。項目の値は含めない。 */
 export const CENTER_ONLY_MCP_ERROR =
-  "外部記憶（memory）や MCP の接続の設定は MCP からは変えられない（url・token・agentId などは center の側だけで扱う）。center を動かしている host の command（README の「外部記憶の設定」の `bantou-center memory` など）を使う";
+  "外部記憶（memory）や追加の MCP の接続（mcpServers）の設定は MCP からは変えられない（url・token・agentId・接続の割り当てなどは center の側だけで扱う）。center を動かしている host で、README の「外部記憶の設定」「追加の MCP の接続」の手順（`bantou-center memory`・設定 file の編集）を使う";
 export const MEMORY_MCP_ERROR = CENTER_ONLY_MCP_ERROR;
 
 /** patch に center の側だけの項目（null を含む）があれば投げる。黙って捨てない。 */
@@ -155,7 +160,7 @@ export const CENTER_SERVERS_ERROR = "servers は center 共通の設定では持
 export function readCenterSettings(raw: unknown): ProjectSettings {
   const out = readSettings(raw);
   delete out.servers;
-  // 統括の指定は設定では持たない（旧設定の coordinator は読み捨てる。割り当てへの移行は sessions.ts の restore）
+  // 旧設定の coordinator は読み捨てる（統括の口は mcpServers の bantou-coordinator で割り当てる。移行は sessions.ts の restore）
   delete out.coordinator;
   return out;
 }
@@ -207,6 +212,8 @@ export function readSettings(raw: unknown): ProjectSettings {
   // servers: 配列なら（空でも）残す。配列でなければ未設定（壊れた値で全 server を止めない）
   if (Array.isArray(out.servers)) out.servers = uniqueDirs(out.servers);
   else delete out.servers;
+  // mcpServers: 連想配列だけ残す（中身の検査は mcp-connections.ts が使う時に行う）
+  if (typeof out.mcpServers !== "object" || out.mcpServers === null || Array.isArray(out.mcpServers)) delete out.mcpServers;
   return out;
 }
 

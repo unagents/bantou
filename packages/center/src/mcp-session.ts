@@ -1,5 +1,5 @@
 /**
- * 保存した MCP の接続（mcp-connections.json）を、session の起動の `--mcp-config` に載せる形にする。
+ * 普通の設定（center 共通の設定と session の設定の mcpServers）の MCP の接続を、session の起動の `--mcp-config` に載せる形にする。
  *
  * - 全 session に共通の接続（common）と、その session だけの追加（sessions[session]）を合成した物（effectiveRaw）が載る。
  *   他の session の追加は載らない。
@@ -9,7 +9,6 @@
  * - 載せない理由は名前と理由の種類だけを返す（値・url・header は出さない）。
  */
 import { BUILTIN_NAMES, effectiveRaw, isBuiltin, validateAny, type BuiltinKind, type ConnectionsData, type McpConnection } from "./mcp-connections.js";
-import { own } from "./mcp-json-file.js";
 import type { SecretsStore } from "./mcp-secrets.js";
 import { BANTOU_SERVER_KEY, MEMORY_SERVER_KEY, MESSENGER_SERVER_KEY } from "./wrapper.js";
 
@@ -37,7 +36,14 @@ export interface SessionMcp {
 }
 
 /** session の起動の MCP の設定を作る。centerBase = center の http の origin（`http://host:port`。無ければ null = 組み込みは載せない）。 */
-export function buildSessionMcp(data: ConnectionsData, secrets: Pick<SecretsStore, "get">, session: string, centerBase: string | null): SessionMcp {
+export function buildSessionMcp(
+  data: ConnectionsData,
+  secrets: Pick<SecretsStore, "get">,
+  session: string,
+  centerBase: string | null,
+  /** auth.env で指した環境変数の値の取得元（center の環境。省略時は process.env）。 */
+  envs: Record<string, string | undefined> = process.env,
+): SessionMcp {
   const out: SessionMcp = { servers: {}, env: {}, allow: [], deny: [], builtins: [], attached: [], skipped: [] };
   const skip = (name: string, reason: string): void => void out.skipped.push({ name, reason });
   let n = 0;
@@ -76,9 +82,10 @@ export function buildSessionMcp(data: ConnectionsData, secrets: Pick<SecretsStor
     const headers: Record<string, string> = { ...(conn.headers ?? {}) };
     if (conn.identity) headers[conn.identity.header] = conn.identity.value ?? session;
     if (conn.auth) {
-      const sec = secrets.get(conn.auth.secret ?? name)?.value;
+      // 鍵は設定に書かない。auth.env の環境変数（center の環境）か、旧来の鍵の file（auth.secret / 接続名）から取る
+      const sec = conn.auth.env !== undefined ? envs[conn.auth.env] : secrets.get(conn.auth.secret ?? name)?.value;
       if (sec === undefined || sec === "") {
-        skip(name, "鍵が無い");
+        skip(name, conn.auth.env !== undefined ? "鍵の環境変数が無い" : "鍵が無い");
         continue;
       }
       const envName = `${MCP_SECRET_ENV_PREFIX}${n++}`;
@@ -110,15 +117,4 @@ export function centerBaseOf(sessionMcpUrl: string | null): string | null {
   } catch {
     return null;
   }
-}
-
-/** 旧設定からの移行の書き込み: session に組み込みの接続を割り当てる（既に有効な割り当てがあれば何もしない）。変えたら true。 */
-export function assignBuiltin(data: ConnectionsData, session: string, kind: BuiltinKind): boolean {
-  if (isAssigned(data, session, kind)) return false;
-  const name = BUILTIN_NAMES[kind];
-  const per = own(data.sessions, session) ?? {};
-  if (per[name] === null) return false; // 運用者が明示的に外している（null）物は戻さない
-  per[name] = { transport: "builtin", builtin: kind };
-  Object.defineProperty(data.sessions, session, { value: per, enumerable: true, writable: true, configurable: true });
-  return true;
 }

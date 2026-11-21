@@ -31,6 +31,9 @@ export const TOOLS_LIST_MAX = 50;
 /** claude の道具名の規則（英数字と `_` `-`、64 文字以内。上限は claude の側の値で未確認）。 */
 export const VISIBLE_TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/;
 
+/** 鍵を渡す環境変数の名前。center 自身の token（BANTOU_SESSION_TOKEN など）を外へ送らせないため、接頭を固定する。 */
+export const AUTH_ENV_NAME = /^BANTOU_MCP_KEY_[A-Z0-9_]{1,40}$/;
+
 const HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]{1,100}$/;
 const SECRETISH = /key|token|secret|auth|password/i;
 const TOOL_PATTERN = /^[A-Za-z0-9_.-]{1,100}\*?$/;
@@ -47,8 +50,11 @@ const authSchema = z
       .refine((v) => !v.includes("${") && !/[\x00-\x1f\x7f]/.test(v), { message: "format に ${ ・制御文字・改行は使えない" })
       .optional(),
     secret: z.string().refine((v) => checkSecretNameShape(v) === undefined, { message: SECRET_NAME_ERROR }).optional(),
+    /** 鍵の値を持つ環境変数の名前（center を起動する環境で渡す。値は設定に書かない）。 */
+    env: z.string().regex(AUTH_ENV_NAME, "auth.env は BANTOU_MCP_KEY_ で始まる大文字の環境変数名").optional(),
   })
-  .strict();
+  .strict()
+  .refine((a) => a.env === undefined || a.secret === undefined, { message: "auth は env か secret のどちらか 1 つ" });
 
 const toolListSchema = z
   .array(z.string().regex(TOOL_PATTERN, "道具名は英数字と . _ - （末尾の * だけ可）"))
@@ -191,6 +197,8 @@ export function validateAny(raw: unknown, name?: string, opts: { allowPlainHttp?
     if (name !== undefined && name !== BUILTIN_NAMES[r.data.builtin]) return { ok: false, issues: [`組み込みの接続の名前は ${BUILTIN_NAMES[r.data.builtin]} だけ`] };
     return { ok: true, value: r.data };
   }
+  // 組み込みの名前は組み込みの接続だけが使える（http の接続を同じ名前で置いて、道具の許可（mcp__<名>__*）を横取りさせない）
+  if (name !== undefined && Object.values(BUILTIN_NAMES).includes(name)) return { ok: false, issues: [`${name} は組み込みの接続の名前（transport: builtin だけ）`] };
   const r = validateConnection(raw, opts);
   return r.ok ? r : { ok: false, issues: r.issues };
 }
@@ -260,36 +268,79 @@ export function validateAll(data: ConnectionsData): ScopeIssue[] {
 
 // ---- 読み込み ----
 
+const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+
+/** 共通の接続の表（name → 接続）を読む。不正な項目は捨てて、捨てた名前（値は含めない）を返す。 */
+function parseCommonMap(raw: unknown): { map: Record<string, AnyConnection>; dropped: string[] } {
+  const map: Record<string, AnyConnection> = {};
+  const dropped: string[] = [];
+  if (!isObj(raw)) return { map, dropped: raw === undefined ? [] : ["(全体)"] };
+  for (const [name, v] of Object.entries(raw)) {
+    const r = storedConnectionSchema.safeParse(v);
+    if (r.success && validateName(name) === undefined) setOwn(map, name, r.data);
+    else dropped.push(name);
+  }
+  return { map, dropped };
+}
+
+/** session の接続の表（name → 上書き / null）を読む。 */
+function parseSessionMap(raw: unknown): { map: Record<string, ConnOverride | null>; dropped: string[] } {
+  const map: Record<string, ConnOverride | null> = {};
+  const dropped: string[] = [];
+  if (!isObj(raw)) return { map, dropped: raw === undefined ? [] : ["(全体)"] };
+  for (const [name, v] of Object.entries(raw)) {
+    if (v === null) {
+      if (validateName(name) === undefined || Object.values(BUILTIN_NAMES).includes(name)) setOwn(map, name, null);
+      else dropped.push(name);
+      continue;
+    }
+    const r = overrideSchema.safeParse(v);
+    if (r.success && validateName(name) === undefined) setOwn(map, name, r.data);
+    else dropped.push(name);
+  }
+  return { map, dropped };
+}
+
+/**
+ * 普通の設定（center 共通の設定と各 session の設定の `mcpServers`）から接続の一覧を作る。呼ぶたびに今の値から作る（キャッシュしない）。
+ * 不正な項目は捨て、problems に scope と名前だけを返す（値は出さない）。
+ */
+export function connectionsFromSettings(
+  common: { mcpServers?: unknown } | undefined,
+  sessions: Iterable<[string, { mcpServers?: unknown } | undefined]>,
+): { data: ConnectionsData; problems: string[] } {
+  const data = emptyConnections();
+  const problems: string[] = [];
+  const c = parseCommonMap(common?.mcpServers);
+  data.common = c.map;
+  for (const n of c.dropped) problems.push(`共通: ${n}`);
+  for (const [session, st] of sessions) {
+    if (st?.mcpServers === undefined) continue;
+    const r = parseSessionMap(st.mcpServers);
+    setOwn(data.sessions, session, r.map);
+    for (const n of r.dropped) problems.push(`${session}: ${n}`);
+  }
+  return { data, problems };
+}
+
 export function parseConnections(raw: unknown): { data: ConnectionsData; problem?: string } {
   const data = emptyConnections();
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return { data, problem: "形が不正" };
-  const o = raw as Record<string, unknown>;
+  if (!isObj(raw)) return { data, problem: "形が不正" };
+  const o = raw;
   if (o.version !== 1) return { data, problem: "version が 1 でない" };
   let dropped = 0;
-  const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
-  if (isObj(o.common)) {
-    for (const [name, v] of Object.entries(o.common)) {
-      const r = storedConnectionSchema.safeParse(v);
-      if (r.success && validateName(name) === undefined) data.common[name] = r.data;
-      else dropped++;
-    }
-  } else if (o.common !== undefined) dropped++;
+  const c = parseCommonMap(o.common);
+  data.common = c.map;
+  dropped += c.dropped.length;
   if (isObj(o.sessions)) {
     for (const [s, per] of Object.entries(o.sessions)) {
       if (!SESSION_NAME.test(s) || !isObj(per)) {
         dropped++;
         continue;
       }
-      const m: Record<string, ConnOverride | null> = {};
-      for (const [name, v] of Object.entries(per)) {
-        if (v === null) m[name] = null;
-        else {
-          const r = overrideSchema.safeParse(v);
-          if (r.success && validateName(name) === undefined) m[name] = r.data;
-          else dropped++;
-        }
-      }
-      setOwn(data.sessions, s, m);
+      const r = parseSessionMap(per);
+      dropped += r.dropped.length;
+      setOwn(data.sessions, s, r.map);
     }
   } else if (o.sessions !== undefined) dropped++;
   return dropped ? { data, problem: `${dropped} 件の項目が不正（捨てた）` } : { data };
