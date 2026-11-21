@@ -92,6 +92,42 @@ test("agents: session.env は process.env に合成して runner に渡す", asy
   });
 });
 
+test("agents: server を起動した npx の npm_config_package などは claude に渡さず、registry と session.env の明示は渡す", async () => {
+  const leaked: Record<string, string> = {
+    npm_config_package: "bantou@0.6.10",
+    npm_config_yes: "true",
+    npm_lifecycle_event: "npx",
+    npm_lifecycle_script: "bantou",
+    npm_execpath: "/x/npm-cli.js",
+    npm_command: "exec",
+    npm_config_registry: "https://registry.example.test/",
+  };
+  const saved = process.env;
+  process.env = { ...saved, ...leaked };
+  try {
+    await withFixture(0, async (f) => {
+      f.config.session.env = { npm_config_yes: "false" };
+      const m = mgr(f, async () => ok("r"));
+      await m.invoke("cap", "c1", { prompt: "p" });
+      await m.invoke("worker", "w1", { prompt: "p" });
+      for (const call of f.calls) {
+        const env = call.env ?? {};
+        for (const k of ["npm_config_package", "npm_lifecycle_event", "npm_lifecycle_script", "npm_execpath", "npm_command"]) {
+          assert.equal(env[k], undefined, `${k} は渡さない`);
+        }
+        assert.equal(env.npm_config_registry, "https://registry.example.test/");
+        assert.equal(env.npm_config_yes, "false", "session.env で明示した物は渡す");
+        assert.equal(env.HOME, saved.HOME);
+      }
+      assert.equal(f.calls.length, 2);
+      // server 自身の env（自動更新の npx が使う）は変えない
+      for (const [k, v] of Object.entries(leaked)) assert.equal(process.env[k], v);
+    });
+  } finally {
+    process.env = saved;
+  }
+});
+
 test("agents: resume で session 無しなら新しい id の new に切り替える", async () => {
   await withFixture(0, async (f) => {
     let n = 0;
