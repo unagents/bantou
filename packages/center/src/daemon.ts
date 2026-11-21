@@ -33,7 +33,8 @@ import { createCore } from "./core.js";
 import { createEventHub } from "./events.js";
 import { createSessionTokens } from "./session-auth.js";
 import { createSessionActivityTracker } from "./session-activity.js";
-import { createServerLink, createStandInClient } from "./server-link.js";
+import { createServerLink } from "./server-link.js";
+import { createProcessStandInClient } from "./stand-in.js";
 import { createSleepGate } from "./sleep-gate.js";
 import { createCenterMemoryEvents } from "./memory-events.js";
 import { capSessionName } from "./session-name.js";
@@ -189,7 +190,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   });
   // スリープ中の session 宛の message で、その session を起こす（身代わり peer。link は messenger の broker 1 つに繋がる）
   const sleepGate = createSleepGate({
-    clientFactory: (peerName) => createStandInClient(peerName, log),
+    clientFactory: (peerName) => createProcessStandInClient(peerName, log),
     wake: (name) => sessions.wake(name),
     deliver: (name, text) => link.notifyPeer(capSessionName(name), text),
     isSleeping: (name) => sessions.list().some((s) => s.name === name && s.sleeping),

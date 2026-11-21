@@ -46,6 +46,15 @@ if (process.argv[2] === "coordinator-mcp") {
   await new Promise<never>(() => {});
 }
 
+if (process.argv[2] === "stand-in") {
+  // スリープ中の session の身代わりの messenger peer（center が子として起動する。1 session = 1 process）。daemon は読み込まない
+  const { runStandIn } = await import("./stand-in.js");
+  const r = await runStandIn(process.argv.slice(3), { out: (l) => console.log(l), err: (l) => console.error(l) });
+  if (r !== "serving") process.exit(r);
+  watchParent({ onOrphan: () => process.exit(0) });
+  await new Promise<never>(() => {});
+}
+
 if (process.argv[2] === "mcp") {
   // MCP の接続の設定・鍵・試す（center の側だけで扱う。MCP からは変えられない）。daemon は読み込まない
   const { runMcpCli } = await import("./mcp-cli.js");
