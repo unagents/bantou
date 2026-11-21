@@ -195,7 +195,7 @@ export function describeUpdateWait(update: UpdateProgress, nowMs = Date.now()): 
   const items = runs.slice(0, WAIT_RUNS_IN_MESSAGE).map((x) => {
     const m = minutesSince(x.started_at, nowMs);
     const owner = x.kind === "worker" && x.cap_id ? `[cap ${x.cap_id}]` : "";
-    return `${x.kind}:${x.id}${owner} ${PHASE_WORD[x.phase]}${m !== undefined ? ` ${m} 分` : ""}`;
+    return `${x.kind}:${x.id}${owner} ${PHASE_WORD[x.phase] ?? String(x.phase)}${m !== undefined ? ` ${m} 分` : ""}`;
   });
   const more = runs.length > WAIT_RUNS_IN_MESSAGE ? ` ほか ${runs.length - WAIT_RUNS_IN_MESSAGE} 件` : "";
   const head = `待っている run: cap ${r.caps} / worker ${r.workers}${items.length > 0 ? `（${items.join("、")}${more}）` : ""}`;
@@ -207,7 +207,7 @@ export function describeUpdateWait(update: UpdateProgress, nowMs = Date.now()): 
   return `${tail.length > 0 ? `${tail.join("、")}。` : ""}${head}`;
 }
 
-const PHASE_WORD: Record<UpdateWaitRun["phase"], string> = { running: "実行", preparing: "準備", queued: "待ち" };
+const PHASE_WORD: Partial<Record<string, string>> & Record<UpdateWaitRun["phase"], string> = { running: "実行", preparing: "準備", queued: "待ち" };
 
 /** 更新待機中に断る kick_cap / task の error。center は同じ指示を再送できる。何を待っているか（update）を載せる。 */
 export function updatingError(

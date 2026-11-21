@@ -310,7 +310,10 @@ export interface UpdateWaitRun {
   cap_id?: string;
   /** ISO 8601, when this run started. */
   started_at?: string;
-  /** queued = behind an earlier command of the same agent; preparing = before the claude process is spawned (clone etc.), between retries, or after it ended until the result is written; running = the process is alive. */
+  /**
+   * queued = behind an earlier command of the same agent; preparing = before the claude process is spawned (clone etc.), between retries, or after it ended until the result is written; running = the process is alive.
+   * A reader must accept other strings (a later server may add phases) and show them as they are; isServerReply does not reject them.
+   */
   phase: "queued" | "preparing" | "running";
 }
 
@@ -822,7 +825,8 @@ function isUpdateWaitRun(v: unknown): v is UpdateWaitRun {
     typeof v.id === "string" &&
     (v.cap_id === undefined || typeof v.cap_id === "string") &&
     (v.started_at === undefined || typeof v.started_at === "string") &&
-    (v.phase === "queued" || v.phase === "preparing" || v.phase === "running")
+    // 未知の phase（後の版で足したもの）も受け入れる。厳しく見ると hello_result / update_result / error 全体を捨ててしまう
+    typeof v.phase === "string"
   );
 }
 

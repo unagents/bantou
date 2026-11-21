@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ErrorReply, HelloResultReply, UpdateResultReply } from "@agent-hand/bantou-protocol";
-import { MESSENGER_PROTOCOL } from "@agent-hand/bantou-protocol";
+import { MESSENGER_PROTOCOL, parseServerReply } from "@agent-hand/bantou-protocol";
 import { compareVersions, createFollow, type Follow } from "../src/follow.js";
 import type { ServerLink, ServerPeer } from "../src/server-link.js";
 
@@ -462,4 +462,23 @@ test("lost は最後に hello に答えた時刻から測る: 長く正常に待
   t = 241_000;
   await fl.check();
   assert.equal(fl.snapshot().peers[0]?.state, "lost");
+});
+
+test("待っている run の未知の phase（後の版の server）: hello_result を捨てず updating にし、phase はそのまま出す", async () => {
+  const f = fake();
+  const t = Date.parse("2026-11-21T05:22:00.000Z");
+  const fl = mk(f, "0.3.1", { now: () => t });
+  const raw = hello({
+    update: {
+      state: "waiting", from: "0.3.0", to: "0.3.1", running: { caps: 1, workers: 0, reports: 0 },
+      runs: [{ kind: "cap", id: "c-x", started_at: "2026-11-21T05:20:00.000Z", phase: "suspended" as never }],
+    },
+  });
+  const parsed = parseServerReply(JSON.stringify(raw));
+  assert.equal(parsed?.type, "hello_result", "link の検証（parseServerReply）を通る");
+  f.helloReply = () => parsed as HelloResultReply;
+  await fl.check();
+  assert.equal(only(fl).state, "updating");
+  assert.match(only(fl).detail, /cap c-x suspended 2 分/);
+  assert.match(fl.gate({ id: "id-1" }, "task")?.message ?? "", /cap c-x suspended/);
 });

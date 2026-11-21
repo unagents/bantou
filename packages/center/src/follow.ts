@@ -43,6 +43,9 @@ export interface UpdateInfo {
   runs?: WaitRun[];
 }
 
+/** run の phase の表示。知らない phase（後の版の server が足したもの）はそのまま出す。 */
+const PHASE_WORD: Partial<Record<string, string>> = { running: "実行", preparing: "準備", queued: "待ち" };
+
 /** 待っている run を文に並べる上限。 */
 const WAIT_RUNS_IN_TEXT = 5;
 
@@ -64,7 +67,7 @@ export function describeWait(u: { running?: UpdateRunning; since?: string; deadl
     const owner = x.session !== undefined ? `session ${x.session} の ` : x.kind === "worker" && x.cap_id ? `cap ${x.cap_id} の ` : "";
     const what = x.kind === "cap" ? (x.session !== undefined ? "cap" : `cap ${x.id}`) : `worker ${x.id}`;
     const m = minutesSince(x.started_at, nowMs);
-    return `${owner}${what} ${x.phase === "running" ? "実行" : x.phase === "queued" ? "待ち" : "準備"}${m !== undefined ? ` ${m} 分` : ""}`;
+    return `${owner}${what} ${PHASE_WORD[x.phase] ?? String(x.phase)}${m !== undefined ? ` ${m} 分` : ""}`;
   });
   const more = runs.length > WAIT_RUNS_IN_TEXT ? ` ほか ${runs.length - WAIT_RUNS_IN_TEXT} 件` : "";
   const waited = minutesSince(u.since, nowMs);
