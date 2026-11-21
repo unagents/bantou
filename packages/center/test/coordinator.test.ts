@@ -8,10 +8,11 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer as createNetServer } from "node:net";
 import { z } from "zod";
 import { buildSessionBrief, SESSION_BRIEF_LINE_MAX, SESSION_BRIEF_MAX_CHARS, SESSION_BRIEF_MAX_LINES, type CoordinatorDeps } from "../src/coordinator.js";
 import {
-  bearerIs, centerBackend, CENTER_TOKEN_ENV, coordinatorEntry, COORDINATOR_MCP_DEFAULT_PORT, COORDINATOR_MCP_FILE, COORDINATOR_MCP_PATH, ensureCoordinatorState, isCoordinatorEntry, startCoordinatorChild, startCoordinatorHttp,
+  bearerIs, centerBackend, centerHostOf, CENTER_TOKEN_ENV, coordinatorEntry, COORDINATOR_MCP_FILE, COORDINATOR_MCP_PATH, ensureCoordinatorState, isCoordinatorEntry, startCoordinatorChild, startCoordinatorHttp,
 } from "../src/coordinator-mcp.js";
 import { createCore } from "../src/core.js";
 import { createEventHub } from "../src/events.js";
@@ -78,6 +79,20 @@ test("session_brief: 1 行は件数だけ。本文・path・URL・error の文�
   for (const s of ["SECRET", "/secret", "https://"]) assert.ok(!all.includes(s), s);
   assert.equal(r.truncated, false);
   assert.equal(buildSessionBrief([info("alpha"), info("beta")], "main", NOW, { session: "beta" }).sessions.length, 1);
+});
+
+test("道具の説明: session_brief の説明に、出ない自分の行の警告を書かない（owner は渡さない）", async () => {
+  const h = await startCoordinatorHttp({ port: 0, key: "k".repeat(40), backend: { sessions: async () => [], createSession: async () => ({ name: "x", state: "" }) } });
+  try {
+    const c = new Client({ name: "t", version: "0" });
+    await c.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${h.port}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${"k".repeat(40)}` } } }));
+    const tools = (await c.listTools()).tools;
+    const brief = tools.find((t) => t.name === "session_brief")!;
+    assert.ok(!brief.description!.includes("警告"));
+    await c.close();
+  } finally {
+    await h.close();
+  }
 });
 
 test("session_brief: 統括の自分の行だけ、作業が多い時に警告が付く", () => {
@@ -287,16 +302,41 @@ test("centerBackend: center の /mcp（token）の session_list・session_create
   }
 });
 
+test("centerBackend: 呼ぶたびに center の MCP session を閉じる（DELETE）。上限（32）を越える回数を呼んでも center の initialize は断られない", async () => {
+  const makeServer = (): McpServer => {
+    const s = new McpServer({ name: "fake-center", version: "0" });
+    s.registerTool("session_list", { description: "x" }, async () => ({ content: [{ type: "text", text: JSON.stringify([info("main")]) }] }));
+    return s;
+  };
+  const h = await startHttpServer({
+    createServer: () => makeServer(),
+    createSessionServer: (owner) => createSessionMcpServer({ remotes: {} as RemoteManager, owner }),
+    sessionAuth: createSessionTokens(),
+    core: createCore(),
+    events: createEventHub(),
+    port: 0,
+    log: () => {},
+    bind: "127.0.0.1",
+    token: "center-token-0123456789abcdef0123",
+  });
+  try {
+    const b = centerBackend({ url: `http://127.0.0.1:${h.port}/mcp`, token: "center-token-0123456789abcdef0123" });
+    for (let i = 0; i < 40; i++) assert.deepEqual((await b.sessions()).map((s) => s.name), ["main"], `call ${i}`);
+  } finally {
+    await h.close();
+  }
+});
+
 // ---- 状態（port・key）と設定の 1 項目 ----
 
 test("ensureCoordinatorState: 初回に作り（0600）、以後は同じ port・key を返す（url が起動のたびに変わらない）。不正なら作り直さず止まる", async () => {
   const dir = await mkdtemp(join(process.env.TMPDIR ?? tmpdir(), "coord-state-"));
   try {
-    const a = ensureCoordinatorState(dir);
-    assert.equal(a.port, COORDINATOR_MCP_DEFAULT_PORT);
+    const a = await ensureCoordinatorState(dir);
+    assert.ok(Number.isInteger(a.port) && a.port >= 1 && a.port <= 65535);
     assert.ok(a.key.length >= 32);
     assert.equal((await stat(join(dir, COORDINATOR_MCP_FILE))).mode & 0o777, 0o600);
-    assert.deepEqual(ensureCoordinatorState(dir), a);
+    assert.deepEqual(await ensureCoordinatorState(dir), a);
     assert.deepEqual(await readdir(dir), [COORDINATOR_MCP_FILE]);
     const e = coordinatorEntry(a);
     assert.deepEqual(Object.keys(e).sort(), ["headers", "type", "url"]);
@@ -305,11 +345,39 @@ test("ensureCoordinatorState: 初回に作り（0600）、以後は同じ port�
     assert.deepEqual(e.headers, { Authorization: `Bearer ${a.key}` });
     assert.ok(isCoordinatorEntry(e, a));
     await writeFile(join(dir, COORDINATOR_MCP_FILE), JSON.stringify({ port: 0, key: "short" }));
-    assert.throws(() => ensureCoordinatorState(dir), /不正/);
+    await assert.rejects(ensureCoordinatorState(dir), /不正/);
     assert.equal(JSON.parse(await readFile(join(dir, COORDINATOR_MCP_FILE), "utf8")).key, "short");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("ensureCoordinatorState: 初回は空き port を選ぶ。同じ host の 2 台目の状態 dir は、1 台目が使っている port を取らない", async () => {
+  const d1 = await mkdtemp(join(process.env.TMPDIR ?? tmpdir(), "coord-state-"));
+  const d2 = await mkdtemp(join(process.env.TMPDIR ?? tmpdir(), "coord-state-"));
+  const holder = createNetServer();
+  try {
+    const a = await ensureCoordinatorState(d1);
+    await new Promise<void>((resolve, reject) => (holder.once("error", reject), holder.listen(a.port, "127.0.0.1", resolve)));
+    const b = await ensureCoordinatorState(d2);
+    assert.notEqual(b.port, a.port);
+    assert.notEqual(b.key, a.key);
+    // 書いた後は変わらない（1 台目が止まって port が空いても）
+    await new Promise<void>((resolve) => holder.close(() => resolve()));
+    assert.deepEqual(await ensureCoordinatorState(d2), b);
+  } finally {
+    if (holder.listening) await new Promise<void>((resolve) => holder.close(() => resolve()));
+    await rm(d1, { recursive: true, force: true });
+    await rm(d2, { recursive: true, force: true });
+  }
+});
+
+test("centerHostOf: 同じ host の子が center へ繋ぐ host。全部受ける bind・localhost は 127.0.0.1、IPv6 は [ ] で囲む、それ以外は bind のまま", () => {
+  for (const b of ["", "0.0.0.0", "::", "localhost"]) assert.equal(centerHostOf(b), "127.0.0.1", b);
+  assert.equal(centerHostOf("::1"), "[::1]");
+  assert.equal(centerHostOf("[::1]"), "[::1]");
+  assert.equal(centerHostOf("127.0.0.1"), "127.0.0.1");
+  assert.equal(centerHostOf("192.168.1.5"), "192.168.1.5");
 });
 
 test("isCoordinatorEntry: url が統括の server（127.0.0.1 か localhost・port・/mcp）の http の項目だけ。他の server・stdio は違う", () => {

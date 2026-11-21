@@ -6,7 +6,7 @@ import { resolveSessionPath } from "./path-env.js";
 import { createActivityStore } from "./activity.js";
 import { loadCapId } from "./center-id.js";
 import { loadConfig, MIN_TOKEN_LEN } from "./config.js";
-import { coordinatorEntry, ensureCoordinatorState, startCoordinatorChild, type CoordinatorChild, type CoordinatorMcpState } from "./coordinator-mcp.js";
+import { centerHostOf, coordinatorEntry, ensureCoordinatorState, startCoordinatorChild, type CoordinatorChild, type CoordinatorMcpState } from "./coordinator-mcp.js";
 import { SESSION_MCP_PATH, startHttpServer, type HttpHandle } from "./http.js";
 import { createConnectionsStore } from "./mcp-connections.js";
 import { createSecretsStore } from "./mcp-secrets.js";
@@ -77,9 +77,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   // session（master-cap）から center の MCP へ戻る URL。http で待ち受けていなければ null（--mcp-config を付けない）
   const sessionMcpUrl = (): string | null => {
     if (httpPort === null) return null;
-    const b = args.bind;
-    const host = b === "" || b === "0.0.0.0" || b === "::" || b === "localhost" ? "127.0.0.1" : b.includes(":") && !b.startsWith("[") ? `[${b}]` : b;
-    return `http://${host}:${httpPort}${SESSION_MCP_PATH}`;
+    return `http://${centerHostOf(args.bind)}:${httpPort}${SESSION_MCP_PATH}`;
   };
   // session の増減・認証状態の変化を desktop へ知らせる（GET /events）
   const events = createEventHub();
@@ -292,8 +290,8 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     httpPort = http.port;
     // 統括の MCP の server（独立した process）。port・key は state dir の coordinator-mcp.json（初回に作る。以後は変わらない）
     try {
-      coordState = ensureCoordinatorState(stateDir, log);
-      coordChild = startCoordinatorChild({ stateDir, centerUrl: `http://127.0.0.1:${http.port}/mcp`, token: config.token, log });
+      coordState = await ensureCoordinatorState(stateDir, log);
+      coordChild = startCoordinatorChild({ stateDir, centerUrl: `http://${centerHostOf(args.bind)}:${http.port}/mcp`, token: config.token, log });
     } catch (e) {
       coordState = null;
       log(`統括の MCP の server を起動しない: ${e instanceof Error ? e.message : String(e)}`);

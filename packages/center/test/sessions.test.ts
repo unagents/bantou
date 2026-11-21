@@ -972,6 +972,26 @@ test("旧設定の移行（起動時）: builtin は統括の MCP の server の
   assert.equal(await readFile(join(dir, "sessions.json"), "utf8"), before);
 });
 
+test("旧設定の移行（起動時）: 落とした項目（timeoutMs・exposeMemoryWrite・string 以外の header）は名前だけ log に出る（値は出さない）。BANTOU_MCP_KEY_ 接頭でない auth.env は center の環境変数を読まず移さない", async () => {
+  const logs: string[] = [];
+  const dropping = { transport: "http", url: "https://d.example/mcp", auth: { env: "BANTOU_MCP_KEY_T" }, timeoutMs: 12345, exposeMemoryWrite: true, headers: { "X-Num": 42, "X-Ok": "ok" } };
+  const anyEnv = { transport: "http", url: "https://a.example/mcp", auth: { env: "HOME" } };
+  const envLegacy = { ...legacyMcp, env: () => ({ BANTOU_MCP_KEY_T: "ENV-KEY-VALUE", HOME: "SECRET-HOME-VALUE" }) as Record<string, string | undefined> };
+  await writeFile(join(dir, "center-settings.json"), JSON.stringify({ mcpServers: { drop: dropping, anyenv: anyEnv } }));
+  await writeFile(join(dir, "sessions.json"), JSON.stringify([rec("main")]));
+  const { mgr } = setup({ legacyMcp: envLegacy, log: (m: string) => void logs.push(m) });
+  await mgr.restore();
+  const c = await readJson("center-settings.json");
+  assert.deepEqual(c.mcpServers.drop, { type: "http", url: "https://d.example/mcp", headers: { "X-Ok": "ok", Authorization: "Bearer ENV-KEY-VALUE" } });
+  const l = logs.find((m) => /drop/.test(m) && /timeoutMs/.test(m));
+  assert.ok(l, "落とした項目を log に出す");
+  for (const n of ["timeoutMs", "exposeMemoryWrite", "headers.X-Num"]) assert.ok(l.includes(n), n);
+  assert.ok(!l.includes("12345") && !l.includes("42"), "値は出さない");
+  assert.deepEqual(c.mcpServers.anyenv, anyEnv, "接頭の無い auth.env は移さず残る");
+  assert.ok(logs.some((m) => /移行失敗/.test(m) && /anyenv/.test(m)));
+  assert.ok(!logs.join("\n").includes("SECRET-HOME-VALUE") && !JSON.stringify(c).includes("SECRET-HOME-VALUE"), "他の環境変数の値は読まない");
+});
+
 test("mcp-connections.json 移行: common は center 共通の設定、session ごとはその session の設定へ移し、file は .migrated に退ける。設定にある物が勝つ。冪等", async () => {
   const logs: string[] = [];
   const fileData = {

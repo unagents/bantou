@@ -2,7 +2,7 @@
  * 統括の道具（session_brief・coordinator_session_create）を出す、独立した MCP の server（http だけ。stdio は無い）。
  *
  * - center の daemon が子 process として起動する（`bantou-center coordinator-mcp`）。center の終了で止まり、落ちたら再起動する。
- * - 待ち受けは 127.0.0.1 の固定 port（state dir の coordinator-mcp.json。初回に作り、以後変わらない）。
+ * - 待ち受けは 127.0.0.1 の port（state dir の coordinator-mcp.json。初回に空き port を選んで作り、以後変わらない）。
  * - 呼び手の確認は、設定の headers の `Authorization: Bearer <key>` を、coordinator-mcp.json の key と定時間で比べる。
  * - center への経路は、center の外向けの窓口 /mcp（center の token で MCP client として繋ぐ）の session_list と session_create だけ。
  * - 使える session は、設定の mcpServers にこの server の 1 項目（type: http・url・headers）を書いた session だけ（key は他の session に渡らない）。
@@ -11,7 +11,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 import { chmodSync, existsSync, readFileSync, writeFileSync, renameSync, mkdirSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type { AddressInfo } from "node:net";
+import { createServer as createNetServer, type AddressInfo } from "node:net";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -22,7 +22,6 @@ import { selfCommand } from "./status-line.js";
 import type { SessionInfo } from "./sessions.js";
 
 export const COORDINATOR_MCP_FILE = "coordinator-mcp.json";
-export const COORDINATOR_MCP_DEFAULT_PORT = 7911;
 export const COORDINATOR_MCP_PATH = "/mcp";
 export const COORDINATOR_MCP_HOST = "127.0.0.1";
 /** 子 process が center の token を受け取る env。 */
@@ -36,8 +35,23 @@ export interface CoordinatorMcpState {
 
 const isPort = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= 65535;
 
-/** state dir の coordinator-mcp.json を読む。無ければ作る（key は乱数、port は既定。書いた後は変えない）。 */
-export function ensureCoordinatorState(stateDir: string, log: (m: string) => void = () => {}): CoordinatorMcpState {
+/** 127.0.0.1 の空き port を 1 つ選ぶ（OS に割り当てさせて閉じる）。 */
+export const pickFreePort = (): Promise<number> =>
+  new Promise((resolve, reject) => {
+    const srv = createNetServer();
+    srv.once("error", reject);
+    srv.listen(0, COORDINATOR_MCP_HOST, () => {
+      const port = (srv.address() as AddressInfo).port;
+      srv.close((e) => (e ? reject(e) : resolve(port)));
+    });
+  });
+
+/** 同じ host の子 process が center へ繋ぐ時の host（center の --bind から。全部受ける bind・localhost は 127.0.0.1、IPv6 は [ ] で囲む）。 */
+export const centerHostOf = (bind: string): string =>
+  bind === "" || bind === "0.0.0.0" || bind === "::" || bind === "localhost" ? "127.0.0.1" : bind.includes(":") && !bind.startsWith("[") ? `[${bind}]` : bind;
+
+/** state dir の coordinator-mcp.json を読む。無ければ作る（key は乱数、port は空き port。書いた後は変えない）。 */
+export async function ensureCoordinatorState(stateDir: string, log: (m: string) => void = () => {}, pickPort: () => Promise<number> = pickFreePort): Promise<CoordinatorMcpState> {
   const path = join(stateDir, COORDINATOR_MCP_FILE);
   if (existsSync(path)) {
     try {
@@ -49,7 +63,7 @@ export function ensureCoordinatorState(stateDir: string, log: (m: string) => voi
     }
     throw new Error(`${path} が不正（直すか、消すと作り直す）`);
   }
-  const state: CoordinatorMcpState = { port: COORDINATOR_MCP_DEFAULT_PORT, key: randomBytes(32).toString("hex") };
+  const state: CoordinatorMcpState = { port: await pickPort(), key: randomBytes(32).toString("hex") };
   mkdirSync(stateDir, { recursive: true });
   const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
@@ -104,6 +118,8 @@ export function centerBackend(opts: { url: string; token: string }): Pick<Coordi
       }
       return parsed;
     } finally {
+      // center の MCP session は DELETE で閉じる（閉じないと TTL まで残り、上限を越えると initialize が 503 になる）。失敗は無視
+      await transport.terminateSession().catch(() => {});
       await client.close().catch(() => {});
     }
   };
@@ -260,7 +276,7 @@ export async function runCoordinatorMcp(
       io.err(`${join(stateDir, COORDINATOR_MCP_FILE)} が無い（center を http で一度起動すると作られる）`);
       return 1;
     }
-    const state = ensureCoordinatorState(stateDir);
+    const state = await ensureCoordinatorState(stateDir);
     io.out(JSON.stringify({ "bantou-coordinator": coordinatorEntry(state) }, null, 2));
     return 0;
   }
@@ -272,7 +288,7 @@ export async function runCoordinatorMcp(
       return 2;
     }
     delete env[CENTER_TOKEN_ENV];
-    const state = ensureCoordinatorState(stateDir, (m) => io.err(m));
+    const state = await ensureCoordinatorState(stateDir, (m) => io.err(m));
     await startCoordinatorHttp({ port: state.port, key: state.key, backend: centerBackend({ url: centerUrl, token }), log: (m) => io.err(`[coordinator-mcp] ${m}`) });
     return "serving";
   }

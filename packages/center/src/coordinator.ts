@@ -97,7 +97,7 @@ export function registerCoordinatorTools(server: McpServer, deps: CoordinatorDep
     {
       title: "各 session の状態を 1 行で読む",
       description:
-        `各 session の状態を 1 行ずつ返す。返り値 { at, sessions: [{ name, line }], truncated, omitted }。line は \`<name> | <起動の状態: 起動中 / 接続 / 停止 / error> | <作業状態: working / needs-input / idle と、その時刻からの分。不明の時は「作業状態 不明」> | ctx <n>% | remote 実行中 <n>・返答待ち <n>・到達不能 <n>・lost <n>\`（自分の project の作業が多い時は末尾に警告）。件数だけで、report・result・指示の本文は入らない。中身が要る時は各 session の担当に任せる。1 行 ${SESSION_BRIEF_LINE_MAX} 文字・1 回 ${SESSION_BRIEF_MAX_LINES} 行・${SESSION_BRIEF_MAX_CHARS} 文字まで（越えたら truncated: true と omitted = 落とした行数）。session で 1 つに絞れる`,
+        `各 session の状態を 1 行ずつ返す。返り値 { at, sessions: [{ name, line }], truncated, omitted }。line は \`<name> | <起動の状態: 起動中 / 接続 / 停止 / error> | <作業状態: working / needs-input / idle と、その時刻からの分。不明の時は「作業状態 不明」> | ctx <n>% | remote 実行中 <n>・返答待ち <n>・到達不能 <n>・lost <n>\`。件数だけで、report・result・指示の本文は入らない。中身が要る時は各 session の担当に任せる。1 行 ${SESSION_BRIEF_LINE_MAX} 文字・1 回 ${SESSION_BRIEF_MAX_LINES} 行・${SESSION_BRIEF_MAX_CHARS} 文字まで（越えたら truncated: true と omitted = 落とした行数）。session で 1 つに絞れる`,
       inputSchema: { session: z.string().min(1).optional() },
     },
     async ({ session }) => {

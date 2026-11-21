@@ -261,6 +261,20 @@ test("server_list / rc_start / rc_stop", async () => {
   await close();
 });
 
+test("session_create: start: false は SessionManager へ渡る（本物の schema。落ちると起動してしまう）", async () => {
+  const { client, close } = await connect();
+  const tool = (await client.listTools()).tools.find((t) => t.name === "session_create")!;
+  assert.ok("start" in (tool.inputSchema.properties as object), "schema に start が在る");
+  await close();
+  const seen: unknown[] = [];
+  const c2 = await connect({}, { sessions: { create: async (i: unknown) => (seen.push(i), { name: "pm1" }) as never } });
+  await c2.client.callTool({ name: "session_create", arguments: { name: "pm1", start: false } });
+  await c2.client.callTool({ name: "session_create", arguments: { name: "pm2" } });
+  assert.equal((seen[0] as { start?: boolean }).start, false);
+  assert.equal("start" in (seen[1] as object), false, "省略は渡さない（起動する）");
+  await c2.close();
+});
+
 test("session_create / session_delete / session_list は SessionManager に委譲し、例外は isError", async () => {
   const { client, close } = await connect({}, {
     sessions: { create: async (i) => { if (i.name === "dup") throw new Error("name が既に使われている: dup"); return { name: i.name, path: "/p", state: "starting" } as never; } },
