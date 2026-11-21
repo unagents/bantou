@@ -65,11 +65,14 @@ export const MEMORY_TOKEN_ENV = "BANTOU_MEMORY_TOKEN";
  *   bantou の X-Bantou-Session と memory の X-Agent-Id は内部の識別子なので session 名のまま。
  *   broker は client が自分で解決する（env → config → UDP 発見）ので指名しない。
  * - bantou: token は ${BANTOU_SESSION_TOKEN} のまま（claude が環境変数から展開する）。url が無い時は付けない。
+ * - extra: 保存した MCP の接続（共通 + その session の追加。鍵は ${…} の参照だけ）。名前が上の物と重なれば上の物が勝つ。
  * - memory: 外部記憶の設定がある時だけ付ける（type: "http"）。X-Agent-Id は agentId、無ければ session 名。
  *   token がある時だけ Authorization: Bearer ${BANTOU_MEMORY_TOKEN}（実値はファイル・argv に書かず、env で渡す）。
  */
-export function mcpConfigJson(url: string | null, session: string, memory?: { url: string; token?: string; agentId?: string }): string {
+export function mcpConfigJson(url: string | null, session: string, memory?: { url: string; token?: string; agentId?: string }, extra: Record<string, unknown> = {}): string {
+  // 保存した接続（mcp-session.ts）。center の組み立てる entry と同じ名前は center の側が勝つ（下で上書きする）
   const mcpServers: Record<string, unknown> = {
+    ...extra,
     [MESSENGER_SERVER_KEY]: {
       type: "stdio",
       command: "npx",
@@ -107,8 +110,9 @@ export const BANTOU_SERVER_KEY = "bantou";
  * - bantou: 窓口がある時だけ（mcpConfigJson が url 無しで付けない時は入れない）
  * - memory: 外部記憶がある時だけ
  */
-export function bantouAllowRules(opts: { bantou: boolean; memory: boolean }): string[] {
+export function bantouAllowRules(opts: { bantou: boolean; memory: boolean; extra?: string[] }): string[] {
   return [
+    ...(opts.extra ?? []),
     `mcp__${MESSENGER_SERVER_KEY}__*`,
     ...(opts.bantou ? [`mcp__${BANTOU_SERVER_KEY}__*`] : []),
     ...(opts.memory ? [`mcp__${MEMORY_SERVER_KEY}__*`] : []),

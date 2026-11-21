@@ -9,6 +9,8 @@ import { parseConfig, type Config, type ProjectConfig } from "../src/config.js";
 import { createCore, type CoreEvent } from "../src/core.js";
 import { createRemoteControlSupervisor, redactSessionArgs, type ChildLike, type SpawnImpl } from "../src/remote-control.js";
 import { createSessionTokens } from "../src/session-auth.js";
+import type { ConnectionsData } from "../src/mcp-connections.js";
+import { buildSessionMcp, centerBaseOf } from "../src/mcp-session.js";
 import { applicableParts, buildSystemInstructions, partLabel } from "../src/system-instructions.js";
 import { bantouAllowRules, buildWrapperArgs, findSessionUrl, mcpConfigJson, parseWrapperLine, resolveWrapperPath, windowConnected } from "../src/wrapper.js";
 
@@ -989,16 +991,19 @@ test("起動引数: project 名が -cap で終わる時は --remote-control と 
   assert.equal(JSON.parse(mcpConfigJson(null, "x-cap")).mcpServers["bantou-messenger"].env.AGENT_MESSENGER_NAME, "x-cap");
 });
 
-test("coordinator: setCoordinator('a') の後に a と b を起動すると、launch の ctx.coordinator は a だけ true。指示文と labels の coordinator@2 も a だけ。解除すると a からも消える", async () => {
+const COORD = { transport: "builtin", builtin: "coordinator" } as const;
+const mcpWith = (data: () => ConnectionsData, secrets: Record<string, string> = {}) => (name: string, mcpUrl: string | null) =>
+  buildSessionMcp(data(), { get: (n: string) => (secrets[n] !== undefined ? { value: secrets[n], rev: 1, updatedAt: "" } : undefined) }, name, centerBaseOf(mcpUrl));
+
+test("統括の割り当て: 割り当てた session だけ launch の ctx.coordinator が true・指示文と labels に coordinator@3・--mcp-config に bantou-coordinator。他の session には載らない。外すと次の起動から消える", async () => {
   const seen: { session: string; coordinator?: boolean }[] = [];
-  // ctx を記録しつつ本物の部品を使う supervisor
-  const core = createCore();
-  const tokens = createSessionTokens();
+  const data: ConnectionsData = { version: 1, common: {}, sessions: { a: { "bantou-coordinator": COORD } } };
   const sup2 = createRemoteControlSupervisor({
     config: cfg,
     log: () => {},
     spawnImpl,
-    wrapper: { core, tokens, path: "/fake/bantou-pty-wrapper", mcpUrl: () => "http://127.0.0.1:4567/mcp/session", statusLineSelf: ["/fake/bantou-center"] },
+    mcpOf: mcpWith(() => data),
+    wrapper: { core: createCore(), tokens: createSessionTokens(), path: "/fake/bantou-pty-wrapper", mcpUrl: () => "http://127.0.0.1:4567/mcp/session", statusLineSelf: ["/fake/bantou-center"] },
     systemInstructions: {
       build: (ctx: { session: string; memory?: boolean; coordinator?: boolean }) => (seen.push({ session: ctx.session, coordinator: ctx.coordinator }), buildSystemInstructions(ctx)),
       labels: (ctx: { session: string; memory?: boolean; coordinator?: boolean }) => applicableParts(ctx).map(partLabel),
@@ -1006,17 +1011,122 @@ test("coordinator: setCoordinator('a') の後に a と b を起動すると、la
   });
   sup2.add({ ...project, name: "a", path: "/tmp/a" }, { wrapper: true });
   sup2.add({ ...project, name: "b", path: "/tmp/b" }, { wrapper: true });
-  sup2.setCoordinator("a");
   const sa = await sup2.start("a");
   const sb = await sup2.start("b");
   assert.deepEqual(seen, [{ session: "a", coordinator: true }, { session: "b", coordinator: false }]);
-  assert.ok(sa.systemInstructions!.includes("coordinator@2"));
-  assert.ok(!sb.systemInstructions!.includes("coordinator@2"));
+  assert.ok(sa.systemInstructions!.includes("coordinator@3"));
+  assert.ok(!sb.systemInstructions!.includes("coordinator@3"));
   assert.equal(valueOf(launches[0].args, "--append-system-prompt"), buildSystemInstructions({ session: "a", coordinator: true }));
   assert.equal(valueOf(launches[1].args, "--append-system-prompt"), buildSystemInstructions({ session: "b" }));
+  const cfgA = JSON.parse(valueOf(launches[0].args, "--mcp-config")!).mcpServers;
+  const cfgB = JSON.parse(valueOf(launches[1].args, "--mcp-config")!).mcpServers;
+  assert.deepEqual(cfgA["bantou-coordinator"], { type: "http", url: "http://127.0.0.1:4567/mcp/coordinator", headers: { Authorization: "Bearer ${BANTOU_SESSION_TOKEN}", "X-Bantou-Session": "a" } });
+  assert.ok(!("bantou-coordinator" in cfgB));
+  assert.ok(JSON.parse(valueOf(launches[0].args, "--settings")!).permissions.allow.includes("mcp__bantou-coordinator__*"));
+  assert.ok(!JSON.parse(valueOf(launches[1].args, "--settings")!).permissions.allow.includes("mcp__bantou-coordinator__*"));
   await sup2.stop("a");
-  sup2.setCoordinator(null);
+  delete data.sessions.a;
   const sa2 = await sup2.start("a");
-  assert.ok(!sa2.systemInstructions!.includes("coordinator@2"));
+  assert.ok(!sa2.systemInstructions!.includes("coordinator@3"));
+  assert.ok(!("bantou-coordinator" in JSON.parse(valueOf(launches[2].args, "--mcp-config")!).mcpServers));
+  await sup2.shutdown();
+});
+
+test("接続の配線: 共通の接続は全 session の --mcp-config に載り、session ごとの追加はその session だけ。鍵は env だけで argv・--mcp-config・status・log に出ない", async () => {
+  const SECRET = "SEKRET-VALUE-0123456789";
+  const logs: string[] = [];
+  const data: ConnectionsData = {
+    version: 1,
+    common: { tool1: { transport: "http", url: "https://tools.example/mcp", auth: { header: "X-Api", format: "Key {secret}", secret: "tool1key" }, identity: { header: "X-Agent-Id" }, tools: { deny: ["danger"] } } },
+    sessions: { a: { extra: { transport: "http", url: "https://extra.example/mcp" } } },
+  };
+  const sup2 = createRemoteControlSupervisor({
+    config: cfg,
+    log: (m) => logs.push(m),
+    spawnImpl,
+    mcpOf: mcpWith(() => data, { tool1key: SECRET }),
+    wrapper: { core: createCore(), tokens: createSessionTokens(), path: "/fake/bantou-pty-wrapper", mcpUrl: () => "http://127.0.0.1:4567/mcp/session", statusLineSelf: ["/fake/bantou-center"] },
+  });
+  sup2.add({ ...project, name: "a", path: "/tmp/a" }, { wrapper: true });
+  sup2.add({ ...project, name: "b", path: "/tmp/b" }, { wrapper: true });
+  const sa = await sup2.start("a");
+  const sb = await sup2.start("b");
+  const servers = (i: number) => JSON.parse(valueOf(launches[i].args, "--mcp-config")!).mcpServers as Record<string, { url?: string; headers?: Record<string, string> }>;
+  assert.deepEqual(Object.keys(servers(0)).sort(), ["bantou", "bantou-messenger", "extra", "tool1"]);
+  assert.deepEqual(Object.keys(servers(1)).sort(), ["bantou", "bantou-messenger", "tool1"]);
+  assert.equal(servers(0).tool1.url, "https://tools.example/mcp");
+  assert.deepEqual(servers(0).tool1.headers, { "X-Agent-Id": "a", "X-Api": "Key ${BANTOU_MCP_SECRET_0}" });
+  assert.equal(servers(1).tool1.headers!["X-Agent-Id"], "b");
+  assert.equal(launches[0].env.BANTOU_MCP_SECRET_0, SECRET);
+  const settings = JSON.parse(valueOf(launches[0].args, "--settings")!) as { permissions: { allow: string[]; deny?: string[] } };
+  assert.ok(settings.permissions.allow.includes("mcp__tool1__*") && settings.permissions.allow.includes("mcp__extra__*"));
+  assert.deepEqual(settings.permissions.deny, ["mcp__tool1__danger"]);
+  // 鍵の値はどこにも出ない（env 以外）
+  for (const l of launches) assert.ok(!l.args.join("\0").includes(SECRET));
+  assert.ok(!JSON.stringify(sa).includes(SECRET) && !JSON.stringify(sb).includes(SECRET));
+  assert.ok(!logs.join("\n").includes(SECRET));
+  assert.match(sa.args!.at(sa.args!.indexOf("--mcp-config") + 1)!, /^<mcp: [a-z0-9, -]+>$/);
+  await sup2.shutdown();
+});
+
+test("接続の鍵（auth.env）: center の環境の BANTOU_MCP_KEY_* は子 process に継承されない。割り当てた接続の鍵だけが BANTOU_MCP_SECRET_n で渡り、割り当てていない session には他の接続の鍵が届かない", async () => {
+  const KEY_T = "TOOLS-KEY-VALUE-0123456789";
+  const KEY_A = "ONLYA-KEY-VALUE-0123456789";
+  const saved = { t: process.env.BANTOU_MCP_KEY_T, a: process.env.BANTOU_MCP_KEY_ONLYA };
+  process.env.BANTOU_MCP_KEY_T = KEY_T;
+  process.env.BANTOU_MCP_KEY_ONLYA = KEY_A;
+  try {
+    const data: ConnectionsData = {
+      version: 1,
+      common: { tool1: { transport: "http", url: "https://tools.example/mcp", auth: { env: "BANTOU_MCP_KEY_T" } } },
+      sessions: { a: { onlya: { transport: "http", url: "https://a.example/mcp", auth: { env: "BANTOU_MCP_KEY_ONLYA" } } } },
+    };
+    const sup2 = createRemoteControlSupervisor({
+      config: cfg,
+      log: () => {},
+      spawnImpl,
+      mcpOf: (name, mcpUrl) => buildSessionMcp(data, { get: () => undefined }, name, centerBaseOf(mcpUrl), process.env),
+      wrapper: { core: createCore(), tokens: createSessionTokens(), path: "/fake/bantou-pty-wrapper", mcpUrl: () => "http://127.0.0.1:4567/mcp/session", statusLineSelf: ["/fake/bantou-center"] },
+    });
+    sup2.add({ ...project, name: "a", path: "/tmp/a" }, { wrapper: true });
+    sup2.add({ ...project, name: "b", path: "/tmp/b" }, { wrapper: true });
+    const base = launches.length;
+    await sup2.start("a");
+    await sup2.start("b");
+    const envA = launches[base].env;
+    const envB = launches[base + 1].env;
+    for (const env of [envA, envB]) assert.deepEqual(Object.keys(env).filter((k) => k.startsWith("BANTOU_MCP_KEY_")), [], "BANTOU_MCP_KEY_* は継承させない");
+    assert.deepEqual(Object.values(envA).filter((v) => v === KEY_T || v === KEY_A).sort(), [KEY_A, KEY_T].sort(), "a は自分の接続の鍵だけ");
+    assert.deepEqual(Object.values(envB).filter((v) => v === KEY_T || v === KEY_A), [KEY_T], "b には a だけの接続の鍵は届かない");
+    for (const l of launches.slice(base)) assert.ok(!l.args.join("\0").includes(KEY_T) && !l.args.join("\0").includes(KEY_A));
+    await sup2.shutdown();
+  } finally {
+    if (saved.t === undefined) delete process.env.BANTOU_MCP_KEY_T;
+    else process.env.BANTOU_MCP_KEY_T = saved.t;
+    if (saved.a === undefined) delete process.env.BANTOU_MCP_KEY_ONLYA;
+    else process.env.BANTOU_MCP_KEY_ONLYA = saved.a;
+  }
+});
+
+test("接続の配線: 鍵が無い・claude に渡せない設定（toolPrefix・tools.allow・role）の接続は載せない（名前と理由だけ log）。center の名前（bantou・memory）は接続で上書きできない", async () => {
+  const logs: string[] = [];
+  const base = { transport: "http", url: "https://x.example/mcp" } as const;
+  const data: ConnectionsData = {
+    version: 1,
+    common: { nokey: { ...base, auth: { secret: "missing" } }, pfx: { ...base, toolPrefix: "p-" }, alw: { ...base, tools: { allow: ["a"] } }, bantou: { ...base }, ok1: { ...base } },
+    sessions: {},
+  };
+  const sup2 = createRemoteControlSupervisor({
+    config: cfg, log: (m) => logs.push(m), spawnImpl, mcpOf: mcpWith(() => data),
+    wrapper: { core: createCore(), tokens: createSessionTokens(), path: "/fake/bantou-pty-wrapper", mcpUrl: () => "http://127.0.0.1:4567/mcp/session", statusLineSelf: ["/fake/bantou-center"] },
+  });
+  sup2.add({ ...project, name: "a", path: "/tmp/a" }, { wrapper: true });
+  await sup2.start("a");
+  const servers = JSON.parse(valueOf(launches[0].args, "--mcp-config")!).mcpServers as Record<string, { url?: string }>;
+  assert.deepEqual(Object.keys(servers).sort(), ["bantou", "bantou-messenger", "ok1"]);
+  assert.equal(servers.bantou.url, "http://127.0.0.1:4567/mcp/session", "center の bantou が勝つ");
+  const l = logs.find((x) => x.includes("載せなかった MCP の接続"))!;
+  for (const n of ["nokey", "pfx", "alw", "bantou"]) assert.ok(l.includes(n), n);
+  assert.ok(!l.includes("x.example"));
   await sup2.shutdown();
 });

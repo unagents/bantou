@@ -17,6 +17,10 @@ import { SESSION_NAME } from "./sessions.js";
 export const MCP_CONNECTIONS_FILE = "mcp-connections.json";
 /** center が自分で組み立てる物と、口の path と重なる名前。 */
 export const RESERVED_NAMES: readonly string[] = ["bantou", "bantou-messenger", "mcp", "conn"];
+/** center の中に在る組み込みの接続の種類 → その接続名（claude の側の tool 名 mcp__<名>__*）。名前は種類ごとに固定。 */
+export const BUILTIN_KINDS = ["coordinator"] as const;
+export type BuiltinKind = (typeof BUILTIN_KINDS)[number];
+export const BUILTIN_NAMES: Record<BuiltinKind, string> = { coordinator: "bantou-coordinator" };
 export const CONNECTION_NAME = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 export const IDENTITY_VALUE = /^[A-Za-z0-9_-]{1,64}$/;
 export const TIMEOUT_MIN_MS = 1000;
@@ -26,6 +30,9 @@ export const HEADERS_MAX = 10;
 export const TOOLS_LIST_MAX = 50;
 /** claude の道具名の規則（英数字と `_` `-`、64 文字以内。上限は claude の側の値で未確認）。 */
 export const VISIBLE_TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/;
+
+/** 鍵を渡す環境変数の名前。center 自身の token（BANTOU_SESSION_TOKEN など）を外へ送らせないため、接頭を固定する。 */
+export const AUTH_ENV_NAME = /^BANTOU_MCP_KEY_[A-Z0-9_]{1,40}$/;
 
 const HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]{1,100}$/;
 const SECRETISH = /key|token|secret|auth|password/i;
@@ -43,8 +50,11 @@ const authSchema = z
       .refine((v) => !v.includes("${") && !/[\x00-\x1f\x7f]/.test(v), { message: "format に ${ ・制御文字・改行は使えない" })
       .optional(),
     secret: z.string().refine((v) => checkSecretNameShape(v) === undefined, { message: SECRET_NAME_ERROR }).optional(),
+    /** 鍵の値を持つ環境変数の名前（center を起動する環境で渡す。値は設定に書かない）。 */
+    env: z.string().regex(AUTH_ENV_NAME, "auth.env は BANTOU_MCP_KEY_ で始まる大文字の環境変数名").optional(),
   })
-  .strict();
+  .strict()
+  .refine((a) => a.env === undefined || a.secret === undefined, { message: "auth は env か secret のどちらか 1 つ" });
 
 const toolListSchema = z
   .array(z.string().regex(TOOL_PATTERN, "道具名は英数字と . _ - （末尾の * だけ可）"))
@@ -84,10 +94,18 @@ export const connectionSchema = z
   .strict();
 export type McpConnection = z.infer<typeof connectionSchema>;
 
+/** center 自身が出す口（組み込み）の接続。url・鍵は持たない。割り当てた session にだけ載る。 */
+export const builtinConnectionSchema = z.object({ transport: z.literal("builtin"), builtin: z.enum(BUILTIN_KINDS) }).strict();
+export type BuiltinConnection = z.infer<typeof builtinConnectionSchema>;
+export type AnyConnection = McpConnection | BuiltinConnection;
+/** 保存してよい接続（外向けの http か、組み込み）。 */
+export const storedConnectionSchema = z.union([connectionSchema, builtinConnectionSchema]);
+
 /** session ごとの上書き（項目ごと。null = その項目を外す）。 */
 export const overrideSchema = z
   .object({
-    transport: baseShape.transport.optional(),
+    transport: z.enum(["http", "builtin"]).optional(),
+    builtin: z.enum(BUILTIN_KINDS).optional(),
     url: baseShape.url.optional(),
     auth: baseShape.auth.nullable().optional(),
     headers: baseShape.headers.nullable().optional(),
@@ -103,7 +121,7 @@ export type ConnOverride = z.infer<typeof overrideSchema>;
 
 export interface ConnectionsData {
   version: 1;
-  common: Record<string, McpConnection>;
+  common: Record<string, AnyConnection>;
   /** session 名 → 接続名 → 上書き（null = その session ではその接続を付けない）。 */
   sessions: Record<string, Record<string, ConnOverride | null>>;
 }
@@ -169,6 +187,24 @@ export function validateConnection(raw: unknown, opts: { allowPlainHttp?: boolea
   return extra.length ? { ok: false, issues: extra } : { ok: true, value: r.data };
 }
 
+export type ValidateAnyResult = { ok: true; value: AnyConnection } | { ok: false; issues: string[] };
+
+/** http でも組み込みでも検査する。組み込みは接続名が種類ごとの固定名であること。 */
+export function validateAny(raw: unknown, name?: string, opts: { allowPlainHttp?: boolean } = {}): ValidateAnyResult {
+  if (typeof raw === "object" && raw !== null && (raw as { transport?: unknown }).transport === "builtin") {
+    const r = builtinConnectionSchema.safeParse(raw);
+    if (!r.success) return { ok: false, issues: issuesOf(r.error) };
+    if (name !== undefined && name !== BUILTIN_NAMES[r.data.builtin]) return { ok: false, issues: [`組み込みの接続の名前は ${BUILTIN_NAMES[r.data.builtin]} だけ`] };
+    return { ok: true, value: r.data };
+  }
+  // 組み込みの名前は組み込みの接続だけが使える（http の接続を同じ名前で置いて、道具の許可（mcp__<名>__*）を横取りさせない）
+  if (name !== undefined && Object.values(BUILTIN_NAMES).includes(name)) return { ok: false, issues: [`${name} は組み込みの接続の名前（transport: builtin だけ）`] };
+  const r = validateConnection(raw, opts);
+  return r.ok ? r : { ok: false, issues: r.issues };
+}
+
+export const isBuiltin = (c: AnyConnection): c is BuiltinConnection => c.transport === "builtin";
+
 export function validateName(name: string): string | undefined {
   if (!CONNECTION_NAME.test(name)) return "名前は [a-z0-9][a-z0-9_-]{0,31}";
   if (RESERVED_NAMES.includes(name)) return "予約された名前（center が組み立てる物か口の path）";
@@ -178,7 +214,7 @@ export function validateName(name: string): string | undefined {
 // ---- 合成 ----
 
 /** common と session の上書きを項目ごとに合成する（1 段。入れ子の中身は丸ごと置き換え）。上書きが null なら undefined（付けない）。 */
-export function composeConnection(common: McpConnection | undefined, override: ConnOverride | null | undefined): Record<string, unknown> | undefined {
+export function composeConnection(common: AnyConnection | undefined, override: ConnOverride | null | undefined): Record<string, unknown> | undefined {
   if (override === null) return undefined;
   const out: Record<string, unknown> = { ...(common ?? {}) };
   for (const [k, v] of Object.entries(override ?? {})) {
@@ -221,9 +257,9 @@ export function validateAll(data: ConnectionsData): ScopeIssue[] {
     for (const [name, raw] of Object.entries(eff)) {
       const ne = validateName(name);
       if (ne) out.push({ scope, name, issue: ne });
-      const r = validateConnection(raw, { allowPlainHttp: true });
+      const r = validateAny(raw, name, { allowPlainHttp: true });
       if (!r.ok) for (const issue of r.issues) out.push({ scope, name, issue });
-      else if (r.value.role === "memory") roles.push(name);
+      else if (!isBuiltin(r.value) && r.value.role === "memory") roles.push(name);
     }
     if (roles.length > 1) out.push({ scope, issue: `role memory の接続が ${roles.length} 個ある（1 つまで: ${roles.join(", ")}）` });
   }
@@ -232,36 +268,79 @@ export function validateAll(data: ConnectionsData): ScopeIssue[] {
 
 // ---- 読み込み ----
 
+const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+
+/** 共通の接続の表（name → 接続）を読む。不正な項目は捨てて、捨てた名前（値は含めない）を返す。 */
+function parseCommonMap(raw: unknown): { map: Record<string, AnyConnection>; dropped: string[] } {
+  const map: Record<string, AnyConnection> = {};
+  const dropped: string[] = [];
+  if (!isObj(raw)) return { map, dropped: raw === undefined ? [] : ["(全体)"] };
+  for (const [name, v] of Object.entries(raw)) {
+    const r = storedConnectionSchema.safeParse(v);
+    if (r.success && validateName(name) === undefined) setOwn(map, name, r.data);
+    else dropped.push(name);
+  }
+  return { map, dropped };
+}
+
+/** session の接続の表（name → 上書き / null）を読む。 */
+function parseSessionMap(raw: unknown): { map: Record<string, ConnOverride | null>; dropped: string[] } {
+  const map: Record<string, ConnOverride | null> = {};
+  const dropped: string[] = [];
+  if (!isObj(raw)) return { map, dropped: raw === undefined ? [] : ["(全体)"] };
+  for (const [name, v] of Object.entries(raw)) {
+    if (v === null) {
+      if (validateName(name) === undefined || Object.values(BUILTIN_NAMES).includes(name)) setOwn(map, name, null);
+      else dropped.push(name);
+      continue;
+    }
+    const r = overrideSchema.safeParse(v);
+    if (r.success && validateName(name) === undefined) setOwn(map, name, r.data);
+    else dropped.push(name);
+  }
+  return { map, dropped };
+}
+
+/**
+ * 普通の設定（center 共通の設定と各 session の設定の `mcpServers`）から接続の一覧を作る。呼ぶたびに今の値から作る（キャッシュしない）。
+ * 不正な項目は捨て、problems に scope と名前だけを返す（値は出さない）。
+ */
+export function connectionsFromSettings(
+  common: { mcpServers?: unknown } | undefined,
+  sessions: Iterable<[string, { mcpServers?: unknown } | undefined]>,
+): { data: ConnectionsData; problems: string[] } {
+  const data = emptyConnections();
+  const problems: string[] = [];
+  const c = parseCommonMap(common?.mcpServers);
+  data.common = c.map;
+  for (const n of c.dropped) problems.push(`共通: ${n}`);
+  for (const [session, st] of sessions) {
+    if (st?.mcpServers === undefined) continue;
+    const r = parseSessionMap(st.mcpServers);
+    setOwn(data.sessions, session, r.map);
+    for (const n of r.dropped) problems.push(`${session}: ${n}`);
+  }
+  return { data, problems };
+}
+
 export function parseConnections(raw: unknown): { data: ConnectionsData; problem?: string } {
   const data = emptyConnections();
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return { data, problem: "形が不正" };
-  const o = raw as Record<string, unknown>;
+  if (!isObj(raw)) return { data, problem: "形が不正" };
+  const o = raw;
   if (o.version !== 1) return { data, problem: "version が 1 でない" };
   let dropped = 0;
-  const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
-  if (isObj(o.common)) {
-    for (const [name, v] of Object.entries(o.common)) {
-      const r = connectionSchema.safeParse(v);
-      if (r.success && validateName(name) === undefined) data.common[name] = r.data;
-      else dropped++;
-    }
-  } else if (o.common !== undefined) dropped++;
+  const c = parseCommonMap(o.common);
+  data.common = c.map;
+  dropped += c.dropped.length;
   if (isObj(o.sessions)) {
     for (const [s, per] of Object.entries(o.sessions)) {
       if (!SESSION_NAME.test(s) || !isObj(per)) {
         dropped++;
         continue;
       }
-      const m: Record<string, ConnOverride | null> = {};
-      for (const [name, v] of Object.entries(per)) {
-        if (v === null) m[name] = null;
-        else {
-          const r = overrideSchema.safeParse(v);
-          if (r.success && validateName(name) === undefined) m[name] = r.data;
-          else dropped++;
-        }
-      }
-      setOwn(data.sessions, s, m);
+      const r = parseSessionMap(per);
+      dropped += r.dropped.length;
+      setOwn(data.sessions, s, r.map);
     }
   } else if (o.sessions !== undefined) dropped++;
   return dropped ? { data, problem: `${dropped} 件の項目が不正（捨てた）` } : { data };

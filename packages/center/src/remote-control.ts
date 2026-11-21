@@ -26,6 +26,7 @@ import {
 } from "./wrapper.js";
 import { OUTPUT_STYLE_NAME, syncOutputStyleSync } from "./output-style.js";
 import type { MemorySetting } from "./project-settings.js";
+import { MCP_KEY_ENV_PREFIX, MCP_SECRET_ENV_PREFIX, type SessionMcp } from "./mcp-session.js";
 import { hookCommand, hookUrl, statusLineCommand, statusLineSettings, statusLineUrl } from "./status-line.js";
 
 export type RcState = "stopped" | "starting" | "connected" | "error";
@@ -145,8 +146,6 @@ export interface RemoteControlSupervisor {
   setOutputStyle(name: string, outputStyle: string): void;
   /** 外部記憶を差し替える（次の起動から効く。undefined で無し）。 */
   setMemory(name: string, memory: MemorySetting | undefined): void;
-  /** 統括の session の名前を差し替える（全 session に共通。次の起動の指示文から効く。null で無し）。 */
-  setCoordinator(session: string | null): void;
   stop(project: string): Promise<RcStatus>;
   status(project: string): RcStatus;
   list(): RcStatus[];
@@ -382,6 +381,11 @@ export function createRemoteControlSupervisor(opts: {
    * center は memory-settings.json を読む（CLI で変えた設定が次の起動から効く）。
    */
   memoryOf?: (name: string) => MemorySetting | undefined;
+  /**
+   * 保存した MCP の接続（共通 + その session の追加）を起動の --mcp-config に載せる元。起動のたびに呼ぶ（割り当ての変更が次の起動から効く）。
+   * 鍵の実値は env（子だけ）に渡し、argv・status・log には出さない。取れなければ付けずに起動する。
+   */
+  mcpOf?: (name: string, mcpUrl: string | null) => SessionMcp;
   /** session が使える server の範囲（session 設定 settings.servers）。undefined = 全部。起動のたびに指示文へ出す。 */
   serversOf?: (name: string) => string[] | undefined;
   /** 認証状態（auth / loginUrl / loginError）が変わった時の通知。 */
@@ -396,8 +400,6 @@ export function createRemoteControlSupervisor(opts: {
   const claude: ResolvedClaude =
     opts.claude ?? (rc.claude ? { path: rc.claude, source: "config" } : { path: "claude", source: "PATH" });
   const entries = new Map<string, Entry>();
-  /** 統括の session の名前（center 共通の設定 coordinator.session）。無ければ null。 */
-  let coordinatorSession: string | null = null;
   /** add() で足した project の名前（remove できるのはこれだけ）。 */
   const dynamic = new Set<string>();
   const newEntry = (p: ProjectConfig, wrapper = false, instructions = "", addDirs: string[] = [], outputStyle = "", memory: MemorySetting | null = null): Entry => ({
@@ -486,8 +488,13 @@ export function createRemoteControlSupervisor(opts: {
       }
     }
     let command = claude.path;
+    /** この起動で統括の口（組み込みの接続）が割り当て済みか。指示文の部品と status の label の判定に使う。 */
+    let assignedCoordinator = false;
     let args: string[];
     let env = childEnv(e.project, rc);
+    // 接続の鍵（auth.env の BANTOU_MCP_KEY_*）は center の環境にある。どの session の子にも継承させない
+    // （割り当てた接続の鍵は、下で BANTOU_MCP_SECRET_n として子の env にだけ渡す。割り当てていない session から読めてはいけない）
+    for (const k of Object.keys(env)) if (k.startsWith(MCP_KEY_ENV_PREFIX)) delete env[k];
     if (e.wrapper) {
       if (!wd) {
         e.status.state = "error";
@@ -498,7 +505,19 @@ export function createRemoteControlSupervisor(opts: {
       const mcpUrl = wd.mcpUrl();
       if (!mcpUrl) log(`session 向け MCP 窓口が無いので bantou の MCP を付けない（messenger のみ）: project=${name}`);
       const servers = opts.serversOf?.(name);
-      const sysCtx = { session: name, memory: memory !== null, coordinator: coordinatorSession === name, ...(servers !== undefined ? { servers } : {}) };
+      // 保存した MCP の接続。取れなければ付けない（割り当ても無い = 統括の部品も付かない）
+      let mcp: SessionMcp | undefined;
+      if (opts.mcpOf) {
+        try {
+          mcp = opts.mcpOf(name, mcpUrl);
+          if (mcp.skipped.length) log(`載せなかった MCP の接続: project=${name} ${mcp.skipped.map((k) => `${k.name}(${k.reason})`).join(", ")}`);
+        } catch (err) {
+          log(`MCP の接続を取れない（付けずに起動）: project=${name} ${err instanceof Error ? err.name : "error"}`);
+        }
+      }
+      const coordinator = mcp?.builtins.includes("coordinator") === true;
+      assignedCoordinator = coordinator;
+      const sysCtx = { session: name, memory: memory !== null, coordinator, ...(servers !== undefined ? { servers } : {}) };
       const system = opts.systemInstructions?.build(sysCtx) ?? "";
       const appendSystemPrompt = [system, e.instructions].filter((t) => t !== "").join("\n\n");
       // 出力スタイルは project の .claude/output-styles/ に書いて名前で選ぶ。書けなくても起動は止めない（style 無しで起動）
@@ -514,13 +533,16 @@ export function createRemoteControlSupervisor(opts: {
         ...(mcpUrl ? statusLineSettings(statusLineCommand(statusLineUrl(mcpUrl, name), wd.statusLineSelf), hookCommand(hookUrl(mcpUrl, name), wd.statusLineSelf)) : {}),
         ...(outputStyle ? { outputStyle: OUTPUT_STYLE_NAME } : {}),
         // bantou 自身の MCP tool を許可（allow は利用者の allow と連結され、利用者の deny が優先される）
-        permissions: { allow: bantouAllowRules({ bantou: !!mcpUrl, memory: memory !== null }) },
+        permissions: {
+          allow: bantouAllowRules({ bantou: !!mcpUrl, memory: memory !== null, ...(mcp ? { extra: mcp.allow } : {}) }),
+          ...(mcp?.deny.length ? { deny: mcp.deny } : {}),
+        },
       };
       args = buildWrapperArgs({
         claudePath: claude.path,
         name,
         permissionMode: e.project.permissionMode,
-        mcpConfig: mcpConfigJson(mcpUrl, name, memory ?? undefined),
+        mcpConfig: mcpConfigJson(mcpUrl, name, memory ?? undefined, mcp?.servers),
         settings: Object.keys(settings).length ? JSON.stringify(settings) : null,
         resume: useContinue,
         ...(rc.model ? { model: rc.model } : {}),
@@ -533,6 +555,9 @@ export function createRemoteControlSupervisor(opts: {
       // 外部記憶の token は env だけで渡す（argv・--mcp-config・log・status には出さない）。token が無ければ継承分も消す
       if (memory?.token) env[MEMORY_TOKEN_ENV] = memory.token;
       else delete env[MEMORY_TOKEN_ENV];
+      // 保存した接続の鍵も env だけ。継承分の同名の変数は消してから入れる
+      for (const k of Object.keys(env)) if (k.startsWith(MCP_SECRET_ENV_PREFIX)) delete env[k];
+      if (mcp) Object.assign(env, mcp.env);
     } else {
       args = buildRcArgs(e.project, rc, { continue: useContinue });
     }
@@ -550,7 +575,7 @@ export function createRemoteControlSupervisor(opts: {
       args: shownArgs,
       instructions: e.wrapper && !!e.instructions,
       ...(e.wrapper && opts.systemInstructions
-        ? { systemInstructions: typeof opts.systemInstructions.labels === "function" ? opts.systemInstructions.labels({ session: name, memory: memory !== null, coordinator: coordinatorSession === name, ...(opts.serversOf?.(name) !== undefined ? { servers: opts.serversOf(name)! } : {}) }) : [...opts.systemInstructions.labels] }
+        ? { systemInstructions: typeof opts.systemInstructions.labels === "function" ? opts.systemInstructions.labels({ session: name, memory: memory !== null, coordinator: assignedCoordinator, ...(opts.serversOf?.(name) !== undefined ? { servers: opts.serversOf(name)! } : {}) }) : [...opts.systemInstructions.labels] }
         : {}),
     };
     delete e.status.lastError;
@@ -895,9 +920,6 @@ export function createRemoteControlSupervisor(opts: {
   const setOutputStyle = (name: string, outputStyle: string): void => {
     get(name).outputStyle = outputStyle;
   };
-  const setCoordinator = (session: string | null): void => {
-    coordinatorSession = session;
-  };
   const setMemory = (name: string, memory: MemorySetting | undefined): void => {
     get(name).memory = memory ? { ...memory } : null;
   };
@@ -922,7 +944,6 @@ export function createRemoteControlSupervisor(opts: {
     setAddDirs,
     setOutputStyle,
     setMemory,
-    setCoordinator,
     stop,
     status: (name) => snapshot(get(name)),
     list: () => [...entries.values()].map(snapshot),
