@@ -71,6 +71,20 @@ export interface SessionConfig {
   env: Record<string, string>;
 }
 
+/** server が組む MCP の名前（追加の道具は同名にできない）。 */
+export const RESERVED_MCP_NAMES = ["bantou"] as const;
+
+export type ExtraMcpTarget = "cap" | "worker";
+
+/** 追加の stdio MCP の道具（手元で動く物）。鍵を要する接続は扱わない。 */
+export interface ExtraMcpServer {
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  /** 載せる側。省略は両方。 */
+  targets: ExtraMcpTarget[];
+}
+
 export interface Config {
   /** workspace フォルダの絶対パス。 */
   workspace: string;
@@ -82,6 +96,8 @@ export interface Config {
   session: SessionConfig;
   /** 自己更新の設定。 */
   update: { spec: string };
+  /** cap / worker に載せる追加の stdio MCP。name → 定義。 */
+  extraMcp?: Record<string, ExtraMcpServer>;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -132,6 +148,57 @@ function parseUpdate(v: unknown, path: string): Config["update"] {
     throw new Error(`config の update.spec は {version} を含む文字列（- で始められない）: ${path}`);
   }
   return { spec };
+}
+
+const EXTRA_MCP_KEYS = ["command", "args", "env", "targets"];
+
+function parseExtraMcp(v: unknown, path: string): Record<string, ExtraMcpServer> {
+  if (v === undefined) return {};
+  if (!isRecord(v)) throw new Error(`config の extraMcp はオブジェクト: ${path}`);
+  const out: Record<string, ExtraMcpServer> = {};
+  for (const [name, def] of Object.entries(v)) {
+    const where = `extraMcp.${name}`;
+    if (!/^[A-Za-z0-9_-]+$/.test(name) || name.includes("__")) {
+      throw new Error(`config の extraMcp の名前は英数字・_・- のみで "__" を含まない: ${name} (${path})`);
+    }
+    if ((RESERVED_MCP_NAMES as readonly string[]).includes(name)) {
+      throw new Error(`config の extraMcp の名前 ${name} は server の MCP と衝突する（予約名）: ${path}`);
+    }
+    if (!isRecord(def)) throw new Error(`config の ${where} はオブジェクト: ${path}`);
+    for (const k of Object.keys(def)) {
+      if (!EXTRA_MCP_KEYS.includes(k)) {
+        throw new Error(`config の ${where} に未知のキー ${k}（command / args / env / targets のみ。stdio 専用）: ${path}`);
+      }
+    }
+    const { command } = def;
+    if (typeof command !== "string" || command.length === 0 || command.includes("\0")) {
+      throw new Error(`config の ${where}.command は空でない文字列: ${path}`);
+    }
+    const args = def.args ?? [];
+    if (!Array.isArray(args) || args.some((x) => typeof x !== "string" || x.includes("\0"))) {
+      throw new Error(`config の ${where}.args は文字列の配列: ${path}`);
+    }
+    const env = def.env ?? {};
+    if (!isRecord(env) || Object.entries(env).some(([k, x]) => k.length === 0 || k.includes("=") || typeof x !== "string")) {
+      throw new Error(`config の ${where}.env は文字列値のオブジェクト: ${path}`);
+    }
+    const targets = def.targets ?? ["cap", "worker"];
+    if (
+      !Array.isArray(targets) ||
+      targets.length === 0 ||
+      targets.some((t) => t !== "cap" && t !== "worker") ||
+      new Set(targets).size !== targets.length
+    ) {
+      throw new Error(`config の ${where}.targets は "cap" / "worker" の重複なし非空配列: ${path}`);
+    }
+    out[name] = {
+      command,
+      args: [...(args as string[])],
+      env: { ...(env as Record<string, string>) },
+      targets: [...(targets as ExtraMcpTarget[])],
+    };
+  }
+  return out;
 }
 
 function parseStringList(v: unknown, key: string, path: string): string[] {
@@ -239,5 +306,6 @@ export async function loadConfig(path: string): Promise<Config> {
     mcp: parseMcp(obj.mcp, path),
     session,
     update: parseUpdate(obj.update, path),
+    extraMcp: parseExtraMcp(obj.extraMcp, path),
   };
 }
