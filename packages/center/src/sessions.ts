@@ -2,6 +2,7 @@ import { mkdir, rename } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
 import { projectSchema, PERMISSION_MODES, type Config, type ProjectConfig } from "./config.js";
+import { isLegacyEntry, migrateEntry, type LegacyCtx } from "./mcp-legacy.js";
 import { assertCenterOnly, CENTER_SERVERS_ERROR, composeAddDirs, composeInstructions, composeOutputStyle, composeServers, mergeSettings, projectSettingsPatchSchema, readCenterSettings, readCoordinator, readSettings, settingsIssues, type CenterSettingsPatch, type ProjectSettings, type ProjectSettingsPatch } from "./project-settings.js";
 import { connectionsFromSettings, emptyConnections, serverEntryIssues, type ConnectionsData } from "./mcp-connections.js";
 import type { McpSource } from "./mcp-source.js";
@@ -133,6 +134,8 @@ export function createSessionManager(opts: {
    * 省略時はメモリ上の値。
    */
   mcpSource?: () => McpSource | undefined;
+  /** 旧設定の接続（builtin・auth.env）を普通の書き方へ移す時の材料（mcp-legacy.ts）。省略時は旧設定の接続を移さない。 */
+  legacyMcp?: LegacyCtx;
   log: Logger;
   /** create 後、接続（URL 取得）か失敗を待つ上限。0 で待たない。既定 15 秒。 */
   waitMs?: number;
@@ -377,7 +380,11 @@ export function createSessionManager(opts: {
     if (legacyFile?.exists && legacyFile.problem)
       log(`移行失敗: mcp-connections.json を読めないので移さずに残す（${legacyFile.problem}）。直すか、中身を center-settings.json / sessions.json の mcpServers へ手で移す`);
     const fileData = legacyFile?.exists && !legacyFile.problem ? legacyFile.data : undefined;
-    if (!hasCoord && fileData === undefined) return rawCommon;
+    const legacyCtx = opts.legacyMcp;
+    const entriesOf = (st: unknown): [string, unknown][] => (isRec(st) && isRec(st.mcpServers) ? Object.entries(st.mcpServers) : []);
+    const hasLegacyEntries =
+      legacyCtx !== undefined && (entriesOf(rawCommon).some(([, v]) => isLegacyEntry(v)) || list.some((r) => entriesOf(r.settings).some(([, v]) => isLegacyEntry(v))));
+    if (!hasCoord && fileData === undefined && !hasLegacyEntries) return rawCommon;
     const raw: Record<string, unknown> = isRec(rawCommon) ? { ...rawCommon } : {};
     /** target.mcpServers に name が無ければ足す（設定にある物が勝つ = 冪等）。足したら true。 */
     const addTo = (target: Record<string, unknown>, name: string, v: unknown): boolean => {
@@ -403,29 +410,67 @@ export function createSessionManager(opts: {
       }
       return true;
     };
+    /** 旧設定の 1 項目を普通の書き方へ。移せない物は元のまま返し、名前と理由だけを log に出す（値は出さない）。 */
+    const conv = (where: string, name: string, v: unknown, session?: string): unknown => {
+      if (!legacyCtx || !isLegacyEntry(v)) return v;
+      const r = migrateEntry(v, legacyCtx, session !== undefined ? { session } : {});
+      if (r.kind === "moved") return r.value;
+      if (r.kind === "fail") log(`移行失敗: 旧設定の接続を普通の書き方へ移せない（そのまま残す）: ${where}/${name}: ${r.reason}`);
+      return v;
+    };
+    // 設定に既に在る旧設定の接続（builtin・auth.env）を普通の書き方へ
+    if (legacyCtx) {
+      const convMap = (st: Record<string, unknown>, where: string, session?: string): boolean => {
+        let changed = false;
+        const next: Record<string, unknown> = {};
+        for (const [n, v] of entriesOf(st)) {
+          const nv = conv(where, n, v, session);
+          if (nv !== v) changed = true;
+          Object.defineProperty(next, n, { value: nv, enumerable: true, writable: true, configurable: true });
+        }
+        if (changed) st.mcpServers = next;
+        return changed;
+      };
+      if (convMap(raw, "共通")) {
+        commonChanged = true;
+        log("設定の旧設定の接続を普通の書き方へ移した（center 共通）");
+      }
+      for (const rec of list) {
+        const st: Record<string, unknown> = { ...(rec.settings ?? {}) };
+        if (convMap(st, rec.name, rec.name)) {
+          rec.settings = st as ProjectSettings;
+          sessionsChanged = true;
+          touched.add(rec.name);
+        }
+      }
+    }
     let coordinatorRaw: unknown;
     if (hasCoord) {
       coordinatorRaw = raw.coordinator;
       const legacy = readCoordinator(coordinatorRaw);
+      const entry = legacyCtx?.coordinatorEntry() ?? null;
       if (legacy === null) {
         log("旧設定の統括の指定（center-settings.json の coordinator）が壊れているので捨てた");
         delete raw.coordinator;
         commonChanged = true;
         coordinatorRaw = undefined;
-      } else if (addSession(legacy, "bantou-coordinator", { transport: "builtin", builtin: "coordinator" })) {
+      } else if (entry === null) {
+        ok = false;
+        log(`移行失敗: 旧設定の統括の指定を移せない（統括の MCP の server の設定 coordinator-mcp.json が無い）。center-settings.json の coordinator は残す: session=${legacy}`);
+      } else if (addSession(legacy, "bantou-coordinator", entry)) {
         delete raw.coordinator;
         commonChanged = true;
-        log(`旧設定の統括の指定を session の設定（mcpServers の bantou-coordinator）へ移した: session=${legacy}`);
+        log(`旧設定の統括の指定を session の設定（mcpServers の bantou-coordinator。type: http の 1 項目）へ移した: session=${legacy}`);
       } else {
         ok = false;
-        log(`移行失敗: 旧設定の統括の指定の session が session_create で作った物の中に無い（${legacy}）。center-settings.json の coordinator は残す（統括の口は割り当て無しで動く）。その session の設定の mcpServers に bantou-coordinator を書く`);
+        log(`移行失敗: 旧設定の統括の指定の session が session_create で作った物の中に無い（${legacy}）。center-settings.json の coordinator は残す。その session の設定の mcpServers に統括の MCP の server の 1 項目を書く（README）`);
       }
     }
     if (fileData !== undefined) {
-      for (const [name, c] of Object.entries(fileData.common)) if (addTo(raw, name, c)) commonChanged = true;
+      for (const [name, c] of Object.entries(fileData.common)) if (addTo(raw, name, conv("mcp-connections.json 共通", name, c))) commonChanged = true;
       for (const [session, per] of Object.entries(fileData.sessions)) {
         for (const [name, ov] of Object.entries(per)) {
-          if (!addSession(session, name, ov)) {
+          if (!addSession(session, name, conv(`mcp-connections.json ${session}`, name, ov, session))) {
             ok = false;
             log(`移行失敗: mcp-connections.json の session が session_create で作った物の中に無い（${session}）。file は残す`);
             break;

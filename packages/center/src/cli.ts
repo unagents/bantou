@@ -7,6 +7,9 @@ import { fatalLine } from "./log.js";
 // ここで動的 import すると、bun build --compile がその依存（zod）を遅延初期化に包み、MCP SDK の
 // top-level が zod の初期化前に走って起動時に落ちる（0.1.54: TypeError: undefined is not a constructor）。
 import { runMemoryCli } from "./memory-settings.js";
+import { runCoordinatorMcp } from "./coordinator-mcp.js";
+import { watchParent } from "./parent-watch.js";
+import { dirname } from "node:path";
 
 if (process.argv[2] === "status-line") {
   // claude の statusLine から呼ばれるサブコマンド（stdin の JSON を center に POST する）。daemon は読み込まない
@@ -30,6 +33,17 @@ if (process.argv[2] === "memory") {
       err: (l) => console.error(l),
     }),
   );
+}
+
+if (process.argv[2] === "coordinator-mcp") {
+  // 統括の道具を出す独立した MCP の server（http）。center が子として起動する。daemon は読み込まない
+  const r = await runCoordinatorMcp(process.argv.slice(3), dirname(DEFAULT_CONFIG), { out: (l) => console.log(l), err: (l) => console.error(l) });
+  if (r !== "serving") process.exit(r);
+  // 親の center が消えたら自分も止まる
+  watchParent({ onOrphan: () => process.exit(0) });
+  process.once("SIGTERM", () => process.exit(0));
+  process.once("SIGINT", () => process.exit(0));
+  await new Promise<never>(() => {});
 }
 
 if (process.argv[2] === "mcp") {

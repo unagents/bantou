@@ -53,7 +53,7 @@ export interface ProjectSettings {
   /**
    * 追加の MCP の server（名前 → Claude Code の mcp.json の mcpServers の値と同じ形。stdio・http・sse など。headers に Bearer などの値もそのまま書ける）。
    * center 共通の設定では全 session に載り、session の設定ではその session だけに載る（同じ名前は共通を置き換える。null = 共通の server をその session では外す）。
-   * 統括の組み込みの接続 `{ transport: "builtin", builtin: "coordinator" }` と旧形式（transport: http + auth.env）も書ける（mcp-connections.ts）。
+   * 旧形式（transport: http + auth.secret）も書ける（mcp-connections.ts）。統括の道具は、独立した MCP の server（coordinator-mcp.ts）を普通の http の 1 項目で書く。
    * 書けるのは center を起動した所（desktop の sidecar の設定の画面・stdio の起動元）と設定 file の直接の編集。
    */
   mcpServers?: Record<string, unknown>;

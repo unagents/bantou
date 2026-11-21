@@ -18,10 +18,6 @@ import { CENTER_ENTRY_NAMES, SERVER_ENTRY_NAME, serverDefIssues, type McpServerD
 export const MCP_CONNECTIONS_FILE = "mcp-connections.json";
 /** center が自分で組み立てる物と、口の path と重なる名前。 */
 export const RESERVED_NAMES: readonly string[] = ["bantou", "bantou-messenger", "mcp", "conn"];
-/** center の中に在る組み込みの接続の種類 → その接続名（claude の側の tool 名 mcp__<名>__*）。名前は種類ごとに固定。 */
-export const BUILTIN_KINDS = ["coordinator"] as const;
-export type BuiltinKind = (typeof BUILTIN_KINDS)[number];
-export const BUILTIN_NAMES: Record<BuiltinKind, string> = { coordinator: "bantou-coordinator" };
 export const CONNECTION_NAME = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 export const IDENTITY_VALUE = /^[A-Za-z0-9_-]{1,64}$/;
 export const TIMEOUT_MIN_MS = 1000;
@@ -31,9 +27,6 @@ export const HEADERS_MAX = 10;
 export const TOOLS_LIST_MAX = 50;
 /** claude の道具名の規則（英数字と `_` `-`、64 文字以内。上限は claude の側の値で未確認）。 */
 export const VISIBLE_TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/;
-
-/** 鍵を渡す環境変数の名前。center 自身の token（BANTOU_SESSION_TOKEN など）を外へ送らせないため、接頭を固定する。 */
-export const AUTH_ENV_NAME = /^BANTOU_MCP_KEY_[A-Z0-9_]{1,40}$/;
 
 const HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]{1,100}$/;
 const SECRETISH = /key|token|secret|auth|password/i;
@@ -51,11 +44,8 @@ const authSchema = z
       .refine((v) => !v.includes("${") && !/[\x00-\x1f\x7f]/.test(v), { message: "format に ${ ・制御文字・改行は使えない" })
       .optional(),
     secret: z.string().refine((v) => checkSecretNameShape(v) === undefined, { message: SECRET_NAME_ERROR }).optional(),
-    /** 鍵の値を持つ環境変数の名前（center を起動する環境で渡す。値は設定に書かない）。 */
-    env: z.string().regex(AUTH_ENV_NAME, "auth.env は BANTOU_MCP_KEY_ で始まる大文字の環境変数名").optional(),
   })
-  .strict()
-  .refine((a) => a.env === undefined || a.secret === undefined, { message: "auth は env か secret のどちらか 1 つ" });
+  .strict();
 
 const toolListSchema = z
   .array(z.string().regex(TOOL_PATTERN, "道具名は英数字と . _ - （末尾の * だけ可）"))
@@ -95,28 +85,22 @@ export const connectionSchema = z
   .strict();
 export type McpConnection = z.infer<typeof connectionSchema>;
 
-/** center 自身が出す口（組み込み）の接続。url・鍵は持たない。割り当てた session にだけ載る。 */
-export const builtinConnectionSchema = z.object({ transport: z.literal("builtin"), builtin: z.enum(BUILTIN_KINDS) }).strict();
-export type BuiltinConnection = z.infer<typeof builtinConnectionSchema>;
 /**
  * 普通の MCP の設定（Claude Code の mcp.json の mcpServers の 1 件。stdio・http・sse など）。`transport` を持たない物。
  * 書いた項目をそのまま claude の --mcp-config に載せる（mcp-server-def.ts）。
  */
 export type PlainConnection = McpServerDef & { transport?: never };
-export type AnyConnection = McpConnection | BuiltinConnection | PlainConnection;
+export type AnyConnection = McpConnection | PlainConnection;
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
-/** 普通の MCP の設定（旧形式でも組み込みでもない）か。 */
+/** 普通の MCP の設定（旧形式でない）か。 */
 export const isPlain = (c: unknown): c is PlainConnection => isRecord(c) && !Object.hasOwn(c, "transport");
 /** session の設定の中の 1 件が、共通を丸ごと置き換える普通の MCP の設定か（type か command を持ち transport を持たない）。旧形式の上書きは項目ごと。 */
 export const isPlainEntry = (c: unknown): c is PlainConnection => isPlain(c) && (Object.hasOwn(c, "type") || Object.hasOwn(c, "command"));
-/** 保存してよい接続（外向けの http か、組み込み）。 */
-export const storedConnectionSchema = z.union([connectionSchema, builtinConnectionSchema]);
 
 /** session ごとの上書き（項目ごと。null = その項目を外す）。 */
 export const overrideSchema = z
   .object({
-    transport: z.enum(["http", "builtin"]).optional(),
-    builtin: z.enum(BUILTIN_KINDS).optional(),
+    transport: z.literal("http").optional(),
     url: baseShape.url.optional(),
     auth: baseShape.auth.nullable().optional(),
     headers: baseShape.headers.nullable().optional(),
@@ -200,16 +184,8 @@ export function validateConnection(raw: unknown, opts: { allowPlainHttp?: boolea
 
 export type ValidateAnyResult = { ok: true; value: AnyConnection } | { ok: false; issues: string[] };
 
-/** http でも組み込みでも検査する。組み込みは接続名が種類ごとの固定名であること。 */
+/** 普通の MCP の設定でも旧形式の http でも検査する。 */
 export function validateAny(raw: unknown, name?: string, opts: { allowPlainHttp?: boolean } = {}): ValidateAnyResult {
-  if (typeof raw === "object" && raw !== null && (raw as { transport?: unknown }).transport === "builtin") {
-    const r = builtinConnectionSchema.safeParse(raw);
-    if (!r.success) return { ok: false, issues: issuesOf(r.error) };
-    if (name !== undefined && name !== BUILTIN_NAMES[r.data.builtin]) return { ok: false, issues: [`組み込みの接続の名前は ${BUILTIN_NAMES[r.data.builtin]} だけ`] };
-    return { ok: true, value: r.data };
-  }
-  // 組み込みの名前は組み込みの接続だけが使える（http の接続を同じ名前で置いて、道具の許可（mcp__<名>__*）を横取りさせない）
-  if (name !== undefined && Object.values(BUILTIN_NAMES).includes(name)) return { ok: false, issues: [`${name} は組み込みの接続の名前（transport: builtin だけ）`] };
   if (isPlain(raw)) {
     const issues = [...(name !== undefined ? plainNameIssues(name) : []), ...serverDefIssues(raw)];
     return issues.length ? { ok: false, issues } : { ok: true, value: raw };
@@ -218,9 +194,7 @@ export function validateAny(raw: unknown, name?: string, opts: { allowPlainHttp?
   return r.ok ? r : { ok: false, issues: r.issues };
 }
 
-export const isBuiltin = (c: AnyConnection): c is BuiltinConnection => c.transport === "builtin";
-
-/** 普通の MCP の設定の名前の検査（英数字と _ -。center が組み立てる名前・組み込みの名前は不可）。 */
+/** 普通の MCP の設定の名前の検査（英数字と _ -。center が組み立てる名前は不可）。 */
 export function plainNameIssues(name: string): string[] {
   if (!SERVER_ENTRY_NAME.test(name)) return ["名前は英数字と _ - のみ"];
   if (CENTER_ENTRY_NAMES.includes(name)) return [`${name} は center が組み立てる名前（外部記憶は設定の memory に書く）`];
@@ -283,7 +257,7 @@ export function validateAll(data: ConnectionsData): ScopeIssue[] {
       if (ne) out.push({ scope, name, issue: ne });
       const r = validateAny(raw, name, { allowPlainHttp: true });
       if (!r.ok) for (const issue of r.issues) out.push({ scope, name, issue });
-      else if (!isBuiltin(r.value) && !isPlain(r.value) && r.value.role === "memory") roles.push(name);
+      else if (!isPlain(r.value) && r.value.role === "memory") roles.push(name);
     }
     if (roles.length > 1) out.push({ scope, issue: `role memory の接続が ${roles.length} 個ある（1 つまで: ${roles.join(", ")}）` });
   }
@@ -305,7 +279,7 @@ function parseCommonMap(raw: unknown): { map: Record<string, AnyConnection>; dro
       else dropped.push(name);
       continue;
     }
-    const r = storedConnectionSchema.safeParse(v);
+    const r = connectionSchema.safeParse(v);
     if (r.success && validateName(name) === undefined) setOwn(map, name, r.data);
     else dropped.push(name);
   }
@@ -427,7 +401,7 @@ export function configHash(c: McpConnection): string {
 
 /**
  * 設定の更新で受けた mcpServers の 1 件の検査（project-settings.ts の settingsIssues が呼ぶ）。誤りの文に値は含めない。
- * - 普通の MCP の設定（stdio・http・sse など）・組み込み・旧形式の接続のどれか。
+ * - 普通の MCP の設定（stdio・http・sse など）・旧形式の接続のどれか。
  * - session の設定では旧形式の項目ごとの上書き（`{ url }` など）も可。
  */
 export function serverEntryIssues(name: string, raw: unknown, scope: "common" | "session"): string[] {
@@ -437,7 +411,7 @@ export function serverEntryIssues(name: string, raw: unknown, scope: "common" | 
   }
   const r = validateAny(raw, name, { allowPlainHttp: true });
   if (!r.ok) return r.issues;
-  if (!isPlain(r.value) && !isBuiltin(r.value)) {
+  if (!isPlain(r.value)) {
     const ne = validateName(name);
     if (ne) return [ne];
   }

@@ -491,12 +491,12 @@ export function createRemoteControlSupervisor(opts: {
       }
     }
     let command = claude.path;
-    /** この起動で統括の口（組み込みの接続）が割り当て済みか。指示文の部品と status の label の判定に使う。 */
+    /** この起動で統括の MCP の server が設定に書かれているか。指示文の部品と status の label の判定に使う。 */
     let assignedCoordinator = false;
     let args: string[];
     let env = childEnv(e.project, rc);
-    // 接続の鍵（auth.env の BANTOU_MCP_KEY_*）は center の環境にある。どの session の子にも継承させない
-    // （割り当てた接続の鍵は、下で BANTOU_MCP_SECRET_n として子の env にだけ渡す。割り当てていない session から読めてはいけない）
+    // 旧設定の auth.env が指していた環境変数（BANTOU_MCP_KEY_*）が center の環境に残っていても、どの session の子にも継承させない
+    // （設定の headers の値は、下で BANTOU_MCP_SECRET_n として子の env にだけ渡す）
     for (const k of Object.keys(env)) if (k.startsWith(MCP_KEY_ENV_PREFIX)) delete env[k];
     // 起動元の鍵（desktop が sidecar に渡す）も子には渡さない（session から設定の口を起動元として呼ばせない）
     delete env[LAUNCHER_KEY_ENV];
@@ -520,7 +520,7 @@ export function createRemoteControlSupervisor(opts: {
           log(`MCP の接続を取れない（付けずに起動）: project=${name} ${err instanceof Error ? err.name : "error"}`);
         }
       }
-      const coordinator = mcp?.builtins.includes("coordinator") === true;
+      const coordinator = mcp?.coordinator === true;
       assignedCoordinator = coordinator;
       const sysCtx = { session: name, memory: memory !== null, coordinator, ...(servers !== undefined ? { servers } : {}) };
       const system = opts.systemInstructions?.build(sysCtx) ?? "";

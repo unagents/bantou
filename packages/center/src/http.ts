@@ -17,7 +17,6 @@ export const MCP_PATH = "/mcp";
 export const EVENTS_PATH = "/events";
 export const SESSION_MCP_PATH = "/mcp/session";
 /** 統括の道具だけを出す口。割り当てた session にだけ（呼び出しの度に判定）。認証は /mcp/session と同じ session token。 */
-export const COORDINATOR_PATH = "/mcp/coordinator";
 const OWNER_HEADER = "x-bantou-session";
 const SESSION_NAME = /^[A-Za-z0-9_-]+$/;
 /** core の SSE に流す keep-alive コメントの間隔。 */
@@ -51,7 +50,7 @@ interface Session {
   transport: StreamableHTTPServerTransport;
   server: McpServer;
   /** どの窓口で作った MCP session か（別の窓口からは使えない）。 */
-  window: "external" | "session" | "coordinator";
+  window: "external" | "session";
   /** session 窓口の呼び出し元 session 名。 */
   owner?: string;
   /** 外向けの窓口で、center を起動した所（launcher.ts）が作った MCP session か。 */
@@ -162,12 +161,6 @@ export async function startHttpServer(opts: {
   launcherKey?: string;
   /** /mcp/session 用の MCP server。owner = 認証済みの呼び出し元 session 名。省略時は /mcp/session を提供しない。 */
   createSessionServer?: (owner: string) => McpServer;
-  /**
-   * /mcp/coordinator 用の MCP server（統括の道具だけ）。省略時は提供しない。
-   * isAssigned はリクエストのたびに呼ぶ（initialize だけでなく、既存の MCP session の呼び出しでも）。false なら 403。
-   */
-  createCoordinatorServer?: (owner: string) => McpServer;
-  isCoordinatorAssigned?: (owner: string) => boolean;
   /** /mcp/session の認証（session ごとの使い捨て token）。createSessionServer と一緒に渡す。 */
   sessionAuth?: SessionTokens;
   /** pty 出力の core。渡すと /sessions/<name>/{output,input,resize} を外向け token で提供する。 */
@@ -401,7 +394,7 @@ export async function startHttpServer(opts: {
     const coreMatch = opts.core ? CORE_PATH.exec(path) : null;
     const statusLineMatch = opts.onStatusLine && opts.sessionAuth ? STATUS_LINE_PATH.exec(path) : null;
     const hookMatch = opts.onHook && opts.sessionAuth ? HOOK_PATH.exec(path) : null;
-    let window: "external" | "session" | "coordinator";
+    let window: "external" | "session";
     let owner: string | undefined;
     let launcher = false;
     if (path === MCP_PATH) {
@@ -419,28 +412,6 @@ export async function startHttpServer(opts: {
       const auth = req.headers.authorization;
       if (!name || !SESSION_NAME.test(name) || !auth?.startsWith("Bearer ") || !opts.sessionAuth.verify(name, auth.slice("Bearer ".length))) {
         sendJson(res, 401, { error: "unauthorized" }, { "www-authenticate": "Bearer" });
-        return;
-      }
-      owner = name;
-    } else if (path === COORDINATOR_PATH && opts.createCoordinatorServer && opts.isCoordinatorAssigned && opts.sessionAuth) {
-      window = "coordinator";
-      const h = req.headers[OWNER_HEADER];
-      const name = Array.isArray(h) ? h[0] : h;
-      const auth = req.headers.authorization;
-      if (!name || !SESSION_NAME.test(name) || !auth?.startsWith("Bearer ") || !opts.sessionAuth.verify(name, auth.slice("Bearer ".length))) {
-        sendJson(res, 401, { error: "unauthorized" }, { "www-authenticate": "Bearer" });
-        return;
-      }
-      // 割り当ては呼び出しのたびに見る（古い MCP session・他の session は断る）
-      let assigned = false;
-      try {
-        assigned = opts.isCoordinatorAssigned(name);
-      } catch {
-        assigned = false;
-      }
-      if (!assigned) {
-        log(`統括の口を拒否: session=${name}（割り当て無し）`);
-        sendJson(res, 403, { error: "この口は割り当てた session だけが使える" });
         return;
       }
       owner = name;
@@ -541,7 +512,7 @@ export async function startHttpServer(opts: {
     }
     pending++;
     try {
-      const server = window === "session" ? opts.createSessionServer!(owner!) : window === "coordinator" ? opts.createCoordinatorServer!(owner!) : opts.createServer(launcher);
+      const server = window === "session" ? opts.createSessionServer!(owner!) : opts.createServer(launcher);
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         // DNS rebinding 対策: Host（ポート込み）と、Origin があればそれも自分宛のものだけ通す

@@ -9,7 +9,6 @@ import type { RemoteManager } from "./remotes.js";
 import type { RemoteControlSupervisor } from "./remote-control.js";
 import type { SessionManager } from "./sessions.js";
 import type { ServerLink } from "./server-link.js";
-import { registerCoordinatorTools, type CoordinatorDeps } from "./coordinator.js";
 import { registerSessionTools, registerTools } from "./tools.js";
 
 /** package.json の version（src/ と dist/ のどちらからでも ../package.json）。 */
@@ -48,12 +47,5 @@ export function createCenterServer(deps: {
 export function createSessionMcpServer(deps: { remotes: RemoteManager; follow?: Follow; owner: string }): McpServer {
   const server = new McpServer({ name: "bantou-center-session", version: packageVersion() });
   registerSessionTools(server, { remotes: deps.remotes, owner: deps.owner, ...(deps.follow ? { follow: deps.follow } : {}) });
-  return server;
-}
-
-/** 統括の道具だけを出す口（/mcp/coordinator）の MCP server。割り当ての判定は口（http）と道具ごとの両方で行う。 */
-export function createCoordinatorMcpServer(deps: { owner: string; coordinator: CoordinatorDeps }): McpServer {
-  const server = new McpServer({ name: "bantou-center-coordinator", version: packageVersion() });
-  registerCoordinatorTools(server, { ...deps.coordinator, owner: deps.owner });
   return server;
 }

@@ -6,13 +6,13 @@ import { resolveSessionPath } from "./path-env.js";
 import { createActivityStore } from "./activity.js";
 import { loadCapId } from "./center-id.js";
 import { loadConfig, MIN_TOKEN_LEN } from "./config.js";
-import { createSessionVia } from "./coordinator.js";
+import { coordinatorEntry, ensureCoordinatorState, startCoordinatorChild, type CoordinatorChild, type CoordinatorMcpState } from "./coordinator-mcp.js";
 import { SESSION_MCP_PATH, startHttpServer, type HttpHandle } from "./http.js";
 import { createConnectionsStore } from "./mcp-connections.js";
 import { createSecretsStore } from "./mcp-secrets.js";
 import { existsSync, renameSync } from "node:fs";
 import { createMcpSource } from "./mcp-source.js";
-import { buildSessionMcp, centerBaseOf, isAssigned } from "./mcp-session.js";
+import { buildSessionMcp } from "./mcp-session.js";
 import { mkdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { log, setLogFile } from "./log.js";
@@ -28,7 +28,7 @@ import { createMemoryFile } from "./memory-settings.js";
 import { takeLauncherKey } from "./launcher.js";
 import { backupFileOnce, createJsonListStore, createJsonObjectStore } from "./store.js";
 import { applicableParts, buildSystemInstructions, partLabel } from "./system-instructions.js";
-import { createCenterServer, createCoordinatorMcpServer, createSessionMcpServer } from "./server.js";
+import { createCenterServer, createSessionMcpServer } from "./server.js";
 import { createCore } from "./core.js";
 import { createEventHub } from "./events.js";
 import { createSessionTokens } from "./session-auth.js";
@@ -71,6 +71,9 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   const core = createCore();
   const sessionTokens = createSessionTokens();
   let httpPort: number | null = null;
+  // 統括の道具を出す独立した MCP の server（coordinator-mcp.ts。http で待ち受ける時だけ center が子として起動する）の port と key
+  let coordState: CoordinatorMcpState | null = null;
+  let coordChild: CoordinatorChild | null = null;
   // session（master-cap）から center の MCP へ戻る URL。http で待ち受けていなければ null（--mcp-config を付けない）
   const sessionMcpUrl = (): string | null => {
     if (httpPort === null) return null;
@@ -83,7 +86,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   // 旧設定の外部記憶の file（memory-settings.json。起動時に普通の設定の memory へ移す）
   const memoryFile = createMemoryFile(dirname(resolve(configPath)), log);
   // 追加の MCP の server は普通の設定（center-settings.json と session の settings の mcpServers）に書く。書けるのは center を起動した所の画面と設定 file の直接の編集。
-  // connections は旧設定 mcp-connections.json（M1 の CLI）の移行元。鍵は環境変数（auth.env）か、旧来の鍵の file（CLI が書く）
+  // connections は旧設定 mcp-connections.json（M1 の CLI）の移行元。鍵は旧来の鍵の file（CLI が書く）
   const connections = createConnectionsStore(dirname(resolve(configPath)), log);
   const mcpSecrets = createSecretsStore(dirname(resolve(configPath)), log);
   const supervisor = createRemoteControlSupervisor({
@@ -92,7 +95,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     mcpOf: (name, mcpUrl) => {
       const { data, problems } = sessions.mcpConnections();
       if (problems.length) log(`MCP の接続の設定に不正な項目がある（捨てた。名前だけ）: ${problems.join(", ")}`);
-      return buildSessionMcp(data, mcpSecrets, name, centerBaseOf(mcpUrl));
+      return buildSessionMcp(data, mcpSecrets, name, coordState);
     },
     // sessions は supervisor の後に作るので、呼ばれる時に参照する
     serversOf: (name) => sessions.serversOf(name),
@@ -169,6 +172,8 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     memoryFile,
     // 旧設定 mcp-connections.json（M1 の CLI が書いた物）は起動時に普通の設定へ移し、移せたら .migrated に退ける
     // 追加の MCP の接続は設定 file を直接読む（運用者の書き換えが再起動なしで効く。読めなければ割り当て無し）
+    // 旧設定の接続（builtin・auth.env）を普通の書き方へ移す材料。統括の server が無い時（stdio）は統括の項目は移せない（log に出る）
+    legacyMcp: { coordinatorEntry: () => (coordState ? { ...coordinatorEntry(coordState) } : null), env: () => process.env },
     mcpSource: createMcpSource(join(stateDir, "center-settings.json"), join(stateDir, "sessions.json"), log),
     legacyConnections: {
       load: () => ({ ...connections.file.load(), exists: existsSync(connections.file.path) }),
@@ -225,6 +230,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     try {
       // 子の停止を最優先にする（http.close が長引いても子に signal が届くように）
       follow.stop();
+      coordChild?.stop();
       contextUsage.stop();
       memoryEvents.close();
       const results = await Promise.allSettled([supervisor.shutdown(), http?.close(), link.close()]);
@@ -255,8 +261,6 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   process.stderr.on("error", () => {});
   process.stdout.on("error", () => {});
 
-  // 割り当ての判定は呼び出しの度に今の設定（center 共通 + session の mcpServers）から行う
-  const assigned = (session: string): boolean => isAssigned(sessions.mcpConnections().data, session, "coordinator");
   const makeServer = (launcher: boolean) => createCenterServer({ config, supervisor, link, sessions, remotes, follow, login, log, launcher });
   if (args.transport === "http") {
     if (!config.token || config.token.length < MIN_TOKEN_LEN) {
@@ -266,9 +270,6 @@ export async function runDaemon(args: CliArgs): Promise<void> {
       createServer: (launcher) => makeServer(launcher === true),
       ...(launcherKey ? { launcherKey } : {}),
       createSessionServer: (owner) => createSessionMcpServer({ remotes, follow, owner }),
-      // 統括の口: 割り当てた session だけ（呼び出しの度に mcp-connections.json を見る。file が壊れていれば割り当て無し）
-      createCoordinatorServer: (owner) => createCoordinatorMcpServer({ owner, coordinator: { assigned, sessions: () => sessions.list(), createSession: createSessionVia(sessions), log } }),
-      isCoordinatorAssigned: assigned,
       sessionAuth: sessionTokens,
       onStatusLine: (name, payload) => {
         const s = sessions.list().find((x) => x.name === name);
@@ -289,6 +290,14 @@ export async function runDaemon(args: CliArgs): Promise<void> {
       log,
     });
     httpPort = http.port;
+    // 統括の MCP の server（独立した process）。port・key は state dir の coordinator-mcp.json（初回に作る。以後は変わらない）
+    try {
+      coordState = ensureCoordinatorState(stateDir, log);
+      coordChild = startCoordinatorChild({ stateDir, centerUrl: `http://127.0.0.1:${http.port}/mcp`, token: config.token, log });
+    } catch (e) {
+      coordState = null;
+      log(`統括の MCP の server を起動しない: ${e instanceof Error ? e.message : String(e)}`);
+    }
     watchParent({ onOrphan: (reason) => void shutdown(reason) });
   } else {
     // stdio は起動元（stdin / stdout の相手）だけが呼べる

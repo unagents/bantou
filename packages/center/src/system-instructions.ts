@@ -51,7 +51,7 @@ export interface SystemInstructionContext {
   session: string;
   /** 外部記憶（settings.memory）がある session か。省略 = false。 */
   memory?: boolean;
-  /** 統括の口（mcp__bantou-coordinator__*）が割り当てられている session か（mcp-connections.json の割り当て。center の側だけで書く）。省略 = false。 */
+  /** 統括の MCP の server を指す項目が設定の mcpServers に在る session か。省略 = false。 */
   coordinator?: boolean;
   /** この session が使える server の範囲（session 設定 settings.servers。host 名か server_id）。省略 = 全部（範囲の指定なし）。空配列 = どの server も使わない。 */
   servers?: string[];
@@ -188,20 +188,20 @@ export const MEMORY_USAGE: SystemInstructionPart = {
 };
 
 /**
- * 統括の口を割り当てた session だけに付く部品。文面はその時点で出す道具だけを書く（今は session_brief）。
+ * 統括の MCP の server（coordinator-mcp.ts）を設定の mcpServers に書いた session だけに付く部品。文面はその時点で出す道具だけを書く（今は session_brief）。
  * 道具を足すまとまり（発言の記録・指示を渡す道具）が、足した道具の分だけ文面を足す。
  */
 export const COORDINATOR_USAGE: SystemInstructionPart = {
   id: "coordinator",
-  version: 3,
-  title: "統括の口を割り当てた session だけ: 各 session の状態を session_brief で読む",
+  version: 4,
+  title: "統括の MCP の server を設定に書いた session だけ: 各 session の状態を session_brief で読む",
   when: (ctx) => ctx.coordinator === true,
   text: () =>
     [
       "[統括の session]",
-      "- この session には、他の session の状態を見渡す統括の口（MCP server bantou-coordinator）が割り当てられている。自分の project の master-cap でもある。",
-      "- 新しい project の session を立てる時は coordinator_session_create（mcp__bantou-coordinator__coordinator_session_create。name・instructions（省略可）・start（既定は起動する））。作業 dir は center が決める。同じ名前は断られる。既存の session は消せない・変えられない。",
-      "- 状態を読む道具は session_brief（mcp__bantou-coordinator__session_brief）。各 session の状態（起動の状態・作業状態・context の使用量・remote の件数）を 1 行ずつ読む。件数だけで、report や結果の本文は入らない。",
+      "- この session には、他の session の状態を見渡す統括の MCP の server が設定に書かれている（道具 session_brief と coordinator_session_create。claude の側の名前は mcp__<その server の名前>__<道具名>）。自分の project の master-cap でもある。",
+      "- 新しい project の session を立てる時は coordinator_session_create（name・instructions（省略可）・start（既定は起動する））。作業 dir は center が決める。同じ名前は断られる。既存の session は消せない・変えられない。",
+      "- 状態を読む道具は session_brief。各 session の状態（起動の状態・作業状態・context の使用量・remote の件数）を 1 行ずつ読む。件数だけで、report や結果の本文は入らない。",
       "- 他の session の作業の中身には踏み込まない。各 project の進め方はその session の master-cap が決める。他の session の remote-cap や worker に直接は指示しない。",
       "- remote_list の include_shared は使わない（旧共有の cap は owner に関係なく返るため、他の project の結果が流れ込む）。",
       "- 他の session の作業 dir と、center の状態 dir の file は Read しない。",

@@ -7,7 +7,7 @@
  * 書いた項目は手を加えずに claude の `--mcp-config` へ渡す（知らない項目も素通し）。検査は claude 自身が要る物
  * （stdio の command、url の type の url、args・env・headers の形）だけ。header の値（`Authorization: Bearer <値>` など）もそのまま書ける。
  *
- * 旧形式（0.1.56 までの `transport: "http"` + `auth.env` の接続、外部記憶の `{ url, token, agentId }`）も読める（mcp-connections.ts / memoryDefOf）。
+ * 旧形式（0.1.56 までの `transport: "http"` の接続、外部記憶の `{ url, token, agentId }`）も読める（mcp-connections.ts / memoryDefOf）。
  */
 
 /** 普通の MCP の設定 1 件（形は Claude Code の mcp.json の mcpServers の値）。 */

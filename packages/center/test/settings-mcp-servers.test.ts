@@ -18,7 +18,7 @@ import { createCore } from "../src/core.js";
 import { startHttpServer } from "../src/http.js";
 import { LAUNCHER_HEADER, LAUNCHER_KEY_ENV, launcherMatches, takeLauncherKey } from "../src/launcher.js";
 import { createMcpSource } from "../src/mcp-source.js";
-import { buildSessionMcp, centerBaseOf } from "../src/mcp-session.js";
+import { buildSessionMcp } from "../src/mcp-session.js";
 import { createMemoryFile } from "../src/memory-settings.js";
 import { CENTER_ONLY_MCP_ERROR, type ProjectSettings } from "../src/project-settings.js";
 import { createRemoteControlSupervisor, type ChildLike, type RemoteControlSupervisor } from "../src/remote-control.js";
@@ -92,7 +92,7 @@ function boot(extra: { memoryFile?: ReturnType<typeof createMemoryFile> } = {}):
       return new FakeChild();
     },
     memoryOf: (name) => mgr.memoryOf(name),
-    mcpOf: (name, url) => buildSessionMcp(mgr.mcpConnections().data, { get: () => undefined }, name, centerBaseOf(url)),
+    mcpOf: (name) => buildSessionMcp(mgr.mcpConnections().data, { get: () => undefined }, name, { port: 7911 }),
     wrapper: { core: createCore(), tokens: createSessionTokens(), path: "/fake/bantou-pty-wrapper", mcpUrl: () => MCP_URL, statusLineSelf: ["/fake/bantou-center"] },
   });
   mgr = createSessionManager({
@@ -111,7 +111,7 @@ function boot(extra: { memoryFile?: ReturnType<typeof createMemoryFile> } = {}):
 const STDIO = { command: "npx", args: ["-y", "@example/tools-mcp"], env: { TOOLS_KEY: "STDIO-ENV-VALUE" } };
 const HTTP = { type: "http", url: "https://tools.example/mcp", headers: { Authorization: "Bearer HTTP-BEARER-VALUE", "X-Team": "t1" } };
 const MEMORY = { type: "http", url: "https://memory.example/mcp", headers: { Authorization: "Bearer MEMORY-BEARER-VALUE" } };
-const COORD = { transport: "builtin", builtin: "coordinator" };
+const COORD = { type: "http", url: "http://127.0.0.1:7911/mcp", headers: { Authorization: "Bearer COORD-KEY-0123456789" } };
 
 test("mcpServers: stdio と Bearer 付き http を共通と session ごとに保存でき、読み直し（restore）でも残る。起動の --mcp-config に書いた形のまま載り、header・env の値は ${BANTOU_MCP_SECRET_n} の参照で子の env だけに渡る", async () => {
   const { sup, mgr } = boot();
@@ -154,7 +154,7 @@ test("mcpServers: stdio と Bearer 付き http を共通と session ごとに保
   await b.sup.shutdown();
 });
 
-test("mcpServers: session の同じ名前は共通を丸ごと置き換える（stdio と http を混ぜない）。null で共通の server をその session では外す。統括の組み込みの接続も同じ欄で書ける", async () => {
+test("mcpServers: session の同じ名前は共通を丸ごと置き換える（stdio と http を混ぜない）。null で共通の server をその session では外す。統括の MCP の server の 1 項目も同じ欄で書ける", async () => {
   const { sup, mgr } = boot();
   await mgr.restore();
   await mgr.updateCenterSettings({ mcpServers: { tools: STDIO, other: { command: "other-mcp" } } } as never);
@@ -164,7 +164,7 @@ test("mcpServers: session の同じ名前は共通を丸ごと置き換える（
   const m = mcpOf(l.args);
   assert.deepEqual(expand(m.tools, l.env), HTTP, "共通の stdio の項目（command・args・env）は残らない");
   assert.equal(m.other, undefined);
-  assert.equal(m["bantou-coordinator"]!.url, "http://127.0.0.1:4567/mcp/coordinator");
+  assert.equal(m["bantou-coordinator"]!.url, "http://127.0.0.1:7911/mcp");
   await sup.shutdown();
 });
 

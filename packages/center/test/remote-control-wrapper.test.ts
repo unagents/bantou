@@ -10,7 +10,7 @@ import { createCore, type CoreEvent } from "../src/core.js";
 import { createRemoteControlSupervisor, redactSessionArgs, type ChildLike, type SpawnImpl } from "../src/remote-control.js";
 import { createSessionTokens } from "../src/session-auth.js";
 import type { ConnectionsData } from "../src/mcp-connections.js";
-import { buildSessionMcp, centerBaseOf, memoryEntry } from "../src/mcp-session.js";
+import { buildSessionMcp, memoryEntry } from "../src/mcp-session.js";
 import { applicableParts, buildSystemInstructions, partLabel } from "../src/system-instructions.js";
 import { bantouAllowRules, buildWrapperArgs, findSessionUrl, mcpConfigJson, parseWrapperLine, resolveWrapperPath, windowConnected } from "../src/wrapper.js";
 
@@ -1020,11 +1020,12 @@ test("起動引数: project 名が -cap で終わる時は --remote-control と 
   assert.equal(JSON.parse(mcpConfigJson(null, "x-cap")).mcpServers["bantou-messenger"].env.AGENT_MESSENGER_NAME, "x-cap");
 });
 
-const COORD = { transport: "builtin", builtin: "coordinator" } as const;
-const mcpWith = (data: () => ConnectionsData, secrets: Record<string, string> = {}) => (name: string, mcpUrl: string | null) =>
-  buildSessionMcp(data(), { get: (n: string) => (secrets[n] !== undefined ? { value: secrets[n], rev: 1, updatedAt: "" } : undefined) }, name, centerBaseOf(mcpUrl));
+const COORD_KEY = "COORD-KEY-0123456789abcdef";
+const COORD = { type: "http", url: "http://127.0.0.1:7911/mcp", headers: { Authorization: `Bearer ${COORD_KEY}` } } as const;
+const mcpWith = (data: () => ConnectionsData, secrets: Record<string, string> = {}) => (name: string, _mcpUrl: string | null) =>
+  buildSessionMcp(data(), { get: (n: string) => (secrets[n] !== undefined ? { value: secrets[n], rev: 1, updatedAt: "" } : undefined) }, name, { port: 7911 });
 
-test("統括の割り当て: 割り当てた session だけ launch の ctx.coordinator が true・指示文と labels に coordinator@3・--mcp-config に bantou-coordinator。他の session には載らない。外すと次の起動から消える", async () => {
+test("統括の割り当て: 割り当てた session だけ launch の ctx.coordinator が true・指示文と labels に coordinator@4・--mcp-config に bantou-coordinator。他の session には載らない。外すと次の起動から消える", async () => {
   const seen: { session: string; coordinator?: boolean }[] = [];
   const data: ConnectionsData = { version: 1, common: {}, sessions: { a: { "bantou-coordinator": COORD } } };
   const sup2 = createRemoteControlSupervisor({
@@ -1043,20 +1044,23 @@ test("統括の割り当て: 割り当てた session だけ launch の ctx.coord
   const sa = await sup2.start("a");
   const sb = await sup2.start("b");
   assert.deepEqual(seen, [{ session: "a", coordinator: true }, { session: "b", coordinator: false }]);
-  assert.ok(sa.systemInstructions!.includes("coordinator@3"));
-  assert.ok(!sb.systemInstructions!.includes("coordinator@3"));
+  assert.ok(sa.systemInstructions!.includes("coordinator@4"));
+  assert.ok(!sb.systemInstructions!.includes("coordinator@4"));
   assert.equal(valueOf(launches[0].args, "--append-system-prompt"), buildSystemInstructions({ session: "a", coordinator: true }));
   assert.equal(valueOf(launches[1].args, "--append-system-prompt"), buildSystemInstructions({ session: "b" }));
   const cfgA = JSON.parse(valueOf(launches[0].args, "--mcp-config")!).mcpServers;
   const cfgB = JSON.parse(valueOf(launches[1].args, "--mcp-config")!).mcpServers;
-  assert.deepEqual(cfgA["bantou-coordinator"], { type: "http", url: "http://127.0.0.1:4567/mcp/coordinator", headers: { Authorization: "Bearer ${BANTOU_SESSION_TOKEN}", "X-Bantou-Session": "a" } });
+  // 設定に書いた普通の 1 項目（type・url・headers）がそのまま載る。鍵は env の参照にして実値は子の env にだけ渡す
+  assert.deepEqual(cfgA["bantou-coordinator"], { type: "http", url: "http://127.0.0.1:7911/mcp", headers: { Authorization: "${BANTOU_MCP_SECRET_0}" } });
+  assert.equal(launches[0].env.BANTOU_MCP_SECRET_0, `Bearer ${COORD_KEY}`);
+  assert.ok(!launches[0].args.join("\0").includes(COORD_KEY) && !launches[1].args.join("\0").includes(COORD_KEY));
   assert.ok(!("bantou-coordinator" in cfgB));
   assert.ok(JSON.parse(valueOf(launches[0].args, "--settings")!).permissions.allow.includes("mcp__bantou-coordinator__*"));
   assert.ok(!JSON.parse(valueOf(launches[1].args, "--settings")!).permissions.allow.includes("mcp__bantou-coordinator__*"));
   await sup2.stop("a");
   delete data.sessions.a;
   const sa2 = await sup2.start("a");
-  assert.ok(!sa2.systemInstructions!.includes("coordinator@3"));
+  assert.ok(!sa2.systemInstructions!.includes("coordinator@4"));
   assert.ok(!("bantou-coordinator" in JSON.parse(valueOf(launches[2].args, "--mcp-config")!).mcpServers));
   await sup2.shutdown();
 });
@@ -1098,23 +1102,22 @@ test("接続の配線: 共通の接続は全 session の --mcp-config に載り�
   await sup2.shutdown();
 });
 
-test("接続の鍵（auth.env）: center の環境の BANTOU_MCP_KEY_* は子 process に継承されない。割り当てた接続の鍵だけが BANTOU_MCP_SECRET_n で渡り、割り当てていない session には他の接続の鍵が届かない", async () => {
+test("接続の鍵（headers）: center の環境の BANTOU_MCP_KEY_* は子 process に継承されない。設定の headers の値は BANTOU_MCP_SECRET_n で渡り、他の session には届かない", async () => {
   const KEY_T = "TOOLS-KEY-VALUE-0123456789";
   const KEY_A = "ONLYA-KEY-VALUE-0123456789";
-  const saved = { t: process.env.BANTOU_MCP_KEY_T, a: process.env.BANTOU_MCP_KEY_ONLYA };
-  process.env.BANTOU_MCP_KEY_T = KEY_T;
-  process.env.BANTOU_MCP_KEY_ONLYA = KEY_A;
+  const saved = process.env.BANTOU_MCP_KEY_OLD;
+  process.env.BANTOU_MCP_KEY_OLD = "OLD-ENV-KEY-0123456789";
   try {
     const data: ConnectionsData = {
       version: 1,
-      common: { tool1: { transport: "http", url: "https://tools.example/mcp", auth: { env: "BANTOU_MCP_KEY_T" } } },
-      sessions: { a: { onlya: { transport: "http", url: "https://a.example/mcp", auth: { env: "BANTOU_MCP_KEY_ONLYA" } } } },
+      common: { tool1: { type: "http", url: "https://tools.example/mcp", headers: { Authorization: `Bearer ${KEY_T}` } } },
+      sessions: { a: { onlya: { type: "http", url: "https://a.example/mcp", headers: { Authorization: `Bearer ${KEY_A}` } } } },
     };
     const sup2 = createRemoteControlSupervisor({
       config: cfg,
       log: () => {},
       spawnImpl,
-      mcpOf: (name, mcpUrl) => buildSessionMcp(data, { get: () => undefined }, name, centerBaseOf(mcpUrl), process.env),
+      mcpOf: (name) => buildSessionMcp(data, { get: () => undefined }, name, null),
       wrapper: { core: createCore(), tokens: createSessionTokens(), path: "/fake/bantou-pty-wrapper", mcpUrl: () => "http://127.0.0.1:4567/mcp/session", statusLineSelf: ["/fake/bantou-center"] },
     });
     sup2.add({ ...project, name: "a", path: "/tmp/a" }, { wrapper: true });
@@ -1125,15 +1128,13 @@ test("接続の鍵（auth.env）: center の環境の BANTOU_MCP_KEY_* は子 pr
     const envA = launches[base].env;
     const envB = launches[base + 1].env;
     for (const env of [envA, envB]) assert.deepEqual(Object.keys(env).filter((k) => k.startsWith("BANTOU_MCP_KEY_")), [], "BANTOU_MCP_KEY_* は継承させない");
-    assert.deepEqual(Object.values(envA).filter((v) => v === KEY_T || v === KEY_A).sort(), [KEY_A, KEY_T].sort(), "a は自分の接続の鍵だけ");
-    assert.deepEqual(Object.values(envB).filter((v) => v === KEY_T || v === KEY_A), [KEY_T], "b には a だけの接続の鍵は届かない");
+    assert.deepEqual(Object.values(envA).filter((v) => v === `Bearer ${KEY_T}` || v === `Bearer ${KEY_A}`).sort(), [`Bearer ${KEY_A}`, `Bearer ${KEY_T}`].sort(), "a は自分の接続の鍵だけ");
+    assert.deepEqual(Object.values(envB).filter((v) => v === `Bearer ${KEY_T}` || v === `Bearer ${KEY_A}`), [`Bearer ${KEY_T}`], "b には a だけの接続の鍵は届かない");
     for (const l of launches.slice(base)) assert.ok(!l.args.join("\0").includes(KEY_T) && !l.args.join("\0").includes(KEY_A));
     await sup2.shutdown();
   } finally {
-    if (saved.t === undefined) delete process.env.BANTOU_MCP_KEY_T;
-    else process.env.BANTOU_MCP_KEY_T = saved.t;
-    if (saved.a === undefined) delete process.env.BANTOU_MCP_KEY_ONLYA;
-    else process.env.BANTOU_MCP_KEY_ONLYA = saved.a;
+    if (saved === undefined) delete process.env.BANTOU_MCP_KEY_OLD;
+    else process.env.BANTOU_MCP_KEY_OLD = saved;
   }
 });
 

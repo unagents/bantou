@@ -14,11 +14,7 @@ import {
   validateAny,
   validateConnection,
   validateName,
-  isBuiltin,
-  BUILTIN_KINDS,
-  BUILTIN_NAMES,
   type AnyConnection,
-  type BuiltinKind,
   configHash,
   type ConnectionsData,
   type ConnOverride,
@@ -55,7 +51,7 @@ export const MCP_USAGE = `usage:
 --secret は接続が使う鍵の「名前」の参照で、値ではない（短い識別子。値らしい形は断る）。鍵を入れるのは secret set <名前> --stdin|--file だけ。<名前> の位置に値を書かない。
 名前の検査は値らしい形を断るだけの緩和で、短い値は名前として通りうる。値は必ず標準入力か file で渡す。
 この CLI の set / unset が書く mcp-connections.json は旧設定。center は起動時に普通の設定（mcpServers）へ移し、以後は普通の設定が正本になる（README の「追加の MCP の接続」）。
-鍵の値は設定に書かず、環境変数（auth.env）で渡す。鍵は session の子の env にだけ渡り、表示・log・status には出ない。
+鍵は session の子の env にだけ渡り、表示・log・status には出ない。
 claude に直接渡せない設定（--tool-prefix・--allow・--role）の接続は session に載せない。外部記憶（役割 memory）への切り替えはこの版では行わない（今の外部記憶は bantou-center memory の設定）。
 test の終了 code: 0 = 道具の一覧が取れた、1 = 取れない、2 = 使い方の誤り。`;
 
@@ -75,10 +71,10 @@ class UsageError extends Error {}
 /** 値を引数に書かせない flag（値は出さずに断る）。 */
 const REFUSED = /^--(value|token|password|secret-value|key|api-key|bearer)(=|$)/;
 
-const VALUE_FLAGS = new Set(["--config", "--session", "--url", "--auth-header", "--auth-format", "--secret", "--header", "--identity-header", "--identity", "--tool-prefix", "--allow", "--deny", "--role", "--timeout-ms", "--file", "--builtin"]);
+const VALUE_FLAGS = new Set(["--config", "--session", "--url", "--auth-header", "--auth-format", "--secret", "--header", "--identity-header", "--identity", "--tool-prefix", "--allow", "--deny", "--role", "--timeout-ms", "--file"]);
 const BOOL_FLAGS = new Set(["--no-auth", "--clear-headers", "--no-identity", "--no-tool-prefix", "--clear-tools", "--no-role", "--expose-memory-write", "--no-expose-memory-write", "--allow-plain-http", "--off", "--stdin", "--json"]);
 
-const SET_FLAGS = new Set(["--url", "--auth-header", "--auth-format", "--secret", "--header", "--identity-header", "--identity", "--tool-prefix", "--allow", "--deny", "--role", "--timeout-ms", "--no-auth", "--clear-headers", "--no-identity", "--no-tool-prefix", "--clear-tools", "--no-role", "--expose-memory-write", "--no-expose-memory-write", "--allow-plain-http", "--off", "--builtin"]);
+const SET_FLAGS = new Set(["--url", "--auth-header", "--auth-format", "--secret", "--header", "--identity-header", "--identity", "--tool-prefix", "--allow", "--deny", "--role", "--timeout-ms", "--no-auth", "--clear-headers", "--no-identity", "--no-tool-prefix", "--clear-tools", "--no-role", "--expose-memory-write", "--no-expose-memory-write", "--allow-plain-http", "--off"]);
 
 interface Parsed {
   positional: string[];
@@ -134,7 +130,6 @@ function describeConn(name: string, c: McpConnection, secretInfo: (n: string) =>
   return `  ${name}: ${parts.join(" ")}`;
 }
 
-const describeBuiltin = (name: string, c: AnyConnection): string => `  ${name}: 組み込み（${isBuiltin(c) ? c.builtin : ""}）center の口。割り当てた session にだけ載る`;
 
 /** `bantou-center mcp ...` の本体。戻り値は exit code（0 成功、2 使い方の誤り、1 失敗）。 */
 export async function runMcpCli(argv: string[], defaultConfig: string, deps: McpCliDeps): Promise<number> {
@@ -184,7 +179,7 @@ export async function runMcpCli(argv: string[], defaultConfig: string, deps: Mcp
         const cd = conns.read();
         const usedBy = (n: string): string[] => {
           const out: string[] = [];
-          for (const [name, c] of Object.entries(cd.common)) if (!isBuiltin(c) && !isPlain(c) && c.auth && (c.auth.secret ?? name) === n) out.push(name);
+          for (const [name, c] of Object.entries(cd.common)) if (!isPlain(c) && c.auth && (c.auth.secret ?? name) === n) out.push(name);
           for (const [s, per] of Object.entries(cd.sessions)) for (const [name, o] of Object.entries(per)) if (o && !isPlain(o) && o.auth && (o.auth.secret ?? name) === n) out.push(`${s}/${name}`);
           return out;
         };
@@ -236,7 +231,7 @@ export async function runMcpCli(argv: string[], defaultConfig: string, deps: Mcp
         if (!names.length) deps.out("  （なし）");
         for (const n of names) {
           const v = validateAny(eff[n], n, { allowPlainHttp: true });
-          if (v.ok) deps.out(isPlain(v.value) ? describePlain(n, v.value) : isBuiltin(v.value) ? describeBuiltin(n, v.value) : describeConn(n, v.value, secretInfo, statusLineOf(scope, n)));
+          if (v.ok) deps.out(isPlain(v.value) ? describePlain(n, v.value) : describeConn(n, v.value, secretInfo, statusLineOf(scope, n)));
           else deps.out(`  ${n}: 設定が不正（${v.issues.join(" / ")}）`);
         }
       };
@@ -268,7 +263,7 @@ export async function runMcpCli(argv: string[], defaultConfig: string, deps: Mcp
         const raw = effectiveRaw(data, scope)[name];
         if (!raw) return false;
         const v = validateAny(raw, name, { allowPlainHttp: true });
-        deps.out(v.ok ? (isPlain(v.value) ? describePlain(name, v.value) : isBuiltin(v.value) ? describeBuiltin(name, v.value) : describeConn(name, v.value, secretInfo, statusLineOf(scope, name))).trimStart() : `${name}: 設定が不正（${v.issues.join(" / ")}）`);
+        deps.out(v.ok ? (isPlain(v.value) ? describePlain(name, v.value) : describeConn(name, v.value, secretInfo, statusLineOf(scope, name))).trimStart() : `${name}: 設定が不正（${v.issues.join(" / ")}）`);
         return true;
       };
       if (session !== undefined) {
@@ -326,10 +321,6 @@ export async function runMcpCli(argv: string[], defaultConfig: string, deps: Mcp
         conns.file.write(data);
         deps.out(`session ${session}: 接続 ${name} を付けない設定にした（旧設定の file に書いた。center の起動時に普通の設定へ移る）`);
         return 0;
-      }
-      if (has(p, "--builtin") || name === BUILTIN_NAMES.coordinator) {
-        // 組み込みの口（統括）の割り当ては普通の設定に書く。この CLI の file は旧設定（起動時に設定へ移す物）なので、ここでは書かない
-        return fail(`組み込みの接続（${BUILTIN_NAMES.coordinator}）の割り当てはこの CLI では書かない。その session の設定の mcpServers に { "${BUILTIN_NAMES.coordinator}": { "transport": "builtin", "builtin": "coordinator" } } を書く（README の「追加の MCP の接続」）`);
       }
       const base: Record<string, unknown> | undefined = session === undefined ? (own(data.common, name) as Record<string, unknown> | undefined) : effectiveRaw(data, session)[name];
       type Obj = Record<string, unknown>;
@@ -448,7 +439,6 @@ export async function runMcpCli(argv: string[], defaultConfig: string, deps: Mcp
       }
       return r.result === "ok" ? 0 : 1;
     };
-    if (typeof raw === "object" && (raw as { transport?: unknown }).transport === "builtin") return fail("組み込みの接続は試せない（center の口。割り当ては mcp get で見る）");
     const v = validateConnection(raw, { allowPlainHttp: true });
     if (!v.ok) {
       deps.err(`設定が不正: ${v.issues.join(" / ")}`);
