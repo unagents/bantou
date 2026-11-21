@@ -17,7 +17,8 @@ import { startHttpServer } from "../src/http.js";
 import { assertCenterOnly, readCenterSettings, readCoordinator } from "../src/project-settings.js";
 import type { RemoteManager } from "../src/remotes.js";
 import { createCoordinatorMcpServer, createSessionMcpServer } from "../src/server.js";
-import { createConnectionsStore } from "../src/mcp-connections.js";
+import { connectionsFromSettings } from "../src/mcp-connections.js";
+import { createMcpSource } from "../src/mcp-source.js";
 import { isAssigned } from "../src/mcp-session.js";
 import { createSessionTokens } from "../src/session-auth.js";
 import type { SessionInfo } from "../src/sessions.js";
@@ -336,25 +337,38 @@ test("http: 割り当てを外すと、開いている古い MCP session から�
   }
 });
 
-test("http: 実際の割り当て（mcp-connections.json）を毎回読む。外す・付ける・file が壊れる・消えるで判定が変わり、他の session は常に断られる", async () => {
+test("http: 実際の割り当て（session の設定 sessions.json の mcpServers）を呼び出しの度に読む。外す・付ける・file が壊れる・消えるで判定が変わり、他の session は常に断られる。開いている古い MCP session も断られる", async () => {
   const dir = await mkdtemp(join(process.env.TMPDIR ?? tmpdir(), "coord-assign-"));
   try {
-    const store = createConnectionsStore(dir);
-    const write = (o: unknown): Promise<void> => writeFile(join(dir, "mcp-connections.json"), JSON.stringify(o));
-    const assignedFor = (s: string): boolean => isAssigned(store.read(), s, "coordinator");
+    const coord = { transport: "builtin", builtin: "coordinator" };
+    const rec = (name: string, mcpServers?: unknown) => ({ name, path: join(dir, name), permissionMode: "auto", ...(mcpServers ? { settings: { mcpServers } } : {}), createdAt: "2026-01-01T00:00:00Z" });
+    const writeSessions = (o: unknown): Promise<void> => writeFile(join(dir, "sessions.json"), JSON.stringify(o));
+    const source = createMcpSource(join(dir, "center-settings.json"), join(dir, "sessions.json"));
+    const assignedFor = (s: string): boolean => {
+      const src = source();
+      return src !== undefined && isAssigned(connectionsFromSettings({ mcpServers: src.common }, [...src.sessions].map(([n, m]): [string, { mcpServers: unknown }] => [n, { mcpServers: m }])).data, s, "coordinator");
+    };
     const { h, connect } = await bootHttp(assignedFor);
     try {
       await assert.rejects(connect("main"), /割り当てた session だけ/);
-      await write({ version: 1, common: {}, sessions: { main: { "bantou-coordinator": { transport: "builtin", builtin: "coordinator" } } } });
-      assert.ok((await names(await connect("main"))).includes("session_brief"));
+      await writeSessions([rec("main", { "bantou-coordinator": coord }), rec("other")]);
+      const old = await connect("main");
+      assert.ok((await names(old)).includes("session_brief"));
       await assert.rejects(connect("other"), /割り当てた session だけ/);
-      // 共通に置いても（誤って全 session に割り当てても）名前が違えば効かない
-      await write({ version: 1, common: { coordinator: { transport: "builtin", builtin: "coordinator" } }, sessions: {} });
+      // 割り当てを外す（設定から消す）と、開いている古い MCP session からの呼び出しも断られる
+      await writeSessions([rec("main"), rec("other")]);
+      await assert.rejects(old.callTool({ name: "session_brief", arguments: {} }), /割り当てた session だけ/);
+      // 共通の設定に置いても名前が違えば効かない
+      await writeFile(join(dir, "center-settings.json"), JSON.stringify({ mcpServers: { coordinator: coord } }));
       await assert.rejects(connect("main"), /割り当てた session だけ/);
+      // 共通の設定に正しい名前で置けば全 session が割り当て済み（運用者が書いた時だけ）
+      await writeFile(join(dir, "center-settings.json"), JSON.stringify({ mcpServers: { "bantou-coordinator": coord } }));
+      assert.ok((await names(await connect("other"))).includes("session_brief"));
+      await writeFile(join(dir, "center-settings.json"), JSON.stringify({}));
       // 壊れた file は割り当て無し（fail closed）
-      await writeFile(join(dir, "mcp-connections.json"), "{ broken");
+      await writeFile(join(dir, "sessions.json"), "{ broken");
       await assert.rejects(connect("main"), /割り当てた session だけ/);
-      await write({ version: 1, common: {}, sessions: { main: { "bantou-coordinator": null } } });
+      await writeSessions([rec("main", { "bantou-coordinator": null })]);
       await assert.rejects(connect("main"), /割り当てた session だけ/);
     } finally {
       await h.close();
