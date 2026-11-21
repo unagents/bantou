@@ -18,6 +18,8 @@ export const WEB_ALLOWED_TOOLS: readonly string[] = [
   "session_list",
   "session_create",
   "session_update",
+  "session_sleep",
+  "session_wake",
   "session_settings_get",
   "session_settings_update",
   "center_info",

@@ -25,6 +25,8 @@ const {
   onSessionCreated,
   loginOpen,
   onLoggedIn,
+  sleep,
+  openSession,
 } = useSessionBoard(board);
 const toast = useToast();
 // --- pane widths (side | middle | right; drag the dividers) ---
@@ -156,7 +158,7 @@ watch(modalOpen, (v) => {
                 :aria-current="g.name === selectedName ? 'true' : undefined"
                 class="flex min-w-0 flex-1 items-center gap-2 px-3 py-2 text-left text-sm hover:bg-cork-elevated"
                 :class="g.name === selectedName ? 'bg-cork-elevated font-semibold' : ''"
-                @click="selectedName = g.name"
+                @click="openSession(g.name)"
               >
                 <UIcon name="i-lucide-terminal-square" class="text-cork-accent size-4 shrink-0" />
                 <span class="truncate">{{ g.name }}</span>
@@ -177,6 +179,15 @@ watch(modalOpen, (v) => {
                   data-testid="side-auth"
                   :data-auth="g.auth"
                 />
+ <UBadge
+                  v-if="g.sleeping"
+                  color="neutral"
+                  variant="subtle"
+                  size="sm"
+                  label="スリープ"
+                  class="ml-auto shrink-0"
+                  data-testid="side-sleeping"
+                />
                 <SessionActivityMark v-if="g.activity" :activity="g.activity" :waiting-reply="g.remoteWaiting" :issues="g.remoteIssues" class="ml-auto" />
                 <ContextUsage :usage="g.contextUsage" percent-only :class="g.activity ? '' : 'ml-auto'" data-scope="side" />
               </button>
@@ -192,6 +203,19 @@ watch(modalOpen, (v) => {
                 data-testid="session-settings-open"
                 :data-name="g.name"
                 @click="openSettings(g.name)"
+              />
+              <UButton
+                class="rounded-none"
+                variant="ghost"
+                color="neutral"
+                size="xs"
+                icon="i-lucide-moon"
+                :aria-label="`${g.name} をスリープさせる`"
+                :disabled="fromConfig(g.name) || g.sleeping"
+                :title="fromConfig(g.name) ? 'center の config 由来の project はスリープさせられない' : g.sleeping ? 'スリープ中（開くと起きる）' : 'スリープさせる（claude を止めて空ける。開くと元の会話のまま起きる）'"
+                data-testid="session-sleep"
+                :data-name="g.name"
+                @click="sleep(g.name)"
               />
             </li>
           </ul>

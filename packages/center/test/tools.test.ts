@@ -73,12 +73,12 @@ async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partia
 
 const text = (r: unknown): string => (r as { content: { text: string }[] }).content[0].text;
 
-test("外向けの tool は 23 個。remote_create / remote_delete / remote_send / cap_kick は無い", async () => {
+test("外向けの tool は 25 個。remote_create / remote_delete / remote_send / cap_kick は無い", async () => {
   const { client, close } = await connect();
   const names = (await client.listTools()).tools.map((t) => t.name).sort();
   assert.deepEqual(names, [
     "center_info", "center_settings_get", "center_settings_update", "rc_list", "rc_start", "rc_status", "rc_stop", "remote_list", "remote_wait",
-    "server_list", "server_peers", "server_retire", "server_status", "session_create", "session_delete", "session_list", "session_login", "session_login_code", "session_settings_get", "session_settings_update", "session_update", "worker_reply", "worker_resume",
+    "server_list", "server_peers", "server_retire", "server_status", "session_create", "session_delete", "session_list", "session_login", "session_login_code", "session_settings_get", "session_settings_update", "session_sleep", "session_update", "session_wake", "worker_reply", "worker_resume",
   ]);
   for (const gone of ["remote_create", "remote_send", "remote_delete", "cap_kick"]) assert.ok(!names.includes(gone), gone);
   await close();
@@ -604,7 +604,7 @@ test("rc_start: resume: true は supervisor.start に resume を渡し、無け�
     shutdown: async () => {},
   } as unknown as RemoteControlSupervisor;
   const server = createCenterServer({
-    config: parseConfig({}, "/x/c.json"), supervisor, link: {} as ServerLink, sessions: {} as SessionManager, remotes: {} as RemoteManager,
+    config: parseConfig({}, "/x/c.json"), supervisor, link: {} as ServerLink, sessions: { list: () => [] } as unknown as SessionManager, remotes: {} as RemoteManager,
   });
   const [ct, st] = InMemoryTransport.createLinkedPair();
   const c = new Client({ name: "t", version: "0" });
@@ -613,5 +613,40 @@ test("rc_start: resume: true は supervisor.start に resume を渡し、無け�
   await c.callTool({ name: "rc_start", arguments: { project: "p", resume: true } });
   await c.callTool({ name: "rc_start", arguments: { project: "p", resume: false } });
   assert.deepEqual(seen, [["p", {}], ["p", { resume: true }], ["p", {}]]);
+  await c.close();
+});
+
+test("session_sleep / session_wake は SessionManager へ名前を委譲し、例外は isError。不正な名前は弾く", async () => {
+  const seen: string[] = [];
+  const { client, close } = await connect({}, {
+    sessions: {
+      sleep: async (n) => { seen.push(`sleep:${n}`); if (n === "cfg") throw new Error("session_create で作ったものではない（config 由来）: cfg"); return { name: n, state: "stopped", sleeping: true } as never; },
+      wake: async (n) => { seen.push(`wake:${n}`); return { name: n, state: "connected", sleeping: false } as never; },
+    },
+  });
+  assert.deepEqual(JSON.parse(text(await client.callTool({ name: "session_sleep", arguments: { name: "pm1" } }))), { name: "pm1", state: "stopped", sleeping: true });
+  assert.deepEqual(JSON.parse(text(await client.callTool({ name: "session_wake", arguments: { name: "pm1" } }))), { name: "pm1", state: "connected", sleeping: false });
+  const cfg = await client.callTool({ name: "session_sleep", arguments: { name: "cfg" } });
+  assert.equal(cfg.isError, true);
+  assert.match(text(cfg), /config 由来/);
+  const bad = await client.callTool({ name: "session_sleep", arguments: { name: "a b" } }).catch((e: unknown) => e);
+  assert.ok(bad instanceof Error || (bad as { isError?: boolean }).isError === true);
+  assert.deepEqual(seen, ["sleep:pm1", "wake:pm1", "sleep:cfg"]);
+  await close();
+});
+
+test("rc_start: スリープ中の session は supervisor.start ではなく wake（元の会話で起こす）", async () => {
+  const woken: string[] = [];
+  const started: string[] = [];
+  const supervisor = { start: async (p: string) => (started.push(p), rc(p)), list: () => [] } as unknown as RemoteControlSupervisor;
+  const sessions = { list: () => [{ name: "zzz", sleeping: true }, { name: "awake", sleeping: false }], wake: async (n: string) => (woken.push(n), { name: n, sleeping: false }) } as unknown as SessionManager;
+  const server = createCenterServer({ config: parseConfig({}, "/x/c.json"), supervisor, link: {} as ServerLink, sessions, remotes: {} as RemoteManager });
+  const [ct, st] = InMemoryTransport.createLinkedPair();
+  const c = new Client({ name: "t", version: "0" });
+  await Promise.all([server.connect(st), c.connect(ct)]);
+  await c.callTool({ name: "rc_start", arguments: { project: "zzz" } });
+  await c.callTool({ name: "rc_start", arguments: { project: "awake" } });
+  assert.deepEqual(woken, ["zzz"]);
+  assert.deepEqual(started, ["awake"]);
   await c.close();
 });

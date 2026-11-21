@@ -28,7 +28,7 @@ const NOW = Date.parse("2026-01-01T01:00:00Z");
 const iso = (minAgo: number): string => new Date(NOW - minAgo * 60_000).toISOString();
 
 const info = (name: string, extra: Partial<SessionInfo> = {}): SessionInfo => ({
-  name, path: "/secret/path", state: "connected", pid: 1, sessionUrl: "https://secret.example/s", startedAt: iso(30), source: "session",
+  name, path: "/secret/path", state: "connected", sleeping: false, pid: 1, sessionUrl: "https://secret.example/s", startedAt: iso(30), source: "session",
   lastError: "SECRET-ERROR", contextUsage: { usedTokens: 1, windowTokens: 10, percent: 42.4, updatedAt: iso(1) },
   activity: "working", activityAt: iso(7), remote: { running: 1, waitingReply: 0 }, instructions: true, auth: "ok" as SessionInfo["auth"], loginUrl: null, loginError: null, ...extra,
 });
@@ -82,7 +82,7 @@ test("session_brief: 1 行は件数だけ。本文・path・URL・error の文�
 });
 
 test("道具の説明: session_brief の説明に、出ない自分の行の警告を書かない（owner は渡さない）", async () => {
-  const h = await startCoordinatorHttp({ port: 0, key: "k".repeat(40), backend: { sessions: async () => [], createSession: async () => ({ name: "x", state: "" }) } });
+  const h = await startCoordinatorHttp({ port: 0, key: "k".repeat(40), backend: { sessions: async () => [], createSession: async () => ({ name: "x", state: "" }), sleepSession: async (n) => ({ name: n, state: "stopped", sleeping: true }) } });
   try {
     const c = new Client({ name: "t", version: "0" });
     await c.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${h.port}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${"k".repeat(40)}` } } }));
@@ -128,13 +128,14 @@ test("session_brief: 1 行 200 文字・40 行・6000 文字の上限。越え�
 // ---- 統括の MCP の server（coordinator-mcp.ts。独立した http の server） ----
 
 const KEY = "k".repeat(40);
-type Backend = Pick<CoordinatorDeps, "sessions" | "createSession">;
+type Backend = Pick<CoordinatorDeps, "sessions" | "createSession" | "sleepSession">;
 const fakeBackend = (over: Partial<Backend> = {}, created: string[] = []): Backend => ({
   sessions: async () => [info("main"), info("other")],
   createSession: async (i) => {
     created.push(i.name);
     return { name: i.name, state: i.start ? "connected" : "stopped" };
   },
+  sleepSession: async (name) => ({ name, state: "stopped", sleeping: true }),
   ...over,
 });
 
@@ -151,11 +152,11 @@ async function boot(backend: Backend = fakeBackend(), logs: string[] = []) {
 }
 const names = async (c: Client): Promise<string[]> => (await c.listTools()).tools.map((t) => t.name).sort();
 
-test("統括の server: 設定の 1 項目（url・Authorization）で initialize・tools/list・tools/call が通り、道具は 2 つだけ", async () => {
+test("統括の server: 設定の 1 項目（url・Authorization）で initialize・tools/list・tools/call が通り、道具は 3 つだけ", async () => {
   const { h, connect } = await boot();
   try {
     const c = await connect();
-    assert.deepEqual(await names(c), ["coordinator_session_create", "session_brief"]);
+    assert.deepEqual(await names(c), ["coordinator_session_create", "coordinator_session_sleep", "session_brief"]);
     const r = JSON.parse(text(await c.callTool({ name: "session_brief", arguments: {} }))) as { sessions: { name: string; line: string }[] };
     assert.deepEqual(r.sessions.map((s) => s.name), ["main", "other"]);
     assert.ok(!text(await c.callTool({ name: "session_brief", arguments: {} })).includes("SECRET"));
@@ -415,4 +416,55 @@ test("startCoordinatorChild: 子に center の token を env で渡し（argv �
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("統括の道具 coordinator_session_sleep: 他の session をスリープさせる（center の session_sleep へ委譲）。未定義の拒否は文を返し、それ以外は一般化して詳細は log だけ", async () => {
+  const slept: string[] = [];
+  const logs: string[] = [];
+  const { h, connect } = await boot(
+    fakeBackend({
+      sleepSession: async (name) => {
+        if (name === "ghost") throw new Error("未定義の session: ghost");
+        if (name === "boom") throw new Error("SECRET-DETAIL");
+        slept.push(name);
+        return { name, state: "stopped", sleeping: true };
+      },
+    }),
+    logs,
+  );
+  try {
+    const c = await connect();
+    const ok = await c.callTool({ name: "coordinator_session_sleep", arguments: { name: "other" } });
+    assert.equal(isError(ok), false);
+    assert.deepEqual(JSON.parse(text(ok)), { name: "other", state: "stopped", sleeping: true });
+    assert.deepEqual(slept, ["other"]);
+    const ghost = await c.callTool({ name: "coordinator_session_sleep", arguments: { name: "ghost" } });
+    assert.equal(isError(ghost), true);
+    assert.match(text(ghost), /未定義の session: ghost/);
+    const boom = await c.callTool({ name: "coordinator_session_sleep", arguments: { name: "boom" } });
+    assert.equal(isError(boom), true);
+    assert.doesNotMatch(text(boom), /SECRET-DETAIL/);
+    assert.ok(logs.some((l) => l.includes("SECRET-DETAIL")));
+    await c.close();
+  } finally {
+    await h.close();
+  }
+});
+
+test("統括の道具: key の無い呼び手（統括の server を書いていない session）は 401 で、スリープさせられない", async () => {
+  const slept: string[] = [];
+  const { h, connect } = await boot(fakeBackend({ sleepSession: async (n) => (slept.push(n), { name: n, state: "stopped", sleeping: true }) }));
+  try {
+    await assert.rejects(() => connect({}));
+    await assert.rejects(() => connect({ Authorization: `Bearer ${"x".repeat(40)}` }));
+    assert.deepEqual(slept, []);
+  } finally {
+    await h.close();
+  }
+});
+
+test("session_brief: スリープ中の session は状態が「スリープ」と出る（停止とは別）", () => {
+  const r = buildSessionBrief([info("a", { state: "stopped", sleeping: true, activity: "unknown", activityAt: null }), info("b", { state: "stopped" })], "", NOW);
+  assert.match(r.sessions[0].line, /^a \| スリープ \|/);
+  assert.match(r.sessions[1].line, /^b \| 停止 \|/);
 });

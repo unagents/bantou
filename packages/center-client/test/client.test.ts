@@ -147,6 +147,8 @@ test("sessions: list is the cache, refresh reads the center, create / update / s
   center.tools.set("session_list", [{ name: "a", state: "running", path: "/w/a" }]);
   center.tools.set("session_create", { name: "b", state: "running" });
   center.tools.set("session_update", { name: "c" });
+  center.tools.set("session_sleep", { name: "a", state: "stopped", sleeping: true });
+  center.tools.set("session_wake", { name: "a", state: "connected", sleeping: false });
   center.tools.set("session_settings_get", { name: "a", settings: { instructions: "x" } });
   center.tools.set("session_settings_update", { name: "a", settings: { instructions: null } });
   center.tools.set("center_info", { workspace: " /ws " });
@@ -167,6 +169,17 @@ test("sessions: list is the cache, refresh reads the center, create / update / s
   assert.equal(up.status, 200);
   const su = center.log.filter((r) => r.body?.params?.name === "session_update").at(-1)!;
   assert.deepEqual(su.body.params.arguments, { name: "a", newName: "c" });
+
+  // sleep / wake: the name (trimmed) goes to the center's tool; the answer is the session with `sleeping`, and the list is read again
+  const sl = await post(c, "session_sleep", { name: " a " });
+  assert.equal(sl.status, 200);
+  assert.equal((sl.body as { sleeping: boolean }).sleeping, true);
+  const slSent = center.log.filter((r) => r.body?.params?.name === "session_sleep").at(-1)!;
+  assert.deepEqual(slSent.body.params.arguments, { name: "a" });
+  const wk = await post(c, "session_wake", { name: "a" });
+  assert.equal((wk.body as { sleeping: boolean }).sleeping, false);
+  assert.deepEqual(center.log.filter((r) => r.body?.params?.name === "session_wake").at(-1)!.body.params.arguments, { name: "a" });
+  assert.equal((await post(c, "session_sleep", {})).status, 400);
 
   assert.deepEqual((await post(c, "session_get_settings", { name: "a" })).body, { instructions: "x" });
   assert.deepEqual((await post(c, "session_update_settings", { name: "a", settings: { instructions: "  " } })).body, { instructions: null } as never);

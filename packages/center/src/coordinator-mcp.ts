@@ -1,10 +1,10 @@
 /**
- * 統括の道具（session_brief・coordinator_session_create）を出す、独立した MCP の server（http だけ。stdio は無い）。
+ * 統括の道具（session_brief・coordinator_session_create・coordinator_session_sleep）を出す、独立した MCP の server（http だけ。stdio は無い）。
  *
  * - center の daemon が子 process として起動する（`bantou-center coordinator-mcp`）。center の終了で止まり、落ちたら再起動する。
  * - 待ち受けは 127.0.0.1 の port（state dir の coordinator-mcp.json。初回に空き port を選んで作り、以後変わらない）。
  * - 呼び手の確認は、設定の headers の `Authorization: Bearer <key>` を、coordinator-mcp.json の key と定時間で比べる。
- * - center への経路は、center の外向けの窓口 /mcp（center の token で MCP client として繋ぐ）の session_list と session_create だけ。
+ * - center への経路は、center の外向けの窓口 /mcp（center の token で MCP client として繋ぐ）の session_list・session_create・session_sleep だけ。
  * - 使える session は、設定の mcpServers にこの server の 1 項目（type: http・url・headers）を書いた session だけ（key は他の session に渡らない）。
  */
 import { spawn, type ChildProcess } from "node:child_process";
@@ -98,7 +98,7 @@ export const isCoordinatorEntry = (def: unknown, state: Pick<CoordinatorMcpState
 // ---- center への経路 ----
 
 /** center の外向けの窓口 /mcp を、token で MCP client として呼ぶ（呼ぶたびに繋いで閉じる）。 */
-export function centerBackend(opts: { url: string; token: string }): Pick<CoordinatorDeps, "sessions" | "createSession"> {
+export function centerBackend(opts: { url: string; token: string }): Pick<CoordinatorDeps, "sessions" | "createSession" | "sleepSession"> {
   const call = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
     const client = new Client({ name: "bantou-coordinator-mcp", version: "0.0.0" });
     const transport = new StreamableHTTPClientTransport(new URL(opts.url), { requestInit: { headers: { Authorization: `Bearer ${opts.token}` } } });
@@ -133,6 +133,10 @@ export function centerBackend(opts: { url: string; token: string }): Pick<Coordi
       // path は渡さない（center の workspace の下だけ）
       const v = (await call("session_create", { name: input.name, start: input.start, ...(input.instructions ? { settings: { instructions: input.instructions } } : {}) })) as { name?: string; state?: string };
       return { name: String(v.name ?? input.name), state: String(v.state ?? "") };
+    },
+    sleepSession: async (name) => {
+      const v = (await call("session_sleep", { name })) as { name?: string; state?: string; sleeping?: boolean };
+      return { name: String(v.name ?? name), state: String(v.state ?? ""), sleeping: v.sleeping === true };
     },
   };
 }
@@ -183,7 +187,7 @@ const readBody = (req: IncomingMessage, max = 1024 * 1024): Promise<unknown> =>
 export async function startCoordinatorHttp(opts: {
   port: number;
   key: string;
-  backend: Pick<CoordinatorDeps, "sessions" | "createSession">;
+  backend: Pick<CoordinatorDeps, "sessions" | "createSession" | "sleepSession">;
   log?: (m: string) => void;
   now?: () => number;
 }): Promise<CoordinatorHttpHandle> {

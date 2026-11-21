@@ -166,6 +166,9 @@ pub struct Session {
     /// Center's `loginError` (why the last `/login` failed).
     #[serde(default)]
     pub login_error: Option<String>,
+    /// Center's `sleeping`: the session's claude is stopped (conversation kept; it wakes when opened or addressed on the messenger). false when the center says no or is older than this field.
+    #[serde(default)]
+    pub sleeping: bool,
 }
 
 /// Mirror of the center's `session_list[].remote`.
@@ -370,6 +373,25 @@ pub async fn session_update(
     Ok(s)
 }
 
+/// Put a session to sleep (`session_sleep`: its claude is stopped, the conversation and settings stay).
+#[tauri::command]
+pub async fn session_sleep(app: tauri::AppHandle, cache: tauri::State<'_, SessionCache>, name: String) -> CmdResult<Session> {
+    session_sleep_wake(&app, &cache, "session_sleep", name.trim()).await
+}
+
+/// Wake a sleeping session (`session_wake`: its claude starts again with the same conversation). Called when the session is opened.
+#[tauri::command]
+pub async fn session_wake(app: tauri::AppHandle, cache: tauri::State<'_, SessionCache>, name: String) -> CmdResult<Session> {
+    session_sleep_wake(&app, &cache, "session_wake", name.trim()).await
+}
+
+async fn session_sleep_wake(app: &tauri::AppHandle, cache: &SessionCache, tool: &str, name: &str) -> CmdResult<Session> {
+    let v = center_json(app, tool, Some(serde_json::json!({ "name": name }))).await.map_err(CommandError::Other)?;
+    let s: Session = serde_json::from_value(v).map_err(|e| CommandError::other(format!("{tool} の結果を読めない: {e}")))?;
+    read_list(app, cache).await;
+    Ok(s)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,7 +423,17 @@ mod tests {
             auth: Some("ok".into()),
             login_url: None,
             login_error: None,
+            sleeping: false,
         }
+    }
+
+    #[test]
+    fn sleeping_is_read_from_the_center_and_defaults_to_false() {
+        let s: Session = serde_json::from_value(serde_json::json!({"name":"a","state":"stopped","sleeping":true})).unwrap();
+        assert!(s.sleeping);
+        let s: Session = serde_json::from_value(serde_json::json!({"name":"a","state":"stopped"})).unwrap();
+        assert!(!s.sleeping);
+        assert_eq!(serde_json::to_value(entry("a", "connected")).unwrap()["sleeping"], false);
     }
 
     #[test]

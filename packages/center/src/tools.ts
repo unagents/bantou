@@ -123,6 +123,25 @@ export function registerTools(
     ({ name }) => guard(async () => json(await sessions.delete(name))),
   );
   server.registerTool(
+    "session_sleep",
+    {
+      title: "session をスリープさせる",
+      description:
+        "session_create で作った session をスリープさせる（claude の process を止めてメモリなどを空ける。会話（resume できる状態）・設定・remote の記録は残す）。眠っている間は session_list の sleeping が true（state は stopped）。desktop でその session を開いた時と、messenger でその session が宛先になった時に、元の会話のまま自動で起き直す（session_wake でも起こせる）。眠っている session には何もしない。{ SessionInfo } を返す",
+      inputSchema: { name: z.string().regex(SESSION_NAME, "英数字と _ - のみ") },
+    },
+    ({ name }) => guard(async () => json(await sessions.sleep(name))),
+  );
+  server.registerTool(
+    "session_wake",
+    {
+      title: "スリープ中の session を起こす",
+      description: "スリープ中の session を元の会話のまま起こす（claude を --continue で起動し直す）。眠っていない session には何もしない。{ SessionInfo } を返す",
+      inputSchema: { name: z.string().regex(SESSION_NAME, "英数字と _ - のみ") },
+    },
+    ({ name }) => guard(async () => json(await sessions.wake(name))),
+  );
+  server.registerTool(
     "session_update",
     {
       title: "session の名前・path を変更",
@@ -285,7 +304,12 @@ export function registerTools(
       description: "project の claude remote-control を起動する（起動済みなら現状を返す）。resume: true で前回の会話に復帰（--continue。復帰できなければ素の起動）",
       inputSchema: { project: projectName, resume: z.boolean().optional() },
     },
-    ({ project, resume }) => guard(async () => json(await supervisor.start(project, resume ? { resume: true } : {}))),
+    ({ project, resume }) =>
+      guard(async () => {
+        // スリープ中の session は、起動の前にスリープを解く（身代わり peer を外し、元の会話で起こす）
+        if (sessions.list().some((s) => s.name === project && s.sleeping)) return json(await sessions.wake(project));
+        return json(await supervisor.start(project, resume ? { resume: true } : {}));
+      }),
   );
   server.registerTool(
     "rc_stop",

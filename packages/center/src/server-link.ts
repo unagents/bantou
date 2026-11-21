@@ -334,6 +334,16 @@ export function createClient(s: ServerConfig, log: Logger): LinkClient {
   }) as unknown as LinkClient;
 }
 
+/** スリープ中の session の身代わり peer（sleep-gate.ts）。名前だけが違う、普通の agent-messenger client。 */
+export function createStandInClient(peerName: string, log: Logger): LinkClient {
+  return createMessengerClient({
+    name: peerName,
+    summary: `center ${hostname()} (スリープ中の session の身代わり)`,
+    autoStartBroker: false,
+    log: (m) => log(`messenger(${peerName} 身代わり): ${m}`),
+  }) as unknown as LinkClient;
+}
+
 export function createServerLink(opts: {
   config: Config;
   log: Logger;

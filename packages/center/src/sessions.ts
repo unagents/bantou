@@ -26,12 +26,16 @@ export interface SavedSession {
   /** プロジェクトごとの設定（instructions など。未知の項目も保持）。無ければ未設定。 */
   settings?: ProjectSettings;
   createdAt: string;
+  /** スリープ中（claude の process を止めてある。会話・設定は残る）。起こすのは wake()。center 再起動でも眠ったまま。 */
+  sleeping?: boolean;
 }
 
 export interface SessionInfo {
   name: string;
   path: string;
   state: RcStatus["state"];
+  /** スリープ中か（claude の process は止まっていて state は stopped。会話は残り、開く・messenger の宛先になる・wake で元の会話のまま起き直す）。 */
+  sleeping: boolean;
   pid: number | null;
   sessionUrl: string | null;
   startedAt: string | null;
@@ -106,6 +110,13 @@ export interface SessionManager {
    */
   update(input: SessionUpdateInput): Promise<SessionInfo>;
   delete(name: string): Promise<{ name: string; deleted: true }>;
+  /**
+   * session をスリープさせる（claude の process を止める。会話・設定・remote の記録は残す）。session_create で作った session のみ。眠っている session には何もしない。
+   * 起こすのは wake()（--continue で元の会話に復帰）。center の再起動後も眠ったまま。
+   */
+  sleep(name: string): Promise<SessionInfo>;
+  /** スリープ中の session を元の会話のまま起こす（resume）。眠っていなければ何もしない（今の状態を返す）。 */
+  wake(name: string): Promise<SessionInfo>;
   list(): SessionInfo[];
 }
 
@@ -154,6 +165,8 @@ export function createSessionManager(opts: {
   remoteNameConflict?: (name: string, mode: "create" | "rename", oldName?: string) => string | null;
   /** session の使う server の範囲（settings.servers）が変わった時に、その session の master-cap へ知らせる先（messenger の push）。省略時は知らせない。失敗しても更新は成功にする。 */
   notifyServersChanged?: (name: string, text: string) => Promise<{ ok: boolean; reason?: string }>;
+  /** スリープ状態が変わった時（sleeping = 今眠っているか。restore で眠ったままの session にも呼ぶ）。messenger の身代わり peer の登録・解除に使う。失敗しても本体は成功にする。 */
+  onSleepChange?: (name: string, sleeping: boolean) => void;
 }): SessionManager {
   const { config, supervisor, store, log } = opts;
   const waitMs = opts.waitMs ?? 15_000;
@@ -222,6 +235,7 @@ export function createSessionManager(opts: {
     name: s.project,
     path: s.path,
     state: s.state,
+    sleeping: s.state === "stopped" && saved.get(s.project)?.sleeping === true,
     pid: s.pid,
     sessionUrl: s.sessionUrl,
     startedAt: s.startedAt,
@@ -517,6 +531,21 @@ export function createSessionManager(opts: {
 
   const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+  const notifySleep = (name: string, sleeping: boolean): void => {
+    try {
+      opts.onSleepChange?.(name, sleeping);
+    } catch (e) {
+      log(`スリープ状態の通知に失敗: ${name} ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const savedOrThrow = (name: string): SavedSession => {
+    const rec = saved.get(name);
+    if (rec) return rec;
+    const known = supervisor.list().some((s) => s.project === name);
+    throw new Error(known ? `session_create で作ったものではない（config 由来）: ${name}` : `未定義の session: ${name}`);
+  };
+
   return {
     async restore() {
       let rawCommon: unknown = opts.centerStore ? await opts.centerStore.load() : undefined;
@@ -536,6 +565,12 @@ export function createSessionManager(opts: {
           saved.set(s.name, s);
           opts.events?.publish({ reason: "restored", name: s.name });
           await mkdir(s.path, { recursive: true });
+          if (s.sleeping === true) {
+            // 眠っていた session は起こさない（messenger の宛先になるか、開かれたら起きる）
+            notifySleep(s.name, true);
+            log(`session スリープのまま復帰: ${s.name} (${s.path})`);
+            continue;
+          }
           await supervisor.start(s.name, { resume: true });
           log(`session 復帰: ${s.name} (${s.path})`);
         } catch (e) {
@@ -726,7 +761,10 @@ export function createSessionManager(opts: {
         if (!renaming && !moving) throw new Error("変更が無い: newName か今と違う path を指定する");
 
         const oldRec = rec;
+        // 名前・path の変更は止めて起動し直す操作なので、眠っていた session も起きる
+        const wasSleeping = rec.sleeping === true;
         const newRec: SavedSession = { ...rec, name: newName, path: newPath };
+        delete newRec.sleeping;
         const doMove = moving && input.move === true;
         let renamedRemotes = false;
         let moved = false;
@@ -760,6 +798,7 @@ export function createSessionManager(opts: {
           }
           supervisor.add(toProject(newRec), { wrapper: true, ...instrOpt(newRec.settings) });
           added = true;
+          if (wasSleeping) notifySleep(name, false);
           const st = await supervisor.start(newName, { resume: true });
           opts.events?.publish({ reason: "updated", name: newName });
           log(`session 更新: ${name} -> ${newName} (${oldRec.path} -> ${newPath}${doMove ? ", フォルダ移動" : ""})`);
@@ -786,7 +825,8 @@ export function createSessionManager(opts: {
           if (moved) await undo("フォルダの移動を戻す", () => rename(newPath, oldRec.path));
           await undo("元の名前で起動", async () => {
             supervisor.add(toProject(oldRec), { wrapper: true, ...instrOpt(oldRec.settings) });
-            await supervisor.start(name, { resume: true });
+            if (oldRec.sleeping === true) notifySleep(name, true);
+            else await supervisor.start(name, { resume: true });
           });
           throw new Error(`session を更新できない（元に戻した）: ${why}`);
         }
@@ -799,11 +839,51 @@ export function createSessionManager(opts: {
           throw new Error(known ? `session_create で作ったものではない（config 由来）: ${name}` : `未定義の session: ${name}`);
         }
         await supervisor.remove(name);
+        const wasSleeping = saved.get(name)?.sleeping === true;
         saved.delete(name);
         await persist();
+        if (wasSleeping) notifySleep(name, false);
         opts.events?.publish({ reason: "deleted", name });
         log(`session 削除: ${name}`);
         return { name, deleted: true as const };
+      }),
+
+    sleep: (name) =>
+      serial(async () => {
+        const rec = savedOrThrow(name);
+        if (rec.sleeping === true && supervisor.status(name).state === "stopped") return info(supervisor.status(name));
+        // 先にフラグを保存する（止めている途中で center が落ちても、次の起動で眠ったまま復帰する）
+        rec.sleeping = true;
+        try {
+          await persist();
+        } catch (e) {
+          delete rec.sleeping;
+          throw new Error(`状態ファイルに保存できない: ${(e as Error).message}`);
+        }
+        const st = await supervisor.stop(name);
+        notifySleep(name, true);
+        opts.events?.publish({ reason: "sleep", name });
+        log(`session スリープ: ${name}`);
+        return info(st);
+      }),
+
+    wake: (name) =>
+      serial(async () => {
+        const rec = savedOrThrow(name);
+        if (rec.sleeping !== true) return info(supervisor.status(name));
+        delete rec.sleeping;
+        try {
+          await persist();
+        } catch (e) {
+          rec.sleeping = true;
+          throw new Error(`状態ファイルに保存できない: ${(e as Error).message}`);
+        }
+        // 身代わりを先に外す（外さないと、起きた claude の peer と同名が並ぶ）
+        notifySleep(name, false);
+        const st = await supervisor.start(name, { resume: true });
+        opts.events?.publish({ reason: "sleep", name });
+        log(`session 起床: ${name}`);
+        return info(await settle(name, st));
       }),
 
     list: () => supervisor.list().map(info),

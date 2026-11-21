@@ -33,7 +33,8 @@ import { createCore } from "./core.js";
 import { createEventHub } from "./events.js";
 import { createSessionTokens } from "./session-auth.js";
 import { createSessionActivityTracker } from "./session-activity.js";
-import { createServerLink } from "./server-link.js";
+import { createServerLink, createStandInClient } from "./server-link.js";
+import { createSleepGate } from "./sleep-gate.js";
 import { createCenterMemoryEvents } from "./memory-events.js";
 import { capSessionName } from "./session-name.js";
 
@@ -182,6 +183,17 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     remoteNameConflict: (name, mode, oldName) => remotes.conflictsWith(name, mode, oldName),
     // 範囲の変更を master-cap へ知らせる（完了通知と同じ messenger の push）
     notifyServersChanged: (name, text) => link.notifyPeer(capSessionName(name), text),
+    // スリープの出入りで messenger の身代わり peer を置く・外す（gate は sessions の後に作るので、呼ばれる時に参照する）
+    onSleepChange: (name, sleeping) => sleepGate.sync(name, sleeping),
+    log,
+  });
+  // スリープ中の session 宛の message で、その session を起こす（身代わり peer。link は messenger の broker 1 つに繋がる）
+  const sleepGate = createSleepGate({
+    clientFactory: (peerName) => createStandInClient(peerName, log),
+    wake: (name) => sessions.wake(name),
+    deliver: (name, text) => link.notifyPeer(capSessionName(name), text),
+    isSleeping: (name) => sessions.list().some((s) => s.name === name && s.sleeping),
+    peerName: capSessionName,
     log,
   });
   // 外部記憶への書き込み（設定がある session だけ。非同期キュー。失敗しても session・hook・remote は止まらない）
@@ -231,7 +243,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
       coordChild?.stop();
       contextUsage.stop();
       memoryEvents.close();
-      const results = await Promise.allSettled([supervisor.shutdown(), http?.close(), link.close()]);
+      const results = await Promise.allSettled([supervisor.shutdown(), http?.close(), link.close(), sleepGate.close()]);
       for (const r of results) {
         if (r.status === "rejected") throw r.reason;
       }

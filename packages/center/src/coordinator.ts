@@ -28,6 +28,8 @@ export interface SessionBriefResult {
 }
 
 const STATE_LABEL: Record<SessionInfo["state"], string> = { starting: "起動中", connected: "接続", stopped: "停止", error: "error" };
+/** スリープ中の session の状態ラベル（state は stopped のまま。停止と区別する）。 */
+export const SLEEP_LABEL = "スリープ";
 
 const clip = (s: string, max: number): string => (s.length > max ? `${s.slice(0, max - 1)}…` : s);
 
@@ -54,7 +56,7 @@ export function buildSessionBrief(sessions: readonly SessionInfo[], coordinator:
     const lost = s.remote.lost?.length ?? 0;
     const parts = [
       s.name,
-      STATE_LABEL[s.state],
+      s.sleeping ? SLEEP_LABEL : STATE_LABEL[s.state],
       work,
       `ctx ${ctx === null || ctx === undefined ? "?" : `${Math.round(ctx)}%`}`,
       `remote 実行中 ${s.remote.running}・返答待ち ${s.remote.waitingReply}・到達不能 ${unreachable}・lost ${lost}`,
@@ -79,6 +81,8 @@ export interface CoordinatorDeps {
   sessions: () => Promise<SessionInfo[]>;
   /** 新しい session を作る（center の session_create。path は渡さない = center の workspace の下だけ）。 */
   createSession: (input: { name: string; instructions?: string; start: boolean }) => Promise<{ name: string; state: string }>;
+  /** 他の session をスリープさせる（center の session_sleep）。 */
+  sleepSession: (name: string) => Promise<{ name: string; state: string; sleeping: boolean }>;
   now?: () => number;
   /** 失敗の詳細を残す先（log）。省略時は残さない。 */
   log?: (msg: string) => void;
@@ -97,7 +101,7 @@ export function registerCoordinatorTools(server: McpServer, deps: CoordinatorDep
     {
       title: "各 session の状態を 1 行で読む",
       description:
-        `各 session の状態を 1 行ずつ返す。返り値 { at, sessions: [{ name, line }], truncated, omitted }。line は \`<name> | <起動の状態: 起動中 / 接続 / 停止 / error> | <作業状態: working / needs-input / idle と、その時刻からの分。不明の時は「作業状態 不明」> | ctx <n>% | remote 実行中 <n>・返答待ち <n>・到達不能 <n>・lost <n>\`。件数だけで、report・result・指示の本文は入らない。中身が要る時は各 session の担当に任せる。1 行 ${SESSION_BRIEF_LINE_MAX} 文字・1 回 ${SESSION_BRIEF_MAX_LINES} 行・${SESSION_BRIEF_MAX_CHARS} 文字まで（越えたら truncated: true と omitted = 落とした行数）。session で 1 つに絞れる`,
+        `各 session の状態を 1 行ずつ返す。返り値 { at, sessions: [{ name, line }], truncated, omitted }。line は \`<name> | <起動の状態: 起動中 / 接続 / 停止 / スリープ / error> | <作業状態: working / needs-input / idle と、その時刻からの分。不明の時は「作業状態 不明」> | ctx <n>% | remote 実行中 <n>・返答待ち <n>・到達不能 <n>・lost <n>\`。件数だけで、report・result・指示の本文は入らない。中身が要る時は各 session の担当に任せる。1 行 ${SESSION_BRIEF_LINE_MAX} 文字・1 回 ${SESSION_BRIEF_MAX_LINES} 行・${SESSION_BRIEF_MAX_CHARS} 文字まで（越えたら truncated: true と omitted = 落とした行数）。session で 1 つに絞れる`,
       inputSchema: { session: z.string().min(1).optional() },
     },
     async ({ session }) => {
@@ -134,6 +138,27 @@ export function registerCoordinatorTools(server: McpServer, deps: CoordinatorDep
         if (nameTaken(name, detail)) return json({ error: `name が既に使われている: ${name}` }, true);
         deps.log?.(`coordinator_session_create 失敗: name=${name} ${detail}`);
         return json({ error: "session を作れなかった（名前の衝突、または作業 dir を作れない）。詳細は log" }, true);
+      }
+    },
+  );
+  server.registerTool(
+    "coordinator_session_sleep",
+    {
+      title: "他の session をスリープさせる",
+      description:
+        "name の session をスリープさせる（claude の process を止めてメモリなどを空ける。会話・設定・remote の記録は残る）。眠った session は、利用者が desktop で開いた時と、messenger でその session が宛先になった時に、元の会話のまま自動で起き直す。session_brief には「スリープ」と出る。すでに眠っている session には何もしない。返り値 { name, state, sleeping }",
+      inputSchema: { name: z.string().max(MAX_SESSION_NAME, `${MAX_SESSION_NAME} 文字以内`).regex(SESSION_NAME, "英数字と _ - のみ") },
+    },
+    async ({ name }) => {
+      try {
+        const r = await deps.sleepSession(name);
+        return json({ name: r.name, state: r.state, sleeping: r.sleeping });
+      } catch (e) {
+        const detail = e instanceof Error ? e.message : String(e);
+        // 利用者が直せる拒否（未定義・config 由来）だけ文を返す。それ以外は一般化し、詳細は log にだけ残す
+        if (detail.includes("未定義の session") || detail.includes("config 由来")) return json({ error: detail }, true);
+        deps.log?.(`coordinator_session_sleep 失敗: name=${name} ${detail}`);
+        return json({ error: "session をスリープさせられなかった。詳細は log" }, true);
       }
     },
   );

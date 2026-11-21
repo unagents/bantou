@@ -1,4 +1,4 @@
-import { centerGetSettings } from "#bantou-ui/api";
+import { centerGetSettings, sleepSession, wakeSession } from "#bantou-ui/api";
 import type { SessionActivity } from "#bantou-ui/types";
 import type { SessionGroup, useBoard } from "./useBoard";
 
@@ -51,6 +51,41 @@ export function useSessionBoard(board: Pick<Board, "sessions" | "centerList" | "
     },
     { immediate: true },
   );
+
+  // --- sleep / wake -----------------------------------------------------------
+
+  /** Put a session to sleep (its claude stops; the conversation stays). */
+  async function sleep(name: string) {
+    try {
+      await sleepSession(name);
+      toast.add({ title: `${name} をスリープさせた`, color: "success" });
+    } catch (e) {
+      toast.add({ title: `${name} をスリープさせられない`, description: String(e), color: "error" });
+    }
+    void refreshSessions();
+  }
+  const waking = new Set<string>();
+  /** Opening (selecting) a sleeping session wakes it: its claude starts again with the same conversation. */
+  async function wakeIfSleeping(name: string | null) {
+    if (name === null || waking.has(name)) return;
+    if (!sessions.value.find((g) => g.name === name)?.sleeping) return;
+    waking.add(name);
+    try {
+      await wakeSession(name);
+    } catch (e) {
+      toast.add({ title: `${name} を起こせない`, description: String(e), color: "error" });
+    } finally {
+      waking.delete(name);
+      void refreshSessions();
+    }
+  }
+  // A selection change wakes a sleeping session (not a list change: putting the open session to sleep must not wake it again).
+  watch(selectedName, (n) => void wakeIfSleeping(n), { immediate: true });
+  /** Open a session from the side menu (also the one already open: it wakes if it is asleep). */
+  function openSession(name: string) {
+    selectedName.value = name;
+    void wakeIfSleeping(name);
+  }
 
   // --- work state summary / filter (side menu) -----------------------------
 
@@ -134,5 +169,7 @@ export function useSessionBoard(board: Pick<Board, "sessions" | "centerList" | "
     onSessionCreated,
     loginOpen,
     onLoggedIn,
+    sleep,
+    openSession,
   };
 }
