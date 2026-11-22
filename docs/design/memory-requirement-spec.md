@@ -292,7 +292,7 @@ S-user（利用者の指示にあった仕様・設計をまとめた 1 件。ba
 | 1 | 型の軸 | resession は引継ぎを **event の種別 `handoff`**（`memory_events.kind` の追加）として持つ。本書 #1 は **item 側の type**（`record_type`）の話で、軸が違う。今の `kind` は 6 つの CHECK（`001_init.sql:25`、`events.ts:4`）で、両者とも migration / CHECK を変える | `resession.md:197`、`001_init.sql:25` |
 | 2 | 書き手 | resession は「session は memory に書かない。書くのは center」を守る（U2 の推奨 A）。system 指示にも「書き込みの tool を呼ばない」とある（`packages/center/src/system-instructions.ts:173-186`）。本書 #5 の案 B（master-cap が登録 tool を呼ぶ）はこの決まりを変える。resession の U2 の案 B（session が直接書く）と**同じ決まりを動かす**ので、片方だけ決められない | `resession.md:95-96`、`:212-217`、`system-instructions.ts:186` |
 | 3 | 読み方 | resession の読み出しは「識別で event 本文を返す口」で、抽出を通さない。本書 #10 は `recall` / `context` の出力に木と category を足す。**変更する関数は別**（resession は新しい口、本書は `recall.ts` の既存 2 関数）だが、tool 一覧（`server/mcp/tools/`）と system 指示の案内（memory 部品）を両方が変える | `resession.md:136`、`:198`、本書 §7 |
-| 4 | 抽出との交差 | 抽出は kind を問わず未処理の event を全て取る（`extract.ts:243-249` の `SELECT ... FROM memory_events WHERE ... processed_at IS NULL`）。**推測**: `handoff` event もそのまま抽出に入り、引継ぎの中の決定・仕掛かりが item（本書の requirement・仕様・設計）として二重に登録されうる。出典が `user_prompt` でないので既存規則では `inferred`（`extract.ts:184-186`）。抽出の対象から外すか、入れるかは未決 | `extract.ts:243-249` |
+| 4 | 抽出との交差 | 抽出は kind を問わず未処理の event を全て取る（`extract.ts:243-249` の `UPDATE memory_events SET claimed_at ... WHERE event_id IN (SELECT ... WHERE ... processed_at IS NULL ...)`。kind の条件は無い）。**推測**: `handoff` event もそのまま抽出に入り、引継ぎの中の決定・仕掛かりが item（本書の requirement・仕様・設計）として二重に登録されうる。出典が `user_prompt` でないので既存規則では `inferred`（`extract.ts:184-186`）。抽出の対象から外すか、入れるかは未決 | `extract.ts:243-249` |
 | 5 | 内容の重なり | 引継ぎ（仕掛かり・決定と未決、`resession.md:92`）と、本書の木 A（未完了の requirement・task）・木 B（決めた設計）は同じ事の別の持ち方になりうる。**推測**: 木が入れば、引継ぎの「仕掛かり」は木の読み出し（本書 #10 の `openRequirements`）で代替でき、引継ぎ本文は「次の一手・止まっている事」に絞れる。ただし resession は「session が本文を書く」前提で、この代替は resession 側が決める事 | `resession.md:92` |
 | 6 | 再起動をまたぐ継続 | Agent ID = session 名は再起動で変わらない（`resession.md:34`）ので、本書の木は再起動後も同じ agent の記憶として残る。木の親子は新しい会話の session からも読める | `resession.md:34` |
 | 7 | 完了の判定 | resession の安全確認は center の remote の記録の `pending`（未完了の指示）を見る（`resession.md:76`）。本書 #9 案 A は未完了を memory の event（task の後続 result 無し）から導く（`recall.ts:182-188`）。**元が別**（center の pending と memory の event）で、食い違いうる。どちらを正にするかは両設計で未調整 | `resession.md:76`、`recall.ts:182-188` |
@@ -309,7 +309,7 @@ resession 設計は「その設計が出たら照合する」として 3 点を�
 ### 8.4 順序（推奨）
 
 1. 先に決める: 書き込みの決まり（本書 #5 と resession U2 を**同時に**）。同じ決まり（session は memory に書かない）を両方が動かしうるため。本書 #5 が案 A なら決まりは変わらず、resession U2 の A と矛盾しない。
-2. 次に: 型（本書 #1）と event 種別の追加（`handoff`）の migration を 1 つの変更にまとめるか分けるか。両方とも `001_init.sql:25` の CHECK を変える可能性がある（resession は `kind`、本書は item の列。**同じ CHECK ではない**ので衝突はしない。**推測**: migration の番号を揃えるだけでよい）。
+2. 次に: 型（本書 #1）と event 種別の追加（`handoff`）の migration を 1 つの変更にまとめるか分けるか。変える CHECK が違う（resession は `memory_events.kind` の CHECK = `001_init.sql:25`、本書 #1 案 A は `memory_items.memory_type` の CHECK = `001_init.sql:46`。案 B は新しい列を足す。**同じ CHECK ではない**ので衝突はしない。**推測**: migration の番号を揃えるだけでよい）。
 3. その次: 読み出し（本書 #10 と resession の識別で引く口）。tool 名と system 指示の案内を 1 回で書く。
 4. 抽出との交差（接点 #4）は、`handoff` を足す側（resession）が実装する時に決める。本書はその時点の抽出規則に従う。
 
