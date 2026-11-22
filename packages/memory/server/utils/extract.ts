@@ -38,8 +38,8 @@ export function createChatClient(opts: { url: string; token: string; model: stri
         throw e;
       }
       if (!res.ok) {
-        // 400 / 413 / 422 は入力（内容）起因とみなす。5xx・429 などは障害（呼び出し側は attempts を加算しない）
-        if (CONTENT_HTTP_STATUS.has(res.status)) throw new ChatContentError(`chatp rejected the input: HTTP ${res.status}`);
+        // 400 / 413 / 422 と 5xx は入力（内容）起因の可能性があるとみなす（chatp は特定の入力で 502 を返す）。429 などは障害（呼び出し側は attempts を加算しない）
+        if (CONTENT_HTTP_STATUS.has(res.status) || res.status >= 500) throw new ChatContentError(`chatp rejected the input: HTTP ${res.status}`);
         throw new Error(`chatp failed: HTTP ${res.status}`);
       }
       let content: unknown;
@@ -320,13 +320,13 @@ class Skip extends Error {}
 /**
  * 1 agent 分。
  *  - 未処理 event を lease（claimed_at）付きで取る（複数 process / 手動実行の二重処理を防ぐ。FOR UPDATE SKIP LOCKED）
- *  - chatp の応答が壊れている / timeout / 内容起因の HTTP エラー（400 / 413 / 422）の時は batch を二分して再試行し、
+ *  - chatp の応答が壊れている / timeout / 内容起因の HTTP エラー（400 / 413 / 422 / 5xx）の時は batch を二分して再試行し、
  *    1 件まで絞れた event を「失敗候補」にする
  *  - run の終わりに、1 つでも通った batch があれば（= chatp は動いている）失敗候補の attempts を加算する。
  *    attempts が MAX_ATTEMPTS に達した event は failed_at を立て、以後の batch から外す（dead-letter）
  *  - 通った batch が 1 つも無い（全滅）なら chatp 側の系統障害とみなし、attempts を加算しない
  *    （1 件だけの batch が失敗した場合も区別できないので加算しない。他の event と同じ batch に入れば特定できる）
- *  - 接続失敗・5xx・429 などは障害とみなし、attempts を加算せず claim を解いて throw する（次回再試行）
+ *  - 接続失敗・429 などは障害とみなし、attempts を加算せず claim を解いて throw する（次回再試行）
  *  - budget（LLM 呼び出し回数 / 経過時間）を超えたら残りの claim を解いて打ち切る
  */
 export async function extractForAgent(db: Db, deps: ExtractDeps, agentId: string): Promise<ExtractSummary> {

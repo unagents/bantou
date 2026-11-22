@@ -582,7 +582,7 @@ async function startFakeChatp(opts: { poisonStatus?: number; allStatus?: number 
   return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, server };
 }
 
-test("HTTP status の分類: 400 は内容起因（poison だけ attempts 加算）、503 は障害（加算せず throw、claim を解く）", async () => {
+test("HTTP status の分類: 400 は内容起因（poison だけ attempts 加算）、429 は障害（加算せず throw、claim を解く）", async () => {
   const a = newAgent();
   for (let i = 1; i <= 3; i++) await recordEvent(t.db, a, ev({ eventId: `${a}-${i}`, body: i === 2 ? "POISON" : `事実 ${i}`, at: `2026-11-01T00:00:0${i}Z` }));
   const p400 = await startFakeChatp({ poisonStatus: 400 });
@@ -596,7 +596,7 @@ test("HTTP status の分類: 400 は内容起因（poison だけ attempts 加算
   }
   const b = newAgent();
   for (let i = 1; i <= 3; i++) await recordEvent(t.db, b, ev({ eventId: `${b}-${i}`, body: `事実 ${i}`, at: `2026-11-01T00:00:0${i}Z` }));
-  for (const status of [503, 429]) {
+  for (const status of [429]) {
     const down = await startFakeChatp({ allStatus: status });
     try {
       const chat = createChatClient({ url: down.url, token: "", model: "m", timeoutMs: 5000 });
@@ -606,6 +606,45 @@ test("HTTP status の分類: 400 は内容起因（poison だけ attempts 加算
     }
   }
   for (const r of await evState(b)) assert.deepEqual([r.attempts, r.failed, r.claimed], [0, false, false]);
+});
+
+test("5xx（chatp の 502）: 特定の event だけが 502 になる時は batch を分け、他は処理され、その event だけが attempts を数えて dead-letter になる", async () => {
+  const a = newAgent();
+  for (let i = 1; i <= 5; i++) await recordEvent(t.db, a, ev({ eventId: `${a}-${i}`, body: i === 1 ? "POISON" : `事実 ${i}`, at: `2026-11-01T00:00:0${i}Z` }));
+  const srv = await startFakeChatp({ poisonStatus: 502 });
+  try {
+    const chat = createChatClient({ url: srv.url, token: "", model: "m", timeoutMs: 5000 });
+    // 最古の event が poison でも、他の event は処理される（agent が止まらない）
+    const s1 = await extractForAgent(t.db, { chat, batchSize: 50 }, a);
+    assert.deepEqual([s1.accepted, s1.retried, s1.failed, s1.systemic], [4, 1, 0, 0]);
+    assert.deepEqual((await evState(a)).map((r) => [r.processed, r.attempts]), [[false, 1], [true, 0], [true, 0], [true, 0], [true, 0]]);
+    for (let run = 1; run < MAX_ATTEMPTS; run++) {
+      await recordEvent(t.db, a, ev({ eventId: `${a}-g${run}`, body: `追加の事実 ${run}`, at: `2026-11-01T00:01:0${run}Z` }));
+      await extractForAgent(t.db, { chat, batchSize: 50 }, a);
+    }
+    const rows = await evState(a);
+    const poison = rows.find((r) => r.event_id === `${a}-1`)!;
+    assert.deepEqual([poison.processed, poison.failed, poison.attempts], [false, true, MAX_ATTEMPTS]);
+    assert.ok(rows.filter((r) => r.event_id !== `${a}-1`).every((r) => r.processed && !r.failed), "poison 以外は全て処理済み");
+  } finally {
+    srv.server.close();
+  }
+});
+
+test("5xx（chatp の 502）: 全ての batch が 502 の時（chatp の系統障害）は throw せず、attempts を加算せず、claim を解く", async () => {
+  const a = newAgent();
+  for (let i = 1; i <= 3; i++) await recordEvent(t.db, a, ev({ eventId: `${a}-${i}`, body: `事実 ${i}`, at: `2026-11-01T00:00:0${i}Z` }));
+  const srv = await startFakeChatp({ allStatus: 502 });
+  try {
+    const chat = createChatClient({ url: srv.url, token: "", model: "m", timeoutMs: 5000 });
+    for (let run = 0; run < MAX_ATTEMPTS + 1; run++) {
+      const s = await extractForAgent(t.db, { chat, batchSize: 50 }, a);
+      assert.deepEqual([s.systemic, s.retried, s.failed, s.accepted], [3, 0, 0, 0]);
+    }
+    for (const r of await evState(a)) assert.deepEqual([r.attempts, r.failed, r.processed, r.claimed], [0, false, false, false]);
+  } finally {
+    srv.server.close();
+  }
 });
 
 test("排他: 一部の event だけ他が先に処理した時は batch を諦めるが、自分の claim は解いて残りをすぐ取り直せる", async () => {
