@@ -189,6 +189,20 @@ test("並行 task: 待っている task は task_status で待ちの理由を出
   await tick();
   const lines = buildTaskStatus(s.mgr.list({ owner: "pm1" }), "pm1", Date.now()).tasks.map((t) => t.line);
   assert.match(lines[0]!, /\| 実行中 \|/);
-  assert.match(lines[1]!, /\| 待ち（同時実行の上限） \|/);
-  assert.match(lines[2]!, /\| 待ち（同じ branch feat\/x の前の task） \|/);
+  assert.match(lines[1]!, /\| 待ち（利用者が置いた並行の上限） \|/);
+  assert.match(lines[2]!, /\| 待ち（同じ branch feat\/x の前の task。旧 server） \|/);
+});
+
+test("並行 task: 同じ branch の task は待たず、task_status に同じ branch の task の数が出る", async () => {
+  const s = setup();
+  s.server.exists = true;
+  const p = s.mgr.send({ owner: "pm1", goal: "a", deliverables: { branch: "feat/x" } });
+  await until("kick 1", () => s.kicks.length === 1);
+  const id = s.kicks[0]!.cmd.task_id as string;
+  s.server.tasks = [info(id, "running", { same_branch: ["t-other"], branch: "feat/x" })];
+  await p;
+  s.pushActivity("running", [info(id, "running", { same_branch: ["t-other"], branch: "feat/x" })]);
+  await tick();
+  const lines = buildTaskStatus(s.mgr.list({ owner: "pm1" }), "pm1", Date.now()).tasks.map((t) => t.line);
+  assert.match(lines[0]!, /実行中（同じ branch の task 1 本）/);
 });
