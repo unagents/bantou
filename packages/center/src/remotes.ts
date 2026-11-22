@@ -1947,9 +1947,12 @@ export function createRemoteManager(opts: {
         const settle = (res: { ok: boolean; text: string; error?: string }, kind: "cap_result" | "error" | "transport", taskResult?: TaskResultReply): void => {
           inflight.set(target, Math.max(0, (inflight.get(target) ?? 1) - 1));
           inflightTasks.get(target)?.delete(taskId);
-          inflightIdle.delete(target);
-          // 返信待ちのまま止まったと印を付けた後に、返信待ちが閉じた（結果・error・送信失敗のどれでも）: その印を消す。failed など他の印は消さない
-          if (target.stopped?.kind === "no_result") delete target.stopped;
+          // 返信待ちのまま止まったと印を付けた後に、返信待ちが全部閉じた（結果・error・送信失敗のどれでも）: その印と数えを消す。
+          // 同じ cap の返信待ちがまだ残っている間は消さない（同じ止まりで 2 回目の知らせを出さない）。failed など他の印は消さない
+          if ((inflight.get(target) ?? 0) === 0) {
+            inflightIdle.delete(target);
+            if (target.stopped?.kind === "no_result") delete target.stopped;
+          }
           if (kind === "cap_result") {
             // task_result が返った = server が受け付けて実行した
             markObserved(target, entry, "task_result");

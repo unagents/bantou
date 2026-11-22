@@ -304,6 +304,8 @@ test("止まった印(返信待ちのまま止まった): 返信待ちが server
   st.results[0]({ bantou: 1, type: "error", ok: false, message: "task を断った" });
   await sleep(300);
   assert.deepEqual((mgr.summary("pm1").stopped ?? []).map((s) => s.kind), ["failed"]);
+  assert.doesNotMatch(mgr.summary("pm1").stopped?.[0].detail ?? "", /返信待ちのまま/, "no_result の印の detail が残っていない");
+  assert.equal(mgr.list()[0].stopped?.kind, "failed", "記録の印も failed だけ");
   assert.doesNotMatch(pushes(sent, "[bantou] remote 完了").slice(1).map((x) => x.text).join("\n"), /note: task の結果が返らないまま/);
 });
 
@@ -321,6 +323,8 @@ test("止まった印(返信待ちのまま止まった): 返信待ちが failed
   await sleep(300);
   const stopped = mgr.summary("pm1").stopped ?? [];
   assert.deepEqual(stopped.map((s) => s.kind), ["failed"], "印は failed だけ");
+  assert.doesNotMatch(stopped[0].detail ?? "", /返信待ちのまま/, "no_result の印の detail が残っていない");
+  assert.equal(mgr.list()[0].stopped?.kind, "failed", "記録の印も failed だけ");
   const done = pushes(sent, "[bantou] remote 完了");
   assert.equal(done.length, 2, "止まった知らせ 1 回 + 失敗の知らせ 1 回");
   assert.doesNotMatch(done[1].text, /note: task の結果が返らないまま/, "失敗の知らせに no_result の note は載らない");
@@ -343,4 +347,50 @@ test("止まった印(返信待ちのまま止まった): 古い status が来�
   await mgr.checkReachability(); // 連続 2 回目
   await tick();
   assert.equal(mgr.summary("pm1").stopped?.[0].kind, "no_result");
+});
+
+test("止まった印(返信待ちのまま止まった): 返信待ちが複数ある時、1 つが閉じても残っていれば no_result の印は消えず、知らせも増えない。全部閉じたら消える", async () => {
+  const { mgr, st, sent } = setup();
+  await mgr.send({ owner: "pm1", goal: "go-1" });
+  await mgr.send({ owner: "pm1", goal: "go-2" });
+  assert.equal(st.results.length, 2, "返信待ちが 2 つ開いている");
+  st.running = false;
+  st.queued = 0;
+  await mgr.checkReachability();
+  await sleep(5);
+  await mgr.checkReachability();
+  await tick();
+  assert.equal(mgr.summary("pm1").stopped?.[0].kind, "no_result");
+  assert.equal(pushes(sent, "[bantou] remote 完了").length, 1);
+  // 1 つ目が閉じる（cap は止まったまま）。2 つ目がまだ開いているので印は残る
+  st.results[0]({ bantou: 1, type: "error", ok: false, message: "返信が来ない（task）", transport: true });
+  await sleep(100);
+  assert.equal(mgr.summary("pm1").stopped?.[0].kind, "no_result", "返信待ちが残っているので印は消えない");
+  for (let i = 0; i < 3; i++) {
+    await sleep(5);
+    await mgr.checkReachability();
+  }
+  await tick();
+  assert.equal(pushes(sent, "[bantou] remote 完了").length, 1, "同じ止まりで 2 回目の知らせは出ない");
+  // 2 つ目も閉じる: 全部閉じたので印は消える
+  st.running = true;
+  st.results[1]({ bantou: 1, type: "error", ok: false, message: "返信が来ない（task）", transport: true });
+  await sleep(300);
+  assert.equal(mgr.summary("pm1").stopped, undefined, "返信待ちが全部閉じたので印は消える");
+});
+
+test("止まった印(返信待ちのまま止まった): 返信待ちが複数ある時、1 つが閉じても「連続」の数えは戻らない（残りの返信待ちで続きから数える）", async () => {
+  const { mgr, st, sent } = setup();
+  await mgr.send({ owner: "pm1", goal: "go-1" });
+  await mgr.send({ owner: "pm1", goal: "go-2" });
+  st.running = false;
+  st.queued = 0;
+  await mgr.checkReachability(); // idle 1 回目
+  st.results[0]({ bantou: 1, type: "error", ok: false, message: "返信が来ない（task）", transport: true }); // 1 つ閉じる。もう 1 つは開いたまま
+  await sleep(5);
+  assert.equal(mgr.summary("pm1").stopped, undefined);
+  await mgr.checkReachability(); // 数えが残っていれば 2 回目で印が付く（戻っていれば 1 回目になり付かない）
+  await tick();
+  assert.equal(mgr.summary("pm1").stopped?.[0].kind, "no_result");
+  assert.equal(pushes(sent, "[bantou] remote 完了").length, 1);
 });
