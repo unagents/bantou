@@ -128,6 +128,11 @@ export class PermanentMemoryError extends Error {}
 export interface MemorySink {
   /** Resolve when memory recorded the event or reported it as a duplicate. Throw to retry later; throw PermanentMemoryError to drop. */
   send(target: MemoryTarget, event: MemoryEvent): Promise<void>;
+  /**
+   * 引継ぎ（kind: handoff）の本文を memory の `handoff` tool で読む（eventId、agent = target の agentId）。
+   * 本文があれば `{ body }`、memory が「無い」（`eventId: null`）と答えたら `null`。届かない・拒否（isError）は投げる。
+   */
+  readHandoff?(target: MemoryTarget, eventId: string, timeoutMs?: number): Promise<{ body: string } | null>;
   close?(): Promise<void>;
 }
 
