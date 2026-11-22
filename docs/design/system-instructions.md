@@ -14,6 +14,8 @@ v2（2026-11-10）: worker の progress report は push されない（push は 
 
 3 つ目の部品は `memory`（2026-11-11）: 外部記憶（`settings.memory`）がある session だけに付く。起動時と判断の前に `mcp__memory__` の context / recall を呼ぶ運用の案内。書き込みは bantou が自動で渡すので自分では呼ばない（設計は `docs/design/external-memory.md`）。memory の設定が無い session では部品も label も出ず、出力は従来と同じ。
 
+`resession` 部品（2026-11-23 の改訂で v2。設計は `docs/design/resession.md` の 10.4）: 道具 `session_resession` が付く session（session 向けの窓口がある session）だけに付く（`when: ctx.resession === true`）。区切りがついた時に引継ぎの本文を `handoff` に渡して申告する決まりと、再起動後の最初の入力の扱いを書く。v2 では、最初の入力に center が渡した引継ぎの本文（取り出せなかった時はその事と置き場）が入っているので、common の [記録] の順に読んでから続ける、に一本化する（v1 にあった「外部記憶の `mcp__memory__handoff` で id から引く」分岐と、`memory` の有無による文の分岐は無くなる）。
+
 ## 並び
 
 ```

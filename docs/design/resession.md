@@ -18,7 +18,7 @@
 
 - リセッション = 「引継ぎを外部記憶に保存（外部記憶が無い・届かない時は決まったローカルの file）→ session の claude を `--continue` 無しで起動し直す（新しい会話） → center が引継ぎを外部記憶（または file）から取り出して新しい session に渡す」を、center が 1 つの操作として実行する事。**改訂: 新しい session が自分で引きに行く形はやめた（10 節）。**
 - 実行は center に新しい tool `session_resession`（session 自身が呼ぶ。session 向けの窓口 `/mcp/session`）を足して行う。tool は引継ぎを受けて即座に返り、再起動は **session の turn が終わってから** center が行う（tool の途中で自分の claude を止めない）。
-- 引継ぎの保存は center が memory へ書く（今の「session は memory に書かない」決まりを守る。書く主体は今と同じく center）。memory 側に引継ぎの種別と、そのまま読み出す口が要る（`docs/design/memory-requirement-spec.md` の #1・#10 の決定待ちの提案。6.2・7 節）。
+- 引継ぎの保存は center が memory へ書く（今の「session は memory に書かない」決まりを守る。書く主体は今と同じく center）。~~memory 側に引継ぎの種別と、そのまま読み出す口が要る（`docs/design/memory-requirement-spec.md` の #1・#10 の決定待ちの提案。6.2・7 節）。~~ **改訂: 0.1.61 で memory 側（`handoff` 種別・`handoff` tool）は実装済み。決定待ちではない（10.1・10.5）。読み出すのは center（10.3）。**
 - 画面は、center の出力キュー（core）が session の再起動をまたいで残る事【事実】を使い、リセッション前の表示をそのまま残し、再起動の直前に center が区切りの行を 1 行積む。区切りより後が新しい session の内容。center の再起動をまたぐ保持は別の手当てが要る（U5）。
 - 分かれ目は U1〜U9（8 節）。
 
@@ -102,7 +102,7 @@ session が申告する決まりは system 指示の部品に足す（`packages/
 - B: session が memory の書き込み tool を直接呼ぶ。今の決まり（`system-instructions.ts:186`）を変える。memory 側の書き込みの tool の公開範囲も変わる。
 - C: file（記録の置き場。common.md:15）に書き、memory には書かない。原文の「メモリで保存」と合わない。
 
-推奨: A。理由は原文どおり memory に残し、今の決まり（書くのは center だけ）を変えないため。memory が使えない（設定なし・届かない）時は center の状態置き場に file で残す（再起動後の読み出しも同じ file から。U3 の経路で拾う）。これは原文の制約ではなく、memory に届かない時に引継ぎを失わないための扱い。
+推奨: A。理由は原文どおり memory に残し、今の決まり（書くのは center だけ）を変えないため。memory が使えない（設定なし・届かない）時は center の状態置き場に file で残す（~~再起動後の読み出しも同じ file から。U3 の経路で拾う~~ → 改訂: file の置き場は session ごとの固定の path（10.2）。読み出すのは center で、`stored = "file"` の時だけ file を読む（10.3））。これは原文の制約ではなく、memory に届かない時に引継ぎを失わないための扱い。
 
 保存が済んでから再起動する（順序の約束）: 【事実】memory への送信は非同期のキューで、再試行で遅れうる（`docs/design/external-memory.md:57`）。再起動の前に、引継ぎの event が memory に受理された（または file に書けた）事を確かめる。受理されない間は再起動しない（失敗は session に tool の結果で返す）。
 
@@ -141,14 +141,15 @@ platform 側ではなく tool にする理由（原文の「toolかプラット�
 
 - 【事実】session の名前・memory の Agent ID・messenger の peer 名・remote の記録は再起動でも変わらない（2.1）。応対の継続に要る「状態」のうち、新しい会話に無いのは claude の会話だけ。引継ぎがそれを補う。
 - 引き方（U3）:
-  - A: center が、起動後に session へ最初の入力を 1 通送る。内容は「リセッションで始めた。引継ぎを memory から読んで続ける」旨と引継ぎの識別（id）。session が `mcp__memory__*` の読み出しの tool で引継ぎを引く（原文の「メモリから引っ張って来て」どおり、引くのは session）。
-  - B: center が memory（または file）から引継ぎの本文を読み、最初の入力にそのまま入れる。
-  - C: 起動のたびに system 指示で「最新の引継ぎを引く」と常に案内する（`--append-system-prompt` は再起動・`--continue` でも同じ値で、1 回きりにできない。`packages/center/src/remote-control.ts:315-318`）。
-- 推奨: A。ただし memory が無い・引けない時は B（file から本文を入れる）。理由は原文の動作（session が memory から引く）を基本にしつつ、引継ぎを失わない最小の後ろ盾を持つため。C は引継ぎを「読み終えた」印が無い限り、普通の再起動のたびに古い引継ぎを引いてしまう。
+  - ~~A: center が、起動後に session へ最初の入力を 1 通送る。内容は「リセッションで始めた。引継ぎを memory から読んで続ける」旨と引継ぎの識別（id）。session が `mcp__memory__*` の読み出しの tool で引継ぎを引く（原文の「メモリから引っ張って来て」どおり、引くのは session）。~~ **【U3 置換: 廃止。実装者は A を採らない】**
+  - B: center が memory（または file）から引継ぎの本文を読み、最初の入力にそのまま入れる。**【改訂後の主案。10.3・10.4】**
+  - ~~C: 起動のたびに system 指示で「最新の引継ぎを引く」と常に案内する（`--append-system-prompt` は再起動・`--continue` でも同じ値で、1 回きりにできない。`packages/center/src/remote-control.ts:315-318`）。~~ （引き続き採らない）
+- ~~推奨: A。ただし memory が無い・引けない時は B（file から本文を入れる）。理由は原文の動作（session が memory から引く）を基本にしつつ、引継ぎを失わない最小の後ろ盾を持つため。C は引継ぎを「読み終えた」印が無い限り、普通の再起動のたびに古い引継ぎを引いてしまう。~~
+- **改訂後の推奨: B（center が取り出して本文を渡す）。取り出し元は保存先（`stored`）の側 1 つ。`stored = "memory"` なら memory、`stored = "file"` なら file（10.3）。理由は利用者の指示（新しい session が自分で引きに行く形はやめる）。C は採らない。**
 - 最初の入力を送る時機: 【事実】core の入力は wrapper が繋がっていれば pty にそのまま流れる（`packages/center/src/http.ts:355-372` の `core.input`）。【事実】休止の設計 2.6 は、起動直後の入力が確定されず入力欄に残った実測（自己申告）を挙げ、「接続と `SessionStart` の hook を見るまで入力を断る」としている。本設計も、`SessionStart`（`source` が `startup`）の hook を受けてから送る。
-- 読み出しの口: 【事実】今の memory に「引継ぎをそのまま返す」口が無い（2.3）。`recall` / `context` は抽出後の記憶を返すので、引継ぎの全文が欠ける事がある【推測】。memory 側に「種別と識別で event の本文を返す」口が要る（7 節）。
-- 引継ぎは 1 回だけ使う: 渡した後、引継ぎに「渡し済み」を center が記録する（memory 側の印、または file の移動）。普通の再起動（`--continue`）では渡さない。
-- 注（原文の制約ではない）: 「1 回だけ使う」と「memory が無い・引けない時の B（center が本文を入力に入れる）」は、利用者が言っていない。前者は古い引継ぎを後の再起動で誤って引かないため、後者は引継ぎを失わないための、設計の提案。B を採らない場合、memory に届かない構成では引継ぎが渡らず、新しい会話は引継ぎ無しで始まる。
+- 読み出しの口: ~~【事実】今の memory に「引継ぎをそのまま返す」口が無い（2.3）。~~（2.3 の記述は当初の調査時点。0.1.61 では `handoff` tool が実装済み。10.1）`recall` / `context` は抽出後の記憶を返すので引継ぎの全文が欠ける事がある【推測】ため、`handoff` tool（id で本文をそのまま返す）を center が呼ぶ（10.5）。
+- 引継ぎは 1 回だけ使う: ~~渡した後、引継ぎに「渡し済み」を center が記録する（memory 側の印、または file の移動）。~~ 改訂: 「渡し済み」の記録は、center の process 内の印の削除と、`stored = "file"` の時の file の `deliveredAt` だけ（memory 側の印・file の移動はしない。10.2）。普通の再起動（`--continue`）では渡さない。
+- 注（原文の制約ではない）: 「1 回だけ使う」は、利用者が言っていない。古い引継ぎを後の再起動で誤って渡さないための、設計の提案。~~後者（memory が無い・引けない時の B）~~ center が本文を渡す B は、改訂で利用者の指示になった。
 
 ### 3.5 リセッション前のやり取りを画面に残し、最終行から後を新しい session の内容にする（原文: 出来れば）
 
@@ -186,7 +187,7 @@ platform 側ではなく tool にする理由（原文の「toolかプラット�
 | `packages/center/src/remote-control.ts` | 変更なし見込み。`start(name)`（`resume` 無し）がそのまま「新しい会話」。区切りの行は `core.push` |
 | `packages/center/src/daemon.ts` | `onHook` の `Stop` / `SessionStart` でリセッション待ち・最初の入力を扱う |
 | `packages/center/src/memory-events.ts` / `memory.ts` | 引継ぎの event を書く（種別 `handoff`）。受理の確認を待てる形 |
-| `packages/memory/`（spec の #1・#10 の決定待ち） | event の種別 `handoff` の追加（`server/utils/events.ts:4` と `migrations/001_init.sql:25` の CHECK）と、引継ぎを返す読み出しの口 |
+| `packages/memory/`（当初は spec の #1・#10 の決定待ち。**0.1.61 で実装済み**。10.1） | event の種別 `handoff` の追加（`server/utils/events.ts:4` と `migrations/001_init.sql:25` の CHECK）と、引継ぎを返す読み出しの口 |
 | `packages/center/src/system-instructions.ts` | 申告の決まりの部品（U7） |
 
 ## 6. 既存の別設計との関係
@@ -217,19 +218,19 @@ platform 側ではなく tool にする理由（原文の「toolかプラット�
 
 #### この設計書が spec に求める事・spec から受ける事
 
-- spec の順序（spec:285、:376）に従い、引継ぎの `handoff` 種別と読み出しの口は **spec の #1・#10 の決定待ち**とする。この設計書の center 側（tool `session_resession`、保存の受理待ち、`stop` → `start`、最初の入力、区切りの行）は、memory 側の形が変わっても動かし方が変わらない。memory 側の形に依存するのは「保存の呼び方」と「読み出しの口の名前」だけ。
+- spec の順序（spec:285、:376）に従い、~~引継ぎの `handoff` 種別と読み出しの口は **spec の #1・#10 の決定待ち**とする。~~（当初の扱い。**改訂: 0.1.61 で `handoff` 種別・`handoff` tool は実装済み。spec の #1・#10 の結論に依らず動いている。10.1**）この設計書の center 側（tool `session_resession`、保存の受理待ち、`stop` → `start`、最初の入力、区切りの行）は、memory 側の形が変わっても動かし方が変わらない。memory 側の形に依存するのは「保存の呼び方」と「読み出しの口の名前」だけ。
 - 引継ぎが spec の #1 で item の型に入る結論になった場合: 上の表の 3 点（本文の欠落・長さ・`confirmed`）への対処が spec 側に要る。対処できない間は、event の `handoff` を素材として残し、item はそこから抽出に任せる形（U9 の「渡す」）で足りる。
 - 「書くのは center」の決まり（`packages/center/src/system-instructions.ts:186`）はそのまま。spec は書き込みの担い手を #5 で扱うが（spec:174-183）、案 B（master-cap が tool で登録）が選ばれると session が memory に書く経路ができる。その時は U2 の B が選べるようになる。
 - 要確認（利用者）: spec の #1 を先に決めるか、`handoff` の event 種別だけ先に足すか（U2 の選択に含める）。
 
-## 7. memory 側に求める事（引継ぎの保存と読み出し。spec の #1・#10 の決定待ち。6.2）
+## 7. memory 側に求める事（当初の求め。0.1.61 で実装済み。10.1。6.2）
 
 > 改訂: 0.1.61 の memory は 7 節の求めをすべて満たしている（10.1）。改訂で memory 側に足す変更は無い（10.5）。
 
-- 種別 `handoff` の event を受ける。変更は 2 か所: zod の `EVENT_KINDS`（`packages/memory/server/utils/events.ts:4`）と、DB の CHECK（`packages/memory/migrations/001_init.sql:25` の `kind IN (…)`。migration が要る）。【事実】今の種別は 6 つで、どちらも固定の列挙。
-- 識別（agent + 引継ぎの id）で本文をそのまま返す読み出しの口。抽出（LLM）を通さない。【推測】event の本文は DB に生で入っている（`packages/memory/server/utils/events.ts:34-36` の insert。本文の上限は `:20` の 65536 文字）ので、口を足せば返せる。item に載せない理由は 6.2 の表。
+- 種別 `handoff` の event を受ける。変更は 2 か所: zod の `EVENT_KINDS`（`packages/memory/server/utils/events.ts:4`）と、DB の CHECK（`packages/memory/migrations/001_init.sql:25` の `kind IN (…)`。migration が要る）。~~【事実】今の種別は 6 つで、どちらも固定の列挙。~~（当初の記述。今は `handoff` を含む 7 つ。実装済み）
+- 識別（agent + 引継ぎの id）で本文をそのまま返す読み出しの口。抽出（LLM）を通さない。~~口を足せば返せる【推測】~~ **実装済み**（`handoff` tool。10.1）。item に載せない理由は 6.2 の表。呼ぶのは session でなく center（10.3・10.5）。
 - 受理を center が待てる事（`event` tool の応答。`recorded` / `duplicate`、`events.ts:29`）。
-- 引継ぎが「使用済み」かを持てる事（なければ center の側で持つ）。
+- ~~引継ぎが「使用済み」かを持てる事（なければ center の側で持つ）。~~ 改訂: memory 側に使用済みの印は持たない。center の process 内の印の削除と、file の時の `deliveredAt` だけ（10.2）。
 - 抽出に渡すか・Graphiti の outbox に積むか（U9）。
 - ここまでが memory の変更。bantou の center は、memory の設定が無い構成でも file で動く（3.2）。
 
@@ -256,7 +257,7 @@ platform 側ではなく tool にする理由（原文の「toolかプラット�
 - B: center が本文を最初の入力に入れる。利点: 確実。欠点: 本文が center を通る（長いと入力が大きい）。原文の「引っ張って来て」と少し違う。
 - C: 常に system 指示で案内する。利点: 入力を送らない。欠点: 1 回きりにできない。普通の再起動でも引く。
 - 推奨（旧）: A。memory が使えない時の後ろ盾に B。
-- **改訂（利用者の指示）: 新しい session が自分で引きに行く形（A）はやめる。center が取り出して渡す（B を主にする。取り出し元は memory → file の順、10.3）。C は引き続き採らない。**
+- **改訂（利用者の指示）: 新しい session が自分で引きに行く形（A）はやめる。center が取り出して渡す（B を主にする。取り出し元は保存先（`stored`）の側 1 つ。memory に保存した引継ぎは memory から、file に保存した引継ぎは file から。10.3）。C は引き続き採らない。**
 
 ### U4 再起動の時機
 
@@ -324,21 +325,25 @@ platform 側ではなく tool にする理由（原文の「toolかプラット�
 
 #### U13 取り出しの待ち時間と再試行
 
-- A: 既存の値を流用する（memory の呼びの timeout は `MEMORY_CALL_TIMEOUT_MS` = 15 秒、`packages/center/src/memory.ts`。書く側の受理待ちは 20 秒）。再試行はしない。取り出せなければ「取り出せなかった」。利点: 新しい値を決めない。欠点: 一時的な不通でも取り出せなかったになる。
-- B: 再試行を足す（回数・間隔は利用者が決める）。利点: 一時的な不通に強い。欠点: 再起動後の最初の入力が遅れる。
-- 推奨: A。
+【事実】待ちの今の作り。読む口はまだ無いので、書く側の値を示す。memory の呼びの timeout `MEMORY_CALL_TIMEOUT_MS` = 15 秒（`packages/center/src/memory.ts:322`）は `callTool` の `timeout` として渡る（`:368`）。接続（`connect` の中の `client.connect`、`:341`）には timeout を渡していない。引継ぎを **書く** `handoff`（`memory-events.ts:227`）は、接続と `callTool` の全体を 20 秒の `Promise.race` で囲んでいる（`:243-249`）。読む側を同じ形にしなければ、接続が詰まった時に取り出しが終わらず、`deliver`（最初の入力）が待ち続けうる（今の設計では `deliver` 側に上限が無い）。以下の秒数・回数は **既存の値**で、この改訂で新しく決めた値ではない。
+
+- A: 書く側の `handoff` と同じ形にする。接続と `callTool` の全体を、既存の書く側の待ち（20 秒）で囲む。再試行はしない。時間切れ・失敗は「取り出せなかった」にして `deliver` へ渡す。`deliver` 側には別の上限を持たない。利点: 新しい値を決めない。接続が詰まっても最初の入力が送られる。欠点: 一時的な不通でも取り出せなかったになる。
+- B: `callTool` の 15 秒だけ（接続は囲まない）。利点: 読みの口が簡単。欠点: 接続が詰まった時に最初の入力がいつまでも遅れうる。
+- C: A に加え、再試行を足す（回数・間隔は利用者が決める）。利点: 一時的な不通に強い。欠点: 再起動後の最初の入力が遅れる。
+- D: 取り出しの長さと別に、`deliver` が最初の入力を送るまでの上限を持つ（値は利用者が決める）。利点: 取り出しがどうなっても遅れの上限が決まる。欠点: 新しい上限が増える。
+- 推奨: A（新しい値を決めず、接続の詰まりでも最初の入力が止まらない）。C・D は利用者が値を決める場合の案。
 
 #### U14 渡した後の file の扱い
 
-- A: 残して `deliveredAt` を書く（今と同じ）。次の保存で上書き。利点: 何を渡したか後で分かる。取り出しは id が合う時だけなので、古い file は使われない。欠点: 本文が file に残る。
-- B: 渡した後に消す。利点: 本文が残らない。欠点: 渡したかの記録が file から無くなる（log には残る）。
+- A: 残して `deliveredAt` を書く（今と同じ）。次の保存で上書き。**file に残るのは `stored = "file"` の時だけ**（`stored = "memory"` の時は file を書かないので残る物が無い。10.2 の表）。利点: 何を渡したか後で分かる。取り出しは id が合う時だけなので、古い file は使われない。欠点: 本文が file に残る。
+- B: 渡した後に消す（`stored = "file"` の時の file）。利点: 本文が残らない。欠点: 渡したかの記録が file から無くなる（log には残る）。
 - 推奨: A。
 
 #### U15 session から `mcp__memory__handoff` を外すか
 
 - A: 残す（system 指示から「引け」の文を消すだけ。tool は session から呼べる）。利点: memory 側の変更が要らない。利用者・別の session が手で確かめられる。欠点: session が自分で引ける口が残る（指示では引かせない）。
 - B: session に見せない（memory 側で公開範囲を分ける変更）。利点: 「自分で引きに行く」口が無くなる。欠点: memory 側の変更・test が要る。
-- 推奨: A。
+- 推奨: A。理由: 利用者の「新しい session が自分で引きに行く形はやめる」を、**引継ぎの渡し方（center が本文を渡す。session に引かせる指示・最初の入力の案内をやめる）の事**と解釈しているため。tool を session から外せとは言われていないので、memory 側の公開範囲は変えない。「session が tool を呼べる事自体も止める」意味なら B になる（利用者の確認が要る）。
 
 #### U16 引継ぎの本文の長さの上限
 
@@ -399,15 +404,26 @@ file の置き場（決める事）: `<center の状態 dir>/handoffs/<session �
 | memory にも file にも保存できない | tool が失敗を返す。再起動しない。元の会話が続く |
 | 保存の後〜turn の終わりに center が再起動 | 印が消え、再起動は起きず元の会話が続く（U8 の B。維持）。memory に保存済みの引継ぎは使われずに残る。file の引継ぎも残る（次の保存で上書き） |
 
+保存先ごとの記録の扱い（`records` の Map・`record()`・`deliveredAt`。今は `writeRecord` が `records.set` と file 書きを常に行う。改訂後）:
+
+| 保存先 | `records` の Map・`record(session)` | file | `deliveredAt` |
+|---|---|---|---|
+| `stored = "memory"` | 積まない（`record()` は `undefined`） | 書かない | 記録しない。渡した事は log（`リセッションの最初の入力を送った`）と、process 内の印の削除だけ |
+| `stored = "file"` | 積む（file と同じ内容） | 書く（本文入り） | 渡した後に file へ書く（Map も同じ） |
+
+3.4 の「渡し済みを記録する（memory 側の印、または file の移動）」との関係: 改訂後の「渡し済み」は、上の表のとおり process 内の印の削除（1 回だけ使う）と、`stored = "file"` の時の `deliveredAt` だけ。memory 側の印・file の移動はしない。`record()` は今呼ぶ所が無く（10.1）、この改訂でも呼び先は増やさない。
+
 ### 10.3 取り出しの順（center が行う）
 
 center の process 内の印（`Mark`）が、保存先（`stored`）と id を持っている（`request` が付ける。今と同じ）。取り出しは印を元に行う:
 
-1. `stored = "memory"`: 外部記憶から id で本文を読む（memory の `handoff` tool。10.5）。取り出せた → 本文を渡す。
-2. 取り出せなかった・無かった: `stored = "file"` ならこの file を読む。`stored = "memory"` でも、置き場の file に **同じ id** の引継ぎがあればそれを使う（U11 の A の通常運用では無い。B を採った時の後ろ盾）。id が違う file は使わない（古い引継ぎを渡さない）。
-3. どちらでも取り出せなかった: 「取り出せなかった」として扱う（10.4 の失敗の文）。
+取り出し元は **保存先（`stored`）の側 1 つだけ**（これが取り出しの順の正。U3 の項・10.6・10.8 も同じ）:
 
-`stored = "file"` の時は、1 を飛ばして file を読む。
+1. `stored = "memory"`: 外部記憶から id で本文を読む（memory の `handoff` tool。10.5）。取り出せた → 本文を渡す。取り出せなかった・無かった → 3 へ。
+2. `stored = "file"`: 置き場の file を読み、**file の `id` が印の id と同じ時だけ**使う（古い引継ぎを渡さない）。読めない・id が違う → 3 へ。
+3. 取り出せなかった: 「取り出せなかった」として扱う（10.4 の失敗の文）。
+
+例外（U11 で B「memory に保存できた時も file に写す」を採った時だけ）: 1 で取り出せなかった時に、file に **同じ id** の引継ぎがあればそれを使う。U11 が A（推奨。写さない）なら、`stored = "memory"` の時に file は読まない。
 
 取り出す時機: `run`（`Stop` の後、再起動の直前）で取り出しを始め、`restartFresh` の間に並行して進め、`deliver`（`SessionStart` の後）が結果を待つ。取り出しは投げない（失敗は「取り出せなかった」の結果にして `deliver` へ渡す）。取り出しが長引いても再起動は待たない。待ち時間・再試行は U13。
 
@@ -450,7 +466,7 @@ center の process 内の印（`Mark`）が、保存先（`stored`）と id を�
 |---|---|
 | U1（判定: 自己申告 + 安全確認） | 維持 |
 | U2（保存: center が memory に書く、届かなければ file） | **維持・確定**。「届かない時の file」の置き場を決めた（10.2）。U2 の B・C は引き続き採らない |
-| U3（引き方） | **置換**。A「session が引く」は廃止。B「center が本文を渡す」を主にし、取り出し元を memory → file の順にする。C は引き続き採らない |
+| U3（引き方） | **置換**。A「session が引く」は廃止。B「center が本文を渡す」を主にし、取り出し元は保存先（`stored`）の側 1 つ（10.3）。C は引き続き採らない |
 | U4（再起動の時機: 次の `Stop`） | 維持 |
 | U5（表示の保持: 今のキュー） | 維持 |
 | U6（再起動の間の message） | 維持（未解決のまま。実装の時に決める） |
@@ -464,7 +480,7 @@ center の process 内の印（`Mark`）が、保存先（`stored`）と id を�
 |---|---|---|---|
 | W1 | center: `packages/center/src/memory.ts`・`memory-events.ts` | `MemorySink` に読みの口を足す。`CenterMemoryEvents` に `readHandoff(session, id, timeoutMs?)`（戻り: `"none"`（memory の設定なし）／ 本文 ／ 「無い」。届かない・拒否は投げる）を足す。`handoff`（書く）の隣 | W2 と並行できる（`readHandoff` の型を先に合わせる） |
 | W2 | center: `packages/center/src/resession.ts`・`daemon.ts` | file は memory に保存できなかった時だけ書く。`deps` に `readFromMemory` を足し、取り出し（10.3）と最初の入力（10.4）を組む。`firstInputText` を改訂。`daemon.ts` の配線 | W1 の型が決まれば並行 |
-| W3 | center: `packages/center/src/system-instructions.ts` | `RESESSION_USAGE` を v2 に（10.4） | 独立 |
+| W3 | center: `packages/center/src/system-instructions.ts`・`packages/center/src/tools.ts`・docs | (a) `RESESSION_USAGE` を v2 に（10.4）。(b) tool `session_resession` の `description`（`tools.ts:414-421`）を v2 の挙動に直す: 「起動し直した最初の入力で引継ぎの id が知らされる」→「最初の入力で center が引継ぎの本文（取り出せなかった時はその事と置き場）を渡す」。返り値 `stored` の説明は「memory = 外部記憶に保存 / file = 外部記憶に届かず center の file に保存。どちらも center が保存先から取り出して渡す」と、取り出しが center の仕事である事が分かる形にする。`inputSchema` は変えない。(c) `docs/design/system-instructions.md` に `resession` 部品（v2）の記述を足す（今この doc に `resession` の記述は無い。版の扱いは同 doc の「変更の手順」: 文面を直す → `version` を上げる → test を更新 → `docs/design` を直す）。(d) `tools.ts` の description を検査する test があれば更新する | 独立（a・b・c は文面の一貫のため同じ担当が望ましい） |
 | W4 | memory | 変更なし。確認だけ（`handoff` tool が center の呼びで返る事） | — |
 | W5 | desktop / ui | 変更なし | — |
 | W6 | test | 下の 10.8。W1〜W3 に付く | 各単位と同時 |
@@ -473,7 +489,7 @@ center の process 内の印（`Mark`）が、保存先（`stored`）と id を�
 
 - 保存の順: memory に受理 → file を書かない。memory が `"none"`／投げる → file に本文入りで書く。どちらも書けない → `request` が断る・印が付かない・再起動しない。
 - file の置き場: `<dir>/<session>.json`。session ごとに別。同じ session の 2 回目の保存で上書き。`.tmp` が残らない。
-- 取り出しの順: `stored = "memory"` → memory から読む（`mark.body` を使わない事を、`mark.body` と memory の本文を変えて確かめる）。memory が届かない・無い → 同じ id の file があればそれ、無ければ「取り出せなかった」。id の違う file は使わない。`stored = "file"` → file から読む（`mark.body` を使わない事を、file の本文を差し替えて確かめる）。
+- 取り出しの順: `stored = "memory"` → memory から読む（`mark.body` を使わない事を、`mark.body` と memory の本文を変えて確かめる）。memory が届かない・無い → 「取り出せなかった」（`stored = "memory"` で file を読まない。U11 が B の時だけ、同じ id の file があればそれを使う）。`stored = "file"` → file から読む（id が印と違う file は使わない）（`mark.body` を使わない事を、file の本文を差し替えて確かめる）。
 - 渡し方: 取り出せた時の最初の入力に本文が入り、「`handoff` を呼べ」の文が無い。取り出せなかった時に、理由・置き場（保存した方を先）が入り、token・url・header が入らない。bracketed paste と Enter の順・`SessionStart`（`startup`）の後にだけ送る（今の test を維持）。
 - 取り出しが投げない: memory が例外・timeout でも `deliver` に結果が届き、最初の入力が送られる。取り出しが `restartFresh` を待たせない。
 - 1 回だけ: 渡した後に印が消える。2 回目の `SessionStart` では送らない。file に `deliveredAt`。
