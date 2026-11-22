@@ -12,7 +12,7 @@ export type HexDigest = (s: string) => string;
 
 // -- event ---------------------------------------------------------------------------------------------------------
 
-export type MemoryEventKind = "user_prompt" | "assistant_message" | "task" | "result" | "report" | "reply";
+export type MemoryEventKind = "user_prompt" | "assistant_message" | "task" | "result" | "report" | "reply" | "handoff";
 
 export interface MemoryParty {
   session?: string;

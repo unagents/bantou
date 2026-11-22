@@ -117,6 +117,12 @@ export interface SessionManager {
   sleep(name: string): Promise<SessionInfo>;
   /** スリープ中の session を元の会話のまま起こす（resume）。眠っていなければ何もしない（今の状態を返す）。 */
   wake(name: string): Promise<SessionInfo>;
+  /**
+   * リセッションの再起動: claude を止め、`--continue` 無し（新しい会話）で起動し直す。session_create で作った session のみ。眠っている session は不可。
+   * 止めてから新しい claude が接続するまでの間は、スリープと同じ messenger の身代わりを置く（取りこぼしを防ぐ。設計 U6 の A）。
+   * 起動に失敗したら投げる（身代わりは外す。元の会話は残っているので、次の起動（restore・wake）は `--continue` で元の会話に戻る）。
+   */
+  restartFresh(name: string): Promise<SessionInfo>;
   list(): SessionInfo[];
 }
 
@@ -904,6 +910,23 @@ export function createSessionManager(opts: {
         opts.events?.publish({ reason: "sleep", name });
         log(`session 起床: ${name}`);
         return info(await settle(name, st));
+      }),
+
+    restartFresh: (name) =>
+      serial(async () => {
+        const rec = savedOrThrow(name);
+        if (rec.sleeping === true) throw new Error(`眠っている session は再起動しない: ${name}`);
+        await supervisor.stop(name);
+        // 止めてから新しい claude の接続までの間の message を身代わりが預かる
+        notifySleep(name, true);
+        try {
+          const st = await supervisor.start(name);
+          opts.events?.publish({ reason: "restarted", name });
+          log(`session リセッション再起動（新しい会話）: ${name}`);
+          return info(await settle(name, st));
+        } finally {
+          notifySleep(name, false);
+        }
       }),
 
     list: () => supervisor.list().map(info),

@@ -40,7 +40,7 @@ test("master-cap-role: session 名が入り、作業は remote-cap に回す旨�
 });
 
 test("master-cap-availability: 2 つ目に並び、いつでも受けられる・remote_send・background・turn を塞がない旨がある。label は master-cap-availability@2", () => {
-  assert.equal(SYSTEM_INSTRUCTION_PARTS.length, 5);
+  assert.equal(SYSTEM_INSTRUCTION_PARTS.length, 6);
   assert.equal(SYSTEM_INSTRUCTION_PARTS[0], BASE_SPEC);
   assert.equal(SYSTEM_INSTRUCTION_PARTS[1], MASTER_CAP_ROLE);
   assert.equal(SYSTEM_INSTRUCTION_PARTS[2], MASTER_CAP_AVAILABILITY);
@@ -154,4 +154,13 @@ test("生成物: instructions.generated.ts は md と一致する（md を直し
 test("基盤仕様: 3 層共通の md は server の指示文の元と同じ内容（server の md は共通の文面を持たない）", () => {
   const serverGen = readFileSync(new URL("../../server/server/utils/bantou/instructions.generated.ts", import.meta.url), "utf8");
   assert.ok(serverGen.includes(JSON.stringify(COMMON_MD)));
+});
+
+test("resession: session_resession が付く session（resession: true）だけに付く。申告の条件と引継ぎの引き方がある", async () => {
+  const { RESESSION_USAGE } = await import("../src/system-instructions.js");
+  assert.equal(partLabel(RESESSION_USAGE), "resession@1");
+  assert.ok(!applicableParts({ session: "s" }).includes(RESESSION_USAGE));
+  assert.ok(applicableParts({ session: "s", resession: true }).includes(RESESSION_USAGE));
+  const t = RESESSION_USAGE.text({ session: "s", resession: true });
+  for (const w of ["session_resession", "handoff", "mcp__memory__handoff", "返事を待っている時", "turn を終える"]) assert.ok(t.includes(w), w);
 });
