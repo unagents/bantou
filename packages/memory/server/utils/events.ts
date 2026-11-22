@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { Db } from "./db";
 
-export const EVENT_KINDS = ["user_prompt", "assistant_message", "task", "result", "report", "reply"] as const;
+export const EVENT_KINDS = ["user_prompt", "assistant_message", "task", "result", "report", "reply", "handoff"] as const;
 
 // PostgreSQL の text は NUL を保存できない。DB error（500 相当）にせず入力検証で弾く
 const noNul = (s: string) => !s.includes("\u0000");
@@ -23,6 +23,7 @@ export const eventShape = {
     .refine((s) => Date.parse(s) <= Date.now() + DAY_MS, "at は現在から 1 日より先にできない")
     .describe("発生時刻（ISO 8601）"),
 };
+export const handoffShape = { eventId: id128.describe("引継ぎの event の eventId（リセッションの最初の入力に書いてある）") };
 export const eventSchema = z.object(eventShape);
 export type EventInput = z.infer<typeof eventSchema>;
 
@@ -33,8 +34,8 @@ export async function recordEvent(db: Db, agentId: string, raw: unknown): Promis
     const ins = await q.query(
       `INSERT INTO memory_events
          (agent_id, event_id, sender_session, sender_cap_id, sender_worker_id,
-          recipient_session, recipient_cap_id, recipient_worker_id, remote_id, task_id, kind, body, at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+          recipient_session, recipient_cap_id, recipient_worker_id, remote_id, task_id, kind, body, at, processed_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, CASE WHEN $11 = 'handoff' THEN now() END)
        ON CONFLICT (agent_id, event_id) DO NOTHING
        RETURNING event_id`,
       [
@@ -55,6 +56,8 @@ export async function recordEvent(db: Db, agentId: string, raw: unknown): Promis
       }
       return { status: "duplicate" as const, eventId: e.eventId };
     }
+    // handoff（リセッションの引継ぎ）は抽出（processed_at を立てて対象から外す）にも Graphiti にも渡さない（設計 U9 の B）。id で引く口（handoff tool）だけで読む
+    if (e.kind === "handoff") return { status: "recorded" as const, eventId: e.eventId };
     // Graphiti 同期用 Outbox（同じ transaction。event_id が冪等キー）。反映は Phase 2
     await q.query(
       `INSERT INTO outbox_events (agent_id, topic, idempotency_key, payload)
@@ -62,5 +65,18 @@ export async function recordEvent(db: Db, agentId: string, raw: unknown): Promis
       [agentId, e.eventId, JSON.stringify({ eventId: e.eventId, kind: e.kind, at: e.at })],
     );
     return { status: "recorded" as const, eventId: e.eventId };
+  });
+}
+
+/** 引継ぎ（kind = handoff の event）の本文を、抽出を通さずそのまま返す。自分の agent の分だけ。無ければ null */
+export async function readHandoff(db: Db, agentId: string, raw: unknown): Promise<{ eventId: string; at: string; body: string } | null> {
+  const { eventId } = z.object(handoffShape).parse(raw);
+  return db.withAgent(agentId, async (q) => {
+    const r = await q.query<{ body: string; at: Date | string }>(
+      "SELECT body, at FROM memory_events WHERE agent_id = $1 AND event_id = $2 AND kind = 'handoff'",
+      [agentId, eventId],
+    );
+    const row = r.rows[0];
+    return row ? { eventId, at: new Date(row.at).toISOString(), body: row.body } : null;
   });
 }

@@ -3,7 +3,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { DIM, closedPortUrl, fakeChat, fakeEmbedder, fakeVector, ev, startFakeOllama, type TestDb } from "./fakes.ts";
-import { recordEvent } from "../../server/utils/events.ts";
+import { readHandoff, recordEvent } from "../../server/utils/events.ts";
 import { extractAll, extractForAgent } from "../../server/utils/extract.ts";
 import { EMBED_SINGLE_RUNS, EMBED_SQL_TIMEOUT_MS, EmbedUnreachableError, createEmbedGate, createEmbedState, createOllamaEmbedder, createQueryEmbedder, embedBacklog, embedPending, type Embedder } from "../../server/utils/embed.ts";
 import { STATUS_SQL_TIMEOUT_MS, buildStatus } from "../../server/utils/status.ts";
@@ -43,6 +43,27 @@ async function run(agent: string, chat: ReturnType<typeof fakeChat>) {
   await embedPending(t.db, agent, emb);
   return s;
 }
+
+test("handoff: 受理される・抽出と outbox に渡らない・id で本文がそのまま引ける・他の agent には見えない（migration 005）", async () => {
+  const a = newAgent();
+  const b = newAgent();
+  const body = "引継ぎ\n仕掛かり: x\n" + "あ".repeat(5000);
+  assert.deepEqual(await recordEvent(t.db, a, ev({ eventId: "ho-1", kind: "handoff", body })), { status: "recorded", eventId: "ho-1" });
+  assert.deepEqual(await recordEvent(t.db, a, ev({ eventId: "ho-1", kind: "handoff", body })), { status: "duplicate", eventId: "ho-1" });
+  const row = await t.asSuper(async (sq) => ({
+    ev: (await sq.query<{ processed: boolean }>("SELECT processed_at IS NOT NULL AS processed FROM memory_events WHERE agent_id = $1 AND event_id = 'ho-1'", [a])).rows[0],
+    ob: (await sq.query<{ c: string }>("SELECT count(*)::text AS c FROM outbox_events WHERE agent_id = $1", [a])).rows[0]!.c,
+  }));
+  assert.equal(row.ev?.processed, true);
+  assert.equal(row.ob, "0");
+  const got = await readHandoff(t.db, a, { eventId: "ho-1" });
+  assert.equal(got?.body, body);
+  assert.equal(await readHandoff(t.db, b, { eventId: "ho-1" }), null);
+  assert.equal(await readHandoff(t.db, a, { eventId: "nothing" }), null);
+  // 他の kind の event は引継ぎとして引けない
+  await recordEvent(t.db, a, ev({ eventId: "not-ho", kind: "task" }));
+  assert.equal(await readHandoff(t.db, a, { eventId: "not-ho" }), null);
+});
 
 test("event: 冪等（同じ eventId は 1 件・2 回目は duplicate）、outbox は 1 件", async () => {
   const a = newAgent();
