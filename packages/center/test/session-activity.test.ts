@@ -233,3 +233,70 @@ test("tracker: SessionStart の compact は何も変えない。壊れた入力�
   assert.equal(view(t).activity, "working");
   for (const v of [null, "x", [], 1, ev("SessionEnd"), ev("Foo")]) assert.equal(t.apply("a", v, "S1"), false);
 });
+
+// --- subagent の数え方: Stop / SubagentStop の background_tasks が正本、Start / Stop は agent_id 単位の補助 ---------------
+
+const subTask = (id: string) => ({ id, type: "subagent", status: "running", agent_type: "general-purpose" });
+
+test("(a) Stop の snapshot に居る subagent に、別の SubagentStart / SubagentStop が重なっても、先に動いていた subagent は数え続ける", () => {
+  const t = fresh();
+  t.apply("a", ev("Stop", { background_tasks: [subTask("X")] }), "S1");
+  assert.equal(view(t).background.subagents, 1);
+  t.apply("a", ev("SubagentStart", { agent_id: "a", agent_type: "Explore" }), "S1");
+  assert.equal(view(t).background.subagents, 2, "snapshot の 1 + 後から始まった 1");
+  // a が終わる。snapshot には X だけが残る
+  t.apply("a", ev("SubagentStop", { agent_id: "a", agent_type: "Explore", background_tasks: [subTask("X")] }), "S1");
+  assert.equal(view(t).background.subagents, 1, "X が動いているので進行中のまま");
+  // snapshot が終わった subagent 自身（agent_id と同じ id）を含んでいても数えない
+  t.apply("a", ev("SubagentStart", { agent_id: "b" }), "S1");
+  t.apply("a", ev("SubagentStop", { agent_id: "b", background_tasks: [subTask("X"), subTask("b")] }), "S1");
+  assert.equal(view(t).background.subagents, 1);
+  // snapshot の無い SubagentStop（古い claude）でも、Start を見ていない agent の Stop は X を減らさない
+  t.apply("a", ev("SubagentStop", { agent_id: "ghost" }), "S1");
+  assert.equal(view(t).background.subagents, 1);
+});
+
+test("(b) SubagentStart だけで SubagentStop が来なくても（resume・teammate の message 処理）、次の Stop / SubagentStop の snapshot で数え直される", () => {
+  const t = fresh();
+  t.apply("a", ev("SubagentStart", { agent_id: "teammate", agent_type: "teammate" }), "S1");
+  assert.equal(view(t).background.subagents, 1, "Stop が来るまでは動いているとみなす");
+  t.apply("a", ev("Stop", { background_tasks: [] }), "S1");
+  assert.equal(view(t).background.subagents, 0, "Stop の snapshot が正");
+  t.apply("a", ev("SubagentStart", { agent_id: "resumed" }), "S1");
+  t.apply("a", ev("SubagentStart", { agent_id: "other" }), "S1");
+  t.apply("a", ev("SubagentStop", { agent_id: "other", background_tasks: [] }), "S1");
+  assert.equal(view(t).background.subagents, 0, "SubagentStop の snapshot（親 session 全体の in-flight）が正");
+});
+
+test("(c) Start の無い SubagentStop（内部 agent: prompt suggestions・/btw）は、動いている他の subagent の数を減らさない", () => {
+  const t = fresh();
+  t.apply("a", ev("Stop", { background_tasks: [subTask("X"), subTask("Y")] }), "S1");
+  assert.equal(view(t).background.subagents, 2);
+  // 内部 agent の SubagentStop。snapshot には X・Y が居る / 古い claude では snapshot が無い
+  t.apply("a", ev("SubagentStop", { agent_id: "internal", agent_type: "", background_tasks: [subTask("X"), subTask("Y")] }), "S1");
+  assert.equal(view(t).background.subagents, 2);
+  t.apply("a", ev("SubagentStop", { agent_id: "internal2", agent_type: "" }), "S1");
+  assert.equal(view(t).background.subagents, 2);
+  assert.equal(view(t).activity, "idle");
+});
+
+test("(c) background の shell も、subagent の SubagentStop の snapshot で置き換わる（subagent の数は変えない）", () => {
+  const t = fresh();
+  t.apply("a", ev("Stop", { background_tasks: [subTask("X"), { id: "sh", type: "shell", status: "running" }] }), "S1");
+  t.apply("a", ev("SubagentStop", { agent_id: "internal", background_tasks: [subTask("X")] }), "S1");
+  assert.deepEqual(view(t).background, { subagents: 1, tasks: 0 }, "shell が終わった後の snapshot");
+});
+
+test("hook 設定が起動時に作られる既存 session（SubagentStart / Stop が来ない）でも、Stop の snapshot で作業進行中が分かる", () => {
+  // hook の設定は claude の起動時に `--settings` で渡される。center を更新した後も、動いたままの session は旧 event の組（SubagentStart / Stop 無し）のまま
+  const t = fresh();
+  t.apply("a", ev("UserPromptSubmit"), "S1");
+  t.apply("a", ev("PostToolUse", { tool_name: "Agent" }), "S1");
+  t.apply("a", ev("Stop", { background_tasks: [subTask("X"), { id: "sh", type: "shell", status: "running" }] }), "S1");
+  assert.equal(view(t).activity, "idle");
+  assert.deepEqual(view(t).background, { subagents: 1, tasks: 1 }, "Stop の snapshot だけで進行中");
+  // 次の turn が終わって空になれば消える
+  t.apply("a", ev("UserPromptSubmit"), "S1");
+  t.apply("a", ev("Stop", { background_tasks: [] }), "S1");
+  assert.deepEqual(view(t).background, { subagents: 0, tasks: 0 });
+});

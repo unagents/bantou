@@ -116,11 +116,14 @@ interface Held {
   turn: boolean;
   /** 利用者の返答待ちか。 */
   needsInput: boolean;
-  /** SubagentStart で見えた、まだ SubagentStop が来ていない subagent の agent_id。 */
-  subagents: Set<string>;
-  /** 最後の Stop の background_tasks にいた subagent の数（Stop より前に始まった物。SubagentStop で 1 つずつ減らす）。 */
-  stopSubagents: number;
-  /** background_tasks の subagent 以外（shell / monitor / workflow …）の数。Stop / SubagentStop の payload で置き換える。 */
+  /**
+   * 最後の background_tasks（Stop / SubagentStop の payload。公式: 親 session 全体の in-flight）にいた subagent の数。subagent の数の正本。
+   * その snapshot より後に来た SubagentStart / SubagentStop だけ、下の `started` で補う。
+   */
+  snapSubagents: number;
+  /** 最後の snapshot より後に SubagentStart が来て、まだ SubagentStop が来ていない subagent の agent_id（agent_id 単位の補助。snapshot が来るたびに空にする）。 */
+  started: Set<string>;
+  /** 最後の background_tasks の subagent 以外（shell / monitor / workflow …）の数。 */
   tasks: number;
   at: string;
   /** 最後に反映した event の発火時刻。これより古い event は捨てる。 */
@@ -128,17 +131,20 @@ interface Held {
 }
 
 const activityOf = (h: Held): Exclude<SessionActivity, "unknown"> => (h.needsInput ? "needs-input" : h.turn ? "working" : "idle");
-const backgroundOf = (h: Held): SessionBackground => ({ subagents: Math.max(h.subagents.size, h.stopSubagents), tasks: h.tasks });
+const backgroundOf = (h: Held): SessionBackground => ({ subagents: h.snapSubagents + h.started.size, tasks: h.tasks });
 const sameBackground = (a: SessionBackground, b: SessionBackground): boolean => a.subagents === b.subagents && a.tasks === b.tasks;
 
 /** Stop / SubagentStop の background_tasks（公式: 在る時は配列。type = shell / subagent / monitor / workflow …）。無い・壊れた時は null。 */
-function backgroundTasksOf(p: Record<string, unknown>): { subagents: number; tasks: number } | null {
+function backgroundTasksOf(p: Record<string, unknown>, excludeId?: string): { subagents: number; tasks: number } | null {
   const list = p.background_tasks;
   if (!Array.isArray(list)) return null;
   let subagents = 0;
   let tasks = 0;
   for (const t of list) {
-    if (typeof t === "object" && t !== null && (t as Record<string, unknown>).type === "subagent") subagents++;
+    const r = typeof t === "object" && t !== null ? (t as Record<string, unknown>) : {};
+    // SubagentStop の snapshot に、いま終わった subagent 自身が（id が agent_id と同じ形で）残っていても数えない
+    if (excludeId !== undefined && r.id === excludeId) continue;
+    if (r.type === "subagent") subagents++;
     else tasks++;
   }
   return { subagents, tasks };
@@ -164,26 +170,32 @@ export function createSessionActivityTracker(opts: { now?: () => number } = {}):
       const base = activityFromHook(p);
       const agentId = str(p.agent_id);
       const h: Held = sameRun
-        ? { ...prev!, subagents: new Set(prev!.subagents), ts }
-        : { startedAt, turn: false, needsInput: false, subagents: new Set(), stopSubagents: 0, tasks: 0, at: new Date(now()).toISOString(), ts };
+        ? { ...prev!, started: new Set(prev!.started), ts }
+        : { startedAt, turn: false, needsInput: false, snapSubagents: 0, started: new Set(), tasks: 0, at: new Date(now()).toISOString(), ts };
       const before = sameRun ? { activity: activityOf(prev!), background: backgroundOf(prev!) } : null;
       switch (event) {
         case "SessionStart":
           if (base === null) return false; // compact
           h.turn = false;
           h.needsInput = false;
-          h.subagents.clear();
-          h.stopSubagents = 0;
+          h.started.clear();
+          h.snapSubagents = 0;
           h.tasks = 0;
           break;
         case "SubagentStart":
-          if (agentId) h.subagents.add(agentId);
+          if (agentId) h.started.add(agentId);
           break;
         case "SubagentStop": {
-          if (agentId) h.subagents.delete(agentId);
-          h.stopSubagents = Math.max(0, h.stopSubagents - 1);
-          const bg = backgroundTasksOf(p);
-          if (bg) h.tasks = bg.tasks; // subagent の数は Start / Stop の対で数える（この snapshot に終わる subagent 自身が残る可能性があるため）
+          // 正本は payload の background_tasks（親 session 全体の in-flight）。内部 agent（prompt suggestions・/btw）の SubagentStop でも、動いている他の subagent は snapshot に居るので減らない
+          const bg = backgroundTasksOf(p, agentId);
+          if (bg) {
+            h.snapSubagents = bg.subagents;
+            h.tasks = bg.tasks;
+            h.started.clear();
+          } else if (agentId) {
+            // snapshot の無い（古い）claude: この agent_id の Start を見ていた時だけ減らす。Start を見ていない Stop（内部 agent）では何も減らさない
+            h.started.delete(agentId);
+          }
           break;
         }
         case "Stop":
@@ -192,9 +204,9 @@ export function createSessionActivityTracker(opts: { now?: () => number } = {}):
           h.needsInput = false;
           const bg = backgroundTasksOf(p);
           if (bg) {
-            // 公式: Stop の background_tasks は「今 in-flight の物」。foreground の subagent は Stop の時点で居ないので、ここで数え直す
-            h.subagents.clear();
-            h.stopSubagents = bg.subagents;
+            // 公式: Stop の background_tasks は「今 in-flight の物」。ここで数え直す（Start / Stop の取りこぼしもここで直る）
+            h.started.clear();
+            h.snapSubagents = bg.subagents;
             h.tasks = bg.tasks;
           }
           break;
