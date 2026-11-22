@@ -259,8 +259,22 @@ export function createCenterMemoryEvents(opts: {
       return "memory";
     },
 
-    async readHandoff() {
-      throw new Error("readHandoff: 未実装");
+    async readHandoff(session, id, timeoutMs = 20_000) {
+      const target = targetOf(session);
+      if (!target || !sink.readHandoff) return "none";
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const r = await Promise.race([
+          sink.readHandoff(target, id, timeoutMs),
+          new Promise<never>((_, rej) => {
+            timer = setTimeout(() => rej(new Error(`memory の応答を ${timeoutMs}ms 待ったが来ない`)), timeoutMs);
+            timer.unref?.();
+          }),
+        ]);
+        return r === null ? "missing" : { body: r.body };
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
     },
 
     drain: (t) => queue.drain(t),
