@@ -88,6 +88,13 @@ services:
       # 同時に処理する episode 数。1 episode は LLM を数回呼ぶ。chatp（claude -p）は 1 回が重いので低く始める
       SEMAPHORE_LIMIT: ${GRAPHITI_SEMAPHORE_LIMIT:-2}
       GRAPHITI_TELEMETRY_ENABLED: "false"
+    # image 既定の healthcheck は localhost:8000 を見るため、7931 で待ち受ける構成では常に unhealthy になる。待受 port（GRAPHITI_MCP_PORT）の /health を見る
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:$${GRAPHITI_MCP_PORT:-7931}/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     volumes:
       - ./graphiti/config.yaml:/app/mcp/config/config.yaml:ro
 
