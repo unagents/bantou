@@ -17,7 +17,7 @@ Phase 1 の範囲: event の保存、LLM（chatp）による記憶候補の抽�
 
 | tool | 入力 | 出力 |
 |---|---|---|
-| `event` | `eventId`（冪等キー）、`sender` / `recipient`（`session` / `capId` / `workerId`）、`remoteId?`、`taskId?`、`parentRequirementId?`（kind=task のみ。親の requirement の id）、`kind`（`user_prompt` / `assistant_message` / `task` / `result` / `report` / `reply`）、`body`（≤ 65536）、`at`（ISO 8601） | `{ status: "recorded" \| "duplicate", eventId }`。同じ `eventId` の再送は `duplicate`（無視） |
+| `event` | `eventId`（冪等キー）、`sender` / `recipient`（`session` / `capId` / `workerId`）、`remoteId?`、`taskId?`、`parentRequirementId?`（kind=task のみ。他の kind に付けると入力検証で拒否。親の requirement の id）、`kind`（`user_prompt` / `assistant_message` / `task` / `result` / `report` / `reply`）、`body`（≤ 65536）、`at`（ISO 8601） | `{ status: "recorded" \| "duplicate", eventId }`。同じ `eventId` の再送は `duplicate`（無視） |
 | `recall` | `query`、`memoryTypes?`、`scope?`（`projectIds` / `agentIds` / `userId`）、`temporal?`（`validAt` / `from` / `to`）、`includeInferred?`、`recordType?`（`requirement` / `spec_design`）、`category?`、`limit?`（≤ 50、既定 10） | `[{ id, content, memoryType, status, sourceEventIds, validFrom?, validUntil?, confidence?, relevance }]` |
 | `context` | `agentId?`（自分のみ） | `{ agentId, policies, recentDecisions, openQuestions, activeTasks, openRequirements, specs }` |
 | `explain` | `id` | `{ item, sources: [event…], verification }` |
@@ -118,7 +118,7 @@ context は LLM を使わず保存済みの情報から作る: `policies` = conf
 - 各表に Row Level Security（`FORCE`）。各 transaction で `set_config('app.agent_id', <認証済み agent>, true)` を設定する。
 - SQL は全てパラメータ化（値を文字列連結で埋めない）。`test/unit.test.ts` が `server/` の `query()` に `${}` / 連結が無いことを検査する。
 
-`migrations/004_requirement_spec.sql`（設計: `docs/design/memory-requirement-spec.md`）: `memory_items` に `record_type`（NULL = 従来の記憶 / `requirement` / `spec_design`）・`origin`（user / agent）・`role`（requirement / task）・`category`（requirement の作業の種類。文字列で CHECK 無し）・`spec_categories`（仕様・設計の category。5 つの値の配列）・`basis`（user / agent）・`parent_id`（木）・`task_id` を足す。dedup の unique index は `record_type` と `parent_id` を含める形に作り直し、content の上限は仕様・設計だけ 8000 文字にする。`memory_events` に `parent_requirement_id`、新しい表 `memory_relations`（requirement ↔ 仕様・設計。RLS は agent_id）を足す。列は全て NULL 可で、既存の行は従来の記憶のまま。**表の追加があるので migration 後に `GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA public TO memory_app;` を当て直す**。**migration を先に当ててから**新しい code に切り替える。
+`migrations/004_requirement_spec.sql`（設計: `docs/design/memory-requirement-spec.md`）: `memory_items` に `record_type`（NULL = 従来の記憶 / `requirement` / `spec_design`）・`origin`（user / agent）・`role`（requirement / task）・`category`（requirement の作業の種類。文字列で CHECK 無し。抽出は前後の空白を除いて **64 字で切り**、空なら `other` にする）・`spec_categories`（仕様・設計の category。5 つの値の配列）・`basis`（user / agent）・`parent_id`（木）・`task_id` を足す。dedup の unique index は `record_type` と `parent_id` を含める形に作り直し、content の上限は仕様・設計だけ 8000 文字にする。`memory_events` に `parent_requirement_id`、新しい表 `memory_relations`（requirement ↔ 仕様・設計。RLS は agent_id）を足す。列は全て NULL 可で、既存の行は従来の記憶のまま。新しい表 `memory_relations` への `memory_app` の SELECT / INSERT / UPDATE（DELETE なし）は、migration の末尾が付ける（role `memory_app` が在る時だけ。無ければ上の「DB role」の手順で付ける。`GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA public TO memory_app;` を当て直しても同じ）。ADD CONSTRAINT / CREATE POLICY は先に DROP ... IF EXISTS するので、何度当てても同じ。**migration を先に当ててから**新しい code に切り替える。
 
 ### migration に node-pg-migrate を選んだ理由
 

@@ -24,7 +24,9 @@ export const eventShape = {
     .refine((s) => Date.parse(s) <= Date.now() + DAY_MS, "at は現在から 1 日より先にできない")
     .describe("発生時刻（ISO 8601）"),
 };
-export const eventSchema = z.object(eventShape);
+export const eventSchema = z
+  .object(eventShape)
+  .refine((e) => e.parentRequirementId === undefined || e.kind === "task", { message: "parentRequirementId は kind=task の event だけで受ける", path: ["parentRequirementId"] });
 export type EventInput = z.infer<typeof eventSchema>;
 
 export async function recordEvent(db: Db, agentId: string, raw: unknown): Promise<{ status: "recorded" | "duplicate"; eventId: string }> {

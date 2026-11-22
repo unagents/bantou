@@ -2,7 +2,9 @@
 -- 作業指示（requirement）と仕様・設計（spec_design）の型。設計: docs/design/memory-requirement-spec.md（決定 #1〜#12）。
 -- 設置済みの DB にそのまま当てられる: 足す列は全て NULL 可（既存の行は record_type = NULL = 従来の記憶のまま）。
 -- 権限: memory_app は memory_items に表単位の SELECT / INSERT / UPDATE を持つので、足した列にも効く。
---       新しい表 memory_relations には README の手順（GRANT ... ON ALL TABLES IN SCHEMA public）を当て直すこと（DELETE は付けない）。
+--       新しい表 memory_relations には、この migration の末尾で memory_app の SELECT / INSERT / UPDATE を付ける（role が在る時だけ。DELETE は付けない）。
+--       README の手順（GRANT ... ON ALL TABLES IN SCHEMA public）を当て直しても同じ。
+-- 何度当てても同じ: ADD CONSTRAINT / CREATE POLICY は先に DROP ... IF EXISTS する。
 
 -- #1 B: 新しい列 record_type（NULL = 従来の記憶）。memory_type は残す。
 ALTER TABLE memory_items ADD COLUMN IF NOT EXISTS record_type text CHECK (record_type IS NULL OR record_type IN ('requirement','spec_design'));
@@ -22,6 +24,7 @@ ALTER TABLE memory_items ADD COLUMN IF NOT EXISTS parent_id uuid REFERENCES memo
 -- center が採番した remote_send の task_id（master-cap が remote-cap に出した requirement のみ）。
 ALTER TABLE memory_items ADD COLUMN IF NOT EXISTS task_id text;
 -- 型ごとに使う列の規則: requirement だけ origin / role / category / task_id、spec_design だけ basis / spec_categories。
+ALTER TABLE memory_items DROP CONSTRAINT IF EXISTS memory_items_record_shape;
 ALTER TABLE memory_items ADD CONSTRAINT memory_items_record_shape CHECK (
   (record_type IS NULL AND origin IS NULL AND role IS NULL AND category IS NULL AND spec_categories IS NULL AND basis IS NULL AND parent_id IS NULL AND task_id IS NULL)
   OR (record_type = 'requirement' AND origin IS NOT NULL AND role IS NOT NULL AND basis IS NULL AND spec_categories IS NULL)
@@ -36,6 +39,7 @@ CREATE INDEX IF NOT EXISTS memory_items_task ON memory_items (agent_id, task_id)
 DROP INDEX IF EXISTS memory_items_dedup;
 CREATE UNIQUE INDEX memory_items_dedup ON memory_items (agent_id, memory_type, COALESCE(record_type, ''), COALESCE(parent_id::text, ''), content_norm) WHERE status <> 'superseded';
 ALTER TABLE memory_items DROP CONSTRAINT IF EXISTS memory_items_content_check;
+ALTER TABLE memory_items DROP CONSTRAINT IF EXISTS memory_items_content_len;
 ALTER TABLE memory_items ADD CONSTRAINT memory_items_content_len CHECK (char_length(content) >= 1 AND char_length(content) <= CASE WHEN record_type = 'spec_design' THEN 8000 ELSE 2000 END);
 
 -- #6 A: remote_send に渡された親の requirement の id（memory_items.id）。task event だけに付く（任意）。
@@ -53,7 +57,14 @@ CREATE TABLE IF NOT EXISTS memory_relations (
 CREATE INDEX IF NOT EXISTS memory_relations_to ON memory_relations (agent_id, to_id);
 ALTER TABLE memory_relations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE memory_relations FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS own_rows ON memory_relations;
 CREATE POLICY own_rows ON memory_relations USING (agent_id = current_setting('app.agent_id', true)) WITH CHECK (agent_id = current_setting('app.agent_id', true));
+-- memory_app が在れば、新しい表に権限を付ける（README の GRANT の当て直しが要らない。DELETE は付けない）。
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'memory_app') THEN
+    GRANT SELECT, INSERT, UPDATE ON memory_relations TO memory_app;
+  END IF;
+END $$;
 
 -- Down Migration
 DROP TABLE IF EXISTS memory_relations;
