@@ -364,6 +364,36 @@ export interface CenterAgentActivity {
   model?: string | null;
 }
 
+/** Host resources a server measured (protocol `ResourceSample`). The server only shows them; it judges nothing (the cap decides). */
+export interface CenterResourceSample {
+  at: string;
+  load1: number;
+  load5: number;
+  load15: number;
+  cpus: number;
+  /** Bytes. */
+  mem_total: number;
+  mem_free: number;
+  disk_total: number | null;
+  disk_free: number | null;
+  /** Workers running now on the server. */
+  workers: number;
+}
+
+/** `remote_list[].server_board` (center `ServerBoardSummary`): counts and resources of the cap's server. Absent from an older server. */
+export interface CenterServerBoard {
+  at: string;
+  /** Caps on the server. */
+  caps: number;
+  /** Workers running now. */
+  workers: number;
+  /** Worker reservations waiting for resources. */
+  reserved: number;
+  /** User-set limit of tasks run at once per cap; null = no limit. */
+  max_parallel_tasks: number | null;
+  resources: CenterResourceSample | null;
+}
+
 /** `remote_list[].activity` (center `RemoteActivity`). Omitted until the first notice arrives. */
 export interface CenterRemoteActivity {
   at: string;
@@ -457,6 +487,8 @@ export interface CenterRemoteRecord {
   error_at?: string;
   pending?: CenterPendingInstruction[];
   activity?: CenterRemoteActivity;
+  /** Board of the cap's server (caps, workers, resources, reservations). */
+  server_board?: CenterServerBoard;
   /** Latest `task_result` of the cap (absent until a `task` finished). */
   task_result?: CenterTaskResult;
   /** Latest worker reports (at most 20, arrival order). */

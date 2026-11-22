@@ -5,8 +5,9 @@ import { STOP_MSG } from "./agents";
  * cap の task の待ち行列と並行の管理。
  *
  * task ごとに、その task だけを受け持つ指揮の会話（lane。agents.ts の InvokeInput.taskId）を立てて動かす。
- * 1 つの cap で同時に動く task は maxParallel まで。超えた分と、先に来て終わっていない task と同じ
- * deliverables.branch の task は、来た順に待たせる（同じ branch への同時の push を避ける）。branch の指定が無い task は上限の内で並行に動く。
+ * task は受けたらすぐ始める（並行の上限は無い）。利用者が maxParallel（config の session.maxParallelTasks）を置いた時だけ、
+ * 1 つの cap で同時に動く task をその数までにして、超えた分は来た順に待たせる。
+ * 同じ deliverables.branch の task も待たせない。始める時に、同じ branch で終わっていない task を run に渡して cap に知らせる（判断は cap）。
  *
  * task が「動いている」間 = 指揮の run・その task の worker の run・report 起因の処理（再開と返信の送信）のどれかが残っている間、
  * または最初の指揮の run の返信（task_result）をまだ送り終えていない間。全部が無くなったら終わり（done / failed）にして、待っている task を始める。
@@ -15,10 +16,13 @@ import { STOP_MSG } from "./agents";
 export type TaskLaneState = CapTaskInfo["state"];
 
 export interface TaskSchedulerDeps {
-  /** 1 つの cap で同時に動かす task の上限（config.session.maxParallelTasks。1 以上）。 */
-  maxParallel: number;
-  /** task の最初の指揮の run を始める（manager.invoke("cap", cap_id, { taskId })）。manager には同期で載せること。 */
-  run: (cmd: TaskCommand) => Promise<RunOutcome>;
+  /** 利用者が置いた時だけ効く、1 つの cap で同時に動かす task の上限（config.session.maxParallelTasks。1 以上）。省略 = 上限なし。 */
+  maxParallel?: number;
+  /**
+   * task の最初の指揮の run を始める（manager.invoke("cap", cap_id, { taskId })）。manager には同期で載せること。
+   * sameBranch = 同じ cap で、同じ deliverables.branch の終わっていない他の task の id（無ければ空）。
+   */
+  run: (cmd: TaskCommand, info: { sameBranch: string[] }) => Promise<RunOutcome>;
   /** その task に、run（指揮・worker。待ちを含む）か report 起因の処理が残っているか。 */
   busy: (capId: string, taskId: string) => boolean;
   /** cap の task の状態が変わった（activity を送る）。 */
@@ -101,7 +105,7 @@ interface Entry {
   branch?: string;
   cmd?: TaskCommand;
   state: TaskLaneState;
-  waitingFor?: "limit" | "branch";
+  waitingFor?: "limit" | "closing";
   queuedAt: string;
   startedAt: string | null;
   finishedAt: string | null;
@@ -130,7 +134,7 @@ export function createTaskScheduler(deps: TaskSchedulerDeps): TaskScheduler {
   const retainMs = deps.retainMs ?? TASK_RETAIN_MS;
   const retainMax = deps.retainMax ?? TASK_RETAIN_MAX;
   const defer = deps.defer ?? ((f: () => void) => void setImmediate(f));
-  const maxParallel = Math.max(1, Math.floor(deps.maxParallel));
+  const maxParallel = deps.maxParallel === undefined ? undefined : Math.max(1, Math.floor(deps.maxParallel));
   const entries = new Map<string, Entry>();
   /** stop_cap の close の最中の cap（その間は task を始めない）。 */
   const closing = new Map<string, number>();
@@ -159,17 +163,19 @@ export function createTaskScheduler(deps: TaskSchedulerDeps): TaskScheduler {
   const isLive = (e: Entry): boolean => e.state === "waiting" || e.state === "running";
 
   /** 待たせる理由。始められるなら undefined。 */
-  function blockedBy(e: Entry): "limit" | "branch" | "closing" | undefined {
+  function blockedBy(e: Entry): "limit" | "closing" | undefined {
     if (closing.has(e.capId)) return "closing";
-    const mine = ofCap(e.capId);
-    if (
-      e.branch !== undefined &&
-      mine.some((x) => x !== e && x.branch === e.branch && (x.state === "running" || (x.state === "waiting" && x.seq < e.seq)))
-    ) {
-      return "branch";
-    }
-    if (mine.filter((x) => x.state === "running").length >= maxParallel) return "limit";
+    if (maxParallel !== undefined && ofCap(e.capId).filter((x) => x.state === "running").length >= maxParallel) return "limit";
     return undefined;
+  }
+
+  /** 同じ cap・同じ branch で、終わっていない他の task（来た順）。branch の無い task は空。 */
+  function sameBranchOf(e: Entry): string[] {
+    if (e.branch === undefined) return [];
+    return ofCap(e.capId)
+      .filter((x) => x !== e && x.branch === e.branch && isLive(x))
+      .sort((a, b) => a.seq - b.seq)
+      .map((x) => x.taskId);
   }
 
   function start(e: Entry): void {
@@ -177,11 +183,14 @@ export function createTaskScheduler(deps: TaskSchedulerDeps): TaskScheduler {
     e.startedAt = iso();
     delete e.waitingFor;
     const cmd = e.cmd!;
-    log(`task 開始: cap_id=${e.capId} task_id=${e.taskId}${e.branch !== undefined ? ` branch=${e.branch}` : ""} 同時=${ofCap(e.capId).filter((x) => x.state === "running").length}/${maxParallel}`);
+    const sameBranch = sameBranchOf(e);
+    log(
+      `task 開始: cap_id=${e.capId} task_id=${e.taskId}${e.branch !== undefined ? ` branch=${e.branch}` : ""} 同時=${ofCap(e.capId).filter((x) => x.state === "running").length}${maxParallel !== undefined ? `/${maxParallel}` : ""}${sameBranch.length > 0 ? ` 同じ branch の task=${sameBranch.join(",")}` : ""}`,
+    );
     changed(e.capId);
     let p: Promise<RunOutcome>;
     try {
-      p = deps.run(cmd);
+      p = deps.run(cmd, { sameBranch });
     } catch (err) {
       p = Promise.reject(err);
     }
@@ -214,9 +223,8 @@ export function createTaskScheduler(deps: TaskSchedulerDeps): TaskScheduler {
         start(e);
         continue;
       }
-      const w = why === "closing" ? (e.waitingFor ?? "limit") : why;
-      if (e.waitingFor !== w) {
-        e.waitingFor = w;
+      if (e.waitingFor !== why) {
+        e.waitingFor = why;
         changed(e.capId);
       }
     }
@@ -447,6 +455,7 @@ export function createTaskScheduler(deps: TaskSchedulerDeps): TaskScheduler {
         task_id: e.taskId,
         state: e.state,
         ...(e.branch !== undefined ? { branch: e.branch } : {}),
+        ...(isLive(e) && sameBranchOf(e).length > 0 ? { same_branch: sameBranchOf(e) } : {}),
         ...(e.state === "waiting" && e.waitingFor !== undefined ? { waiting_for: e.waitingFor } : {}),
         queued_at: e.queuedAt,
         started_at: e.startedAt,

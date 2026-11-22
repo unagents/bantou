@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { centerTool } from "../api";
-import type { CenterActivityState, CenterRemoteRecord, CenterWorkerReport } from "../types";
+import type { CenterActivityState, CenterRemoteRecord, CenterServerBoard, CenterWorkerReport } from "../types";
 
 const props = defineProps<{ owner?: string }>();
 
@@ -128,6 +128,32 @@ function waiting(r: CenterRemoteRecord): boolean {
   return !agents.some((a) => a.kind === "worker") && !agents.some((a) => a.kind === "cap" && a.state !== "idle" && a.state !== "done");
 }
 
+/** Show the server's board once per server (on the first remote of that server). */
+function boardOf(i: number): CenterServerBoard | undefined {
+  const list = remotes.value ?? [];
+  const r = list[i];
+  if (!r?.server_board) return undefined;
+  return list.findIndex((x) => x.server === r.server && x.server_board) === i ? r.server_board : undefined;
+}
+
+const GIB = 1024 ** 3;
+const gib = (n: number): string => (n / GIB).toFixed(1);
+
+/** One line of the board: caps / workers / reservations / resources. The server only measures; it does not judge whether there is room. */
+function boardLine(b: CenterServerBoard): string {
+  const parts = [`cap ${b.caps}`, `worker ${b.workers}`, `予約 ${b.reserved}`];
+  parts.push(b.max_parallel_tasks === null ? "並行の上限 なし" : `並行の上限 ${b.max_parallel_tasks}`);
+  const x = b.resources;
+  if (x) {
+    parts.push(`負荷 ${x.load1.toFixed(2)}/${x.cpus}cpu`);
+    parts.push(`メモリ空き ${gib(x.mem_free)}/${gib(x.mem_total)}GiB`);
+    if (x.disk_free !== null && x.disk_total !== null) parts.push(`ディスク空き ${gib(x.disk_free)}/${gib(x.disk_total)}GiB`);
+  } else {
+    parts.push("資源 未測定");
+  }
+  return parts.join(" | ");
+}
+
 /** `silent_ms` as of the fetch plus the time since, so host clock skew does not matter. */
 function elapsed(silentMs: number): string {
   const s = Math.max(0, Math.floor((silentMs + (now.value - fetchedAt.value)) / 1000));
@@ -145,12 +171,16 @@ function elapsed(silentMs: number): string {
       {{ error }}
     </p>
     <div
-      v-for="r in remotes ?? []"
+      v-for="(r, i) in remotes ?? []"
       :key="`${r.server}:${r.remote_id}`"
       class="flex flex-col gap-1"
       :data-testid="`${tp}remote`"
       :data-remote-id="r.remote_id"
     >
+      <div v-if="boardOf(i)" class="text-cork-muted flex items-center gap-2 text-xs" :data-testid="`${tp}server-board`">
+        <span class="shrink-0">{{ r.server_label ?? r.serverName ?? r.server }}</span>
+        <span class="min-w-0 flex-1 truncate">{{ boardLine(boardOf(i)!) }}</span>
+      </div>
       <div class="flex items-center gap-2 text-xs">
         <span class="font-medium">{{ r.remote_id }}</span>
         <span class="text-cork-muted">{{ r.server_label ?? r.serverName ?? r.server }}</span>

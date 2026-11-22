@@ -8,6 +8,8 @@ import {
   type ConversationInfo,
   type CapResultReply,
   type ErrorReply,
+  type ResourceSample,
+  type ServerBoard,
   type StatusReply,
   type TaskCommand,
   type TaskResultReply,
@@ -161,9 +163,34 @@ export interface PendingInstruction {
 /** remote_list の pending に足す、server が知らせた task の状態（task を並行に動かす server の status / activity の tasks から。旧 server では無い）。 */
 export interface PendingServerTask {
   state: CapTaskInfo["state"];
-  /** 待っている理由（limit = 同時に動かす数の上限 / branch = 同じ deliverables.branch の前の task が終わっていない）。 */
+  /** 待っている理由（limit = 利用者が置いた同時に動かす数の上限 / closing = cap の停止中 / branch = 旧 server の、同じ deliverables.branch の前の task が終わっていない）。 */
   waiting_for?: CapTaskInfo["waiting_for"];
   branch?: string;
+  /** 同じ branch で終わっていない他の task（server は待たせず cap に知らせている）。 */
+  same_branch?: string[];
+}
+
+/**
+ * server の掲示板の要約（remote_list の server_board。cap の数・worker の数・資源・予約の件数だけ。他の session の cap の id・中身は出さない）。
+ * server は測って掲示するだけで閾値を持たず、足りるかは判定しない（判断は cap）。
+ */
+export interface ServerBoardSummary {
+  /** server が掲示板を作った時刻（ISO 8601）。 */
+  at: string;
+  /** この server の cap の数。 */
+  caps: number;
+  /** 動いている worker の数。 */
+  workers: number;
+  /** 予約（資源待ちの worker）の件数。 */
+  reserved: number;
+  /** 利用者が置いた task の並行の上限。null = 上限なし。 */
+  max_parallel_tasks: number | null;
+  resources: ResourceSample | null;
+}
+
+/** server の掲示板から要約を作る（cap の id は載せない）。 */
+export function summarizeBoard(b: ServerBoard): ServerBoardSummary {
+  return { at: b.at, caps: b.caps.length, workers: b.workers, reserved: b.reserved, max_parallel_tasks: b.max_parallel_tasks, resources: b.resources };
 }
 
 /** task を送る直前の cap の状態。ahead = 送る時点で受付が未確認だった、この cap の先行する task の数（受付は ahead + 1 本分の増加を見るまで認めない）。 */
@@ -251,6 +278,8 @@ export type RemoteView = Omit<RemoteRecord, "worker_reports" | "pending"> & {
   owners: string[];
   worker_reports: StoredWorkerReport[];
   activity?: RemoteActivity;
+  /** この cap の server の掲示板（status の board。周期の status で更新）。board を知らせない旧 server・status 未取得の間は無い。 */
+  server_board?: ServerBoardSummary;
   /**
    * cap の会話（claude の session）の使用量。server の status（周期取得）から。開始時刻・run 数・直近の context（tokens / window / %）・直近の失敗の error 文。
    * 旧 server・status 未取得・cap が server に無い間は無い。
@@ -624,6 +653,8 @@ export function createRemoteManager(opts: {
   const health = new Map<string, Health>();
   /** 最後に取れた status の cap（記録ごと。cap が無ければ cap は undefined。メモリのみ）。cap_state の根拠。 */
   const capSnap = new Map<RemoteRecord, { at: number; cap: AgentStatus | undefined }>();
+  /** 最後に取れた server の掲示板（server key ごと。メモリのみ）。 */
+  const boards = new Map<string, ServerBoard>();
   /** task を server が断った・送れなかった理由（task_id → 理由。メモリのみ）。受付の待ちを早く終えるのに使う。 */
   const taskFailures = new Map<string, { message: string; transport: boolean }>();
 
@@ -832,6 +863,7 @@ export function createRemoteManager(opts: {
   };
   /** 取れた status を、同じ server の記録に反映する（cap の状態）。受付の判定は awaitAck の直接の観測だけで行い、周期の status では pending を observed にしない（別の要因の変化を受付と取り違えるため）。 */
   const recordStatus = (key: string, st: StatusReply): void => {
+    if (st.board !== undefined) boards.set(key, st.board);
     for (const x of recordsOfKey(key)) capSnap.set(x, { at: Date.now(), cap: st.caps.find((c) => c.id === x.remote_id) });
     for (const x of recordsOfKey(key)) completeFinishedTasks(x);
   };
@@ -948,15 +980,17 @@ export function createRemoteManager(opts: {
     const tasks = serverTasksOf(r);
     const serverTask = (p: PendingInstruction): { server_task?: PendingServerTask } => {
       const t = p.task_id !== undefined ? tasks?.find((x) => x.task_id === p.task_id) : undefined;
-      return t ? { server_task: { state: t.state, ...(t.waiting_for !== undefined ? { waiting_for: t.waiting_for } : {}), ...(t.branch !== undefined ? { branch: t.branch } : {}) } } : {};
+      return t ? { server_task: { state: t.state, ...(t.waiting_for !== undefined ? { waiting_for: t.waiting_for } : {}), ...(t.branch !== undefined ? { branch: t.branch } : {}), ...(t.same_branch !== undefined && t.same_branch.length > 0 ? { same_branch: t.same_branch } : {}) } } : {};
     };
     const base: RemoteView = { ...r, server_label: labelOf(r), reachability: reachOf(r), cap_state: capStateOf(r), pending: r.pending.map((p) => ({ ...p, delivery: p.delivery ?? ("sent" as const), ...serverTask(p) })), owners: ownersOf(r), worker_reports: (r.worker_reports ?? []).map((w) => ({ ...w })), state };
     if (state === "running") delete base.finishedAt;
     const activity = activityOf(r);
     const snapCap = capSnap.get(r)?.cap;
+    const board = boards.get(healthKeyOf(r));
     return {
       ...base,
       ...(activity ? { activity } : {}),
+      ...(board ? { server_board: summarizeBoard(board) } : {}),
       ...(snapCap?.conversation ? { conversation: snapCap.conversation } : {}),
       ...(snapCap?.state === "failed" && snapCap.last_error !== undefined ? { cap_last_error: snapCap.last_error } : {}),
     };

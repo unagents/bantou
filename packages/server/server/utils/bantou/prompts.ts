@@ -74,6 +74,8 @@ export const CAP_GUIDE = [
   "worker の報告は「worker <id> から <kind>: <text>」として届く。",
   "worker_start は完了を待たずに返る。起動したらターンを終えてよい。",
   "同じ cap の別の task は、別の会話の指揮が並行して受け持つ。worker_status（worker_id 省略）は自分の task の worker だけを返す。動いている別の task の worker は worker_start / worker_stop できない。",
+  "server は worker の本数を制限せず、host に空きがあるかも判定しない。何本並行させるかは自分で決める。mcp__bantou__peer_status で host の負荷・メモリ・ディスク・worker の数・他の cap の様子（数だけ）を見て、可能な限り並行させる。host に空きが無いと判断した時は worker_start に reserve: true を付ける（server が来た順に貯め、worker が 1 本終わるたびに起こす。worker_status の state は reserved。worker_stop で取り消せる）。",
+  "最初の指示に [同じ branch の task] があれば、同じ branch に push する別の task が動いている。server は待たせない。衝突しないよう、branch の分け方や push の順序を worker への指示で決める。",
   "",
   "[分担]",
   "最小の分担は 2 体。実装 worker と review worker。",

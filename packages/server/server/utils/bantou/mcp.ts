@@ -107,13 +107,17 @@ function registerWorkerTools(server: McpServer, capId: string, taskId: string | 
         "Use it to start a review worker too (separate clone, reads the diff, runs the tests, reports problems), and to send its findings back to the implementing worker with the same worker_id until fixed. " +
         "Start independent parts as separate workers in parallel. Always state in the prompt the deliverable (branch, commit, report location) and how to verify (which tests). " +
         "Optional model (e.g. sonnet, opus, haiku, or a full model id) is passed to claude --model; without it the worker keeps its earlier model, else uses your default worker model, else claude's own default. " +
-        "Returns {worker_id, accepted} immediately without waiting for the work; the worker reports back with its own report tool, which resumes you.",
+        "Returns {worker_id, accepted} immediately without waiting for the work; the worker reports back with its own report tool, which resumes you. " +
+        "The server never limits how many workers run and never judges whether the host has room: look at peer_status (host load / memory / disk, worker counts, other caps) and decide yourself. " +
+        "If you judge the host has no room, set reserve: true: the server queues the worker in arrival order and starts it when a worker of this server ends (at once when no worker is running). " +
+        "A queued worker is returned as {worker_id, accepted, reserved: true}; its worker_status state is 'reserved'. End your turn; its own report resumes you. worker_stop cancels a reservation.",
       inputSchema: {
         prompt: z.string().min(1).refine(noNul, { message: "NUL 文字を含められない" }),
         worker_id: z.string().regex(WORKER_ID_PATTERN).optional(),
         repo: z.string().min(1).refine((s) => !s.startsWith("-") && noNul(s), { message: "- で始められない / NUL 不可" }).optional(),
         branch: z.string().min(1).refine((s) => !s.startsWith("-") && noNul(s), { message: "- で始められない / NUL 不可" }).optional(),
         model: z.string().regex(MODEL_PATTERN).optional(),
+        reserve: z.boolean().optional(),
       },
     },
     async (args) => {
@@ -130,7 +134,7 @@ function registerWorkerTools(server: McpServer, capId: string, taskId: string | 
     "worker_status",
     {
       description:
-        "State of your workers: {workers:[{id, state (running|stalled|idle|done|failed|lost), task, last_activity, last_output_at, silent_ms, ...}]}. " +
+        "State of your workers: {workers:[{id, state (reserved|running|stalled|idle|done|failed|lost), task, last_activity, last_output_at, silent_ms, ...}]}. " +
         "Without worker_id it lists the workers of your task. Give worker_id to see one.",
       inputSchema: { worker_id: z.string().regex(WORKER_ID_PATTERN).optional() },
     },
@@ -139,6 +143,28 @@ function registerWorkerTools(server: McpServer, capId: string, taskId: string | 
       if (!h) return unavailable();
       try {
         return json(await h.status(capId, worker_id, taskId));
+      } catch (e) {
+        return fail(e);
+      }
+    },
+  );
+  server.registerTool(
+    "peer_status",
+    {
+      description:
+        "Read-only board of this server (the host your workers run on): {self, peers, host}. " +
+        "host = {workers (running now), reserved (queued worker reservations), max_parallel_tasks (user-set limit or null = none), " +
+        "resources: {at, load1, load5, load15, cpus, mem_total, mem_free, disk_total, disk_free (bytes), workers} measured just now}. " +
+        "self / peers[] = {cap_ref (opaque), running_workers, waiting_tasks, reserved_workers, no_followers}; peers are the other caps of this server (counts only, never their content). " +
+        "The server has no threshold and does not judge whether there is room: you decide how many workers to start from these numbers (and use worker_start reserve: true when you judge there is no room). " +
+        "Your task's same_branch notice (tasks that push to the same branch) is in your first instruction.",
+      inputSchema: {},
+    },
+    async () => {
+      const f = getPeerStatusHandler();
+      if (!f) return unavailable();
+      try {
+        return json(await f(capId));
       } catch (e) {
         return fail(e);
       }
@@ -160,6 +186,17 @@ function registerWorkerTools(server: McpServer, capId: string, taskId: string | 
       }
     },
   );
+}
+
+/** peer_status の中身を作る（daemon が設定する。未設定の間は拒否）。 */
+let peerStatusHandler: ((capId: string) => unknown | Promise<unknown>) | undefined;
+
+export function setPeerStatusHandler(f: ((capId: string) => unknown | Promise<unknown>) | undefined): void {
+  peerStatusHandler = f;
+}
+
+export function getPeerStatusHandler(): ((capId: string) => unknown | Promise<unknown>) | undefined {
+  return peerStatusHandler;
 }
 
 export interface McpListener {
