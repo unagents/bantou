@@ -252,3 +252,60 @@ test("hang する memory（接続は受けるが応答しない）でも onHook 
     await new Promise<void>((r) => hang.close(() => r()));
   }
 });
+
+// -- readHandoff（設計 10.7 の W1）--------------------------------------------------------------------------------------
+
+test("readHandoff: handoff で書いた本文が、そのまま（改行・空白・65536 文字）id で読める", async () => {
+  const m = mk();
+  const body = `見出し\n\n  - 手順 1\n${"あ".repeat(65536 - 20)}\n末尾 `;
+  assert.equal(await m.handoff("hs", { id: "h-1", body }), "memory");
+  assert.deepEqual(await m.readHandoff("hs", "h-1"), { body });
+});
+
+test("readHandoff: memory が「無い」と答えた時は \"missing\"（別の id・別の session の agent の分は読めない）", async () => {
+  const m = mk();
+  await m.handoff("hs", { id: "h-2", body: "本文" });
+  assert.equal(await m.readHandoff("hs", "h-other"), "missing");
+  assert.equal(await m.readHandoff("other-session", "h-2"), "missing");
+});
+
+test("readHandoff: memory の設定が無い／sink に読む口が無い時は \"none\"（呼ばない）", async () => {
+  const m = mk();
+  setting = undefined;
+  assert.equal(await m.readHandoff("hs", "h-3"), "none");
+  setting = { url: mem.url, token: mem.token };
+  const calls: string[] = [];
+  const noRead: MemorySink = { send: async () => void calls.push("send") };
+  const m2 = mk({ sink: noRead });
+  assert.equal(await m2.readHandoff("hs", "h-3"), "none");
+  assert.deepEqual(calls, []);
+});
+
+test("readHandoff: 届かない（500）時は投げる。\"missing\" や \"none\" にしない", async () => {
+  const m = mk();
+  await m.handoff("hs", { id: "h-4", body: "本文" });
+  mem.setDown(true);
+  await assert.rejects(m.readHandoff("hs", "h-4"));
+  mem.setDown(false);
+  assert.deepEqual(await m.readHandoff("hs", "h-4"), { body: "本文" });
+});
+
+test("readHandoff: 応答が来ない memory は timeoutMs で投げる（理由に token が入らない）", async () => {
+  const socks = new Set<import("node:net").Socket>();
+  const hang = createNetServer((s) => {
+    socks.add(s);
+    s.on("error", () => {});
+  });
+  await new Promise<void>((r) => hang.listen(0, "127.0.0.1", r));
+  const port = (hang.address() as import("node:net").AddressInfo).port;
+  setting = { url: `http://127.0.0.1:${port}/mcp`, token: "HANG-TOKEN" };
+  try {
+    const m = mk();
+    const t = Date.now();
+    await assert.rejects(m.readHandoff("hs", "h-5", 150), (e: Error) => !e.message.includes("HANG-TOKEN"));
+    assert.ok(Date.now() - t < 2000);
+  } finally {
+    for (const s of socks) s.destroy();
+    await new Promise<void>((r) => hang.close(() => r()));
+  }
+});

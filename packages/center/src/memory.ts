@@ -381,6 +381,38 @@ export function createMcpEventSink(sdk: McpSdkLike, opts: { clientName: string; 
         throw new PermanentMemoryError(text);
       }
     },
+    async readHandoff(target, eventId, timeoutMs) {
+      let client: McpClientLike;
+      try {
+        client = await connect(target);
+      } catch (e) {
+        drop(target);
+        throw e;
+      }
+      let res: unknown;
+      try {
+        res = await client.callTool({ name: "handoff", arguments: { eventId } }, undefined, { timeout: timeoutMs ?? timeout });
+      } catch (e) {
+        drop(target);
+        throw e;
+      }
+      const r = res as { isError?: boolean; structuredContent?: unknown; content?: Array<{ type?: string; text?: string }> } | undefined;
+      const text = r?.content?.find((c) => c.type === "text")?.text;
+      if (r?.isError === true) throw new Error(text ?? "handoff tool error");
+      let v: unknown = r?.structuredContent;
+      if (v === undefined || v === null || typeof v !== "object") {
+        try {
+          v = text === undefined ? undefined : JSON.parse(text);
+        } catch {
+          throw new Error("handoff tool の応答を読めない");
+        }
+      }
+      const o = v as { eventId?: unknown; body?: unknown } | null | undefined;
+      if (o === null || typeof o !== "object") throw new Error("handoff tool の応答を読めない");
+      if (o.eventId === null && o.body === null) return null;
+      if (typeof o.body !== "string") throw new Error("handoff tool の応答に本文が無い");
+      return { body: o.body };
+    },
     async close() {
       const all = [...clients.values()];
       clients.clear();
