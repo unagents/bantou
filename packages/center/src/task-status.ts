@@ -48,12 +48,23 @@ const stateLabel = (v: RemoteView, openAsks: number, p?: RemoteView["pending"][n
   if (v.state === "unknown") return "不明";
   // task を並行に動かす server は task ごとの状態を知らせる。始まっていない task は待ち（理由付き）
   const t = p?.server_task;
-  if (t?.state === "waiting") return t.waiting_for === "branch" ? `待ち（同じ branch${t.branch !== undefined ? ` ${t.branch}` : ""} の前の task）` : t.waiting_for === "limit" ? "待ち（同時実行の上限）" : "待ち";
+  // 並行の上限は既定で無い。待ちになるのは、利用者が上限を置いた時（limit）と、cap の停止中（closing）。branch は旧 server だけ
+  if (t?.state === "waiting") {
+    return t.waiting_for === "branch"
+      ? `待ち（同じ branch${t.branch !== undefined ? ` ${t.branch}` : ""} の前の task。旧 server）`
+      : t.waiting_for === "limit"
+        ? "待ち（利用者が置いた並行の上限）"
+        : t.waiting_for === "closing"
+          ? "待ち（cap の停止中）"
+          : "待ち";
+  }
   if (t?.state === "failed") return "失敗";
   if (t === undefined && v.state === "failed") return "失敗";
   if (openAsks > 0) return "返答待ち";
   if (t?.state === "done") return "完了";
   if (t === undefined && v.state === "done") return "完了";
+  // server は同じ branch の task も待たせない。cap に知らせて cap が判断する
+  if (t?.same_branch !== undefined && t.same_branch.length > 0) return `実行中（同じ branch の task ${t.same_branch.length} 本）`;
   return "実行中";
 };
 

@@ -2,7 +2,8 @@ import { randomBytes } from "node:crypto";
 import type { Dirent } from "node:fs";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { isValidAgentId, type AgentActivity } from "@agent-hand/bantou-protocol";
+import { isValidAgentId, type ActivityState, type AgentActivity } from "@agent-hand/bantou-protocol";
+import type { Reservation, ReservationQueue } from "./reservations";
 import type { AgentManager } from "./agents";
 import type { ActivityTracker } from "./activity";
 import type { WorkerCleaner } from "./cleanup";
@@ -17,7 +18,15 @@ export interface WorkerStartInput {
   branch?: string;
   /** この worker の claude --model。省略時は前回の記録、それも無ければ cap の worker_model、それも無ければ付けない。 */
   model?: string;
+  /**
+   * true = 資源が足りないと cap が判断した: 予約として server の queue に貯め、worker が 1 本終わるたびに先頭から 1 本ずつ起こす
+   * （動いている worker が 0 本ならすぐ起こす）。server は足りるかを判定しない。
+   */
+  reserve?: boolean;
 }
+
+/** worker_status の 1 件。reserved = 予約中（まだ始まっていない）。 */
+export type WorkerStatusEntry = Omit<WithModel<AgentActivity>, "state"> & { state: ActivityState | "reserved" };
 
 /**
  * taskId = 呼び出し元の指揮が受け持つ task（mcp の x-bantou-task-id）。指揮の run が task の lane なら付く。
@@ -25,8 +34,9 @@ export interface WorkerStartInput {
  * status: worker_id を省くと、その task の worker だけを返す。stop: 別の task（まだ動いている）の worker は断る。
  */
 export interface WorkerHub {
-  start(capId: string, input: WorkerStartInput, taskId?: string): Promise<{ worker_id: string; accepted: true }>;
-  status(capId: string, workerId?: string, taskId?: string): Promise<{ workers: Array<WithModel<AgentActivity>> }>;
+  /** reserved: true = 予約として貯めた（始まる時は server が自動で起こす）。 */
+  start(capId: string, input: WorkerStartInput, taskId?: string): Promise<{ worker_id: string; accepted: true; reserved?: true }>;
+  status(capId: string, workerId?: string, taskId?: string): Promise<{ workers: WorkerStatusEntry[] }>;
   stop(capId: string, workerId: string, taskId?: string): Promise<{ worker_id: string; stopped: boolean }>;
 }
 
@@ -41,6 +51,11 @@ export interface WorkerHubDeps {
   newId?: () => string;
   /** その cap の task が待ちか実行中か（別の task の worker を触らせない判定）。省略時は常に false（task をまたいで触れる）。 */
   taskActive?: (capId: string, taskId: string) => boolean;
+  /**
+   * 予約の queue。worker の run が終わるたびに workerEnded を呼ぶ（先頭を 1 本起こす）。launch は hub が持つ（hub.launchReserved）。
+   * 省略時は予約を受けない（reserve は無視して今すぐ起こす）。
+   */
+  reservations?: Pick<ReservationQueue, "add" | "cancel" | "has" | "workerEnded" | "list">;
 }
 
 /** 持ち主の記録先。state.json は agents.ts が丸ごと書き換えるので別ファイルにする（center.json と同じ流儀）。 */
@@ -81,7 +96,7 @@ export async function writeOwner(workspace: string, workerId: string, capId: str
 const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 const oneLine = (s: string, n: number): string => s.replace(/\s+/g, " ").trim().slice(0, n);
 
-export function createWorkerHub(deps: WorkerHubDeps): WorkerHub {
+export function createWorkerHub(deps: WorkerHubDeps): WorkerHub & { launchReserved: (r: Reservation) => void } {
   const { workspace, log } = deps;
   const newId = deps.newId ?? ((): string => `w-${randomBytes(5).toString("hex")}`);
 
@@ -116,11 +131,48 @@ export function createWorkerHub(deps: WorkerHubDeps): WorkerHub {
     if (deps.taskActive?.(capId, owner.taskId) === true) throw new Error(`別の task（${owner.taskId}）の worker: ${workerId}`);
   }
 
-  async function start(capId: string, input: WorkerStartInput, taskId?: string): Promise<{ worker_id: string; accepted: true }> {
+  /** worker を起こす（完了は待たない）。manager には同期で載せる。終わったら予約の先頭を 1 本起こす。 */
+  function invokeWorker(
+    capId: string,
+    workerId: string,
+    lane: string | undefined,
+    input: { prompt: string; repo?: string; branch?: string; model?: string; defaultModel?: string },
+  ): void {
+    deps.manager
+      .invoke("worker", workerId, {
+        prompt: input.prompt,
+        ...(input.repo ? { repo: input.repo } : {}),
+        ...(input.branch ? { branch: input.branch } : {}),
+        ...(input.model !== undefined ? { model: input.model } : {}),
+        ...(input.defaultModel !== undefined ? { defaultModel: input.defaultModel } : {}),
+        reason: `worker_start from cap ${capId}`,
+        capId,
+        ...(lane !== undefined ? { taskId: lane } : {}),
+      })
+      .then(
+        (r) => log(`worker 終了: worker_id=${workerId} ok=${r.ok}`),
+        (e: unknown) => log(`エラー: worker 起動: worker_id=${workerId} ${errMsg(e)}`),
+      )
+      .finally(() => {
+        try {
+          deps.reservations?.workerEnded();
+        } catch (e) {
+          log(`予約の起動に失敗: ${errMsg(e)}`);
+        }
+      });
+  }
+
+  /** 予約を起こす（queue の launch。予約の時に決めた入力のまま worker を起こす）。 */
+  function launchReserved(r: Reservation): void {
+    invokeWorker(r.capId, r.workerId, r.taskId, r.input);
+  }
+
+  async function start(capId: string, input: WorkerStartInput, taskId?: string): Promise<{ worker_id: string; accepted: true; reserved?: true }> {
     await requireCap(capId);
     if (taskId !== undefined && !isValidAgentId(taskId)) throw new Error(`task_id が不正: ${taskId}`);
     const workerId = input.worker_id ?? newId();
     if (!isValidAgentId(workerId)) throw new Error(`worker_id が不正: ${workerId}`);
+    if (deps.reservations?.has(workerId) !== undefined) throw new Error(`worker は予約中（始まるまで次の指示は送れない）: ${workerId}`);
     if (typeof input.prompt !== "string" || input.prompt === "" || input.prompt.includes("\0")) {
       throw new Error("prompt は空でない文字列（NUL 不可）");
     }
@@ -142,23 +194,21 @@ export function createWorkerHub(deps: WorkerHubDeps): WorkerHub {
       if (lane !== undefined) capModel = (await readModelRecord(laneDir(workspace, capId, lane))).worker_model;
       capModel ??= (await readModelRecord(agentDir(workspace, "cap", capId))).worker_model;
     }
-    log(`worker_start: cap_id=${capId}${lane !== undefined ? ` task_id=${lane}` : ""} worker_id=${workerId} prompt=${oneLine(input.prompt, 80)}`);
+    log(`worker_start: cap_id=${capId}${lane !== undefined ? ` task_id=${lane}` : ""} worker_id=${workerId}${input.reserve === true ? " reserve" : ""} prompt=${oneLine(input.prompt, 80)}`);
+    const launchInput = {
+      prompt: input.prompt,
+      ...(input.repo ? { repo: input.repo } : {}),
+      ...(input.branch ? { branch: input.branch } : {}),
+      ...(input.model !== undefined ? { model: input.model } : {}),
+      ...(capModel !== undefined ? { defaultModel: capModel } : {}),
+    };
+    // 予約（cap が資源が足りないと判断した）: queue に貯める。動いている worker が 0 本ならすぐ起こす（queue が launchReserved を呼ぶ）
+    if (input.reserve === true && deps.reservations) {
+      const queued = deps.reservations.add({ capId, workerId, ...(lane !== undefined ? { taskId: lane } : {}), input: launchInput });
+      return { worker_id: workerId, accepted: true, ...(queued ? { reserved: true as const } : {}) };
+    }
     // 完了は待たない。失敗は activity と state.json に出る
-    deps.manager
-      .invoke("worker", workerId, {
-        prompt: input.prompt,
-        ...(input.repo ? { repo: input.repo } : {}),
-        ...(input.branch ? { branch: input.branch } : {}),
-        ...(input.model !== undefined ? { model: input.model } : {}),
-        ...(capModel !== undefined ? { defaultModel: capModel } : {}),
-        reason: `worker_start from cap ${capId}`,
-        capId,
-        ...(lane !== undefined ? { taskId: lane } : {}),
-      })
-      .then(
-        (r) => log(`worker 終了: worker_id=${workerId} ok=${r.ok}`),
-        (e: unknown) => log(`エラー: worker 起動: worker_id=${workerId} ${errMsg(e)}`),
-      );
+    invokeWorker(capId, workerId, lane, launchInput);
     return { worker_id: workerId, accepted: true };
   }
 
@@ -188,15 +238,39 @@ export function createWorkerHub(deps: WorkerHubDeps): WorkerHub {
     return a;
   }
 
-  async function status(capId: string, workerId?: string, taskId?: string): Promise<{ workers: Array<WithModel<AgentActivity>> }> {
+  /** 予約中の worker（state=reserved）。 */
+  function reservedEntries(capId: string, workerId: string | undefined, onlyTask: string | undefined): WorkerStatusEntry[] {
+    return (deps.reservations?.list() ?? [])
+      .filter((r) => r.capId === capId && (workerId === undefined || r.workerId === workerId) && (onlyTask === undefined || r.taskId === onlyTask))
+      .map((r) => ({
+        kind: "worker" as const,
+        id: r.workerId,
+        cap_id: capId,
+        state: "reserved" as const,
+        task: oneLine(r.input.prompt, 200),
+        model: r.input.model ?? r.input.defaultModel ?? null,
+        last_activity: "reserved",
+        last_output_at: null,
+        silent_ms: Math.max(0, Date.now() - Date.parse(r.reservedAt)),
+        started_at: null,
+        finished_at: null,
+        ...(r.taskId !== undefined ? { task_id: r.taskId } : {}),
+      }));
+  }
+
+  async function status(capId: string, workerId?: string, taskId?: string): Promise<{ workers: WorkerStatusEntry[] }> {
     await requireCap(capId);
     if (workerId !== undefined) {
       if (!isValidAgentId(workerId)) throw new Error(`worker_id が不正: ${workerId}`);
+      // 予約中の worker は持ち主の記録がまだ無いことがある（clone 前）
+      if (deps.reservations?.has(workerId)?.capId === capId) return { workers: reservedEntries(capId, workerId, undefined) };
       await requireOwned(capId, workerId);
     }
     // task の指揮が worker_id を省いた時は、その task の worker だけ
     const onlyTask = workerId === undefined ? taskId : undefined;
-    const tracked0 = deps.activity.snapshot(capId).filter((a) => a.kind === "worker" && (workerId === undefined || a.id === workerId));
+    const reserved = reservedEntries(capId, workerId, onlyTask);
+    const reservedIds = new Set(reserved.map((r) => r.id));
+    const tracked0 = deps.activity.snapshot(capId).filter((a) => a.kind === "worker" && !reservedIds.has(a.id) && (workerId === undefined || a.id === workerId));
     const tracked: typeof tracked0 = [];
     for (const a of tracked0) {
       if (onlyTask === undefined || (a.task_id ?? (await readOwnerTask(workspace, a.id))) === onlyTask) tracked.push(a);
@@ -215,19 +289,29 @@ export function createWorkerHub(deps: WorkerHubDeps): WorkerHub {
     }
     const extra: Array<WithModel<AgentActivity>> = [];
     for (const id of ids.sort()) {
-      if (seen.has(id)) continue;
+      if (seen.has(id) || reservedIds.has(id)) continue;
       const rec = await readOwnerRecord(workspace, id);
       if (rec?.capId !== capId) continue;
       if (onlyTask !== undefined && rec.taskId !== onlyTask) continue;
       const a = await fromState(capId, id, rec.taskId);
       if (a) extra.push(a);
     }
-    return { workers: [...tracked, ...extra].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)) };
+    return { workers: [...tracked, ...extra, ...reserved].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)) };
   }
 
   async function stop(capId: string, workerId: string, taskId?: string): Promise<{ worker_id: string; stopped: boolean }> {
     await requireCap(capId);
     if (!isValidAgentId(workerId)) throw new Error(`worker_id が不正: ${workerId}`);
+    // 予約中の worker は予約を取り消す
+    const reservedRec = deps.reservations?.has(workerId);
+    if (reservedRec !== undefined && reservedRec.capId === capId) {
+      if (taskId !== undefined && reservedRec.taskId !== undefined && reservedRec.taskId !== taskId && deps.taskActive?.(capId, reservedRec.taskId) === true) {
+        throw new Error(`別の task（${reservedRec.taskId}）の worker: ${workerId}`);
+      }
+      const cancelled = deps.reservations!.cancel(workerId);
+      log(`worker_stop: cap_id=${capId} worker_id=${workerId} 予約を取り消し=${cancelled}`);
+      return { worker_id: workerId, stopped: cancelled };
+    }
     await requireOwned(capId, workerId);
     guardTask(capId, workerId, await readOwnerRecord(workspace, workerId), taskId);
     const r = await deps.manager.stop("worker", workerId);
@@ -235,7 +319,7 @@ export function createWorkerHub(deps: WorkerHubDeps): WorkerHub {
     return { worker_id: workerId, stopped: r.stopped };
   }
 
-  return { start, status, stop };
+  return { start, status, stop, launchReserved };
 }
 
 // -- /mcp route との橋渡し -------------------------------------------------------

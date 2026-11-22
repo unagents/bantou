@@ -581,10 +581,19 @@ export type CapTaskState = "waiting" | "running" | "done" | "failed";
 export interface CapTaskInfo {
   task_id: string;
   state: CapTaskState;
-  /** `deliverables.branch` of the task. Tasks of a cap with the same branch run one after another. */
+  /** `deliverables.branch` of the task. */
   branch?: string;
-  /** waiting only. limit = the cap already runs as many tasks as the server allows at once; branch = an earlier task with the same branch has not finished. */
-  waiting_for?: "limit" | "branch";
+  /**
+   * Other unfinished tasks of the cap with the same `branch` (task ids). The server does not make a task wait for them any more:
+   * the cap is told and decides. Additive; absent when there is none.
+   */
+  same_branch?: string[];
+  /**
+   * waiting only. limit = the cap already runs as many tasks as the user-set `session.maxParallelTasks` (absent = no limit);
+   * closing = the cap is being closed by stop_cap; branch = legacy (an older server made a task wait for an earlier task
+   * with the same branch; this server never sends it). A reader must accept other strings.
+   */
+  waiting_for?: "limit" | "branch" | "closing";
   /** ISO 8601, when the server received the task. */
   queued_at: string;
   /** ISO 8601, when its conductor run started (null while waiting). */
@@ -610,6 +619,52 @@ export interface ServerIdentityFields {
   workspace?: string;
 }
 
+/** Host resources the server measured (it only measures and shows; it has no threshold and never judges whether there is enough). */
+export interface ResourceSample {
+  /** ISO 8601, when it was measured. */
+  at: string;
+  load1: number;
+  load5: number;
+  load15: number;
+  /** Logical CPU count. */
+  cpus: number;
+  /** Bytes. */
+  mem_total: number;
+  mem_free: number;
+  /** Bytes of the filesystem of the server workspace; null when not measurable. */
+  disk_total: number | null;
+  disk_free: number | null;
+  /** Workers running now on this server (reserved ones excluded). */
+  workers: number;
+}
+
+/** One cap on the board: counts only, never the content of its tasks. */
+export interface BoardCap {
+  cap_id: string;
+  state: AgentState;
+  running_tasks: number;
+  waiting_tasks: number;
+  /** Workers of this cap running now. */
+  workers: number;
+  /** Workers of this cap waiting as a reservation. */
+  reserved: number;
+}
+
+/** The server's board (additive field of status_result): its caps, worker count, host resources and reservations. */
+export interface ServerBoard {
+  /** ISO 8601, when the board was built. */
+  at: string;
+  caps: BoardCap[];
+  /** Workers running now on this server. */
+  workers: number;
+  /** Reservations waiting (worker_start with `reserve: true`, queued in arrival order). */
+  reserved: number;
+  /** Latest measurement, null before the first one. */
+  resources: ResourceSample | null;
+  /** The user-set upper limit of tasks running at once per cap (`session.maxParallelTasks`); null = no limit (default). */
+  max_parallel_tasks: number | null;
+}
+
 export interface StatusReply extends ServerIdentityFields {
   bantou: typeof PROTOCOL_VERSION;
   type: "status_result";
@@ -620,6 +675,8 @@ export interface StatusReply extends ServerIdentityFields {
   protocol_version?: string;
   caps: AgentStatus[];
   workers: AgentStatus[];
+  /** The server's board (caps, workers, host resources, reservations). Additive; absent from an older server. */
+  board?: ServerBoard;
 }
 
 export interface ErrorReply {
@@ -1041,6 +1098,7 @@ function isCapTaskList(v: unknown): v is CapTaskInfo[] {
         typeof t.state === "string" &&
         optString(t.branch) &&
         optString(t.waiting_for) &&
+        (t.same_branch === undefined || (Array.isArray(t.same_branch) && t.same_branch.every((x: unknown) => typeof x === "string"))) &&
         typeof t.queued_at === "string" &&
         strOrNull(t.started_at) &&
         strOrNull(t.finished_at) &&
@@ -1128,7 +1186,8 @@ export function isServerReply(v: unknown): v is ServerReply {
         Array.isArray(v.caps) &&
         v.caps.every(isAgentStatus) &&
         Array.isArray(v.workers) &&
-        v.workers.every(isAgentStatus)
+        v.workers.every(isAgentStatus) &&
+        (v.board === undefined || isRecord(v.board))
       );
     case "hello_result":
       return (
