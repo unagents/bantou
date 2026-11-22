@@ -1947,9 +1947,9 @@ export function createRemoteManager(opts: {
           inflight.set(target, Math.max(0, (inflight.get(target) ?? 1) - 1));
           inflightTasks.get(target)?.delete(taskId);
           inflightIdle.delete(target);
+          // 返信待ちのまま止まったと印を付けた後に、返信待ちが閉じた（結果・error・送信失敗のどれでも）: その印を消す。failed など他の印は消さない
+          if (target.stopped?.kind === "no_result") delete target.stopped;
           if (kind === "cap_result") {
-            // 返信待ちのまま止まったと印を付けた後に結果が届いた: 通常の完了として扱い、その印を消す
-            if (target.stopped?.kind === "no_result") delete target.stopped;
             // task_result が返った = server が受け付けて実行した
             markObserved(target, entry, "task_result");
             markOk(target);

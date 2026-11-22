@@ -273,3 +273,20 @@ test("止まった印(返信待ちのまま止まった): 印の後に task_resu
   assert.match(done[1].text, /late result/);
   assert.doesNotMatch(done[1].text, /note: task の結果が返らないまま/);
 });
+
+test("止まった印(返信待ちのまま止まった): 返信待ちが transport error で閉じたら no_result の印が消え、通知は増えない", async () => {
+  const { mgr, st, sent } = setup();
+  await mgr.send({ owner: "pm1", goal: "go" });
+  st.running = false;
+  await mgr.checkReachability();
+  await sleep(5);
+  await mgr.checkReachability();
+  await tick();
+  assert.equal(mgr.summary("pm1").stopped?.[0].kind, "no_result");
+  assert.equal(pushes(sent, "[bantou] remote 完了").length, 1);
+  st.running = true; // 返信待ちが閉じる時に cap は動いている（完了判定は走らない）。no_result の印だけが消える事を見る
+  st.results[0]({ bantou: 1, type: "error", ok: false, message: "返信が来ない（task）", transport: true });
+  await sleep(300);
+  assert.equal(mgr.summary("pm1").stopped, undefined, "返信待ちが閉じたので no_result の印は消える");
+  assert.equal(pushes(sent, "[bantou] remote 完了").length, 1, "閉じた事で通知は増えない");
+});
