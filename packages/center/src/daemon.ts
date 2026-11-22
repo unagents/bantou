@@ -38,6 +38,7 @@ import { createProcessStandInClient } from "./stand-in.js";
 import { createSleepGate } from "./sleep-gate.js";
 import { createResessioner } from "./resession.js";
 import { createCenterMemoryEvents } from "./memory-events.js";
+import { expandEnvRefs } from "./mcp-server-def.js";
 import { capSessionName } from "./session-name.js";
 
 /** 強制終了の猶予に足す余裕（stop は SIGTERM 待ち stopGraceMs の後、SIGKILL 待ちで最大 5 秒）。 */
@@ -206,6 +207,13 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     info: (name) => sessions.list().find((x) => x.name === name),
     restartFresh: (name) => sessions.restartFresh(name),
     saveToMemory: (name, h) => memoryEvents.handoff(name, h),
+    readFromMemory: (name, id) => memoryEvents.readHandoff(name, id),
+    // 取り出せなかった理由の文から除く値: 外部記憶の url と、header の値（展開前・展開後。token は Authorization の中）
+    secretsOf: (name) => {
+      const d = sessions.memoryOf(name);
+      const vals = [typeof d?.url === "string" ? d.url : "", ...Object.values((d?.headers as Record<string, unknown> | undefined) ?? {}).flatMap((v) => (typeof v === "string" ? [v, expandEnvRefs(v)] : []))];
+      return vals.filter((v) => v.length >= 4);
+    },
     core,
     dir: join(stateDir, "handoffs"),
     log,
