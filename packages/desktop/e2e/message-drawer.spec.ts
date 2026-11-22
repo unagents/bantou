@@ -21,69 +21,110 @@ const drawer = (page: Page) => page.getByTestId("message-drawer");
 const handle = (page: Page) => page.getByTestId("message-drawer-handle");
 const items = (page: Page) => page.getByTestId("message-drawer-item");
 
-/** The handle's box once the panel has stopped moving (it slides for a moment after a release). */
-async function settledBox(page: Page) {
-  let prev = "";
-  let box = (await handle(page).boundingBox())!;
-  for (let i = 0; i < 50 && JSON.stringify(box) !== prev; i++) {
-    prev = JSON.stringify(box);
-    await page.waitForTimeout(50);
-    box = (await handle(page).boundingBox())!;
-  }
-  return box;
-}
-
-/** Drag the handle by `dx` px (negative = left) with the mouse. */
-async function drag(page: Page, dx: number) {
-  const box = await settledBox(page);
-  const x = box.x + box.width / 2;
-  const y = box.y + box.height / 2;
-  await page.mouse.move(x, y);
-  await page.mouse.down();
-  await page.mouse.move(x + dx / 2, y, { steps: 4 });
-  await page.mouse.move(x + dx, y, { steps: 4 });
-  await page.mouse.up();
-}
+const panel = (page: Page) => page.getByTestId("message-drawer-panel");
+/** Opens the drawer with a click on its strip. */
+const open = async (page: Page) => {
+  await handle(page).click();
+  await expect(drawer(page)).toHaveAttribute("data-open", "true");
+};
+const shot = (page: Page, name: string) => page.screenshot({ path: `${SHOT_DIR}/${name}.png` });
 
 test.describe("message drawer", () => {
   test.use({ seed: boardSeed });
 
-  test("pulling the right edge to the left opens it, pushing it back closes it", async ({ page }) => {
+  test("a click on the strip opens and closes it; it has no resize handle", async ({ page }) => {
     await page.goto("/");
     await pickSession(page, "stroke-board");
     await expect(drawer(page)).toHaveAttribute("data-open", "false");
-    await expect(drawer(page)).toHaveAttribute("data-visible", "0");
-    // the closed strip covers nothing of the board (the terminal's right edge stays usable)
-    const strip = await settledBox(page);
-    const right = (await page.getByTestId("right-col").boundingBox())!;
-    expect(right.x + right.width).toBeLessThanOrEqual(strip.x + 0.5);
-    await drag(page, -300);
-    await expect(drawer(page)).toHaveAttribute("data-open", "true");
-    await expect(drawer(page)).toHaveAttribute("data-visible", "340");
+    await expect(panel(page)).toBeHidden();
+    await open(page);
+    await expect(panel(page)).toBeVisible();
     await expect(page.getByText("最終メッセージ").first()).toBeVisible();
-    // a short push back does not close it; a long one does
-    await drag(page, 60);
+    // dragging the strip changes nothing
+    const box = (await handle(page).boundingBox())!;
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x - 150, box.y + box.height / 2, { steps: 5 });
+    await page.mouse.up();
     await expect(drawer(page)).toHaveAttribute("data-open", "true");
-    await expect(drawer(page)).toHaveAttribute("data-visible", "340");
-    await drag(page, 250);
+    await handle(page).click();
     await expect(drawer(page)).toHaveAttribute("data-open", "false");
-    await expect(drawer(page)).toHaveAttribute("data-visible", "0");
-    await settledBox(page);
-    await page.screenshot({ path: `${SHOT_DIR}/drawer-closed.png` });
-    await drag(page, -300);
-    await expect(drawer(page)).toHaveAttribute("data-open", "true");
+    await open(page);
     await page.getByTestId("message-drawer-close").click();
     await expect(drawer(page)).toHaveAttribute("data-open", "false");
   });
 
-  test("a half-way pull settles by which side of the middle it ends on", async ({ page }) => {
-    await page.goto("/");
-    await pickSession(page, "stroke-board");
-    await drag(page, -100);
-    await expect(drawer(page)).toHaveAttribute("data-open", "false");
-    await drag(page, -250);
-    await expect(drawer(page)).toHaveAttribute("data-open", "true");
-  });
+  for (const [vw, panelW] of [
+    [1300, 288],
+    [1700, 384],
+  ] as const) {
+    test(`at ${vw}px the panel is ${panelW}px wide and the conversation narrows instead of being covered`, async ({ page }) => {
+      await page.setViewportSize({ width: vw, height: 800 });
+      await page.goto("/");
+      await pickSession(page, "stroke-board");
+      const right = page.getByTestId("right-col");
+      const closedW = (await right.boundingBox())!.width;
+      await shot(page, `drawer-${vw}-closed`);
+      await open(page);
+      const o = (await right.boundingBox())!;
+      const d = (await drawer(page).boundingBox())!;
+      const p = (await panel(page).boundingBox())!;
+      expect(Math.round(p.width)).toBe(panelW);
+      // the conversation lost exactly the panel's width and ends where the drawer starts
+      expect(Math.round(closedW - o.width)).toBe(panelW);
+      expect(o.x + o.width).toBeLessThanOrEqual(d.x + 0.5);
+      // the terminal's own width follows (its content wraps in the narrower box)
+      const term = (await page.getByTestId("terminal-pane").boundingBox())!;
+      expect(term.x + term.width).toBeLessThanOrEqual(d.x + 0.5);
+      // the xterm grid (input line and output) is inside the narrowed terminal: it re-wraps there instead of running under the drawer
+      const grid = (await page.locator(".xterm-screen").boundingBox())!;
+      expect(grid.x + grid.width).toBeLessThanOrEqual(d.x + 0.5);
+      await shot(page, `drawer-${vw}-open`);
+      await page.getByTestId("message-drawer-close").click();
+      expect(Math.round((await right.boundingBox())!.width)).toBe(Math.round(closedW));
+      console.log(`measure vw=${vw} closedW=${closedW} openW=${o.width} panelW=${p.width} termRight=${term.x + term.width} gridRight=${grid.x + grid.width} drawerX=${d.x}`);
+    });
+  }
+
+  for (const vw of [1100, 1300, 1700]) {
+    test(`at ${vw}px, open or closed, the conversation grid stays left of the drawer and nothing scrolls sideways`, async ({ page }) => {
+      await page.setViewportSize({ width: vw, height: 800 });
+      await page.goto("/");
+      await pickSession(page, "stroke-board");
+      const noScroll = async (state: string) => {
+        const m = await page.evaluate(() => {
+          const row = document.querySelector('[data-testid="pane-row"]')!;
+          const doc = document.documentElement;
+          return { rowS: row.scrollWidth, rowC: row.clientWidth, docS: doc.scrollWidth, docC: doc.clientWidth };
+        });
+        expect(m.rowS, `${vw} ${state} pane row`).toBeLessThanOrEqual(m.rowC);
+        expect(m.docS, `${vw} ${state} document`).toBeLessThanOrEqual(m.docC);
+        return m;
+      };
+      const gridRight = async () => {
+        const g = (await page.locator(".xterm-screen").boundingBox())!;
+        return g.x + g.width;
+      };
+      await noScroll("closed");
+      const closedRight = await gridRight();
+      await open(page);
+      const d = (await drawer(page).boundingBox())!;
+      const right = await gridRight();
+      expect(right).toBeLessThanOrEqual(d.x + 0.5);
+      await noScroll("open");
+      const side = (await page.getByRole("navigation", { name: "セッション一覧" }).boundingBox())!.width;
+      const mid = (await page.getByTestId("middle-col").boundingBox())!.width;
+      const conv = (await page.getByTestId("right-col").boundingBox())!.width;
+      expect(mid).toBeGreaterThanOrEqual(320);
+      expect(conv).toBeGreaterThanOrEqual(320);
+      await shot(page, `drawer-fit-${vw}-open`);
+      console.log(`fit vw=${vw} closedGridRight=${closedRight} openGridRight=${right} drawerX=${d.x} side=${side} middle=${mid} conv=${conv}`);
+      await page.getByTestId("message-drawer-close").click();
+      await expect(drawer(page)).toHaveAttribute("data-open", "false");
+      await noScroll("reclosed");
+      expect(Math.round(await gridRight())).toBe(Math.round(closedRight));
+    });
+  }
 
   test("last messages stack up in arrival order, with the session and the time", async ({ page }) => {
     await page.goto("/");
@@ -92,7 +133,7 @@ test.describe("message drawer", () => {
     await message(page, "careery", "careery の最後の応答", "2026-11-09T10:00:00.000Z");
     await message(page, "stroke-board", "stroke-board の応答\n二行目", "2026-11-09T10:01:00.000Z");
     await message(page, "careery", "careery の二つ目", "2026-11-09T10:02:00.000Z");
-    await drag(page, -300);
+    await open(page);
     await expect(items(page)).toHaveCount(3);
     await expect(page.getByTestId("message-drawer-session")).toHaveText(["careery", "stroke-board", "careery"]);
     await expect(page.getByTestId("message-drawer-text")).toHaveText([
@@ -106,7 +147,6 @@ test.describe("message drawer", () => {
     await message(page, "agent-messenger", "四つ目", "2026-11-09T10:03:00.000Z");
     await expect(items(page)).toHaveCount(4);
     await expect(items(page).last()).toHaveAttribute("data-session", "agent-messenger");
-    await settledBox(page);
     await page.screenshot({ path: `${SHOT_DIR}/drawer-open.png` });
   });
 
@@ -115,7 +155,7 @@ test.describe("message drawer", () => {
     await pickSession(page, "stroke-board");
     await message(page, "careery", "careery の応答", "2026-11-09T10:00:00.000Z");
     await message(page, "agent-messenger", "agent-messenger の応答", "2026-11-09T10:01:00.000Z");
-    await drag(page, -300);
+    await open(page);
     await items(page).filter({ hasText: "careery の応答" }).click();
     await expect(page.locator("[aria-current=true]")).toContainText("careery");
     await expect(page.locator('section[aria-label="careery"]')).toBeVisible();
@@ -140,7 +180,7 @@ test.describe("message drawer", () => {
       },
       501,
     );
-    await drag(page, -300);
+    await open(page);
     await expect(items(page)).toHaveCount(500);
     await expect(page.getByTestId("message-drawer-text").first()).toHaveText("応答 2");
     await message(page, "careery", "応答 502", "2026-11-09T10:01:00.000Z");

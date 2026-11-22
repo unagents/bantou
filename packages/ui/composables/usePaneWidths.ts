@@ -44,16 +44,20 @@ function webStorage(): Storage | null {
  * `rowWidth` is the visible width of the pane row (0 = not measured yet).
  * The stored values are kept as the user set them: a narrow window only clamps what is shown, so widening it again brings them back.
  */
-export function usePaneWidths(rowWidth: Ref<number>) {
+export function usePaneWidths(rowWidth: Ref<number>, drawerOpen: Ref<boolean> = ref(false)) {
   const raw = useState<Raw>("pane-widths", () => loadPaneWidths(webStorage()));
-  const avail = computed(() => Math.max(rowWidth.value, PANE_ROW_MIN) - PANE_DIVIDER * 2);
+  // The conversation (right) is the main screen. While the message drawer is open the row is short of room, so the side menu gives way
+  // first (down to nothing); the middle column and the conversation keep their minimums.
+  const sideMin = computed(() => (drawerOpen.value ? 0 : PANE_MIN.side));
+  const rowMin = computed(() => sideMin.value + PANE_MIN.middle + PANE_MIN.right + PANE_DIVIDER * 2);
+  const avail = computed(() => Math.max(rowWidth.value, rowMin.value) - PANE_DIVIDER * 2);
 
   const sideMax = computed(() => (rowWidth.value > 0 ? avail.value - PANE_MIN.middle - PANE_MIN.right : Infinity));
-  const side = computed(() => Math.round(clamp(raw.value.side, PANE_MIN.side, sideMax.value)));
+  const side = computed(() => Math.round(clamp(raw.value.side, sideMin.value, sideMax.value)));
   const middleMax = computed(() => (rowWidth.value > 0 ? avail.value - side.value - PANE_MIN.right : Infinity));
   const middle = computed(() => Math.round(clamp(raw.value.middle, PANE_MIN.middle, middleMax.value)));
 
-  const setSide = (w: number) => (raw.value = { ...raw.value, side: Math.round(clamp(w, PANE_MIN.side, sideMax.value)) });
+  const setSide = (w: number) => (raw.value = { ...raw.value, side: Math.round(clamp(w, sideMin.value, sideMax.value)) });
   const setMiddle = (w: number) => (raw.value = { ...raw.value, middle: Math.round(clamp(w, PANE_MIN.middle, middleMax.value)) });
   const resetSide = () => setSide(PANE_DEFAULT.side);
   const resetMiddle = () => setMiddle(PANE_DEFAULT.middle);
@@ -67,5 +71,5 @@ export function usePaneWidths(rowWidth: Ref<number>) {
     }
   }
 
-  return { side, middle, sideMax, middleMax, setSide, setMiddle, resetSide, resetMiddle, save };
+  return { side, middle, sideMin, rowMin, sideMax, middleMax, setSide, setMiddle, resetSide, resetMiddle, save };
 }

@@ -1,7 +1,7 @@
 import { getTransport, type UnlistenFn } from "~/tauri";
 import { CENTER_SESSION_MESSAGE_EVENT } from "../api";
 
-/** One entry of the drawer: a session's last response of a turn. */
+/** One entry of the drawer: a session's final message to the user (its last response of a turn). */
 export interface DrawerMessage {
   /** Arrival order (0, 1, 2 ...). */
   seq: number;
@@ -10,12 +10,6 @@ export interface DrawerMessage {
   /** When the center got it (ISO). */
   at: string;
 }
-
-/** Width (px) of the opened panel. */
-export const DRAWER_WIDTH = 340;
-
-/** Width (px) of the grab strip that stays on the right edge while closed. The screen keeps this much free on its right. */
-export const DRAWER_HANDLE = 14;
 
 /** How many messages are kept. The app runs for days: past this the oldest ones are dropped so memory and the list stay bounded. */
 export const MAX_DRAWER_MESSAGES = 500;

@@ -6,11 +6,12 @@ const goSession = (name: string) => void navigateTo(`/s/${encodeURIComponent(nam
 
 <template>
   <UApp>
-    <!-- the right edge is left free for the closed drawer's grab strip -->
-    <div :style="{ paddingRight: `${DRAWER_HANDLE}px` }">
-      <NuxtPage />
+    <!-- the drawer is a column beside the page: opened, the page narrows (below WebHeader, h-12) -->
+    <div class="flex">
+      <div class="min-w-0 flex-1">
+        <NuxtPage />
+      </div>
+      <MessageDrawer class="sticky top-12 h-[calc(100vh-3rem)] self-start" :messages="messages" @select="goSession" />
     </div>
-    <!-- top: below WebHeader (h-12) -->
-    <MessageDrawer :messages="messages" top="3rem" @select="goSession" />
   </UApp>
 </template>

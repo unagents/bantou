@@ -1,60 +1,20 @@
 <script setup lang="ts">
-import { DRAWER_HANDLE as HANDLE, DRAWER_WIDTH, type DrawerMessage } from "../composables/useMessageDrawer";
+import type { DrawerMessage } from "../composables/useMessageDrawer";
 
 /**
- * Right-edge drawer: grab the strip on the right edge and pull it left to open, push it back to close
- * (a click on the strip or the close button toggles too). It lists the sessions' last messages in arrival order.
+ * Right-edge drawer: a column beside the main screen (not over it). The strip on its left edge opens / closes it with a click.
+ * Opened, it takes room from the main screen, which narrows and re-wraps. Its width is fixed per viewport size (two steps, see the
+ * template classes); there is no resizing. It lists the sessions' final messages (the replies to the user) in arrival order.
  */
-const props = withDefaults(
-  defineProps<{
-    messages: DrawerMessage[];
-    /** Where the panel starts from the top (CSS length): below the app's header. */
-    top?: string;
-  }>(),
-  { top: "var(--cork-header-height, 0px)" },
-);
+const props = defineProps<{ messages: DrawerMessage[] }>();
 const emit = defineEmits<{ select: [session: string] }>();
 
-/** Moves shorter than this (px) count as a click on the strip. */
-const CLICK_SLOP = 3;
-
-const open = ref(false);
-/** How many px of the panel are out (0 .. DRAWER_WIDTH). Follows the pointer while dragging. */
-const visible = ref(0);
-const dragging = ref(false);
-let startX = 0;
-let startVisible = 0;
-let moved = false;
-
-function settle(isOpen: boolean) {
-  open.value = isOpen;
-  visible.value = isOpen ? DRAWER_WIDTH : 0;
-}
-
-function onDown(e: PointerEvent) {
-  if (e.button !== 0) return;
-  (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-  dragging.value = true;
-  moved = false;
-  startX = e.clientX;
-  startVisible = visible.value;
-}
-function onMove(e: PointerEvent) {
-  if (!dragging.value) return;
-  const dx = startX - e.clientX; // pulling left is positive
-  if (Math.abs(dx) > CLICK_SLOP) moved = true;
-  visible.value = Math.min(DRAWER_WIDTH, Math.max(0, startVisible + dx));
-}
-function onUp() {
-  if (!dragging.value) return;
-  dragging.value = false;
-  settle(moved ? visible.value > DRAWER_WIDTH / 2 : !open.value);
-}
+const open = defineModel<boolean>("open", { default: false });
 
 const list = ref<HTMLElement | null>(null);
 // New messages stack at the bottom; keep the newest in view. (The newest seq, not the length: the length stops growing at the cap.)
 watch(
-  () => props.messages.at(-1)?.seq,
+  () => [props.messages.at(-1)?.seq, open.value],
   async () => {
     await nextTick();
     if (list.value) list.value.scrollTop = list.value.scrollHeight;
@@ -69,34 +29,23 @@ const timeText = (iso: string) => {
 
 <template>
   <aside
-    class="border-cork-border fixed right-0 z-30 flex bg-default shadow-lg"
-    :class="dragging ? '' : 'transition-transform duration-150'"
-    :style="{
-      top,
-      bottom: '0',
-      width: `${DRAWER_WIDTH + HANDLE}px`,
-      transform: `translateX(${DRAWER_WIDTH - visible}px)`,
-    }"
+    class="border-cork-border flex h-full min-h-0 shrink-0 border-l bg-default"
     aria-label="最終メッセージ"
     data-testid="message-drawer"
     :data-open="open ? 'true' : 'false'"
-    :data-visible="Math.round(visible)"
   >
-    <div
-      role="separator"
-      aria-orientation="vertical"
-      aria-label="最終メッセージの引き出し"
-      class="bg-cork-elevated hover:bg-cork-border flex shrink-0 cursor-ew-resize touch-none items-center justify-center"
-      :style="{ width: `${HANDLE}px` }"
+    <button
+      type="button"
+      class="bg-cork-elevated hover:bg-cork-border flex w-3.5 shrink-0 cursor-pointer items-center justify-center"
+      :aria-label="open ? '最終メッセージを閉じる' : '最終メッセージを開く'"
+      :aria-expanded="open"
       data-testid="message-drawer-handle"
-      @pointerdown="onDown"
-      @pointermove="onMove"
-      @pointerup="onUp"
-      @pointercancel="onUp"
+      @click="open = !open"
     >
-      <UIcon name="i-lucide-grip-vertical" class="text-cork-muted size-3" aria-hidden="true" />
-    </div>
-    <div class="border-cork-border flex min-w-0 flex-1 flex-col border-l">
+      <UIcon :name="open ? 'i-lucide-chevron-right' : 'i-lucide-chevron-left'" class="text-cork-muted size-3" aria-hidden="true" />
+    </button>
+    <!-- two widths by viewport: 18rem, and 24rem from 1500px up -->
+    <div v-show="open" class="border-cork-border flex w-72 min-w-0 flex-col border-l min-[1500px]:w-96" data-testid="message-drawer-panel">
       <div class="border-cork-border flex items-center justify-between border-b px-3 py-1.5 text-sm font-semibold">
         <span>最終メッセージ</span>
         <UButton
@@ -106,7 +55,7 @@ const timeText = (iso: string) => {
           icon="i-lucide-x"
           aria-label="閉じる"
           data-testid="message-drawer-close"
-          @click="settle(false)"
+          @click="open = false"
         />
       </div>
       <ul ref="list" class="flex min-h-0 flex-1 flex-col overflow-y-auto" data-testid="message-drawer-list">
