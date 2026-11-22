@@ -954,8 +954,8 @@ test("memory 無しの session は従来どおり: mcp-config は bantou-messeng
   assert.deepEqual(Object.keys(mcpOf(l.args).mcpServers), ["bantou-messenger", "bantou"]);
   assert.equal(valueOf(l.args, "--mcp-config"), mcpConfigJson("http://127.0.0.1:4567/mcp/session", "pm1"));
   assert.equal(l.env.BANTOU_MEMORY_TOKEN, undefined);
-  assert.deepEqual(st.systemInstructions, ["base-spec@1", "master-cap-role@6", "master-cap-availability@2"]);
-  assert.equal(valueOf(l.args, "--append-system-prompt"), buildSystemInstructions({ session: "pm1" }));
+  assert.deepEqual(st.systemInstructions, ["base-spec@1", "master-cap-role@6", "master-cap-availability@2", "resession@1"]);
+  assert.equal(valueOf(l.args, "--append-system-prompt"), buildSystemInstructions({ session: "pm1", resession: true }));
   assert.ok(!valueOf(l.args, "--append-system-prompt")!.includes("mcp__memory__"));
   await sup.shutdown();
 });
@@ -963,9 +963,9 @@ test("memory 無しの session は従来どおり: mcp-config は bantou-messeng
 test("memory あり: system-instructions に memory@1 が付く（文面は --append-system-prompt の先頭の部品群の末尾、label は status に出る）。利用者の指示はその後ろ", async () => {
   const { sup } = make({ realSystem: true, instructions: "利用者の指示", memory: { url: "http://m/mcp" } });
   const st = await sup.start("pm1");
-  assert.deepEqual(st.systemInstructions, ["base-spec@1", "master-cap-role@6", "master-cap-availability@2", "memory@1"]);
+  assert.deepEqual(st.systemInstructions, ["base-spec@1", "master-cap-role@6", "master-cap-availability@2", "memory@1", "resession@1"]);
   const v = valueOf(launches[0].args, "--append-system-prompt")!;
-  assert.equal(v, `${buildSystemInstructions({ session: "pm1", memory: true })}\n\n利用者の指示`);
+  assert.equal(v, `${buildSystemInstructions({ session: "pm1", memory: true, resession: true })}\n\n利用者の指示`);
   assert.equal(st.instructions, true); // 利用者の指示だけを数える
   await sup.shutdown();
 });
@@ -1046,8 +1046,8 @@ test("統括の割り当て: 割り当てた session だけ launch の ctx.coord
   assert.deepEqual(seen, [{ session: "a", coordinator: true }, { session: "b", coordinator: false }]);
   assert.ok(sa.systemInstructions!.includes("coordinator@4"));
   assert.ok(!sb.systemInstructions!.includes("coordinator@4"));
-  assert.equal(valueOf(launches[0].args, "--append-system-prompt"), buildSystemInstructions({ session: "a", coordinator: true }));
-  assert.equal(valueOf(launches[1].args, "--append-system-prompt"), buildSystemInstructions({ session: "b" }));
+  assert.equal(valueOf(launches[0].args, "--append-system-prompt"), buildSystemInstructions({ session: "a", coordinator: true, resession: true }));
+  assert.equal(valueOf(launches[1].args, "--append-system-prompt"), buildSystemInstructions({ session: "b", resession: true }));
   const cfgA = JSON.parse(valueOf(launches[0].args, "--mcp-config")!).mcpServers;
   const cfgB = JSON.parse(valueOf(launches[1].args, "--mcp-config")!).mcpServers;
   // 設定に書いた普通の 1 項目（type・url・headers）がそのまま載る。鍵は env の参照にして実値は子の env にだけ渡す
