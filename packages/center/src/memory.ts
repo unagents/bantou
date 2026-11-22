@@ -128,6 +128,11 @@ export class PermanentMemoryError extends Error {}
 export interface MemorySink {
   /** Resolve when memory recorded the event or reported it as a duplicate. Throw to retry later; throw PermanentMemoryError to drop. */
   send(target: MemoryTarget, event: MemoryEvent): Promise<void>;
+  /**
+   * 引継ぎ（kind: handoff）の本文を memory の `handoff` tool で読む（eventId、agent = target の agentId）。
+   * 本文があれば `{ body }`、memory が「無い」（`eventId: null`）と答えたら `null`。届かない・拒否（isError）は投げる。
+   */
+  readHandoff?(target: MemoryTarget, eventId: string, timeoutMs?: number): Promise<{ body: string } | null>;
   close?(): Promise<void>;
 }
 
@@ -375,6 +380,38 @@ export function createMcpEventSink(sdk: McpSdkLike, opts: { clientName: string; 
         const text = r.content?.find((c) => c.type === "text")?.text ?? "event tool error";
         throw new PermanentMemoryError(text);
       }
+    },
+    async readHandoff(target, eventId, timeoutMs) {
+      let client: McpClientLike;
+      try {
+        client = await connect(target);
+      } catch (e) {
+        drop(target);
+        throw e;
+      }
+      let res: unknown;
+      try {
+        res = await client.callTool({ name: "handoff", arguments: { eventId } }, undefined, { timeout: timeoutMs ?? timeout });
+      } catch (e) {
+        drop(target);
+        throw e;
+      }
+      const r = res as { isError?: boolean; structuredContent?: unknown; content?: Array<{ type?: string; text?: string }> } | undefined;
+      const text = r?.content?.find((c) => c.type === "text")?.text;
+      if (r?.isError === true) throw new Error(text ?? "handoff tool error");
+      let v: unknown = r?.structuredContent;
+      if (v === undefined || v === null || typeof v !== "object") {
+        try {
+          v = text === undefined ? undefined : JSON.parse(text);
+        } catch {
+          throw new Error("handoff tool の応答を読めない");
+        }
+      }
+      const o = v as { eventId?: unknown; body?: unknown } | null | undefined;
+      if (o === null || typeof o !== "object") throw new Error("handoff tool の応答を読めない");
+      if (o.eventId === null && o.body === null) return null;
+      if (typeof o.body !== "string") throw new Error("handoff tool の応答に本文が無い");
+      return { body: o.body };
     },
     async close() {
       const all = [...clients.values()];

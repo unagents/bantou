@@ -415,7 +415,7 @@ export function registerSessionTools(server: McpServer, deps: { remotes: RemoteM
       {
         title: "リセッション（引継ぎを残して新しい会話で起動し直す）",
         description:
-          "自分（呼び出し元 session）のリセッションを申告する。引継ぎ（handoff）を center が外部記憶に保存して受理を返し、この turn が終わったあと center が claude を新しい会話（--continue 無し）で起動し直す。起動し直した最初の入力で引継ぎの id が知らされる。他の session は指せない。利用者の入力待ち・未完了の remote の指示・未返答の worker_reply がある間は断られる。返り値 { accepted, handoff_id, stored（memory = 外部記憶に保存 / file = 外部記憶に届かず center の file に保存）, restart }。受理されたら短く再起動すると言って turn を終える",
+          "自分（呼び出し元 session）のリセッションを申告する。引継ぎ（handoff）を center が保存して受理を返し、この turn が終わったあと center が claude を新しい会話（--continue 無し）で起動し直す。起動し直した最初の入力で、center が引継ぎの本文（取り出せなかった時はその事と置き場）を渡す。新しい会話が自分で引きに行く必要は無い。他の session は指せない。利用者の入力待ち・未完了の remote の指示・未返答の worker_reply がある間は断られる。返り値 { accepted, handoff_id, stored（memory = 外部記憶に保存 / file = 外部記憶に届かず center の file に保存。どちらも center が保存先から取り出して渡す）, restart }。受理されたら短く再起動すると言って turn を終える",
         inputSchema: { handoff: z.string().min(1).max(65536).describe("引継ぎの本文。仕掛かり・止まっている事・次の一手 / 決定と番号つきの未決 / 今の窓口") },
       },
       ({ handoff }) => guard(async () => json(await resession.request(owner, handoff))),
