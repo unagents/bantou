@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
@@ -15,7 +15,7 @@ import { parseConfig, type Config } from "../src/config.js";
 import { createCore } from "../src/core.js";
 import { createCenterMemoryEvents } from "../src/memory-events.js";
 import { createRemoteControlSupervisor, type ChildLike, type SpawnImpl } from "../src/remote-control.js";
-import { AWAIT_START_STALE_MS, createResessioner, RESESSION_DIVIDER, type Resessioner, type ResessionDeps } from "../src/resession.js";
+import { AWAIT_START_STALE_MS, createResessioner, firstInputText, RESESSION_DIVIDER, type Resessioner, type ResessionDeps } from "../src/resession.js";
 import { MEMORY_BODY_MAX } from "../src/memory.js";
 import type { SessionInfo } from "../src/sessions.js";
 import { createSessionActivityTracker } from "../src/session-activity.js";
@@ -152,6 +152,8 @@ async function rig(opts: { withMemory?: boolean; failFresh?: boolean } = {}): Pr
     info: (name) => sessions.list().find((x) => x.name === name),
     restartFresh: (name) => sessions.restartFresh(name),
     saveToMemory: (name, h) => memoryEvents.handoff(name, h, 3000),
+    readFromMemory: (name, id) => memoryEvents.readHandoff(name, id, 3000),
+    secretsOf: () => [mem.url, `Bearer ${mem.token}`],
     core,
     dir: join(dir, "handoffs"),
     log: (m) => void logs.push(m),
@@ -200,7 +202,7 @@ async function boot(r: Rig): Promise<FakeWrapper> {
 
 const HANDOFF = "[引継ぎ]\n仕掛かり: x\n止まっている事: なし\n次の一手: y\n[決定と未決]\nU1 は C\n[今の窓口]\nmaster-cap";
 
-test("流れ: 申告 → 引継ぎが memory に保存 → turn の終わりで新しい会話に再起動（区切りの行）→ 最初の入力 → memory から引いて続く", async () => {
+test("流れ: 申告 → 引継ぎが memory に保存（file は書かない）→ turn の終わりで新しい会話に再起動（区切りの行）→ center が memory から取り出して最初の入力に本文を渡す", async () => {
   const r = await rig();
   const w1 = await boot(r);
   const got = await r.res.request("pm1", HANDOFF);
@@ -241,22 +243,17 @@ test("流れ: 申告 → 引継ぎが memory に保存 → turn の終わりで�
   assert.equal(enter, "\r");
   assert.ok(text!.includes("リセッションで再起動した"));
   assert.ok(text!.includes(got.handoff_id));
-  assert.ok(text!.includes("mcp__memory__handoff"));
-  assert.ok(!text!.includes("仕掛かり: x"), "memory に保存した時は本文を入力に入れない（session が引く）");
-  // 偽の claude が入力の id で memory から引いて、続きを読める（agent = session 名）
-  const id = /eventId=(\S+) /.exec(text!)![1]!;
-  const client = new Client({ name: "fake-claude", version: "0" });
-  await client.connect(new StreamableHTTPClientTransport(new URL(mem.url), { requestInit: { headers: { Authorization: `Bearer ${mem.token}`, "X-Agent-Id": "pm1" } } }));
-  const out = (await client.callTool({ name: "handoff", arguments: { eventId: id } })) as { content: { text: string }[] };
-  assert.equal((JSON.parse(out.content[0]!.text) as { body: string }).body, HANDOFF);
-  await client.close();
+  assert.ok(text!.includes(HANDOFF), "center が memory から取り出した本文が最初の入力に入る");
+  assert.ok(!text!.includes("mcp__memory__handoff"), "session に引かせない");
+  // memory に保存できた時は file を書かない（U11 の A）
+  await assert.rejects(readFile(join(dir, "handoffs", "pm1.json"), "utf8"), /ENOENT/);
   // 1 回だけ: 印は消え、2 回目の SessionStart では送らない。記録に渡し済みが付く
   assert.equal(r.res.pending("pm1"), false);
   r.hook(hookOf("SessionStart", { source: "startup" }));
   await sleep(80);
   assert.equal(w2.inputs().length, 2);
-  await until(() => r.res.record("pm1")?.deliveredAt !== undefined);
-  assert.equal(r.res.record("pm1")?.stored, "memory");
+  assert.equal(r.res.record("pm1"), undefined, "memory に保存した時は記録を積まない");
+  assert.ok(r.logs.some((l) => l.includes("リセッションの最初の入力を送った")));
   await r.close();
 });
 
@@ -276,6 +273,30 @@ test("memory に届かない時: 引継ぎを file に残して受理し、最�
   r.hook(hookOf("SessionStart", { source: "startup" }));
   await until(() => launches[1]!.child.inputs().length === 2);
   assert.ok(launches[1]!.child.inputs()[0]!.includes("仕掛かり: x"));
+  // 渡した後の file は残し、deliveredAt を書く（U14 の A）
+  await until(() => r.res.record("pm1")?.deliveredAt !== undefined);
+  const after = JSON.parse(await readFile(join(dir, "handoffs", "pm1.json"), "utf8")) as { body: string; deliveredAt?: string };
+  assert.equal(after.body, HANDOFF);
+  assert.ok(after.deliveredAt);
+  await r.close();
+});
+
+test("memory に保存した後に memory が読めなくなった時: 取り出せなかった事・理由・置き場（memory 側）を最初の入力に書く。file は読まない。url・token は書かない", async () => {
+  const r = await rig();
+  await boot(r);
+  const got = await r.res.request("pm1", HANDOFF);
+  assert.equal(got.stored, "memory");
+  mem.setDown(true);
+  r.hook(hookOf("Stop"));
+  await until(() => launches.length === 2);
+  launches[1]!.child.connect("two");
+  r.hook(hookOf("SessionStart", { source: "startup" }));
+  await until(() => launches[1]!.child.inputs().length === 2);
+  const text = launches[1]!.child.inputs()[0]!;
+  assert.ok(text.includes("取り出せなかった") && text.includes(got.handoff_id));
+  assert.ok(text.includes("agent=pm1") && text.includes(`eventId=${got.handoff_id}`));
+  assert.ok(!text.includes("仕掛かり: x"), "本文は渡していない");
+  assert.ok(!text.includes(mem.token) && !text.includes(mem.url));
   await r.close();
 });
 
@@ -448,6 +469,8 @@ function unit(over: Partial<ResessionDeps> & { info?: Partial<SessionInfo> | nul
     info: () => state.info,
     restartFresh: over.restartFresh ?? (async () => void restarts++),
     saveToMemory: over.saveToMemory ?? (async (_s, h) => (saves.push(h.id), "memory")),
+    readFromMemory: over.readFromMemory ?? (async () => ({ body: HANDOFF })),
+    ...(over.secretsOf ? { secretsOf: over.secretsOf } : {}),
     core: { push: () => undefined, input: (_n, d) => (inputs.push(d.toString()), true) },
     dir: over.dir ?? join(dir, "unit-handoffs"),
     log: (m) => void logs.push(m),
@@ -531,7 +554,7 @@ test("file にも書けない時: memory に届かなければ断る（引継ぎ
   const ok = unit({ dir: join(blocker, "sub") });
   const got = await ok.res.request("pm1", HANDOFF);
   assert.equal(got.stored, "memory");
-  assert.ok(ok.logs.some((l) => l.includes("記録 file を書けない")));
+  assert.ok(!ok.logs.some((l) => l.includes("file を書けない")), "memory に保存できた時は file に触らない");
 });
 
 test("SessionStart は source=startup の時だけ最初の入力を送る（resume / compact・別の起動では送らない）。送る時は bracketed paste で包み、Enter は別に送る", async () => {
@@ -550,7 +573,7 @@ test("SessionStart は source=startup の時だけ最初の入力を送る（res
   u.res.onHook("pm1", hookOf("SessionStart", { source: "startup" }));
   await until(() => u.inputs.length === 2);
   assert.ok(u.inputs[0]!.startsWith("\u001b[200~") && u.inputs[0]!.endsWith("\u001b[201~"), "bracketed paste で包む");
-  assert.ok(u.inputs[0]!.includes("mcp__memory__handoff"));
+  assert.ok(u.inputs[0]!.includes("仕掛かり: x") && !u.inputs[0]!.includes("mcp__memory__handoff"));
   assert.equal(u.inputs[1], "\r");
 });
 
@@ -568,4 +591,167 @@ test("awaiting-start は 5 分で古い物になる: それまでは申告を断
   const got = await u.res.request("pm1", HANDOFF + "2");
   assert.equal(got.accepted, true);
   assert.equal(u.saves.length, 2);
+});
+
+// ---- 保存・取り出し・渡し方（設計 10.2〜10.4。単体） ----
+
+/** 申告 → turn の終わり → 再起動まで進める。 */
+async function toRestart(u: ReturnType<typeof unit>, body = HANDOFF, beforeStop?: (id: string) => Promise<void>): Promise<string> {
+  const got = await u.res.request("pm1", body);
+  await beforeStop?.(got.handoff_id);
+  u.state.info = { ...u.state.info!, activity: "idle" } as SessionInfo;
+  u.res.onHook("pm1", hookOf("Stop"));
+  await until(() => u.restarts() === 1);
+  return got.handoff_id;
+}
+const start = (u: ReturnType<typeof unit>): void => u.res.onHook("pm1", hookOf("SessionStart", { source: "startup" }));
+const unitFile = (name = "pm1"): string => join(dir, "unit-handoffs", `${name}.json`);
+
+test("保存: memory に受理されたら file を書かない・記録を積まない。memory が none / 投げる時は本文入りで file に書く", async () => {
+  const mem1 = unit();
+  await mem1.res.request("pm1", HANDOFF);
+  await assert.rejects(readFile(unitFile(), "utf8"), /ENOENT/);
+  assert.equal(mem1.res.record("pm1"), undefined);
+
+  const none = unit({ saveToMemory: async () => "none" });
+  const g1 = await none.res.request("pm1", HANDOFF);
+  assert.equal(g1.stored, "file");
+  const f1 = JSON.parse(await readFile(unitFile(), "utf8")) as { id: string; session: string; stored: string; body: string };
+  assert.deepEqual([f1.id, f1.session, f1.stored, f1.body], [g1.handoff_id, "pm1", "file", HANDOFF]);
+  assert.equal(none.res.record("pm1")?.body, HANDOFF);
+
+  const down = unit({ saveToMemory: async () => { throw new Error("届かない"); } });
+  const g2 = await down.res.request("pm1", HANDOFF + "2");
+  assert.equal(g2.stored, "file");
+  assert.equal((JSON.parse(await readFile(unitFile(), "utf8")) as { body: string }).body, HANDOFF + "2", "同じ session の 2 回目の保存は上書き");
+});
+
+test("file の置き場: session ごとに別の <dir>/<session>.json。.tmp は残らない", async () => {
+  const { readdir } = await import("node:fs/promises");
+  const a = unit({ saveToMemory: async () => "none" });
+  await a.res.request("pm1", HANDOFF);
+  a.state.info = { ...a.state.info!, name: "pm2" } as SessionInfo;
+  await a.res.request("pm2", HANDOFF + "b");
+  assert.deepEqual((await readdir(join(dir, "unit-handoffs"))).sort(), ["pm1.json", "pm2.json"]);
+});
+
+test("取り出し（memory）: 印に本文を持ち越さず、memory から読んだ本文を渡す。読む時は session 名と id", async () => {
+  const calls: string[] = [];
+  const u = unit({ readFromMemory: async (s, id) => (calls.push(`${s}|${id}`), { body: "MEMORY の本文" }) });
+  const id = await toRestart(u);
+  start(u);
+  await until(() => u.inputs.length === 2);
+  assert.deepEqual(calls, [`pm1|${id}`]);
+  assert.ok(u.inputs[0]!.includes("MEMORY の本文"));
+  assert.ok(!u.inputs[0]!.includes("仕掛かり: x"), "request 時の本文は使わない");
+  assert.ok(u.inputs[0]!.includes(`id=${id}`) && u.inputs[0]!.includes("common の [記録] の順"));
+});
+
+test("取り出せなかった（memory）: none / 無い / 投げる / 空。置き場は保存した方（memory）を先に、file は保存していないと書く。file に同じ id があっても読まない（U11 の A）。url・token は理由に出さない", async () => {
+  const cases: { name: string; read: () => Promise<"none" | "missing" | { body: string }>; reason: RegExp }[] = [
+    { name: "none", read: async () => "none", reason: /設定が無い/ },
+    { name: "missing", read: async () => "missing", reason: /該当の引継ぎが無い/ },
+    { name: "throw", read: async () => { throw new Error("fetch failed https://mem.example/mcp Bearer SECRET-TOKEN-1"); }, reason: /fetch failed/ },
+    { name: "empty", read: async () => ({ body: " " }), reason: /本文が空/ },
+  ];
+  for (const c of cases) {
+    const u = unit({ readFromMemory: c.read, secretsOf: () => ["SECRET-TOKEN-1"] });
+    const id = await toRestart(u);
+    // 同じ id の file が置き場にあっても、stored = memory の時は読まない
+    await mkdir(join(dir, "unit-handoffs"), { recursive: true });
+    await writeFile(unitFile(), JSON.stringify({ id, session: "pm1", at: "x", stored: "file", body: "FILE の本文" }));
+    start(u);
+    await until(() => u.inputs.length === 2);
+    const t = u.inputs[0]!;
+    assert.ok(t.includes("取り出せなかった"), c.name);
+    assert.match(t, c.reason, c.name);
+    assert.ok(!t.includes("FILE の本文") && !t.includes("仕掛かり: x") && !t.includes("--- 引継ぎ ---"), `${c.name}: 本文は渡さない`);
+    const place = t.slice(t.indexOf("置き場:"));
+    assert.ok(place.indexOf("外部記憶（agent=pm1、eventId=") < place.indexOf("file "), `${c.name}: 保存した方を先`);
+    assert.ok(place.includes(`${unitFile()} には保存していない`), c.name);
+    assert.ok(!t.includes("SECRET-TOKEN-1") && !t.includes("mem.example"), `${c.name}: 秘密を書かない`);
+    assert.ok(!t.includes("mcp__memory__handoff"), c.name);
+    await rm(join(dir, "unit-handoffs"), { recursive: true, force: true });
+  }
+});
+
+test("取り出し（file）: file を読む。process 内の本文には頼らない（file の本文を差し替えると差し替えが渡る）。記録の渡し済みは本文を渡した時だけ", async () => {
+  const u = unit({ saveToMemory: async () => "none" });
+  const id = await toRestart(u, HANDOFF, async () => {
+    const f = JSON.parse(await readFile(unitFile(), "utf8")) as Record<string, unknown>;
+    await writeFile(unitFile(), JSON.stringify({ ...f, body: "差し替えた本文" }));
+  });
+  start(u);
+  await until(() => u.inputs.length === 2);
+  assert.ok(u.inputs[0]!.includes("差し替えた本文") && !u.inputs[0]!.includes("仕掛かり: x"));
+  await until(() => u.res.record("pm1")?.deliveredAt !== undefined);
+  const after = JSON.parse(await readFile(unitFile(), "utf8")) as { id: string; body: string; deliveredAt?: string };
+  assert.equal(after.id, id);
+  assert.ok(after.deliveredAt, "file は残し deliveredAt を書く（U14 の A）");
+});
+
+test("取り出せなかった（file）: id が違う file・読めない file・本文が無い file は使わない。置き場は file を先、外部記憶は保存していないと書く。deliveredAt は書かない", async () => {
+  const variants: { name: string; make: (id: string) => string | null; reason: RegExp }[] = [
+    { name: "別の id", make: () => JSON.stringify({ id: "c1:old", body: "古い引継ぎ" }), reason: /id が違う/ },
+    { name: "壊れた json", make: () => "{not json", reason: /file を読めない/ },
+    { name: "file が無い", make: () => null, reason: /file を読めない/ },
+    { name: "本文が無い", make: (id) => JSON.stringify({ id }), reason: /本文が無い/ },
+  ];
+  for (const v of variants) {
+    const u = unit({ saveToMemory: async () => "none" });
+    await toRestart(u, HANDOFF, async (id) => {
+      const content = v.make(id);
+      if (content === null) await rm(unitFile());
+      else await writeFile(unitFile(), content);
+    });
+    start(u);
+    await until(() => u.inputs.length === 2);
+    const t = u.inputs[0]!;
+    assert.match(t, v.reason, v.name);
+    assert.ok(t.includes("取り出せなかった") && !t.includes("古い引継ぎ") && !t.includes("仕掛かり: x"), v.name);
+    const place = t.slice(t.indexOf("置き場:"));
+    assert.ok(place.indexOf(`file ${unitFile()}`) < place.indexOf("外部記憶（agent=pm1、eventId="), v.name);
+    assert.ok(place.includes("には保存していない"), v.name);
+    await sleep(10);
+    assert.equal(u.res.record("pm1")?.deliveredAt, undefined, `${v.name}: 本文を渡していない`);
+    await rm(join(dir, "unit-handoffs"), { recursive: true, force: true });
+  }
+});
+
+test("取り出しは再起動を待たせない。SessionStart の後、取り出しの結果が来てから最初の入力を送る。1 回だけ", async () => {
+  let release: (b: { body: string }) => void = () => {};
+  const gate = new Promise<{ body: string }>((r) => (release = r));
+  const reads: string[] = [];
+  const u = unit({ readFromMemory: async (_s, id) => (reads.push(id), gate) });
+  await toRestart(u); // 取り出しが終わらなくても restartFresh は完了している
+  assert.equal(reads.length, 1, "再起動の直前に取り出しを始める");
+  start(u);
+  await sleep(40);
+  assert.deepEqual(u.inputs, [], "取り出しの結果を待つ");
+  release({ body: "遅れて届いた本文" });
+  await until(() => u.inputs.length === 2);
+  assert.ok(u.inputs[0]!.includes("遅れて届いた本文"));
+  start(u);
+  await sleep(30);
+  assert.equal(u.inputs.length, 2, "2 回目の SessionStart では送らない");
+  assert.equal(reads.length, 1, "取り出しは 1 回");
+  assert.equal(u.res.pending("pm1"), false);
+});
+
+test("取り出しは投げない: 読む口が例外でも最初の入力は送られ、失敗の旨が入る。区切りの行・再起動は妨げられない", async () => {
+  const u = unit({ readFromMemory: async () => { throw new Error("接続が詰まった"); } });
+  await toRestart(u);
+  start(u);
+  await until(() => u.inputs.length === 2);
+  assert.ok(u.inputs[0]!.includes("取り出せなかった: 接続が詰まった"));
+  assert.equal(u.inputs[1], "\r");
+  assert.ok(u.logs.some((l) => l.includes("引継ぎを取り出せない")));
+});
+
+test("firstInputText: 取り出せた時は本文入りで handoff を引かせる文が無い。取り出せなかった時は 1 行で本文が無い", () => {
+  const ok = firstInputText({ id: "c1:x", stored: "memory", session: "s", file: "/d/s.json", result: { ok: true, body: "本文\nA" } });
+  assert.ok(ok.includes("引継ぎ（id=c1:x）の本文を渡す") && ok.includes("--- 引継ぎ ---\n本文\nA\n--- ここまで ---"));
+  assert.ok(!ok.includes("mcp__memory__handoff") && !ok.includes("自分で"));
+  const ng = firstInputText({ id: "c1:x", stored: "file", session: "s", file: "/d/s.json", result: { ok: false, reason: "R" } });
+  assert.ok(!ng.includes("\n") && ng.includes("取り出せなかった: R") && ng.includes("本文は渡していない"));
 });

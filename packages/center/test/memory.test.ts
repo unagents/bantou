@@ -137,3 +137,31 @@ test("digest8 と makeEventId: 本文だけが違う 2 つは別 id、同じ本�
   // digest を部品に入れない id は本文を区別できない（digest が必要な理由）
   assert.equal(makeEventId("c1", "pm1", "u", "p-1", 1000), makeEventId("c1", "pm1", "u", "p-1", 1000));
 });
+
+test("mcp sink readHandoff: handoff tool を eventId で呼ぶ。本文があれば返し、eventId:null は null、isError・throw・読めない応答は投げる", async () => {
+  const made = []; let reply;
+  class Client { constructor() { this.calls = []; } async connect(t) { this.t = t; made.push(this); } async callTool(p) { this.calls.push(p); if (reply instanceof Error) throw reply; return reply; } async close() { this.closed = true; } }
+  class Transport { constructor(url, o) { this.url = url; this.headers = o.requestInit.headers; } }
+  const sink = createMcpEventSink({ Client, StreamableHTTPClientTransport: Transport }, { clientName: "t" });
+  const text = (o) => ({ content: [{ type: "text", text: JSON.stringify(o) }] });
+  reply = text({ eventId: "h1", at: "x", body: "本文\n2 行目" });
+  assert.deepEqual(await sink.readHandoff(tgt, "h1"), { body: "本文\n2 行目" });
+  assert.equal(made[0].calls[0].name, "handoff");
+  assert.deepEqual(made[0].calls[0].arguments, { eventId: "h1" });
+  assert.equal(made[0].t.headers["X-Agent-Id"], "a");
+  reply = { structuredContent: { eventId: "h1", body: "sc" }, content: [] };
+  assert.deepEqual(await sink.readHandoff(tgt, "h1"), { body: "sc" });
+  reply = text({ eventId: null, body: null, error: "無い" });
+  assert.equal(await sink.readHandoff(tgt, "h2"), null);
+  reply = { isError: true, content: [{ type: "text", text: "denied" }] };
+  await assert.rejects(sink.readHandoff(tgt, "h3"), /denied/);
+  reply = { content: [{ type: "text", text: "not json" }] };
+  await assert.rejects(sink.readHandoff(tgt, "h4"));
+  reply = text({ eventId: "h5" });
+  await assert.rejects(sink.readHandoff(tgt, "h5"));
+  reply = new Error("net");
+  await assert.rejects(sink.readHandoff(tgt, "h6"), /net/);
+  reply = text({ eventId: "h1", body: "again" });
+  assert.deepEqual(await sink.readHandoff(tgt, "h1"), { body: "again" });
+  assert.equal(made.length, 2); // throw の後は client を作り直す
+});

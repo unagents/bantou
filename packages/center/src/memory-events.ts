@@ -57,6 +57,12 @@ export interface CenterMemoryEvents {
    * memory の設定が無い（書き込み先が無い）時は "none"。届かない・拒否された時は投げる。
    */
   handoff(session: string, h: { id: string; body: string; at?: number }, timeoutMs?: number): Promise<"memory" | "none">;
+  /**
+   * リセッションの引継ぎ（kind: handoff）の本文を memory から id で読む（`handoff` の隣。設計 10.7 の W1）。
+   * 戻り: memory の設定が無い／読む口が無い → "none"、memory が「無い」と答えた → "missing"、本文があれば `{ body }`。
+   * 届かない・拒否された・待ちが過ぎた時は投げる。
+   */
+  readHandoff(session: string, id: string, timeoutMs?: number): Promise<"none" | "missing" | { body: string }>;
   /** 積んだ分が空になるまで待つ（テスト・終了用）。 */
   drain(timeoutMs?: number): Promise<boolean>;
   close(): void;
@@ -251,6 +257,24 @@ export function createCenterMemoryEvents(opts: {
         if (timer) clearTimeout(timer);
       }
       return "memory";
+    },
+
+    async readHandoff(session, id, timeoutMs = 20_000) {
+      const target = targetOf(session);
+      if (!target || !sink.readHandoff) return "none";
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const r = await Promise.race([
+          sink.readHandoff(target, id, timeoutMs),
+          new Promise<never>((_, rej) => {
+            timer = setTimeout(() => rej(new Error(`memory の応答を ${timeoutMs}ms 待ったが来ない`)), timeoutMs);
+            timer.unref?.();
+          }),
+        ]);
+        return r === null ? "missing" : { body: r.body };
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
     },
 
     drain: (t) => queue.drain(t),
