@@ -120,7 +120,7 @@ export interface SessionManager {
   /**
    * リセッションの再起動: claude を止め、`--continue` 無し（新しい会話）で起動し直す。session_create で作った session のみ。眠っている session は不可。
    * 止めてから新しい claude が接続するまでの間は、スリープと同じ messenger の身代わりを置く（取りこぼしを防ぐ。設計 U6 の A）。
-   * 起動に失敗したら投げる（身代わりは外す。元の会話は残っているので、次の起動（restore・wake）は `--continue` で元の会話に戻る）。
+   * 起動に失敗したら、元の会話（`--continue`）での起動を試みてから投げる（身代わりは外す。それも失敗したら停止のままだが、次の起動（restore・wake）は `--continue` で元の会話に戻る）。
    */
   restartFresh(name: string): Promise<SessionInfo>;
   list(): SessionInfo[];
@@ -920,7 +920,20 @@ export function createSessionManager(opts: {
         // 止めてから新しい claude の接続までの間の message を身代わりが預かる
         notifySleep(name, true);
         try {
-          const st = await supervisor.start(name);
+          let st: RcStatus;
+          try {
+            st = await supervisor.start(name);
+          } catch (e) {
+            // 新しい会話で起動できなかった。止めたままにせず、元の会話（--continue。restore・自動の再起動と同じ起動）で起こし直してから失敗を返す
+            log(`session リセッション再起動失敗（元の会話で起動し直す）: ${name} ${(e as Error).message}`);
+            try {
+              await supervisor.start(name, { resume: true });
+              log(`session 元の会話で再起動した: ${name}`);
+            } catch (re) {
+              log(`session 元の会話での再起動も失敗（停止のまま。次の起動は --continue で元の会話に戻る）: ${name} ${(re as Error).message}`);
+            }
+            throw e;
+          }
           opts.events?.publish({ reason: "restarted", name });
           log(`session リセッション再起動（新しい会話）: ${name}`);
           return info(await settle(name, st));

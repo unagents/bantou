@@ -206,6 +206,12 @@ export function createResessioner(deps: ResessionDeps): Resessioner {
         const name = str(p.hook_event_name);
         const mark = marks.get(session);
         if (!mark) return;
+        if (name === "UserPromptSubmit" && mark.phase === "waiting-stop") {
+          // 申告の後に利用者の入力が来て会話が進んだ（Stop が来ないまま後の turn が走りうる）。古い引継ぎで再起動しないよう印を戻す（3.3 の 4 の「利用者の入力で working に戻ったら印を戻して見送る」と同じ扱い。必要なら session がもう一度申告する）
+          marks.delete(session);
+          log(`リセッション見送り（申告の後に利用者の入力）: session=${session} id=${mark.id}`);
+          return;
+        }
         if (name === "Stop" && mark.phase === "waiting-stop") {
           // Stop は同期の hook。ここでは印を立てるだけにして、止める・起動するのは応答を返した後（defer）に行う
           mark.phase = "restarting";

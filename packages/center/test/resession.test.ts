@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
@@ -15,7 +15,9 @@ import { parseConfig, type Config } from "../src/config.js";
 import { createCore } from "../src/core.js";
 import { createCenterMemoryEvents } from "../src/memory-events.js";
 import { createRemoteControlSupervisor, type ChildLike, type SpawnImpl } from "../src/remote-control.js";
-import { createResessioner, RESESSION_DIVIDER, type Resessioner } from "../src/resession.js";
+import { AWAIT_START_STALE_MS, createResessioner, RESESSION_DIVIDER, type Resessioner, type ResessionDeps } from "../src/resession.js";
+import { MEMORY_BODY_MAX } from "../src/memory.js";
+import type { SessionInfo } from "../src/sessions.js";
 import { createSessionActivityTracker } from "../src/session-activity.js";
 import { createSessionTokens } from "../src/session-auth.js";
 import { createSessionManager, type SessionManager } from "../src/sessions.js";
@@ -91,6 +93,10 @@ interface Rig {
   tracker: ReturnType<typeof createSessionActivityTracker>;
   remote: { running: number; waitingReply: number };
   logs: string[];
+  /** supervisor.start の呼び出し（resume の有無）。 */
+  starts: { resume: boolean }[];
+  /** sessions.events に流れた reason。 */
+  published: string[];
   /** 身代わり peer の置き外し（onSleepChange）の履歴。 */
   standIn: string[];
   /** hook を center が受ける順（activity → resession）で流す。 */
@@ -99,7 +105,7 @@ interface Rig {
   close: () => Promise<void>;
 }
 
-async function rig(opts: { withMemory?: boolean } = {}): Promise<Rig> {
+async function rig(opts: { withMemory?: boolean; failFresh?: boolean } = {}): Promise<Rig> {
   const withMemory = opts.withMemory !== false;
   const spawnImpl: SpawnImpl = (_cmd, args) => {
     const child = new FakeWrapper();
@@ -116,12 +122,24 @@ async function rig(opts: { withMemory?: boolean } = {}): Promise<Rig> {
     ...(memoryDef ? { memoryOf: () => memoryDef } : {}),
     wrapper: { core, tokens: createSessionTokens(), path: "/fake/bantou-pty-wrapper", mcpUrl: () => "http://127.0.0.1:4567/mcp/session", statusLineSelf: ["/fake/bantou-center"] },
   });
+  // --continue 無しの起動（リセッションの新しい会話）だけ失敗させられる supervisor
+  const starts: { resume: boolean }[] = [];
+  const published: string[] = [];
+  const supervisor = {
+    ...sup,
+    start: async (name: string, o?: { resume?: boolean }) => {
+      starts.push({ resume: o?.resume === true });
+      if (opts.failFresh && starts.length > 1 && o?.resume !== true) throw new Error("新しい会話で起動できない");
+      return sup.start(name, o);
+    },
+  };
   const tracker = createSessionActivityTracker();
   const standIn: string[] = [];
   const remote = { running: 0, waitingReply: 0 };
   const sessions = createSessionManager({
     config: cfg,
-    supervisor: sup,
+    supervisor,
+    events: { publish: (e: { reason: string }) => void published.push(e.reason) } as never,
     store: createJsonListStore(join(dir, "sessions.json"), () => {}),
     log: (m) => void logs.push(m),
     waitMs: 0,
@@ -141,7 +159,7 @@ async function rig(opts: { withMemory?: boolean } = {}): Promise<Rig> {
   });
   const startedAt = (): string | null => sessions.list().find((s) => s.name === "pm1")?.startedAt ?? null;
   return {
-    core, sessions, res, tracker, remote, logs, standIn, startedAt,
+    core, sessions, res, tracker, remote, logs, starts, published, standIn, startedAt,
     // daemon.ts の onHook と同じ順: 作業状態 → resession
     hook: (payload) => {
       tracker.apply("pm1", payload, startedAt());
@@ -355,4 +373,199 @@ test("tool session_resession（/mcp/session）: 呼び出し元 session を自�
   const client3 = new Client({ name: "c", version: "0" });
   await client3.connect(f);
   assert.ok(!(await client3.listTools()).tools.some((x) => x.name === "session_resession"));
+});
+
+// ---- 再起動の失敗・見送り（本物の SessionManager） ----
+
+test("再起動に失敗したら、元の会話（--continue）で起動し直す。止まったままにしない（設計 3.3 の U8: 次の起動は --continue）", async () => {
+  const r = await rig({ failFresh: true });
+  const w1 = await boot(r);
+  await r.res.request("pm1", HANDOFF);
+  r.hook(hookOf("Stop"));
+  // 新しい会話の起動が失敗 → 元の会話で起動し直す（resume: true の start）
+  await until(() => r.starts.length === 3);
+  assert.deepEqual(r.starts, [{ resume: false }, { resume: false }, { resume: true }]);
+  assert.equal(w1.stopped(), true);
+  assert.equal(launches.length, 2, "元の会話の claude が 1 つ起動している");
+  assert.ok(launches[1]!.args.includes("--continue"), "元の会話（--continue）");
+  await until(() => r.logs.some((l) => l.includes("元の会話で再起動した")));
+  assert.ok(r.logs.some((l) => l.includes("再起動に失敗")));
+  assert.equal(r.res.pending("pm1"), false, "印は戻る");
+  assert.ok(!r.published.includes("restarted"), "失敗は restarted を流さない");
+  // 身代わりは外れている
+  await until(() => r.standIn.length === 2);
+  assert.deepEqual(r.standIn, ["pm1:true", "pm1:false"]);
+  // 起動し直した元の会話の SessionStart（startup でない）では最初の入力を送らない
+  launches[1]!.child.connect("back");
+  r.hook(hookOf("SessionStart", { source: "resume" }));
+  await sleep(60);
+  assert.deepEqual(launches[1]!.child.inputs(), []);
+  await r.close();
+});
+
+test("申告の後に利用者の入力が来て会話が進んだら、印を戻す。後の Stop で古い引継ぎのまま再起動しない（3.3 の 4 と同じ扱い）", async () => {
+  const r = await rig();
+  const w1 = await boot(r);
+  await r.res.request("pm1", HANDOFF);
+  assert.equal(r.res.pending("pm1"), true);
+  // Stop が来ないまま（中断など）利用者が入力して、後の turn が走る
+  r.hook(hookOf("UserPromptSubmit", { prompt: "やっぱり別の件" }));
+  assert.equal(r.res.pending("pm1"), false);
+  r.hook(hookOf("Stop"));
+  await sleep(100);
+  assert.equal(launches.length, 1, "再起動しない");
+  assert.equal(w1.stopped(), false);
+  assert.ok(r.logs.some((l) => l.includes("リセッション見送り（申告の後に利用者の入力）")));
+  // もう一度申告すれば、新しい引継ぎで通る
+  await r.res.request("pm1", HANDOFF);
+  assert.equal(r.res.pending("pm1"), true);
+  await r.close();
+});
+
+test("restartFresh: 眠っている session は再起動しない。成功したら restarted を流す", async () => {
+  const r = await rig();
+  await boot(r);
+  await r.sessions.sleep("pm1");
+  await assert.rejects(r.sessions.restartFresh("pm1"), /眠っている session は再起動しない/);
+  assert.ok(!r.published.includes("restarted"));
+  await r.sessions.wake("pm1");
+  launches[launches.length - 1]!.child.connect("w");
+  await r.sessions.restartFresh("pm1");
+  assert.ok(r.published.includes("restarted"));
+  await r.close();
+});
+
+// ---- Resessioner の単体（偽の info・保存・再起動。変異で生き残った処理の固定） ----
+
+function unit(over: Partial<ResessionDeps> & { info?: Partial<SessionInfo> | null } = {}) {
+  const base = { name: "pm1", state: "connected", sleeping: false, source: "session", activity: "working", remote: { running: 0, waitingReply: 0 } } as unknown as SessionInfo;
+  const state = { info: over.info === null ? undefined : ({ ...base, ...(over.info ?? {}) } as SessionInfo), clock: 1_000_000 };
+  const logs: string[] = [];
+  const inputs: string[] = [];
+  const saves: string[] = [];
+  let restarts = 0;
+  const res = createResessioner({
+    info: () => state.info,
+    restartFresh: over.restartFresh ?? (async () => void restarts++),
+    saveToMemory: over.saveToMemory ?? (async (_s, h) => (saves.push(h.id), "memory")),
+    core: { push: () => undefined, input: (_n, d) => (inputs.push(d.toString()), true) },
+    dir: over.dir ?? join(dir, "unit-handoffs"),
+    log: (m) => void logs.push(m),
+    now: () => state.clock,
+    submitDelayMs: 1,
+    defer: (fn) => fn(),
+  });
+  return { res, state, logs, inputs, saves, restarts: () => restarts };
+}
+
+test("安全確認: session_create で作った session（source=session）以外・存在しない session は断る。保存しない", async () => {
+  const u = unit({ info: { source: "config" } });
+  await assert.rejects(u.res.request("pm1", HANDOFF), /session_create で作った session だけ/);
+  assert.equal(u.saves.length, 0);
+  const none = unit({ info: null });
+  await assert.rejects(none.res.request("pm1", HANDOFF), /未定義の session/);
+});
+
+test("安全確認: スリープ中・動いていない state（stopped / failed など）は断る。保存しない", async () => {
+  const sl = unit({ info: { sleeping: true, state: "stopped" } });
+  await assert.rejects(sl.res.request("pm1", HANDOFF), /動いていない/);
+  const st = unit({ info: { state: "stopped" } });
+  await assert.rejects(st.res.request("pm1", HANDOFF), /動いていない（state=stopped）/);
+  const ok = unit({ info: { state: "starting" } });
+  await ok.res.request("pm1", HANDOFF);
+  assert.equal(sl.saves.length + st.saves.length, 0);
+});
+
+test("本文の検査: NUL を含む・長すぎる（MEMORY_BODY_MAX 超）は断る。ちょうど上限は通る。保存しない", async () => {
+  const u = unit();
+  await assert.rejects(u.res.request("pm1", "a\0b"), /NUL/);
+  await assert.rejects(u.res.request("pm1", "あ".repeat(MEMORY_BODY_MAX + 1)), /長すぎる/);
+  assert.equal(u.saves.length, 0);
+  await u.res.request("pm1", "あ".repeat(MEMORY_BODY_MAX));
+  assert.equal(u.saves.length, 1);
+});
+
+test("二重申告: 申告前の確認で 2 回目は memory に書かれない（保存は 1 回）", async () => {
+  const u = unit();
+  await u.res.request("pm1", HANDOFF);
+  await assert.rejects(u.res.request("pm1", HANDOFF + "2"), /途中/);
+  assert.equal(u.saves.length, 1, "2 回目は保存まで進まない");
+});
+
+test("二重申告: 保存の await の間に別の申告が先に印を付けたら、保存後の確認で断る（印は 1 つ）", async () => {
+  let release: () => void = () => {};
+  const gate = new Promise<void>((r) => (release = r));
+  const saved: string[] = [];
+  const u = unit({ saveToMemory: async (_s, h) => (saved.push(h.id), await gate, "memory") });
+  const a = u.res.request("pm1", HANDOFF + "a");
+  const b = u.res.request("pm1", HANDOFF + "b");
+  await until(() => saved.length === 2); // 申告前の確認はどちらも通っている
+  release();
+  const rs = await Promise.allSettled([a, b]);
+  assert.deepEqual(rs.map((x) => x.status).sort(), ["fulfilled", "rejected"]);
+  assert.match(String((rs.find((x) => x.status === "rejected") as PromiseRejectedResult).reason), /申告済み/);
+});
+
+test("保存の間に状況が変わったら（needs-input）、保存後の確認で断る。印は付かない", async () => {
+  let release: () => void = () => {};
+  const gate = new Promise<void>((r) => (release = r));
+  const saved: string[] = [];
+  const u = unit({ saveToMemory: async (_s, h) => (saved.push(h.id), await gate, "memory") });
+  const p = u.res.request("pm1", HANDOFF);
+  await until(() => saved.length === 1);
+  u.state.info = { ...u.state.info!, activity: "needs-input" } as SessionInfo;
+  release();
+  await assert.rejects(p, /needs-input/);
+  assert.equal(u.res.pending("pm1"), false);
+});
+
+test("file にも書けない時: memory に届かなければ断る（引継ぎを失うので）。memory に受理済みなら進める", async () => {
+  // dir に file を指して mkdir を失敗させる
+  const blocker = join(dir, "blocker");
+  await writeFile(blocker, "x");
+  const down = unit({ dir: join(blocker, "sub"), saveToMemory: async () => { throw new Error("届かない"); } });
+  await assert.rejects(down.res.request("pm1", HANDOFF), /引継ぎを保存できない/);
+  assert.equal(down.res.pending("pm1"), false, "断った時は印を付けない");
+  const none = unit({ dir: join(blocker, "sub"), saveToMemory: async () => "none" });
+  await assert.rejects(none.res.request("pm1", HANDOFF), /引継ぎを保存できない/);
+  const ok = unit({ dir: join(blocker, "sub") });
+  const got = await ok.res.request("pm1", HANDOFF);
+  assert.equal(got.stored, "memory");
+  assert.ok(ok.logs.some((l) => l.includes("記録 file を書けない")));
+});
+
+test("SessionStart は source=startup の時だけ最初の入力を送る（resume / compact・別の起動では送らない）。送る時は bracketed paste で包み、Enter は別に送る", async () => {
+  const u = unit();
+  await u.res.request("pm1", HANDOFF);
+  u.state.info = { ...u.state.info!, activity: "idle" } as SessionInfo; // turn が終わった
+  u.res.onHook("pm1", hookOf("Stop"));
+  await until(() => u.restarts() === 1);
+  assert.equal(u.res.pending("pm1"), true, "起動し直した後は SessionStart を待つ");
+  for (const source of ["resume", "compact", "clear", undefined]) {
+    u.res.onHook("pm1", hookOf("SessionStart", source === undefined ? {} : { source }));
+  }
+  await sleep(30);
+  assert.deepEqual(u.inputs, []);
+  assert.equal(u.res.pending("pm1"), true, "startup 以外では印を消さない");
+  u.res.onHook("pm1", hookOf("SessionStart", { source: "startup" }));
+  await until(() => u.inputs.length === 2);
+  assert.ok(u.inputs[0]!.startsWith("\u001b[200~") && u.inputs[0]!.endsWith("\u001b[201~"), "bracketed paste で包む");
+  assert.ok(u.inputs[0]!.includes("mcp__memory__handoff"));
+  assert.equal(u.inputs[1], "\r");
+});
+
+test("awaiting-start は 5 分で古い物になる: それまでは申告を断り、過ぎたら pending でなくなり新しい申告で上書きできる", async () => {
+  const u = unit();
+  await u.res.request("pm1", HANDOFF);
+  u.state.info = { ...u.state.info!, activity: "idle" } as SessionInfo; // turn が終わった
+  u.res.onHook("pm1", hookOf("Stop"));
+  await until(() => u.restarts() === 1);
+  u.state.clock += AWAIT_START_STALE_MS; // ちょうどは古くない
+  assert.equal(u.res.pending("pm1"), true);
+  await assert.rejects(u.res.request("pm1", HANDOFF + "2"), /途中/);
+  u.state.clock += 1;
+  assert.equal(u.res.pending("pm1"), false);
+  const got = await u.res.request("pm1", HANDOFF + "2");
+  assert.equal(got.accepted, true);
+  assert.equal(u.saves.length, 2);
 });
