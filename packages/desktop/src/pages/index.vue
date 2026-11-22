@@ -117,8 +117,9 @@ watch(modalOpen, (v) => {
     </div>
 
     <template v-else-if="dir">
-      <!-- the right edge is left free for the closed message drawer's grab strip -->
-      <div ref="paneRow" class="flex min-h-0 flex-1 overflow-x-auto" :style="{ paddingRight: `${DRAWER_HANDLE}px` }" data-testid="pane-row">
+      <!-- the message drawer sits beside the pane row: opened, it takes width from the row (the conversation narrows and re-wraps) -->
+      <div class="flex min-h-0 flex-1">
+      <div ref="paneRow" class="flex min-h-0 min-w-0 flex-1 overflow-x-auto" data-testid="pane-row">
       <div class="flex min-h-0 flex-1" :style="{ minWidth: `${PANE_ROW_MIN}px` }">
         <nav aria-label="セッション一覧" class="shrink-0 overflow-y-auto" :style="{ width: `${pane.side.value}px` }">
           <UTooltip v-if="!centerList.reachable" :text="centerList.reason ?? 'center に問い合わせられなかった'">
@@ -287,6 +288,8 @@ watch(modalOpen, (v) => {
         </main>
       </div>
       </div>
+      <MessageDrawer :messages="drawerMessages" @select="selectFromDrawer" />
+      </div>
     </template>
 
     <ThreadModal
@@ -320,7 +323,6 @@ watch(modalOpen, (v) => {
       :login-error="selectedGroup.loginError"
       @done="onLoggedIn"
     />
-    <MessageDrawer v-if="loaded && dir" :messages="drawerMessages" @select="selectFromDrawer" />
     <SettingsDialog v-if="settingsOpen" v-model:open="settingsOpen" />
     <CenterDialog v-if="centerOpen" v-model:open="centerOpen" />
   </div>
