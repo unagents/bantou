@@ -27,6 +27,8 @@ export interface MemoryEvent {
   recipient?: MemoryParty;
   remoteId?: string;
   taskId?: string;
+  /** kind: task only. The parent requirement's id (memory item id) given to remote_send. Omitted when not given. */
+  parentRequirementId?: string;
   kind: MemoryEventKind;
   body: string;
   /** ISO 8601. */

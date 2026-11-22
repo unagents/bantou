@@ -336,6 +336,25 @@ test("remote_send / remote_create（別名）: owner は session の認証済み
   await close();
 });
 
+test("remote_send: parent_requirement_id（任意の uuid）は remotes.send へ渡る。省略時は今までと同じ呼び方。uuid でない値は拒否", async () => {
+  const { session, calls, close } = await connect();
+  const c = await session("pm1");
+  const pid = "3f2b1c64-8a52-4d6e-9f60-0a1b2c3d4e5f";
+  await c.callTool({ name: "remote_send", arguments: { goal: "g1", parent_requirement_id: pid } });
+  await c.callTool({ name: "remote_create", arguments: { goal: "g2", parent_requirement_id: pid } });
+  await c.callTool({ name: "remote_send", arguments: { goal: "g3" } });
+  assert.deepEqual(calls, [
+    { remoteSend: { owner: "pm1", goal: "g1", parent_requirement_id: pid } },
+    { remoteSend: { owner: "pm1", goal: "g2", parent_requirement_id: pid } },
+    { remoteSend: { owner: "pm1", goal: "g3" } },
+  ]);
+  const bad = await c.callTool({ name: "remote_send", arguments: { goal: "x", parent_requirement_id: "not-a-uuid" } });
+  assert.equal(bad.isError, true);
+  assert.equal(calls.length, 3);
+  await c.close();
+  await close();
+});
+
 test("worker_reply: session 向け・外向け（desktop の center_call）とも {remote_id?, worker_id, text, server?} を remotes.workerReply へ渡す。不正な worker_id・空の text は拒否。失敗は isError", async () => {
   const { client, session, calls, close } = await connect(undefined, { remotes: { workerReply: async (i: unknown) => { calls.push({ workerReply: i }); if ((i as { text: string }).text === "boom") throw new Error("版が合わない"); return { remote_id: "c-1", server: "id", worker_id: "w-1", accepted: true } as never; } } });
   const c = await session("pm1");

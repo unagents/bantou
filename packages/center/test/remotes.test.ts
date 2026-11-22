@@ -2019,6 +2019,21 @@ test("memory: task の送信で task event を session の記憶へ積む", asyn
   memoryEvents.close();
 });
 
+test("memory: parent_requirement_id は task event にだけ載る（server への task には載せない）。渡さなければ項目ごと無い", async () => {
+  const { mgr, kicks, sent, flush, memoryEvents } = memorySetup();
+  const pid = "3f2b1c64-8a52-4d6e-9f60-0a1b2c3d4e5f";
+  const r1 = await mgr.send({ owner: "pm1", goal: "g1", parent_requirement_id: pid });
+  const r2 = await mgr.send({ owner: "pm1", goal: "g2" });
+  await flush();
+  assert.equal(sent.length, 2);
+  assert.equal(sent[0].event.eventId, `c1:pm1:task:${r1.task_id}`);
+  assert.equal(sent[0].event.parentRequirementId, pid);
+  assert.equal(sent[1].event.eventId, `c1:pm1:task:${r2.task_id}`);
+  assert.equal("parentRequirementId" in sent[1].event, false);
+  for (const k of kicks) assert.equal(JSON.stringify(k.cmd).includes(pid), false);
+  memoryEvents.close();
+});
+
 test("memory: 設定が無い session では event を積まない", async () => {
   const { mgr, sent, flush } = memorySetup({ memory: false });
   await mgr.send({ owner: "pm1", goal: "g" });

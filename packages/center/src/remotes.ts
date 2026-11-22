@@ -345,6 +345,7 @@ export const remoteSendSchema = {
     .describe("worker の分担。items 無し = 既定（implement + review の最低 2 体）。省略時 {}"),
   server: serverArg,
   worker_model: modelArg("worker の既定モデル（task に載せる。items[].model が優先）。省略時、新規の cap は config servers[].workerModel、既存の cap は送らない（server の記憶のまま）"),
+  parent_requirement_id: z.string().uuid().optional().describe("この指示の親の requirement の id（外部記憶の openRequirements / recall の id）。外部記憶にだけ記録し、server には送らない。省略時は外部記憶の抽出が直近の利用者の発言から親を決める"),
 };
 /** worker_reply の入力（desktop の center_call と /mcp/session で共通）。remote_id 省略時は記録が 1 件ならその cap。 */
 export const workerReplySchema = {
@@ -396,6 +397,8 @@ export interface RemoteSendInput {
   constraints?: string[];
   workers?: TaskCommand["workers"];
   worker_model?: string;
+  /** 外部記憶の task event に載せる親の requirement の id。server には送らない */
+  parent_requirement_id?: string;
 }
 
 export interface RemoteManager {
@@ -1834,7 +1837,7 @@ export function createRemoteManager(opts: {
           workers: input.workers ?? {},
           ...(workerModel ? { worker_model: workerModel } : {}),
         };
-        opts.memoryEvents?.task(input.owner, { capId: cid, taskId, goal: input.goal, ...(input.repo ? { repo: input.repo } : {}), ...(input.branch ? { branch: input.branch } : {}), ...(input.constraints?.length ? { constraints: input.constraints } : {}) });
+        opts.memoryEvents?.task(input.owner, { capId: cid, taskId, goal: input.goal, ...(input.repo ? { repo: input.repo } : {}), ...(input.branch ? { branch: input.branch } : {}), ...(input.constraints?.length ? { constraints: input.constraints } : {}), ...(input.parent_requirement_id ? { parentRequirementId: input.parent_requirement_id } : {}) });
         const onSent = (): void => {
           if (entry.delivery !== "unsent") return;
           entry.delivery = "sent";
