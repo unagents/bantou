@@ -56,13 +56,13 @@ requirement の状態の持ち方、requirement の category の最終一覧、1
 
 - recall は query の埋め込みで近傍検索。既定は `confirmed` / `verified` のみ、`includeInferred` で `inferred`、`temporal` 指定で `superseded` も含める（`server/utils/recall.ts:95-97`）。`memoryTypes` は 4 種（`recall.ts:16`）。
 - context は LLM を使わず決定論的に作る（`recall.ts:162-196`）: `policies`（confirmed の semantic / procedural、10 件）、`recentDecisions`（confirmed の episodic、10 件）、`openQuestions`（kind=report で同じ task_id の後続 reply が無いもの）、`activeTasks`（kind=task で同じ task_id の後続 result が無いもの）。**item は `status = 'confirmed'` だけ**（`recall.ts:171`）。
-- explain は item の出典 event と検証状態を返す（`recall.ts` の `explain`）。
+- explain は item の出典 event と検証状態を返す（`recall.ts:210` の `explain`）。
 
 ### 1.4 Graphiti への反映（`memory-graphiti.md`）
 
-- Outbox の 1 行 = 1 episode。item は本文 = content、event は `[kind] 送り元 -> 宛先` + body（`docs/design/memory-graphiti.md:39-41`）。agent ごとの group（`:41`）。
+- Outbox の 1 行 = 1 episode。item は本文 = content、event は `[kind] 送り元 -> 宛先` + body（`docs/design/memory-graphiti.md:37-41`）。agent ごとの group（`:41`）。
 - Neo4j / Graphiti の fact は常に `inferred` 扱いで、PostgreSQL の item / event に出典として戻す（`memory-graphiti.md:50` `:54`、実装 `server/utils/graphiti-recall.ts`）。tool（recall / context）への接続は未決 4 で保留（`memory-graphiti.md:108-113`）。
-- Graphiti に渡るのは episode の**本文**だけで、item 同士の親子・関係は渡らない（`memory-graphiti.md:39-41` の内容にその項目が無い。現状の事実）。
+- Graphiti に渡るのは episode の**本文**だけで、item 同士の親子・関係は渡らない（`memory-graphiti.md:37-41` の内容にその項目が無い。現状の事実）。
 
 ### 1.5 center の event の送り方
 
@@ -129,7 +129,7 @@ role（requirement とタスクの区別）: 原文は「タスクは requiremen
 | content | 仕様・設計にまとめた形の本文（利用者の指示の中の設計を 1 つにまとめる） | R5 |
 | category | `presentation` / `business` / `data` / `infrastructure` / `cross-cutting`（原文の 5 つ。定義は原文のまま） | R7 |
 | parent | 親の仕様・設計（木 B） | R6 |
-| 種類（basis） | 利用者の指示にあった物 / エージェントの推論 / エージェントの判断による決め。未決 #3 | R6 |
+| 種類（basis） | 利用者の指示にあった物 / エージェントの推論 / エージェントの判断による決め。原文の「推論や判断」を 2 値に割るのは**推測**（原文は「エージェントの推論や判断による設計とわかる」とだけ言う）。未決 #3 | R6 |
 | requirement との紐付け | 相互関係の link（親子ではない）。未決 #7 | R5 |
 | 出典・status | 既存の `memory_sources` と status。利用者が言った設計は出典が user_prompt だけなら既存の規則で `confirmed`、エージェントの設計は `inferred`（`extract.ts:184-186`） | — |
 
@@ -178,9 +178,9 @@ role（requirement とタスクの区別）: 原文は「タスクは requiremen
   - 欠点: 登録が非同期（毎分）なので、master-cap がその発言に対して `remote_send` する時点では requirement の id がまだ無い（親の解決は未決 #6）。LLM が複数作業を分けそこなう可能性がある（推測）。
 - 案 B: master-cap が発言を読んだ時に、新しい tool（例 `requirement_register`）で 1 作業ずつ登録する。
   - 利点: 登録が同期で id が即座に得られ、`remote_send` の親に使える。分け方を master-cap（利用者との窓口）が決める。
-  - 欠点: 新しい tool と system-instructions の追加（`external-memory.md:35` は今「書き込みは案内しない」）。master-cap が登録を忘れうる。出典の event id は center が決める（`memory-events.ts:132`）ので、master-cap は自分の発言の event id を知らない（推測: 別途渡す仕組みが要る）。
+  - 欠点: 新しい tool と system-instructions の追加。今の system 指示は「記憶への書き込みは bantou が自動で渡す。自分では書き込みの tool を呼ばない」と案内しており（`packages/center/src/system-instructions.ts:173-186`、`external-memory.md:35`）、その決まりを変える。resession 設計の U2 の B と同じ決まり（§8.2 接点 2）。master-cap が登録を忘れうる。出典の event id は center が決める（`memory-events.ts:132`）ので、master-cap は自分の発言の event id を知らない（推測: 別途渡す仕組みが要る）。
 - 案 C: A と B の併用。master-cap が登録し、抽出が漏れを拾う。利点: 即時性と網羅の両立。欠点: 二重登録の突き合わせ（既存の重複排除 `001_init.sql:59` は同文でしか効かない）。
-- 推奨: 案 A（まず既存の経路に載せる）。理由: 利用者が決めた「LLM での抽出は memory 側、bantou 側はしない」（`external-memory.md:39`）に沿い、新しい tool と運用の追加が要らない。親の即時性は #6 の案で補う。
+- 推奨: 案 A（まず既存の経路に載せる）。理由: `external-memory.md:39` の設計（抽出は memory 側、bantou 側はしない）に沿い、新しい tool と運用の追加が要らない。親の即時性は #6 の案で補う。
 
 ### 4.3 分け方の規則（原文から）
 
@@ -217,7 +217,7 @@ R-user（利用者の requirement。出典 = user_prompt）
 
 - 今、center が記録するのは master-cap の記憶だけで、server（remote-cap）は書かない（`external-memory.md:44`）。remote-cap の中の分解（worker ごとの分担、task の中の手順）は、master-cap の記憶には `result` の本文（`summary` / `remaining`。`memory.ts:106-110` の `formatTaskResultBody`）と `report` の本文として入るだけ。
 - 「remote-cap もタスクに分解する」（R3）をノードとして持つ案:
-  - 案 A: master-cap の記憶の中だけで持つ。remote-cap の分解は `result` / `report` の本文から抽出する（A は #5 の抽出と同じ経路）。利点: 利用者が決めた「書くのは master-cap の記憶だけ」（`external-memory.md:39`）を変えない。欠点: 抽出の LLM 頼みで、分解の粒度は本文に書かれた分だけ。
+  - 案 A: master-cap の記憶の中だけで持つ。remote-cap の分解は `result` / `report` の本文から抽出する（A は #5 の抽出と同じ経路）。利点: 利用者の決定「外部記憶の書き込みは master-cap の記憶だけ」（`external-memory.md:39`）を変えない。欠点: 抽出の LLM 頼みで、分解の粒度は本文に書かれた分だけ。
   - 案 B: remote-cap の記憶（agent = cap_id）にも書き、その木を別 agent の行として持つ。利点: cap の分解を直接記録。欠点: 利用者の決定（master-cap だけ）を変える。RLS が agent ごとに行を隔てる（`001_init.sql:118`）ので、親（master-cap の記憶の requirement）を cap 側の木から辿れない（共有する仕組みは scope の shared / 昇格だが未実装。`memory-design.md:489-504`）。
   - 案 C: 親子の参照だけ `(agent_id, item_id)` の文字列で持ち、読めるのは各 agent 自身の範囲だけにする。欠点: 木が agent をまたいで読めない。
 - 推奨: 案 A。理由: 既決の範囲内で動き、RLS を触らない。cap 側の記憶が要る時は `external-memory.md:44` の「将来足す」で別に扱う。
@@ -246,7 +246,7 @@ S-user（利用者の指示にあった仕様・設計をまとめた 1 件。ba
 
 - 利用者の仕様・設計: 出典が `user_prompt` だけなら `confirmed`（`extract.ts:184-186`）。
 - エージェントの設計: 利用者が確定していない物は `inferred`。**`memory-design.md` の原則「推測を確定として扱わない」（`:672` のテスト D）と同じ**。エージェントの設計が実装の根拠になっても、利用者が確定するまでは `inferred`（推測）のまま。
-- 利用者が後から確認した時に `confirmed` へ上げる手順（`memory.confirm`。`memory-design.md:343`）は未実装（tool 一覧は event / recall / context / explain / status。`server/mcp/tools/`）。本書では扱わない。
+- 利用者が後から確認した時に `confirmed` へ上げる手順（`memory.confirm`。`memory-design.md:345`）は未実装（tool 一覧は event / recall / context / explain / status。`server/mcp/tools/`）。本書では扱わない。
 
 ## 7. (5) context・recall からの読み方
 
@@ -274,15 +274,46 @@ S-user（利用者の指示にあった仕様・設計をまとめた 1 件。ba
 
 ## 8. リセッション設計との関係
 
-別 task で `docs/resession-design`（引継ぎを外部記憶に保存する設計）が並行している。
+別 task のリセッション設計 `origin/docs/resession-design`（01f6673。`docs/design/resession.md`、以下「resession 設計」）を fetch して読んだ。行は `resession.md:行`。resession 設計は develop 未 merge。
 
-- **未確認**: `git ls-remote --heads origin 'docs/resession*'` では該当 branch が見つからなかった（2026-11-22 時点。まだ push されていない可能性）。**その中身は読めていない。以下は本書側から見た接点で、resession 側の設計は推測しない。**
-- 本書から分かっている接点:
-  1. `external-memory.md:70` と `:94` は「session の制御（`--continue` をやめて memory から文脈を組み立て直す）は別設計。読み書きの経路はそのまま使う」としている。resession の「引継ぎを外部記憶に保存」は、その別設計に当たる（**推測**。branch 名からの推定）。
-  2. 型の重なり（**推測**）: 引継ぎも外部記憶の item として持つなら、本書の `record_type`（#1）に 3 つ目の値を足すか、別の軸にするかが両者で揃っている必要がある。
-  3. 読み方の重なり（**推測**）: 引継ぎを読み戻すのも `context` / `recall` になるなら、本書 §7 の context の出力項目の変更と衝突しうる。
-  4. 内容の重なり（**推測**）: 引継ぎに「仕掛かりの requirement・決めた設計」が含まれるなら、本書の木 A・木 B が引継ぎの元データになる。
-- 順序（推奨・**推測**）: 型と項目（本書 #1）を先に決め、resession はその型に載せる。理由: 型が決まっていないと resession が独自の type を作って後で揃えることになる。resession の中身を確認できた後に、#1・#10 を両者で突き合わせる。確認前は決めない。
+### 8.1 resession 設計の要点（本書に関わる所）
+
+- リセッション = 引継ぎを外部記憶に保存 → session を `--continue` 無しで再起動 → 起動した session が引継ぎを memory から読んで応対を続ける。center が 1 つの操作として実行する（`resession.md:17`）。
+- 引継ぎの内容は common.md の記録 3 つ（引継ぎ・決定と未決・今の窓口）に合わせ、新しい項目は足さない（`:92`）。
+- 引継ぎの保存は、session が tool の引数で本文を渡し、**center が** memory に書く案を推奨。memory 側に新しい event の種別 `handoff` を足す（`:95`、`:174-175`、`:197`。U2 は `:212-217`）。
+- 読み出し: memory に「識別（agent + 引継ぎの id）で本文をそのまま返す口」を足す。抽出（LLM）を通さない（`:136`、`:198`）。理由は、`recall` / `context` が抽出後の記憶を返すので引継ぎの全文が欠けうるから（`:136`）。
+- session 名・memory の Agent ID・messenger の peer 名・remote の記録は再起動でも変わらない（`:34`）。
+- 本書の branch について、resession 設計は「まだ読めていない」と書き、矛盾を避ける約束を推測で置いている（`:185-193`）。その約束は §8.3 で照合する。
+
+### 8.2 接点・重なり
+
+| # | 接点 | 内容 | 根拠 |
+|---|---|---|---|
+| 1 | 型の軸 | resession は引継ぎを **event の種別 `handoff`**（`memory_events.kind` の追加）として持つ。本書 #1 は **item 側の type**（`record_type`）の話で、軸が違う。今の `kind` は 6 つの CHECK（`001_init.sql:25`、`events.ts:4`）で、両者とも migration / CHECK を変える | `resession.md:197`、`001_init.sql:25` |
+| 2 | 書き手 | resession は「session は memory に書かない。書くのは center」を守る（U2 の推奨 A）。system 指示にも「書き込みの tool を呼ばない」とある（`packages/center/src/system-instructions.ts:173-186`）。本書 #5 の案 B（master-cap が登録 tool を呼ぶ）はこの決まりを変える。resession の U2 の案 B（session が直接書く）と**同じ決まりを動かす**ので、片方だけ決められない | `resession.md:95-96`、`:212-217`、`system-instructions.ts:186` |
+| 3 | 読み方 | resession の読み出しは「識別で event 本文を返す口」で、抽出を通さない。本書 #10 は `recall` / `context` の出力に木と category を足す。**変更する関数は別**（resession は新しい口、本書は `recall.ts` の既存 2 関数）だが、tool 一覧（`server/mcp/tools/`）と system 指示の案内（memory 部品）を両方が変える | `resession.md:136`、`:198`、本書 §7 |
+| 4 | 抽出との交差 | 抽出は kind を問わず未処理の event を全て取る（`extract.ts:243-249` の `SELECT ... FROM memory_events WHERE ... processed_at IS NULL`）。**推測**: `handoff` event もそのまま抽出に入り、引継ぎの中の決定・仕掛かりが item（本書の requirement・仕様・設計）として二重に登録されうる。出典が `user_prompt` でないので既存規則では `inferred`（`extract.ts:184-186`）。抽出の対象から外すか、入れるかは未決 | `extract.ts:243-249` |
+| 5 | 内容の重なり | 引継ぎ（仕掛かり・決定と未決、`resession.md:92`）と、本書の木 A（未完了の requirement・task）・木 B（決めた設計）は同じ事の別の持ち方になりうる。**推測**: 木が入れば、引継ぎの「仕掛かり」は木の読み出し（本書 #10 の `openRequirements`）で代替でき、引継ぎ本文は「次の一手・止まっている事」に絞れる。ただし resession は「session が本文を書く」前提で、この代替は resession 側が決める事 | `resession.md:92` |
+| 6 | 再起動をまたぐ継続 | Agent ID = session 名は再起動で変わらない（`resession.md:34`）ので、本書の木は再起動後も同じ agent の記憶として残る。木の親子は新しい会話の session からも読める | `resession.md:34` |
+| 7 | 完了の判定 | resession の安全確認は center の remote の記録の `pending`（未完了の指示）を見る（`resession.md:76`）。本書 #9 案 A は未完了を memory の event（task の後続 result 無し）から導く（`recall.ts:182-188`）。**元が別**（center の pending と memory の event）で、食い違いうる。どちらを正にするかは両設計で未調整 | `resession.md:76`、`recall.ts:182-188` |
+
+### 8.3 resession 設計が置いた「約束」との照合
+
+resession 設計は「その設計が出たら照合する」として 3 点を置いている（`resession.md:189-193`）。本書の側の答え:
+
+- 「引継ぎは event の 1 種別 `handoff` と識別で引ける読み出しの 2 つだけを memory に求める。型の仕組みが先にできていれば、引継ぎをその型の 1 つとして載せ替える」（`:190`）→ 本書の型（`record_type`、#1）は item 側。**載せ替えるなら** `record_type` に 3 つ目（例 `handoff`）を足す形になるが、引継ぎは全文を抽出なしで返したい（`:136`）ので item（抽出後）には向かない（**推測**）。event の種別のまま持つ方が resession の目的に合う。載せ替えは本書からは求めない。
+- 「引継ぎの項目は common.md の 3 記録に合わせ、その設計が別の項目を決めたらそちらを優先」（`:191`）→ 本書は引継ぎの項目を決めない。requirement・仕様・設計の項目は §3 のとおりで、引継ぎとは別。
+- 「書くのは center の決まりはそのまま。その設計が session の直接の書き込みを許すなら U2 の B が選べる」（`:192`）→ 本書 #5 の案 A（抽出 worker）は書き込みの決まりを変えない。案 B（master-cap の tool）を選ぶ場合のみ、決まりが動く（接点 #2）。
+- 「要確認: 型の名前、識別の形、読み出しの口の名前」（`:193`）→ 本書の型の名前は仮（`record_type` / `requirement` / `spec_design`。#1）。識別は item の uuid と event の `event_id`（既存）。読み出しの口は本書 #10。
+
+### 8.4 順序（推奨）
+
+1. 先に決める: 書き込みの決まり（本書 #5 と resession U2 を**同時に**）。同じ決まり（session は memory に書かない）を両方が動かしうるため。本書 #5 が案 A なら決まりは変わらず、resession U2 の A と矛盾しない。
+2. 次に: 型（本書 #1）と event 種別の追加（`handoff`）の migration を 1 つの変更にまとめるか分けるか。両方とも `001_init.sql:25` の CHECK を変える可能性がある（resession は `kind`、本書は item の列。**同じ CHECK ではない**ので衝突はしない。**推測**: migration の番号を揃えるだけでよい）。
+3. その次: 読み出し（本書 #10 と resession の識別で引く口）。tool 名と system 指示の案内を 1 回で書く。
+4. 抽出との交差（接点 #4）は、`handoff` を足す側（resession）が実装する時に決める。本書はその時点の抽出規則に従う。
+
+本書は resession 設計に依存しない（単独で実装できる）。resession 設計は本書の型・木が入ると、引継ぎの本文を短くできる可能性がある（接点 #5。**推測**）が、入らなくても動く（`resession.md:201` は memory が無い構成でも file で動くとする）。
 
 ## 9. 未決
 
@@ -303,7 +334,7 @@ S-user（利用者の指示にあった仕様・設計をまとめた 1 件。ba
 ### 未決 #3: 仕様・設計の「種類」の持ち方
 
 原文は「typeは設計扱い、種類？はエージェントの推論や判断による設計とわかるように」と、「種類？」に疑問符を付けている。
-- 案 A（推奨）: type は `spec_design` の 1 つで、項目 `basis` に `user`（利用者の指示にあった）/ `agent_inferred`（エージェントの推論）/ `agent_decided`（エージェントの判断による決め）を持つ。利点: 木 B が 1 つの type で済む。原文の「推論や判断」の 2 つを区別できる。欠点: 推論と判断を分ける意味が使う側に伝わるか（推測）。
+- 案 A（推奨）: type は `spec_design` の 1 つで、項目 `basis` に `user`（利用者の指示にあった）/ `agent_inferred`（エージェントの推論）/ `agent_decided`（エージェントの判断による決め）を持つ。利点: 木 B が 1 つの type で済む。原文の「推論や判断」の 2 つを区別できる（ただし原文の「推論や判断」を 2 値に割るのは**推測**で、利用者は 2 つに分けろとは言っていない）。欠点: 推論と判断を分ける意味が使う側に伝わるか（推測）。
 - 案 B: `basis` を `user` / `agent` の 2 値にする。利点: 単純。欠点: 推論と判断が混ざる。
 - 案 C: 利用者の仕様と、エージェントの設計を別の type にする。利点: type で分かる。欠点: type が 3 つになり、原文の「type は 2 つ」と合わない。
 - 推奨 A。「種類？」の意味は利用者に確認が要る（本書は A で進める前提の推測）。
@@ -332,14 +363,24 @@ S-user（利用者の指示にあった仕様・設計をまとめた 1 件。ba
 
 ### 未決 #7: 木と紐付けの持ち方、タスクの区別
 
-- 木（親子）: 案 A（推奨）item に `parent_id`（同じ record_type 内）を持つ。案 B 関連の表に親子も入れる。
-- requirement ↔ 仕様・設計: 案 A（推奨）関連の表（`memory_relations` を実装して使う）。親子の列では多対多を持てない。
-- タスクの区別: 案 A（推奨）requirement の `role`（requirement / task）。案 B タスクを別 type にする（原文の 2 type と合わない）。
+- 木（親子）:
+  - 案 A（推奨）: item に `parent_id`（同じ record_type 内）を持つ。利点: 1 親の木が 1 列で書け、親を辿る問い合わせが単純。`superseded_by`（`001_init.sql:53`）と同じ作りで、RLS も既存の行の規則（`001_init.sql:139-143`）のまま。欠点: 親が 1 つに限られる。item を差し替える時の親子の付け替えを別に扱う。
+  - 案 B: 関連の表に親子も入れる。利点: 親子と紐付けが 1 つの表で揃い、親が複数でも書ける。欠点: 木を辿るたびに結合が要る。`memory_relations` は未実装（§1.2）で、表と RLS から作る。
+- requirement ↔ 仕様・設計:
+  - 案 A（推奨）: 関連の表（`memory_relations` を実装して使う）。利点: 多対多を持てる（1 発言の複数 requirement と 1 つの仕様。§4.3）。関係の名前を付けられる。欠点: 新しい表と RLS が要る。
+  - 案 B: requirement の列に仕様の id を持つ。利点: 表が増えない。欠点: 1 requirement に 1 仕様しか持てず、多対多にならない。
+- タスクの区別:
+  - 案 A（推奨）: requirement の `role`（requirement / task）。利点: 原文の 2 type のまま（タスクは requirement の子）。欠点: role の値の規則が増える。
+  - 案 B: タスクを別 type にする。利点: type で区別できる。欠点: 原文の「type は 2 つ」と合わない（推測。原文はタスクの type を言っていない）。
 - 推奨: 木は `parent_id`、紐付けは関連の表。理由: 木は 1 親で足り、紐付けは多対多になりうる（推測）。
 
 ### 未決 #8: remote-cap / worker が分解したタスクの記録
 
-§5.3。案 A（推奨）master-cap の記憶の中だけ（result / report から抽出）。案 B cap の記憶にも書く（`external-memory.md:39` `:44` の決定を変える。RLS で木が分断）。案 C 参照だけ持つ。推奨 A。
+§5.3。
+- 案 A（推奨）: master-cap の記憶の中だけ（result / report から抽出）。利点: 利用者の決定（書き込みは master-cap の記憶だけ。`external-memory.md:39`）を変えず、RLS（`001_init.sql:118`）も触らない。欠点: 抽出の LLM 頼みで、分解の粒度は result / report の本文に書かれた分だけ。remote-cap の中の分解は漏れうる。
+- 案 B: cap の記憶（agent = cap_id）にも書く。利点: cap 側の分解を直接記録できる。欠点: 利用者の決定（`external-memory.md:39` `:44`）を変える。RLS が agent ごとに行を隔てる（`001_init.sql:118`）ので、親（master-cap の記憶の requirement）を cap 側の木から辿れず、木が分断される。cap 側の抽出の LLM 呼び出しが増える（`external-memory.md:44` の理由）。
+- 案 C: 親の参照だけ `(agent_id, item_id)` の文字列で持つ。利点: 書き込みの決まりを変えずに cap 側の分解を持てる。欠点: 親を読めるのは各 agent 自身の範囲だけで、木として読めない。
+- 推奨 A。
 
 ### 未決 #9: requirement の進み具合の持ち方
 
@@ -350,7 +391,11 @@ S-user（利用者の指示にあった仕様・設計をまとめた 1 件。ba
 
 ### 未決 #10: recall / context での出し方
 
-§7.1。案 A（推奨）recall に絞り込みを足し、context に `openRequirements` と `specs` を足す。案 B 別の tool（`requirement_tree` など）。案 C context だけに足す。推奨 A。理由: tool が増えず、起動時に context を呼ぶ既存の運用（`external-memory.md:35`）で読める。エージェントの設計は `inferred` と明示して出す。
+§7.1。
+- 案 A（推奨）: recall に `recordType` / `category` の絞り込みを足し、context に `openRequirements` と `specs` を足す。利点: tool が増えず、起動時と判断前に context / recall を呼ぶ既存の運用（`external-memory.md:35`、`system-instructions.ts:173-186`）で読める。エージェントの設計は `inferred` と明示して出せる。欠点: context の出力が大きくなる（今は各 10 件。`recall.ts:172`）。recall の入力 schema の変更で tool の互換に注意が要る。
+- 案 B: 別の tool（`requirement_tree` など）。利点: 既存の recall / context が変わらず、影響が分離する。欠点: tool 名と system 指示の案内の追加。agent が使い分ける必要がある。resession 設計の読み出しの口（§8.2 接点 3）と tool が増える。
+- 案 C: context だけに足す。利点: 変更が小さい。欠点: category や木の絞り込み検索ができず、context の件数上限の外の requirement は読めない。
+- 推奨 A。
 
 ### 未決 #11: Graphiti にツリーを反映するか
 
@@ -366,7 +411,7 @@ S-user（利用者の指示にあった仕様・設計をまとめた 1 件。ba
 
 ## 10. 調べて分からなかった事
 
-- `docs/resession-design`（リセッション設計）の中身。branch が fetch できなかった（§8）。
+- resession 設計（`docs/design/resession.md`）は読んだが、`handoff` event を抽出に通すか外すか（§8.2 接点 4）と、未完了の判定の元（center の pending と memory の event。接点 7）の突き合わせは、resession 設計がまだ決めていない。
 - 抽出 LLM（chatp 経由の `claude -p`）が、1 発言から複数の requirement を分けられる精度か。実機で未測定（`memory-graphiti.md:73` と同様、本物の LLM は触っていない）。
 - master-cap が分解したタスク（remote_send 無し）を、どの event で捉えるか。今の event 種別（§1.1）に該当が無い（`assistant_message` の本文から抽出するしかない。推測）。
 - 利用者の「種類？」の意図（未決 #3）。
