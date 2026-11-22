@@ -1234,6 +1234,7 @@ export function createRemoteManager(opts: {
     const i = records.indexOf(rec);
     if (i >= 0) records.splice(i, 1);
     inflight.delete(rec);
+    inflightIdle.delete(rec);
     inflightTasks.delete(rec);
     settling.delete(rec);
     statusIdleAt.delete(rec);
@@ -1779,8 +1780,54 @@ export function createRemoteManager(opts: {
    * 周期の確認の最後に、未完了の指示があるのに cap が止まっている（status が idle で、activity も動いていない）記録を、完了判定（probe）に回す。
    * 通知の取りこぼし・center の再起動などで、cap が task の途中で止まったまま完了の push が出ない状態を掬い上げる（新しい周期は足さず、REACH_CHECK_MS の確認に乗る）。
    */
+  /** 返信待ち（inflight）が開いたまま、周期の status で cap が idle と見えた連続回数（at = 数えた status の時刻。同じ status を二重に数えない）。 */
+  const inflightIdle = new Map<RemoteRecord, { n: number; at: number }>();
+  /**
+   * 返信待ちが開いたまま cap が止まった（周期の status で連続 reachThreshold 回 idle）記録に、no_result の印を付けて owner へ 1 回知らせる。
+   * 返信待ち・pending は閉じない。後から task_result が届けば通常の完了になり、印は settle で消える。印の付いている間は重ねて知らせない。
+   */
+  const sweepInflightIdle = (r: RemoteRecord): void => {
+    const waiting = r.pending.length > 0 && (inflight.get(r) ?? 0) > 0;
+    const snap = capSnap.get(r);
+    const cap = snap?.cap;
+    const a = activityOf(r);
+    const idle =
+      waiting && snap !== undefined && Date.now() - snap.at <= reachCheckMs * 2 + 1000 && !unreachableActive(r) && !r.cap_lost &&
+      (cap === undefined || (cap.state !== "running" && (cap.queued ?? 0) === 0)) &&
+      (a === undefined || a.received_ms_ago >= Date.now() - snap.at);
+    if (!idle || !snap) {
+      if (!waiting || snap === undefined || Date.now() - snap.at <= reachCheckMs * 2 + 1000) inflightIdle.delete(r);
+      return;
+    }
+    const prev = inflightIdle.get(r);
+    if (prev && prev.at === snap.at) return;
+    const n = (prev?.n ?? 0) + 1;
+    inflightIdle.set(r, { n, at: snap.at });
+    if (n < reachThreshold || r.stopped) return;
+    const pending = r.pending;
+    markStopped(r, { kind: "no_result", at: new Date().toISOString(), ...(pending[0]?.task_id !== undefined ? { task_id: pending[0].task_id } : {}), detail: "返信待ちのまま cap が止まった（task の結果が返らない）" });
+    void persist();
+    const byOwner = new Map<string, PendingInstruction[]>();
+    for (const p of pending) byOwner.set(r.session ?? p.owner, [...(byOwner.get(r.session ?? p.owner) ?? []), p]);
+    for (const [owner, instr] of byOwner) {
+      const text = formatDoneNotice({ remote_id: r.remote_id, state: "done", note: "task の結果が返らないまま cap が止まった（途中で止まった可能性）。次の指示か remote_delete で扱う", instructions: instr.map((i) => i.prompt) });
+      if (!opts.notify) {
+        log(`remote 完了通知を送れない: ${r.remote_id} owner=${owner} 通知の送り先が無い`);
+        continue;
+      }
+      void opts.notify(owner, text).then(
+        (res) => res,
+        (e: unknown) => ({ ok: false as const, reason: e instanceof Error ? e.message : String(e) }),
+      ).then((res) => {
+        if (res.ok) log(`remote 停止の通知（返信待ちのまま）: ${r.remote_id} owner=${owner} 指示=${instr.length}`);
+        else log(`remote 完了通知を送れない: ${r.remote_id} owner=${owner} ${res.reason}`);
+      });
+    }
+    wake();
+  };
   const sweepStalled = (): void => {
     for (const r of records) {
+      sweepInflightIdle(r);
       if (r.pending.length === 0 || (inflight.get(r) ?? 0) > 0 || probes.has(r) || settling.has(r)) continue;
       if (unreachableActive(r) || r.cap_lost) continue;
       const snap = capSnap.get(r);
@@ -1878,6 +1925,7 @@ export function createRemoteManager(opts: {
         syncRecord(rec, peer);
         // 次の指示を出した = master-cap が止まった cap を扱った。止まった印を消す
         delete rec.stopped;
+        inflightIdle.delete(rec);
         consolidate();
         recordStatus(healthKeyOf(rec), st);
         // cap を作る時は、記録も作った時の値にする
@@ -1898,7 +1946,10 @@ export function createRemoteManager(opts: {
         const settle = (res: { ok: boolean; text: string; error?: string }, kind: "cap_result" | "error" | "transport", taskResult?: TaskResultReply): void => {
           inflight.set(target, Math.max(0, (inflight.get(target) ?? 1) - 1));
           inflightTasks.get(target)?.delete(taskId);
+          inflightIdle.delete(target);
           if (kind === "cap_result") {
+            // 返信待ちのまま止まったと印を付けた後に結果が届いた: 通常の完了として扱い、その印を消す
+            if (target.stopped?.kind === "no_result") delete target.stopped;
             // task_result が返った = server が受け付けて実行した
             markObserved(target, entry, "task_result");
             markOk(target);

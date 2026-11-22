@@ -213,3 +213,63 @@ test("止まった印(定期の掬い上げ・結果なし): 再起動後、task
   await mgr2.send({ owner: "pm1", goal: "next" });
   assert.equal(mgr2.summary("pm1").stopped, undefined);
 });
+
+test("止まった印(返信待ちのまま止まった): 返信待ちが開いたまま周期の status で連続 2 回 idle → no_result の印と push 1 回（重ねない）。次の指示で消える", async () => {
+  const { mgr, st, sent } = setup();
+  await mgr.send({ owner: "pm1", goal: "go" });
+  st.running = false; // cap は止まったが task_result は返らない（返信待ちは開いたまま）
+  await mgr.checkReachability(); // 1 回目: まだ印は付かない
+  await tick();
+  assert.equal(mgr.summary("pm1").stopped, undefined);
+  assert.equal(pushes(sent, "[bantou] remote 完了").length, 0);
+  await sleep(5);
+  await mgr.checkReachability(); // 連続 2 回目
+  await tick();
+  assert.equal(mgr.summary("pm1").stopped?.[0].kind, "no_result");
+  assert.equal(pushes(sent, "[bantou] remote 完了").length, 1);
+  assert.match(sent[0].text, /note: task の結果が返らないまま/);
+  for (let i = 0; i < 3; i++) {
+    await sleep(5);
+    await mgr.checkReachability();
+  }
+  await tick();
+  assert.equal(pushes(sent, "[bantou] remote 完了").length, 1, "周期を重ねても二重にならない");
+  st.running = true;
+  await mgr.send({ owner: "pm1", goal: "next" });
+  assert.equal(mgr.summary("pm1").stopped, undefined);
+});
+
+test("止まった印(返信待ちのまま止まった): 連続でなければ印は付かない（途中で動けば数え直し）", async () => {
+  const { mgr, st, sent } = setup();
+  await mgr.send({ owner: "pm1", goal: "go" });
+  st.running = false;
+  await mgr.checkReachability();
+  st.running = true;
+  await sleep(5);
+  await mgr.checkReachability();
+  st.running = false;
+  await sleep(5);
+  await mgr.checkReachability();
+  await tick();
+  assert.equal(mgr.summary("pm1").stopped, undefined);
+  assert.equal(pushes(sent, "[bantou] remote 完了").length, 0);
+});
+
+test("止まった印(返信待ちのまま止まった): 印の後に task_result が届けば通常の完了になり、印は消える", async () => {
+  const { mgr, st, sent } = setup();
+  const r = await mgr.send({ owner: "pm1", goal: "go" });
+  st.running = false;
+  await mgr.checkReachability();
+  await sleep(5);
+  await mgr.checkReachability();
+  await tick();
+  assert.equal(mgr.summary("pm1").stopped?.[0].kind, "no_result");
+  st.results[0](result(r.task_id, "done", "late result"));
+  await sleep(250);
+  assert.equal(mgr.summary("pm1").stopped, undefined);
+  assert.equal(mgr.list()[0].pending.length, 0);
+  const done = pushes(sent, "[bantou] remote 完了");
+  assert.equal(done.length, 2, "止まった知らせ 1 回 + 通常の完了 1 回");
+  assert.match(done[1].text, /late result/);
+  assert.doesNotMatch(done[1].text, /note: task の結果が返らないまま/);
+});
