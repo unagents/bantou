@@ -182,6 +182,16 @@ test("remote 往復: task / result / report / reply の種別・送り手・受�
   for (const e of mem.recorded()) assert.ok((e.eventId as string).startsWith("c1:pm1:"));
 });
 
+test("task event: parentRequirementId を渡した時だけ event に載る", async () => {
+  const m = mk();
+  m.task("pm1", { capId: "c-x-pm1", taskId: "t-p", goal: "g", parentRequirementId: "3f2b1c64-8a52-4d6e-9f60-0a1b2c3d4e5f" });
+  m.task("pm1", { capId: "c-x-pm1", taskId: "t-q", goal: "g" });
+  await waitFor(() => mem.recorded().length === 2);
+  const [p, q] = mem.recorded();
+  assert.equal(p.parentRequirementId, "3f2b1c64-8a52-4d6e-9f60-0a1b2c3d4e5f");
+  assert.equal("parentRequirementId" in q, false);
+});
+
 test("result の eventId: 同じ結果の二重受信（send と遅れた返信）は同じ id、同じ task_id の別の結果は別の id", async () => {
   const m = mk();
   const tr = (summary: string) => ({ bantou: 1 as const, type: "task_result" as const, cap_id: "c", task_id: "t-1", state: "done" as const, summary, workers: [], review: { verdict: "unknown" as const, items: [], rounds: 0 }, remaining: [] });

@@ -23,6 +23,8 @@ export const recallShape = {
     .optional(),
   temporal: z.object({ validAt: iso.optional(), from: iso.optional(), to: iso.optional() }).optional(),
   includeInferred: z.boolean().optional(),
+  recordType: z.enum(["requirement", "spec_design"]).optional().describe("作業指示（requirement）か仕様・設計（spec_design）だけに絞る。省略時は従来の記憶も含め全て"),
+  category: z.string().min(1).max(64).optional().describe("requirement の作業の種類、または仕様・設計の category（presentation / business / data / infrastructure / cross-cutting。複数持つ項目は 1 つでも当たれば出る）で絞る"),
   limit: z.number().int().min(1).max(50).optional(),
 };
 export const recallSchema = z.object(recallShape);
@@ -39,6 +41,17 @@ export interface RecallResult {
   validUntil?: string;
   confidence?: number;
   relevance: number;
+  /** 以下は requirement / 仕様・設計の項目だけ（従来の記憶には付かない） */
+  recordType?: "requirement" | "spec_design";
+  origin?: "user" | "agent";
+  role?: "requirement" | "task";
+  category?: string;
+  categories?: string[];
+  basis?: "user" | "agent";
+  parentId?: string;
+  taskId?: string;
+  /** requirement なら紐付く仕様・設計の id、仕様・設計なら紐付く requirement の id */
+  relatedIds?: string[];
 }
 
 interface ItemRow {
@@ -51,7 +64,17 @@ interface ItemRow {
   valid_until: Date | string | null;
   confidence: number | null;
   relevance: number;
+  record_type?: string | null;
+  origin?: string | null;
+  role?: string | null;
+  category?: string | null;
+  spec_categories?: string[] | null;
+  basis?: string | null;
+  parent_id?: string | null;
+  task_id?: string | null;
+  related_ids?: string[] | null;
 }
+
 
 const iso8601 = (v: Date | string) => new Date(v).toISOString();
 
@@ -67,6 +90,17 @@ function toResult(r: ItemRow): RecallResult {
   if (r.valid_from) out.validFrom = iso8601(r.valid_from);
   if (r.valid_until) out.validUntil = iso8601(r.valid_until);
   if (r.confidence !== null && r.confidence !== undefined) out.confidence = Number(r.confidence);
+  if (r.record_type === "requirement" || r.record_type === "spec_design") {
+    out.recordType = r.record_type;
+    if (r.origin === "user" || r.origin === "agent") out.origin = r.origin;
+    if (r.role === "requirement" || r.role === "task") out.role = r.role;
+    if (r.category) out.category = r.category;
+    if (r.spec_categories) out.categories = r.spec_categories;
+    if (r.basis === "user" || r.basis === "agent") out.basis = r.basis;
+    if (r.parent_id) out.parentId = r.parent_id;
+    if (r.task_id) out.taskId = r.task_id;
+    if (r.related_ids?.length) out.relatedIds = r.related_ids;
+  }
   return out;
 }
 
@@ -100,7 +134,8 @@ export async function recall(db: Db, embedder: Embedder, agentId: string, raw: u
   const rows = await db.withAgent(agentId, async (q) =>
     (await q.query<ItemRow>(
       `SELECT i.id, i.content, i.memory_type, i.status, i.valid_from, i.valid_until, i.confidence,
-              1 - (i.embedding <=> $1::vector) AS relevance,
+              1 - (i.embedding <=> $1::vector) AS relevance, i.record_type, i.origin, i.role, i.category, i.spec_categories, i.basis, i.parent_id, i.task_id,
+              COALESCE((SELECT array_agg(x ORDER BY x) FROM (SELECT r.to_id::text AS x FROM memory_relations r WHERE r.from_id = i.id UNION SELECT r.from_id::text FROM memory_relations r WHERE r.to_id = i.id) t), '{}') AS related_ids,
               COALESCE((SELECT array_agg(s.event_id ORDER BY s.event_id) FROM memory_sources s WHERE s.item_id = i.id), '{}') AS source_event_ids
          FROM memory_items i
         WHERE (i.agent_id = $2 OR i.scope IN ('shared','organizational'))
@@ -111,12 +146,15 @@ export async function recall(db: Db, embedder: Embedder, agentId: string, raw: u
           AND ($7::timestamptz IS NULL OR ((i.valid_from IS NULL OR i.valid_from <= $7::timestamptz) AND (i.valid_until IS NULL OR i.valid_until > $7::timestamptz)))
           AND ($8::timestamptz IS NULL OR i.valid_until IS NULL OR i.valid_until > $8::timestamptz)
           AND ($9::timestamptz IS NULL OR i.valid_from IS NULL OR i.valid_from <= $9::timestamptz)
+          AND ($11::text IS NULL OR i.record_type = $11::text)
+          AND ($12::text IS NULL OR i.category = $12::text OR $12::text = ANY(COALESCE(i.spec_categories, '{}')))
         ORDER BY i.embedding <=> $1::vector
         LIMIT $10`,
       [
         toVectorLiteral(vec!), agentId, embedder.model, types, statuses,
         req.scope?.projectIds?.length ? req.scope.projectIds : null,
         t?.validAt ?? null, t?.from ?? null, t?.to ?? null, limit,
+        req.recordType ?? null, req.category ?? null,
       ],
     )).rows,
   );
@@ -150,6 +188,29 @@ export interface ContextResult {
   recentDecisions: RecallResult[];
   openQuestions: { eventId: string; taskId: string | null; at: string; body: string }[];
   activeTasks: { taskId: string; remoteId: string | null; at: string; body: string }[];
+  /** 完了していない requirement の木（根 = 利用者の requirement。子 = master-cap が出した requirement・タスク） */
+  openRequirements: RecordNode[];
+  /** 仕様・設計の木（根 = 利用者の仕様・設計。子 = エージェントの推論・判断の設計。status が inferred の物は推測） */
+  specs: RecordNode[];
+}
+
+export interface RecordNode extends RecallResult {
+  children: RecordNode[];
+}
+
+const CONTEXT_ROOTS = 10;
+const CONTEXT_MAX_NODES = 100;
+
+/** 親子の並びを木にする。親が範囲外（上限で落ちた）の node は根として扱う */
+function toTree(rows: RecallResult[]): RecordNode[] {
+  const nodes = new Map<string, RecordNode>(rows.map((r) => [r.id, { ...r, children: [] }]));
+  const roots: RecordNode[] = [];
+  for (const n of nodes.values()) {
+    const parent = n.parentId ? nodes.get(n.parentId) : undefined;
+    if (parent && parent !== n) parent.children.push(n);
+    else roots.push(n);
+  }
+  return roots;
 }
 
 /**
@@ -158,6 +219,9 @@ export interface ContextResult {
  *  - recentDecisions: confirmed の episodic（新しい順 10）
  *  - openQuestions: kind=report で、同じ task_id の後続 reply が無いもの
  *  - activeTasks: kind=task で、同じ task_id の後続 result が無いもの
+ *  - openRequirements: record_type=requirement の木。task_id を持つ node は、同じ task_id の後続 result があれば完了。
+ *    task_id を持たない node は、子があって全て完了なら完了（子が無ければ未完了として出す。event から導けない）
+ *  - specs: record_type=spec_design の木（confirmed と inferred。status を付けて返す）
  */
 export async function buildContext(db: Db, agentId: string, raw: unknown): Promise<ContextResult> {
   const { agentId: asked } = z.object(contextShape).parse(raw ?? {});
@@ -165,10 +229,11 @@ export async function buildContext(db: Db, agentId: string, raw: unknown): Promi
   return db.withAgent(agentId, async (q) => {
     const items = async (types: string[]) =>
       (await q.query<ItemRow>(
-        `SELECT i.id, i.content, i.memory_type, i.status, i.valid_from, i.valid_until, i.confidence, 1.0 AS relevance,
+        `SELECT i.id, i.content, i.memory_type, i.status, i.valid_from, i.valid_until, i.confidence, 1.0 AS relevance, i.record_type, i.origin, i.role, i.category, i.spec_categories, i.basis, i.parent_id, i.task_id,
+              COALESCE((SELECT array_agg(x ORDER BY x) FROM (SELECT r.to_id::text AS x FROM memory_relations r WHERE r.from_id = i.id UNION SELECT r.from_id::text FROM memory_relations r WHERE r.to_id = i.id) t), '{}') AS related_ids,
                 COALESCE((SELECT array_agg(s.event_id ORDER BY s.event_id) FROM memory_sources s WHERE s.item_id = i.id), '{}') AS source_event_ids
            FROM memory_items i
-          WHERE i.agent_id = $1 AND i.status = 'confirmed' AND i.memory_type = ANY($2::text[])
+          WHERE i.agent_id = $1 AND i.status = 'confirmed' AND i.record_type IS NULL AND i.memory_type = ANY($2::text[])
           ORDER BY i.created_at DESC, i.id LIMIT 10`,
         [agentId, types],
       )).rows.map(toResult);
@@ -186,8 +251,50 @@ export async function buildContext(db: Db, agentId: string, raw: unknown): Promi
         ORDER BY e.at DESC LIMIT 10`,
       [agentId],
     );
+    // 木: 根を新しい順に CONTEXT_ROOTS 件、その子孫を深さ 8 まで（全体で CONTEXT_MAX_NODES 件）
+    const tree = async (recordType: "requirement" | "spec_design", statuses: string[]) =>
+      (await q.query<ItemRow>(
+        `WITH RECURSIVE roots AS (
+            SELECT i.id FROM memory_items i
+             WHERE i.agent_id = $1 AND i.record_type = $2 AND i.status = ANY($3::text[]) AND i.parent_id IS NULL
+             ORDER BY i.created_at DESC, i.id LIMIT $4
+          ), walk AS (
+            SELECT id, 0 AS depth FROM roots
+            UNION ALL
+            SELECT c.id, w.depth + 1 FROM memory_items c JOIN walk w ON c.parent_id = w.id
+             WHERE c.agent_id = $1 AND c.status = ANY($3::text[]) AND w.depth < 8
+          )
+          SELECT i.id, i.content, i.memory_type, i.status, i.valid_from, i.valid_until, i.confidence, 1.0 AS relevance, i.record_type, i.origin, i.role, i.category, i.spec_categories, i.basis, i.parent_id, i.task_id,
+              COALESCE((SELECT array_agg(x ORDER BY x) FROM (SELECT r.to_id::text AS x FROM memory_relations r WHERE r.from_id = i.id UNION SELECT r.from_id::text FROM memory_relations r WHERE r.to_id = i.id) t), '{}') AS related_ids,
+                 COALESCE((SELECT array_agg(s.event_id ORDER BY s.event_id) FROM memory_sources s WHERE s.item_id = i.id), '{}') AS source_event_ids
+            FROM memory_items i JOIN walk w ON w.id = i.id
+           ORDER BY w.depth, i.created_at DESC, i.id LIMIT $5`,
+        [agentId, recordType, statuses, CONTEXT_ROOTS, CONTEXT_MAX_NODES],
+      )).rows.map(toResult);
+    const reqRows = await tree("requirement", ["confirmed", "inferred"]);
+    const taskIds = reqRows.map((r) => r.taskId).filter((x): x is string => !!x);
+    const doneTasks = new Set<string>(
+      taskIds.length === 0
+        ? []
+        : (await q.query<{ task_id: string }>(
+            `SELECT DISTINCT e.task_id FROM memory_events e
+              WHERE e.agent_id = $1 AND e.kind = 'result' AND e.task_id = ANY($2::text[])
+                AND e.at > COALESCE((SELECT min(t.at) FROM memory_events t WHERE t.agent_id = e.agent_id AND t.kind = 'task' AND t.task_id = e.task_id), '-infinity'::timestamptz)`,
+            [agentId, taskIds],
+          )).rows.map((r) => r.task_id),
+    );
+    const isOpen = (n: RecordNode): boolean => {
+      if (n.taskId) return !doneTasks.has(n.taskId);
+      if (n.children.length === 0) return true;
+      return n.children.some(isOpen);
+    };
+    const prune = (n: RecordNode): RecordNode => ({ ...n, children: n.children.filter(isOpen).map(prune) });
+    const openRequirements = toTree(reqRows).filter(isOpen).map(prune);
+    const specs = toTree(await tree("spec_design", ["confirmed", "inferred"]));
     return {
       agentId,
+      openRequirements,
+      specs,
       policies: await items(["semantic", "procedural"]),
       recentDecisions: await items(["episodic"]),
       openQuestions: questions.rows.map((r) => ({ eventId: r.event_id, taskId: r.task_id, at: iso8601(r.at), body: r.body })),
@@ -211,7 +318,8 @@ export async function explain(db: Db, agentId: string, raw: unknown): Promise<Ex
   const { id } = z.object(explainShape).parse(raw);
   return db.withAgent(agentId, async (q) => {
     const it = await q.query<ItemRow & { scope: string; superseded_by: string | null }>(
-      `SELECT i.id, i.content, i.memory_type, i.status, i.valid_from, i.valid_until, i.confidence, 1.0 AS relevance, i.scope, i.superseded_by,
+      `SELECT i.id, i.content, i.memory_type, i.status, i.valid_from, i.valid_until, i.confidence, 1.0 AS relevance, i.record_type, i.origin, i.role, i.category, i.spec_categories, i.basis, i.parent_id, i.task_id,
+              COALESCE((SELECT array_agg(x ORDER BY x) FROM (SELECT r.to_id::text AS x FROM memory_relations r WHERE r.from_id = i.id UNION SELECT r.from_id::text FROM memory_relations r WHERE r.to_id = i.id) t), '{}') AS related_ids, i.scope, i.superseded_by,
               COALESCE((SELECT array_agg(s.event_id ORDER BY s.event_id) FROM memory_sources s WHERE s.item_id = i.id), '{}') AS source_event_ids
          FROM memory_items i WHERE i.id = $1 AND (i.agent_id = $2 OR i.scope IN ('shared','organizational'))`,
       [id, agentId],

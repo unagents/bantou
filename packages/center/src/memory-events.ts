@@ -45,7 +45,7 @@ export interface CenterMemoryEvents {
   /** hook の payload（UserPromptSubmit の prompt / Stop の last_assistant_message）を event にして積む。 */
   onHook(session: string, payload: unknown): void;
   /** remote_send の送信（kind: task）。 */
-  task(session: string, t: { capId: string; taskId: string; goal: string; repo?: string; branch?: string; constraints?: string[]; at?: number }): void;
+  task(session: string, t: { capId: string; taskId: string; goal: string; repo?: string; branch?: string; constraints?: string[]; parentRequirementId?: string; at?: number }): void;
   /** cap_result / task_result の受信（kind: result）。error 返信は記録しない。 */
   result(session: string, reply: CapResultReply | TaskResultReply, at?: number): void;
   /** worker_report の受信（kind: report）。 */
@@ -149,6 +149,7 @@ export function createCenterMemoryEvents(opts: {
           recipient: { capId: t.capId },
           remoteId: t.capId,
           taskId: t.taskId,
+          ...(t.parentRequirementId ? { parentRequirementId: t.parentRequirementId } : {}),
           kind: "task",
           body: formatTaskBody(t),
           at: eventAt(t.at, now()),

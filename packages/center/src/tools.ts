@@ -424,6 +424,7 @@ export function registerSessionTools(server: McpServer, deps: { remotes: RemoteM
         ...(args.constraints ? { constraints: args.constraints } : {}),
         ...(args.workers ? { workers: args.workers } : {}),
         ...(args.worker_model ? { worker_model: args.worker_model } : {}),
+        ...(args.parent_requirement_id ? { parent_requirement_id: args.parent_requirement_id } : {}),
       });
       // server の受付を確かめられなかった: isError。結果（delivered:false, task_id, delivery, error）はそのまま返す
       return json(r, !r.delivered);

@@ -16,6 +16,7 @@ export const eventShape = {
   recipient: party.optional().describe("受け手（session 名 / cap_id / worker_id）"),
   remoteId: id128.optional(),
   taskId: id128.optional(),
+  parentRequirementId: id128.optional().describe("kind=task のみ。親の requirement の id（memory_items.id）。remote_send に渡された時だけ付く"),
   kind: z.enum(EVENT_KINDS),
   body: z.string().min(1).max(65536).refine(noNul, "NUL 文字は使えない"),
   at: z.iso
@@ -23,7 +24,9 @@ export const eventShape = {
     .refine((s) => Date.parse(s) <= Date.now() + DAY_MS, "at は現在から 1 日より先にできない")
     .describe("発生時刻（ISO 8601）"),
 };
-export const eventSchema = z.object(eventShape);
+export const eventSchema = z
+  .object(eventShape)
+  .refine((e) => e.parentRequirementId === undefined || e.kind === "task", { message: "parentRequirementId は kind=task の event だけで受ける", path: ["parentRequirementId"] });
 export type EventInput = z.infer<typeof eventSchema>;
 
 export async function recordEvent(db: Db, agentId: string, raw: unknown): Promise<{ status: "recorded" | "duplicate"; eventId: string }> {
@@ -33,15 +36,15 @@ export async function recordEvent(db: Db, agentId: string, raw: unknown): Promis
     const ins = await q.query(
       `INSERT INTO memory_events
          (agent_id, event_id, sender_session, sender_cap_id, sender_worker_id,
-          recipient_session, recipient_cap_id, recipient_worker_id, remote_id, task_id, kind, body, at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+          recipient_session, recipient_cap_id, recipient_worker_id, remote_id, task_id, kind, body, at, parent_requirement_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
        ON CONFLICT (agent_id, event_id) DO NOTHING
        RETURNING event_id`,
       [
         agentId, e.eventId,
         e.sender.session ?? null, e.sender.capId ?? null, e.sender.workerId ?? null,
         e.recipient?.session ?? null, e.recipient?.capId ?? null, e.recipient?.workerId ?? null,
-        e.remoteId ?? null, e.taskId ?? null, e.kind, e.body, e.at,
+        e.remoteId ?? null, e.taskId ?? null, e.kind, e.body, e.at, e.parentRequirementId ?? null,
       ],
     );
     if (ins.rows.length === 0) {
