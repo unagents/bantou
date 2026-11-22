@@ -108,7 +108,7 @@ test("mcp: tool 一覧は header で変わる（cap は worker_*、worker は re
   const l = await startMcpListener(toNodeListener(app), { port: 0, bind: "127.0.0.1" });
   try {
     const url = `http://127.0.0.1:${l.port}/mcp`;
-    assert.deepEqual(await listTools(url, { "x-bantou-cap-id": "c1" }), ["report", "bash", "worker_start", "worker_status", "worker_stop"]);
+    assert.deepEqual(await listTools(url, { "x-bantou-cap-id": "c1" }), ["report", "bash", "worker_start", "worker_status", "peer_status", "worker_stop"]);
     assert.deepEqual(await listTools(url, { "x-bantou-cap-id": "c1", "x-bantou-worker-id": "w1" }), ["report", "bash"]);
     assert.deepEqual(await listTools(url, {}), ["report"]);
   } finally {

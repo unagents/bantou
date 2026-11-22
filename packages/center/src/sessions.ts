@@ -13,7 +13,7 @@ import type { RcStatus, RemoteControlSupervisor } from "./remote-control.js";
 import type { EventHub } from "./events.js";
 import type { JsonListStore, JsonObjectStore } from "./store.js";
 import type { ContextUsage } from "./context-usage.js";
-import type { SessionActivityView } from "./session-activity.js";
+import type { SessionActivityView, SessionBackground } from "./session-activity.js";
 import type { RemoteSummary } from "./remotes.js";
 
 export const SESSION_NAME = /^[A-Za-z0-9_-]+$/;
@@ -45,12 +45,14 @@ export interface SessionInfo {
   /** claude のコンテキスト使用状況。まだ分からない（transcript が無い等）時は null。 */
   contextUsage: ContextUsage | null;
   /**
-   * 作業状態。working = turn 実行中 / needs-input = 利用者の入力待ち（permission・AskUserQuestion・plan 承認）/ idle = turn が終わり次の指示待ち / unknown = 不明（停止中・起動し直し直後・center 再起動直後）。
+   * cap（claude 本体）の状態。working = 本体が turn を実行中で入力に反応できない / needs-input = 利用者の返答待ち（permission・AskUserQuestion・plan 承認）/ idle = 待機（作業の進行の有無に左右されない。subagent や background が動いていても idle）/ unknown = 不明（停止中・起動し直し直後・center 再起動直後）。
    * unknown の時、desktop は何も表示しない。thread の ask（waiting）は center の知らない desktop 側の情報なので、ここには含まない。
    */
   activity: SessionActivityView["activity"];
   /** activity が最後に変わった時刻（ISO）。unknown の時は null。 */
   activityAt: string | null;
+  /** cap（claude 本体）とは別に session の中で続いている作業（subagent・background の実行）の数。activity が idle でも 0 でなければ作業は進んでいる。 */
+  background: SessionBackground;
   /** その session の cap（remote）の集計。running = 未完了の指示がある server の数、waitingReply = worker_reply が未返答の ask / approve の数。cap が無ければ 0 / 0。 */
   remote: RemoteSummary;
   /** 起動時に追加指示（instructions）を付けたか。本文は出さない。 */
@@ -117,6 +119,12 @@ export interface SessionManager {
   sleep(name: string): Promise<SessionInfo>;
   /** スリープ中の session を元の会話のまま起こす（resume）。眠っていなければ何もしない（今の状態を返す）。 */
   wake(name: string): Promise<SessionInfo>;
+  /**
+   * リセッションの再起動: claude を止め、`--continue` 無し（新しい会話）で起動し直す。session_create で作った session のみ。眠っている session は不可。
+   * 止めてから新しい claude が接続するまでの間は、スリープと同じ messenger の身代わりを置く（取りこぼしを防ぐ。設計 U6 の A）。
+   * 起動に失敗したら、元の会話（`--continue`）での起動を試みてから投げる（身代わりは外す。それも失敗したら停止のままだが、次の起動（restore・wake）は `--continue` で元の会話に戻る）。
+   */
+  restartFresh(name: string): Promise<SessionInfo>;
   list(): SessionInfo[];
 }
 
@@ -242,7 +250,7 @@ export function createSessionManager(opts: {
     source: saved.has(s.project) ? "session" : "config",
     ...(s.lastError ? { lastError: s.lastError } : {}),
     contextUsage: opts.contextUsage?.(s.project) ?? null,
-    ...(opts.activity?.(s.project, s.startedAt, s.state === "starting" || s.state === "connected") ?? { activity: "unknown" as const, activityAt: null }),
+    ...(opts.activity?.(s.project, s.startedAt, s.state === "starting" || s.state === "connected") ?? { activity: "unknown" as const, activityAt: null, background: { subagents: 0, tasks: 0 } }),
     remote: opts.remote?.(s.project) ?? { running: 0, waitingReply: 0 },
     instructions: s.instructions,
     auth: s.auth,
@@ -904,6 +912,36 @@ export function createSessionManager(opts: {
         opts.events?.publish({ reason: "sleep", name });
         log(`session 起床: ${name}`);
         return info(await settle(name, st));
+      }),
+
+    restartFresh: (name) =>
+      serial(async () => {
+        const rec = savedOrThrow(name);
+        if (rec.sleeping === true) throw new Error(`眠っている session は再起動しない: ${name}`);
+        await supervisor.stop(name);
+        // 止めてから新しい claude の接続までの間の message を身代わりが預かる
+        notifySleep(name, true);
+        try {
+          let st: RcStatus;
+          try {
+            st = await supervisor.start(name);
+          } catch (e) {
+            // 新しい会話で起動できなかった。止めたままにせず、元の会話（--continue。restore・自動の再起動と同じ起動）で起こし直してから失敗を返す
+            log(`session リセッション再起動失敗（元の会話で起動し直す）: ${name} ${(e as Error).message}`);
+            try {
+              await supervisor.start(name, { resume: true });
+              log(`session 元の会話で再起動した: ${name}`);
+            } catch (re) {
+              log(`session 元の会話での再起動も失敗（停止のまま。次の起動は --continue で元の会話に戻る）: ${name} ${(re as Error).message}`);
+            }
+            throw e;
+          }
+          opts.events?.publish({ reason: "restarted", name });
+          log(`session リセッション再起動（新しい会話）: ${name}`);
+          return info(await settle(name, st));
+        } finally {
+          notifySleep(name, false);
+        }
       }),
 
     list: () => supervisor.list().map(info),

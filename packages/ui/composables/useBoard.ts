@@ -10,6 +10,8 @@ import {
   SESSIONS_CHANGED_EVENT,
   THREADS_CHANGED_EVENT,
 } from "../api";
+import type { ChipKey } from "./useSessionBoard";
+import { capActivity, sessionProgress, type SessionProgress } from "./sessionStatus";
 import type { CenterAuthState, ContextUsage, Ping, RemoteIssue, SessionActivity, SessionList, Task, Thread } from "../types";
 
 /** How often the remaining time of the ping timers is re-evaluated. */
@@ -31,10 +33,15 @@ export interface SessionGroup {
    * could be asked and the session is connected (stopped / starting / error keep their own display).
    */
   activity: SessionActivity | null;
+  /**
+   * Work is going on in the session: the cap is busy, a subagent / background run is going on, or a remote task is running.
+   * Independent of `activity` (an idle cap can have work in progress).
+   */
+  progress: SessionProgress | null;
   /** Unanswered worker asks / approvals on this session's remote-caps (already counted in a "needs-input" activity). */
   remoteWaiting: number;
   /** Remote-caps in trouble (the tooltip of "remote-unreachable" / "remote-lost" names the servers). Empty while the center could not be asked. */
-  remoteIssues: { unreachable: RemoteIssue[]; lost: RemoteIssue[] };
+  remoteIssues: { unreachable: RemoteIssue[]; lost: RemoteIssue[]; stopped: RemoteIssue[] };
   /** The session is asleep (the center's `sleeping`): its claude is stopped; opening it wakes it. */
   sleeping: boolean;
   /** The claude's auth state as the center reports it (null: not reported). */
@@ -111,34 +118,16 @@ export function useBoard(dir: Ref<string | null>) {
     const first = statuses.value[0];
     const last = statuses.value[statuses.value.length - 1];
     const map = new Map<string, SessionGroup>();
-    // Priority: claude needs-input > remote waitingReply > remote unreachable > remote lost > claude working > remote running > idle.
-    // (A waiting thread is added in the task loop below and beats everything.)
-    // claude's own state and "remote running" need a connected session; an unanswered worker ask is shown whatever
-    // the state is, like a thread ask (it waits for a person even if the master-cap stopped).
-    const centerActivity = (name: string): SessionActivity | null => {
-      if (!centerList.value.reachable) return null;
-      const r = centerList.value.sessions.find((x) => x.name === name);
-      if (!r) return null;
-      const a = r.activity === "working" || r.activity === "needs-input" || r.activity === "idle" ? r.activity : null;
-      const connected = r.state === "connected";
-      if (connected && a === "needs-input") return "needs-input";
-      if ((r.remote?.waitingReply ?? 0) > 0) return "needs-input";
-      // A server that does not answer / a lost cap: the work left there is not going on, so it beats "working".
-      // Shown whatever the session state is (like an unanswered worker ask): the trouble is on the remote side, not in the session.
-      if ((r.remote?.unreachable?.length ?? 0) > 0) return "remote-unreachable";
-      if ((r.remote?.lost?.length ?? 0) > 0) return "remote-lost";
-      if (!connected) return null;
-      if (a === "working") return "working";
-      if ((r.remote?.running ?? 0) > 0) return "remote-working";
-      return a;
-    };
+    const find = (name: string) => centerList.value.sessions.find((x) => x.name === name);
+    const centerActivity = (name: string) => capActivity(find(name), centerList.value.reachable);
+    const progressOf = (name: string) => sessionProgress(find(name), centerList.value.reachable);
     const remoteWaiting = (name: string): number => {
       if (!centerList.value.reachable) return 0;
       return centerList.value.sessions.find((x) => x.name === name)?.remote?.waitingReply ?? 0;
     };
-    const remoteIssues = (name: string): { unreachable: RemoteIssue[]; lost: RemoteIssue[] } => {
+    const remoteIssues = (name: string): { unreachable: RemoteIssue[]; lost: RemoteIssue[]; stopped: RemoteIssue[] } => {
       const r = centerList.value.reachable ? centerList.value.sessions.find((x) => x.name === name)?.remote : null;
-      return { unreachable: r?.unreachable ?? [], lost: r?.lost ?? [] };
+      return { unreachable: r?.unreachable ?? [], lost: r?.lost ?? [], stopped: r?.stopped ?? [] };
     };
     const group = (name: string) => {
       let g = map.get(name);
@@ -150,6 +139,7 @@ export function useBoard(dir: Ref<string | null>) {
           contextUsage: centerList.value.sessions.find((r) => r.name === name)?.contextUsage ?? null,
           instructions: centerList.value.sessions.find((r) => r.name === name)?.instructions ?? false,
           activity: centerActivity(name),
+          progress: progressOf(name),
           remoteWaiting: remoteWaiting(name),
           remoteIssues: remoteIssues(name),
           sleeping: false,
@@ -187,10 +177,14 @@ export function useBoard(dir: Ref<string | null>) {
   });
 
   /** Sessions per work state (the side menu summary). */
-  const activityCounts = computed<Record<SessionActivity, number>>(() => {
-    const c: Record<SessionActivity, number> = { working: 0, "needs-input": 0, idle: 0, "remote-working": 0, "remote-unreachable": 0, "remote-lost": 0 };
-    // "remote-working" counts as "working" in the summary (the key stays 0). "remote-unreachable" / "remote-lost" have their own chips (shown only while someone is in that state).
-    for (const g of sessions.value) if (g.activity) c[g.activity === "remote-working" ? "working" : g.activity]++;
+  const activityCounts = computed<Record<ChipKey, number>>(() => {
+    const c: Record<ChipKey, number> = { progress: 0, "needs-input": 0, idle: 0, "remote-unreachable": 0, "remote-lost": 0, "remote-stopped": 0 };
+    // "progress" (work in progress) is counted apart from the cap's state: a session can be in both (an idle cap with a subagent running).
+    // "working" (the cap itself busy) is in progress, so it has no chip of its own. "remote-unreachable" / "remote-lost" have their own chips (shown only while someone is in that state).
+    for (const g of sessions.value) {
+      if (g.progress) c.progress++;
+      if (g.activity && g.activity !== "working") c[g.activity]++;
+    }
     return c;
   });
 

@@ -45,13 +45,18 @@ export interface CenterMemoryEvents {
   /** hook の payload（UserPromptSubmit の prompt / Stop の last_assistant_message）を event にして積む。 */
   onHook(session: string, payload: unknown): void;
   /** remote_send の送信（kind: task）。 */
-  task(session: string, t: { capId: string; taskId: string; goal: string; repo?: string; branch?: string; constraints?: string[]; at?: number }): void;
+  task(session: string, t: { capId: string; taskId: string; goal: string; repo?: string; branch?: string; constraints?: string[]; parentRequirementId?: string; at?: number }): void;
   /** cap_result / task_result の受信（kind: result）。error 返信は記録しない。 */
   result(session: string, reply: CapResultReply | TaskResultReply, at?: number): void;
   /** worker_report の受信（kind: report）。 */
   report(session: string, n: WorkerReportNotice): void;
   /** worker_reply の送信（kind: reply）。 */
   reply(session: string, r: { capId: string; workerId: string; text: string; taskId?: string; at?: number }): void;
+  /**
+   * リセッションの引継ぎ（kind: handoff）を memory に書き、受理（recorded / duplicate）を待つ（キューを通さない。再起動の前に受理を確かめるため）。
+   * memory の設定が無い（書き込み先が無い）時は "none"。届かない・拒否された時は投げる。
+   */
+  handoff(session: string, h: { id: string; body: string; at?: number }, timeoutMs?: number): Promise<"memory" | "none">;
   /** 積んだ分が空になるまで待つ（テスト・終了用）。 */
   drain(timeoutMs?: number): Promise<boolean>;
   close(): void;
@@ -68,10 +73,11 @@ export function createCenterMemoryEvents(opts: {
   now?: () => number;
 }): CenterMemoryEvents {
   const now = opts.now ?? Date.now;
+  const sink = opts.sink ?? createCenterMemorySink();
   const queue =
     opts.queue ??
     createMemoryQueue({
-      sink: opts.sink ?? createCenterMemorySink(),
+      sink,
       log: opts.log,
       label: "memory",
     });
@@ -149,6 +155,7 @@ export function createCenterMemoryEvents(opts: {
           recipient: { capId: t.capId },
           remoteId: t.capId,
           taskId: t.taskId,
+          ...(t.parentRequirementId ? { parentRequirementId: t.parentRequirementId } : {}),
           kind: "task",
           body: formatTaskBody(t),
           at: eventAt(t.at, now()),
@@ -215,6 +222,35 @@ export function createCenterMemoryEvents(opts: {
           at: eventAt(t, now()),
         });
       });
+    },
+
+    async handoff(session, h, timeoutMs = 20_000) {
+      const target = targetOf(session);
+      if (!target) return "none";
+      const ev = buildEvent({
+        eventId: h.id,
+        sender: { session },
+        recipient: { session },
+        kind: "handoff",
+        body: h.body,
+        at: eventAt(h.at, now()),
+      });
+      if (!ev) throw new Error("引継ぎの本文が空");
+      // 引き渡すのは省略していない本文だけ（切り詰めると続きが失われる）
+      if (ev.body !== h.body) throw new Error("引継ぎの本文が長すぎる（65536 文字まで）");
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          sink.send(target, ev),
+          new Promise<never>((_, rej) => {
+            timer = setTimeout(() => rej(new Error(`memory の受理を ${timeoutMs}ms 待ったが来ない`)), timeoutMs);
+            timer.unref?.();
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+      return "memory";
     },
 
     drain: (t) => queue.drain(t),

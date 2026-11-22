@@ -40,7 +40,7 @@ test("master-cap-role: session 名が入り、作業は remote-cap に回す旨�
 });
 
 test("master-cap-availability: 2 つ目に並び、いつでも受けられる・remote_send・background・turn を塞がない旨がある。label は master-cap-availability@2", () => {
-  assert.equal(SYSTEM_INSTRUCTION_PARTS.length, 5);
+  assert.equal(SYSTEM_INSTRUCTION_PARTS.length, 6);
   assert.equal(SYSTEM_INSTRUCTION_PARTS[0], BASE_SPEC);
   assert.equal(SYSTEM_INSTRUCTION_PARTS[1], MASTER_CAP_ROLE);
   assert.equal(SYSTEM_INSTRUCTION_PARTS[2], MASTER_CAP_AVAILABILITY);
@@ -59,8 +59,8 @@ test("buildSystemInstructions: 出力で master-cap-availability の文面が ma
   assert.ok(out.indexOf(role) < out.indexOf(avail));
 });
 
-test("describeSystemInstructions: 既定は 5 件（base-spec, role, availability, memory, coordinator の順）。memory・coordinator は条件付きだと title で分かる", () => {
-  assert.deepEqual(describeSystemInstructions().map((d) => `${d.id}@${d.version}`), ["base-spec@1", "master-cap-role@6", "master-cap-availability@2", "memory@1", "coordinator@4"]);
+test("describeSystemInstructions: 既定は 6 件（base-spec, role, availability, memory, coordinator, resession の順）。memory・coordinator は条件付きだと title で分かる", () => {
+  assert.deepEqual(describeSystemInstructions().map((d) => `${d.id}@${d.version}`), ["base-spec@1", "master-cap-role@6", "master-cap-availability@2", "memory@1", "coordinator@4", "resession@1"]);
   assert.ok(describeSystemInstructions()[3]!.title.includes("設定がある session だけ"));
   assert.ok(describeSystemInstructions()[4]!.title.includes("統括の MCP の server"));
 });
@@ -98,7 +98,7 @@ test("buildSystemInstructions: 部品を順に空行で結合。空の部品は�
     { id: "c", version: 3, title: "C" },
   ]);
   assert.equal(partLabel(parts[2]!), "c@3");
-  assert.equal(buildSystemInstructions({ session: "x", memory: true }), SYSTEM_INSTRUCTION_PARTS.filter((p) => p.id !== "coordinator").map((p) => p.text({ session: "x" })).join("\n\n"));
+  assert.equal(buildSystemInstructions({ session: "x", memory: true }), SYSTEM_INSTRUCTION_PARTS.filter((p) => p.id !== "coordinator" && p.id !== "resession").map((p) => p.text({ session: "x" })).join("\n\n"));
   // when が false の部品は文面も出ない
   const cond = [{ id: "a", version: 1, title: "A", text: () => "A 文" }, { id: "m", version: 1, title: "M", when: (c: { memory?: boolean }) => c.memory === true, text: () => "M 文" }];
   assert.equal(buildSystemInstructions({ session: "s" }, cond), "A 文");
@@ -154,4 +154,17 @@ test("生成物: instructions.generated.ts は md と一致する（md を直し
 test("基盤仕様: 3 層共通の md は server の指示文の元と同じ内容（server の md は共通の文面を持たない）", () => {
   const serverGen = readFileSync(new URL("../../server/server/utils/bantou/instructions.generated.ts", import.meta.url), "utf8");
   assert.ok(serverGen.includes(JSON.stringify(COMMON_MD)));
+});
+
+test("resession: session_resession が付く session（resession: true）だけに付く。申告の条件と引継ぎの引き方がある", async () => {
+  const { RESESSION_USAGE } = await import("../src/system-instructions.js");
+  assert.equal(partLabel(RESESSION_USAGE), "resession@1");
+  assert.ok(!applicableParts({ session: "s" }).includes(RESESSION_USAGE));
+  assert.ok(applicableParts({ session: "s", resession: true }).includes(RESESSION_USAGE));
+  const t = RESESSION_USAGE.text({ session: "s", resession: true, memory: true });
+  for (const w of ["session_resession", "handoff", "mcp__memory__handoff", "返事を待っている時", "turn を終える"]) assert.ok(t.includes(w), w);
+  // memory の設定が無い session には、使えない mcp__memory__ の tool を案内しない（最初の入力の本文を読む）
+  const t2 = RESESSION_USAGE.text({ session: "s", resession: true });
+  assert.ok(!t2.includes("mcp__memory__"));
+  assert.ok(t2.includes("入力に入っている引継ぎの本文"));
 });

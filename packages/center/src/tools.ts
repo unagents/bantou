@@ -10,6 +10,7 @@ import type { Follow } from "./follow.js";
 import type { ServerLink } from "./server-link.js";
 import { retireServer } from "./retire.js";
 import type { Logger } from "./log.js";
+import type { Resessioner } from "./resession.js";
 import { buildTaskStatus, limitRemoteList } from "./task-status.js";
 
 type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean };
@@ -202,7 +203,7 @@ export function registerTools(
     "session_list",
     {
       title: "session 一覧",
-      description: "center が監視する全 session（config の project と session_create で作ったもの）の状態を返す。source で区別できる。activity（working / needs-input / idle / unknown）と activityAt は claude の作業状態（unknown = 不明・停止中）",
+      description: "center が監視する全 session（config の project と session_create で作ったもの）の状態を返す。source で区別できる。activity（working = cap 本体が実行中で入力に反応できない / needs-input = 返答待ち / idle = 待機 / unknown = 不明・停止中）と activityAt は cap（claude 本体）の状態、background { subagents, tasks } は session の中で続く subagent・background の実行の数（idle でも 0 でなければ作業は進行中）",
     },
     () => guard(() => json(sessions.list())),
   );
@@ -255,6 +256,7 @@ export function registerTools(
       description:
         "center が保持する remote（session × server の cap 単位。remote_id = cap_id = c-<center-id>-<session>, session, server（server_id。旧形式で server_id 不明なら peer id）, server_id, peer（今の到達先）, serverHost / serverUser / serverWorkspace, server_label（host 名を主に server_id を添えた表示。同じ host 名が複数なら user と workspace 付き）, state, owners, 時刻, 最新の結果, 未完了の指示 pending）の一覧。owner が分かれば（header / query / 引数）その session の cap だけ、分からなければ全件（session の無い記録 = 旧共有 cap を含む）。" +
         "最新の task_result（task_result 本体）と直近の worker_reports（WorkerReportNotice の配列、最大 20 件、到着順）も含む。server から通知を受けた remote には activity が付く: agents（cap → worker。state は running / stalled / idle / done / failed / lost、task、last_activity、last_output_at、silent_ms = 最後の出力からの経過 ms）、received_ms_ago（最後の通知から）、stale（running の agent がいるのに通知が途絶えた）。" +
+        "server が掲示板を知らせていれば server_board { at, caps（その server の cap の数）, workers（動いている worker の数）, reserved（資源待ちの worker の予約の件数）, max_parallel_tasks（利用者が置いた task の並行の上限。null = 上限なし）, resources { load1 / load5 / load15, cpus, mem_total / mem_free, disk_total / disk_free（byte）, 測った時刻 at } } が付く（数と資源だけ。他の session の cap の中身は出ない。server は測るだけで足りるかを判定しない）。pending[].server_task の waiting_for は limit（利用者が置いた並行の上限）/ closing（cap の停止中）/ branch（旧 server のみ）、same_branch は同じ branch で動いている他の task。" +
         "各 remote には server の到達性 reachability { reachable, last_ok_at（最後に status の成功・通知・report・結果が返った時刻。hello では更新しない。center の再起動後は最初の応答まで null）, failures（連続失敗回数）, last_error } と、cap の server 側の状態 cap_state（running / idle / lost / unknown）が付く。server に連続 2 回の確認（status）に応答が無い（または発見から消えた。hello だけ成功しても戻らない）間は、作業中の cap の state は unknown、cap_state も unknown になり、応答が戻れば元に戻る。server が cap を lost と通知した cap は state=failed、cap_state=lost。pending の各要素には送達状態 delivery（unsent = 未送信 / sent = 送信済で server への到達は未確認 / observed = server への到達を観測した（server の ack ではない。delivery_basis に根拠））、sent_at、observed_at が付く",
       inputSchema: { owner: ownerArg },
     },
@@ -405,8 +407,20 @@ export function registerTools(
  * session 向けの窓口（/mcp/session）の tool。owner は呼び出し元 session（認証済みの header X-Bantou-Session）で、
  * 引数では受けない（自己申告させない）。
  */
-export function registerSessionTools(server: McpServer, deps: { remotes: RemoteManager; owner: string; follow?: Follow }): void {
-  const { remotes, owner, follow } = deps;
+export function registerSessionTools(server: McpServer, deps: { remotes: RemoteManager; owner: string; follow?: Follow; resession?: Pick<Resessioner, "request"> }): void {
+  const { remotes, owner, follow, resession } = deps;
+  if (resession) {
+    server.registerTool(
+      "session_resession",
+      {
+        title: "リセッション（引継ぎを残して新しい会話で起動し直す）",
+        description:
+          "自分（呼び出し元 session）のリセッションを申告する。引継ぎ（handoff）を center が外部記憶に保存して受理を返し、この turn が終わったあと center が claude を新しい会話（--continue 無し）で起動し直す。起動し直した最初の入力で引継ぎの id が知らされる。他の session は指せない。利用者の入力待ち・未完了の remote の指示・未返答の worker_reply がある間は断られる。返り値 { accepted, handoff_id, stored（memory = 外部記憶に保存 / file = 外部記憶に届かず center の file に保存）, restart }。受理されたら短く再起動すると言って turn を終える",
+        inputSchema: { handoff: z.string().min(1).max(65536).describe("引継ぎの本文。仕掛かり・止まっている事・次の一手 / 決定と番号つきの未決 / 今の窓口") },
+      },
+      ({ handoff }) => guard(async () => json(await resession.request(owner, handoff))),
+    );
+  }
   /** この session の cap の server ごとの版の状態（server の事実だけ。他の session の情報は入らない）。 */
   const withVersions = (views: RemoteView[]): RemoteView[] =>
     follow ? views.map((v) => { const info = follow.versionOf({ ...(v.server_id !== undefined ? { server_id: v.server_id } : {}), ...(peerOfRec(v) !== undefined ? { peer: peerOfRec(v)! } : {}) }); return info ? { ...v, server_version_state: info } : v; }) : views;
@@ -424,6 +438,7 @@ export function registerSessionTools(server: McpServer, deps: { remotes: RemoteM
         ...(args.constraints ? { constraints: args.constraints } : {}),
         ...(args.workers ? { workers: args.workers } : {}),
         ...(args.worker_model ? { worker_model: args.worker_model } : {}),
+        ...(args.parent_requirement_id ? { parent_requirement_id: args.parent_requirement_id } : {}),
       });
       // server の受付を確かめられなかった: isError。結果（delivered:false, task_id, delivery, error）はそのまま返す
       return json(r, !r.delivered);
@@ -433,7 +448,7 @@ export function registerSessionTools(server: McpServer, deps: { remotes: RemoteM
     {
       title: "remote-cap へ指示",
       description:
-        `server の remote-cap に task を送る（cap は session × server に 1 つ。cap_id = c-<center-id>-<session 名>。無ければ server が作る。他の session の cap には届かない）。goal（必須）だけでも動く（deliverables / verify / constraints / workers は省略時 {} / {} / [] / {}。workers.items 無し = implement + review の最低 2 体）。task_id は center が採番して返す。server は同じ cap の task を task ごとの指揮で並行に動かす（同時に動く数は server の config session.maxParallelTasks、既定 2。超えた分と、先の task と同じ deliverables.branch の task は、前の task が終わるまで server で待つ。branch の無い task は上限の内で並行）。cap の完了は待たないが、server が task を受け付けた（status の cap が送る前から変わった）ことは最大 ${ACK_TIMEOUT_MS / 1000} 秒（環境変数 BANTOU_REMOTE_ACK_TIMEOUT_MS）確かめてから返す。受け付けを確認できた時は {remote_id, state:\"running\", created, task_id, delivered:true, delivery:\"observed\", delivered_at, delivery_basis} を返す。delivery は accepted とは名乗らず observed（観測）に留める（server は task に ack を返さない）。delivery_basis は観測の根拠: task_id = 自分の task_id の worker_report が届いた（確実）/ task_result = server が結果を返した（確実）/ status = status の cap の tasks に自分の task_id が載った（task を並行に動かす server）、旧 server では status の変化からの推定（server の ack ではない。cap が別の要因で動き直した場合の偽陽性が理論上ある）。確認できなかった（server が落ちている・届いていない・届いたが status に変化が出ない）時は isError で {delivered:false, delivery:\"sent\"|\"unsent\", task_id, error, …} を返す。この task は pending に送信済（sent）または未送信（unsent）として残っている。再送する前に remote_list で delivery を確認する。受け付けが未確認の送信済の同じ指示は 10 分は再送せず確認だけやり直す（server は task_id の重複を除かない）。後から observed になるのは task_result が返った時と、自分の task_id の worker_report が届いた時だけ（周期の status では格上げしない）。worker_report の task_id は、その worker を起動した task の id（旧 server は最後に受けた task の id）。task の完了は task ごとに通知（push。task_id 付き。他の task が動いていても待たない）で届く。cap 全体の完了は remote_wait / remote_list（task_result、pending[].server_task に task ごとの状態）で確認する。worker の report（progress / ask / approve / done）は push で届く（progress は同じ worker から 60 秒に 1 回まで）。ask / approve への返答は worker_reply。server は protocol bantou で発見した先頭（この session に使う server の範囲 settings.servers があれば範囲内の先頭。範囲が 1 つなら server を省いてよい。範囲外は error で、見つからない時の候補も範囲内だけ）。server 引数は server_id（server が再起動・再登録しても変わらない）、host 名、peer id のどれでも指せる（host 名が複数の server に一致する時は error。候補を user と workspace 付きで返すので server_id で指し直す）。返り値の server は server_id（旧 server は peer id）、peer は今の到達先、host は host 名。worker_model の既定は center の設定 servers[]（新規の cap のみ）。state は running / done / failed / unknown（server に届かない・status も取れず不明。取れたら戻る）。protocol の版が合わない server へは送らず error`,
+        `server の remote-cap に task を送る（cap は session × server に 1 つ。cap_id = c-<center-id>-<session 名>。無ければ server が作る。他の session の cap には届かない）。goal（必須）だけでも動く（deliverables / verify / constraints / workers は省略時 {} / {} / [] / {}。workers.items 無し = implement + review の最低 2 体）。task_id は center が採番して返す。server は同じ cap の task を task ごとの指揮で並行に動かす（並行の上限は既定で無く、受けた task はすぐ動く。待つのは、利用者が server の config session.maxParallelTasks を置いた時の超えた分と、cap の停止中だけ。先の task と同じ deliverables.branch の task も待たせず、server が cap に同じ branch の task が動いている事を知らせて cap が判断する。何本の worker を並行させるかは cap が server の掲示板（host の負荷・メモリ・ディスク・worker の数）を見て決める。remote_list の server_board は、その server の cap の数・worker の数・資源・予約の件数）。cap の完了は待たないが、server が task を受け付けた（status の cap が送る前から変わった）ことは最大 ${ACK_TIMEOUT_MS / 1000} 秒（環境変数 BANTOU_REMOTE_ACK_TIMEOUT_MS）確かめてから返す。受け付けを確認できた時は {remote_id, state:\"running\", created, task_id, delivered:true, delivery:\"observed\", delivered_at, delivery_basis} を返す。delivery は accepted とは名乗らず observed（観測）に留める（server は task に ack を返さない）。delivery_basis は観測の根拠: task_id = 自分の task_id の worker_report が届いた（確実）/ task_result = server が結果を返した（確実）/ status = status の cap の tasks に自分の task_id が載った（task を並行に動かす server）、旧 server では status の変化からの推定（server の ack ではない。cap が別の要因で動き直した場合の偽陽性が理論上ある）。確認できなかった（server が落ちている・届いていない・届いたが status に変化が出ない）時は isError で {delivered:false, delivery:\"sent\"|\"unsent\", task_id, error, …} を返す。この task は pending に送信済（sent）または未送信（unsent）として残っている。再送する前に remote_list で delivery を確認する。受け付けが未確認の送信済の同じ指示は 10 分は再送せず確認だけやり直す（server は task_id の重複を除かない）。後から observed になるのは task_result が返った時と、自分の task_id の worker_report が届いた時だけ（周期の status では格上げしない）。worker_report の task_id は、その worker を起動した task の id（旧 server は最後に受けた task の id）。task の完了は task ごとに通知（push。task_id 付き。他の task が動いていても待たない）で届く。cap 全体の完了は remote_wait / remote_list（task_result、pending[].server_task に task ごとの状態）で確認する。worker の report（progress / ask / approve / done）は push で届く（progress は同じ worker から 60 秒に 1 回まで）。ask / approve への返答は worker_reply。server は protocol bantou で発見した先頭（この session に使う server の範囲 settings.servers があれば範囲内の先頭。範囲が 1 つなら server を省いてよい。範囲外は error で、見つからない時の候補も範囲内だけ）。server 引数は server_id（server が再起動・再登録しても変わらない）、host 名、peer id のどれでも指せる（host 名が複数の server に一致する時は error。候補を user と workspace 付きで返すので server_id で指し直す）。返り値の server は server_id（旧 server は peer id）、peer は今の到達先、host は host 名。worker_model の既定は center の設定 servers[]（新規の cap のみ）。state は running / done / failed / unknown（server に届かない・status も取れず不明。取れたら戻る）。protocol の版が合わない server へは送らず error`,
       inputSchema: remoteSendSchema,
     },
     sendHandler,

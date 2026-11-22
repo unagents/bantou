@@ -3,9 +3,9 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
-import type { CapTaskInfo } from "@agent-hand/bantou-protocol";
+import type { CapTaskInfo, ServerBoard } from "@agent-hand/bantou-protocol";
 import { createActivityStore } from "../src/activity.js";
-import { createRemoteManager, type RemoteRecord } from "../src/remotes.js";
+import { createRemoteManager, summarizeBoard, type RemoteRecord } from "../src/remotes.js";
 import type { ServerLink, ServerPeer } from "../src/server-link.js";
 import { createJsonListStore } from "../src/store.js";
 import { buildTaskStatus } from "../src/task-status.js";
@@ -50,7 +50,7 @@ const taskResult = (taskId: string, summary: string, state: "done" | "failed" = 
 function setup() {
   const kicks: { cmd: Record<string, unknown>; resolve: (r: unknown) => void }[] = [];
   /** server の cap の状態。status は毎回これを返す（tasks を載せる新しい server）。cap の負荷・last_started_at は変えない（tasks だけで受付を確かめられること）。 */
-  const server = { exists: false, state: "running", tasks: [] as CapTaskInfo[] };
+  const server = { exists: false, state: "running", tasks: [] as CapTaskInfo[], board: undefined as ServerBoard | undefined };
   const link = {
     peers: async () => [peerA],
     selectPeer: async () => peerA,
@@ -60,6 +60,7 @@ function setup() {
       ok: true,
       caps: server.exists ? [{ kind: "cap", id: CAP, path: "/w", session_id: "s", state: server.state, last_started_at: "s0", last_finished_at: null, retries: 0, queued: 0, tasks: server.tasks }] : [],
       workers: [],
+      ...(server.board ? { board: server.board } : {}),
     }),
     taskOn: (_peer: ServerPeer, cmd: Record<string, unknown>, hooks?: { onSent?: () => void }) =>
       new Promise((resolve) => {
@@ -189,6 +190,55 @@ test("並行 task: 待っている task は task_status で待ちの理由を出
   await tick();
   const lines = buildTaskStatus(s.mgr.list({ owner: "pm1" }), "pm1", Date.now()).tasks.map((t) => t.line);
   assert.match(lines[0]!, /\| 実行中 \|/);
-  assert.match(lines[1]!, /\| 待ち（同時実行の上限） \|/);
-  assert.match(lines[2]!, /\| 待ち（同じ branch feat\/x の前の task） \|/);
+  assert.match(lines[1]!, /\| 待ち（利用者が置いた並行の上限） \|/);
+  assert.match(lines[2]!, /\| 待ち（同じ branch feat\/x の前の task。旧 server） \|/);
+});
+
+test("並行 task: 同じ branch の task は待たず、task_status に同じ branch の task の数が出る", async () => {
+  const s = setup();
+  s.server.exists = true;
+  const p = s.mgr.send({ owner: "pm1", goal: "a", deliverables: { branch: "feat/x" } });
+  await until("kick 1", () => s.kicks.length === 1);
+  const id = s.kicks[0]!.cmd.task_id as string;
+  s.server.tasks = [info(id, "running", { same_branch: ["t-other"], branch: "feat/x" })];
+  await p;
+  s.pushActivity("running", [info(id, "running", { same_branch: ["t-other"], branch: "feat/x" })]);
+  await tick();
+  const lines = buildTaskStatus(s.mgr.list({ owner: "pm1" }), "pm1", Date.now()).tasks.map((t) => t.line);
+  assert.match(lines[0]!, /実行中（同じ branch の task 1 本）/);
+});
+
+const board = (): ServerBoard => ({
+  at,
+  caps: [
+    { cap_id: CAP, state: "running", running_tasks: 2, waiting_tasks: 0, workers: 3, reserved: 1 },
+    { cap_id: "c-other-secret", state: "idle", running_tasks: 0, waiting_tasks: 0, workers: 0, reserved: 0 },
+  ],
+  workers: 3,
+  reserved: 1,
+  resources: { at, load1: 1.5, load5: 1, load15: 0.5, cpus: 8, mem_total: 16e9, mem_free: 8e9, disk_total: 100e9, disk_free: 50e9, workers: 3 },
+  max_parallel_tasks: null,
+});
+
+test("掲示板: summarizeBoard は cap の数・worker の数・予約の件数・資源だけを残し、cap の id は載せない", () => {
+  const sum = summarizeBoard(board());
+  assert.deepEqual(sum, { at, caps: 2, workers: 3, reserved: 1, max_parallel_tasks: null, resources: board().resources });
+  assert.ok(!JSON.stringify(sum).includes("c-other-secret"));
+  assert.equal(summarizeBoard({ ...board(), max_parallel_tasks: 4, resources: null }).max_parallel_tasks, 4);
+  assert.equal(summarizeBoard({ ...board(), resources: null }).resources, null);
+});
+
+test("掲示板: status の board が remote_list の server_board になる。board を知らせない旧 server は付かない", async () => {
+  const s = setup();
+  s.server.exists = true;
+  const p = s.mgr.send({ owner: "pm1", goal: "g" });
+  await until("kick", () => s.kicks.length === 1);
+  const id = s.kicks[0]!.cmd.task_id as string;
+  s.server.tasks = [info(id, "running")];
+  await p;
+  assert.equal(s.mgr.list({ owner: "pm1" })[0]!.server_board, undefined, "旧 server（board 無し）");
+  s.server.board = board();
+  await s.mgr.send({ owner: "pm1", goal: "g2" }).catch(() => undefined);
+  await until("board が載る", () => s.mgr.list({ owner: "pm1" })[0]!.server_board !== undefined);
+  assert.deepEqual(s.mgr.list({ owner: "pm1" })[0]!.server_board, summarizeBoard(board()));
 });

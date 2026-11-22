@@ -375,9 +375,9 @@ export function createRemoteControlSupervisor(opts: {
    * （利用者の追加指示は空行を挟んでその後ろ）。省略時は付けない。
    */
   systemInstructions?: {
-    build: (ctx: { session: string; memory?: boolean; coordinator?: boolean }) => string;
+    build: (ctx: { session: string; memory?: boolean; coordinator?: boolean; resession?: boolean }) => string;
     /** 付けた部品の `<id>@<version>`。関数なら起動ごとの文脈（memory の有無）で決める。 */
-    labels: string[] | ((ctx: { session: string; memory?: boolean; coordinator?: boolean }) => string[]);
+    labels: string[] | ((ctx: { session: string; memory?: boolean; coordinator?: boolean; resession?: boolean }) => string[]);
   };
   /**
    * 外部記憶の取得元。あれば起動のたびに（add / setMemory で渡した値でなく）これを呼んで使う。
@@ -493,6 +493,7 @@ export function createRemoteControlSupervisor(opts: {
     let command = claude.path;
     /** この起動で統括の MCP の server が設定に書かれているか。指示文の部品と status の label の判定に使う。 */
     let assignedCoordinator = false;
+    let assignedResession = false;
     let args: string[];
     let env = childEnv(e.project, rc);
     // 旧設定の auth.env が指していた環境変数（BANTOU_MCP_KEY_*）が center の環境に残っていても、どの session の子にも継承させない
@@ -522,7 +523,8 @@ export function createRemoteControlSupervisor(opts: {
       }
       const coordinator = mcp?.coordinator === true;
       assignedCoordinator = coordinator;
-      const sysCtx = { session: name, memory: memory !== null, coordinator, ...(servers !== undefined ? { servers } : {}) };
+      assignedResession = !!mcpUrl;
+      const sysCtx = { session: name, memory: memory !== null, coordinator, resession: !!mcpUrl, ...(servers !== undefined ? { servers } : {}) };
       const system = opts.systemInstructions?.build(sysCtx) ?? "";
       const appendSystemPrompt = [system, e.instructions].filter((t) => t !== "").join("\n\n");
       // 出力スタイルは project の .claude/output-styles/ に書いて名前で選ぶ。書けなくても起動は止めない（style 無しで起動）
@@ -591,7 +593,7 @@ export function createRemoteControlSupervisor(opts: {
       args: shownArgs,
       instructions: e.wrapper && !!e.instructions,
       ...(e.wrapper && opts.systemInstructions
-        ? { systemInstructions: typeof opts.systemInstructions.labels === "function" ? opts.systemInstructions.labels({ session: name, memory: memory !== null, coordinator: assignedCoordinator, ...(opts.serversOf?.(name) !== undefined ? { servers: opts.serversOf(name)! } : {}) }) : [...opts.systemInstructions.labels] }
+        ? { systemInstructions: typeof opts.systemInstructions.labels === "function" ? opts.systemInstructions.labels({ session: name, memory: memory !== null, coordinator: assignedCoordinator, resession: assignedResession, ...(opts.serversOf?.(name) !== undefined ? { servers: opts.serversOf(name)! } : {}) }) : [...opts.systemInstructions.labels] }
         : {}),
     };
     delete e.status.lastError;

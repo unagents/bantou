@@ -12,7 +12,7 @@ export type HexDigest = (s: string) => string;
 
 // -- event ---------------------------------------------------------------------------------------------------------
 
-export type MemoryEventKind = "user_prompt" | "assistant_message" | "task" | "result" | "report" | "reply";
+export type MemoryEventKind = "user_prompt" | "assistant_message" | "task" | "result" | "report" | "reply" | "handoff";
 
 export interface MemoryParty {
   session?: string;
@@ -27,6 +27,8 @@ export interface MemoryEvent {
   recipient?: MemoryParty;
   remoteId?: string;
   taskId?: string;
+  /** kind: task only. The parent requirement's id (memory item id) given to remote_send. Omitted when not given. */
+  parentRequirementId?: string;
   kind: MemoryEventKind;
   body: string;
   /** ISO 8601. */

@@ -31,7 +31,7 @@ export interface FakeMemory {
   close(): Promise<void>;
 }
 
-const EVENT_KINDS = ["user_prompt", "assistant_message", "task", "result", "report", "reply"];
+const EVENT_KINDS = ["user_prompt", "assistant_message", "task", "result", "report", "reply", "handoff"];
 
 function validate(a: Record<string, unknown>): string | undefined {
   const idOk = (v: unknown): boolean => typeof v === "string" && v.length >= 1 && v.length <= 128 && !v.includes("\u0000");
@@ -54,6 +54,7 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
 export async function startFakeMemory(token = "FAKE-MEMORY-TOKEN"): Promise<FakeMemory> {
   const calls: FakeEventCall[] = [];
   const seen = new Set<string>();
+  const handoffs = new Map<string, string>();
   let failures = 0;
   let down = false;
   const sockets = new Set<import("node:net").Socket>();
@@ -71,9 +72,14 @@ export async function startFakeMemory(token = "FAKE-MEMORY-TOKEN"): Promise<Fake
       }
       const agentId = typeof req.headers["x-agent-id"] === "string" ? req.headers["x-agent-id"] : undefined;
       const mcp = new Server({ name: "fake-memory", version: "0" }, { capabilities: { tools: {} } });
-      mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: "event", inputSchema: { type: "object" as const, properties: {} } }] }));
+      mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: "event", inputSchema: { type: "object" as const, properties: {} } }, { name: "handoff", inputSchema: { type: "object" as const, properties: {} } }] }));
       mcp.setRequestHandler(CallToolRequestSchema, async (r) => {
         const args = (r.params.arguments ?? {}) as Record<string, unknown>;
+        if (r.params.name === "handoff") {
+          // 本物の handoff tool と同じ: 自分の agent の分だけ、eventId で本文をそのまま返す
+          const body = handoffs.get(`${agentId}\u0000${String(args.eventId)}`);
+          return { content: [{ type: "text" as const, text: JSON.stringify(body === undefined ? { eventId: null, body: null } : { eventId: args.eventId, body }) }] };
+        }
         const bad = validate(args);
         if (bad) {
           calls.push({ agentId, authorization: req.headers.authorization, args, status: "invalid" });
@@ -82,6 +88,7 @@ export async function startFakeMemory(token = "FAKE-MEMORY-TOKEN"): Promise<Fake
         const key = `${agentId}\u0000${String(args.eventId)}`;
         const dup = seen.has(key);
         seen.add(key);
+        if (args.kind === "handoff" && !dup) handoffs.set(key, String(args.body));
         calls.push({ agentId, authorization: req.headers.authorization, args, status: dup ? "duplicate" : "recorded" });
         return { content: [{ type: "text" as const, text: JSON.stringify({ status: dup ? "duplicate" : "recorded", eventId: args.eventId }) }] };
       });

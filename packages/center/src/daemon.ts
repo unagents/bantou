@@ -36,6 +36,7 @@ import { createSessionActivityTracker, publishLastMessage } from "./session-acti
 import { createServerLink } from "./server-link.js";
 import { createProcessStandInClient } from "./stand-in.js";
 import { createSleepGate } from "./sleep-gate.js";
+import { createResessioner } from "./resession.js";
 import { createCenterMemoryEvents } from "./memory-events.js";
 import { capSessionName } from "./session-name.js";
 
@@ -200,6 +201,15 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   });
   // 外部記憶への書き込み（設定がある session だけ。非同期キュー。失敗しても session・hook・remote は止まらない）
   const memoryEvents = createCenterMemoryEvents({ memoryOf: (name) => sessions.memoryOf(name), log });
+  // リセッション（引継ぎを残して新しい会話で起動し直す。設計は docs/design/resession.md）
+  const resession = createResessioner({
+    info: (name) => sessions.list().find((x) => x.name === name),
+    restartFresh: (name) => sessions.restartFresh(name),
+    saveToMemory: (name, h) => memoryEvents.handoff(name, h),
+    core,
+    dir: join(stateDir, "handoffs"),
+    log,
+  });
   const capId = await loadCapId(stateDir, log);
   centerCapId = capId;
   log(`remote-cap の cap_id 接頭: ${capId}（center ごとに固定。session の cap_id は ${capId}-<session 名>）`);
@@ -281,7 +291,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     http = await startHttpServer({
       createServer: (launcher) => makeServer(launcher === true),
       ...(launcherKey ? { launcherKey } : {}),
-      createSessionServer: (owner) => createSessionMcpServer({ remotes, follow, owner }),
+      createSessionServer: (owner) => createSessionMcpServer({ remotes, follow, owner, resession }),
       sessionAuth: sessionTokens,
       onStatusLine: (name, payload) => {
         const s = sessions.list().find((x) => x.name === name);
@@ -294,6 +304,8 @@ export async function runDaemon(args: CliArgs): Promise<void> {
         if (s && (s.state === "starting" || s.state === "connected")) publishLastMessage(events, name, payload);
         // 外部記憶へ（応答を待たない。キューに積むだけ）
         if (s && (s.state === "starting" || s.state === "connected")) memoryEvents.onHook(name, payload);
+        // リセッション待ちの session の Stop で再起動、起動し直した SessionStart で最初の入力（Stop の応答は先に返る。実行は次の tick）
+        if (s && (s.state === "starting" || s.state === "connected")) resession.onHook(name, payload);
       },
       core,
       events,

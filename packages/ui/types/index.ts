@@ -86,10 +86,12 @@ export interface Session {
   contextUsage: ContextUsage | null;
   /** The session was started with the session instructions (the text itself is not sent). */
   instructions: boolean;
-  /** The center's work state (`unknown`/null: show nothing). Mirror of `session_list` `activity`. */
+  /** The cap's (the session's claude) own state (`unknown`/null: show nothing). Mirror of `session_list` `activity`: working = the cap itself is busy and cannot react to input, needs-input = waiting for the person's reply, idle = just waiting (whether or not work is going on elsewhere). */
   activity: "working" | "needs-input" | "idle" | "unknown" | null;
   /** When `activity` last changed (ISO string). null: none. */
   activityAt: string | null;
+  /** Work going on inside the session apart from the cap's own turn (subagents, background runs). null: the center sent none (older center). */
+  background: SessionBackground | null;
   /** Work left on remote-caps (`session_list` `remote`). null: the center sent none (older center). */
   remote: SessionRemote | null;
   /** The claude's auth state (null: an older center that does not report it). */
@@ -100,8 +102,17 @@ export interface Session {
   sleeping: boolean;
 }
 
-/** The work state shown on the side menu (`unknown` is not shown). */
-export type SessionActivity = "working" | "needs-input" | "idle" | "remote-working" | "remote-unreachable" | "remote-lost";
+/** `session_list[].background` of the center: subagents and background runs (shell / monitor / workflow …) still going on in the session. */
+export interface SessionBackground {
+  subagents: number;
+  tasks: number;
+}
+
+/**
+ * The cap's state shown on the side menu (`unknown` is not shown), apart from the "work in progress" mark (`SessionGroup.progress`).
+ * working = the cap itself is busy and cannot react to input / needs-input = waiting for a reply / idle = just waiting.
+ */
+export type SessionActivity = "working" | "needs-input" | "idle" | "remote-unreachable" | "remote-lost" | "remote-stopped";
 
 /** A remote-cap whose server does not answer (`lastOkAt`: the last answer, ISO; null: none yet) or that the server reported lost (`at`: when, ISO). `server` is the center's label for the server. */
 export interface RemoteIssue {
@@ -109,6 +120,10 @@ export interface RemoteIssue {
   remoteId: string;
   lastOkAt?: string | null;
   at?: string;
+  /** `stopped` only: failed = a task failed / no_result = the cap stopped without the task's result. */
+  kind?: "failed" | "no_result";
+  taskId?: string;
+  detail?: string;
 }
 
 /** The center's `session_list[].remote`. */
@@ -119,6 +134,8 @@ export interface SessionRemote {
   unreachable?: RemoteIssue[];
   /** Caps the server reported lost (absent: none). */
   lost?: RemoteIssue[];
+  /** Caps that stopped (a task failed / the cap stopped without a result) and the master-cap has not handled yet; gone when it sends the next instruction or closes the cap (absent: none). */
+  stopped?: RemoteIssue[];
 }
 
 /** What the add dialog needs for the folder field (mirror of `session.rs::PathHints`). */
@@ -364,6 +381,36 @@ export interface CenterAgentActivity {
   model?: string | null;
 }
 
+/** Host resources a server measured (protocol `ResourceSample`). The server only shows them; it judges nothing (the cap decides). */
+export interface CenterResourceSample {
+  at: string;
+  load1: number;
+  load5: number;
+  load15: number;
+  cpus: number;
+  /** Bytes. */
+  mem_total: number;
+  mem_free: number;
+  disk_total: number | null;
+  disk_free: number | null;
+  /** Workers running now on the server. */
+  workers: number;
+}
+
+/** `remote_list[].server_board` (center `ServerBoardSummary`): counts and resources of the cap's server. Absent from an older server. */
+export interface CenterServerBoard {
+  at: string;
+  /** Caps on the server. */
+  caps: number;
+  /** Workers running now. */
+  workers: number;
+  /** Worker reservations waiting for resources. */
+  reserved: number;
+  /** User-set limit of tasks run at once per cap; null = no limit. */
+  max_parallel_tasks: number | null;
+  resources: CenterResourceSample | null;
+}
+
 /** `remote_list[].activity` (center `RemoteActivity`). Omitted until the first notice arrives. */
 export interface CenterRemoteActivity {
   at: string;
@@ -457,6 +504,8 @@ export interface CenterRemoteRecord {
   error_at?: string;
   pending?: CenterPendingInstruction[];
   activity?: CenterRemoteActivity;
+  /** Board of the cap's server (caps, workers, resources, reservations). */
+  server_board?: CenterServerBoard;
   /** Latest `task_result` of the cap (absent until a `task` finished). */
   task_result?: CenterTaskResult;
   /** Latest worker reports (at most 20, arrival order). */

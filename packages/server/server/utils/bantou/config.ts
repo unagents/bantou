@@ -41,9 +41,11 @@ export const DEFAULT_SESSION = {
   workerKeepMs: 1_800_000,
   exitResumeMax: 3,
   exitRecoverMs: 3_600_000,
-  maxParallelTasks: 2,
   env: {} as Record<string, string>,
 };
+
+/** host の資源の再測定の周期（ms。掲示のためだけ。予約の起動の契機ではない）。 */
+export const DEFAULT_RESOURCE = { sampleMs: 30_000 };
 
 export interface SessionConfig {
   /** claude 実行ファイル。 */
@@ -69,10 +71,10 @@ export interface SessionConfig {
   /** server 起動時に、直近この時間（ms）に終わった未通知の worker を拾う。0 は拾わない。 */
   exitRecoverMs: number;
   /**
-   * 1 つの cap で同時に動かす task の上限（1 以上）。超えた分は前の task が終わるまで待つ。1 は従来どおり 1 つずつ。
-   * 同じ deliverables.branch の task は、上限に関わらず前の task が終わるまで待つ。
+   * 利用者が置いた時だけ効く、1 つの cap で同時に動かす task の上限（1 以上）。既定は無し（上限なし）。置くと超えた分は前の task が終わるまで待つ。
+   * 同じ deliverables.branch の task は待たせない（cap に知らせる）。
    */
-  maxParallelTasks: number;
+  maxParallelTasks?: number;
   /** spawn する claude に追加で渡す環境変数。自身の環境変数に上書きで合成する。 */
   env: Record<string, string>;
 }
@@ -102,6 +104,8 @@ export interface Config {
   session: SessionConfig;
   /** 自己更新の設定。 */
   update: { spec: string; maxWaitMs?: number };
+  /** host の資源の測定の設定。省略は既定。 */
+  resource?: { sampleMs: number };
   /** cap / worker に載せる追加の stdio MCP。name → 定義。 */
   extraMcp?: Record<string, ExtraMcpServer>;
 }
@@ -158,6 +162,16 @@ function parseUpdate(v: unknown, path: string): Config["update"] {
     throw new Error(`config の update.maxWaitMs は正の整数: ${path}`);
   }
   return { spec, ...(maxWaitMs !== undefined ? { maxWaitMs } : {}) };
+}
+
+function parseResource(v: unknown, path: string): { sampleMs: number } {
+  if (v === undefined) return { ...DEFAULT_RESOURCE };
+  if (!isRecord(v)) throw new Error(`config の resource はオブジェクト: ${path}`);
+  const sampleMs = v.sampleMs ?? DEFAULT_RESOURCE.sampleMs;
+  if (typeof sampleMs !== "number" || !Number.isInteger(sampleMs) || sampleMs < 1000) {
+    throw new Error(`config の resource.sampleMs は 1000 以上の整数（ms）: ${path}`);
+  }
+  return { sampleMs };
 }
 
 /** 名前の衝突判定用。- と _ を同一視し、大小を区別しない。 */
@@ -281,9 +295,9 @@ function parseSession(v: unknown, path: string): SessionConfig {
   if (typeof exitRecoverMs !== "number" || !Number.isInteger(exitRecoverMs) || exitRecoverMs < 0) {
     throw new Error(`config の session.exitRecoverMs は 0 以上の整数（0 は拾わない）: ${path}`);
   }
-  const maxParallelTasks = v.maxParallelTasks ?? DEFAULT_SESSION.maxParallelTasks;
-  if (typeof maxParallelTasks !== "number" || !Number.isInteger(maxParallelTasks) || maxParallelTasks < 1) {
-    throw new Error(`config の session.maxParallelTasks は 1 以上の整数: ${path}`);
+  const maxParallelTasks = v.maxParallelTasks;
+  if (maxParallelTasks !== undefined && (typeof maxParallelTasks !== "number" || !Number.isInteger(maxParallelTasks) || maxParallelTasks < 1)) {
+    throw new Error(`config の session.maxParallelTasks は 1 以上の整数（省略 = 上限なし）: ${path}`);
   }
   return {
     claude,
@@ -297,7 +311,7 @@ function parseSession(v: unknown, path: string): SessionConfig {
     workerKeepMs,
     exitResumeMax,
     exitRecoverMs,
-    maxParallelTasks,
+    ...(maxParallelTasks !== undefined ? { maxParallelTasks } : {}),
     env: parseEnv(v.env, path),
   };
 }
@@ -337,6 +351,7 @@ export async function loadConfig(path: string): Promise<Config> {
     mcp: parseMcp(obj.mcp, path),
     session,
     update: parseUpdate(obj.update, path),
+    resource: parseResource(obj.resource, path),
     extraMcp: parseExtraMcp(obj.extraMcp, path),
   };
 }

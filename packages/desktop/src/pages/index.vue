@@ -38,7 +38,8 @@ function selectFromDrawer(name: string) {
 // --- pane widths (side | middle | right; drag the dividers) ---
 const paneRow = ref<HTMLElement | null>(null);
 const { width: paneRowWidth } = useElementSize(paneRow);
-const pane = usePaneWidths(paneRowWidth);
+const drawerOpen = ref(false);
+const pane = usePaneWidths(paneRowWidth, drawerOpen);
 const { state: updaterState, checkManually, installAndRestart } = useUpdater();
 
 useWorkspaceWatcher(dir, () => void refresh());
@@ -117,9 +118,10 @@ watch(modalOpen, (v) => {
     </div>
 
     <template v-else-if="dir">
-      <!-- the right edge is left free for the closed message drawer's grab strip -->
-      <div ref="paneRow" class="flex min-h-0 flex-1 overflow-x-auto" :style="{ paddingRight: `${DRAWER_HANDLE}px` }" data-testid="pane-row">
-      <div class="flex min-h-0 flex-1" :style="{ minWidth: `${PANE_ROW_MIN}px` }">
+      <!-- the message drawer sits beside the pane row: opened, it takes width from the row (the conversation narrows and re-wraps) -->
+      <div class="flex min-h-0 flex-1">
+      <div ref="paneRow" class="flex min-h-0 min-w-0 flex-1 overflow-x-auto" data-testid="pane-row">
+      <div class="flex min-h-0 flex-1" :style="{ minWidth: `${pane.rowMin.value}px` }">
         <nav aria-label="セッション一覧" class="shrink-0 overflow-y-auto" :style="{ width: `${pane.side.value}px` }">
           <UTooltip v-if="!centerList.reachable" :text="centerList.reason ?? 'center に問い合わせられなかった'">
             <UBadge
@@ -195,8 +197,9 @@ watch(modalOpen, (v) => {
                   class="ml-auto shrink-0"
                   data-testid="side-sleeping"
                 />
-                <SessionActivityMark v-if="g.activity" :activity="g.activity" :waiting-reply="g.remoteWaiting" :issues="g.remoteIssues" class="ml-auto" />
-                <ContextUsage :usage="g.contextUsage" percent-only :class="g.activity ? '' : 'ml-auto'" data-scope="side" />
+                <SessionProgressMark v-if="g.progress" :progress="g.progress" class="ml-auto" />
+                <SessionActivityMark v-if="g.activity" :activity="g.activity" :waiting-reply="g.remoteWaiting" :issues="g.remoteIssues" :class="g.progress ? '' : 'ml-auto'" />
+                <ContextUsage :usage="g.contextUsage" percent-only :class="g.activity || g.progress ? '' : 'ml-auto'" data-scope="side" />
               </button>
               <UButton
                 class="rounded-none"
@@ -232,7 +235,7 @@ watch(modalOpen, (v) => {
         <PaneResizer
           label="セッション一覧の幅"
           :model-value="pane.side.value"
-          :min="PANE_MIN.side"
+          :min="pane.sideMin.value"
           :max="pane.sideMax.value"
           @update:model-value="pane.setSide"
           @commit="pane.save"
@@ -287,6 +290,8 @@ watch(modalOpen, (v) => {
         </main>
       </div>
       </div>
+      <MessageDrawer v-model:open="drawerOpen" :messages="drawerMessages" @select="selectFromDrawer" />
+      </div>
     </template>
 
     <ThreadModal
@@ -320,7 +325,6 @@ watch(modalOpen, (v) => {
       :login-error="selectedGroup.loginError"
       @done="onLoggedIn"
     />
-    <MessageDrawer v-if="loaded && dir" :messages="drawerMessages" @select="selectFromDrawer" />
     <SettingsDialog v-if="settingsOpen" v-model:open="settingsOpen" />
     <CenterDialog v-if="centerOpen" v-model:open="centerOpen" />
   </div>

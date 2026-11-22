@@ -18,6 +18,8 @@ export const HOOK_EVENTS = [
   "Notification",
   "Stop",
   "StopFailure",
+  "SubagentStart",
+  "SubagentStop",
 ] as const;
 
 /** async にしない event（turn の終わりは取りこぼしたくない。hook は常に exit 0 で POST も 2 秒で打ち切るので claude を長く止めない）。 */
@@ -27,6 +29,9 @@ export const SYNC_HOOK_EVENTS: ReadonlySet<string> = new Set(["Stop", "StopFailu
 const INPUT_TOOLS = new Set(["AskUserQuestion", "ExitPlanMode"]);
 /** 利用者の入力待ちを表す Notification の notification_type。 */
 const INPUT_NOTIFICATIONS = new Set(["permission_prompt", "elicitation_dialog", "elicitation_url_dialog", "agent_needs_input"]);
+
+/** tracker が見る event（HOOK_EVENTS と同じ）。 */
+const TRACKED_EVENTS: ReadonlySet<string> = new Set(HOOK_EVENTS);
 
 const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
 
@@ -76,16 +81,25 @@ export function publishLastMessage(hub: Pick<EventHub, "publishMessage">, sessio
   if (text !== null) hub.publishMessage({ session, text, at: new Date(now()).toISOString() });
 }
 
+/** session の中で続いている作業（claude 本体の turn とは別）。subagents = 動いている subagent の数、tasks = background の shell / monitor / workflow などの数。 */
+export interface SessionBackground {
+  subagents: number;
+  tasks: number;
+}
+
 export interface SessionActivityView {
+  /** cap（session の claude 本体）の状態。working = 本体が turn の実行中で利用者の入力に反応できない / needs-input = 利用者の返答待ち / idle = 待機（subagent や background が動いていても idle）。 */
   activity: SessionActivity;
   /** 最後に状態が変わった時刻（ISO）。unknown の時は null。 */
   activityAt: string | null;
+  /** claude 本体とは別に続いている作業（subagent・background の実行）。unknown の時は 0 / 0。 */
+  background: SessionBackground;
 }
 
 export interface SessionActivityTracker {
   /**
    * hook の payload を反映する。startedAt = その session の今回の起動時刻（起動し直したら前の状態は捨てる）。
-   * 状態が変わったら true。
+   * 見える状態（activity・background）が変わったら true。
    */
   apply(name: string, payload: unknown, startedAt: string | null): boolean;
   /** running でない・起動し直した・まだ hook が来ていない時は unknown。 */
@@ -93,12 +107,47 @@ export interface SessionActivityTracker {
   forget(name: string): void;
 }
 
+const NO_BACKGROUND: SessionBackground = { subagents: 0, tasks: 0 };
+const UNKNOWN: SessionActivityView = { activity: "unknown", activityAt: null, background: NO_BACKGROUND };
+
 interface Held {
   startedAt: string;
-  activity: Exclude<SessionActivity, "unknown">;
+  /** 本体が turn の実行中か（UserPromptSubmit / PreToolUse… で true、Stop で false）。 */
+  turn: boolean;
+  /** 利用者の返答待ちか。 */
+  needsInput: boolean;
+  /**
+   * 最後の background_tasks（Stop / SubagentStop の payload。公式: 親 session 全体の in-flight）にいた subagent の数。subagent の数の正本。
+   * その snapshot より後に来た SubagentStart / SubagentStop だけ、下の `started` で補う。
+   */
+  snapSubagents: number;
+  /** 最後の snapshot より後に SubagentStart が来て、まだ SubagentStop が来ていない subagent の agent_id（agent_id 単位の補助。snapshot が来るたびに空にする）。 */
+  started: Set<string>;
+  /** 最後の background_tasks の subagent 以外（shell / monitor / workflow …）の数。 */
+  tasks: number;
   at: string;
   /** 最後に反映した event の発火時刻。これより古い event は捨てる。 */
   ts: number;
+}
+
+const activityOf = (h: Held): Exclude<SessionActivity, "unknown"> => (h.needsInput ? "needs-input" : h.turn ? "working" : "idle");
+const backgroundOf = (h: Held): SessionBackground => ({ subagents: h.snapSubagents + h.started.size, tasks: h.tasks });
+const sameBackground = (a: SessionBackground, b: SessionBackground): boolean => a.subagents === b.subagents && a.tasks === b.tasks;
+
+/** Stop / SubagentStop の background_tasks（公式: 在る時は配列。type = shell / subagent / monitor / workflow …）。無い・壊れた時は null。 */
+function backgroundTasksOf(p: Record<string, unknown>, excludeId?: string): { subagents: number; tasks: number } | null {
+  const list = p.background_tasks;
+  if (!Array.isArray(list)) return null;
+  let subagents = 0;
+  let tasks = 0;
+  for (const t of list) {
+    const r = typeof t === "object" && t !== null ? (t as Record<string, unknown>) : {};
+    // SubagentStop の snapshot に、いま終わった subagent 自身が（id が agent_id と同じ形で）残っていても数えない
+    if (excludeId !== undefined && r.id === excludeId) continue;
+    if (r.type === "subagent") subagents++;
+    else tasks++;
+  }
+  return { subagents, tasks };
 }
 
 /** 保持はメモリのみ。center が再起動したら unknown から始まる。 */
@@ -108,21 +157,86 @@ export function createSessionActivityTracker(opts: { now?: () => number } = {}):
   return {
     apply(name, payload, startedAt) {
       if (!startedAt) return false;
-      const next = activityFromHook(payload);
-      if (!next) return false;
-      const rawTs = (payload as Record<string, unknown>)[HOOK_TS_FIELD];
+      if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return false;
+      const p = payload as Record<string, unknown>;
+      const event = str(p.hook_event_name);
+      if (!event || !TRACKED_EVENTS.has(event)) return false;
+      const rawTs = p[HOOK_TS_FIELD];
       const ts = typeof rawTs === "number" && Number.isFinite(rawTs) ? rawTs : now();
-      const cur = held.get(name);
-      const sameRun = cur?.startedAt === startedAt;
-      if (sameRun && ts < cur!.ts) return false;
-      const changed = !sameRun || cur!.activity !== next;
-      held.set(name, { startedAt, activity: next, at: changed ? new Date(now()).toISOString() : cur!.at, ts });
+      const prev = held.get(name);
+      const sameRun = prev?.startedAt === startedAt;
+      if (sameRun && ts < prev!.ts) return false;
+      // compact の SessionStart など、状態を変えない event は何も保持しない（ts も進めない）
+      const base = activityFromHook(p);
+      const agentId = str(p.agent_id);
+      const h: Held = sameRun
+        ? { ...prev!, started: new Set(prev!.started), ts }
+        : { startedAt, turn: false, needsInput: false, snapSubagents: 0, started: new Set(), tasks: 0, at: new Date(now()).toISOString(), ts };
+      const before = sameRun ? { activity: activityOf(prev!), background: backgroundOf(prev!) } : null;
+      switch (event) {
+        case "SessionStart":
+          if (base === null) return false; // compact
+          h.turn = false;
+          h.needsInput = false;
+          h.started.clear();
+          h.snapSubagents = 0;
+          h.tasks = 0;
+          break;
+        case "SubagentStart":
+          if (agentId) h.started.add(agentId);
+          break;
+        case "SubagentStop": {
+          // 正本は payload の background_tasks（親 session 全体の in-flight）。内部 agent（prompt suggestions・/btw）の SubagentStop でも、動いている他の subagent は snapshot に居るので減らない
+          const bg = backgroundTasksOf(p, agentId);
+          if (bg) {
+            h.snapSubagents = bg.subagents;
+            h.tasks = bg.tasks;
+            h.started.clear();
+          } else if (agentId) {
+            // snapshot の無い（古い）claude: この agent_id の Start を見ていた時だけ減らす。Start を見ていない Stop（内部 agent）では何も減らさない
+            h.started.delete(agentId);
+          }
+          break;
+        }
+        case "Stop":
+        case "StopFailure": {
+          h.turn = false;
+          h.needsInput = false;
+          const bg = backgroundTasksOf(p);
+          if (bg) {
+            // 公式: Stop の background_tasks は「今 in-flight の物」。ここで数え直す（Start / Stop の取りこぼしもここで直る）
+            h.started.clear();
+            h.snapSubagents = bg.subagents;
+            h.tasks = bg.tasks;
+          }
+          break;
+        }
+        default:
+          // subagent の中の hook（agent_id 付き）は、claude 本体の turn の状態を変えない。
+          // 本体が待機の間に subagent が tool を使っても、cap は待機のまま（入力に反応できる）。返答待ち（permission）だけは本体と同じ扱い
+          if (agentId && base !== "needs-input") {
+            if (base === "working") h.needsInput = false; // subagent の許可の返答が済んで tool が動いた
+            break;
+          }
+          if (base === null) return false;
+          if (base === "needs-input") h.needsInput = true;
+          else if (base === "working") {
+            h.turn = true;
+            h.needsInput = false;
+          } else {
+            h.turn = false;
+            h.needsInput = false;
+          }
+      }
+      const changed = !before || before.activity !== activityOf(h) || !sameBackground(before.background, backgroundOf(h));
+      if (before && before.activity !== activityOf(h)) h.at = new Date(now()).toISOString();
+      held.set(name, h);
       return changed;
     },
     get(name, startedAt, running) {
       const h = held.get(name);
-      if (!running || !h || h.startedAt !== startedAt) return { activity: "unknown", activityAt: null };
-      return { activity: h.activity, activityAt: h.at };
+      if (!running || !h || h.startedAt !== startedAt) return UNKNOWN;
+      return { activity: activityOf(h), activityAt: h.at, background: backgroundOf(h) };
     },
     forget: (name) => void held.delete(name),
   };

@@ -8,6 +8,8 @@ import {
   type ConversationInfo,
   type CapResultReply,
   type ErrorReply,
+  type ResourceSample,
+  type ServerBoard,
   type StatusReply,
   type TaskCommand,
   type TaskResultReply,
@@ -130,6 +132,28 @@ export interface RemoteSummary {
   unreachable?: RemoteIssue[];
   /** server が lost と通知した cap（新しい task が受け付けられるまで）。届かない server の cap は unreachable の側に載る。無ければ省く。 */
   lost?: RemoteIssue[];
+  /** 止まった（task が failed・cap が終わった task の結果を返さずに止まった）のに、master-cap がまだ扱っていない cap。次の指示を送る・cap を閉じるまで残る。無ければ省く。 */
+  stopped?: RemoteStopIssue[];
+}
+
+/** 止まり方。failed = task が failed で終わった / no_result = cap が止まったのに task の結果（task_result / cap_result）が来なかった。到達不能・lost は別（RemoteSummary の unreachable / lost）。 */
+export type RemoteStopKind = "failed" | "no_result";
+
+/** 止まったまま、master-cap がまだ扱っていない印（RemoteRecord.stopped。永続）。 */
+export interface RemoteStop {
+  kind: RemoteStopKind;
+  at: string;
+  task_id?: string;
+  detail?: string;
+}
+
+export interface RemoteStopIssue {
+  server: string;
+  remoteId: string;
+  kind: RemoteStopKind;
+  at: string;
+  taskId?: string;
+  detail?: string;
 }
 
 /** 未完了の指示（完了したら消す）。通知先 = owner の session。 */
@@ -161,9 +185,34 @@ export interface PendingInstruction {
 /** remote_list の pending に足す、server が知らせた task の状態（task を並行に動かす server の status / activity の tasks から。旧 server では無い）。 */
 export interface PendingServerTask {
   state: CapTaskInfo["state"];
-  /** 待っている理由（limit = 同時に動かす数の上限 / branch = 同じ deliverables.branch の前の task が終わっていない）。 */
+  /** 待っている理由（limit = 利用者が置いた同時に動かす数の上限 / closing = cap の停止中 / branch = 旧 server の、同じ deliverables.branch の前の task が終わっていない）。 */
   waiting_for?: CapTaskInfo["waiting_for"];
   branch?: string;
+  /** 同じ branch で終わっていない他の task（server は待たせず cap に知らせている）。 */
+  same_branch?: string[];
+}
+
+/**
+ * server の掲示板の要約（remote_list の server_board。cap の数・worker の数・資源・予約の件数だけ。他の session の cap の id・中身は出さない）。
+ * server は測って掲示するだけで閾値を持たず、足りるかは判定しない（判断は cap）。
+ */
+export interface ServerBoardSummary {
+  /** server が掲示板を作った時刻（ISO 8601）。 */
+  at: string;
+  /** この server の cap の数。 */
+  caps: number;
+  /** 動いている worker の数。 */
+  workers: number;
+  /** 予約（資源待ちの worker）の件数。 */
+  reserved: number;
+  /** 利用者が置いた task の並行の上限。null = 上限なし。 */
+  max_parallel_tasks: number | null;
+  resources: ResourceSample | null;
+}
+
+/** server の掲示板から要約を作る（cap の id は載せない）。 */
+export function summarizeBoard(b: ServerBoard): ServerBoardSummary {
+  return { at: b.at, caps: b.caps.length, workers: b.workers, reserved: b.reserved, max_parallel_tasks: b.max_parallel_tasks, resources: b.resources };
 }
 
 /** task を送る直前の cap の状態。ahead = 送る時点で受付が未確認だった、この cap の先行する task の数（受付は ahead + 1 本分の増加を見るまで認めない）。 */
@@ -221,6 +270,8 @@ export interface RemoteRecord {
   error_at?: string;
   /** server が cap を lost と通知した（実行中に server が落ちた等で実行が失われた）。新しい task が受け付けられる、または cap が動き直すまで残す。 */
   cap_lost?: { at: string; error?: string };
+  /** 止まったのに master-cap がまだ扱っていない印。次の指示（remote_send）で消える（cap を閉じれば記録ごと消える）。 */
+  stopped?: RemoteStop;
   /** 未完了の指示（古い順）。完了したら消す。履歴は持たない。 */
   pending: PendingInstruction[];
 }
@@ -251,6 +302,8 @@ export type RemoteView = Omit<RemoteRecord, "worker_reports" | "pending"> & {
   owners: string[];
   worker_reports: StoredWorkerReport[];
   activity?: RemoteActivity;
+  /** この cap の server の掲示板（status の board。周期の status で更新）。board を知らせない旧 server・status 未取得の間は無い。 */
+  server_board?: ServerBoardSummary;
   /**
    * cap の会話（claude の session）の使用量。server の status（周期取得）から。開始時刻・run 数・直近の context（tokens / window / %）・直近の失敗の error 文。
    * 旧 server・status 未取得・cap が server に無い間は無い。
@@ -283,14 +336,20 @@ export const remoteWaitSchema = {
 };
 
 /** 通知の本文を作る。 */
-export function formatDoneNotice(r: { remote_id: string; state: string; result?: string; error?: string; instructions?: string[]; task_id?: string }): string {
+export function formatDoneNotice(r: { remote_id: string; state: string; result?: string; error?: string; instructions?: string[]; task_id?: string; note?: string }): string {
   const head = r.result === undefined ? "" : r.result.length > NOTIFY_RESULT_MAX ? `${r.result.slice(0, NOTIFY_RESULT_MAX)}…(省略。全文は remote_list)` : r.result;
   return [
     `[bantou] remote 完了 remote_id=${r.remote_id}${r.task_id !== undefined ? ` task_id=${r.task_id}` : ""} state=${r.state}`,
     ...(r.instructions?.length ? [`指示: ${r.instructions.map((p) => (p.length > NOTIFY_PROMPT_MAX ? `${p.slice(0, NOTIFY_PROMPT_MAX)}…` : p)).join(" / ")}`] : []),
     `result: ${head}`,
     ...(r.error ? [`error: ${r.error}`] : []),
+    ...(r.note ? [`note: ${r.note}`] : []),
   ].join("\n");
+}
+
+/** server に届かなくなった時の push 本文。 */
+export function formatUnreachableNotice(remoteIds: string[], server: string, message: string): string {
+  return `[bantou] remote 到達不能 remote_id=${remoteIds.join(",")} server=${server}\nserver に届かない（${message}）。作業が止まっている可能性がある。戻れば自動で追従する。待てない時は remote_delete（force）で扱う`;
 }
 
 /** worker_report の push 本文を作る。 */
@@ -345,6 +404,7 @@ export const remoteSendSchema = {
     .describe("worker の分担。items 無し = 既定（implement + review の最低 2 体）。省略時 {}"),
   server: serverArg,
   worker_model: modelArg("worker の既定モデル（task に載せる。items[].model が優先）。省略時、新規の cap は config servers[].workerModel、既存の cap は送らない（server の記憶のまま）"),
+  parent_requirement_id: z.string().uuid().optional().describe("この指示の親の requirement の id（外部記憶の openRequirements / recall の id）。外部記憶にだけ記録し、server には送らない。省略時は外部記憶の抽出が直近の利用者の発言から親を決める"),
 };
 /** worker_reply の入力（desktop の center_call と /mcp/session で共通）。remote_id 省略時は記録が 1 件ならその cap。 */
 export const workerReplySchema = {
@@ -396,6 +456,8 @@ export interface RemoteSendInput {
   constraints?: string[];
   workers?: TaskCommand["workers"];
   worker_model?: string;
+  /** 外部記憶の task event に載せる親の requirement の id。server には送らない */
+  parent_requirement_id?: string;
 }
 
 export interface RemoteManager {
@@ -622,8 +684,12 @@ export function createRemoteManager(opts: {
     lastError?: string;
   }
   const health = new Map<string, Health>();
+  /** 到達不能を master-cap に知らせた server（key。メモリのみ）。届くようになったら外す（次の障害でまた知らせる）。 */
+  const unreachNotified = new Set<string>();
   /** 最後に取れた status の cap（記録ごと。cap が無ければ cap は undefined。メモリのみ）。cap_state の根拠。 */
   const capSnap = new Map<RemoteRecord, { at: number; cap: AgentStatus | undefined }>();
+  /** 最後に取れた server の掲示板（server key ごと。メモリのみ）。 */
+  const boards = new Map<string, ServerBoard>();
   /** task を server が断った・送れなかった理由（task_id → 理由。メモリのみ）。受付の待ちを早く終えるのに使う。 */
   const taskFailures = new Map<string, { message: string; transport: boolean }>();
 
@@ -633,6 +699,7 @@ export function createRemoteManager(opts: {
     let waitingReply = 0;
     const unreachable: RemoteIssue[] = [];
     const lost: RemoteIssue[] = [];
+    const stopped: RemoteStopIssue[] = [];
     for (const r of records) {
       if (r.session !== session) continue;
       if (r.pending.length > 0) running++;
@@ -641,8 +708,12 @@ export function createRemoteManager(opts: {
       }
       if (unreachableActive(r)) unreachable.push({ server: labelOf(r), remoteId: r.remote_id, lastOkAt: lastOkIso(r) });
       else if (r.cap_lost) lost.push({ server: labelOf(r), remoteId: r.remote_id, at: r.cap_lost.at });
+      if (r.stopped && !unreachableActive(r) && !r.cap_lost) {
+        const x = r.stopped;
+        stopped.push({ server: labelOf(r), remoteId: r.remote_id, kind: x.kind, at: x.at, ...(x.task_id !== undefined ? { taskId: x.task_id } : {}), ...(x.detail !== undefined ? { detail: x.detail } : {}) });
+      }
     }
-    return { running, waitingReply, ...(unreachable.length > 0 ? { unreachable } : {}), ...(lost.length > 0 ? { lost } : {}) };
+    return { running, waitingReply, ...(unreachable.length > 0 ? { unreachable } : {}), ...(lost.length > 0 ? { lost } : {}), ...(stopped.length > 0 ? { stopped } : {}) };
   };
   /** 通知済みの集計（メモリのみ。session → "running/waitingReply"）。 */
   const notified = new Map<string, string>();
@@ -651,9 +722,9 @@ export function createRemoteManager(opts: {
     for (const r of records) if (r.session !== undefined) sessions.add(r.session);
     for (const s of sessions) {
       const v = summarize(s);
-      const key = `${v.running}/${v.waitingReply}/${(v.unreachable ?? []).map((i) => i.remoteId).join(",")}/${(v.lost ?? []).map((i) => i.remoteId).join(",")}`;
-      const prev = notified.get(s) ?? "0/0//";
-      if (key === "0/0//") notified.delete(s);
+      const key = `${v.running}/${v.waitingReply}/${(v.unreachable ?? []).map((i) => i.remoteId).join(",")}/${(v.lost ?? []).map((i) => i.remoteId).join(",")}/${(v.stopped ?? []).map((i) => `${i.remoteId}:${i.kind}:${i.at}`).join(",")}`;
+      const prev = notified.get(s) ?? "0/0///";
+      if (key === "0/0///") notified.delete(s);
       else notified.set(s, key);
       if (key !== prev) opts.onSummaryChange?.(s);
     }
@@ -743,6 +814,7 @@ export function createRemoteManager(opts: {
     const changed = h.failures > 0;
     h.lastOkAt = nowMs();
     h.failures = 0;
+    unreachNotified.delete(key);
     delete h.countedAt;
     delete h.lastError;
     health.set(key, h);
@@ -769,7 +841,32 @@ export function createRemoteManager(opts: {
     health.set(key, h);
     if (before < reachThreshold && h.failures >= reachThreshold) {
       log(`server に届かない: ${key} 連続 ${h.failures} 回 ${message}`);
+      notifyUnreachable(key, message);
       wake();
+    }
+  };
+  /** 到達不能になった server で動いている cap の owner へ、1 回の障害につき 1 回 push する（今ある完了通知と同じ opts.notify の道）。 */
+  const notifyUnreachable = (key: string, message: string): void => {
+    if (unreachNotified.has(key)) return;
+    unreachNotified.add(key);
+    const byOwner = new Map<string, RemoteRecord[]>();
+    for (const x of recordsOfKey(key)) {
+      if (!isActiveRec(x) || x.session === undefined) continue;
+      byOwner.set(x.session, [...(byOwner.get(x.session) ?? []), x]);
+    }
+    for (const [owner, recs] of byOwner) {
+      if (!opts.notify) {
+        log(`remote 到達不能の通知を送れない: owner=${owner} 通知の送り先が無い`);
+        continue;
+      }
+      const text = formatUnreachableNotice(recs.map((x) => x.remote_id), labelOf(recs[0]), message);
+      void opts.notify(owner, text).then(
+        (res) => res,
+        (e: unknown) => ({ ok: false as const, reason: e instanceof Error ? e.message : String(e) }),
+      ).then((res) => {
+        if (res.ok) log(`remote 到達不能の通知: owner=${owner} server=${key}`);
+        else log(`remote 到達不能の通知を送れない: owner=${owner} ${res.reason}`);
+      });
     }
   };
   /**
@@ -832,6 +929,7 @@ export function createRemoteManager(opts: {
   };
   /** 取れた status を、同じ server の記録に反映する（cap の状態）。受付の判定は awaitAck の直接の観測だけで行い、周期の status では pending を observed にしない（別の要因の変化を受付と取り違えるため）。 */
   const recordStatus = (key: string, st: StatusReply): void => {
+    if (st.board !== undefined) boards.set(key, st.board);
     for (const x of recordsOfKey(key)) capSnap.set(x, { at: Date.now(), cap: st.caps.find((c) => c.id === x.remote_id) });
     for (const x of recordsOfKey(key)) completeFinishedTasks(x);
   };
@@ -844,6 +942,12 @@ export function createRemoteManager(opts: {
     const fromStatus = snap?.cap?.tasks;
     if (fromActivity !== undefined && fromStatus !== undefined) return a!.received_ms_ago <= Date.now() - snap!.at ? fromActivity : fromStatus;
     return fromActivity ?? fromStatus;
+  };
+
+  /** 止まった印を付ける（master-cap が扱う＝次の指示・cap を閉じる、まで残す）。persist は呼び側が行う。 */
+  const markStopped = (r: RemoteRecord, stop: RemoteStop): void => {
+    r.stopped = stop;
+    log(`remote 停止の印: ${r.remote_id} kind=${stop.kind}${stop.task_id !== undefined ? ` task_id=${stop.task_id}` : ""} ${stop.detail ?? ""}`);
   };
 
   /**
@@ -864,6 +968,7 @@ export function createRemoteManager(opts: {
       const t = finished.get(p.task_id!)!;
       const owner = r.session ?? p.owner;
       const error = t.state === "failed" ? (t.error ?? p.last_result?.error ?? "失敗") : undefined;
+      if (error !== undefined) markStopped(r, { kind: "failed", at: new Date().toISOString(), task_id: p.task_id!, detail: error });
       const text = formatDoneNotice({
         remote_id: r.remote_id,
         task_id: p.task_id,
@@ -948,15 +1053,17 @@ export function createRemoteManager(opts: {
     const tasks = serverTasksOf(r);
     const serverTask = (p: PendingInstruction): { server_task?: PendingServerTask } => {
       const t = p.task_id !== undefined ? tasks?.find((x) => x.task_id === p.task_id) : undefined;
-      return t ? { server_task: { state: t.state, ...(t.waiting_for !== undefined ? { waiting_for: t.waiting_for } : {}), ...(t.branch !== undefined ? { branch: t.branch } : {}) } } : {};
+      return t ? { server_task: { state: t.state, ...(t.waiting_for !== undefined ? { waiting_for: t.waiting_for } : {}), ...(t.branch !== undefined ? { branch: t.branch } : {}), ...(t.same_branch !== undefined && t.same_branch.length > 0 ? { same_branch: t.same_branch } : {}) } } : {};
     };
     const base: RemoteView = { ...r, server_label: labelOf(r), reachability: reachOf(r), cap_state: capStateOf(r), pending: r.pending.map((p) => ({ ...p, delivery: p.delivery ?? ("sent" as const), ...serverTask(p) })), owners: ownersOf(r), worker_reports: (r.worker_reports ?? []).map((w) => ({ ...w })), state };
     if (state === "running") delete base.finishedAt;
     const activity = activityOf(r);
     const snapCap = capSnap.get(r)?.cap;
+    const board = boards.get(healthKeyOf(r));
     return {
       ...base,
       ...(activity ? { activity } : {}),
+      ...(board ? { server_board: summarizeBoard(board) } : {}),
       ...(snapCap?.conversation ? { conversation: snapCap.conversation } : {}),
       ...(snapCap?.state === "failed" && snapCap.last_error !== undefined ? { cap_last_error: snapCap.last_error } : {}),
     };
@@ -984,8 +1091,12 @@ export function createRemoteManager(opts: {
       const to = r.session ?? p.owner;
       byOwner.set(to, [...(byOwner.get(to) ?? []), p]);
     }
+    // 結果の無い完了: cap が止まったのに、その指示の task_result / cap_result が来ていない（cap が task の途中でターンを終えて止まった）
+    const noResult = s === "done" && pending.some((p) => p.last_result === undefined && (r.result_at === undefined || Date.parse(r.result_at) < Date.parse(p.at)));
+    if (s === "failed" && !r.cap_lost) markStopped(r, { kind: "failed", at: new Date().toISOString(), ...(pending[0]?.task_id !== undefined ? { task_id: pending[0].task_id } : {}), detail: r.error ?? "失敗" });
+    else if (noResult) markStopped(r, { kind: "no_result", at: new Date().toISOString(), ...(pending[0]?.task_id !== undefined ? { task_id: pending[0].task_id } : {}), detail: "cap が止まったが task の結果が返っていない" });
     const text = (instr: PendingInstruction[]): string =>
-      formatDoneNotice({ remote_id: r.remote_id, state: s, ...(r.result !== undefined ? { result: r.result } : {}), ...(r.error ? { error: r.error } : {}), instructions: instr.map((i) => i.prompt) });
+      formatDoneNotice({ remote_id: r.remote_id, state: s, ...(r.result !== undefined ? { result: r.result } : {}), ...(r.error ? { error: r.error } : {}), ...(noResult ? { note: "task の結果が返らないまま cap が止まった（途中で止まった可能性）。次の指示か remote_delete で扱う" } : {}), instructions: instr.map((i) => i.prompt) });
     for (const [owner, instr] of byOwner) {
       if (!opts.notify) {
         log(`remote 完了通知を送れない: ${r.remote_id} owner=${owner} 通知の送り先が無い`);
@@ -1160,6 +1271,7 @@ export function createRemoteManager(opts: {
     const i = records.indexOf(rec);
     if (i >= 0) records.splice(i, 1);
     inflight.delete(rec);
+    inflightIdle.delete(rec);
     inflightTasks.delete(rec);
     settling.delete(rec);
     statusIdleAt.delete(rec);
@@ -1699,6 +1811,72 @@ export function createRemoteManager(opts: {
         }
       }),
     );
+    sweepStalled();
+  };
+  /**
+   * 周期の確認の最後に、未完了の指示があるのに cap が止まっている（status が idle で、activity も動いていない）記録を、完了判定（probe）に回す。
+   * 通知の取りこぼし・center の再起動などで、cap が task の途中で止まったまま完了の push が出ない状態を掬い上げる（新しい周期は足さず、REACH_CHECK_MS の確認に乗る）。
+   */
+  /** 返信待ち（inflight）が開いたまま、周期の status で cap が idle と見えた連続回数（at = 数えた status の時刻。同じ status を二重に数えない）。 */
+  const inflightIdle = new Map<RemoteRecord, { n: number; at: number }>();
+  /**
+   * 返信待ちが開いたまま cap が止まった（周期の status で連続 reachThreshold 回 idle）記録に、no_result の印を付けて owner へ 1 回知らせる。
+   * 返信待ち・pending は閉じない。後から task_result が届けば通常の完了になり、印は settle で消える。印の付いている間は重ねて知らせない。
+   */
+  const sweepInflightIdle = (r: RemoteRecord): void => {
+    const waiting = r.pending.length > 0 && (inflight.get(r) ?? 0) > 0;
+    const snap = capSnap.get(r);
+    const cap = snap?.cap;
+    const a = activityOf(r);
+    const idle =
+      waiting && snap !== undefined && Date.now() - snap.at <= reachCheckMs * 2 + 1000 && !unreachableActive(r) && !r.cap_lost &&
+      (cap === undefined || (cap.state !== "running" && (cap.queued ?? 0) === 0)) &&
+      (a === undefined || a.received_ms_ago >= Date.now() - snap.at);
+    if (!idle || !snap) {
+      // 「連続」: idle と見えない周期（動いている・古い status・返信待ちなし）が来たら数えを消す
+      inflightIdle.delete(r);
+      return;
+    }
+    const prev = inflightIdle.get(r);
+    if (prev && prev.at === snap.at) return;
+    const n = (prev?.n ?? 0) + 1;
+    inflightIdle.set(r, { n, at: snap.at });
+    if (n < reachThreshold || r.stopped) return;
+    const pending = r.pending;
+    markStopped(r, { kind: "no_result", at: new Date().toISOString(), ...(pending[0]?.task_id !== undefined ? { task_id: pending[0].task_id } : {}), detail: "返信待ちのまま cap が止まった（task の結果が返らない）" });
+    void persist();
+    const byOwner = new Map<string, PendingInstruction[]>();
+    for (const p of pending) byOwner.set(r.session ?? p.owner, [...(byOwner.get(r.session ?? p.owner) ?? []), p]);
+    for (const [owner, instr] of byOwner) {
+      const text = formatDoneNotice({ remote_id: r.remote_id, state: "done", note: "task の結果が返らないまま cap が止まった（途中で止まった可能性）。次の指示か remote_delete で扱う", instructions: instr.map((i) => i.prompt) });
+      if (!opts.notify) {
+        log(`remote 完了通知を送れない: ${r.remote_id} owner=${owner} 通知の送り先が無い`);
+        continue;
+      }
+      void opts.notify(owner, text).then(
+        (res) => res,
+        (e: unknown) => ({ ok: false as const, reason: e instanceof Error ? e.message : String(e) }),
+      ).then((res) => {
+        if (res.ok) log(`remote 停止の通知（返信待ちのまま）: ${r.remote_id} owner=${owner} 指示=${instr.length}`);
+        else log(`remote 完了通知を送れない: ${r.remote_id} owner=${owner} ${res.reason}`);
+      });
+    }
+    wake();
+  };
+  const sweepStalled = (): void => {
+    for (const r of records) {
+      sweepInflightIdle(r);
+      if (r.pending.length === 0 || (inflight.get(r) ?? 0) > 0 || probes.has(r) || settling.has(r)) continue;
+      if (unreachableActive(r) || r.cap_lost) continue;
+      const snap = capSnap.get(r);
+      if (!snap || Date.now() - snap.at > reachCheckMs * 2 + 1000) continue; // 今の周期の status が取れていない
+      const cap = snap.cap;
+      const idle = cap === undefined || (cap.state !== "running" && (cap.queued ?? 0) === 0);
+      // 周期の status が最後の activity より新しい時は、activity（動いていると言ったまま途絶えた物）でなく status を信じる
+      const a = activityOf(r);
+      const statusNewer = a === undefined || a.received_ms_ago >= Date.now() - snap.at;
+      if (idle && statusNewer) schedule(r, 0);
+    }
   };
   let reachTimer: ReturnType<typeof setTimeout> | undefined;
   const scheduleReach = (): void => {
@@ -1783,6 +1961,9 @@ export function createRemoteManager(opts: {
           records.push(rec);
         }
         syncRecord(rec, peer);
+        // 次の指示を出した = master-cap が止まった cap を扱った。止まった印を消す
+        delete rec.stopped;
+        inflightIdle.delete(rec);
         consolidate();
         recordStatus(healthKeyOf(rec), st);
         // cap を作る時は、記録も作った時の値にする
@@ -1803,6 +1984,12 @@ export function createRemoteManager(opts: {
         const settle = (res: { ok: boolean; text: string; error?: string }, kind: "cap_result" | "error" | "transport", taskResult?: TaskResultReply): void => {
           inflight.set(target, Math.max(0, (inflight.get(target) ?? 1) - 1));
           inflightTasks.get(target)?.delete(taskId);
+          // 返信待ちのまま止まったと印を付けた後に、返信待ちが全部閉じた（結果・error・送信失敗のどれでも）: その印と数えを消す。
+          // 同じ cap の返信待ちがまだ残っている間は消さない（同じ止まりで 2 回目の知らせを出さない）。failed など他の印は消さない
+          if ((inflight.get(target) ?? 0) === 0) {
+            inflightIdle.delete(target);
+            if (target.stopped?.kind === "no_result") delete target.stopped;
+          }
           if (kind === "cap_result") {
             // task_result が返った = server が受け付けて実行した
             markObserved(target, entry, "task_result");
@@ -1834,7 +2021,7 @@ export function createRemoteManager(opts: {
           workers: input.workers ?? {},
           ...(workerModel ? { worker_model: workerModel } : {}),
         };
-        opts.memoryEvents?.task(input.owner, { capId: cid, taskId, goal: input.goal, ...(input.repo ? { repo: input.repo } : {}), ...(input.branch ? { branch: input.branch } : {}), ...(input.constraints?.length ? { constraints: input.constraints } : {}) });
+        opts.memoryEvents?.task(input.owner, { capId: cid, taskId, goal: input.goal, ...(input.repo ? { repo: input.repo } : {}), ...(input.branch ? { branch: input.branch } : {}), ...(input.constraints?.length ? { constraints: input.constraints } : {}), ...(input.parent_requirement_id ? { parentRequirementId: input.parent_requirement_id } : {}) });
         const onSent = (): void => {
           if (entry.delivery !== "unsent") return;
           entry.delivery = "sent";

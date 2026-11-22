@@ -53,6 +53,8 @@ export interface SystemInstructionContext {
   memory?: boolean;
   /** 統括の MCP の server を指す項目が設定の mcpServers に在る session か。省略 = false。 */
   coordinator?: boolean;
+  /** session 向けの窓口（tool session_resession）が付く session か。省略 = false。 */
+  resession?: boolean;
   /** この session が使える server の範囲（session 設定 settings.servers。host 名か server_id）。省略 = 全部（範囲の指定なし）。空配列 = どの server も使わない。 */
   servers?: string[];
 }
@@ -208,8 +210,30 @@ export const COORDINATOR_USAGE: SystemInstructionPart = {
     ].join("\n"),
 };
 
+/**
+ * リセッション（引継ぎを残して session を新しい会話で起動し直す）の申告の決まり。設計は docs/design/resession.md の 3.1 / 3.3 / 3.4。
+ * 道具 session_resession が付く session（session 向けの窓口がある session）だけに付く。
+ */
+export const RESESSION_USAGE: SystemInstructionPart = {
+  id: "resession",
+  version: 1,
+  title: "session_resession が使える session だけ: 区切りがついた時の引継ぎの渡し方と、再起動後の最初の入力の扱い",
+  when: (ctx) => ctx.resession === true,
+  text: (ctx) =>
+    [
+      "[リセッション]",
+      "- 仕事の区切りがつき、これ以上やる事が無い時（未完了の指示・返答待ちの remote が無く、利用者の返事も待っていない時）は、道具 session_resession（claude の側の名前は mcp__bantou__session_resession）を 1 回呼べる。会話を新しく始め直して、context を空ける。",
+      "- 引数 handoff に引継ぎの本文を渡す。common の [記録] の 3 つ（引継ぎ = 仕掛かり・止まっている事・次の一手 / 決定と番号つきの未決 / 今の窓口）を、新しい会話が続きを読めるだけ書く。会話にしか無い事は、書かないと失われる。",
+      "- 呼ぶと center が引継ぎを保存して受理を返す。そのあと turn を終えると、center が再起動する。受理の後は、短く「再起動する」とだけ言って turn を終える。新しい作業を始めない。",
+      "- 利用者が返事を待っている時、remote の指示が動いている時、worker_reply が未返答の時は呼ばない（断られる）。",
+      ctx.memory === true
+        ? "- 再起動した最初の入力に「リセッションで再起動した」と引継ぎの id（eventId）が書いてあったら、mcp__memory__handoff（eventId を渡す）で引継ぎを引き、common の [記録] の順に読んでから続ける。外部記憶に届かなかった時は、最初の入力に本文が入っている。"
+        : "- 再起動した最初の入力に「リセッションで再起動した」と書いてあったら、その入力に入っている引継ぎの本文を、common の [記録] の順に読んでから続ける。",
+    ].join("\n"),
+};
+
 /** 付ける部品の一覧（この順）。足す・外す・直すのはここ。`when` を持つ部品は文脈に合う session だけに付く。 */
-export const SYSTEM_INSTRUCTION_PARTS: readonly SystemInstructionPart[] = [BASE_SPEC, MASTER_CAP_ROLE, MASTER_CAP_AVAILABILITY, MEMORY_USAGE, COORDINATOR_USAGE];
+export const SYSTEM_INSTRUCTION_PARTS: readonly SystemInstructionPart[] = [BASE_SPEC, MASTER_CAP_ROLE, MASTER_CAP_AVAILABILITY, MEMORY_USAGE, COORDINATOR_USAGE, RESESSION_USAGE];
 
 /** 文脈に合う部品（`when` が無いか true を返すもの）。順は元のまま。 */
 export const applicableParts = (ctx: SystemInstructionContext, parts: readonly SystemInstructionPart[] = SYSTEM_INSTRUCTION_PARTS): SystemInstructionPart[] =>

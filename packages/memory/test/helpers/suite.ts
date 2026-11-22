@@ -3,7 +3,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { DIM, closedPortUrl, fakeChat, fakeEmbedder, fakeVector, ev, startFakeOllama, type TestDb } from "./fakes.ts";
-import { recordEvent } from "../../server/utils/events.ts";
+import { readHandoff, recordEvent } from "../../server/utils/events.ts";
 import { extractAll, extractForAgent } from "../../server/utils/extract.ts";
 import { EMBED_SINGLE_RUNS, EMBED_SQL_TIMEOUT_MS, EmbedUnreachableError, createEmbedGate, createEmbedState, createOllamaEmbedder, createQueryEmbedder, embedBacklog, embedPending, type Embedder } from "../../server/utils/embed.ts";
 import { STATUS_SQL_TIMEOUT_MS, buildStatus } from "../../server/utils/status.ts";
@@ -43,6 +43,27 @@ async function run(agent: string, chat: ReturnType<typeof fakeChat>) {
   await embedPending(t.db, agent, emb);
   return s;
 }
+
+test("handoff: 受理される・抽出と outbox に渡らない・id で本文がそのまま引ける・他の agent には見えない（migration 005）", async () => {
+  const a = newAgent();
+  const b = newAgent();
+  const body = "引継ぎ\n仕掛かり: x\n" + "あ".repeat(5000);
+  assert.deepEqual(await recordEvent(t.db, a, ev({ eventId: "ho-1", kind: "handoff", body })), { status: "recorded", eventId: "ho-1" });
+  assert.deepEqual(await recordEvent(t.db, a, ev({ eventId: "ho-1", kind: "handoff", body })), { status: "duplicate", eventId: "ho-1" });
+  const row = await t.asSuper(async (sq) => ({
+    ev: (await sq.query<{ processed: boolean }>("SELECT processed_at IS NOT NULL AS processed FROM memory_events WHERE agent_id = $1 AND event_id = 'ho-1'", [a])).rows[0],
+    ob: (await sq.query<{ c: string }>("SELECT count(*)::text AS c FROM outbox_events WHERE agent_id = $1", [a])).rows[0]!.c,
+  }));
+  assert.equal(row.ev?.processed, true);
+  assert.equal(row.ob, "0");
+  const got = await readHandoff(t.db, a, { eventId: "ho-1" });
+  assert.equal(got?.body, body);
+  assert.equal(await readHandoff(t.db, b, { eventId: "ho-1" }), null);
+  assert.equal(await readHandoff(t.db, a, { eventId: "nothing" }), null);
+  // 他の kind の event は引継ぎとして引けない
+  await recordEvent(t.db, a, ev({ eventId: "not-ho", kind: "task" }));
+  assert.equal(await readHandoff(t.db, a, { eventId: "not-ho" }), null);
+});
 
 test("event: 冪等（同じ eventId は 1 件・2 回目は duplicate）、outbox は 1 件", async () => {
   const a = newAgent();
@@ -1738,6 +1759,35 @@ test("migration 002: 何度当てても同じ（設置済みの DB に安全に�
   const after = (await embedState(a))[0]!;
   assert.deepEqual([after.embedded, after.attempts, new Date(after.embedded_at!).getTime()], [true, 0, new Date(before.embedded_at!).getTime()]);
   assert.ok(!/CREATE INDEX/i.test(migration002()), "使われない部分 index を作らない");
+});
+
+const migration005 = (part: "Up" | "Down") => {
+  const sql = readFileSync(fileURLToPath(new URL("../../migrations/005_handoff_kind.sql", import.meta.url)), "utf8");
+  const [up, down] = sql.split("-- Up Migration")[1]!.split("-- Down Migration");
+  return splitSql(part === "Up" ? up! : down!);
+};
+
+test("migration 005: Down は handoff の行を消して kind の CHECK を元（6 種）に戻す。Up で handoff がまた受かる（何度当てても同じ）", async () => {
+  const a = newAgent();
+  await recordEvent(t.db, a, ev({ eventId: "m5-ho", kind: "handoff", body: "引継ぎ" }));
+  await recordEvent(t.db, a, ev({ eventId: "m5-task", kind: "task" }));
+  const count = (id: string) => t.asSuper(async (sq) => (await sq.query<{ c: string }>("SELECT count(*)::text AS c FROM memory_events WHERE agent_id = $1 AND event_id = $2", [a, id])).rows[0]!.c);
+  assert.equal(await count("m5-ho"), "1");
+  try {
+    await t.asSuper(async (sq) => {
+      for (const stmt of migration005("Down")) await sq.query(stmt);
+    });
+    assert.equal(await count("m5-ho"), "0", "handoff の行は消える");
+    assert.equal(await count("m5-task"), "1", "他の種別は残る");
+    // CHECK は 6 種に戻っている: handoff は入らない
+    await assert.rejects(t.asSuper((sq) => sq.query("INSERT INTO memory_events (agent_id, event_id, kind, body, at) VALUES ($1, 'm5-ho2', 'handoff', 'x', now())", [a])), /memory_events_kind_check|check/i);
+  } finally {
+    await t.asSuper(async (sq) => {
+      for (const stmt of migration005("Up")) await sq.query(stmt);
+      for (const stmt of migration005("Up")) await sq.query(stmt); // 2 回目も通る
+    });
+  }
+  assert.deepEqual(await recordEvent(t.db, a, ev({ eventId: "m5-ho3", kind: "handoff", body: "再び" })), { status: "recorded", eventId: "m5-ho3" });
 });
 
 test("migration 002: 埋め込み済みの行の embedded_at は、RLS を受ける role（superuser でない owner）で当てても埋まる", async () => {

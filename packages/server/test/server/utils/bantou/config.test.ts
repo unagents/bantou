@@ -37,6 +37,7 @@ test("config: 全項目指定はそのまま返る", async () => {
       env: { CLAUDE_CONFIG_DIR: "/c" },
     },
     update: { spec: "file:/x/bantou-{version}.tgz" },
+    resource: { sampleMs: 5000 },
     extraMcp: { fs: { command: "npx", args: ["-y", "p"], env: { A: "b" }, targets: ["worker"] } },
   };
   assert.deepEqual(await load(full), full);
@@ -155,8 +156,10 @@ test("config: workspace 省略は config.json のある dir が root。CLAUDE_CO
   }
 });
 
-test("config: maxParallelTasks は既定 2（1 は従来どおり 1 つずつ）。0・負・小数・文字列は拒否", async () => {
-  assert.equal((await load({ workspace: "/w" })).session.maxParallelTasks, 2);
+test("config: maxParallelTasks は既定で無し（上限なし）。置いた時だけ効く。0・負・小数・文字列は拒否。resource.sampleMs の既定は 30 秒", async () => {
+  assert.equal((await load({ workspace: "/w" })).session.maxParallelTasks, undefined);
+  assert.equal((await load({ workspace: "/w" })).resource?.sampleMs, 30_000);
+  await assert.rejects(load({ workspace: "/w", resource: { sampleMs: 10 } }), /sampleMs/);
   assert.equal((await load({ workspace: "/w", session: { maxParallelTasks: 1 } })).session.maxParallelTasks, 1);
   assert.equal((await load({ workspace: "/w", session: { maxParallelTasks: 4 } })).session.maxParallelTasks, 4);
   for (const bad of [0, -1, 1.5, "2"]) {

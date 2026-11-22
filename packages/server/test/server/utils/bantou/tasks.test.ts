@@ -14,6 +14,7 @@ import { LANE_RECAP_HEAD } from "../../../../server/utils/bantou/agents";
 import { readState } from "../../../../server/utils/bantou/state";
 import { createTaskScheduler, type TaskScheduler } from "../../../../server/utils/bantou/tasks";
 import { createWorkerHub, readOwnerRecord, type WorkerHub } from "../../../../server/utils/bantou/workers";
+import { createReservationQueue, type Reservation, type ReservationQueue } from "../../../../server/utils/bantou/reservations";
 import { laneDir } from "../../../../server/utils/bantou/paths";
 import { createActivityTracker, type ActivityTracker } from "../../../../server/utils/bantou/activity";
 import { createWorkerExitWatcher } from "../../../../server/utils/bantou/worker-exit";
@@ -59,6 +60,7 @@ interface Sys {
   scheduler: TaskScheduler;
   hub: ReportHub;
   workers: WorkerHub;
+  reservations: ReservationQueue;
   tracker: ActivityTracker;
   calls: Call[];
   /** center へ送った report 起因の返信・通知。 */
@@ -82,7 +84,7 @@ const task = (taskId: string, branch?: string, capId = "c1"): TaskCommand => ({
   workers: {},
 });
 
-async function withSystem(maxParallel: number, fn: (s: Sys) => Promise<void>, opts: { retireMs?: number; exitResume?: boolean } = {}): Promise<void> {
+async function withSystem(maxParallel: number | undefined, fn: (s: Sys) => Promise<void>, opts: { retireMs?: number; exitResume?: boolean } = {}): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "bantou-tasks-test-"));
   const calls: Call[] = [];
   try {
@@ -93,7 +95,7 @@ async function withSystem(maxParallel: number, fn: (s: Sys) => Promise<void>, op
       workspace: ws,
       broker: { port: 0, bind: "127.0.0.1", discovery: "off", token: "" },
       mcp: { port: 0, bind: "127.0.0.1" },
-      session: { ...structuredClone(DEFAULT_SESSION), maxRetries: 0, maxParallelTasks: maxParallel },
+      session: { ...structuredClone(DEFAULT_SESSION), maxRetries: 0, ...(maxParallel !== undefined ? { maxParallelTasks: maxParallel } : {}) },
       update: { spec: "bantou@{version}" },
     };
     const logs: string[] = [];
@@ -190,10 +192,18 @@ async function withSystem(maxParallel: number, fn: (s: Sys) => Promise<void>, op
       onLaneSettled: () => scheduler.check(),
       log,
     });
+    // daemon と同じ配線: 予約の queue（worker が 0 本ならすぐ起こす / 1 本終わるたびに先頭を起こす）
+    let workers!: WorkerHub & { launchReserved: (r: Reservation) => void };
+    const reservations = createReservationQueue({
+      running: () => manager.activeCount().workers,
+      launch: (r) => workers.launchReserved(r),
+      changed: (capId) => tracker.touch(capId),
+      log,
+    });
     scheduler = createTaskScheduler({
-      maxParallel,
-      run: (cmd) => manager.invoke("cap", cmd.cap_id, taskInvokeInput(cmd)),
-      busy: (capId, taskId) => manager.laneBusy(capId, taskId) || hub.pendingFor(capId, taskId) > 0,
+      ...(maxParallel !== undefined ? { maxParallel } : {}),
+      run: (cmd, info) => manager.invoke("cap", cmd.cap_id, taskInvokeInput(cmd, info.sameBranch)),
+      busy: (capId, taskId) => manager.laneBusy(capId, taskId) || hub.pendingFor(capId, taskId) > 0 || reservations.reservedFor(capId, taskId) > 0,
       changed: (capId) => tracker.touch(capId),
       retireMs: opts.retireMs ?? 0,
       // daemon と同じ: ask / approve に答えてもらっていない worker がいる task の lane は片付けない
@@ -206,7 +216,7 @@ async function withSystem(maxParallel: number, fn: (s: Sys) => Promise<void>, op
       sweepMs: 3_600_000,
       log,
     });
-    const workers = createWorkerHub({ workspace: ws, manager, activity: { snapshot: () => [] }, log, taskActive: (c, t) => scheduler.isActive(c, t) });
+    workers = createWorkerHub({ workspace: ws, manager, activity: { snapshot: () => [] }, log, taskActive: (c, t) => scheduler.isActive(c, t), reservations });
     await hub.rememberCenter("c1", "center-1");
     const send = async (cmd: TaskCommand): Promise<ServerReply> => {
       const r = await execute(cmd, manager, workers, undefined, scheduler);
@@ -214,7 +224,7 @@ async function withSystem(maxParallel: number, fn: (s: Sys) => Promise<void>, op
       return r;
     };
     const status = async (): Promise<StatusReply> => (await execute({ bantou: 1, type: "status" }, manager, workers, undefined, scheduler)) as StatusReply;
-    await fn({ ws, manager, scheduler, hub, workers, tracker, calls, sent, logs, send, status, call: (pred) => calls.find(pred) });
+    await fn({ ws, manager, scheduler, hub, workers, reservations, tracker, calls, sent, logs, send, status, call: (pred) => calls.find(pred) });
     for (const c of calls) c.release();
     scheduler.close("test 終了");
     tracker.close();
@@ -258,8 +268,8 @@ test("tasks: 別 branch の 2 task は同時に動く（task ごとに別の指�
   });
 });
 
-test("tasks: 同じ branch の 2 task は順に動く（前の task の worker が終わるまで後の task は始まらない）", async () => {
-  await withSystem(2, async (s) => {
+test("tasks: 同じ branch の task も待たせず、cap に同じ branch の task が動いている事を知らせる", async () => {
+  await withSystem(undefined, async (s) => {
     const p1 = s.send(task("t-1", "feat/x"));
     await until("t-1 の指揮", () => laneCall(s, "t-1") !== undefined);
     // t-1 の指揮が worker を起動する（mcp の x-bantou-task-id = t-1）
@@ -267,22 +277,111 @@ test("tasks: 同じ branch の 2 task は順に動く（前の task の worker �
     await until("worker の run", () => s.call((c) => c.lane === undefined && c.o.prompt === "implement") !== undefined);
     assert.deepEqual(await readOwnerRecord(s.ws, w.worker_id), { capId: "c1", taskId: "t-1" });
     const p2 = s.send(task("t-2", "feat/x"));
-    await sleep(50);
-    assert.equal(laneCall(s, "t-2"), undefined, "同じ branch の t-2 は待つ");
-    assert.deepEqual(tasksOf(s), { "t-1": "running", "t-2": "waiting(branch)" });
+    await until("t-2 の指揮が待たずに始まる", () => laneCall(s, "t-2") !== undefined);
+    assert.deepEqual(tasksOf(s), { "t-1": "running", "t-2": "running" });
+    // cap に知らせる: t-2 の指揮の prompt に同じ branch の t-1 が載る。t-1（先に始まった）には載らない
+    assert.ok(laneCall(s, "t-2")!.o.prompt.includes("[同じ branch の task]") && laneCall(s, "t-2")!.o.prompt.includes("t-1"));
+    assert.ok(!laneCall(s, "t-1")!.o.prompt.includes("[同じ branch の task]"));
+    // status にも出る
+    assert.deepEqual(s.scheduler.snapshot("c1").find((t) => t.task_id === "t-2")?.same_branch, ["t-1"]);
     // t-1 の指揮の turn が終わっても、t-1 の worker が動いている間は t-1 は終わらない
     laneCall(s, "t-1")!.release();
     assert.equal(((await p1) as TaskResultReply).task_id, "t-1");
     await sleep(50);
-    assert.equal(laneCall(s, "t-2"), undefined, "t-1 の worker が動いている間は始まらない");
     assert.equal(tasksOf(s)["t-1"], "running");
-    // worker が終わる → t-1 が終わる → t-2 が始まる
+    // worker が終わる → t-1 が終わる
     s.call((c) => c.o.prompt === "implement")!.release();
-    await until("t-2 の指揮が始まる", () => laneCall(s, "t-2") !== undefined);
-    assert.equal(tasksOf(s)["t-1"], "done");
-    assert.equal(tasksOf(s)["t-2"], "running");
+    await until("t-1 が終わる", () => tasksOf(s)["t-1"] === "done");
     laneCall(s, "t-2")!.release();
     assert.equal(((await p2) as TaskResultReply).task_id, "t-2");
+  });
+});
+
+test("tasks: 上限なし（既定）は task を何本でも並行に動かす", async () => {
+  await withSystem(undefined, async (s) => {
+    const ids = ["t-1", "t-2", "t-3", "t-4", "t-5"];
+    const ps = ids.map((t) => s.send(task(t)));
+    await until("5 つ全部が走る", () => ids.every((t) => laneCall(s, t) !== undefined));
+    assert.ok(Object.values(tasksOf(s)).every((v) => v === "running"));
+    for (const t of ids) laneCall(s, t)!.release();
+    await Promise.all(ps);
+  });
+});
+
+test("予約: 動いている worker がある時は貯まり、worker が 1 本終わるたびに先頭から 1 本ずつ起きる", async () => {
+  await withSystem(undefined, async (s) => {
+    const p = s.send(task("t-1"));
+    await until("t-1 の指揮", () => laneCall(s, "t-1") !== undefined);
+    await s.workers.start("c1", { prompt: "run-a", worker_id: "wa" }, "t-1");
+    await until("wa が走る", () => s.call((c) => c.o.prompt === "run-a") !== undefined);
+    const r1 = await s.workers.start("c1", { prompt: "run-b", worker_id: "wb", reserve: true }, "t-1");
+    const r2 = await s.workers.start("c1", { prompt: "run-c", worker_id: "wc", reserve: true }, "t-1");
+    assert.equal(r1.reserved, true);
+    assert.equal(r2.reserved, true);
+    await sleep(50);
+    assert.equal(s.call((c) => c.o.prompt === "run-b"), undefined, "資源待ちの間は始まらない");
+    assert.deepEqual(s.reservations.list().map((r) => r.workerId), ["wb", "wc"]);
+    // wa が終わる → 先頭の wb だけが起きる
+    s.call((c) => c.o.prompt === "run-a")!.release();
+    await until("wb が起きる", () => s.call((c) => c.o.prompt === "run-b") !== undefined);
+    await sleep(50);
+    assert.equal(s.call((c) => c.o.prompt === "run-c"), undefined, "1 本終わるたびに 1 本だけ");
+    s.call((c) => c.o.prompt === "run-b")!.release();
+    await until("wc が起きる", () => s.call((c) => c.o.prompt === "run-c") !== undefined);
+    assert.equal(s.reservations.count(), 0);
+    s.call((c) => c.o.prompt === "run-c")!.release();
+    laneCall(s, "t-1")!.release();
+    await p;
+  });
+});
+
+test("予約: 動いている worker が 0 本の時に来た予約はすぐ起きる", async () => {
+  await withSystem(undefined, async (s) => {
+    const p = s.send(task("t-1"));
+    await until("t-1 の指揮", () => laneCall(s, "t-1") !== undefined);
+    const r = await s.workers.start("c1", { prompt: "run-now", worker_id: "wn", reserve: true }, "t-1");
+    assert.equal(r.reserved, undefined, "貯めない");
+    await until("すぐ起きる", () => s.call((c) => c.o.prompt === "run-now") !== undefined);
+    assert.equal(s.reservations.count(), 0);
+    s.call((c) => c.o.prompt === "run-now")!.release();
+    laneCall(s, "t-1")!.release();
+    await p;
+  });
+});
+
+test("予約: 予約中の worker がある間、その task は終わらない（動いている扱い）", async () => {
+  await withSystem(undefined, async (s) => {
+    const p = s.send(task("t-1"));
+    await until("t-1 の指揮", () => laneCall(s, "t-1") !== undefined);
+    await s.workers.start("c1", { prompt: "run-a", worker_id: "wa" }, "t-1");
+    await s.workers.start("c1", { prompt: "run-b", worker_id: "wb", reserve: true }, "t-1");
+    laneCall(s, "t-1")!.release();
+    await p;
+    // wa が終わると wb が起きる。それまで（wb が終わるまで）t-1 は終わらない
+    s.call((c) => c.o.prompt === "run-a")!.release();
+    await until("wb が起きる", () => s.call((c) => c.o.prompt === "run-b") !== undefined);
+    await sleep(50);
+    assert.equal(tasksOf(s)["t-1"], "running");
+    s.call((c) => c.o.prompt === "run-b")!.release();
+    await until("t-1 が終わる", () => tasksOf(s)["t-1"] === "done");
+  });
+});
+
+test("予約: 予約が残っている間は task は running（worker が走っていなくても終わらない）", async () => {
+  await withSystem(undefined, async (s) => {
+    const p = s.send(task("t-1"));
+    await until("t-1 の指揮", () => laneCall(s, "t-1") !== undefined);
+    await s.workers.start("c1", { prompt: "run-a", worker_id: "wa" }, "t-1");
+    await s.workers.start("c1", { prompt: "run-b", worker_id: "wb", reserve: true }, "t-1");
+    assert.equal(s.reservations.reservedFor("c1", "t-1"), 1);
+    laneCall(s, "t-1")!.release();
+    await p;
+    await sleep(50);
+    assert.equal(tasksOf(s)["t-1"], "running", "予約中は終わらない");
+    // 予約を取り消す → worker も止めれば終われる
+    assert.equal((await s.workers.stop("c1", "wb", "t-1")).stopped, true);
+    s.call((c) => c.o.prompt === "run-a")!.release();
+    await until("t-1 が終わる", () => tasksOf(s)["t-1"] === "done");
   });
 });
 

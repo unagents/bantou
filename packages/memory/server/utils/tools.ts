@@ -1,5 +1,5 @@
 import type { McpRequestExtra } from "@nuxtjs/mcp-toolkit/server";
-import { recordEvent } from "./events";
+import { readHandoff, recordEvent } from "./events";
 import { buildContext, explain, recall } from "./recall";
 import { getRuntime } from "./runtime";
 import { buildStatus } from "./status";
@@ -32,4 +32,9 @@ export async function handleExplain(agentId: string, args: unknown) {
 export async function handleStatus(agentId: string) {
   const { db, embedder } = await getRuntime();
   return { ...(await buildStatus(db, agentId, embedder.model, workerState())) };
+}
+export async function handleHandoff(agentId: string, args: unknown) {
+  const { db } = await getRuntime();
+  const h = await readHandoff(db, agentId, args);
+  return h ?? { eventId: null, body: null, error: "その eventId の引継ぎは無い" };
 }

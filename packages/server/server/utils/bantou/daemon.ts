@@ -11,6 +11,7 @@ import {
   parseServerCommand,
   type ServerCommand,
   type ServerIdentityFields,
+  type ServerBoard,
   type ServerReply,
   type UpdateProgress,
   type UpdateWaitRun,
@@ -18,11 +19,14 @@ import {
 import { createActivityTracker } from "./activity";
 import { createAgentManager, type ActiveRun, type AgentManager, type CloseResult, type InvokeInput, type RunExtras } from "./agents";
 import { createWorkerCleaner } from "./cleanup";
-import { loadConfig } from "./config";
+import { DEFAULT_RESOURCE, loadConfig } from "./config";
 import { buildIdentity, loadOrCreateServerId } from "./identity";
 import { log } from "./log";
 import { buildExtraMcp, writeMcpConfigFile } from "./extra-mcp";
-import { CAP_ID_HEADER, TASK_ID_HEADER, WORKER_ID_HEADER, type McpListener } from "./mcp";
+import { CAP_ID_HEADER, TASK_ID_HEADER, WORKER_ID_HEADER, setPeerStatusHandler, type McpListener } from "./mcp";
+import { buildBoard, buildPeerStatus } from "./board";
+import { createResourceMonitor } from "./resources";
+import { createReservationQueue } from "./reservations";
 import { setBashWorkspace } from "./bash";
 import { agentDir, laneDir, runLogDir } from "./paths";
 import { CAP_GUIDE, WORKER_GUIDE, buildTaskPrompt, buildTaskResult } from "./prompts";
@@ -109,11 +113,16 @@ export function describeCommand(cmd: ServerCommand): string {
 export type StatusIdentity = ServerIdentityFields & { server_version?: string; protocol_version?: string };
 
 /** task の最初の指揮の run の入力（task の lane で動かす）。 */
-export function taskInvokeInput(cmd: Extract<ServerCommand, { type: "task" }>): InvokeInput {
+export function taskInvokeInput(cmd: Extract<ServerCommand, { type: "task" }>, sameBranch: string[] = []): InvokeInput {
   // goal 等から定型の文面を組み立てて cap の最初の指示にする（buildTaskPrompt）。
   // repo / branch は cap には渡さない（cap は git を触らない。clone するのは worker）。文面に載せて cap から worker へ伝える
+  // 同じ branch で終わっていない task があれば知らせる（server は待たせない。判断は cap）
+  const notice =
+    sameBranch.length > 0
+      ? `\n\n[同じ branch の task]\n同じ cap の task（${sameBranch.join(", ")}）が、同じ push 先 branch（${cmd.deliverables?.branch ?? ""}）で動いている。server は待たせない。同時の push が衝突しないよう、branch の分け方や push の順序を worker への指示で決める。`
+      : "";
   return {
-    prompt: buildTaskPrompt(cmd),
+    prompt: buildTaskPrompt(cmd) + notice,
     reason: `task ${cmd.task_id}`,
     ...(cmd.worker_model ? { worker_model: cmd.worker_model } : {}),
     taskId: cmd.task_id,
@@ -132,6 +141,8 @@ export async function execute(
    * status の cap に tasks を載せる。省略時は従来どおり cap の本体で 1 つずつ。
    */
   tasks?: Pick<TaskScheduler, "submit" | "stopCap" | "snapshot" | "waitingCount">,
+  /** 掲示板と予約。board = status_result に載せる掲示板、dropReservations = stop_cap でその cap の予約を捨てる（捨てた件数を返す）。 */
+  extra?: { board?: () => Promise<ServerBoard> | ServerBoard; dropReservations?: (capId: string) => number },
 ): Promise<ServerReply> {
   try {
     if (cmd.type === "kick_cap") {
@@ -158,7 +169,9 @@ export async function execute(
       // 止めるだけでなく会話（session_id）も破棄する。次の task は新しい会話で始まる。
       // task の待ち行列があれば、待っている task も止め、閉じ終わるまでその cap の task を始めない
       const close = (): Promise<CloseResult> => manager.close("cap", cmd.cap_id);
-      const { result: r, dropped } = tasks ? await tasks.stopCap(cmd.cap_id, close) : { result: await close(), dropped: 0 };
+      const { result: r, dropped: droppedTasks } = tasks ? await tasks.stopCap(cmd.cap_id, close) : { result: await close(), dropped: 0 };
+      // その cap の worker の予約も捨てる
+      const dropped = droppedTasks + (extra?.dropReservations?.(cmd.cap_id) ?? 0);
       return {
         bantou: PROTOCOL_VERSION,
         type: "stop_result",
@@ -183,7 +196,8 @@ export async function execute(
     // cap に task の状態（待ち・実行中・最近終わったもの。無ければ空）を載せ、まだ始まっていない task を queued に足す。
     // 空でも載せる（center は tasks があれば task_id で受付を確かめる）
     const caps = tasks ? st.caps.map((c) => ({ ...c, queued: c.queued + tasks.waitingCount(c.id), tasks: tasks.snapshot(c.id) })) : st.caps;
-    return { bantou: PROTOCOL_VERSION, type: "status_result", ok: true, ...(identity ?? {}), caps, workers: st.workers };
+    const board = extra?.board ? await extra.board() : undefined;
+    return { bantou: PROTOCOL_VERSION, type: "status_result", ok: true, ...(identity ?? {}), caps, workers: st.workers, ...(board !== undefined ? { board } : {}) };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     log(`エラー: ${cmd.type}: ${message}`);
@@ -380,13 +394,31 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
     },
   });
   /**
-   * task の待ち行列。task ごとに指揮（lane）を立てて並行に動かす。同時に動く数は session.maxParallelTasks まで、
-   * 同じ deliverables.branch の task は前の task が終わるまで待つ。task が終わる = 指揮・worker・report 起因の処理が全部無くなった時。
+   * worker の開始の予約（cap が資源が足りないと判断して reserve を付けたもの）。来た順に貯め、worker が 1 本終わるたびに先頭を 1 本起こす。
+   * 動いている worker が 0 本の時に来たらすぐ起こす。ファイルに残す（再起動の後も有効）。
+   */
+  const reservations = createReservationQueue({
+    file: join(config.workspace, "reservations.json"),
+    running: () => manager.activeCount().workers,
+    launch: (r) => workerHub.launchReserved(r),
+    changed: (capId) => tracker.touch(capId),
+    log,
+  });
+  /** host の資源の測定（掲示のためだけ。閾値は持たない）。 */
+  const resources = createResourceMonitor({
+    dir: config.workspace,
+    workers: () => manager.activeCount().workers,
+    sampleMs: config.resource?.sampleMs ?? DEFAULT_RESOURCE.sampleMs,
+    log,
+  });
+  /**
+   * task の待ち行列。task ごとに指揮（lane）を立てて並行に動かす。並行の上限は無い（利用者が session.maxParallelTasks を置いた時だけ効く）。
+   * 同じ deliverables.branch の task も待たせず、cap に知らせる。task が終わる = 指揮・worker・予約・report 起因の処理が全部無くなった時。
    */
   const scheduler: TaskScheduler = createTaskScheduler({
-    maxParallel: config.session.maxParallelTasks,
-    run: (cmd) => manager.invoke("cap", cmd.cap_id, taskInvokeInput(cmd)),
-    busy: (capId, taskId) => manager.laneBusy(capId, taskId) || hub.pendingFor(capId, taskId) > 0,
+    ...(config.session.maxParallelTasks !== undefined ? { maxParallel: config.session.maxParallelTasks } : {}),
+    run: (cmd, info) => manager.invoke("cap", cmd.cap_id, taskInvokeInput(cmd, info.sameBranch)),
+    busy: (capId, taskId) => manager.laneBusy(capId, taskId) || hub.pendingFor(capId, taskId) > 0 || reservations.reservedFor(capId, taskId) > 0,
     changed: (capId) => tracker.touch(capId),
     saveMeta: (cmd, meta) => writeLaneMeta(laneDir(config.workspace, cmd.cap_id, cmd.task_id), { task_id: cmd.task_id, ...meta, prompt: taskInvokeInput(cmd).prompt }),
     loadMeta: async (capId, taskId) => {
@@ -412,7 +444,7 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
     rm(join(runLogDir(laneDir(config.workspace, capId, taskId)), "mcp.json"), { force: true }).catch((e: unknown) =>
       log(`lane の mcp.json を消せない: cap_id=${capId} task_id=${taskId} ${e instanceof Error ? e.message : String(e)}`),
     );
-  log(`task の同時実行の上限: cap ごとに ${config.session.maxParallelTasks}（同じ deliverables.branch の task は順に）`);
+  log(`task の同時実行の上限: ${config.session.maxParallelTasks !== undefined ? `cap ごとに ${config.session.maxParallelTasks}（利用者の設定）` : "なし"}（同じ deliverables.branch の task も待たせず、cap に知らせる）`);
   const cleaner = createWorkerCleaner({
     workspace: config.workspace,
     keepMs: config.session.workerKeepMs,
@@ -422,7 +454,24 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
     forget: (id) => tracker.forget("worker", id),
     log,
   });
-  const workerHub = createWorkerHub({ workspace: config.workspace, manager, activity: tracker, log, cleaner, taskActive: (capId, taskId) => scheduler.isActive(capId, taskId) });
+  const workerHub = createWorkerHub({ workspace: config.workspace, manager, activity: tracker, log, cleaner, taskActive: (capId, taskId) => scheduler.isActive(capId, taskId), reservations });
+  /** server の掲示板（cap・worker の数・資源・予約の件数。数と資源だけ）。 */
+  const buildServerBoard = async (): Promise<ServerBoard> => {
+    const st = await manager.status();
+    return buildBoard({
+      caps: st.caps,
+      activity: tracker.snapshot(),
+      workers: manager.activeCount().workers,
+      taskCounts: (capId) => {
+        const t = scheduler.snapshot(capId);
+        return { running: t.filter((x) => x.state === "running").length, waiting: t.filter((x) => x.state === "waiting").length };
+      },
+      reservedOf: (capId) => reservations.count(capId),
+      reservedTotal: reservations.count(),
+      resources: resources.latest(),
+      maxParallelTasks: config.session.maxParallelTasks,
+    });
+  };
   const reaped = await manager.reapOrphans();
   log(`孤児回収: killed=${reaped.killed} failed=${reaped.failed} error=${reaped.errored}`);
   // 閉じた cap の印（再起動をまたぐ）。worker の終了の回収（exitWatcher.recover）より前に読む
@@ -633,7 +682,10 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
           const capId = commandCapId(cmd);
           if (capId !== undefined && cmd.type !== "kick_cap" && cmd.type !== "task") await hub.noteCenter(capId, m.from_id, m.from_name || undefined);
           // execute は task を同期で待ち行列へ入れる（submit）。入れた所で次の task の受け付けを通す
-          const running = execute(cmd, manager, workerHub, { ...identity, server_version: serverVersion, protocol_version: MESSENGER_PROTOCOL.version }, scheduler);
+          const running = execute(cmd, manager, workerHub, { ...identity, server_version: serverVersion, protocol_version: MESSENGER_PROTOCOL.version }, scheduler, {
+            board: buildServerBoard,
+            dropReservations: (id) => reservations.dropCap(id),
+          });
           accepted?.();
           reply = await running;
         } finally {
@@ -700,7 +752,14 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
     return hub.report(capId, workerId, kind, text);
   });
   setWorkerHandler(workerHub);
+  setPeerStatusHandler(async (capId) => {
+    // cap が見る時は今測る（掲示の周期を待たない）
+    await resources.sample().catch(() => undefined);
+    return buildPeerStatus(capId, await buildServerBoard(), (id) => manager.isActive("cap", id));
+  });
   setBashWorkspace(config.workspace);
+  // 前回の予約を読み込む（動いている worker が 0 本なら先頭をすぐ起こす）
+  await reservations.load();
   // 起動時に回収した running は lost として center へ知らせる
   for (const r of reaped.reaped) {
     const capId = r.kind === "cap" ? r.id : await readOwner(config.workspace, r.id);
@@ -716,6 +775,8 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
       // 実行中の claude を止め、中断の返信を出し切るのを少し待つ
       setReportHandler(undefined);
       setWorkerHandler(undefined);
+      setPeerStatusHandler(undefined);
+      resources.close();
       setBashWorkspace(undefined);
       hub.close();
       scheduler.close("server 終了により中断");
