@@ -203,7 +203,7 @@ export function registerTools(
     "session_list",
     {
       title: "session 一覧",
-      description: "center が監視する全 session（config の project と session_create で作ったもの）の状態を返す。source で区別できる。activity（working / needs-input / idle / unknown）と activityAt は claude の作業状態（unknown = 不明・停止中）",
+      description: "center が監視する全 session（config の project と session_create で作ったもの）の状態を返す。source で区別できる。activity（working = cap 本体が実行中で入力に反応できない / needs-input = 返答待ち / idle = 待機 / unknown = 不明・停止中）と activityAt は cap（claude 本体）の状態、background { subagents, tasks } は session の中で続く subagent・background の実行の数（idle でも 0 でなければ作業は進行中）",
     },
     () => guard(() => json(sessions.list())),
   );

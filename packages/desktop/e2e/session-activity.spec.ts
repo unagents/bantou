@@ -41,6 +41,7 @@ const setRemote = (page: Page, name: string, remote: { running: number; waitingR
 /** Any click in the window re-reads the center first. */
 const act = (page: Page) => page.locator("header h1").click();
 const mark = (page: Page, name: string) => sideRow(page, name).getByTestId("session-activity");
+const progressMark = (page: Page, name: string) => sideRow(page, name).getByTestId("session-progress");
 const count = (page: Page, key: string) => page.getByTestId(`session-activity-summary-${key}`);
 
 test.describe("session activity", () => {
@@ -55,9 +56,10 @@ test.describe("session activity", () => {
     await setActivity(page, "careery", "unknown");
     await act(page);
     await expect(mark(page, "stroke-board")).toHaveAttribute("data-activity", "working");
+    await expect(progressMark(page, "stroke-board")).toHaveCount(1);
     await expect(mark(page, "stroke-board")).toHaveText("");
-    await expect(mark(page, "stroke-board")).toHaveAttribute("title", /^作業中: /);
-    await expect(mark(page, "stroke-board")).toHaveAttribute("aria-label", /^作業中: /);
+    await expect(mark(page, "stroke-board")).toHaveAttribute("title", /^cap 処理中: /);
+    await expect(mark(page, "stroke-board")).toHaveAttribute("aria-label", /^cap 処理中: /);
     await expect(mark(page, "agent-messenger")).toHaveAttribute("data-activity", "idle");
     await expect(mark(page, "agent-messenger")).toHaveText("");
     await expect(mark(page, "agent-messenger")).toHaveAttribute("title", /^待機: /);
@@ -65,23 +67,23 @@ test.describe("session activity", () => {
     // careery: center says unknown, but its task has a waiting thread → needs-input
     await expect(mark(page, "careery")).toHaveAttribute("data-activity", "needs-input");
     await expect(mark(page, "careery")).toHaveText("");
-    await expect(mark(page, "careery")).toHaveAttribute("title", /^判断待ち: /);
-    await expect(mark(page, "careery")).toHaveAttribute("aria-label", /^判断待ち: /);
+    await expect(mark(page, "careery")).toHaveAttribute("title", /^返答待ち: /);
+    await expect(mark(page, "careery")).toHaveAttribute("aria-label", /^返答待ち: /);
     await expect(page.getByTestId("session-activity-summary")).toBeVisible();
     // chips: icon + count only; the label is in title / aria-label
-    await expect(count(page, "working")).toHaveText("1");
-    await expect(count(page, "working")).toHaveAttribute("data-count", "1");
-    await expect(count(page, "working")).toHaveAttribute("title", "作業中");
-    await expect(count(page, "working")).toHaveAttribute("aria-label", "作業中 1");
+    await expect(count(page, "progress")).toHaveText("1");
+    await expect(count(page, "progress")).toHaveAttribute("data-count", "1");
+    await expect(count(page, "progress")).toHaveAttribute("title", "作業進行中");
+    await expect(count(page, "progress")).toHaveAttribute("aria-label", "作業進行中 1");
     await expect(count(page, "needs-input")).toHaveText("1");
     await expect(count(page, "needs-input")).toHaveAttribute("data-count", "1");
-    await expect(count(page, "needs-input")).toHaveAttribute("title", "判断待ち");
+    await expect(count(page, "needs-input")).toHaveAttribute("title", "返答待ち");
     await expect(count(page, "needs-input")).toHaveClass(/text-warning/);
     await expect(count(page, "idle")).toHaveText("1");
     await expect(count(page, "idle")).toHaveAttribute("data-count", "1");
     await expect(count(page, "idle")).toHaveAttribute("title", "待機");
     // no label text anywhere in the summary or on the rows' marks
-    await expect(page.getByTestId("session-activity-summary")).not.toContainText(/作業中|判断待ち|待機/);
+    await expect(page.getByTestId("session-activity-summary")).not.toContainText(/作業進行中|返答待ち|待機/);
     // header counts threads, not sessions
     await expect(page.locator("header")).toContainText("返答待ち 1");
   });
@@ -95,7 +97,7 @@ test.describe("session activity", () => {
     await expect(mark(page, "stroke-board")).toHaveAttribute("data-activity", "needs-input");
     await expect(mark(page, "agent-messenger")).toHaveCount(0);
     await expect(count(page, "needs-input")).toHaveAttribute("data-count", "2");
-    await expect(count(page, "working")).toHaveAttribute("data-count", "0");
+    await expect(count(page, "progress")).toHaveAttribute("data-count", "0");
     await setActivity(page, "stroke-board", "unknown");
     await act(page);
     await expect(mark(page, "stroke-board")).toHaveCount(0);
@@ -124,35 +126,55 @@ test.describe("session activity", () => {
     await expect(sideRow(page, "stroke-board")).toBeVisible();
     await expect(sideRow(page, "careery")).toBeVisible();
     // the filter releases itself when its state disappears
-    await count(page, "working").click();
+    await count(page, "progress").click();
     await expect(sideRow(page, "careery")).toHaveCount(0);
     await setActivity(page, "stroke-board", "idle");
     await act(page);
     await expect(sideRow(page, "careery")).toBeVisible();
   });
 
-  test("remote running shows the remote-working icon when claude is idle, counts as 作業中 and is kept by its filter", async ({ page }) => {
+  test("remote running shows the progress mark while the cap stays idle; it counts as 作業進行中 and is kept by its filter", async ({ page }) => {
     await page.goto("/");
     await pickSession(page, "stroke-board");
     await setActivity(page, "stroke-board", "idle");
     await setRemote(page, "stroke-board", { running: 2, waitingReply: 0 });
     await setActivity(page, "agent-messenger", "idle");
     await act(page);
-    await expect(mark(page, "stroke-board")).toHaveAttribute("data-activity", "remote-working");
-    await expect(mark(page, "stroke-board")).toHaveText("");
-    await expect(mark(page, "stroke-board")).toHaveAttribute("title", /^remote 作業中: /);
-    await expect(mark(page, "stroke-board")).toHaveAttribute("aria-label", /^remote 作業中: /);
+    // the cap itself is just waiting (待機) while remote work is in progress: two separate axes
+    await expect(mark(page, "stroke-board")).toHaveAttribute("data-activity", "idle");
+    await expect(progressMark(page, "stroke-board")).toHaveAttribute("title", /^作業進行中: .*remote の作業 2 件/);
+    await expect(progressMark(page, "stroke-board")).toHaveAttribute("aria-label", /^作業進行中: /);
     await expect(mark(page, "agent-messenger")).toHaveAttribute("data-activity", "idle");
-    // summary: remote-working is a 作業中 (no extra chip)
-    await expect(count(page, "working")).toHaveAttribute("data-count", "1");
-    await expect(count(page, "idle")).toHaveAttribute("data-count", "1");
+    await expect(progressMark(page, "agent-messenger")).toHaveCount(0);
+    await expect(count(page, "progress")).toHaveAttribute("data-count", "1");
+    await expect(count(page, "idle")).toHaveAttribute("data-count", "2");
     await expect(page.getByTestId("session-activity-summary").locator("button")).toHaveCount(3);
-    await count(page, "working").click();
+    await count(page, "progress").click();
     await expect(sideRow(page, "stroke-board")).toBeVisible();
     await expect(sideRow(page, "agent-messenger")).toHaveCount(0);
   });
 
-  test("remote waitingReply shows 判断待ち with the unanswered count in the tooltip", async ({ page }) => {
+  test("a subagent / background run keeps 作業進行中 while the cap is idle, and it goes out when they end", async ({ page }) => {
+    await page.goto("/");
+    await pickSession(page, "careery");
+    await setActivity(page, "stroke-board", "idle");
+    await withMock(page, (m) => {
+      const s = m.centerSessions.find((x) => x.name === "stroke-board");
+      if (s) s.background = { subagents: 1, tasks: 2 };
+    });
+    await act(page);
+    await expect(mark(page, "stroke-board")).toHaveAttribute("data-activity", "idle");
+    await expect(progressMark(page, "stroke-board")).toHaveAttribute("title", /subagent 1 件、background の実行 2 件/);
+    await withMock(page, (m) => {
+      const s = m.centerSessions.find((x) => x.name === "stroke-board");
+      if (s) s.background = { subagents: 0, tasks: 0 };
+    });
+    await act(page);
+    await expect(progressMark(page, "stroke-board")).toHaveCount(0);
+    await expect(mark(page, "stroke-board")).toHaveAttribute("data-activity", "idle");
+  });
+
+  test("remote waitingReply shows 返答待ち with the unanswered count in the tooltip", async ({ page }) => {
     await page.goto("/");
     await pickSession(page, "careery");
     await setActivity(page, "stroke-board", "idle");
@@ -162,10 +184,10 @@ test.describe("session activity", () => {
     await expect(mark(page, "stroke-board")).toHaveAttribute("title", /worker の質問に未返答 3 件/);
     // careery (thread waiting) + stroke-board (remote ask) = 2 sessions
     await expect(count(page, "needs-input")).toHaveAttribute("data-count", "2");
-    await expect(count(page, "working")).toHaveAttribute("data-count", "0");
+    await expect(count(page, "progress")).toHaveAttribute("data-count", "0");
   });
 
-  test("priority: claude needs-input > remote waitingReply > claude working > remote running > idle; stopped keeps its own display", async ({ page }) => {
+  test("priority of the cap's state: claude needs-input > remote waitingReply > remote trouble > claude working / idle (work in progress is a separate mark); stopped keeps its own display", async ({ page }) => {
     await page.goto("/");
     await pickSession(page, "careery");
     await setRemote(page, "stroke-board", { running: 1, waitingReply: 0 });
@@ -183,7 +205,8 @@ test.describe("session activity", () => {
     await setRemote(page, "stroke-board", { running: 1, waitingReply: 0 });
     await setActivity(page, "stroke-board", "unknown");
     await act(page);
-    await expect(mark(page, "stroke-board")).toHaveAttribute("data-activity", "remote-working");
+    await expect(mark(page, "stroke-board")).toHaveCount(0);
+    await expect(progressMark(page, "stroke-board")).toHaveCount(1);
     // not connected: remote running is not shown, an unanswered ask still is
     await setActivity(page, "stroke-board", "idle", "stopped");
     await act(page);
@@ -207,7 +230,7 @@ test.describe("session activity", () => {
     await setRemote(page, "stroke-board", { running: 1, waitingReply: 0 });
     // no click: only the event
     await withMock(page, (m) => m.centerSessionsChanged("remote", "stroke-board"));
-    await expect(mark(page, "stroke-board")).toHaveAttribute("data-activity", "remote-working");
+    await expect(progressMark(page, "stroke-board")).toHaveCount(1);
   });
 
   test("screenshot", async ({ page }) => {

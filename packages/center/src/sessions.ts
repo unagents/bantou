@@ -13,7 +13,7 @@ import type { RcStatus, RemoteControlSupervisor } from "./remote-control.js";
 import type { EventHub } from "./events.js";
 import type { JsonListStore, JsonObjectStore } from "./store.js";
 import type { ContextUsage } from "./context-usage.js";
-import type { SessionActivityView } from "./session-activity.js";
+import type { SessionActivityView, SessionBackground } from "./session-activity.js";
 import type { RemoteSummary } from "./remotes.js";
 
 export const SESSION_NAME = /^[A-Za-z0-9_-]+$/;
@@ -45,12 +45,14 @@ export interface SessionInfo {
   /** claude のコンテキスト使用状況。まだ分からない（transcript が無い等）時は null。 */
   contextUsage: ContextUsage | null;
   /**
-   * 作業状態。working = turn 実行中 / needs-input = 利用者の入力待ち（permission・AskUserQuestion・plan 承認）/ idle = turn が終わり次の指示待ち / unknown = 不明（停止中・起動し直し直後・center 再起動直後）。
+   * cap（claude 本体）の状態。working = 本体が turn を実行中で入力に反応できない / needs-input = 利用者の返答待ち（permission・AskUserQuestion・plan 承認）/ idle = 待機（作業の進行の有無に左右されない。subagent や background が動いていても idle）/ unknown = 不明（停止中・起動し直し直後・center 再起動直後）。
    * unknown の時、desktop は何も表示しない。thread の ask（waiting）は center の知らない desktop 側の情報なので、ここには含まない。
    */
   activity: SessionActivityView["activity"];
   /** activity が最後に変わった時刻（ISO）。unknown の時は null。 */
   activityAt: string | null;
+  /** cap（claude 本体）とは別に session の中で続いている作業（subagent・background の実行）の数。activity が idle でも 0 でなければ作業は進んでいる。 */
+  background: SessionBackground;
   /** その session の cap（remote）の集計。running = 未完了の指示がある server の数、waitingReply = worker_reply が未返答の ask / approve の数。cap が無ければ 0 / 0。 */
   remote: RemoteSummary;
   /** 起動時に追加指示（instructions）を付けたか。本文は出さない。 */
@@ -248,7 +250,7 @@ export function createSessionManager(opts: {
     source: saved.has(s.project) ? "session" : "config",
     ...(s.lastError ? { lastError: s.lastError } : {}),
     contextUsage: opts.contextUsage?.(s.project) ?? null,
-    ...(opts.activity?.(s.project, s.startedAt, s.state === "starting" || s.state === "connected") ?? { activity: "unknown" as const, activityAt: null }),
+    ...(opts.activity?.(s.project, s.startedAt, s.state === "starting" || s.state === "connected") ?? { activity: "unknown" as const, activityAt: null, background: { subagents: 0, tasks: 0 } }),
     remote: opts.remote?.(s.project) ?? { running: 0, waitingReply: 0 },
     instructions: s.instructions,
     auth: s.auth,

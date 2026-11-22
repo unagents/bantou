@@ -1,18 +1,19 @@
 import { centerGetSettings, sleepSession, wakeSession } from "#bantou-ui/api";
-import type { SessionActivity } from "#bantou-ui/types";
 import type { SessionGroup, useBoard } from "./useBoard";
 
 type Board = ReturnType<typeof useBoard>;
 
-export type ChipKey = Exclude<SessionActivity, "remote-working">;
+/** The summary chips: "progress" = work in progress (a separate axis from the cap's state), the rest = the cap's state. */
+export type ChipKey = "progress" | "needs-input" | "idle" | "remote-unreachable" | "remote-lost" | "remote-stopped";
 
 /** hideZero: shown only while at least one session is in that state (the three work states are always shown). */
 export const ACTIVITY_CHIPS: { key: ChipKey; label: string; icon: string; hideZero?: boolean; cls?: string }[] = [
-  { key: "working", label: "作業中", icon: "i-lucide-loader-circle" },
-  { key: "needs-input", label: "判断待ち", icon: "i-lucide-message-circle-question" },
+  { key: "progress", label: "作業進行中", icon: "i-lucide-loader-circle" },
+  { key: "needs-input", label: "返答待ち", icon: "i-lucide-message-circle-question" },
   { key: "idle", label: "待機", icon: "i-lucide-circle-check" },
   { key: "remote-unreachable", label: "到達不能", icon: "i-lucide-server-off", hideZero: true, cls: "text-error" },
   { key: "remote-lost", label: "lost", icon: "i-lucide-unplug", hideZero: true, cls: "text-error" },
+  { key: "remote-stopped", label: "停止", icon: "i-lucide-octagon-alert", hideZero: true, cls: "text-error" },
 ];
 
 /**
@@ -90,7 +91,7 @@ export function useSessionBoard(board: Pick<Board, "sessions" | "centerList" | "
   // --- work state summary / filter (side menu) -----------------------------
 
   /** Narrow the rows to one work state (click again to release). Memory only. */
-  const activityFilter = ref<SessionActivity | null>(null);
+  const activityFilter = ref<ChipKey | null>(null);
   function toggleFilter(k: ChipKey) {
     activityFilter.value = activityFilter.value === k ? null : k;
   }
@@ -100,9 +101,7 @@ export function useSessionBoard(board: Pick<Board, "sessions" | "centerList" | "
   });
   const sideRows = computed<SessionGroup[]>(() =>
     activityFilter.value
-      ? sessions.value.filter((g) =>
-          activityFilter.value === "working" ? g.activity === "working" || g.activity === "remote-working" : g.activity === activityFilter.value,
-        )
+      ? sessions.value.filter((g) => (activityFilter.value === "progress" ? g.progress !== null : g.activity === activityFilter.value))
       : sessions.value,
   );
   const selectedGroup = computed(() => sessions.value.find((g) => g.name === selectedName.value));
