@@ -190,3 +190,26 @@ test("止まった印(定期の掬い上げ): activity が「動いている」�
   assert.equal(pushes(sent, "[bantou] remote 完了").length, 1);
   assert.equal(mgr.list()[0].pending.length, 0);
 });
+
+test("止まった印(定期の掬い上げ・結果なし): 再起動後、task_result が来ず、activity は running のまま途絶え、status は idle。周期の確認で no_result の印と push 1 回。次の remote_send で消える", async () => {
+  const a = setup();
+  await a.mgr.send({ owner: "pm1", goal: "go" });
+  a.st.running = false; // cap は task の途中でターンを終えて止まった。task_result は返らないまま center が再起動した
+  a.activity.apply(notice("running"), "id-a"); // 最後の activity は running。この後 server から来ない
+  const sent: { owner: string; text: string }[] = [];
+  const mgr2 = createRemoteManager({ link: a.link, store: a.store, log: () => {}, capId: CENTER, activity: a.activity, graceMs: 60, pollMs: 40, ackTimeoutMs: 200, ackPollMs: 10, reachCheckMs: 0, notify: async (owner, text) => (sent.push({ owner, text }), { ok: true as const }) });
+  await mgr2.restore();
+  await mgr2.checkReachability(); // 周期の確認（status は idle）
+  await sleep(300);
+  const sum = mgr2.summary("pm1");
+  assert.equal(sum.stopped?.length, 1);
+  assert.equal(sum.stopped?.[0].kind, "no_result");
+  assert.equal(pushes(sent, "[bantou] remote 完了").length, 1);
+  assert.match(sent[0].text, /note: task の結果が返らないまま/);
+  await mgr2.checkReachability(); // 周期を重ねても重複しない
+  await sleep(150);
+  assert.equal(pushes(sent, "[bantou] remote 完了").length, 1);
+  a.st.running = true;
+  await mgr2.send({ owner: "pm1", goal: "next" });
+  assert.equal(mgr2.summary("pm1").stopped, undefined);
+});
