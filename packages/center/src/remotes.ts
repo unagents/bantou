@@ -1796,7 +1796,8 @@ export function createRemoteManager(opts: {
       (cap === undefined || (cap.state !== "running" && (cap.queued ?? 0) === 0)) &&
       (a === undefined || a.received_ms_ago >= Date.now() - snap.at);
     if (!idle || !snap) {
-      if (!waiting || snap === undefined || Date.now() - snap.at <= reachCheckMs * 2 + 1000) inflightIdle.delete(r);
+      // 「連続」: idle と見えない周期（動いている・古い status・返信待ちなし）が来たら数えを消す
+      inflightIdle.delete(r);
       return;
     }
     const prev = inflightIdle.get(r);

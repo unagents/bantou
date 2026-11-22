@@ -290,3 +290,57 @@ test("止まった印(返信待ちのまま止まった): 返信待ちが transp
   assert.equal(mgr.summary("pm1").stopped, undefined, "返信待ちが閉じたので no_result の印は消える");
   assert.equal(pushes(sent, "[bantou] remote 完了").length, 1, "閉じた事で通知は増えない");
 });
+
+test("止まった印(返信待ちのまま止まった): 返信待ちが server の error で閉じたら、no_result の印は消えて failed の印だけが残る", async () => {
+  const { mgr, st, sent } = setup();
+  await mgr.send({ owner: "pm1", goal: "go" });
+  st.running = false;
+  await mgr.checkReachability();
+  await sleep(5);
+  await mgr.checkReachability();
+  await tick();
+  assert.equal(mgr.summary("pm1").stopped?.[0].kind, "no_result");
+  st.running = true;
+  st.results[0]({ bantou: 1, type: "error", ok: false, message: "task を断った" });
+  await sleep(300);
+  assert.deepEqual((mgr.summary("pm1").stopped ?? []).map((s) => s.kind), ["failed"]);
+  assert.doesNotMatch(pushes(sent, "[bantou] remote 完了").slice(1).map((x) => x.text).join("\n"), /note: task の結果が返らないまま/);
+});
+
+test("止まった印(返信待ちのまま止まった): 返信待ちが failed の結果で閉じたら、no_result と failed の印・知らせが重ならない", async () => {
+  const { mgr, st, sent } = setup();
+  const r = await mgr.send({ owner: "pm1", goal: "go" });
+  st.running = false;
+  await mgr.checkReachability();
+  await sleep(5);
+  await mgr.checkReachability();
+  await tick();
+  assert.equal(mgr.summary("pm1").stopped?.[0].kind, "no_result");
+  assert.equal(pushes(sent, "[bantou] remote 完了").length, 1);
+  st.results[0](result(r.task_id, "failed", "boom", "boom error"));
+  await sleep(300);
+  const stopped = mgr.summary("pm1").stopped ?? [];
+  assert.deepEqual(stopped.map((s) => s.kind), ["failed"], "印は failed だけ");
+  const done = pushes(sent, "[bantou] remote 完了");
+  assert.equal(done.length, 2, "止まった知らせ 1 回 + 失敗の知らせ 1 回");
+  assert.doesNotMatch(done[1].text, /note: task の結果が返らないまま/, "失敗の知らせに no_result の note は載らない");
+});
+
+test("止まった印(返信待ちのまま止まった): 古い status が来たら「連続」の数えを消す（合算で閾値に達しない）", async () => {
+  const { mgr, st, sent } = setup();
+  await mgr.send({ owner: "pm1", goal: "go" });
+  st.running = false;
+  await mgr.checkReachability(); // idle 1 回目
+  await sleep(1100); // 古い status になるまで待つ（reachCheckMs*2+1000 を超える）
+  st.down = true; // status が取れず、snapshot は古いまま
+  await mgr.checkReachability();
+  st.down = false;
+  await mgr.checkReachability(); // 新しい idle。数えが消えていれば 1 回目
+  await tick();
+  assert.equal(mgr.summary("pm1").stopped, undefined, "古い status を挟んだので連続ではない");
+  assert.equal(pushes(sent, "[bantou] remote 完了").length, 0);
+  await sleep(5);
+  await mgr.checkReachability(); // 連続 2 回目
+  await tick();
+  assert.equal(mgr.summary("pm1").stopped?.[0].kind, "no_result");
+});
