@@ -86,10 +86,12 @@ export interface Session {
   contextUsage: ContextUsage | null;
   /** The session was started with the session instructions (the text itself is not sent). */
   instructions: boolean;
-  /** The center's work state (`unknown`/null: show nothing). Mirror of `session_list` `activity`. */
+  /** The cap's (the session's claude) own state (`unknown`/null: show nothing). Mirror of `session_list` `activity`: working = the cap itself is busy and cannot react to input, needs-input = waiting for the person's reply, idle = just waiting (whether or not work is going on elsewhere). */
   activity: "working" | "needs-input" | "idle" | "unknown" | null;
   /** When `activity` last changed (ISO string). null: none. */
   activityAt: string | null;
+  /** Work going on inside the session apart from the cap's own turn (subagents, background runs). null: the center sent none (older center). */
+  background: SessionBackground | null;
   /** Work left on remote-caps (`session_list` `remote`). null: the center sent none (older center). */
   remote: SessionRemote | null;
   /** The claude's auth state (null: an older center that does not report it). */
@@ -100,8 +102,17 @@ export interface Session {
   sleeping: boolean;
 }
 
-/** The work state shown on the side menu (`unknown` is not shown). */
-export type SessionActivity = "working" | "needs-input" | "idle" | "remote-working" | "remote-unreachable" | "remote-lost";
+/** `session_list[].background` of the center: subagents and background runs (shell / monitor / workflow …) still going on in the session. */
+export interface SessionBackground {
+  subagents: number;
+  tasks: number;
+}
+
+/**
+ * The cap's state shown on the side menu (`unknown` is not shown), apart from the "work in progress" mark (`SessionGroup.progress`).
+ * working = the cap itself is busy and cannot react to input / needs-input = waiting for a reply / idle = just waiting.
+ */
+export type SessionActivity = "working" | "needs-input" | "idle" | "remote-unreachable" | "remote-lost";
 
 /** A remote-cap whose server does not answer (`lastOkAt`: the last answer, ISO; null: none yet) or that the server reported lost (`at`: when, ISO). `server` is the center's label for the server. */
 export interface RemoteIssue {

@@ -154,6 +154,9 @@ pub struct Session {
     /// When `activity` last changed (ISO string); None when unknown.
     #[serde(default)]
     pub activity_at: Option<String>,
+    /// Work going on in the session apart from the cap's own turn (`subagents`, background runs `tasks`). None when the center is older than this field.
+    #[serde(default)]
+    pub background: Option<SessionBackground>,
     /// Work the session left on remote-caps (`running` servers with pending work, `waitingReply` unanswered worker asks). None when the center is older than this field.
     #[serde(default)]
     pub remote: Option<SessionRemote>,
@@ -169,6 +172,16 @@ pub struct Session {
     /// Center's `sleeping`: the session's claude is stopped (conversation kept; it wakes when opened or addressed on the messenger). false when the center says no or is older than this field.
     #[serde(default)]
     pub sleeping: bool,
+}
+
+/// Mirror of the center's `session_list[].background`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionBackground {
+    #[serde(default)]
+    pub subagents: u32,
+    #[serde(default)]
+    pub tasks: u32,
 }
 
 /// Mirror of the center's `session_list[].remote`.
@@ -419,6 +432,7 @@ mod tests {
             instructions: false,
             activity: None,
             activity_at: None,
+            background: None,
             remote: None,
             auth: Some("ok".into()),
             login_url: None,
@@ -513,6 +527,15 @@ mod tests {
         assert!(!off.instructions);
         let old: Session = serde_json::from_str(r#"{"name":"a"}"#).unwrap();
         assert!(!old.instructions);
+    }
+
+    #[test]
+    fn background_is_read_when_the_center_sends_it_and_none_otherwise() {
+        let s: Session = serde_json::from_str(r#"{"name":"a","background":{"subagents":2,"tasks":1}}"#).unwrap();
+        assert_eq!(s.background, Some(SessionBackground { subagents: 2, tasks: 1 }));
+        assert_eq!(serde_json::to_value(&s).unwrap()["background"]["subagents"], 2);
+        let old: Session = serde_json::from_str(r#"{"name":"a"}"#).unwrap();
+        assert_eq!(old.background, None);
     }
 
     #[test]

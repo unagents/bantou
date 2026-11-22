@@ -223,6 +223,7 @@ export class MockBantou {
       instructions: (e.instructions as boolean | undefined) ?? false,
       activity: (e.activity as Session["activity"] | undefined) ?? null,
       activityAt: (e.activityAt as string | undefined) ?? null,
+      background: (e.background as Session["background"] | undefined) ?? null,
       remote: (e.remote as Session["remote"] | undefined) ?? null,
       auth: (e.auth as Session["auth"] | undefined) ?? null,
       loginUrl: (e.loginUrl as string | undefined) ?? null,

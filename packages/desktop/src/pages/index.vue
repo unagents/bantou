@@ -195,8 +195,9 @@ watch(modalOpen, (v) => {
                   class="ml-auto shrink-0"
                   data-testid="side-sleeping"
                 />
-                <SessionActivityMark v-if="g.activity" :activity="g.activity" :waiting-reply="g.remoteWaiting" :issues="g.remoteIssues" class="ml-auto" />
-                <ContextUsage :usage="g.contextUsage" percent-only :class="g.activity ? '' : 'ml-auto'" data-scope="side" />
+                <SessionProgressMark v-if="g.progress" :progress="g.progress" class="ml-auto" />
+                <SessionActivityMark v-if="g.activity" :activity="g.activity" :waiting-reply="g.remoteWaiting" :issues="g.remoteIssues" :class="g.progress ? '' : 'ml-auto'" />
+                <ContextUsage :usage="g.contextUsage" percent-only :class="g.activity || g.progress ? '' : 'ml-auto'" data-scope="side" />
               </button>
               <UButton
                 class="rounded-none"

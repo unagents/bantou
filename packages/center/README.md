@@ -489,7 +489,8 @@ session（`session_create` で作った wrapper 経由の claude。master-cap �
 session（`session_create` で作った wrapper 経由の claude。config 由来の project は対象外）ごとの作業状態を `session_list` の `activity` に載せる。`src/session-activity.ts`。pty 出力の文字列解析はしない。
 
 - `session_list` の各要素: `"activity": "working" | "needs-input" | "idle" | "unknown"`、`"activityAt": "<ISO>" | null`（最後に状態が変わった時刻。unknown は null）。既存の `state`（stopped / starting / connected / error）はそのまま。
-  - `working` = turn 実行中 / `needs-input` = 利用者の入力待ち（permission の確認、AskUserQuestion、plan 承認） / `idle` = turn が終わり次の指示待ち / `unknown` = 不明（表示しない）。
+  - cap（claude 本体）の状態。`working` = 本体が turn を実行中で利用者の入力に反応できない / `needs-input` = 利用者の返答待ち（permission の確認、AskUserQuestion、plan 承認） / `idle` = 待機（作業の進行の有無に左右されない。subagent や background が動いていても idle） / `unknown` = 不明（表示しない）。
+  - `"background": { "subagents": n, "tasks": n }`: cap 本体とは別の軸。session の中で続いている subagent（`SubagentStart` ～ `SubagentStop`）と background の実行（shell / monitor / workflow など）の数。`activity` が idle でも 0 でなければ作業は進行中。取得元は `Stop` の `background_tasks`（公式: 「今 in-flight の task」の配列。`type` = shell / subagent / monitor / workflow / teammate …）と `SubagentStart` / `SubagentStop`。`Stop` の時点で数え直す（`SubagentStop` を取りこぼした subagent は次の `Stop` で消える）。`background_tasks` の無い（古い）claude では `SubagentStart` / `SubagentStop` の対だけで数える。subagent の中の hook（`agent_id` 付きの `PreToolUse` / `PostToolUse`）は cap 本体の状態を変えない（本体が待機の間に subagent が動いても cap は idle のまま）。subagent の許可待ち（`PermissionRequest`）だけは needs-input。
   - thread の ask（status `waiting`）は desktop 側の情報で center は持たないので、`activity` には含まない（desktop が needs-input として合成する）。
 - 取得元は Claude Code の hooks。center は wrapper 経由の session を起動する時、statusLine と同じ `--settings` に `hooks` を足す（利用者の hooks は置き換わらず足し合わされる。`~/.claude/settings.json` / `~/.claude.json` は触らない）。hook のコマンドは center 自身のサブコマンド `bantou-center hook --url <center>/sessions/<name>/hook`。stdin の JSON に発火時刻（`bantou_ts`）を足して POST する。token は argv にも設定にも載せず、claude の env の `BANTOU_SESSION_TOKEN` から読む。失敗しても終了コードは 0（claude を止めない）。
 - `POST /sessions/<name>/hook`: 認証は**その session の token**（外向け token・他の session の token・token 無しは 401）。本文は JSON object（壊れた JSON・object 以外は 400）。204。起動中（starting / connected）の session だけ反映する。
@@ -497,7 +498,7 @@ session（`session_create` で作った wrapper 経由の claude。config 由来
 
 | event | 状態 |
 | --- | --- |
-| SessionStart（source が compact 以外） / Stop / StopFailure / Notification `idle_prompt` | idle |
+| SessionStart（source が compact 以外） / Stop / StopFailure / Notification `idle_prompt` | idle（SessionStart では background も 0 に戻す。Stop は `background_tasks` で background を数え直す） |
 | UserPromptSubmit / PreToolUse（下記以外の tool） / PostToolUse / PostToolUseFailure / PermissionDenied | working |
 | PreToolUse（AskUserQuestion・ExitPlanMode） / PermissionRequest / Notification（`permission_prompt`・`elicitation_dialog`・`elicitation_url_dialog`・`agent_needs_input`） | needs-input |
 
@@ -505,7 +506,8 @@ session（`session_create` で作った wrapper 経由の claude。config 由来
 - 古い状態を残さない: 保持はメモリのみで、起動時刻（`startedAt`）ごと。session が停止・error・起動し直しになると `unknown`（token も起動ごとに作り直すので、前の claude の遅れた hook は 401）。center 再起動直後は、次の hook まで `unknown`。発火時刻が最後に反映した event より古い hook は捨てる（到着順の入れ替わり対策）。
 - 変わった時だけ `GET /events` に `reason: "activity"` を流す（受け手は `session_list` を取り直す）。
 - 限界（実機の対話モードでは未確認。公式 docs の記述からの整理）: 利用者が Esc で turn を中断した時、または permission の確認を利用者が拒否した時に発火する hook は、公式 docs（https://code.claude.com/docs/en/hooks、2026-11-10 確認）に見当たらない。`PermissionDenied` は auto mode が拒否した時だけで「手動で permission ダイアログを拒否した時は動かない」と書かれ、`PostToolUseFailure` は「permission denial では発火しない」「実行中 tool のキャンセルでは発火しない」と書かれ、`Stop` は「Claude が応答を終えた時」で Esc で発火するかは書かれていない。このため出口の hook は足していない（推測で足さない）。結果として、PermissionRequest 由来の **needs-input（判断待ち）が、利用者が拒否・中断した後も残り**、画面に「判断待ち」が出続けうる（実際は判断待ちでない）。working も Esc 中断で残りうる。次の hook（UserPromptSubmit など）か idle_prompt（約 1 分の入力待ち通知）が来れば戻る想定だが、これも未確認。時間切れで消す仕組みも足していない。
-- 他の未確認: background task（subagent・バックグラウンド実行）が Stop の後に動き続けて hook が来ると working に戻りうる。発火時刻が同一ミリ秒の event は到着順になる。PreToolUse / PostToolUse ごとに hook サブコマンドが 1 回起動する負荷は未計測。
+- background の限界: background の shell が終わっても、claude が起きて turn が走り次の `Stop` が来るまで `background.tasks` は減らない（完了時に単独で発火する公式の hook を使っていないため）。subagent の `SubagentStop` を取りこぼしても次の `Stop` で数え直す。
+- 他の未確認: 発火時刻が同一ミリ秒の event は到着順になる。発火時刻が同一ミリ秒の event は到着順になる。PreToolUse / PostToolUse ごとに hook サブコマンドが 1 回起動する負荷は未計測。
 
 ### remote の反映（`remote`）
 

@@ -28,6 +28,7 @@ const setSession = (page: Page, name: string, patch: Record<string, unknown>) =>
 /** Any click in the window re-reads the center. */
 const act = (page: Page) => page.locator("header h1").click();
 const mark = (page: Page, name: string) => sideRow(page, name).getByTestId("session-activity");
+const progressMark = (page: Page, name: string) => sideRow(page, name).getByTestId("session-progress");
 const count = (page: Page, key: string) => page.getByTestId(`session-activity-summary-${key}`);
 
 const UNREACHABLE = {
@@ -64,9 +65,9 @@ test.describe("remote visibility (unreachable server / lost cap)", () => {
     await expect(count(page, "remote-unreachable")).toHaveAttribute("title", "到達不能");
     await expect(count(page, "remote-unreachable")).toHaveAttribute("aria-label", "到達不能 1");
     await expect(count(page, "remote-lost")).toHaveCount(0);
-    await expect(page.getByTestId("session-activity-summary")).not.toContainText(/到達不能|lost|作業中|判断待ち|待機/);
-    // "working" is not counted for it (the unreachable beats working)
-    await expect(count(page, "working")).toHaveAttribute("data-count", "0");
+    await expect(page.getByTestId("session-activity-summary")).not.toContainText(/到達不能|lost|作業進行中|返答待ち|待機/);
+    // the cap's state is the unreachable one, not a chip of "idle" / "needs-input" (the cap itself is still busy, so it is in progress)
+    await expect(count(page, "idle")).toHaveAttribute("data-count", "1");
   });
 
   test("a lost cap shows the lost icon with the server and the time in the tooltip", async ({ page }) => {
@@ -98,7 +99,8 @@ test.describe("remote visibility (unreachable server / lost cap)", () => {
     await expect(mark(page, "stroke-board")).toHaveAttribute("data-activity", "remote-unreachable");
     await setSession(page, "stroke-board", { remote: { running: 1, waitingReply: 0 } });
     await withMock(page, (m) => m.centerSessionsChanged("remote", "stroke-board"));
-    await expect(mark(page, "stroke-board")).toHaveAttribute("data-activity", "remote-working");
+    await expect(mark(page, "stroke-board")).toHaveAttribute("data-activity", "idle");
+    await expect(progressMark(page, "stroke-board")).toHaveCount(1);
     await expect(count(page, "remote-unreachable")).toHaveCount(0);
   });
 

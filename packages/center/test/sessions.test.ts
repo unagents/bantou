@@ -611,7 +611,7 @@ test("list: activity / activityAt は取得元の値、無ければ unknown / nu
   const asked: [string, string | null, boolean][] = [];
   const mgr = createSessionManager({
     config, supervisor: fs2.sup, store, log: () => {}, waitMs: 0,
-    activity: (n, startedAt, running) => (asked.push([n, startedAt, running]), n === "pm1" ? { activity: "needs-input", activityAt: "2026-11-09T00:00:00.000Z" } : { activity: "unknown", activityAt: null }),
+    activity: (n, startedAt, running) => (asked.push([n, startedAt, running]), n === "pm1" ? { activity: "needs-input", activityAt: "2026-11-09T00:00:00.000Z", background: { subagents: 0, tasks: 0 } } : { activity: "unknown", activityAt: null, background: { subagents: 0, tasks: 0 } }),
   });
   await mgr.create({ name: "pm1" });
   const by = Object.fromEntries(mgr.list().map((s) => [s.name, [s.activity, s.activityAt]]));
