@@ -1,0 +1,72 @@
+# Graphiti の公式 MCP server（zepai/knowledge-graph-mcp）用の設定。compose.yaml の graphiti-mcp が /app/mcp/config/config.yaml に読み取り専用で置く。
+# 元: getzep/graphiti の mcp_server/config/config-docker-neo4j.yaml。変えた点:
+#  - llm と embedder の api_url を別々の環境変数にした（元は両方 OPENAI_API_URL で、LLM と埋め込みを別の先に向けられない）
+#  - embedder を 768 次元（nomic-embed-text）にした
+#  - provider は openai のまま。api_url が OpenAI 以外なら OpenAIGenericClient（chat/completions）が選ばれる（mcp_server/src/services/factories.py）
+#  - listen は 127.0.0.1（この server には認証が無い）
+# 値は ${NAME:default} で環境変数から展開される。
+
+server:
+  transport: "http"
+  host: "127.0.0.1"
+  port: ${GRAPHITI_MCP_PORT:7931}
+
+llm:
+  provider: "openai"
+  model: ${GRAPHITI_LLM_MODEL:claude}
+  max_tokens: 4096
+  # chatp などの OpenAI 互換 endpoint が json_schema を受けても守らない時は json_object にする（Graphiti の README）
+  structured_output_mode: ${GRAPHITI_LLM_STRUCTURED_OUTPUT_MODE:json_schema}
+
+  providers:
+    openai:
+      api_key: ${GRAPHITI_LLM_API_KEY:unused}
+      api_url: ${GRAPHITI_LLM_URL:http://127.0.0.1:7920/v1}
+      organization_id: ""
+
+embedder:
+  provider: "openai"
+  model: ${GRAPHITI_EMBED_MODEL:nomic-embed-text}
+  dimensions: ${GRAPHITI_EMBED_DIM:768}
+
+  providers:
+    openai:
+      api_key: ${GRAPHITI_EMBED_API_KEY:unused}
+      api_url: ${GRAPHITI_EMBED_URL:http://127.0.0.1:11435/v1}
+      organization_id: ""
+
+database:
+  provider: "neo4j"
+
+  providers:
+    neo4j:
+      uri: ${NEO4J_URI:bolt://127.0.0.1:7687}
+      username: ${NEO4J_USER:neo4j}
+      password: ${NEO4J_PASSWORD}
+      database: ${NEO4J_DATABASE:neo4j}
+      use_parallel_runtime: false
+
+graphiti:
+  # group_id は episode ごとに add_memory で渡す（memory が agent ごとに決める）。ここは省略時の既定
+  group_id: ${GRAPHITI_GROUP_ID:main}
+  episode_id_prefix: ""
+  user_id: "bantou-memory"
+  entity_types:
+    - name: "Preference"
+      description: "User preferences, choices, opinions, or selections (PRIORITIZE over most other types except User/Assistant)"
+    - name: "Requirement"
+      description: "Specific needs, features, or functionality that must be fulfilled"
+    - name: "Procedure"
+      description: "Standard operating procedures and sequential instructions"
+    - name: "Location"
+      description: "Physical or virtual places where activities occur"
+    - name: "Event"
+      description: "Time-bound activities, occurrences, or experiences"
+    - name: "Organization"
+      description: "Companies, institutions, groups, or formal entities"
+    - name: "Document"
+      description: "Information content in various forms (books, articles, reports, etc.)"
+    - name: "Topic"
+      description: "Subject of conversation, interest, or knowledge domain (use as last resort)"
+    - name: "Object"
+      description: "Physical items, tools, devices, or possessions (use as last resort)"

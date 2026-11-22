@@ -23,6 +23,16 @@ export interface MemoryEnv {
   embedBatch: number;
   /** 1 回の run で埋め込みに使う時間の上限（毎分の起動が飛ばないよう、MAX_EMBED_RUN_MS で頭打ちにする） */
   embedRunMs: number;
+  /** Graphiti の MCP endpoint（例 http://127.0.0.1:8000/mcp/）。空なら Outbox を消費しない（今まで通り積むだけ） */
+  graphitiUrl: string;
+  /** Graphiti へ反映する Outbox の topic（カンマ区切り）。既定は graphiti.memory_item のみ（未決 2 の暫定） */
+  graphitiTopics: string[];
+  graphitiTimeoutMs: number;
+  /** 以下 4 つは暫定値（設計書の未決 3・6・7・9）。利用者が決めるまで既定のまま */
+  graphitiInFlight: number;
+  graphitiMaxAttempts: number;
+  graphitiConfirmTimeoutMin: number;
+  graphitiBodyMax: number;
 }
 
 export function readEnv(env: Record<string, string | undefined> = process.env): MemoryEnv {
@@ -45,5 +55,12 @@ export function readEnv(env: Record<string, string | undefined> = process.env): 
     recallEmbedTimeoutMs: int(env.MEMORY_RECALL_EMBED_TIMEOUT_MS, 60000),
     embedBatch: int(env.MEMORY_EMBED_BATCH, DEFAULT_EMBED_BATCH),
     embedRunMs: Math.min(int(env.MEMORY_EMBED_RUN_MS, DEFAULT_EMBED_RUN_MS), MAX_EMBED_RUN_MS),
+    graphitiUrl: (env.GRAPHITI_MCP_URL ?? "").trim(),
+    graphitiTopics: (env.GRAPHITI_TOPICS ?? "graphiti.memory_item").split(",").map((s) => s.trim()).filter(Boolean),
+    graphitiTimeoutMs: int(env.GRAPHITI_TIMEOUT_MS, 30000),
+    graphitiInFlight: int(env.GRAPHITI_IN_FLIGHT, 20),
+    graphitiMaxAttempts: int(env.GRAPHITI_MAX_ATTEMPTS, 5),
+    graphitiConfirmTimeoutMin: int(env.GRAPHITI_CONFIRM_TIMEOUT_MIN, 30),
+    graphitiBodyMax: int(env.GRAPHITI_BODY_MAX, 4000),
   };
 }
