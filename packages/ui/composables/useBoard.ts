@@ -41,7 +41,7 @@ export interface SessionGroup {
   /** Unanswered worker asks / approvals on this session's remote-caps (already counted in a "needs-input" activity). */
   remoteWaiting: number;
   /** Remote-caps in trouble (the tooltip of "remote-unreachable" / "remote-lost" names the servers). Empty while the center could not be asked. */
-  remoteIssues: { unreachable: RemoteIssue[]; lost: RemoteIssue[] };
+  remoteIssues: { unreachable: RemoteIssue[]; lost: RemoteIssue[]; stopped: RemoteIssue[] };
   /** The session is asleep (the center's `sleeping`): its claude is stopped; opening it wakes it. */
   sleeping: boolean;
   /** The claude's auth state as the center reports it (null: not reported). */
@@ -125,9 +125,9 @@ export function useBoard(dir: Ref<string | null>) {
       if (!centerList.value.reachable) return 0;
       return centerList.value.sessions.find((x) => x.name === name)?.remote?.waitingReply ?? 0;
     };
-    const remoteIssues = (name: string): { unreachable: RemoteIssue[]; lost: RemoteIssue[] } => {
+    const remoteIssues = (name: string): { unreachable: RemoteIssue[]; lost: RemoteIssue[]; stopped: RemoteIssue[] } => {
       const r = centerList.value.reachable ? centerList.value.sessions.find((x) => x.name === name)?.remote : null;
-      return { unreachable: r?.unreachable ?? [], lost: r?.lost ?? [] };
+      return { unreachable: r?.unreachable ?? [], lost: r?.lost ?? [], stopped: r?.stopped ?? [] };
     };
     const group = (name: string) => {
       let g = map.get(name);
@@ -178,7 +178,7 @@ export function useBoard(dir: Ref<string | null>) {
 
   /** Sessions per work state (the side menu summary). */
   const activityCounts = computed<Record<ChipKey, number>>(() => {
-    const c: Record<ChipKey, number> = { progress: 0, "needs-input": 0, idle: 0, "remote-unreachable": 0, "remote-lost": 0 };
+    const c: Record<ChipKey, number> = { progress: 0, "needs-input": 0, idle: 0, "remote-unreachable": 0, "remote-lost": 0, "remote-stopped": 0 };
     // "progress" (work in progress) is counted apart from the cap's state: a session can be in both (an idle cap with a subagent running).
     // "working" (the cap itself busy) is in progress, so it has no chip of its own. "remote-unreachable" / "remote-lost" have their own chips (shown only while someone is in that state).
     for (const g of sessions.value) {

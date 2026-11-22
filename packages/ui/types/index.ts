@@ -112,7 +112,7 @@ export interface SessionBackground {
  * The cap's state shown on the side menu (`unknown` is not shown), apart from the "work in progress" mark (`SessionGroup.progress`).
  * working = the cap itself is busy and cannot react to input / needs-input = waiting for a reply / idle = just waiting.
  */
-export type SessionActivity = "working" | "needs-input" | "idle" | "remote-unreachable" | "remote-lost";
+export type SessionActivity = "working" | "needs-input" | "idle" | "remote-unreachable" | "remote-lost" | "remote-stopped";
 
 /** A remote-cap whose server does not answer (`lastOkAt`: the last answer, ISO; null: none yet) or that the server reported lost (`at`: when, ISO). `server` is the center's label for the server. */
 export interface RemoteIssue {
@@ -120,6 +120,10 @@ export interface RemoteIssue {
   remoteId: string;
   lastOkAt?: string | null;
   at?: string;
+  /** `stopped` only: failed = a task failed / no_result = the cap stopped without the task's result. */
+  kind?: "failed" | "no_result";
+  taskId?: string;
+  detail?: string;
 }
 
 /** The center's `session_list[].remote`. */
@@ -130,6 +134,8 @@ export interface SessionRemote {
   unreachable?: RemoteIssue[];
   /** Caps the server reported lost (absent: none). */
   lost?: RemoteIssue[];
+  /** Caps that stopped (a task failed / the cap stopped without a result) and the master-cap has not handled yet; gone when it sends the next instruction or closes the cap (absent: none). */
+  stopped?: RemoteIssue[];
 }
 
 /** What the add dialog needs for the folder field (mirror of `session.rs::PathHints`). */

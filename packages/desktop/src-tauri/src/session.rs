@@ -198,6 +198,9 @@ pub struct SessionRemote {
     /// Caps the server reported lost (center's `remote.lost`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lost: Vec<SessionRemoteIssue>,
+    /// Caps that stopped (a task failed / the cap stopped without a result) and the master-cap has not handled yet (center's `remote.stopped`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stopped: Vec<SessionRemoteIssue>,
 }
 
 /// One remote-cap in trouble: `last_ok_at` is the last answer of the unreachable server (ISO; None: none yet), `at` when the cap was reported lost.
@@ -212,6 +215,13 @@ pub struct SessionRemoteIssue {
     pub last_ok_at: Option<String>,
     #[serde(default)]
     pub at: Option<String>,
+    /// `stopped` only: "failed" / "no_result".
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub task_id: Option<String>,
+    #[serde(default)]
+    pub detail: Option<String>,
 }
 
 /// What the side menu shows: the center's list as last fetched, and whether the latest read worked.
@@ -550,6 +560,10 @@ mod tests {
         assert_eq!(r.unreachable[0].server, "host-a");
         assert_eq!(r.unreachable[0].last_ok_at.as_deref(), Some("2026-11-10T20:57:00.000Z"));
         assert_eq!(r.lost[0].remote_id, "c-1-b");
+        let stopped: Session = serde_json::from_str(r#"{"name":"a","remote":{"running":0,"waitingReply":0,"stopped":[{"server":"host-a","remoteId":"c-1-a","kind":"no_result","at":"2026-11-10T21:26:00.000Z","taskId":"t-1"}]}}"#).unwrap();
+        let st = &stopped.remote.unwrap().stopped[0];
+        assert_eq!(st.kind.as_deref(), Some("no_result"));
+        assert_eq!(st.task_id.as_deref(), Some("t-1"));
         let part: Session = serde_json::from_str(r#"{"name":"a","remote":{"running":1}}"#).unwrap();
         assert_eq!(part.remote, Some(SessionRemote { running: 1, waiting_reply: 0, ..Default::default() }));
     }

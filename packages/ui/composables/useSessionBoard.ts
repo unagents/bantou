@@ -4,7 +4,7 @@ import type { SessionGroup, useBoard } from "./useBoard";
 type Board = ReturnType<typeof useBoard>;
 
 /** The summary chips: "progress" = work in progress (a separate axis from the cap's state), the rest = the cap's state. */
-export type ChipKey = "progress" | "needs-input" | "idle" | "remote-unreachable" | "remote-lost";
+export type ChipKey = "progress" | "needs-input" | "idle" | "remote-unreachable" | "remote-lost" | "remote-stopped";
 
 /** hideZero: shown only while at least one session is in that state (the three work states are always shown). */
 export const ACTIVITY_CHIPS: { key: ChipKey; label: string; icon: string; hideZero?: boolean; cls?: string }[] = [
@@ -13,6 +13,7 @@ export const ACTIVITY_CHIPS: { key: ChipKey; label: string; icon: string; hideZe
   { key: "idle", label: "待機", icon: "i-lucide-circle-check" },
   { key: "remote-unreachable", label: "到達不能", icon: "i-lucide-server-off", hideZero: true, cls: "text-error" },
   { key: "remote-lost", label: "lost", icon: "i-lucide-unplug", hideZero: true, cls: "text-error" },
+  { key: "remote-stopped", label: "停止", icon: "i-lucide-octagon-alert", hideZero: true, cls: "text-error" },
 ];
 
 /**

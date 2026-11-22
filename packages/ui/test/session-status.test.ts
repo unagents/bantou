@@ -43,6 +43,12 @@ describe("(B) the cap's own state: 3 states, independent of work in progress", (
     const issue = { server: "h", remoteId: "c" };
     assert.equal(capActivity(sess({ activity: "working", remote: { running: 1, waitingReply: 0, unreachable: [issue] } }), true), "remote-unreachable");
     assert.equal(capActivity(sess({ remote: { running: 0, waitingReply: 0, lost: [issue] } }), true), "remote-lost");
+    assert.equal(capActivity(sess({ remote: { running: 0, waitingReply: 0, stopped: [{ ...issue, kind: "failed" }] } }), true), "remote-stopped");
+    assert.equal(capActivity(sess({ remote: { running: 0, waitingReply: 0, stopped: [{ ...issue, kind: "no_result" }] } }), true), "remote-stopped");
+    // a stopped mark does not hide an unanswered ask / an unreachable server, and it goes when the center stops reporting it (handled)
+    assert.equal(capActivity(sess({ remote: { running: 0, waitingReply: 1, stopped: [issue] } }), true), "needs-input");
+    assert.equal(capActivity(sess({ remote: { running: 1, waitingReply: 0, unreachable: [issue], stopped: [issue] } }), true), "remote-unreachable");
+    assert.equal(capActivity(sess({ remote: { running: 0, waitingReply: 0 } }), true), "idle");
     assert.equal(capActivity(sess({ activity: "unknown" }), true), null);
     assert.equal(capActivity(sess({ state: "stopped" }), true), null);
     assert.equal(capActivity(sess(), false), null);

@@ -12,7 +12,7 @@ export interface SessionProgress {
 
 /**
  * The cap's own state of a session row (null: show nothing). Needs a reachable center and a listed session.
- * Priority: needs-input (claude's, or an unanswered worker ask) > remote unreachable > remote lost > claude's own working / idle.
+ * Priority: needs-input (claude's, or an unanswered worker ask) > remote unreachable > remote lost > remote stopped > claude's own working / idle.
  * Claude's own state needs a connected session; an unanswered worker ask / a remote in trouble is shown whatever the state is.
  * "Work in progress" is another axis (`sessionProgress`): it does not change this state.
  */
@@ -25,6 +25,8 @@ export function capActivity(r: Session | undefined, reachable: boolean): Session
   // A server that does not answer / a lost cap: the work left there is not going on.
   if ((r.remote?.unreachable?.length ?? 0) > 0) return "remote-unreachable";
   if ((r.remote?.lost?.length ?? 0) > 0) return "remote-lost";
+  // A task failed / the cap stopped without a result, and the master-cap has not dealt with it yet (the mark goes with the next instruction or closing the cap).
+  if ((r.remote?.stopped?.length ?? 0) > 0) return "remote-stopped";
   if (!connected) return null;
   return a;
 }

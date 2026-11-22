@@ -6,7 +6,7 @@ const props = defineProps<{
   /** Unanswered worker asks / approvals on the session's remote-caps (the tooltip of "needs-input" names them). */
   waitingReply?: number;
   /** The remote-caps in trouble (the tooltip of "remote-unreachable" / "remote-lost" names the servers and the times). */
-  issues?: { unreachable: RemoteIssue[]; lost: RemoteIssue[] };
+  issues?: { unreachable: RemoteIssue[]; lost: RemoteIssue[]; stopped?: RemoteIssue[] };
 }>();
 
 /**
@@ -18,6 +18,7 @@ const META: Record<SessionActivity, { label: string; icon: string; cls: string; 
   "needs-input": { label: "返答待ち", icon: "i-lucide-message-circle-question", cls: "text-warning", tip: "質問・判断・許可の返事を待っている" },
   "remote-unreachable": { label: "到達不能", icon: "i-lucide-server-off", cls: "text-error", tip: "remote の server に届かない（状態が分からない）" },
   "remote-lost": { label: "lost", icon: "i-lucide-unplug", cls: "text-error", tip: "remote の cap が lost（server 側で実行が失われた）" },
+  "remote-stopped": { label: "停止", icon: "i-lucide-octagon-alert", cls: "text-error", tip: "remote の作業が止まった（task の失敗、または結果が返らないまま cap が止まった）。次の指示か cap を閉じると消える" },
   idle: { label: "待機", icon: "i-lucide-circle-check", cls: "text-success", tip: "cap は次の指示を待っている（作業が進行中でも、cap は入力を受けられる）" },
 };
 /** "11/10 20:57" in the local time. */
@@ -36,6 +37,11 @@ const tip = computed(() => {
   if (props.activity === "remote-lost") {
     const items = props.issues?.lost ?? [];
     const d = items.map((i) => `server ${i.server}（${at(i.at)} に通知）`).join("、");
+    return `${META[props.activity].label}: ${META[props.activity].tip}${d ? `: ${d}` : ""}`;
+  }
+  if (props.activity === "remote-stopped") {
+    const items = props.issues?.stopped ?? [];
+    const d = items.map((i) => `server ${i.server}（${at(i.at)}、${i.kind === "failed" ? "task 失敗" : "結果なし"}${i.detail ? `: ${i.detail}` : ""}）`).join("、");
     return `${META[props.activity].label}: ${META[props.activity].tip}${d ? `: ${d}` : ""}`;
   }
   const base = META[props.activity].tip;
