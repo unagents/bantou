@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { z, type ZodRawShape } from "zod";
-import { eventShape } from "../server/utils/events.ts";
+import { eventShape, handoffShape } from "../server/utils/events.ts";
 import { contextShape, explainShape, recallShape } from "../server/utils/recall.ts";
 
 const TOOLS_DIR = fileURLToPath(new URL("../server/mcp/tools/", import.meta.url));
@@ -18,6 +18,7 @@ const NO_INPUT: [string, ZodRawShape] = ["{}", {}];
 const SHAPES: Record<string, [string, ZodRawShape]> = {
   "context.ts": ["contextShape", contextShape],
   "event.ts": ["eventShape", eventShape],
+  "handoff.ts": ["handoffShape", handoffShape],
   "explain.ts": ["explainShape", explainShape],
   "recall.ts": ["recallShape", recallShape],
   "status.ts": NO_INPUT,

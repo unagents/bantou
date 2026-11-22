@@ -10,6 +10,7 @@ import type { Follow } from "./follow.js";
 import type { ServerLink } from "./server-link.js";
 import { retireServer } from "./retire.js";
 import type { Logger } from "./log.js";
+import type { Resessioner } from "./resession.js";
 import { buildTaskStatus, limitRemoteList } from "./task-status.js";
 
 type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean };
@@ -405,8 +406,20 @@ export function registerTools(
  * session 向けの窓口（/mcp/session）の tool。owner は呼び出し元 session（認証済みの header X-Bantou-Session）で、
  * 引数では受けない（自己申告させない）。
  */
-export function registerSessionTools(server: McpServer, deps: { remotes: RemoteManager; owner: string; follow?: Follow }): void {
-  const { remotes, owner, follow } = deps;
+export function registerSessionTools(server: McpServer, deps: { remotes: RemoteManager; owner: string; follow?: Follow; resession?: Pick<Resessioner, "request"> }): void {
+  const { remotes, owner, follow, resession } = deps;
+  if (resession) {
+    server.registerTool(
+      "session_resession",
+      {
+        title: "リセッション（引継ぎを残して新しい会話で起動し直す）",
+        description:
+          "自分（呼び出し元 session）のリセッションを申告する。引継ぎ（handoff）を center が外部記憶に保存して受理を返し、この turn が終わったあと center が claude を新しい会話（--continue 無し）で起動し直す。起動し直した最初の入力で引継ぎの id が知らされる。他の session は指せない。利用者の入力待ち・未完了の remote の指示・未返答の worker_reply がある間は断られる。返り値 { accepted, handoff_id, stored（memory = 外部記憶に保存 / file = 外部記憶に届かず center の file に保存）, restart }。受理されたら短く再起動すると言って turn を終える",
+        inputSchema: { handoff: z.string().min(1).max(65536).describe("引継ぎの本文。仕掛かり・止まっている事・次の一手 / 決定と番号つきの未決 / 今の窓口") },
+      },
+      ({ handoff }) => guard(async () => json(await resession.request(owner, handoff))),
+    );
+  }
   /** この session の cap の server ごとの版の状態（server の事実だけ。他の session の情報は入らない）。 */
   const withVersions = (views: RemoteView[]): RemoteView[] =>
     follow ? views.map((v) => { const info = follow.versionOf({ ...(v.server_id !== undefined ? { server_id: v.server_id } : {}), ...(peerOfRec(v) !== undefined ? { peer: peerOfRec(v)! } : {}) }); return info ? { ...v, server_version_state: info } : v; }) : views;
