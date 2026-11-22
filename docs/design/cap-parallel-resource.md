@@ -69,7 +69,7 @@
   1. task を待たせる理由: 同じ branch の前の task（U1 が A の時だけ残る。B なら無くなる）。
   2. task を待たせる理由: `closing`（`stop_cap` の close の最中。`tasks.ts:163`）。資源・並行の判断ではなく停止の手順なので、今のまま残す。今は `waiting_for` に `limit` と読み替えて載せている（`tasks.ts:217`）。`limit` の廃止後はこの読み替えを直す（直し方は実装時に決める）。
   3. worker の開始を待たせる理由: host のリソース待ち（3.2）。task の待ちではなく worker の予約の待ち（3.5）として現れる。
-- `waiting_for` の値 `limit` は、task の待ちとしては出なくなる。protocol は additive に保ち、旧 `limit` を読む側は未知の文字列を許す（`CapTaskState` と同じ「reader must accept other strings」の流儀。`protocol/src/server.ts:577`）。worker の予約の状態は 3.5 に書く。
+- `waiting_for` の値 `limit` は、task の待ちとしては出なくなる。protocol は additive に保ち、旧 `limit` を読む側は未知の文字列を許す（`CapTaskState` と同じ「reader must accept other strings」の流儀。`protocol/src/server.ts:576`）。worker の予約の状態は 3.5 に書く。
 - `maxParallelTasks` の設定項目の扱い（廃止 / 上限なしの既定 / 利用者が任意で置く上限として残す）は **U2**。
 
 ### 3.2 host のリソースを見て並行の本数を決める（要件 2）
@@ -113,6 +113,7 @@
   - 動き: server が依頼を覚え、対象が完了（worker の done・停止・失敗）した時に、依頼した cap の task の指揮を再開して知らせる。
 - 通知の届け方: cap は report でしか再開しないので、server が依頼した cap の lane を再開する。今の `[worker 終了通知]`（`worker-exit.ts:35-38`）と同じ形の prompt（仮: 先頭行 `[他 cap の完了通知]`）で resume する（推測: 既存の再開の入口を流用できるはず。実装時に要確認）。
 - 通知の依頼の寿命・件数・server 再起動をまたぐか（今の `tasks` はメモリのみ）は **U5**。
+- 通知の再開は、worker 終了の再開の上限（`session.exitResumeMax`、既定 3。`config.ts:42`）に**数えるか**を決めていない（**U11**）。今の上限は、cap・task ごとに「worker が done 無しで終わった再開」を数え、超えると再開せず task を failed にする（`worker-exit.ts:180-191`、`tasks.ts` の `fail`）。
 - 他の cap の worker を止める・順序を変える権限は与えない（問い合わせと通知の依頼だけ）。
 - 同じ server の中の cap だけが対象。同じ host の別 server の cap へは届かない（U7 の案 A の場合。限定は U7 に明記）。
 
@@ -141,6 +142,7 @@ server が、**自分が管理する cap と稼働中の全 worker の数**を 1
 - **予約の対象は、worker の開始の依頼（`worker_start`）の 1 種類だけ**。task は予約しない（3 章の前提。task は受けたらすぐ指揮を始める）。
 - `worker_start` が資源不足の時の返り: 今と同じく**待たずにすぐ返す**（`workers.ts:145-165` は完了を待たず `accepted: true` を返す）。返り値に additive の `reserved: true` を足し、`{worker_id, accepted: true, reserved: true}` とする。cap は「予約された」と分かり、ターンを終えてよい（今の `worker_start` の使い方と同じ）。worker は、空きが出たら server が自動で起動する。
 - cap から見える形: `worker_status` で、その worker は新しい state `reserved`（additive の文字列。読む側は未知の state を許す）。始まれば今と同じ経路で進む（worker の report で cap の lane が再開する）。予約中の worker を止めたい時は `worker_stop` が予約を取り消す（設計。実装時に要確認）。
+- **予約中の worker は、task が「動いている」ことに数える**（task の終わりの判定に足す）。理由: 3 章の前提では、cap は `reserved` を見てターンを終える。その時点で指揮の run も worker の run も無い。今の終わりの判定は、指揮の run・worker の run（`manager.laneBusy`。`agents.ts:1073-1076`）と report 起因の処理（`hub.pendingFor`。`reports.ts:372`）だけを数える（`daemon.ts:389` の `busy`）。予約を数えないと、task が done / failed に見え、lane の `mcp.json` の削除（`cap-orchestration.md:108`）と lane の片付け（`workerKeepMs` 後）が、予約が始まる前に走りうる。設計: `busy` に「その task の worker の予約が 1 件以上ある」を足す（`busy: laneBusy || pendingFor > 0 || reservedFor(capId, taskId) > 0`。名前は仮）。予約が始まれば worker の run（`laneBusy`）が引き継ぐ。予約を取り消した（`worker_stop`・`stop_cap`）場合は数えなくなり、他に動く物が無ければ task は終わる。予約の件数は、再起動をまたいで残すか（U5）に従う。再起動後に予約を残さない案 A の場合は、予約と一緒に task の「動いている」も消える。
 - 予約に載せるもの: フラグ（cap_id・task_id・worker_id・受けた時刻）だけを queue の見え方とする。起動に要る入力（prompt・repo・branch・model。`workers.ts:147-157`）は、今の agent の queue が持つ入力と同じ扱いで server が持つ（メモリか永続かは **U5**）。
 - 貯める場所: bantou-server の queue（`tasks.ts` の waiting と同じ層）。今の「cap ごとの待ち」を「host 全体の待ち」に広げる形。
 - 解放の契機: worker の完了・停止、周期の再測定（3.2。周期は U10）。契機で、予約の先頭から「始めてよいか」（3.2）を問い直す。
@@ -151,7 +153,7 @@ server が、**自分が管理する cap と稼働中の全 worker の数**を 1
 
 ## 4. 影響を受ける所（実装時の洗い出し。今回は変えない）
 
-- server: `config.ts`（maxParallelTasks）、`tasks.ts`（`blockedBy` の `limit`）、`daemon.ts:383-415`、`workers.ts`（worker 起動前の確認・予約）、`mcp.ts`（cap 専用 tool の追加）、`daemon.ts:182-186`（status）。
+- server: `config.ts`（maxParallelTasks）、`tasks.ts`（`blockedBy` の `limit`）、`daemon.ts:383-415`、`workers.ts`（worker 起動前の確認・予約）、`mcp.ts`（cap 専用 tool の追加）、`daemon.ts:182-186`（status）、`daemon.ts:389`（task の終わりの判定 `busy` に予約を足す）、`worker-exit.ts`（通知の再開と `exitResumeMax`。U11）。
 - protocol: `CapTaskInfo.waiting_for`、`status_result` の追加欄、`worker_start` の返り値・worker の state、docs/protocol.md、版。
 - center: `task-status.ts:51`、`tools.ts:436`、`remotes.ts`、`README.md:231`。
 - desktop / ui: `RemoteActivity.vue`、host の掲示板の欄。
@@ -188,7 +190,7 @@ server が、**自分が管理する cap と稼働中の全 worker の数**を 1
 3 章の設計は案 B を前提にしている。
 
 - 案 A: task（lane）の開始を判断する。利点: 今の `tasks.ts` の入口 1 つで済む。欠点: 資源を食うのは worker で、1 task が worker を何本も起こすと見積りが外れる。
-- 案 B: worker の開始を判断する（task は受けたらすぐ指揮を始める）。利点: 資源に直結する。欠点: worker が予約で待つ間、指揮（lane）は worker を待つ状態になる（3.5 の設計: cap は `reserved` を見てターンを終え、worker の report で再開）。
+- 案 B: worker の開始を判断する（task は受けたらすぐ指揮を始める）。利点: 資源に直結する。欠点: worker が予約で待つ間、指揮（lane）は worker を待つ状態になる（3.5 の設計: cap は `reserved` を見てターンを終え、worker の report で再開。その間 task が終わりに見えないよう、予約を task の「動いている」に数える。`daemon.ts:389` の `busy` に足す）。
 - 案 C: 両方（task は掲示板の状態を見て始める、worker は開始時に確認）。利点: 取りこぼしが少ない。欠点: 判断の入口が 2 つになる。
 - 推奨: B。理由: 資源を消費するのは worker で、利用者の原文も「worker タスクの実行数」を見ると言っている。
 
@@ -240,8 +242,17 @@ server が、**自分が管理する cap と稼働中の全 worker の数**を 1
 - 案 C: B + 一定時間待った予約を cap に知らせる（打ち切りはしない。期限は利用者が決める）。利点: cap・利用者が詰まりに気づける。欠点: 期限の値が増える。
 - 推奨: B。理由: 動いている worker が 0 本の時に server 以外に再確認する担い手が無い（cap は report でしか再開しない）ため、周期の再測定が要る。C は、掲示板の表示（3.2）で足りるか利用者が判断した後。
 
+### U11. 通知の再開を worker 終了の再開の上限に数えるか
+
+今の上限（`session.exitResumeMax`、既定 3）は、cap・task ごとに worker が done 無しで終わった再開を数え、超えると task を failed にする（`worker-exit.ts:180-191`）。
+
+- 案 A: 数えない。利点: 正当な通知が上限で止まらず、task も failed にならない。欠点: cap が通知の依頼を出し続ける限り、再開が増える（依頼は 1 件 1 通知で、依頼を出すのは cap の claude なので、暴走の歯止めは cap の判断だけ）。
+- 案 B: 同じ上限に数える。利点: 再開の暴走を既存の上限で止められる。欠点: 通知が worker の失敗の再開と枠を食い合い、正当な通知が上限で止まって task が failed になりうる。
+- 案 C: 通知用に別の上限を置く。利点: 食い合わず、暴走も止まる。欠点: 新しい上限の値が要る（利用者が決める値が増える）。
+- 推奨: A。理由: 新しい上限の値を利用者が決めていない中で、既存の上限（worker の失敗用）の意味を変えない。暴走が実際に出たら C を検討する（その時の値は利用者が決める）。
+
 ## 6. この設計がしていない事
 
-- 上限・閾値・周期・期限の値は決めていない（U2・U3・U5・U10）。
+- 上限・閾値・周期・期限の値は決めていない（U2・U3・U5・U10・U11）。
 - code・config・protocol・DB は変えていない。
 - 動いている server・外部記憶には触れていない。
