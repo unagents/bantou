@@ -6,7 +6,7 @@
 //   - the center could not be asked: the cached list is kept, `reachable: false`, the reason is carried.
 // One cache for the whole backend (all browsers share it). `rev` counts the changes of the cache.
 
-import type { ContextUsage, Session, SessionList, SessionRemote } from "../../ui/types/index.ts";
+import type { ContextUsage, Session, SessionBackground, SessionList, SessionRemote } from "../../ui/types/index.ts";
 import type { CenterMcp } from "./mcp.ts";
 
 export type { Session, SessionList };
@@ -66,6 +66,14 @@ function parseIssues(v: unknown, k: string): NonNullable<SessionRemote["unreacha
   });
 }
 
+/** `background { subagents, tasks }`: missing or null is null (an older center sent none), counts default to 0. */
+function parseBackground(v: unknown): SessionBackground | null {
+  if (v === undefined || v === null) return null;
+  if (!isObj(v)) return bad("background");
+  const n = (k: string) => (v[k] === undefined ? 0 : isUint(v[k]) ? (v[k] as number) : bad(`background.${k}`));
+  return { subagents: n("subagents"), tasks: n("tasks") };
+}
+
 function parseRemote(v: unknown): SessionRemote | null {
   if (v === undefined || v === null) return null;
   if (!isObj(v)) return bad("remote");
@@ -96,6 +104,7 @@ export function parseSession(v: unknown): Session {
     instructions: instr === true,
     activity: optStr(v, "activity") as Session["activity"],
     activityAt: optStr(v, "activityAt"),
+    background: parseBackground(v.background),
     remote: parseRemote(v.remote),
     auth: optStr(v, "auth") as Session["auth"],
     loginUrl: optStr(v, "loginUrl"),

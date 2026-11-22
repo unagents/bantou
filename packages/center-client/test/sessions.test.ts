@@ -29,6 +29,7 @@ const entry = (name: string, state: string): Session => ({
   instructions: false,
   activity: null,
   activityAt: null,
+  background: null,
   remote: null,
   auth: "ok" as Session["auth"],
   loginUrl: null,
@@ -36,6 +37,13 @@ const entry = (name: string, state: string): Session => ({
   sleeping: false,
 });
 const names = (l: SessionList) => l.sessions.map((s) => s.name);
+
+test("background is read as { subagents, tasks }, missing is null", () => {
+  assert.deepEqual(parseSession({ name: "a", background: { subagents: 2, tasks: 1 } }).background, { subagents: 2, tasks: 1 });
+  assert.deepEqual(parseSession({ name: "a", background: { subagents: 1 } }).background, { subagents: 1, tasks: 0 });
+  assert.equal(parseSession({ name: "a" }).background, null);
+  assert.throws(() => parseSession({ name: "a", background: { subagents: -1 } }));
+});
 
 test("S:463 answered list is shown as is", () => {
   const prev: SessionList = { sessions: [entry("old", "connected")], reachable: true, reason: null, rev: 0 };
