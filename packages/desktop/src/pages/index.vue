@@ -38,7 +38,8 @@ function selectFromDrawer(name: string) {
 // --- pane widths (side | middle | right; drag the dividers) ---
 const paneRow = ref<HTMLElement | null>(null);
 const { width: paneRowWidth } = useElementSize(paneRow);
-const pane = usePaneWidths(paneRowWidth);
+const drawerOpen = ref(false);
+const pane = usePaneWidths(paneRowWidth, drawerOpen);
 const { state: updaterState, checkManually, installAndRestart } = useUpdater();
 
 useWorkspaceWatcher(dir, () => void refresh());
@@ -120,7 +121,7 @@ watch(modalOpen, (v) => {
       <!-- the message drawer sits beside the pane row: opened, it takes width from the row (the conversation narrows and re-wraps) -->
       <div class="flex min-h-0 flex-1">
       <div ref="paneRow" class="flex min-h-0 min-w-0 flex-1 overflow-x-auto" data-testid="pane-row">
-      <div class="flex min-h-0 flex-1" :style="{ minWidth: `${PANE_ROW_MIN}px` }">
+      <div class="flex min-h-0 flex-1" :style="{ minWidth: `${pane.rowMin.value}px` }">
         <nav aria-label="セッション一覧" class="shrink-0 overflow-y-auto" :style="{ width: `${pane.side.value}px` }">
           <UTooltip v-if="!centerList.reachable" :text="centerList.reason ?? 'center に問い合わせられなかった'">
             <UBadge
@@ -233,7 +234,7 @@ watch(modalOpen, (v) => {
         <PaneResizer
           label="セッション一覧の幅"
           :model-value="pane.side.value"
-          :min="PANE_MIN.side"
+          :min="pane.sideMin.value"
           :max="pane.sideMax.value"
           @update:model-value="pane.setSide"
           @commit="pane.save"
@@ -288,7 +289,7 @@ watch(modalOpen, (v) => {
         </main>
       </div>
       </div>
-      <MessageDrawer :messages="drawerMessages" @select="selectFromDrawer" />
+      <MessageDrawer v-model:open="drawerOpen" :messages="drawerMessages" @select="selectFromDrawer" />
       </div>
     </template>
 

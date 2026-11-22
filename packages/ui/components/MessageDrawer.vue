@@ -9,7 +9,7 @@ import type { DrawerMessage } from "../composables/useMessageDrawer";
 const props = defineProps<{ messages: DrawerMessage[] }>();
 const emit = defineEmits<{ select: [session: string] }>();
 
-const open = ref(false);
+const open = defineModel<boolean>("open", { default: false });
 
 const list = ref<HTMLElement | null>(null);
 // New messages stack at the bottom; keep the newest in view. (The newest seq, not the length: the length stops growing at the cap.)

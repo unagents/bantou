@@ -86,6 +86,46 @@ test.describe("message drawer", () => {
     });
   }
 
+  for (const vw of [1100, 1300, 1700]) {
+    test(`at ${vw}px, open or closed, the conversation grid stays left of the drawer and nothing scrolls sideways`, async ({ page }) => {
+      await page.setViewportSize({ width: vw, height: 800 });
+      await page.goto("/");
+      await pickSession(page, "stroke-board");
+      const noScroll = async (state: string) => {
+        const m = await page.evaluate(() => {
+          const row = document.querySelector('[data-testid="pane-row"]')!;
+          const doc = document.documentElement;
+          return { rowS: row.scrollWidth, rowC: row.clientWidth, docS: doc.scrollWidth, docC: doc.clientWidth };
+        });
+        expect(m.rowS, `${vw} ${state} pane row`).toBeLessThanOrEqual(m.rowC);
+        expect(m.docS, `${vw} ${state} document`).toBeLessThanOrEqual(m.docC);
+        return m;
+      };
+      const gridRight = async () => {
+        const g = (await page.locator(".xterm-screen").boundingBox())!;
+        return g.x + g.width;
+      };
+      await noScroll("closed");
+      const closedRight = await gridRight();
+      await open(page);
+      const d = (await drawer(page).boundingBox())!;
+      const right = await gridRight();
+      expect(right).toBeLessThanOrEqual(d.x + 0.5);
+      await noScroll("open");
+      const side = (await page.getByRole("navigation", { name: "セッション一覧" }).boundingBox())!.width;
+      const mid = (await page.getByTestId("middle-col").boundingBox())!.width;
+      const conv = (await page.getByTestId("right-col").boundingBox())!.width;
+      expect(mid).toBeGreaterThanOrEqual(320);
+      expect(conv).toBeGreaterThanOrEqual(320);
+      await shot(page, `drawer-fit-${vw}-open`);
+      console.log(`fit vw=${vw} closedGridRight=${closedRight} openGridRight=${right} drawerX=${d.x} side=${side} middle=${mid} conv=${conv}`);
+      await page.getByTestId("message-drawer-close").click();
+      await expect(drawer(page)).toHaveAttribute("data-open", "false");
+      await noScroll("reclosed");
+      expect(Math.round(await gridRight())).toBe(Math.round(closedRight));
+    });
+  }
+
   test("last messages stack up in arrival order, with the session and the time", async ({ page }) => {
     await page.goto("/");
     await pickSession(page, "stroke-board");
