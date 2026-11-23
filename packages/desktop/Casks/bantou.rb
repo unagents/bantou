@@ -1,6 +1,6 @@
 cask "bantou" do
-  version "0.1.62"
-  sha256 "22181b4c39bc552e5ae8fe4b5615ec5f996bc16eafb44a82770e0e3a289b2a71"
+  version "0.1.63"
+  sha256 "fb63e3e2f2662a4f21d24e191b0e575da70415fa1460b16f1cae5fb1f1d69e61"
 
   url "https://github.com/unagents/bantou/releases/download/v#{version}/bantou_#{version}_aarch64.dmg"
   name "bantou"
