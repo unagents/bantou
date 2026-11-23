@@ -240,6 +240,9 @@ test("query terminalOutputSince: after より後のチャンク（base64）。�
     assert.deepEqual(caughtUp.data, { terminalOutputSince: { reset: false, chunks: [] } });
     const ahead = await q('{terminalOutputSince(session:"t",after:99){reset chunks{id}}}');
     assert.equal((ahead.data as { terminalOutputSince: { reset: boolean } }).terminalOutputSince.reset, true);
+    // 名前の形式は他の query と同じ検査（subscribe まで届かない）
+    const badName = await q('{terminalOutputSince(session:"a b"){reset}}');
+    assert.equal(badName.errors?.[0].message, "session の名前は英数字と _ - のみ");
     const none = await q('{terminalOutputSince(session:"nope"){reset}}');
     assert.equal(none.errors?.[0].message, "未定義の session");
     // 取り直しは購読を残さない（subscribe した数だけ解除される）

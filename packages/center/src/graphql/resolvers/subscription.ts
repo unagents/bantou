@@ -1,6 +1,6 @@
-import { readFileSync } from "node:fs";
 import { GraphQLError } from "graphql";
 import type { CoreEvent } from "../../core.js";
+import { packageVersion } from "../../version.js";
 import type { GraphqlContext } from "../context.js";
 
 /**
@@ -66,18 +66,6 @@ function listen<T>(attach: (emit: (v: T) => void, end: () => void) => (() => voi
   };
 }
 
-/** package.json の version（server.ts と同じ読み方。src/ と dist/ のどちらからでも ../package.json が 1 つ上）。 */
-function packageVersion(): string | null {
-  for (const rel of ["../../../package.json", "../../package.json"]) {
-    try {
-      const p = JSON.parse(readFileSync(new URL(rel, import.meta.url), "utf8")) as { version?: string };
-      if (p.version) return p.version;
-    } catch {
-      // 次の候補へ
-    }
-  }
-  return null;
-}
 
 /** Core の event を schema の TerminalEvent にする。end は status "end"（その後 stream は閉じる）。 */
 function terminalEvent(ev: CoreEvent) {
