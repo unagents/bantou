@@ -408,8 +408,7 @@ export function createRemoteManager(opts: {
       targets = [...targets];
       const has = (t: RemoteRecord): boolean => records.includes(t);
       const check = (): RemoteView | undefined => {
-        // ws の書き込みを 1 回も見ていない間は返らない。1 回見た後、60 秒無音で返る
-        for (const t of targets) if (has(t) && tracker.lastAt(parentOf(t)) !== undefined && stateOf(t) === "stopped") return viewOf(t);
+        for (const t of targets) if (has(t) && stateOf(t) === "stopped") return viewOf(t);
         return undefined;
       };
       const deadline = nowMs() + sec * 1000;
@@ -421,7 +420,7 @@ export function createRemoteManager(opts: {
         const left = deadline - nowMs();
         if (left <= 0) return viewOf(alive[0]!);
         // 次に「止まっている」へ変わる時刻（最後の書き込み + 無音の長さ）か、書き込み・控えの変化か、timeout の早い方まで待つ
-        const nextStop = Math.min(...alive.map((t) => { const last = tracker.lastAt(parentOf(t)); return last === undefined ? Infinity : last + tracker.silentMs - nowMs(); }));
+        const nextStop = Math.min(...alive.map((t) => (tracker.lastAt(parentOf(t)) ?? nowMs()) + tracker.silentMs - nowMs()));
         const waitMs = Math.max(10, Math.min(left, nextStop + 10));
         await new Promise<void>((resolve) => {
           const t = setTimeout(done, waitMs);

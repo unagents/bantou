@@ -249,25 +249,6 @@ test("wait: 止まっている cap があれば即返す。動いている間は
   assert.equal(r.state, "running");
 });
 
-test("wait: ws の書き込みを 1 回も見ていない間は返らない（timeout まで）。1 回見た後、60 秒無音で返る", async () => {
-  const s = setup();
-  await s.manager.send({ owner: "pm1", server: "srv", prompt: "x" });
-  const waiting = s.manager.wait({ owner: "pm1", timeoutSec: 600 });
-  let settled = false;
-  void waiting.then(() => void (settled = true));
-  s.clock.advance(120_000);
-  s.tracker.note("other-cap"); // 起こす（pm1-cap の書き込みではない）
-  await new Promise((r) => setTimeout(r, 30));
-  assert.equal(settled, false, "書き込みを見ていない cap は、60 秒を過ぎても返らない");
-  assert.equal(s.manager.list()[0]!.state, "stopped", "remote_list は書き込みが無ければ stopped");
-  s.tracker.note("pm1-cap");
-  s.clock.advance(60_000);
-  s.tracker.note("other-cap");
-  const v = await waiting;
-  assert.equal(v.state, "stopped");
-  assert.equal(v.remote_id, "pm1-cap@srv");
-});
-
 test("wait: 対象が無い・owner 無しで remote_id 省略・待っている間に stop された場合は投げる", async () => {
   const s = setup();
   await assert.rejects(() => s.manager.wait({ owner: "pm1" }), /待つ remote が無い/);
