@@ -12,7 +12,7 @@ import type { ServerLink } from "./server-link.js";
 import { registerSessionTools, registerTools } from "./tools.js";
 
 /** package.json の version（src/ と dist/ のどちらからでも ../package.json）。 */
-function packageVersion(): string {
+export function packageVersion(): string {
   try {
     const p = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version?: string };
     return p.version ?? "0.0.0";
