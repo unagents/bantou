@@ -77,3 +77,6 @@ block2 = "=0.6.2"
 # Resume-from-sleep notification (`os_events.rs`). Same version as already locked via tauri.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_System_Power", "Win32_UI_WindowsAndMessaging"] }
+
+[profile.release]
+incremental = true
