@@ -291,13 +291,6 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
   }
   setBashWorkspace(config.workspace);
 
-  // 前回の server が残した claude を止めた cap へ failed を返す（止めたのは指示を受け付ける前）
-  for (const parentId of reaped) {
-    await workerDeps.sendToCap(parentId, { status: "failed", content: REAPED_CONTENT }).catch((e: unknown) =>
-      log(`孤児回収の failed を返せない: to=${parentId} ${e instanceof Error ? e.message : String(e)}`),
-    );
-  }
-
   const stop = async (): Promise<void> => {
     if (closing) return;
     closing = true;
@@ -328,8 +321,6 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
   log(`常駐開始: name=${name} version=${serverVersion}`);
   return { stop, exitCode: () => 0, name };
 }
-
-const REAPED_CONTENT = "server の再起動で worker を止めた（最後の出力は無い）";
 
 /**
  * 起動時: workers/ の state.json の session で、まだ生きている claude -p を止める。
