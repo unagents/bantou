@@ -1,6 +1,6 @@
 // The web's view of the center's secrets in GraphQL answers (design 4 stage B, the read side of the web's guards).
-// The center's settings carry values that are secrets: `mcpSecrets`, the auth of `memory`, and the `headers` / `env` of
-// `mcpServers`. The answer keeps every item and drops only the value (`***`). A write that sends the masked form back
+// The center's settings carry values that are secrets: `mcpSecrets`, the auth of `memory` / `projectMemory`, the `headers` / `env` of
+// `mcpServers`, and the headers / env / token values of the old `mcp` / `mcpConnections`. The answer keeps every item and drops only the value (`***`). A write that sends the masked form back
 // (the screen saved what it was shown) is "unchanged" for that item. The desktop (the webview calls the center itself)
 // does not pass through here.
 
@@ -10,7 +10,7 @@ import { isDeepStrictEqual } from "node:util";
 export const MASK = "***";
 
 /** The settings items whose values are masked in an answer to the web. */
-export const SECRET_ITEMS: readonly string[] = ["memory", "mcpServers", "mcpSecrets"];
+export const SECRET_ITEMS: readonly string[] = ["memory", "projectMemory", "mcpServers", "mcpSecrets", "mcp", "mcpConnections"];
 const items: ReadonlySet<string> = new Set(SECRET_ITEMS);
 
 /** A key that holds an auth value (Bearer / token / Authorization and the like). */
@@ -23,7 +23,8 @@ const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object
 function isSecretPath(item: string, path: readonly string[]): boolean {
   if (item === "mcpSecrets") return true;
   if (item === "mcpServers") return isHeadersOrEnv(path[1]); // [server name, "headers" | "env", ...]
-  return isHeadersOrEnv(path[0]) || path.some((k) => AUTH_KEY.test(k)); // memory: a server def (or the old { url, token })
+  if (item === "mcp" || item === "mcpConnections") return path.some((k) => isHeadersOrEnv(k) || AUTH_KEY.test(k)); // old settings: headers / env / token at any depth
+  return isHeadersOrEnv(path[0]) || path.some((k) => AUTH_KEY.test(k)); // memory, projectMemory: a server def (or the old { url, token })
 }
 
 function walk(item: string, v: unknown, path: readonly string[], fn: (leaf: unknown) => unknown): unknown {

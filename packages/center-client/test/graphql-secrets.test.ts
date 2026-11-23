@@ -118,6 +118,51 @@ test("write: when the current settings cannot be read, the masked form is refuse
   assert.equal(r.status, 403);
 });
 
+const OLD_STORED = {
+  projectMemory: { type: "http", url: "http://pm/mcp", headers: { Authorization: "Bearer pm-SECRET-7" }, token: "pm-TOKEN-8" },
+  mcp: { url: "http://old/mcp", token: "old-TOKEN-9", headers: { "X-Key": "old-HDR-10" }, env: { K: "old-ENV-11" } },
+  mcpConnections: { conn: { url: "http://c/mcp", headers: { Authorization: "conn-HDR-12" }, env: { K: "conn-ENV-13" }, token: "conn-TOKEN-14" } },
+};
+const OLD_MASKED = {
+  projectMemory: { type: "http", url: "http://pm/mcp", headers: { Authorization: "***" }, token: "***" },
+  mcp: { url: "http://old/mcp", token: "***", headers: { "X-Key": "***" }, env: { K: "***" } },
+  mcpConnections: { conn: { url: "http://c/mcp", headers: { Authorization: "***" }, env: { K: "***" }, token: "***" } },
+};
+
+test("answer: projectMemory and the old mcp / mcpConnections are masked too (items stay, other values left)", () => {
+  const out = JSON.parse(maskGraphqlAnswer(body("{ centerSettings { projectMemory mcp mcpConnections } }"), JSON.stringify({ data: { centerSettings: OLD_STORED } }))) as { data: { centerSettings: unknown } };
+  assert.deepEqual(out.data.centerSettings, OLD_MASKED);
+});
+
+test("write: the masked projectMemory / mcp / mcpConnections sent back is unchanged; an edited one is refused", async () => {
+  const stored = { ...STORED, ...OLD_STORED };
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      const j = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { query: string; variables?: Record<string, unknown> };
+      seen.push({ query: j.query, variables: j.variables ?? {} });
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ data: { centerSettings: stored, updateCenterSettings: stored } }));
+    });
+  });
+  const seen: { query: string; variables: Record<string, unknown> }[] = [];
+  servers.push(server);
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const target: Target = { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`, token: "tok-ABCDEF123456-secret", source: "remote" };
+  const relay = createGraphqlRelay({ getTarget: async () => target });
+  const q = "mutation($s: CenterSettingsInput!) { updateCenterSettings(settings: $s) { instructions } }";
+  const r = await relay.forward(body(q, { s: { instructions: "new", ...OLD_MASKED } }), undefined);
+  assert.equal(r.status, 200);
+  await text(r);
+  assert.deepEqual(seen.find((s) => s.query.includes("updateCenterSettings"))!.variables, { s: { instructions: "new" } });
+  assert.ok(!JSON.stringify(seen).includes("***"));
+  const edited = await relay.forward(body(q, { s: { mcp: { ...OLD_MASKED.mcp, url: "http://evil/mcp" } } }), undefined);
+  assert.equal(edited.status, 403);
+  const other = await relay.forward(body(q, { s: { projectMemory: { token: "***", url: "http://x" } } }), undefined);
+  assert.equal(other.status, 403);
+});
+
 test("desktop (guard off): the answer is not masked", async () => {
   const c = await center();
   const relay = createGraphqlRelay({ getTarget: async () => c.target, guard: false });
