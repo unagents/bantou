@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { MESSENGER_PROTOCOL, isLaunchMessage, isServerMessage } from "@agent-hand/bantou-protocol";
-import { createServerLink, stripWarning, type LinkClient, type LinkInbound, type LinkMeta, type LinkPeer } from "../src/server-link.js";
+import { brokerOptions, createServerLink, isNameConflict, stripWarning, type LinkClient, type LinkInbound, type LinkMeta, type LinkPeer } from "../src/server-link.js";
 
 class FakeClient implements LinkClient {
   sent: Array<{ to: string; text: string; delivery?: string; meta?: LinkMeta }> = [];
@@ -73,6 +73,58 @@ test("connect: center の名前で client を作る。登録に失敗（同名�
   assert.equal(b.client.closed, true);
   // 接続できていないので送れない
   await assert.rejects(() => b.link.stop("srv", "pm1-cap"), /接続していない/);
+});
+
+test("connectKeeping: broker に届かない時は投げず、間隔を置いて繋ぎ直す。繋がったら止める", async () => {
+  const client = new FakeClient();
+  let calls = 0;
+  client.connect = async () => {
+    calls += 1;
+    if (calls < 3) throw new Error("Remote broker at http://192.168.1.203:7901 is not reachable.");
+  };
+  const logs: string[] = [];
+  const link = createServerLink({ name: "bantou-center-0123456789", log: (m) => logs.push(m), clientFactory: () => client, retryMs: 10 });
+  await link.connectKeeping();
+  assert.equal(calls, 1);
+  // 繋がるまで送れない
+  await assert.rejects(() => link.stop("srv", "pm1-cap"), /接続していない/);
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(calls, 3);
+  assert.ok(logs.some((l) => l.includes("繋ぎ直す")));
+  await link.stop("srv", "pm1-cap");
+  assert.equal(client.sent.length, 1);
+  await link.close();
+});
+
+test("connectKeeping: 同じ名前の error は投げる（起動しない）。繋ぎ直さない", async () => {
+  const { link, client } = setup();
+  client.failConnect = true;
+  await assert.rejects(() => link.connectKeeping(), /name already taken/);
+  assert.equal(isNameConflict(new Error("name already taken")), true);
+  assert.equal(isNameConflict(new Error("Remote broker at http://h:7901 is not reachable.")), false);
+});
+
+test("connectKeeping: close で繋ぎ直しを止める", async () => {
+  const client = new FakeClient();
+  let calls = 0;
+  client.connect = async () => {
+    calls += 1;
+    throw new Error("not reachable");
+  };
+  const link = createServerLink({ name: "bantou-center-0123456789", log: () => {}, clientFactory: () => client, retryMs: 10 });
+  await link.connectKeeping();
+  await link.close();
+  const n = calls;
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(calls, n);
+});
+
+test("brokerOptions: brokerUrl があればそれだけを broker にして discovery を切る。無ければ空", () => {
+  assert.deepEqual(brokerOptions(undefined), {});
+  const o = brokerOptions("http://192.168.1.203:7901", { AGENT_MESSENGER_HOST: "10.0.0.9" });
+  assert.deepEqual(o.brokers, ["http://192.168.1.203:7901"]);
+  assert.equal(o.config?.host, "");
+  assert.equal(o.config?.discoveryEnabled, false);
 });
 
 test("launch: schema があれば本文に入る（guard を通る）。無ければ schema を入れない", async () => {

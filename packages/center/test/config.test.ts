@@ -39,6 +39,12 @@ test("workspace は絶対パスの任意項目。相対パスは拒否", () => {
   assert.throws(() => parseConfig({ workspace: "rel/x" }, "/x/c.json"), /workspace/);
 });
 
+test("brokerUrl は URL の任意項目。無ければ未設定。URL でない物は拒否", () => {
+  assert.equal(parseConfig({ brokerUrl: "http://192.168.1.203:7901" }, "/x/c.json").brokerUrl, "http://192.168.1.203:7901");
+  assert.equal(parseConfig({}, "/x/c.json").brokerUrl, undefined);
+  assert.throws(() => parseConfig({ brokerUrl: "not a url" }, "/x/c.json"), /brokerUrl/);
+});
+
 test("全項目指定", () => {
   const c = parseConfig(
     {

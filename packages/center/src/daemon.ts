@@ -130,8 +130,9 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   const name = centerName();
   log(`center の名前: ${name}`);
   const pairServer = resolvePairServerVersion({ warn: log });
-  const link = createServerLink({ name, log, ...(pairServer !== undefined ? { bridgeVersion: pairServer } : {}) });
-  await link.connect();
+  const link = createServerLink({ name, log, ...(pairServer !== undefined ? { bridgeVersion: pairServer } : {}), ...(config.brokerUrl ? { brokerUrl: config.brokerUrl } : {}) });
+  // broker に届かない時は起動を止めず、30 秒ごとに繋ぎ直す（同じ名前の error だけ起動しない）
+  await link.connectKeeping();
   // 移行の橋: protocol 1.x の server に update_server を 1 回だけ送る（返事は待たない。以後は server_list を見るたび）
   void link.bridgeLegacy();
   // worker の ws（最後の書き込みの時刻から running / 止まっている を出す）。口は http で待ち受ける時だけ

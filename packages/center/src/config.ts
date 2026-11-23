@@ -107,6 +107,8 @@ export const configSchema = z
     port: z.number().int().min(0).max(65535).optional(),
     /** 鍵を渡してよい接続元の IP の範囲（`192.168.1.0/24`・`10.0.0.5`・`fd00::/8`）。空・無しなら鍵を渡さない。起動時に読む。 */
     keyRanges: z.array(z.string().refine((s) => parseRange(s) !== undefined, { message: "IP か CIDR（例: 192.168.1.0/24）で指定する" })).optional(),
+    /** messenger の broker の URL（`http://host:port`）。在れば discovery を使わずそれに繋ぐ。無ければ通常の解決（env → config → UDP 発見 → ローカル fallback）。起動時に読む。 */
+    brokerUrl: z.string().url().optional(),
   })
   .superRefine((cfg, ctx) => {
     for (const key of ["projects", "servers"] as const) {
@@ -143,6 +145,8 @@ export interface Config {
   port?: number;
   /** 鍵を渡してよい接続元の IP の範囲（未設定なら鍵を渡さない）。 */
   keyRanges?: string[];
+  /** messenger の broker の URL（未設定なら通常の解決）。 */
+  brokerUrl?: string;
 }
 
 /** zod の検証結果から Config を作る（logDir の既定は config と同じ場所の center-logs）。 */
@@ -160,9 +164,10 @@ export function parseConfig(data: unknown, configPath: string, warn?: (msg: stri
       .join("; ");
     throw new Error(`config が不正: ${issues}`);
   }
-  const { logDir, token, workspace, publicHost, port, keyRanges, ...rest } = r.data;
+  const { logDir, token, workspace, publicHost, port, keyRanges, brokerUrl, ...rest } = r.data;
   return {
     ...rest,
+    ...(brokerUrl ? { brokerUrl } : {}),
     logDir: logDir ?? join(dirname(resolve(configPath)), "center-logs"),
     ...(workspace ? { workspace } : {}),
     ...(token ? { token } : {}),

@@ -93,6 +93,7 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 | `workspace` | 絶対パス | なし | `session_create` で `path` 省略時の置き場所 `<workspace>/<name>` の親。session は起動時に立てない |
 | `token` | 12 文字以上の文字列 | なし | http transport の `/mcp` が要求する Bearer token。書いた場合は 12 文字以上が必要（12 文字未満だと起動せずエラー終了。無い時は下記の `internal-token`。Cork の MCP Server が 12 文字未満の token を拒否し、保存値が不正なら作り直すのに合わせた）。stdio では使わない。desktop は sidecar 起動時に `center.json` へ書く |
 | `port` | 0〜65535 の整数 | `7910` | http の待受ポート（起動時に読む。`--port` があればそちらが優先）。窓の無い起動（bantou-center）はこの値でだけ待ち受ける |
+| `brokerUrl` | URL（`http://192.168.1.203:7901`） | なし（通常の解決: env → config → UDP 発見 → ローカル fallback） | messenger の broker の URL（起動時に読む）。在れば discovery を使わずそれに繋ぐ（env の `AGENT_MESSENGER_HOST` より優先）。届かない間は起動を止めず 30 秒ごとに繋ぎ直す（繋がるまで remote の送受信は出来ない。`/graphql`・`/mcp` は動く）。対象は center 自身の接続。session 側の messenger client には効かない |
 | `keyRanges` | IP / CIDR の配列（`192.168.1.0/24`・`10.0.0.5`・`fd00::/8`） | なし（誰にも鍵を渡さない） | 鍵を渡してよい接続元の IP の範囲（起動時に読む）。範囲内の接続元が `POST /auth/key`（認証なし）で client の鍵（`{ "key": "…" }`）を受け取り、以後 `Authorization: Bearer <鍵>` で `/mcp`・`/events`・`/graphql`・`/sessions/*` を使う。鍵は state dir の `client-keys.json`（hash のみ・0600）に覚える。失効は扱わない |
 
 `token` を書かない http 起動（bantou-center）は、center 自身が使う token を state dir の `internal-token`（0600）に 1 度作って使う（統括の MCP・worker の ws 用。client には渡さない）。
@@ -109,7 +110,7 @@ center は wrapper 経由の session（master-cap）を起動するたび（新�
 
 ### server の発見（protocol 方式）
 
-- center は普通の agent-messenger client として、通常の解決（env `AGENT_MESSENGER_HOST` → `~/.agent-messenger/config.json` → UDP 発見 → ローカル fallback）で broker につなぐ。broker の URL は指名しない（旧 `servers[].broker` / `servers[].token` は廃止。書いても無視される。token が要る場合は `AGENT_MESSENGER_TOKEN`）。server の peer は、リクエストごとに `listPeers("all", {protocol: "bantou"})` で発見する（peer id は再登録で変わるため）。`servers[].peer` を指定すると発見せずその名前へ送る。
+- center は普通の agent-messenger client として、通常の解決（env `AGENT_MESSENGER_HOST` → `~/.agent-messenger/config.json` → UDP 発見 → ローカル fallback）で broker につなぐ。broker の URL は config の `brokerUrl` で指す時だけ指名する（上の表。旧 `servers[].broker` / `servers[].token` は廃止。書いても無視される。token が要る場合は `AGENT_MESSENGER_TOKEN`）。server の peer は、リクエストごとに `listPeers("all", {protocol: "bantou"})` で発見する（peer id は再登録で変わるため）。`servers[].peer` を指定すると発見せずその名前へ送る。
 - 送信は `send(to, text, "pull", {protocol: "bantou", version})`。version は発見した peer が宣言している値（名前宛ての時は `MESSENGER_PROTOCOL.version`）。
 - 受信は、送信元が解決済みの peer id、meta の protocol が `bantou`、`servers[].peer` のいずれかなら server の返信として扱う。text 先頭の `[agent-messenger warning]` 行（version 不一致時に付く）は除いてから JSON として解釈する。
 - 仕様は `../protocol/messenger/protocol.json` と `../../docs/protocol.md`。

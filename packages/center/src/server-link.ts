@@ -1,5 +1,6 @@
 import { hostname } from "node:os";
-import { createMessengerClient } from "@unagents/messenger-client";
+import { createMessengerClient, loadConfig as loadMessengerConfig } from "@unagents/messenger-client";
+import type { ClientConfig } from "@unagents/messenger-client";
 import { MESSENGER_PROTOCOL, parseServerInfoReply } from "@agent-hand/bantou-protocol";
 import type { AnswerMessage, ApproveMessage, LaunchMessage, RejectMessage, SchemaDiscovery, ServerInfoMessage, StopMessage } from "@agent-hand/bantou-protocol";
 import type { Logger } from "./log.js";
@@ -88,6 +89,11 @@ export interface ServerLink {
   readonly name: string;
   /** broker に繋ぐ。同名が既に在る等で登録に失敗したら投げる（起動しない）。 */
   connect(): Promise<void>;
+  /**
+   * 起動の時の接続。同じ名前の error だけ投げる（起動しない）。broker に届かない等の他の失敗は投げず、30 秒ごとに繋ぎ直す
+   * （繋がるまで remote の送受信は出来ない）。close で繋ぎ直しを止める。
+   */
+  connectKeeping(): Promise<void>;
   launch(server: string, input: LaunchInput): Promise<void>;
   stop(server: string, parentId: string): Promise<void>;
   reply(server: string, input: ReplyInput): Promise<void>;
@@ -122,14 +128,32 @@ export function stripWarning(text: string): string {
   return t;
 }
 
-/** 実 client を作る。名前は center の名前（bantou-center-<key>）。普通の解決（env → config → UDP 発見 → ローカル fallback）で broker につなぐ。 */
-export function createClient(name: string, log: Logger): LinkClient {
+/**
+ * brokerUrl（config）を指した時の client の option。env の host を外し・discovery を切り、その URL だけを broker にする。
+ * brokerUrl が無ければ空（普通の解決: env → config → UDP 発見 → ローカル fallback）。
+ */
+export function brokerOptions(brokerUrl: string | undefined, env: NodeJS.ProcessEnv = process.env): { brokers?: string[]; config?: ClientConfig } {
+  if (brokerUrl === undefined) return {};
+  return { brokers: [brokerUrl], config: { ...loadMessengerConfig(env), host: "", discoveryEnabled: false } };
+}
+
+/** 実 client を作る。名前は center の名前（bantou-center-<key>）。brokerUrl があればそれに繋ぐ。無ければ普通の解決で broker につなぐ。 */
+export function createClient(name: string, log: Logger, brokerUrl?: string): LinkClient {
   return createMessengerClient({
     name,
     summary: `center ${hostname()}`,
     autoStartBroker: false,
     log: (m) => log(`messenger: ${m}`),
+    ...brokerOptions(brokerUrl),
   }) as unknown as LinkClient;
+}
+
+/** 繋ぎ直す間隔。 */
+export const CONNECT_RETRY_MS = 30_000;
+
+/** 同じ名前が既に在って登録できない error か（この時だけ起動しない。他の失敗は繋ぎ直す）。 */
+export function isNameConflict(e: unknown): boolean {
+  return /already taken|name.*(already|in use|exists)|already (registered|in use)/i.test(e instanceof Error ? e.message : String(e));
 }
 
 /** 印が無ければ全部。あれば、印の時点にいなかった peer で、登録が印の since 以後の物だけ（registered_at の無い peer は id だけで見る）。 */
@@ -176,9 +200,15 @@ export function createServerLink(opts: {
   clientFactory?: (name: string) => LinkClient;
   /** 組の server の版（x.y.z）。移行の橋が 1.x の server へ指示する版。省略すると橋は送らない。 */
   bridgeVersion?: string;
+  /** config の brokerUrl（在れば discovery を使わずそれに繋ぐ）。clientFactory が無い時だけ効く。 */
+  brokerUrl?: string;
+  /** 繋ぎ直す間隔（既定 30 秒。テスト用）。 */
+  retryMs?: number;
 }): ServerLink {
   const { log, name } = opts;
-  const clientFactory = opts.clientFactory ?? ((n: string): LinkClient => createClient(n, log));
+  const retryMs = opts.retryMs ?? CONNECT_RETRY_MS;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  const clientFactory = opts.clientFactory ?? ((n: string): LinkClient => createClient(n, log, opts.brokerUrl));
   let client: LinkClient | null = null;
   let unsubscribe: (() => void) | null = null;
   let closed = false;
@@ -256,6 +286,22 @@ export function createServerLink(opts: {
       client = c;
       log(`messenger 接続: name=${name} peer=${c.peer?.id ?? "?"}`);
     },
+    async connectKeeping() {
+      const attempt = async (): Promise<void> => {
+        retryTimer = null;
+        if (closed || client) return;
+        try {
+          await this.connect();
+        } catch (e) {
+          if (isNameConflict(e)) throw e;
+          if (closed) return;
+          log(`messenger に繋げない（${CONNECT_RETRY_MS / 1000} 秒後に繋ぎ直す。繋がるまで remote の送受信は出来ない）: ${e instanceof Error ? e.message : String(e)}`);
+          retryTimer = setTimeout(() => void attempt().catch((err) => log(`messenger: 繋ぎ直しを止める: ${err instanceof Error ? err.message : String(err)}`)), retryMs);
+          retryTimer.unref();
+        }
+      };
+      await attempt();
+    },
     launch: (server, i) => sendTo(server, { protocol: "bantou", callType: "invoke", order: "launch", "parent-id": i.parentId, ...(i.model !== undefined ? { model: i.model } : {}), prompt: i.prompt, ws: i.ws, ...(i.schema !== undefined ? { schema: i.schema } : {}) }),
     stop: (server, parentId) => sendTo(server, { protocol: "bantou", callType: "invoke", order: "stop", "parent-id": parentId }),
     reply: (server, i) =>
@@ -312,6 +358,8 @@ export function createServerLink(opts: {
     },
     async close() {
       closed = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      retryTimer = null;
       unsubscribe?.();
       unsubscribe = null;
       const c = client;
