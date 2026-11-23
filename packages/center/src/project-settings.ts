@@ -62,7 +62,35 @@ export interface ProjectSettings {
    * session の値があれば共通の値は使わない。旧形式 `{ url, token?, agentId? }` は読み替える（mcp-server-def.ts の memoryDefOf）。
    */
   memory?: McpServerDef;
+  /**
+   * guardrail の設定: openspec 向けの schema 定義（名前 → 定義の中身）。center 共通の設定だけで持つ。
+   * 定義の中身は不透明な JSON の値（bantou は解釈しない。そのまま保存して返す）。
+   */
+  guardrailSchemas?: Record<string, unknown>;
   [key: string]: unknown;
+}
+
+/** guardrail の schema の名前の規則（`/schemas/[schema-name]` の path に載るので、英数字と _ - のみ。既存の接続名と同じ規則）。 */
+export const GUARDRAIL_SCHEMA_NAME = /^[A-Za-z0-9_-]+$/;
+
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+
+/** 保存済みの設定から guardrail の schema 定義（名前 → 中身）を取り出す。名前の規則に合わない物・null は含めない。壊れていれば空。 */
+export function guardrailSchemasOf(settings: unknown): Record<string, unknown> {
+  const raw = isRecord(settings) ? settings.guardrailSchemas : undefined;
+  if (!isRecord(raw)) return {};
+  // fromEntries は own property として作る（名前が __proto__ でも prototype を書き換えない）
+  return Object.fromEntries(Object.entries(raw).filter(([name, def]) => GUARDRAIL_SCHEMA_NAME.test(name) && def !== null && def !== undefined));
+}
+
+/** 名前を指して定義の中身を 1 件返す（無ければ undefined）。 */
+export function guardrailSchemaOf(settings: unknown, name: string): unknown {
+  return Object.hasOwn(guardrailSchemasOf(settings), name) ? guardrailSchemasOf(settings)[name] : undefined;
+}
+
+/** schema 定義の一覧（名前の昇順）。 */
+export function guardrailSchemaNames(settings: unknown): string[] {
+  return Object.keys(guardrailSchemasOf(settings)).sort();
 }
 
 const serverRefSchema = z
@@ -195,7 +223,9 @@ export function withoutLauncherKeys<T extends object>(settings: T): T {
 export function settingsIssues(patch: object | undefined, scope: "common" | "session", checkServer: (name: string, raw: unknown, scope: "common" | "session") => string[]): string[] {
   if (patch === undefined || patch === null) return [];
   const out: string[] = [];
-  const p = patch as { mcpServers?: unknown; memory?: unknown };
+  const p = patch as { mcpServers?: unknown; memory?: unknown; guardrailSchemas?: unknown };
+  // guardrail の schema 定義は center 共通の設定だけで持つ（session の設定には置かない。null＝削除は無害なので通す）
+  if (scope === "session" && p.guardrailSchemas !== undefined && p.guardrailSchemas !== null) out.push("guardrailSchemas は center 共通の設定でだけ書ける");
   if (p.mcpServers !== undefined && p.mcpServers !== null) {
     if (typeof p.mcpServers !== "object" || Array.isArray(p.mcpServers)) out.push("mcpServers は 名前 → MCP の server の設定 の object");
     else
@@ -216,7 +246,13 @@ export function settingsIssues(patch: object | undefined, scope: "common" | "ses
  * center 共通の設定の更新の入力。session の設定から `servers` を除いたもの（servers は session ごとの設定だけで持つ）。
  * `servers` の指定は null（削除。無害）以外は受け付けない（updateCenterSettings がエラーにする）。
  */
-export const centerSettingsPatchSchema = projectSettingsPatchSchema.omit({ servers: true }).passthrough();
+export const centerSettingsPatchSchema = projectSettingsPatchSchema
+  .omit({ servers: true })
+  .extend({
+    // 名前 → 定義の中身（不透明な JSON）。名前ごとに足す・変える。名前の値が null でその schema を消す。項目全体の null で全部消す
+    guardrailSchemas: z.record(z.string().regex(GUARDRAIL_SCHEMA_NAME, "schema の名前は英数字と _ - のみ"), z.unknown()).nullable().optional(),
+  })
+  .passthrough();
 export type CenterSettingsPatch = z.infer<typeof centerSettingsPatchSchema>;
 
 /** center 共通の設定に `servers` を入れようとした時のエラー文。 */
@@ -250,6 +286,17 @@ export function mergeSettings(current: ProjectSettings | undefined, patch: Proje
       if (dirs.length) out.addDirs = dirs;
       else delete out.addDirs;
     } else if (k === "servers") out.servers = uniqueDirs(v);
+    // guardrail の schema 定義は名前ごとにマージ（名前の値 null でその schema を消す。空になれば項目ごと消す）
+    else if (k === "guardrailSchemas") {
+      const patchEntries = Object.entries(isRecord(v) ? v : {}).filter(([name]) => GUARDRAIL_SCHEMA_NAME.test(name));
+      const removed = new Set(patchEntries.filter(([, def]) => def === null || def === undefined).map(([name]) => name));
+      const merged = Object.fromEntries([
+        ...Object.entries(guardrailSchemasOf(out)).filter(([name]) => !removed.has(name)),
+        ...patchEntries.filter(([name]) => !removed.has(name)),
+      ]);
+      if (Object.keys(merged).length) out.guardrailSchemas = merged;
+      else delete out.guardrailSchemas;
+    }
     // 外部記憶は普通の MCP の設定の形で持つ（旧形式は読み替える）
     else if (k === "memory") {
       const d = memoryDefOf(v);
@@ -286,6 +333,12 @@ export function readSettings(raw: unknown): ProjectSettings {
   else delete out.servers;
   // mcpServers: 連想配列だけ残す（中身の検査は mcp-connections.ts が使う時に行う）
   if (typeof out.mcpServers !== "object" || out.mcpServers === null || Array.isArray(out.mcpServers)) delete out.mcpServers;
+  // guardrailSchemas: 名前の規則に合う物だけ残す。空・壊れていれば未設定
+  if ("guardrailSchemas" in out) {
+    const g = guardrailSchemasOf(out);
+    if (Object.keys(g).length) out.guardrailSchemas = g;
+    else delete out.guardrailSchemas;
+  }
   return out;
 }
 

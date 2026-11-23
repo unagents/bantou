@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { assertCenterOnly, CENTER_ONLY_MCP_ERROR, LEGACY_KEYS_ERROR, memorySchema, composeAddDirs, composeInstructions, composeOutputStyle, mergeSettings, projectSettingsPatchSchema, readSettings, settingsIssues, withoutLauncherKeys } from "../src/project-settings.js";
+import { centerSettingsPatchSchema, guardrailSchemaNames, guardrailSchemaOf, guardrailSchemasOf, assertCenterOnly, CENTER_ONLY_MCP_ERROR, LEGACY_KEYS_ERROR, memorySchema, composeAddDirs, composeInstructions, composeOutputStyle, mergeSettings, projectSettingsPatchSchema, readSettings, settingsIssues, withoutLauncherKeys } from "../src/project-settings.js";
 import { serverEntryIssues } from "../src/mcp-connections.js";
 
 test("mergeSettings: 省略は変えない・値は上書き・null は削除・instructions の空文字は削除・未知項目は保持。元は変えない", () => {
@@ -232,4 +232,68 @@ test("settingsIssues: mcpServers は普通の MCP の設定・組み込み・旧
     assert.ok(out.some((i) => re.test(i)), `${JSON.stringify(patch)}: ${out.join(" / ")}`);
     assert.ok(!out.join(" ").includes("SECRETV"), JSON.stringify(patch));
   }
+});
+
+test("guardrailSchemas: patch の schema は名前が英数字と _ - のみ・中身は何でも（不透明）。項目全体の null は可。session の設定の schema は変えない", () => {
+  assert.equal(centerSettingsPatchSchema.safeParse({ guardrailSchemas: { "spec-driven_1": "name: x\n", obj: { a: [1] }, n: 3 } }).success, true);
+  assert.equal(centerSettingsPatchSchema.safeParse({ guardrailSchemas: { old: null } }).success, true);
+  assert.equal(centerSettingsPatchSchema.safeParse({ guardrailSchemas: null }).success, true);
+  for (const bad of ["a b", "a/b", "a.b", "", "日本語"]) assert.equal(centerSettingsPatchSchema.safeParse({ guardrailSchemas: { [bad]: "x" } }).success, false, bad);
+  assert.equal(centerSettingsPatchSchema.safeParse({ guardrailSchemas: ["x"] }).success, false);
+  assert.equal(centerSettingsPatchSchema.safeParse({ guardrailSchemas: "x" }).success, false);
+});
+
+test("mergeSettings guardrailSchemas: 名前ごとに足す・変える・消す。他の名前・他の項目は変えない。空になれば項目ごと消す。元は変えない", () => {
+  const cur = { instructions: "i", guardrailSchemas: { a: "A", b: { k: 1 } } };
+  const added = mergeSettings(cur, { guardrailSchemas: { c: "C" } });
+  assert.deepEqual(added, { instructions: "i", guardrailSchemas: { a: "A", b: { k: 1 }, c: "C" } });
+  assert.deepEqual(mergeSettings(cur, { guardrailSchemas: { a: "A2" } }).guardrailSchemas, { a: "A2", b: { k: 1 } });
+  assert.deepEqual(mergeSettings(cur, { guardrailSchemas: { a: null } }).guardrailSchemas, { b: { k: 1 } });
+  assert.deepEqual(mergeSettings(cur, { guardrailSchemas: { a: null, b: null } }), { instructions: "i" });
+  assert.deepEqual(mergeSettings(cur, { guardrailSchemas: null }), { instructions: "i" });
+  assert.deepEqual(mergeSettings(cur, { guardrailSchemas: {} }), cur);
+  assert.deepEqual(mergeSettings(cur, { instructions: "j" }).guardrailSchemas, { a: "A", b: { k: 1 } });
+  assert.deepEqual(mergeSettings(undefined, { guardrailSchemas: { z: "" } }), { guardrailSchemas: { z: "" } }, "空文字の中身も値として保存");
+  assert.deepEqual(cur, { instructions: "i", guardrailSchemas: { a: "A", b: { k: 1 } } });
+});
+
+test("mergeSettings guardrailSchemas: 中身は解釈せずそのまま保存（深い object・配列・数・真偽）。__proto__ という名前でも prototype を汚さない", () => {
+  const def = { deep: { list: [1, "x", { y: null }] }, flag: false };
+  assert.deepEqual(mergeSettings({}, { guardrailSchemas: { s: def } }).guardrailSchemas?.s, def);
+  assert.equal(mergeSettings({}, { guardrailSchemas: { n: 0 } }).guardrailSchemas?.n, 0);
+  assert.equal(mergeSettings({}, { guardrailSchemas: { t: false } }).guardrailSchemas?.t, false);
+  const patch = JSON.parse('{"guardrailSchemas":{"__proto__":"P"}}');
+  const out = mergeSettings({}, patch);
+  assert.equal(Object.hasOwn(out.guardrailSchemas ?? {}, "__proto__"), true);
+  assert.equal(Object.getPrototypeOf(out.guardrailSchemas), Object.prototype);
+  assert.equal(({} as Record<string, unknown>).P, undefined);
+});
+
+test("readSettings / guardrailSchemasOf: 壊れた値・規則外の名前・null の中身は落とす。空は未設定。名前の昇順の一覧と 1 件の取得", () => {
+  assert.deepEqual(readSettings({ guardrailSchemas: ["x"] }), {});
+  assert.deepEqual(readSettings({ guardrailSchemas: "x" }), {});
+  assert.deepEqual(readSettings({ guardrailSchemas: {} }), {});
+  assert.deepEqual(readSettings({ guardrailSchemas: { "bad name": "x", ok: "O", nul: null } }), { guardrailSchemas: { ok: "O" } });
+  assert.deepEqual(readSettings({ guardrailSchemas: { b: 1, a: 2 }, future: 1 }), { guardrailSchemas: { b: 1, a: 2 }, future: 1 });
+  const s = { guardrailSchemas: { b: "B", a: "A", c: 0 } };
+  assert.deepEqual(guardrailSchemaNames(s), ["a", "b", "c"]);
+  assert.equal(guardrailSchemaOf(s, "a"), "A");
+  assert.equal(guardrailSchemaOf(s, "c"), 0);
+  assert.equal(guardrailSchemaOf(s, "none"), undefined);
+  assert.equal(guardrailSchemaOf(s, "toString"), undefined);
+  assert.deepEqual(guardrailSchemasOf(undefined), {});
+  assert.deepEqual(guardrailSchemaNames({}), []);
+});
+
+test("guardrailSchemas は launcher 専用ではない: 起動元以外も書ける。読みの応答からも除かれない", () => {
+  assert.doesNotThrow(() => assertCenterOnly({ guardrailSchemas: { a: "A" } }, { launcher: false }));
+  assert.doesNotThrow(() => assertCenterOnly({ guardrailSchemas: null }, { launcher: false }));
+  assert.deepEqual(withoutLauncherKeys({ guardrailSchemas: { a: "A" }, memory: {} }), { guardrailSchemas: { a: "A" } });
+});
+
+test("guardrailSchemas は session の設定には置けない（null＝削除は可）。center 共通の設定では可", () => {
+  const check = () => [];
+  assert.match(settingsIssues({ guardrailSchemas: { a: "A" } }, "session", check).join(" "), /guardrailSchemas/);
+  assert.deepEqual(settingsIssues({ guardrailSchemas: null }, "session", check), []);
+  assert.deepEqual(settingsIssues({ guardrailSchemas: { a: "A" } }, "common", check), []);
 });

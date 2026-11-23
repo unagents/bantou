@@ -181,7 +181,7 @@ export function registerTools(
     {
       title: "center 共通の設定を取得",
       description:
-        "center 共通の設定 { settings } を返す。settings は { instructions?: string（全 session の --append-system-prompt の先頭に付く共通の追加指示。session の追加指示は空行を挟んでその後ろ）, addDirs?: string[]（全 session に --add-dir で付く参照フォルダ。絶対パス。session の addDirs はその後ろ）, outputStyle?: string（全 session の claude の output style の markdown 本文。session に outputStyle があればそちらを使う）, …将来の項目 }。servers（使う server）は共通の設定には無い。session の設定（session_settings_get / session_settings_update）で指定する。未設定は {}。保存済みの共通設定に servers が残っていても読み捨てる。mcpServers・memory は center を起動した所（応答の launcher が true）にだけ返す",
+        "center 共通の設定 { settings } を返す。settings は { instructions?: string（全 session の --append-system-prompt の先頭に付く共通の追加指示。session の追加指示は空行を挟んでその後ろ）, addDirs?: string[]（全 session に --add-dir で付く参照フォルダ。絶対パス。session の addDirs はその後ろ）, outputStyle?: string（全 session の claude の output style の markdown 本文。session に outputStyle があればそちらを使う）, guardrailSchemas?: Record<名前, 定義の中身（任意の JSON）>（guardrail の設定: openspec 向けの schema 定義）, …将来の項目 }。servers（使う server）は共通の設定には無い。session の設定（session_settings_get / session_settings_update）で指定する。未設定は {}。保存済みの共通設定に servers が残っていても読み捨てる。mcpServers・memory は center を起動した所（応答の launcher が true）にだけ返す",
     },
     () => guard(async () => json({ ...shown(sessions.getCenterSettings()), launcher })),
   );
@@ -190,7 +190,7 @@ export function registerTools(
     {
       title: "center 共通の設定を更新",
       description:
-        "center 共通の設定を項目ごとにマージ更新し、更新後の { settings } を返す。settings に書いた項目だけ変わる。null はその項目を削除。instructions は 16000 文字以内で、空文字は削除と同じ。addDirs は絶対パスの配列（20 個以内。空配列は削除と同じ）。outputStyle は 32000 文字以内で、空文字は削除と同じ。servers は共通の設定では持てない（null 以外を渡すと error。session の設定 session_settings_update の settings.servers で指定する）。mcpServers（全 session に載る追加の MCP の server。Claude Code の mcp.json の mcpServers と同じ形）と memory（外部記憶の MCP の server）は center を起動した所（launcher）からだけ書ける（他からは error）。応答の launcher は呼び出し元が起動元か。全 session の次の起動（再起動・--continue 含む）から効く。動いている session には効かない",
+        "center 共通の設定を項目ごとにマージ更新し、更新後の { settings } を返す。settings に書いた項目だけ変わる。null はその項目を削除。instructions は 16000 文字以内で、空文字は削除と同じ。addDirs は絶対パスの配列（20 個以内。空配列は削除と同じ）。outputStyle は 32000 文字以内で、空文字は削除と同じ。guardrailSchemas（guardrail の設定: openspec 向けの schema 定義。名前 → 定義の中身。名前は英数字と _ - のみ。中身は任意の JSON の値で、bantou は解釈せずそのまま保存して返す。名前ごとにマージし、名前の値が null でその schema を削除、guardrailSchemas 自体が null で全部削除。起動元以外からも書ける。session の設定には置けない）。servers は共通の設定では持てない（null 以外を渡すと error。session の設定 session_settings_update の settings.servers で指定する）。mcpServers（全 session に載る追加の MCP の server。Claude Code の mcp.json の mcpServers と同じ形）と memory（外部記憶の MCP の server）は center を起動した所（launcher）からだけ書ける（他からは error）。応答の launcher は呼び出し元が起動元か。全 session の次の起動（再起動・--continue 含む）から効く。動いている session には効かない",
       inputSchema: { settings: centerSettingsPatchSchema },
     },
     ({ settings }) =>

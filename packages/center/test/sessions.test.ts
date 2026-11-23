@@ -10,7 +10,7 @@ import type { RcStatus, RemoteControlSupervisor } from "../src/remote-control.js
 import { createSessionManager, type SavedSession } from "../src/sessions.js";
 import { createMemoryFile } from "../src/memory-settings.js";
 import { createJsonListStore, createJsonObjectStore } from "../src/store.js";
-import type { ProjectSettings } from "../src/project-settings.js";
+import { centerSettingsPatchSchema, type ProjectSettings } from "../src/project-settings.js";
 import { createEventHub, type SessionsEvent } from "../src/events.js";
 
 /** supervisor の偽物。add / remove / start / list / status だけ持つ。 */
@@ -1157,4 +1157,29 @@ test("updateSettings: servers の範囲が変わった時だけ master-cap へ�
   assert.equal(sent[0]!.name, "pm1");
   assert.match(sent[0]!.text, /指定なし（全部） → host-a/);
   assert.match(sent[1]!.text, /host-a → 指定なし（全部）/);
+});
+
+test("guardrailSchemas: updateCenterSettings で足す・変える・消すが center-settings.json に保存され、再起動（restore）後も読める。未知の項目・他の項目は変わらない", async () => {
+  const first = setup();
+  await first.mgr.restore();
+  await first.mgr.updateCenterSettings({ instructions: "共通", future: 1 });
+  assert.deepEqual(await first.mgr.updateCenterSettings({ guardrailSchemas: { a: "A", b: { k: [1] } } }), { settings: { instructions: "共通", future: 1, guardrailSchemas: { a: "A", b: { k: [1] } } } });
+  await first.mgr.updateCenterSettings({ guardrailSchemas: { a: "A2", c: "C" } });
+  await first.mgr.updateCenterSettings({ guardrailSchemas: { b: null } });
+  const onDisk = JSON.parse(await readFile(join(dir, "center-settings.json"), "utf8")) as Record<string, unknown>;
+  assert.deepEqual(onDisk, { instructions: "共通", future: 1, guardrailSchemas: { a: "A2", c: "C" } });
+  const second = setup();
+  await second.mgr.restore();
+  assert.deepEqual(second.mgr.getCenterSettings(), { settings: { instructions: "共通", future: 1, guardrailSchemas: { a: "A2", c: "C" } } });
+  await second.mgr.updateCenterSettings({ guardrailSchemas: null });
+  assert.deepEqual(JSON.parse(await readFile(join(dir, "center-settings.json"), "utf8")), { instructions: "共通", future: 1 });
+});
+
+test("guardrailSchemas: 他の項目の更新は schema 定義を消さない。名前の規則に合わない更新は断る", async () => {
+  const { mgr } = setup();
+  await mgr.restore();
+  await mgr.updateCenterSettings({ guardrailSchemas: { a: "A" } });
+  await mgr.updateCenterSettings({ instructions: "x" });
+  assert.deepEqual(mgr.getCenterSettings().settings.guardrailSchemas, { a: "A" });
+  assert.equal(centerSettingsPatchSchema.safeParse({ guardrailSchemas: { "a b": "x" } }).success, false);
 });
