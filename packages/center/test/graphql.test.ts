@@ -125,13 +125,3 @@ test("graphql schema: 3.1〜3.3 の表の項目が query / mutation / subscripti
   for (const f of Object.values(schema.getSubscriptionType()!.getFields())) assert.equal(typeof f.subscribe, "function", `Subscription.${f.name} の subscribe`);
 });
 
-test("graphql: 土台の stub は NOT_IMPLEMENTED を返す（query。mutation・subscription は実装済み: graphql-mutation.test.ts・graphql-subscription.test.ts）", async () => {
-  const { h, url } = await boot();
-  try {
-    const q = (await (await gql(url, "{sessions{reachable}}")).json()) as { errors: { message: string; extensions: { code: string } }[] };
-    assert.equal(q.errors[0].extensions.code, "NOT_IMPLEMENTED");
-    assert.match(q.errors[0].message, /Query\.sessions/);
-  } finally {
-    await h.close();
-  }
-});
