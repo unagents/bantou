@@ -9,7 +9,7 @@ claude を headless（`claude -p`）で起動する常駐プロセス。messenge
 - messenger broker を内蔵し、peer `bantou-server` として指示を待つ。起動時に agent-messenger の protocol `bantou` の待受としても登録する（下記「protocol 登録」）。
 - bantou-desktop（`../desktop/`）など任意の messenger peer からの指示を受ける。
 - 実行モデルの全体は [`../../docs/architecture.md`](../../docs/architecture.md)。要約は次の通り。
-  - 同一 cap（worker）への指示は直列。別の cap（worker）は並行して走る。
+  - 同一 worker への指示は直列。別の worker は並行して走る。
   - 状態は path 直下の `state.json` に残す。
   - 起動時に、前回の実行が残した孤児 claude プロセスを回収する。
   - 実行方式は差し替え口（`AgentRunner`）で抽象化。claudep 方式（Agent SDK）は interface のみで未実装。
@@ -25,7 +25,7 @@ npx bantou --config <path>
 - `npx bantou --handoff-protocol` は引き継ぎ対応版であることを示す `1` を出して exit 0（旧 supervisor が引き継ぐ前に確かめる）。内部用に `--supervise` / `--serve` もある。
 - それ以外の引数は exit 2。実行時エラーは exit 1。
 - SIGTERM / SIGINT で実行中の claude を止め、peer 解除・broker 停止して exit 0（5 秒で打ち切り）。
-- `<workspace>/server.retired` がある workspace では起動せず exit 75（退役済み。下記「退役」）。
+- `<workspace>/server.retired` がある workspace では起動せず exit 75（退役済みの印）。
 
 ### launcher・supervisor と自己更新
 
@@ -80,7 +80,7 @@ npx bantou --config <path>
 - LAN に公開するには `broker.bind`（例 `0.0.0.0`）を明示する。その場合は `broker.token` の設定を推奨する。
 - 例: 204 の claudeAgent ユーザーは `"env": { "CLAUDE_CONFIG_DIR": "/home/vagrant/.claude-agent" }` を指定する。
 - 旧 `session.command` は廃止。残っていると起動時にエラーになる。`session.claude` を使う。
-- cap（本体と task ごとの lane）/ worker の claude（とその子の extraMcp の道具・worker が叩く npx）には、server を起動した npx が自分の起動のために入れた変数を渡さない（`server/utils/bantou/child-env.ts`）。外すのは何を実行するか・どの npm が実行したかを表す物（`npm_config_package` / `call` / `yes` / `workspace` / `workspaces` / `include_workspace_root` / `user_agent` / `npm_version` / `node_gyp` / `global_prefix` / `local_prefix`、`npm_command` / `npm_execpath` / `npm_node_execpath` / `npm_lifecycle_*` / `npm_package_*`）。残すと子の `npx -y <pkg>@<版> ...` が `npm_config_package` を `--package` として読み、`<pkg>@<版>` をコマンドとして探して失敗する。registry（scope 別を含む）・認証・proxy・userconfig・cache・prefix など取得元と取得の仕方の設定、npm_ で始まらない変数は残す。`session.env` に書いた物はそのまま渡す。server 自身の env は変えない（自動更新の npx は従来どおり）。
+- worker の claude（とその子の extraMcp の道具・worker が叩く npx）には、server を起動した npx が自分の起動のために入れた変数を渡さない（`server/utils/bantou/child-env.ts`）。外すのは何を実行するか・どの npm が実行したかを表す物（`npm_config_package` / `call` / `yes` / `workspace` / `workspaces` / `include_workspace_root` / `user_agent` / `npm_version` / `node_gyp` / `global_prefix` / `local_prefix`、`npm_command` / `npm_execpath` / `npm_node_execpath` / `npm_lifecycle_*` / `npm_package_*`）。残すと子の `npx -y <pkg>@<版> ...` が `npm_config_package` を `--package` として読み、`<pkg>@<版>` をコマンドとして探して失敗する。registry（scope 別を含む）・認証・proxy・userconfig・cache・prefix など取得元と取得の仕方の設定、npm_ で始まらない変数は残す。`session.env` に書いた物はそのまま渡す。server 自身の env は変えない（自動更新の npx は従来どおり）。
 
 ### 追加の MCP（extraMcp）
 
@@ -106,7 +106,7 @@ npx bantou --config <path>
 ```
 
 - 起動時に `<workspace>/caps` と `<workspace>/workers` が無ければ作る。
-- `cap_id` / `worker_id` は `[A-Za-z0-9_-]+`。
+- `worker_id` は `[A-Za-z0-9_-]+`。
 - `repo` を指定した指示では、path を git repo として扱う。path が無ければ clone、`.git` があれば fetch、`.git` が無い既存 path はエラー。clone 後は `.git/info/exclude` に `state.json`・`logs/`・`tmp/` を追記する。
 - 既存の `.git` がある場合は `fetch` だけ行う。`repo` / `branch` の違いは検知しない。
 
@@ -121,7 +121,7 @@ npx bantou --config <path>
 - 接続後に `setProtocol(<protocol dir>)` で bantou protocol（name `bantou`、version は `packages/protocol/messenger/protocol.json` の通り）を登録する。ログ: `protocol 登録: bantou@1.2.0 hash=...`。終了時に `unsetProtocol`（`protocol 解除`）。
 - protocol dir は npm package の `protocol/`（`scripts/copy-protocol.mjs` が `../protocol/messenger/` をコピー。build / dev / e2e / prepack の先頭で実行、`packages/server/protocol` は git 管理外）。`bin/bantou.mjs` が `NUXT_BANTOU_PROTOCOL_DIR`（runtimeConfig `bantou.protocolDir`）に設定する。
 - 登録に失敗しても致命にしない。ログに出して従来の名前待受（peer `bantou-server`）で続ける。
-- 受信 message の `meta.protocol` が `bantou` なら処理、meta 無しは旧形式として処理、他 protocol は無視（`無視(他 protocol)`）。返信は送信元の peer id へ `meta: {protocol: "bantou", version}` 付きで返す（report 起因の `cap_result` も同じ）。
+- 受信 message の `meta.protocol` が `bantou` なら処理、meta 無しは旧形式として処理、他 protocol は無視（`無視(他 protocol)`）。返信は送信元の peer id へ `meta: {protocol: "bantou", version}` 付きで返す。
 - center は `list_peers`（`protocol: "bantou"`）で server を発見できる。
 - summary は `<host> <workspace>`。
 - loopback 以外に bind して token が空だと、起動直後に `警告: token 無しで ...` をログに出す。
@@ -136,10 +136,10 @@ npx bantou --config <path>
 |---|---|---|
 | `bash` | `action`（今は `rm` のみ）、`paths`（1..100 件、各 1024 文字まで）、`recursive?` | `{"removed":["..."],"skipped":[{"path":"...","reason":"..."}]}` |
 - `bash`（cap と worker の両方に載る。cap / worker の起動時に `--allowedTools mcp__bantou__bash` も付く）: Bash の `rm -rf` が permission 分類器に止まる問題を、範囲を server が保証する tool で避ける。任意のシェル文字列は受けず、`action` は handler 表（今は `rm`）で引く。未知の `action` と引数の形の不正（件数・長さ・型）だけ `isError`。全部拒否でも `isError` にせず `skipped` に理由を返す。
-  - 範囲: 呼び出し元の自分の path 配下だけ（worker は `workers/<worker_id>/`、cap は `caps/<cap_id>/` と、`logs/owner.json` の `cap_id` が自分の worker は `worker:<id>/<path>` で指す）。`paths` は自分の path からの相対。
+  - 範囲: 呼び出し元の自分の path 配下だけ（worker は `workers/<worker_id>/`）。`paths` は自分の path からの相対。
   - 拒否: 絶対パス・`~`・`..`・バックスラッシュ・NUL、path そのもの（`.` や空）、`state.json` と `logs/`（`./`・末尾 `/`・大文字小文字違いも。symlink を解決した後も判定）、realpath が範囲外のもの、他の cap の worker、worker から `worker:` 接頭辞。
   - symlink は辿らず link 自体を消す。親が範囲外を指す symlink は拒否。dir は `recursive: true` の時だけ消し、再帰削除でも symlink は辿らない。削除の直前に lstat と親の realpath を取り直す（検査の後で変わっていたら消さない）。
-  - 前提（認証）: 呼び出し元は header `x-bantou-cap-id` / `x-bantou-worker-id` だけで識別し、認証は無い（MCP の認証は全体で後回し。`worker_start` / `worker_stop` も同じ前提）。127.0.0.1 の `/mcp` に curl できる worker が `cap_id` を偽ると、その cap の path と配下 worker の path を `bash` の `rm` で消せる。偽装でも `logs/` と `state.json` は消せない（範囲の判定で常に拒否）。将来 MCP に起動ごとの token を入れる時は `bash` も対象にする。
+  - 前提（認証）: 呼び出し元は header `x-bantou-worker-id` だけで識別し、認証は無い（MCP の認証は全体で後回し）。127.0.0.1 の `/mcp` に curl できる worker が `worker_id` を偽ると、その worker の path を `bash` の `rm` で消せる。偽装でも `logs/` と `state.json` は消せない（範囲の判定で常に拒否）。将来 MCP に起動ごとの token を入れる時は `bash` も対象にする。
   - `TMPDIR`: 起動のたび（resume でも）に `<path>/tmp` を無ければ mode 700 で作り（在れば何もしない。symlink・file なら消して作り直す）、claude の env `TMPDIR` に渡す（`session.env` では上書きできない）。`tmp` は `bash` の `rm` の範囲内。
 
 ## state.json
@@ -174,14 +174,14 @@ npx bantou --config <path>
   - 見つかれば SIGKILL して消えるのを確認し、`failed`（`起動時に孤児プロセスを回収`）にする。
   - 見つからなければ `failed`（`前回の実行が終了しないまま server が落ちた`）にする。
   - `ps` が使えなければ `error` にする。
-- 結果は `孤児回収: killed=<n> failed=<n> error=<n>` でログに出す。回収した running は activity で lost として登録し、center へ通知する（worker の持ち主は `owner.json`）。
+- 結果は `孤児回収: killed=<n> failed=<n> error=<n>` でログに出す。
 - 終了時（SIGTERM / SIGINT）は実行中の claude を process group ごと SIGKILL し、`failed`（`server 終了により中断`）にする。
 
 ## ログ
 
 標準出力に 1 行 1 件。
 
-起動 / 孤児回収 / worker 掃除 / broker 起動 / mcp 起動 / peer 登録 / worker_start / worker_stop / report 受信 / activity 通知 / 指示受信 / claude 起動 / claude 終了 / 再試行 / 返信 / エラー / 終了処理 が出る。
+起動 / 孤児回収 / broker 起動 / mcp 起動 / peer 登録 / 指示受信 / claude 起動 / claude 終了 / 再試行 / 返信 / エラー / 終了処理 が出る。
 
 - `指示受信` は prompt の先頭 80 文字だけを出す。repo URL の userinfo は伏せる。
 - claude の生出力は `logs/<session_id>.jsonl` に追記する。1 回の実行ごとに `# <ISO> mode=<mode> session=<id>` の見出し行が付く。
