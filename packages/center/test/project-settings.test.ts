@@ -76,7 +76,7 @@ test("outputStyle: schema は 32000 文字以内の string か null。merge は�
   assert.equal(composeOutputStyle(undefined, undefined), "");
 });
 
-test("servers: schema は host 名か server_id の配列（50 個以内）か null。形式が違うもの・多すぎるものは不正。merge は重複を除き、空配列は保存（= 使わない）、null で削除。read は壊れた値を未設定にする", async () => {
+test("servers: schema は server の名前（agent-messenger の名前）の配列（50 個以内）か null。形式が違うもの・多すぎるものは不正。merge は重複を除き、空配列は保存（= 使わない）、null で削除。read は壊れた値を未設定にする", async () => {
   const { composeServers, serverAllowed, SERVERS_MAX } = await import("../src/project-settings.js");
   assert.equal(projectSettingsPatchSchema.safeParse({ servers: ["lenovo", "mac-200.local", "srv-aaaaaaaaaa"] }).success, true);
   assert.equal(projectSettingsPatchSchema.safeParse({ servers: null }).success, true);
@@ -100,13 +100,13 @@ test("servers: schema は host 名か server_id の配列（50 個以内）か n
   const { centerSettingsPatchSchema, readCenterSettings } = await import("../src/project-settings.js");
   assert.equal("servers" in centerSettingsPatchSchema.shape, false);
   assert.deepEqual(readCenterSettings({ instructions: "i", servers: ["a"] }), { instructions: "i" });
-  // 範囲の判定: server_id は完全一致、host 名は大文字小文字を区別しない。undefined は全部
+  // 範囲の判定: server の名前（agent-messenger の名前。host に渡す）で、大文字小文字を区別しない。undefined は全部
   assert.equal(serverAllowed(undefined, {}), true);
-  assert.equal(serverAllowed([], { server_id: "x", host: "h" }), false);
-  assert.equal(serverAllowed(["LENOVO"], { host: "lenovo", server_id: "srv-a" }), true);
-  assert.equal(serverAllowed(["srv-a"], { host: "lenovo", server_id: "srv-a" }), true);
-  assert.equal(serverAllowed(["srv-a"], { host: "lenovo", server_id: "srv-b" }), false);
-  assert.equal(serverAllowed(["lenovo"], { server_id: "srv-b" }), false, "host が分からない server は host 指定では通らない");
+  assert.equal(serverAllowed([], { host: "h" }), false);
+  assert.equal(serverAllowed(["LENOVO"], { host: "lenovo" }), true);
+  assert.equal(serverAllowed(["srv-a"], { host: "srv-a" }), true);
+  assert.equal(serverAllowed(["srv-a"], { host: "srv-b" }), false);
+  assert.equal(serverAllowed(["lenovo"], {}), false, "名前が分からない server は指定では通らない");
 });
 
 test("memorySchema（CLI の検証）: url は http/https の絶対 URL（user:pass@ 不可・2048 文字以内）、token は header 安全な ASCII（4096 文字以内）、agentId は英数字と _ - （64 文字以内）。null は削除", () => {

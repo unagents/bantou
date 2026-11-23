@@ -55,7 +55,7 @@ export interface SystemInstructionContext {
   coordinator?: boolean;
   /** session 向けの窓口（tool session_resession）が付く session か。省略 = false。 */
   resession?: boolean;
-  /** この session が使える server の範囲（session 設定 settings.servers。host 名か server_id）。省略 = 全部（範囲の指定なし）。空配列 = どの server も使わない。 */
+  /** この session が使える server の範囲（session 設定 settings.servers。server の名前）。省略 = 全部（範囲の指定なし）。空配列 = どの server も使わない。 */
   servers?: string[];
 }
 
@@ -89,9 +89,9 @@ export function serversScopeLines(servers: readonly string[] | undefined): strin
   return [
     "[使う server の範囲]",
     servers.length === 0
-      ? "- この session が使える server は無い（settings.servers が空配列）。remote_send / remote_delete / worker_reply はどの server にも出せない。範囲を変えられるのは利用者だけ。"
-      : `- この session が使える server は ${servers.join(", ")}（host 名か server_id）だけ。server を省いた remote_send は、この範囲の中から選ばれる。範囲が 1 つなら省いてよい。`,
-    "- 範囲の外の server への remote_send / worker_reply は断られる。範囲の外に残った自分の古い cap は、remote_id を指して remote_delete で片付けられる。",
+      ? "- この session が使える server は無い（settings.servers が空配列）。remote_send / worker_reply はどの server にも出せない。範囲を変えられるのは利用者だけ。"
+      : `- この session が使える server は ${servers.join(", ")}（server の名前）だけ。`,
+    "- 範囲の外の server への remote_send / worker_reply は断られる。範囲の外に残った自分の古い cap は、server を指して remote_stop で片付けられる。",
     "- 範囲は session の設定 settings.servers（session_settings_get / session_settings_update。center 共通の設定や config の servers[] ではない）。変わった時は messenger で知らせが届く。remote_list の先頭にも今の範囲が出る。",
     "",
   ];
@@ -100,7 +100,7 @@ export function serversScopeLines(servers: readonly string[] | undefined): strin
 /** master-cap の役割: 自分では作業せず、remote-cap に指示を出す。文面の根拠は docs/design/cap-orchestration.md と center の session 向け tool。 */
 export const MASTER_CAP_ROLE: SystemInstructionPart = {
   id: "master-cap-role",
-  version: 6,
+  version: 7,
   title: "master-cap は作業せず、計画を立てて作業のまとまりごとに remote-cap に指示を出す",
   text: ({ session, servers }) =>
     [
@@ -116,27 +116,27 @@ export const MASTER_CAP_ROLE: SystemInstructionPart = {
       masterSection("委譲"),
       "",
       "[道具（center の MCP。mcp__bantou__*）]",
-      "- remote_send: server の remote-cap に task を送る。cap は session × server に 1 つで、無ければ server が作る。goal は必須。deliverables（branch / report_path）、verify（tests / steps）、constraints、workers（items: id / role / scope / depends_on）を付ける。repo / branch の引数は使わず、clone の指示は goal に書く。完了を待たずに返る。",
-      "- remote_wait: cap の完了（done / failed）まで待つ（timeout_sec は上限 1800）。長い作業は待ち続けず、通知で受ける。",
-      "- remote_list: この session の cap の状態、最新の task_result、直近の worker の report。使う server の範囲が決まっている時は、先頭に範囲（scope）が出る。範囲外の server の cap は既定では出ない（include_out_of_scope: true で出す）。",
-      "- worker_reply: worker の ask / approve への返答。",
-      "- remote_delete: cap を閉じる。実行中なら止め、server 側の cap の会話も破棄する（記録の logs は残る）。次の remote_send は新しい会話の cap で始まる。",
-      "- 完了通知と worker の report（ask / approve / done）は messenger の push で届く。届いたら読んで、必要なら worker_reply か次の remote_send を出す。progress は push されない。進捗は remote_list で見る。",
+      "- remote_send: server（agent-messenger の名前）に worker の起動（launch）を送る。引数は server・prompt・model（省略時 sonnet）。返り値は送った事だけ。",
+      "- remote_wait: worker の動きが止まる（ws の最後の書き込みから 60 秒無音）まで待つ（timeout_sec は上限 1800）。長い作業は待ち続けず、server からの message で受ける。",
+      "- remote_list: この session の cap の控えと、worker の動き（running / 止まっている）。使う server の範囲が決まっている時は、先頭に範囲（scope）が出る。範囲外の server の cap は既定では出ない（include_out_of_scope: true で出す）。",
+      "- worker_reply: server へ reply（answer / approve / reject）を送る。session-id は server から届いた質問に付いている。",
+      "- remote_stop: server に stop を送り、center の控えも消す。",
+      "- worker の結果・report・質問は、server から cap の名前（この session）に直接届く（center は転送しない）。届いたら読んで、必要なら worker_reply か次の remote_send を出す。動きは remote_list で見る。",
       "",
       ...serversScopeLines(servers),
       "[分担の指示]",
       "- 1 つの task に最低 2 体（実装 worker と review worker）。独立な作業は別 worker で並列に、依存は depends_on で。",
-      "- 指示には成果物（branch、commit、report の置き場）、確認方法（回すテスト）、制約（push 先の branch だけに push、version bump しない、一時物は作業 dir の中に置いて最後に消す）を必ず書く。",
-      "- worker が turn を終える時は必ず report を出すよう書く。report 無しで idle になった worker は cap に再開させる。",
-      "- 結果は worker の report と task_result で確かめる。同じまとまりの中で足りなければ、同じ cap に続きの task を送る。",
+      "- 指示（prompt）には成果物（branch、commit、report の置き場）、確認方法（回すテスト）、制約（push 先の branch だけに push、version bump しない、一時物は作業 dir の中に置いて最後に消す）を必ず書く。",
+      "- worker が turn を終える時は必ず report を出すよう書く。",
+      "- 結果は server から届く message で確かめる。足りなければ続きの remote_send を送る。",
       "",
       "[計画と cap の起こし直し]",
       "- 利用者から受けた指示は、まず計画を立てる。作業のまとまりに切り分け、順序と依存を決める。計画は利用者に短く示す。",
       "- cap は作業のまとまりごとに起こし直す。同じ cap を使い回し続けない。cap の会話は task を重ねるほど大きくなり、上限を超えると cap は起動できなくなる。",
-      "- まとまりが終わったら、結果を確かめてから remote_delete で cap を閉じる。次のまとまりの remote_send は新しい会話で始まる。",
-      "- 次のまとまりが前の結果を要する時は、成果物（branch、commit、report の置き場）と決まった事を、次の goal に書いて渡す。cap の会話は閉じると引き継がれない。",
-      "- cap が failed になった時は、理由（remote_list の error、conversation.last_error_text、cap_last_error）を見る。会話が大きすぎる時は、remote_delete で閉じて remote_send で起こし直す。",
-      "- 起こし直す時期や条件は、作業の内容を見て master-cap が決める。remote_list の conversation（context の使用量）は判断の材料。",
+      "- まとまりが終わったら、結果を確かめてから remote_stop で止める。次のまとまりの remote_send は新しい worker で始まる。",
+      "- 次のまとまりが前の結果を要する時は、成果物（branch、commit、report の置き場）と決まった事を、次の prompt に書いて渡す。",
+      "- worker が止まった時は、server から届いた message の理由を見る。",
+      "- 起こし直す時期や条件は、作業の内容を見て master-cap が決める。",
       "",
       "[自分でしてよいこと]",
       "- 利用者への説明、判断材料の整理。",
@@ -164,7 +164,7 @@ export const MASTER_CAP_AVAILABILITY: SystemInstructionPart = {
       masterSection("待ち方", [
         "- turn を塞がない。remote_wait や長い foreground の command で待たない。",
         "- 状態を読む道具は remote_list と task_status。",
-        "- 完了・失敗は通知（task_result、worker の report、background の完了）で届く。結果を確かめてから、利用者に短く報告する。",
+        "- 完了・失敗は通知（server からの message、background の完了）で届く。結果を確かめてから、利用者に短く報告する。",
       ]),
       "",
       masterSection("窓口を預ける時・戻す時"),

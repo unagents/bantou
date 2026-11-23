@@ -158,28 +158,22 @@ test("キュー上限: 1000 件を超えたら古い分から捨てて log（sin
   assert.equal(logs.filter((l) => l.includes("キューが 1000 件を超えた")).length, 5);
 });
 
-test("remote 往復: task / result / report / reply の種別・送り手・受け手・eventId（namespace c1）", async () => {
+test("remote の送信: task（launch）/ reply の種別・送り手・受け手・eventId（namespace c1）。result / report は center が受けないので無い", async () => {
   const m = mk();
-  m.task("pm1", { capId: "c-x-pm1", taskId: "t-1", goal: "do it", repo: "https://r", constraints: ["no push"] });
-  m.result("pm1", { bantou: 1, type: "task_result", cap_id: "c-x-pm1", task_id: "t-1", state: "done", summary: "fine", workers: [], review: { verdict: "unknown", items: [], rounds: 0 }, remaining: ["x"] });
-  m.report("pm1", { bantou: 1, type: "worker_report", cap_id: "c-x-pm1", task_id: "t-1", worker_id: "w-1", kind: "ask", text: "which?", at: "2026-11-11T01:00:00.000Z" });
-  m.reply("pm1", { capId: "c-x-pm1", workerId: "w-1", text: "this one", taskId: "t-1" });
-  await waitFor(() => mem.recorded().length === 4);
-  const [t, r, p, y] = mem.recorded();
+  m.task("pm1", { capId: "pm1-cap", taskId: "l-1", goal: "do it", repo: "https://r", constraints: ["no push"] });
+  m.reply("pm1", { capId: "pm1-cap", workerId: "s-1", text: "this one", taskId: "l-1" });
+  await waitFor(() => mem.recorded().length === 2);
+  const [t, y] = mem.recorded();
   assert.equal(t.kind, "task");
-  assert.deepEqual([t.sender, t.recipient, t.remoteId, t.taskId], [{ session: "pm1" }, { capId: "c-x-pm1" }, "c-x-pm1", "t-1"]);
-  assert.equal(t.eventId, "c1:pm1:task:t-1");
+  assert.deepEqual([t.sender, t.recipient, t.remoteId, t.taskId], [{ session: "pm1" }, { capId: "pm1-cap" }, "pm1-cap", "l-1"]);
+  assert.equal(t.eventId, "c1:pm1:task:l-1");
   assert.match(t.body as string, /^do it\nrepo: https:\/\/r\nconstraints:\n- no push$/);
-  assert.equal(r.kind, "result");
-  assert.deepEqual([r.sender, r.recipient], [{ capId: "c-x-pm1" }, { session: "pm1" }]);
-  assert.match(r.body as string, /^\[done\] fine\nremaining:\n- x$/);
-  assert.equal(p.kind, "report");
-  assert.deepEqual([p.sender, p.recipient], [{ workerId: "w-1" }, { session: "pm1" }]);
-  assert.equal(p.body, "(ask) which?");
-  assert.equal(p.at, "2026-11-11T01:00:00.000Z");
   assert.equal(y.kind, "reply");
-  assert.deepEqual([y.sender, y.recipient], [{ session: "pm1" }, { workerId: "w-1" }]);
+  assert.deepEqual([y.sender, y.recipient], [{ session: "pm1" }, { workerId: "s-1" }]);
+  assert.equal(y.body, "this one");
   for (const e of mem.recorded()) assert.ok((e.eventId as string).startsWith("c1:pm1:"));
+  assert.equal("result" in m, false);
+  assert.equal("report" in m, false);
 });
 
 test("task event: parentRequirementId を渡した時だけ event に載る", async () => {
@@ -190,16 +184,6 @@ test("task event: parentRequirementId を渡した時だけ event に載る", as
   const [p, q] = mem.recorded();
   assert.equal(p.parentRequirementId, "3f2b1c64-8a52-4d6e-9f60-0a1b2c3d4e5f");
   assert.equal("parentRequirementId" in q, false);
-});
-
-test("result の eventId: 同じ結果の二重受信（send と遅れた返信）は同じ id、同じ task_id の別の結果は別の id", async () => {
-  const m = mk();
-  const tr = (summary: string) => ({ bantou: 1 as const, type: "task_result" as const, cap_id: "c", task_id: "t-1", state: "done" as const, summary, workers: [], review: { verdict: "unknown" as const, items: [], rounds: 0 }, remaining: [] });
-  m.result("pm1", tr("A"));
-  m.result("pm1", tr("A"));
-  m.result("pm1", tr("B"));
-  await waitFor(() => mem.calls.length === 3);
-  assert.deepEqual(mem.calls.map((c) => c.status), ["recorded", "duplicate", "recorded"]);
 });
 
 test("eventId: ts と prompt_id が同じでも本文が違う発言は別の eventId（user_prompt / assistant_message。digest を外すと同じ id になる）", async () => {
@@ -234,14 +218,10 @@ test("hang する memory（接続は受けるが応答しない）でも onHook 
     // 1 件目で接続が張られて応答待ちのまま固まる。その後の呼び出しも待たされない
     assert.ok(timed(() => m.onHook("pm1", prompt("first", { bantou_ts: 1 }))) < 100);
     await new Promise((r) => setTimeout(r, 50));
-    const rep = { bantou: 1 as const, type: "worker_report" as const, cap_id: "c", worker_id: "w", kind: "ask" as const, text: "q", at: "2026-11-11T00:00:00.000Z" };
-    const tr = { bantou: 1 as const, type: "task_result" as const, cap_id: "c", task_id: "t", state: "done" as const, summary: "s", workers: [], review: { verdict: "unknown" as const, items: [], rounds: 0 }, remaining: [] };
     for (const f of [
       () => m.onHook("pm1", prompt("second", { bantou_ts: 2 })),
       () => m.onHook("pm1", stop("answer", { bantou_ts: 3 })),
       () => m.task("pm1", { capId: "c", taskId: "t", goal: "g" }),
-      () => m.result("pm1", tr),
-      () => m.report("pm1", rep),
       () => m.reply("pm1", { capId: "c", workerId: "w", text: "x" }),
     ]) assert.ok(timed(f) < 100);
     assert.equal(await m.drain(100), false); // 送れずに残っている（詰まっても呼び出し側は止まらない）
