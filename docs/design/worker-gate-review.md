@@ -73,7 +73,7 @@
 20. schema-discovery の口。**利用者の原文ではない**: openspec-mcp の project から、利用者が決めた事として届いた物。
     - `/schemas/[schema-name]` は、schema の MCP server の **MCP の口**で問い合わせる（HTTP の path にはしない）。
     - header は `x-schema-discovery` に JSON 1 本。形は mcpServers の 1 件分と同じ（`{"type":"http","url":"…","headers":{…}}`。type は http だけ）。
-    - resource か tool か・URI の形・応答の中身は、openspec-mcp の project が確定版の文書（Gitea `agent-hand/openspec-mcp` の branch `design/schema-discovery` の `docs/schema-discovery-protocol.md`）にしている所で、まだ決まっていない（【openspec-mcp 待ち】。プロトコル待ち）。この設計書では決めない。
+    - resource か tool か・URI の形・応答の中身は、openspec-mcp の project が確定版の文書（Gitea `agent-hand/openspec-mcp` の branch `design/schema-discovery` の `docs/schema-discovery-protocol.md`）にしている所。中身はまだ決まっていない（【openspec-mcp 待ち】。プロトコル待ち）。この設計書では決めない。
 
 ### 前提（決定 15）
 
@@ -215,7 +215,7 @@ session の起動の仕組みは変える予定で、毎回きれいな context 
 | worker の report の受け口 | `report` tool（worker 向け）。受ける。ask / approve は center（master-cap）に通知し、progress / done は change の記録に残すだけで知らせない（3.4 の 3 つ）。cap を起こす所は無くなる | `mcp.ts` / `reports.ts` |
 | worker の停止・孤児回収・process group kill | 変わらない | `workers.ts`、`processes.ts`、`daemon.ts` |
 | path 分離・clone・掃除・更新・退役・identity | 変わらない | `paths.ts`、`workspace.ts`、`cleanup.ts`、`update.ts`、`retire.ts`、`identity.ts` |
-| openspec-mcp への接続 | 全 server が、1 つの openspec-mcp に client としてつなぐ。つなぐ時、header `x-schema-discovery`（JSON 1 本。形は mcpServers の 1 件分と同じで、type は http のみ。決定 20）で、schema の取り先として center（center が内蔵する schema の MCP server）を指す（決定 13）。schema は schema の MCP server の MCP の口で問い合わせる（HTTP の path にはしない）。resource か tool か・URI の形・応答の中身は決めない | 新規。【openspec-mcp 待ち】 |
+| openspec-mcp への接続 | 全 server が、1 つの openspec-mcp に client としてつなぐ。つなぐ時、header `x-schema-discovery`（JSON 1 本。形は mcpServers の 1 件分と同じで、type は http のみ。決定 20）で、schema の取り先として center（center の schema の MCP server）を指す（決定 13）。schema は schema の MCP server の MCP の口で問い合わせる（HTTP の path にはしない）。resource か tool か・URI の形・応答の中身は決めない | 新規。【openspec-mcp 待ち】 |
 | 生存・進捗・掲示の通知 | change の進みを足す（4.3。master-cap に止まって知らせる 3 つとは別の、状態の掲示） | `activity.ts`、`board.ts` |
 
 **捨てる（remote-cap の判断の層）**
@@ -225,7 +225,7 @@ session の起動の仕組みは変える予定で、毎回きれいな context 
 | cap の起動・resume・会話の管理 | `agents.ts` の cap の部分、`conversation.ts`、`lane-meta.ts` | remote-cap が無くなる（0 節の 1） |
 | cap の指示文 | `prompts.ts` の `CAP_GUIDE`・`buildTaskPrompt`・`extractTaskResult`・`buildTaskResult`、`instructions/remote-cap.md`、`docs/design/cap-orchestration.md` | 分担・往復・最終返答は、step の登録（scope）と schema に移る |
 | task の指揮（task ごとの cap の run） | `tasks.ts` | 単位は change になる（0 節の 9）。cap ごとの `session.maxParallelTasks` も、資源の管理（3.6）に置き換わる |
-| report 起因の cap の再開・worker 終了時の cap の再開 | `reports.ts` の cap を起こす部分、`worker-exit.ts` の cap を起こす部分 | 起こす相手の cap が無い。worker が report せずに終わった・失敗した事は、run の終わりとして終わりの判定に回る（通らなければ同じ worker を続きとして起こし直す。決定 19）。master-cap には知らせない（3.4 の 3 つ） |
+| report 起因の cap の再開・worker 終了時の cap の再開 | `reports.ts` の cap を起こす部分、`worker-exit.ts` の cap を起こす部分 | 起こす相手の cap が無い。worker が report せずに終わった・失敗した事の扱いは、本設計では決めない（決定 19 は、step の終わりの確かめに通らなかった時だけの決定） |
 | cap 向けの `worker_start` / `worker_status` / `worker_stop` / `peer_status`（`/mcp`、header `x-bantou-cap-id`） | `mcp.ts` の `registerWorkerTools`、`server/routes/mcp.ts` | master-capは worker を起こさない（0 節の 9）。worker 向けの `report`・`bash` は残る |
 
 【推測】捨てる範囲の細部（`agents.ts` の worker 部分との切り分け）は実装の task で決める。
@@ -254,9 +254,8 @@ session の起動の仕組みは変える予定で、毎回きれいな context 
 1. master-capが `change_register` で change と scope（消化する step の範囲）を server に登録する。server は登録を保存し、先頭の step を `queued` にして worker の起動の依頼を queue に積み（3.6）、残りの step は `pending` にする。change は `in_progress`。
 2. server が資源を見て起こせる時に、worker を起こす。worker は現在の step を実行する（1 step の範囲内。0 節の 8）。
 3. worker の run が終わったら（step の状態は `checking`）、server が step の終わりを機械的に判定する（0 節の 10 の 2。利用者の見立ては「openspec は validate を使って、step の終了とかは判定できたはず」）。
-4. 判定が通れば、server は次の step を `pending` から `queued` にして worker の起動を queue に積む（step 2 → step 3 …）。scope の最後の step が通れば change は `completed`（登録した scope を消化し終えた。change 全体の完了ではない。3.5）になり、server が center に通知する（下の (c)）。
+4. 判定が通れば、server は次の step の worker を起こす: `pending` から `queued` にして worker の起動を queue に積む（step 2 → step 3 …）。scope の最後の step が通れば change は `completed`（登録した scope を消化し終えた。change 全体の完了ではない。3.5）になり、server が center に通知する（下の (c)）。
 5. 判定が通らなければ、server は **同じ worker（同じ session）を起こし直し**、通らなかった中身を渡して続きをやらせる（決定 19）。起こし直しも queue と資源の判定を通る（3.6）。worker の run が終わるたびに 3 に戻る。change は止めない。通らないたびに master-cap には知らせない。何度やっても通らない時の扱い（回数の上限など）は、決定 7 と同じく schema の責務で、bantou の仕組みは持たず、この設計書では決めない。
-6. 通れば次の step の worker を起こす（4）。
 
 **server が止まって master-cap に知らせる場面**（この 3 つに揃える。他の記述・状態の表もこれに合わせる）:
 
@@ -264,7 +263,7 @@ session の起動の仕組みは変える予定で、毎回きれいな context 
 - (b) master-cap が止めた時（`stop_change`）。
 - (c) 登録された範囲（scope）を最後まで終えた時（change が `completed`）。
 
-step の判定が通らない・worker が失敗して終わる、は知らせる場面に入れない（続きをやらせる。決定 19）。進みの掲示（`change_status`、`activity`）は、master-cap が照会して見る物で、止まって知らせる場面ではない。
+step の終わりの確かめに通らない事は、知らせる場面に入れない（続きをやらせる。決定 19）。worker の失敗・異常終了の扱いは、本設計では決めない（決定 19 の範囲外）。進みの掲示（`change_status`、`activity`）は、master-cap が照会して見る物で、止まって知らせる場面ではない。
 
 **今の openspec / openspec-mcp で何が出来るか**: この設計を書いた環境には openspec の CLI も openspec-mcp も無く（`which openspec openspec-mcp` が何も返さない。global の npm package・`~/.npm/_npx` の cache にも無い）、repo の中にも、openspec の CLI・openspec-mcp の実体は無かった（`openspec` の語は、demo の fixture と e2e の seed の task 名に出るだけ）。**「validate で step の終了を判定できる」は利用者の見立てのままで、事実として確かめていない。** validate の引数・出力・何を見て終了とするかも、確かめていないので書かない。確かめられない所・足りない所は openspec-mcp の側の話で、openspec-mcp の project が決める（【openspec-mcp 待ち】）。この設計書が bantou 側で前提にするのは、「server が openspec / openspec-mcp を機械的に実行し、結果が通った / 通らないかを受け取れる」だけ。
 
@@ -546,6 +545,7 @@ tasks の instruction:
 
 - 元の未決 #4（step の終わりの判定が通らなかった時）は、決定 19 で消えた。「change を `blocked` にして止め、center に知らせる」案（案 A）は取り消した。通らない時は、server が同じ worker を同じ session で起こし直して続きをやらせる（3.4）。回数の上限などは schema の責務（決定 7・19）で、未決ではない。
 - 元の未決 #1・#2・#3・#5 は、9.1 の M1〜M4 で決めた（利用者の決定ではない）。
+- 本文中の【未確定】【未確認】【openspec-mcp 待ち】は、決まっていない事・確かめていない事を示す印で、bantou 側の未決ではない（【openspec-mcp 待ち】は openspec-mcp の project が決める事。8 節の【未確定】は、利用者が話に出していない事なので、未決にも仕様にも足さない）。未決 0 件と矛盾しない。
 - 未決が 0 件なので、番号の振り直しは要らない。他の節の「未決 #N」の記述は、M1〜M4 か決定 19 に直した。
 
 ## 10. この設計書を書く時に確かめた事・確かめられなかった事
