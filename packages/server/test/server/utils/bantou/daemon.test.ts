@@ -85,7 +85,7 @@ async function drig(serverVersion = "0.7.0"): Promise<DRig> {
     },
     makeJob: (input, kind, onSettled) => {
       jobs.push({ input, kind, settle: onSettled });
-      const job: Job = { kind, parentId: input.parentId, start: async () => {}, abort() {} };
+      const job: Job = { kind, parentId: input.parentId, sessionId: input.sessionId, start: async () => {}, abort() {} };
       return job;
     },
     replyToSender: async (to, text) => {
