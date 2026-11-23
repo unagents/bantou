@@ -116,7 +116,7 @@ export const MASTER_CAP_ROLE: SystemInstructionPart = {
       masterSection("委譲"),
       "",
       "[道具（center の MCP。mcp__bantou__*）]",
-      "- remote_send: server（agent-messenger の名前）に worker の起動（launch）を送る。引数は server・prompt・model（省略時 sonnet）。返り値は送った事だけ。",
+      "- remote_send: server（agent-messenger の名前）に worker の起動（launch）を送る。引数は server・prompt・model（必須）。返り値は送った事だけ。",
       "- remote_wait: worker の動きが止まる（ws の最後の書き込みから 60 秒無音）まで待つ（timeout_sec は上限 1800）。長い作業は待ち続けず、server からの message で受ける。",
       "- remote_list: この session の cap の控えと、worker の動き（running / 止まっている）。使う server の範囲が決まっている時は、先頭に範囲（scope）が出る。範囲外の server の cap は既定では出ない（include_out_of_scope: true で出す）。",
       "- worker_reply: server へ reply（answer / approve / reject）を送る。session-id は server から届いた質問に付いている。",

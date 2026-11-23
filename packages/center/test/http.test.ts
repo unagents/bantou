@@ -342,7 +342,7 @@ test("http: owner は header X-Bantou-Session > URL query session > 引数 owner
     assert.equal(await owner(none), "(all)"); // 分からなければ全件
     // 作成は外向けから消えた（session 向けの窓口だけ）
     await assert.rejects(async () => {
-      const r = await hdr.callTool({ name: "remote_create", arguments: { server: "s", prompt: "p" } });
+      const r = await hdr.callTool({ name: "remote_create", arguments: { server: "s", prompt: "p", model: "sonnet" } });
       if (r.isError) throw new Error("tool error");
     });
   } finally {
@@ -379,7 +379,7 @@ test("/mcp/session: 窓口は remote_send / remote_create / remote_stop / remote
   const c = await sessionClient(base, t, "pm1");
   try {
     assert.deepEqual((await c.listTools()).tools.map((x) => x.name).sort(), ["remote_create", "remote_list", "remote_send", "remote_stop", "remote_wait", "task_status", "worker_reply"]);
-    await c.callTool({ name: "remote_create", arguments: { server: "s", prompt: "p", owner: "evil" } });
+    await c.callTool({ name: "remote_create", arguments: { server: "s", prompt: "p", model: "sonnet", owner: "evil" } });
     assert.deepEqual(created, [{ owner: "pm1", server: "s", prompt: "p" }]);
     const l = await c.callTool({ name: "remote_list", arguments: {} });
     assert.equal((JSON.parse((l.content as { text: string }[])[0].text) as { owner: string }[])[0].owner, "pm1");

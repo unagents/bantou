@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createRemoteManager, DEFAULT_WORKER_MODEL, type RemoteManager, type RemoteRecord } from "../src/remotes.js";
+import { createRemoteManager, type RemoteManager, type RemoteRecord } from "../src/remotes.js";
 import type { LaunchInput, ReplyInput, ServerLink } from "../src/server-link.js";
 import { createWorkerTracker } from "../src/worker-ws.js";
 
@@ -66,13 +66,13 @@ function setup(o: { initial?: RemoteRecord[]; servers?: Record<string, string[] 
   return { manager, tracker, clock, ...fl, mem, events, memoryCalls };
 }
 
-test("send: parent-id = cap の名前（<session>-cap）、model 省略は既定、ws を載せる。返り値は送った事だけ。控えが 1 件でき running", async () => {
+test("send: parent-id = cap の名前（<session>-cap）、ws を載せる。返り値は送った事だけ。控えが 1 件でき running", async () => {
   const s = setup();
   await s.manager.restore();
-  const r = await s.manager.send({ owner: "pm1", server: "bantou-server-aaaaaaaaaa", prompt: "do it" });
-  assert.deepEqual(r, { remote_id: "pm1-cap@bantou-server-aaaaaaaaaa", server: "bantou-server-aaaaaaaaaa", model: DEFAULT_WORKER_MODEL, sent: true });
+  const r = await s.manager.send({ owner: "pm1", server: "bantou-server-aaaaaaaaaa", prompt: "do it", model: "sonnet" });
+  assert.deepEqual(r, { remote_id: "pm1-cap@bantou-server-aaaaaaaaaa", server: "bantou-server-aaaaaaaaaa", model: "sonnet", sent: true });
   const launch = s.calls.find((c) => c.op === "launch");
-  assert.deepEqual(launch, { op: "launch", server: "bantou-server-aaaaaaaaaa", arg: { parentId: "pm1-cap", model: DEFAULT_WORKER_MODEL, prompt: "do it", ws: WS } });
+  assert.deepEqual(launch, { op: "launch", server: "bantou-server-aaaaaaaaaa", arg: { parentId: "pm1-cap", model: "sonnet", prompt: "do it", ws: WS } });
   const list = s.manager.list({ owner: "pm1" });
   assert.equal(list.length, 1);
   assert.equal(list[0]!.remote_id, "pm1-cap@bantou-server-aaaaaaaaaa");
@@ -91,9 +91,9 @@ test("send: 同じ session × server は 1 件のまま（model は最後の lau
   const s = setup();
   await s.manager.send({ owner: "pm1", server: "srv-a", prompt: "one", model: "opus" });
   await s.manager.send({ owner: "pm1", server: "srv-a", prompt: "two", model: "sonnet" });
-  await s.manager.send({ owner: "pm1", server: "srv-b", prompt: "three" });
+  await s.manager.send({ owner: "pm1", server: "srv-b", prompt: "three", model: "sonnet" });
   const list = s.manager.list({ owner: "pm1" });
-  assert.deepEqual(list.map((v) => [v.server, v.model]), [["srv-a", "sonnet"], ["srv-b", DEFAULT_WORKER_MODEL]]);
+  assert.deepEqual(list.map((v) => [v.server, v.model]), [["srv-a", "sonnet"], ["srv-b", "sonnet"]]);
   assert.deepEqual(s.manager.list({ owner: "pm2" }), []);
   // remote_id は parent-id と server の名前の組で一意（parent-id は同じ）
   assert.deepEqual(list.map((v) => v.remote_id), ["pm1-cap@srv-a", "pm1-cap@srv-b"]);
@@ -102,24 +102,24 @@ test("send: 同じ session × server は 1 件のまま（model は最後の lau
 
 test("send: 不正な入力・ws の宛先が無い・送信失敗は投げ、控えを作らず launch も送らない（失敗時は控え無し）", async () => {
   const s = setup();
-  await assert.rejects(() => s.manager.send({ owner: "pm 1", server: "srv", prompt: "x" }), /owner は英数字/);
-  await assert.rejects(() => s.manager.send({ owner: "pm1", server: "", prompt: "x" }), /server が不正/);
-  await assert.rejects(() => s.manager.send({ owner: "pm1", server: "srv", prompt: "" }), /prompt が不正/);
-  await assert.rejects(() => s.manager.send({ owner: "pm1", server: "srv", prompt: "a\0b" }), /prompt が不正/);
+  await assert.rejects(() => s.manager.send({ owner: "pm 1", server: "srv", prompt: "x", model: "sonnet" }), /owner は英数字/);
+  await assert.rejects(() => s.manager.send({ owner: "pm1", server: "", prompt: "x", model: "sonnet" }), /server が不正/);
+  await assert.rejects(() => s.manager.send({ owner: "pm1", server: "srv", prompt: "", model: "sonnet" }), /prompt が不正/);
+  await assert.rejects(() => s.manager.send({ owner: "pm1", server: "srv", prompt: "a\0b", model: "sonnet" }), /prompt が不正/);
   await assert.rejects(() => s.manager.send({ owner: "pm1", server: "srv", prompt: "x", model: "-bad" }), /model が不正/);
   assert.equal(s.calls.length, 0);
   s.failWith("send failed");
-  await assert.rejects(() => s.manager.send({ owner: "pm1", server: "srv", prompt: "x" }), /send failed/);
+  await assert.rejects(() => s.manager.send({ owner: "pm1", server: "srv", prompt: "x", model: "sonnet" }), /send failed/);
   assert.deepEqual(s.manager.list(), []);
 
   const noWs = setup({ ws: undefined });
-  await assert.rejects(() => noWs.manager.send({ owner: "pm1", server: "srv", prompt: "x" }), /ws の宛先が決まらない.*publicHost/);
+  await assert.rejects(() => noWs.manager.send({ owner: "pm1", server: "srv", prompt: "x", model: "sonnet" }), /ws の宛先が決まらない.*publicHost/);
   assert.equal(noWs.calls.length, 0);
 });
 
 test("state: ws の最後の書き込みから 60 秒以内は running、無音なら done + finishedAt（最後の書き込みの時刻）。書き込みで running に戻る", async () => {
   const s = setup();
-  await s.manager.send({ owner: "pm1", server: "srv", prompt: "x" });
+  await s.manager.send({ owner: "pm1", server: "srv", prompt: "x", model: "sonnet" });
   s.clock.advance(59_000);
   assert.equal(s.manager.list()[0]!.state, "running");
   s.clock.advance(1_000);
@@ -134,7 +134,7 @@ test("state: ws の最後の書き込みから 60 秒以内は running、無音�
 
 test("summary の変化は onSummaryChange で知らせる（running の件数が変わった時だけ）", async () => {
   const s = setup();
-  await s.manager.send({ owner: "pm1", server: "srv", prompt: "x" });
+  await s.manager.send({ owner: "pm1", server: "srv", prompt: "x", model: "sonnet" });
   assert.deepEqual(s.events, ["pm1"]);
   s.tracker.note("pm1-cap");
   assert.deepEqual(s.events, ["pm1"]);
@@ -145,7 +145,7 @@ test("summary の変化は onSummaryChange で知らせる（running の件数�
 
 test("stop: stop を送り、その cap の控えと ws の記録を消す。控えが無くても stop は送る", async () => {
   const s = setup();
-  await s.manager.send({ owner: "pm1", server: "srv", prompt: "x" });
+  await s.manager.send({ owner: "pm1", server: "srv", prompt: "x", model: "sonnet" });
   const r = await s.manager.stop({ owner: "pm1", server: "srv" });
   assert.deepEqual(r, { remote_id: "pm1-cap@srv", server: "srv", sent: true, forgotten: true });
   assert.deepEqual(s.calls.filter((c) => c.op === "stop"), [{ op: "stop", server: "srv", arg: "pm1-cap" }]);
@@ -159,8 +159,8 @@ test("stop: stop を送り、その cap の控えと ws の記録を消す。控
 
 test("stop: 同じ cap の名前で他の server の控えが残る間は、ws の記録を消さない。送信失敗は投げ、控えは残る", async () => {
   const s = setup();
-  await s.manager.send({ owner: "pm1", server: "srv-a", prompt: "x" });
-  await s.manager.send({ owner: "pm1", server: "srv-b", prompt: "y" });
+  await s.manager.send({ owner: "pm1", server: "srv-a", prompt: "x", model: "sonnet" });
+  await s.manager.send({ owner: "pm1", server: "srv-b", prompt: "y", model: "sonnet" });
   await s.manager.stop({ owner: "pm1", server: "srv-a" });
   assert.notEqual(s.tracker.lastAt("pm1-cap"), undefined);
   s.failWith("send failed");
@@ -187,9 +187,9 @@ test("reply: answer / approve / reject を送る。owner 無し（desktop の ce
 
 test("servers の範囲: 範囲外の server への send は error で何も送らず控えも作らない。空配列は何も使わない。大文字小文字は区別しない", async () => {
   const s = setup({ servers: { pm1: ["Srv-A"], pm2: [] } });
-  await s.manager.send({ owner: "pm1", server: "srv-a", prompt: "ok" });
-  await assert.rejects(() => s.manager.send({ owner: "pm1", server: "srv-b", prompt: "x" }), /この session の servers に無い: srv-b/);
-  await assert.rejects(() => s.manager.send({ owner: "pm2", server: "srv-a", prompt: "x" }), /空 = どの server も使わない/);
+  await s.manager.send({ owner: "pm1", server: "srv-a", prompt: "ok", model: "sonnet" });
+  await assert.rejects(() => s.manager.send({ owner: "pm1", server: "srv-b", prompt: "x", model: "sonnet" }), /この session の servers に無い: srv-b/);
+  await assert.rejects(() => s.manager.send({ owner: "pm2", server: "srv-a", prompt: "x", model: "sonnet" }), /空 = どの server も使わない/);
   assert.equal(s.calls.filter((c) => c.op === "launch").length, 1);
   assert.deepEqual(s.manager.list().map((v) => v.server), ["srv-a"]);
 });
@@ -197,9 +197,9 @@ test("servers の範囲: 範囲外の server への send は error で何も送�
 test("list / scopeOf: 範囲を狭めた後の範囲外の自分の cap は既定で出ない。includeOutOfScope で出る。他の session の cap は出ない", async () => {
   const servers: Record<string, string[] | undefined> = {};
   const s = setup({ servers });
-  await s.manager.send({ owner: "pm1", server: "srv-a", prompt: "x" });
-  await s.manager.send({ owner: "pm1", server: "srv-b", prompt: "y" });
-  await s.manager.send({ owner: "pm2", server: "srv-b", prompt: "z" });
+  await s.manager.send({ owner: "pm1", server: "srv-a", prompt: "x", model: "sonnet" });
+  await s.manager.send({ owner: "pm1", server: "srv-b", prompt: "y", model: "sonnet" });
+  await s.manager.send({ owner: "pm2", server: "srv-b", prompt: "z", model: "sonnet" });
   servers.pm1 = ["srv-a"];
   assert.deepEqual(s.manager.list({ owner: "pm1" }).map((v) => v.server), ["srv-a"]);
   assert.deepEqual(s.manager.list({ owner: "pm1", includeOutOfScope: true }).map((v) => v.server), ["srv-a", "srv-b"]);
@@ -213,7 +213,7 @@ test("list / scopeOf: 範囲を狭めた後の範囲外の自分の cap は既�
 
 test("wait: 止まっている cap があれば即返す。動いている間は無音 60 秒で返る（書き込みで延びる）。timeout は running のまま返す", async () => {
   const s = setup();
-  await s.manager.send({ owner: "pm1", server: "srv", prompt: "x" });
+  await s.manager.send({ owner: "pm1", server: "srv", prompt: "x", model: "sonnet" });
   // 実時間の待ちを短くするため、tracker / manager の時計は進めて待ちを起こす
   const waiting = s.manager.wait({ owner: "pm1", timeoutSec: 600 });
   let settled = false;
@@ -236,7 +236,7 @@ test("wait: 止まっている cap があれば即返す。動いている間は
 
   // 動いている cap は timeout で running のまま返す
   const t = setup();
-  await t.manager.send({ owner: "pm1", server: "srv", prompt: "x" });
+  await t.manager.send({ owner: "pm1", server: "srv", prompt: "x", model: "sonnet" });
   const timeoutRun = t.manager.wait({ owner: "pm1", timeoutSec: 1 });
   t.clock.advance(1_000);
   t.tracker.note("pm1-cap");
@@ -248,7 +248,7 @@ test("wait: 対象が無い・owner 無しで remote_id 省略・待っている
   const s = setup();
   await assert.rejects(() => s.manager.wait({ owner: "pm1" }), /待つ remote が無い/);
   await assert.rejects(() => s.manager.wait({}), /owner/);
-  await s.manager.send({ owner: "pm1", server: "srv", prompt: "x" });
+  await s.manager.send({ owner: "pm1", server: "srv", prompt: "x", model: "sonnet" });
   const waiting = s.manager.wait({ owner: "pm1", timeoutSec: 600 });
   const rejected = assert.rejects(() => waiting, /止められた/);
   await new Promise((r) => setTimeout(r, 20));
@@ -258,7 +258,7 @@ test("wait: 対象が無い・owner 無しで remote_id 省略・待っている
 
 test("conflictsWith: cap の名前が別の session の控えと同じになる create / rename は拒否。改名元の控えは衝突と見なさない", async () => {
   const s = setup();
-  await s.manager.send({ owner: "pm1", server: "srv", prompt: "x" });
+  await s.manager.send({ owner: "pm1", server: "srv", prompt: "x", model: "sonnet" });
   // create: "pm1-cap" の cap の名前は session pm1 が持つ（"pm1" と "pm1-cap" は同じ cap の名前になる）
   assert.match(s.manager.conflictsWith("pm1-cap", "create") ?? "", /別の session（pm1）/);
   assert.equal(s.manager.conflictsWith("pm1", "create"), null);
@@ -271,8 +271,8 @@ test("conflictsWith: cap の名前が別の session の控えと同じになる 
 
 test("renameSession: session と cap の名前（remote_id）を付け替える。件数を返し、0 件なら保存しない", async () => {
   const s = setup();
-  await s.manager.send({ owner: "pm1", server: "srv-a", prompt: "x" });
-  await s.manager.send({ owner: "pm1", server: "srv-b", prompt: "y" });
+  await s.manager.send({ owner: "pm1", server: "srv-a", prompt: "x", model: "sonnet" });
+  await s.manager.send({ owner: "pm1", server: "srv-b", prompt: "y", model: "sonnet" });
   assert.equal(await s.manager.renameSession("pm1", "pm2"), 2);
   assert.deepEqual(s.manager.list({ owner: "pm2" }).map((v) => [v.session, v.remote_id]), [["pm2", "pm2-cap@srv-a"], ["pm2", "pm2-cap@srv-b"]]);
   assert.deepEqual(s.manager.list({ owner: "pm1" }), []);
