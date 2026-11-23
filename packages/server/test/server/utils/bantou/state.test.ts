@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { findWorkerBySession, readState, writeState, type WorkerState } from "../../../../server/utils/bantou/state";
@@ -21,6 +21,20 @@ test("state: 無ければ undefined、書いて読める", async () => {
     assert.equal(await readState(dir), undefined);
     await writeState(dir, sample("w-1", "s-1"));
     assert.deepEqual(await readState(dir), sample("w-1", "s-1"));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("state: state.json は 0600（ws の token・schema の認証の値が生で入る）。毎回の書き直しでも保つ", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "bantou-state-test-"));
+  try {
+    const schema = { type: "http" as const, url: "http://c:1/mcp/schemas", headers: { Authorization: "Bearer x" } };
+    await writeState(dir, { ...sample("w-1", "s-1"), schema });
+    assert.equal((await stat(join(dir, "state.json"))).mode & 0o777, 0o600);
+    await writeState(dir, { ...sample("w-1", "s-2"), schema });
+    assert.equal((await stat(join(dir, "state.json"))).mode & 0o777, 0o600);
+    assert.deepEqual((await readState(dir))?.schema, schema);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

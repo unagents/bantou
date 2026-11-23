@@ -1,7 +1,7 @@
 import { hostname } from "node:os";
 import { createMessengerClient } from "@unagents/messenger-client";
 import { MESSENGER_PROTOCOL, parseServerInfoReply } from "@agent-hand/bantou-protocol";
-import type { AnswerMessage, ApproveMessage, LaunchMessage, RejectMessage, ServerInfoMessage, StopMessage } from "@agent-hand/bantou-protocol";
+import type { AnswerMessage, ApproveMessage, LaunchMessage, RejectMessage, SchemaDiscovery, ServerInfoMessage, StopMessage } from "@agent-hand/bantou-protocol";
 import type { Logger } from "./log.js";
 
 /** messenger の meta（protocol 名と version）。 */
@@ -57,6 +57,8 @@ export interface LaunchInput {
   model?: string;
   prompt: string;
   ws: string;
+  /** 省略すると launch に schema を入れない。 */
+  schema?: SchemaDiscovery;
 }
 
 /** reply の入力。 */
@@ -169,7 +171,7 @@ export function createServerLink(opts: {
       client = c;
       log(`messenger 接続: name=${name} peer=${c.peer?.id ?? "?"}`);
     },
-    launch: (server, i) => sendTo(server, { protocol: "bantou", callType: "invoke", order: "launch", "parent-id": i.parentId, ...(i.model !== undefined ? { model: i.model } : {}), prompt: i.prompt, ws: i.ws }),
+    launch: (server, i) => sendTo(server, { protocol: "bantou", callType: "invoke", order: "launch", "parent-id": i.parentId, ...(i.model !== undefined ? { model: i.model } : {}), prompt: i.prompt, ws: i.ws, ...(i.schema !== undefined ? { schema: i.schema } : {}) }),
     stop: (server, parentId) => sendTo(server, { protocol: "bantou", callType: "invoke", order: "stop", "parent-id": parentId }),
     reply: (server, i) =>
       i.order === "answer"

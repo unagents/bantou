@@ -14,7 +14,23 @@
         "parent-id": { "type": "string", "minLength": 1, "description": "Name of the cap." },
         "model": { "type": "string", "pattern": "^[A-Za-z0-9._\\[\\]][A-Za-z0-9._\\[\\]-]*$", "description": "Model of the worker. Optional; when absent the server does not pass --model." },
         "prompt": { "type": "string", "minLength": 1, "description": "The work to do." },
-        "ws": { "type": "string", "minLength": 1, "description": "Destination of the center's ws." }
+        "ws": { "type": "string", "minLength": 1, "description": "Destination of the center's ws." },
+        "schema": {
+          "type": "object",
+          "description": "Optional. Where the center's schema server (/mcp/schemas) is. The JSON object that goes as-is in the x-schema-discovery header of openspec-mcp.",
+          "required": ["type", "url", "headers"],
+          "properties": {
+            "type": { "const": "http" },
+            "url": { "type": "string", "minLength": 1, "description": "URL of the center's /mcp/schemas." },
+            "headers": {
+              "type": "object",
+              "required": ["Authorization"],
+              "properties": { "Authorization": { "type": "string", "minLength": 1 } },
+              "additionalProperties": true
+            }
+          },
+          "additionalProperties": true
+        }
       },
       "additionalProperties": true
     },

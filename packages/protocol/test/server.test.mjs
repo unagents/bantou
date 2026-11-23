@@ -64,6 +64,18 @@ test("guards reject invalid input", () => {
   assert.equal(isServerInfoReply({ ...serverInfoReply, version: 1 }), false);
 });
 
+test("launch schema is optional and must be { type: http, url, headers.Authorization }", () => {
+  const schema = { type: "http", url: "http://c:1/mcp/schemas", headers: { Authorization: "Bearer x" } };
+  assert.equal(isLaunchMessage({ ...launch, schema }), true);
+  assert.equal(isLaunchMessage({ ...launch, schema: undefined }), true);
+  assert.equal(isLaunchMessage({ ...launch, schema: { ...schema, extra: 1 } }), true);
+  for (const bad of [null, "x", [], {}, { ...schema, type: "sse" }, { ...schema, url: "" }, { ...schema, url: undefined },
+    { ...schema, headers: undefined }, { ...schema, headers: {} }, { ...schema, headers: { Authorization: "" } }, { ...schema, headers: { Authorization: 1 } }]) {
+    assert.equal(isLaunchMessage({ ...launch, schema: bad }), false, JSON.stringify(bad));
+  }
+  assert.deepEqual(parseServerMessage(JSON.stringify({ ...launch, schema })).schema, schema);
+});
+
 test("callType exec is not a message; an unknown order is ignored", () => {
   assert.equal(isBantouMessage({ protocol: "bantou", callType: "exec", order: "run" }), false);
   assert.equal(isBantouMessage({ protocol: "bantou", callType: "exec" }), false);

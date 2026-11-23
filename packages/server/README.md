@@ -75,6 +75,7 @@ npx bantou --config <path>
 | `session.capBashSandbox` | 任意 | `false` | cap の `claude -p` の Bash sandbox。`false` は `--settings {"sandbox":{"enabled":false}}` を付けて切る（新規・resume とも）。`true` は付けず claude の設定のまま（sandbox が有効だと worker が cap の終了で消える）。真偽値 |
 | `session.env` | 任意 | `{}` | spawn する claude に追加で渡す環境変数。文字列値のオブジェクト。bantou-server 自身の環境変数に上書きで合成する |
 | `extraMcp` | 任意 | `{}` | cap / worker に追加で載せる手元の stdio MCP の道具。`{ "<name>": { "command", "args", "env", "targets" } }`（下記「追加の MCP（extraMcp）」） |
+| `openspecUrl` | 任意 | なし | openspec-mcp の URL。無ければ openspec を足さない |
 
 - `broker` / `mcp` / `session` / `update` は省略可。書く場合はオブジェクト。
 - LAN に公開するには `broker.bind`（例 `0.0.0.0`）を明示する。その場合は `broker.token` の設定を推奨する。

@@ -5,6 +5,7 @@ import type {
   BantouMessage,
   LaunchMessage,
   RejectMessage,
+  SchemaDiscovery,
   ServerInfoMessage,
   ServerInfoReply,
   ServerMessage,
@@ -28,6 +29,17 @@ function isBase(v: Record<string, unknown>, callType: string, order: string): bo
   return v.protocol === PROTOCOL_NAME && v.callType === callType && v.order === order;
 }
 
+/** The `schema` of launch: { type: "http", url, headers: { Authorization } }. Other keys are allowed. */
+export function isSchemaDiscovery(v: unknown): v is SchemaDiscovery {
+  return (
+    isRecord(v) &&
+    v.type === "http" &&
+    nonEmpty(v.url) &&
+    isRecord(v.headers) &&
+    nonEmpty(v.headers.Authorization)
+  );
+}
+
 export function isLaunchMessage(v: unknown): v is LaunchMessage {
   return (
     isRecord(v) &&
@@ -35,7 +47,8 @@ export function isLaunchMessage(v: unknown): v is LaunchMessage {
     nonEmpty(v["parent-id"]) &&
     (v.model === undefined || isValidModel(v.model)) &&
     nonEmpty(v.prompt) &&
-    nonEmpty(v.ws)
+    nonEmpty(v.ws) &&
+    (v.schema === undefined || isSchemaDiscovery(v.schema))
   );
 }
 

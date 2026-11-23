@@ -60,6 +60,13 @@ test("describeMessage: ws の token（?token=...）は log に出ない", () => 
   assert.ok(line.includes("ws=ws://***@center.example:8080/ws?***"), line);
 });
 
+test("describeMessage: launch の schema の認証の値と query は log に出ない", () => {
+  const schema = { type: "http" as const, url: "http://c:1/mcp/schemas?k=QSECRET", headers: { Authorization: "Bearer HSECRET" } };
+  const line = describeMessage({ protocol: "bantou", callType: "invoke", order: "launch", "parent-id": "cap", model: "sonnet", prompt: "p", ws: "ws://h", schema });
+  assert.ok(!line.includes("HSECRET") && !line.includes("QSECRET") && !line.includes("Bearer"), line);
+  assert.ok(line.includes("schema=http://c:1/mcp/schemas?***"), line);
+});
+
 // -- dispatcher -------------------------------------------------------------------
 
 interface DRig {
@@ -129,6 +136,21 @@ test("dispatcher: launch は新しい worker（session-id を自前で作る）�
     // launch ごとに別の worker
     await createDispatcher(r.d).handle(msg(launchBody));
     assert.notEqual(r.jobs[1]!.input.workerId, j.input.workerId);
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("dispatcher: launch の schema は job の input に渡る（無ければ input に schema が無い）。形が不正な schema の launch は無視", async () => {
+  const r = await drig();
+  try {
+    const schema = { type: "http", url: "http://c:1/mcp/schemas", headers: { Authorization: "Bearer x" } };
+    await createDispatcher(r.d).handle(msg({ ...launchBody, schema }));
+    assert.deepEqual(r.jobs[0]!.input.schema, schema);
+    await createDispatcher(r.d).handle(msg(launchBody));
+    assert.equal("schema" in r.jobs[1]!.input, false);
+    await createDispatcher(r.d).handle(msg({ ...launchBody, schema: { type: "http", url: "" } }));
+    assert.equal(r.jobs.length, 2);
   } finally {
     await r.cleanup();
   }

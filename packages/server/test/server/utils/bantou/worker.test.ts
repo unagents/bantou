@@ -118,6 +118,61 @@ test("worker: launch の worker を起こし、report（success）を parent-id 
   }
 });
 
+const SCHEMA = { type: "http" as const, url: "http://10.0.0.5:7910/mcp/schemas", headers: { Authorization: "Bearer SECRETTOKEN" } };
+
+test("worker: launch の schema と config の openspecUrl が両方在れば、openspec（x-schema-discovery = schema の JSON 文字列）と mcp__openspec__* を足す。state.json には schema を生のまま残す", async () => {
+  const r = await rig(async () => okResult({ lastType: "report", status: "success", content: "x" }));
+  try {
+    r.deps.config.openspecUrl = "http://127.0.0.1:9000/mcp";
+    const logs: string[] = [];
+    r.deps.log = (m) => void logs.push(m);
+    await createWorkerJob(r.deps, { ...r.input, schema: SCHEMA }, "launch").start();
+    const o = r.runs[0] as ClaudeRunOptions;
+    const mcp = JSON.parse(await readFile(o.mcpConfigFile as string, "utf8")) as { mcpServers: Record<string, { type: string; url: string; headers: Record<string, string> }> };
+    assert.deepEqual(Object.keys(mcp.mcpServers), ["bantou", "openspec"]);
+    assert.equal(mcp.mcpServers.openspec?.type, "http");
+    assert.equal(mcp.mcpServers.openspec?.url, "http://127.0.0.1:9000/mcp");
+    assert.deepEqual(mcp.mcpServers.openspec?.headers, { "x-schema-discovery": JSON.stringify(SCHEMA) });
+    assert.deepEqual(o.extraAllowedTools, ["mcp__bantou__bash", "mcp__openspec__*"]);
+    assert.deepEqual((await readState(r.input.dir))?.schema, SCHEMA);
+    assert.ok(!logs.join("\n").includes("SECRETTOKEN"), "schema の認証の値は log に出ない");
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("worker: openspecUrl が無い、または launch に schema が無ければ openspec を足さない", async () => {
+  for (const [openspecUrl, schema] of [[undefined, SCHEMA], ["http://127.0.0.1:9000/mcp", undefined]] as const) {
+    const r = await rig(async () => okResult({ lastType: "report", status: "success", content: "x" }));
+    try {
+      if (openspecUrl !== undefined) r.deps.config.openspecUrl = openspecUrl;
+      await createWorkerJob(r.deps, { ...r.input, ...(schema !== undefined ? { schema } : {}) }, "launch").start();
+      const o = r.runs[0] as ClaudeRunOptions;
+      const mcp = JSON.parse(await readFile(o.mcpConfigFile as string, "utf8")) as { mcpServers: Record<string, unknown> };
+      assert.deepEqual(Object.keys(mcp.mcpServers), ["bantou"]);
+      assert.deepEqual(o.extraAllowedTools, ["mcp__bantou__bash"]);
+    } finally {
+      await r.cleanup();
+    }
+  }
+});
+
+test("worker: reply の起こし直し（resumeInput）も state.json の schema で openspec を足す", async () => {
+  const r = await rig(async () => okResult({ lastType: "report", status: "success", content: "x" }));
+  try {
+    r.deps.config.openspecUrl = "http://127.0.0.1:9000/mcp";
+    await createWorkerJob(r.deps, { ...r.input, schema: SCHEMA }, "launch").start();
+    const again = await resumeInput(r.input.dir, "続き");
+    assert.deepEqual(again?.schema, SCHEMA);
+    await createWorkerJob(r.deps, again as WorkerRunInput, "reply").start();
+    const o = r.runs[1] as ClaudeRunOptions;
+    const mcp = JSON.parse(await readFile(o.mcpConfigFile as string, "utf8")) as { mcpServers: Record<string, unknown> };
+    assert.deepEqual(Object.keys(mcp.mcpServers), ["bantou", "openspec"]);
+  } finally {
+    await r.cleanup();
+  }
+});
+
 test("worker: message（ask）は session-id（最後の result の）付きで返る", async () => {
   const r = await rig(async () => okResult({ lastType: "message", status: "ask", content: "どちら？" }, "33333333-3333-4333-8333-333333333333"));
   try {

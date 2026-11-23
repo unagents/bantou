@@ -3,7 +3,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import { WebSocket } from "ws";
-import { attachWorkerWs, createWorkerTracker, parseWorkerLines, tokenMatches, workerWsUrl, WORKER_WS_PATH, SILENT_MS } from "../src/worker-ws.js";
+import { attachWorkerWs, createWorkerTracker, parseWorkerLines, tokenMatches, workerHostOf, workerWsUrl, WORKER_WS_PATH, SILENT_MS } from "../src/worker-ws.js";
 
 const TOKEN = "test-token-123456";
 
@@ -77,6 +77,13 @@ test("tokenMatches: 一致だけ通す。無い・違う・長さの違うもの
   assert.equal(tokenMatches(null, TOKEN), false);
   assert.equal(tokenMatches("", TOKEN), false);
   assert.equal(tokenMatches(`${TOKEN}x`, TOKEN), false);
+});
+
+test("workerHostOf: ws と同じ元（publicHost 優先、無ければ loopback・wildcard 以外の bind、IPv6 は []）", () => {
+  assert.equal(workerHostOf({ bind: "127.0.0.1", publicHost: "10.0.0.5" }), "10.0.0.5");
+  assert.equal(workerHostOf({ bind: "192.168.1.9" }), "192.168.1.9");
+  assert.equal(workerHostOf({ bind: "0.0.0.0" }), undefined);
+  assert.equal(workerHostOf({ bind: "::1", publicHost: "fd00::5" }), "[fd00::5]");
 });
 
 test("workerWsUrl: publicHost 優先。無ければ bind（loopback・wildcard 以外）。どちらも無ければ undefined。IPv6 は []、token は encode", () => {

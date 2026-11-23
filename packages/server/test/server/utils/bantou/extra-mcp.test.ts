@@ -58,6 +58,15 @@ test("config: 予約名 bantou は拒否", async () => {
   await assert.rejects(load({ bantou: { command: "x" } }), /衝突/);
 });
 
+test("config: 予約名 openspec は拒否（- と _ ・大小は同一視）。組み立て側でも捨てる", async () => {
+  await assert.rejects(load({ openspec: { command: "x" } }), /衝突/);
+  await assert.rejects(load({ OpenSpec: { command: "x" } }), /衝突/);
+  const logs: string[] = [];
+  const r = buildExtraMcp({ openspec: { command: "x", args: [], env: {}, targets: ["worker"] } }, "worker", (m) => logs.push(m));
+  assert.deepEqual(r, { servers: {}, allowedTools: [] });
+  assert.equal(logs.length, 1);
+});
+
 test("config: 不正な形は拒否", async () => {
   const bad: unknown[] = [
     [],

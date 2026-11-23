@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import { MODEL_PATTERN } from "@agent-hand/bantou-protocol";
+import type { SchemaDiscovery } from "@agent-hand/bantou-protocol";
 import type { Logger } from "./log.js";
 import type { ServerLink } from "./server-link.js";
 import type { JsonListStore } from "./store.js";
@@ -185,6 +186,8 @@ export function createRemoteManager(opts: {
   tracker: WorkerTracker;
   /** launch の `ws`（center の ws の宛先）。決まらない（bind が loopback で publicHost が無い等）時は undefined。 */
   wsUrl: () => string | undefined;
+  /** launch の `schema`（center の schema server の指し先と認証）。決まらない時・省略時は undefined（launch に入れない）。 */
+  schema?: () => SchemaDiscovery | undefined;
   /** session が使ってよい server の指定（server の名前）。undefined = 全部。呼ぶたびに引くので、設定の更新はすぐ効く。 */
   serversOf?: (owner: string) => string[] | undefined;
   /** 外部記憶への書き込み（launch の送信・reply の送信）。省略時は何もしない。 */
@@ -309,7 +312,8 @@ export function createRemoteManager(opts: {
       const ws = opts.wsUrl();
       if (ws === undefined) throw new Error("launch を送れない: center の ws の宛先が決まらない（bind が loopback で、config の publicHost が無い。server から届く宛先を publicHost に書く）");
       const parentId = capSessionName(input.owner);
-      await link.launch(input.server, { parentId, ...(model !== undefined ? { model } : {}), prompt: input.prompt, ws });
+      const schema = opts.schema?.();
+      await link.launch(input.server, { parentId, ...(model !== undefined ? { model } : {}), prompt: input.prompt, ws, ...(schema !== undefined ? { schema } : {}) });
       let rec = find(input.owner, input.server);
       if (!rec) {
         rec = { remote_id: remoteIdOf(parentId, input.server), session: input.owner, server: input.server, serverName: input.server, ...(model !== undefined ? { model } : {}), createdAt: new Date(nowMs()).toISOString() };
