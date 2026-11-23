@@ -156,7 +156,7 @@ export function createWorkerJob(deps: WorkerDeps, input: WorkerRunInput, kind: "
     }
   };
 
-  return { kind, parentId: input.parentId, start, abort, cancelled: () => onSettled?.() };
+  return { kind, parentId: input.parentId, sessionId: input.sessionId, start, abort, cancelled: () => onSettled?.() };
 }
 
 /** state.json から reply の起こし直しの入力を作る。 */

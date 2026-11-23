@@ -37,7 +37,7 @@ const until = async (cond: () => boolean, ms = 2000): Promise<void> => {
   }
 };
 
-test("tracker: 書き込み（launch）から 60 秒以内は running、無音なら stopped。forget で消える。変化は onChange に届く", () => {
+test("tracker: 書き込みから 60 秒以内は running、無音なら stopped。forget で消える。変化は onChange に届く", () => {
   let t = 5_000;
   const tr = createWorkerTracker({ now: () => t });
   assert.equal(tr.silentMs, SILENT_MS);
@@ -45,7 +45,7 @@ test("tracker: 書き込み（launch）から 60 秒以内は running、無音�
   assert.equal(tr.lastAt("a-cap"), undefined);
   const seen: string[] = [];
   const off = tr.onChange((id) => void seen.push(id));
-  tr.launched("a-cap");
+  tr.note("a-cap");
   assert.equal(tr.stateOf("a-cap"), "running");
   t += SILENT_MS - 1;
   assert.equal(tr.stateOf("a-cap"), "running");

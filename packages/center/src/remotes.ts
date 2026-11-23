@@ -21,8 +21,8 @@ export const WAIT_MAX_SEC = 1800;
 /** 集計の変化（running の件数）を見直す間隔（ms）。60 秒の無音で「止まっている」へ変わる時は、書き込みの event が無い。 */
 export const SUMMARY_CHECK_MS = 5_000;
 
-/** running = ws の最後の書き込みから 60 秒以内 / done = 止まっている（60 秒無音）。desktop の画面の値（running / done / failed / unknown）に合わせる。 */
-export type RemoteState = "running" | "done";
+/** running = ws の最後の書き込みから 60 秒以内 / stopped = 止まっている（60 秒無音）。 */
+export type RemoteState = "running" | "stopped";
 
 /** session の集計に載せる 1 件（v2 では center が作らない。desktop の型を保つために残す）。 */
 export interface RemoteIssue {
@@ -73,7 +73,7 @@ export interface RemoteRecord {
 /** remote_list が返す 1 件。desktop の画面に出す項目名は旧 1.x のまま。 */
 export type RemoteView = RemoteRecord & {
   state: RemoteState;
-  /** 止まっている（state=done）時だけ。ws の最後の書き込みの時刻（ISO）。 */
+  /** 止まっている（state=stopped）時だけ。ws の最後の書き込みの時刻（ISO）。 */
   finishedAt?: string;
   owners: string[];
   server_label: string;
@@ -209,7 +209,7 @@ export function createRemoteManager(opts: {
 
   /** 控えの parent-id（cap の名前）。ws の書き込みはこの名前で届く。 */
   const parentOf = (r: RemoteRecord): string => capSessionName(r.session);
-  const stateOf = (r: RemoteRecord): RemoteState => (tracker.stateOf(parentOf(r)) === "running" ? "running" : "done");
+  const stateOf = (r: RemoteRecord): RemoteState => tracker.stateOf(parentOf(r));
 
   const viewOf = (r: RemoteRecord): RemoteView => {
     const state = stateOf(r);
@@ -217,7 +217,7 @@ export function createRemoteManager(opts: {
     return {
       ...r,
       state,
-      ...(state === "done" && last !== undefined ? { finishedAt: new Date(last).toISOString() } : {}),
+      ...(state === "stopped" && last !== undefined ? { finishedAt: new Date(last).toISOString() } : {}),
       owners: [r.session],
       server_label: r.server,
     };
@@ -310,7 +310,6 @@ export function createRemoteManager(opts: {
       if (ws === undefined) throw new Error("launch を送れない: center の ws の宛先が決まらない（bind が loopback で、config の publicHost が無い。server から届く宛先を publicHost に書く）");
       const parentId = capSessionName(input.owner);
       await link.launch(input.server, { parentId, ...(model !== undefined ? { model } : {}), prompt: input.prompt, ws });
-      tracker.launched(parentId);
       let rec = find(input.owner, input.server);
       if (!rec) {
         rec = { remote_id: remoteIdOf(parentId, input.server), session: input.owner, server: input.server, serverName: input.server, ...(model !== undefined ? { model } : {}), createdAt: new Date(nowMs()).toISOString() };
@@ -324,8 +323,6 @@ export function createRemoteManager(opts: {
       wake();
       opts.memoryEvents?.task(input.owner, { capId: parentId, taskId: newLaunchId(), goal: input.prompt });
       log(`remote launch: parent-id=${parentId} server=${input.server} model=${model ?? "(指定なし)"}`);
-      // 版の確認（答えは版の表示にだけ使う。届かなくても launch は成功）
-      void link.requestServerInfo(input.server).catch((e: unknown) => log(`server-info を送れない: ${input.server} ${e instanceof Error ? e.message : String(e)}`));
       return { remote_id: remoteIdOf(parentId, input.server), server: input.server, ...(model !== undefined ? { model } : {}), sent: true };
     },
 
@@ -411,7 +408,8 @@ export function createRemoteManager(opts: {
       targets = [...targets];
       const has = (t: RemoteRecord): boolean => records.includes(t);
       const check = (): RemoteView | undefined => {
-        for (const t of targets) if (has(t) && stateOf(t) === "done") return viewOf(t);
+        // ws の書き込みを 1 回も見ていない間は返らない。1 回見た後、60 秒無音で返る
+        for (const t of targets) if (has(t) && tracker.lastAt(parentOf(t)) !== undefined && stateOf(t) === "stopped") return viewOf(t);
         return undefined;
       };
       const deadline = nowMs() + sec * 1000;
@@ -423,7 +421,7 @@ export function createRemoteManager(opts: {
         const left = deadline - nowMs();
         if (left <= 0) return viewOf(alive[0]!);
         // 次に「止まっている」へ変わる時刻（最後の書き込み + 無音の長さ）か、書き込み・控えの変化か、timeout の早い方まで待つ
-        const nextStop = Math.min(...alive.map((t) => (tracker.lastAt(parentOf(t)) ?? nowMs()) + tracker.silentMs - nowMs()));
+        const nextStop = Math.min(...alive.map((t) => { const last = tracker.lastAt(parentOf(t)); return last === undefined ? Infinity : last + tracker.silentMs - nowMs(); }));
         const waitMs = Math.max(10, Math.min(left, nextStop + 10));
         await new Promise<void>((resolve) => {
           const t = setTimeout(done, waitMs);

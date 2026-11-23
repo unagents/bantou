@@ -11,9 +11,6 @@ export const TRACKER_INTERVAL_MS = 5000;
 /** 切れた ws に繋ぎ直す間隔（ms）。 */
 const RECONNECT_MS = 5000;
 
-/** ws に繋がる前に溜める行の上限（超えたら古い方を捨てる）。 */
-const MAX_PENDING = 100;
-
 /** tracker が使う ws の最小の形（global WebSocket と、テストの差し替えが満たす）。 */
 export interface TrackerSocket {
   readonly readyState: number;
@@ -53,28 +50,12 @@ export function createTracker(o: TrackerOptions): Tracker {
   let dead = false;
   let closed = false;
   let output = false;
-  let pending: string[] = [];
   let retry: ReturnType<typeof setTimeout> | undefined;
-
-  const flush = (s: TrackerSocket): void => {
-    if (s !== sock || s.readyState !== OPEN) return;
-    for (const line of pending) {
-      try {
-        s.send(line);
-      } catch (e) {
-        log(`tracker: ws へ書けない: ${redactIn(e instanceof Error ? e.message : String(e), o.ws)}`);
-        lost(s);
-        return;
-      }
-    }
-    pending = [];
-  };
 
   /** 接続が切れた。まだ閉じていなければ、間隔を置いて繋ぎ直す（切れた間の書き込みは捨てる）。 */
   const lost = (s: TrackerSocket | undefined): void => {
     if (s !== sock || dead) return;
     dead = true;
-    pending = [];
     if (closed || retry !== undefined) return;
     retry = setTimeout(() => {
       retry = undefined;
@@ -102,7 +83,6 @@ export function createTracker(o: TrackerOptions): Tracker {
       return;
     }
     sock = s;
-    s.addEventListener("open", () => flush(s));
     s.addEventListener("error", () => {
       if (s === sock && !dead) log(`tracker: ws の接続エラー: ${redactUrl(o.ws)}`);
       lost(s);
@@ -115,9 +95,14 @@ export function createTracker(o: TrackerOptions): Tracker {
     if (!output) return;
     output = false;
     if (dead || closed) return;
-    pending.push(JSON.stringify({ "parent-id": o.parentId, at: now().toISOString() }));
-    if (pending.length > MAX_PENDING) pending = pending.slice(-MAX_PENDING);
-    if (sock !== undefined) flush(sock);
+    const s = sock;
+    if (s === undefined || s.readyState !== OPEN) return; // 繋がっていない間の書き込みは捨てる
+    try {
+      s.send(JSON.stringify({ "parent-id": o.parentId, at: now().toISOString() }));
+    } catch (e) {
+      log(`tracker: ws へ書けない: ${redactIn(e instanceof Error ? e.message : String(e), o.ws)}`);
+      lost(s);
+    }
   }, o.intervalMs ?? TRACKER_INTERVAL_MS);
   timer.unref?.();
 

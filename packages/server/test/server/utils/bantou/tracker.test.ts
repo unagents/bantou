@@ -53,17 +53,6 @@ test("tracker: 間隔の間に出力が在った時だけ { parent-id, at } を 
   assert.equal(sock.closed, true);
 });
 
-test("tracker: ws が開くまでは溜めて、開いたら書く", async () => {
-  const sock = new FakeSocket();
-  const t = createTracker({ parentId: "cap-1", ws: "ws://x", intervalMs: 20, connect: () => sock });
-  t.touch();
-  await sleep(50);
-  assert.deepEqual(sock.sent, []);
-  sock.emit("open");
-  assert.equal(sock.sent.length, 1);
-  t.close();
-});
-
 test("tracker: ws の error / close の後は書かない。close 後の touch も書かない", async () => {
   const a = new FakeSocket();
   a.readyState = 1;

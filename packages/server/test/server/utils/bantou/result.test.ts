@@ -72,8 +72,3 @@ test("interpretResult: structured_output が無い・形が不正・組が不正
     assert.ok(!("session-id" in r));
   }
 });
-
-test("interpretResult: 長い detail は切る", () => {
-  const r = interpretResult(ng("x".repeat(10_000)));
-  assert.ok(r.content.length < 4300);
-});

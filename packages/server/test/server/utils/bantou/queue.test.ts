@@ -3,12 +3,13 @@ import assert from "node:assert/strict";
 import { createWorkQueue, type Job } from "../../../../server/utils/bantou/queue";
 
 /** 手で終わらせられる job。 */
-function makeJob(kind: "launch" | "reply", parentId: string, name: string, events: string[]): Job & { finish(): void; aborted: boolean; cancelledCalled: boolean } {
+function makeJob(kind: "launch" | "reply", parentId: string, name: string, events: string[], sessionId: string = name): Job & { finish(): void; aborted: boolean; cancelledCalled: boolean } {
   let done!: () => void;
   const p = new Promise<void>((r) => (done = r));
   const job = {
     kind,
     parentId,
+    sessionId,
     aborted: false,
     cancelledCalled: false,
     start: () => {
@@ -82,6 +83,27 @@ test("queue: reply は queue で新しい launch より先（reply 同士は来�
   q.close();
 });
 
+test("queue: 動いている session への reply は、その run の終了後に起動する（空きが在っても待ち、終われば launch より先）", async () => {
+  const ev: string[] = [];
+  const q = createWorkQueue(opts({ maxParallel: 3 }));
+  const run = makeJob("launch", "cap", "run", ev, "sess-1");
+  const reply = makeJob("reply", "cap", "reply", ev, "sess-1");
+  const other = makeJob("launch", "cap", "other", ev, "sess-2");
+  q.submit(run);
+  q.submit(reply);
+  assert.deepEqual(ev, ["start:run"], "空きが在っても、同じ session の run が終わるまで reply は起こさない");
+  assert.deepEqual(q.counts(), { running: 1, queued: 1 });
+  q.submit(other);
+  assert.deepEqual(ev, ["start:run", "start:other"], "別の session の launch は待たされない");
+  run.finish();
+  await tick();
+  assert.deepEqual(ev, ["start:run", "start:other", "start:reply"]);
+  reply.finish();
+  other.finish();
+  await tick();
+  q.close();
+});
+
 test("queue: 負荷平均が CPU 数を超えている間は、空きが在っても起こさない。下がれば timer で起こす（同じ値は超えていない）", async () => {
   const ev: string[] = [];
   let load = 5;
@@ -127,7 +149,7 @@ test("queue: job の start が reject しても queue は止まらない", async
   const ev: string[] = [];
   const logs: string[] = [];
   const q = createWorkQueue(opts({ maxParallel: 1, log: (m) => logs.push(m) }));
-  const bad: Job = { kind: "launch", parentId: "cap", start: () => Promise.reject(new Error("boom")), abort() {} };
+  const bad: Job = { kind: "launch", parentId: "cap", sessionId: "bad", start: () => Promise.reject(new Error("boom")), abort() {} };
   const good = makeJob("launch", "cap", "g", ev);
   q.submit(bad);
   q.submit(good);

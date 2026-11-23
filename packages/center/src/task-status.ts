@@ -50,7 +50,7 @@ export function buildTaskStatus(
     const parts = [
       v.remote_id,
       v.state === "running" ? "実行中" : "止まっている",
-      v.state === "done" && !Number.isNaN(stoppedAt) ? `最後の書き込み ${minutes(now - stoppedAt)} 分前` : "",
+      v.state === "stopped" && !Number.isNaN(stoppedAt) ? `最後の書き込み ${minutes(now - stoppedAt)} 分前` : "",
     ].filter((p) => p !== "");
     rows.push({ remote_id: v.remote_id, server: v.server, line: clip(parts.join(" | "), TASK_STATUS_LINE_MAX) });
     const ver = `${v.server_label} | server ${versionOf?.(v.server) ?? "不明"}`;
