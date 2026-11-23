@@ -27,11 +27,48 @@ function isSecretPath(item: string, path: readonly string[]): boolean {
   return isHeadersOrEnv(path[0]) || path.some((k) => AUTH_KEY.test(k)); // memory, projectMemory: a server def (or the old { url, token })
 }
 
-function walk(item: string, v: unknown, path: readonly string[], fn: (leaf: unknown) => unknown): unknown {
-  if (Array.isArray(v)) return v.map((x, i) => walk(item, x, [...path, String(i)], fn));
-  if (isObj(v)) return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(item, x, [...path, k], fn)]));
+/** A `url` key of a server definition: its userinfo (`user:pass@`) and query values can be secrets. */
+function isUrlPath(item: string, path: readonly string[]): boolean {
+  if (item === "mcpSecrets") return false;
+  const last = path[path.length - 1];
+  if (last === undefined || last.toLowerCase() !== "url") return false;
+  if (item === "mcpServers") return path.length === 2; // [server name, "url"]
+  return true; // memory, projectMemory, mcp, mcpConnections: a server def (or the old { url, token }), at any depth
+}
+
+/** A URL with the userinfo and the query values replaced by `***` (the rest is kept as written; masking again changes nothing). */
+export function maskUrl(url: string): string {
+  const hashAt = url.indexOf("#");
+  const head = hashAt < 0 ? url : url.slice(0, hashAt);
+  const tail = hashAt < 0 ? "" : url.slice(hashAt);
+  const qAt = head.indexOf("?");
+  const base = qAt < 0 ? head : head.slice(0, qAt);
+  const query = qAt < 0 ? "" : head.slice(qAt + 1);
+  const maskedBase = base.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/@]*@/i, `$1${MASK}@`);
+  if (qAt < 0) return maskedBase + tail;
+  const maskedQuery = query
+    .split("&")
+    .map((p) => {
+      if (p === "") return p;
+      const eq = p.indexOf("=");
+      return eq < 0 ? MASK : eq === p.length - 1 ? p : `${p.slice(0, eq + 1)}${MASK}`;
+    })
+    .join("&");
+  return `${maskedBase}?${maskedQuery}${tail}`;
+}
+
+function walk(
+  item: string,
+  v: unknown,
+  path: readonly string[],
+  fn: (leaf: unknown) => unknown,
+  urlFn: (url: string) => string = maskUrl,
+): unknown {
+  if (Array.isArray(v)) return v.map((x, i) => walk(item, x, [...path, String(i)], fn, urlFn));
+  if (isObj(v)) return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(item, x, [...path, k], fn, urlFn)]));
   if (v === null || v === undefined || v === "") return v;
-  return isSecretPath(item, path) ? fn(v) : v;
+  if (isSecretPath(item, path)) return fn(v);
+  return typeof v === "string" && isUrlPath(item, path) ? urlFn(v) : v;
 }
 
 /** The value of a settings item with its secret values replaced by `***` (the items stay). */
@@ -40,10 +77,19 @@ export const maskItem = (item: string, value: unknown): unknown => walk(item, va
 /** Does the value of a settings item hold a `***` where a secret value belongs? */
 function hasMask(item: string, value: unknown): boolean {
   let found = false;
-  walk(item, value, [], (leaf) => {
-    if (leaf === MASK) found = true;
-    return leaf;
-  });
+  walk(
+    item,
+    value,
+    [],
+    (leaf) => {
+      if (leaf === MASK) found = true;
+      return leaf;
+    },
+    (url) => {
+      if (url.includes(MASK) && maskUrl(url) === url) found = true; // a URL as the masking leaves it
+      return url;
+    },
+  );
   return found;
 }
 

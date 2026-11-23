@@ -64,6 +64,19 @@ test("refusal: a center-only key in settings is 403 — inline, by variable, nul
   for (const b of bad) assert.equal(graphqlRefusal(b)?.status, 403, b);
 });
 
+test("refusal: a settings variable with only a default (or no value) cannot get past the guard", () => {
+  const bad = [
+    body('mutation($s: CenterSettingsInput = { mcpServers: { a: {} } }) { updateCenterSettings(settings: $s) { instructions } }'),
+    body('mutation($s: CenterSettingsInput = { memory: null }) { updateCenterSettings(settings: $s) { instructions } }', {}),
+    body("mutation($s: CenterSettingsInput) { updateCenterSettings(settings: $s) { instructions } }"),
+    body("mutation($s: CenterSettingsInput) { updateCenterSettings(settings: $s) { instructions } }", { other: 1 }),
+  ];
+  for (const b of bad) assert.equal(graphqlRefusal(b)?.status, 403, b);
+  // a variable with a value actually sent (a harmless one, even with a default) passes
+  const ok = body('mutation($s: CenterSettingsInput = { instructions: "d" }) { updateCenterSettings(settings: $s) { instructions } }', { s: { instructions: "x" } });
+  assert.equal(graphqlRefusal(ok), undefined);
+});
+
 test("refusal: an alias cannot hide a mutation; a fragment at the root and every mutation of the document are checked", () => {
   assert.equal(graphqlRefusal(body('mutation { sleepSession: deleteSession(name: "a") }'))?.status, 403);
   assert.equal(graphqlRefusal(body("mutation { ...F } fragment F on Mutation { deleteSession(name: \"a\") }"))?.status, 403);

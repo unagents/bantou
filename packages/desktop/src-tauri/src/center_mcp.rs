@@ -520,10 +520,18 @@ pub async fn center_call(
 }
 
 /// Where the webview's GraphQL client sends its documents: `<origin of the MCP url>/graphql` and the Bearer header of the center in use.
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(PartialEq, Serialize)]
 pub struct GraphqlTarget {
     pub url: String,
     pub headers: std::collections::BTreeMap<String, String>,
+}
+
+// `headers` holds the Bearer token and the launcher key: `{:?}` (a log, an `assert_eq!` failure) shows the names only.
+impl std::fmt::Debug for GraphqlTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let masked: std::collections::BTreeMap<&str, &str> = self.headers.keys().map(|k| (k.as_str(), "***")).collect();
+        f.debug_struct("GraphqlTarget").field("url", &self.url).field("headers", &masked).finish()
+    }
 }
 
 pub(crate) fn graphql_target_of(t: &Target) -> Result<GraphqlTarget, String> {
@@ -597,6 +605,14 @@ mod tests {
         assert_eq!(g.headers.get("authorization").map(String::as_str), Some("Bearer tok"));
         let none = Target { token: None, ..t };
         assert!(graphql_target_of(&none).unwrap().headers.is_empty());
+    }
+
+    #[test]
+    fn graphql_target_debug_does_not_show_the_header_values() {
+        let t = Target { url: "http://127.0.0.1:7920/mcp".into(), token: Some("tok-SECRET".into()), source: TargetSource::Sidecar };
+        let shown = format!("{:?}", graphql_target_of(&t).unwrap());
+        assert!(!shown.contains("tok-SECRET") && !shown.contains("Bearer"), "{shown}");
+        assert!(shown.contains("authorization") && shown.contains("/graphql"), "{shown}");
     }
 
     #[test]

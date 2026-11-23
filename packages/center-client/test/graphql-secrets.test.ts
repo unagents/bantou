@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, test } from "node:test";
+import { maskItem, maskUrl } from "../src/graphql-secrets.ts";
 import { createGraphqlRelay, maskGraphqlAnswer, type GraphqlReply, type Target } from "../src/index.ts";
 
 const body = (query: string, variables?: Record<string, unknown>) => JSON.stringify({ query, ...(variables ? { variables } : {}) });
@@ -12,7 +13,7 @@ const body = (query: string, variables?: Record<string, unknown>) => JSON.string
 const STORED = {
   memory: { type: "http", url: "http://m/mcp", headers: { Authorization: "Bearer mem-SECRET-1" }, token: "mem-TOKEN-2" },
   mcpServers: {
-    a: { type: "http", url: "http://a/mcp", headers: { "X-Key": "hdr-SECRET-3" } },
+    a: { type: "http", url: "http://u:pw-SECRET-15@a/mcp?key=qs-SECRET-16&v=1", headers: { "X-Key": "hdr-SECRET-3" } },
     b: { command: "node", args: ["x.js"], env: { API: "env-SECRET-4" } },
   },
   mcpSecrets: { conn: { key: "sec-SECRET-5" }, flat: "sec-SECRET-6" },
@@ -20,7 +21,7 @@ const STORED = {
 const MASKED = {
   memory: { type: "http", url: "http://m/mcp", headers: { Authorization: "***" }, token: "***" },
   mcpServers: {
-    a: { type: "http", url: "http://a/mcp", headers: { "X-Key": "***" } },
+    a: { type: "http", url: "http://***@a/mcp?key=***&v=***", headers: { "X-Key": "***" } },
     b: { command: "node", args: ["x.js"], env: { API: "***" } },
   },
   mcpSecrets: { conn: { key: "***" }, flat: "***" },
@@ -63,7 +64,7 @@ test("answer: no secret value reaches the web, every item stays", async () => {
   const c = await center();
   const relay = createGraphqlRelay({ getTarget: async () => c.target });
   const out = await text(await relay.forward(body("{ centerSettings { memory mcpServers mcpSecrets } }"), undefined));
-  for (const s of ["mem-SECRET-1", "mem-TOKEN-2", "hdr-SECRET-3", "env-SECRET-4", "sec-SECRET-5", "sec-SECRET-6"]) assert.ok(!out.includes(s), s);
+  for (const s of ["mem-SECRET-1", "mem-TOKEN-2", "hdr-SECRET-3", "env-SECRET-4", "sec-SECRET-5", "sec-SECRET-6", "pw-SECRET-15", "qs-SECRET-16"]) assert.ok(!out.includes(s), s);
   assert.deepEqual((JSON.parse(out) as { data: { centerSettings: unknown } }).data.centerSettings, MASKED);
 });
 
@@ -168,4 +169,23 @@ test("desktop (guard off): the answer is not masked", async () => {
   const relay = createGraphqlRelay({ getTarget: async () => c.target, guard: false });
   const out = await text(await relay.forward(body("{ centerSettings { mcpSecrets } }"), undefined));
   assert.ok(out.includes("sec-SECRET-5"));
+});
+
+test("url: the userinfo and the query values are masked, the rest is kept; masking again changes nothing", () => {
+  const cases: [string, string][] = [
+    ["http://u:p@h:8080/mcp?k=v&x=1#f", "http://***@h:8080/mcp?k=***&x=***#f"],
+    ["https://h/mcp?token=abc", "https://h/mcp?token=***"],
+    ["https://tok@h/mcp", "https://***@h/mcp"],
+    ["http://h/mcp", "http://h/mcp"],
+    ["http://h/mcp?a=&b", "http://h/mcp?a=&b=***".replace("b=***", "***")],
+  ];
+  for (const [from, to] of cases) {
+    assert.equal(maskUrl(from), to, from);
+    assert.equal(maskUrl(to), to, to);
+  }
+  assert.deepEqual(maskItem("memory", { url: "http://u:p@h/m?k=v" }), { url: "http://***@h/m?k=***" });
+  assert.deepEqual(maskItem("mcp", { url: "http://u:p@h/m?k=v" }), { url: "http://***@h/m?k=***" });
+  assert.deepEqual(maskItem("projectMemory", { url: "http://u:p@h/m" }), { url: "http://***@h/m" });
+  assert.deepEqual(maskItem("mcpConnections", { c: { url: "http://h/m?k=v" } }), { c: { url: "http://h/m?k=***" } });
+  assert.deepEqual(maskItem("mcpServers", { a: { url: "http://h/m?k=v", args: ["http://u:p@h/?k=v"] } }), { a: { url: "http://h/m?k=***", args: ["http://u:p@h/?k=v"] } });
 });

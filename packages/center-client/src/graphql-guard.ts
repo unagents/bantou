@@ -71,6 +71,20 @@ function mutationRefusal(op: OperationDefinitionNode, variables: Record<string, 
     if (!SETTINGS_MUTATIONS.has(name)) continue;
     const arg = field.arguments?.find((a) => a.name.value === "settings");
     if (!arg) continue;
+    if (arg.value.kind === Kind.VARIABLE) {
+      // a variable is looked at only with a value actually sent; a default (or no value at all) is not checked here, so it is refused
+      const varName = arg.value.name.value;
+      if (!Object.prototype.hasOwnProperty.call(variables, varName)) {
+        return { status: 403, message: "settings の変数には variables で値を渡す（既定値だけの変数は使えない）" };
+      }
+      const def = op.variableDefinitions?.find((d) => d.variable.name.value === varName);
+      if (def?.defaultValue) {
+        const dv = valueFromASTUntyped(def.defaultValue, {});
+        if (isObj(dv) && hasCenterOnlyKey(dv)) return { status: 403, message: CENTER_ONLY_REFUSAL };
+      }
+    } else if (arg.value.kind !== Kind.OBJECT) {
+      continue; // null or another literal: no key to write
+    }
     const v = valueFromASTUntyped(arg.value, variables);
     if (isObj(v) && hasCenterOnlyKey(v)) return { status: 403, message: CENTER_ONLY_REFUSAL };
   }
