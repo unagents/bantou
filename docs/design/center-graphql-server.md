@@ -95,7 +95,7 @@ center は GraphQL の endpoint を持つ backend の server。client の app（
 - #33 (a) の workspace・claudePath: 接続の設定ではなく、session の作業に関わる設定。(a)・(b) とも client の画面で変えられ、保存先は center の host。(a) で見せないのは起動と接続の設定（IP・port・bind・鍵・鍵を渡す IP の範囲）だけ。
 - #34 「(a) を選ぶ」の入力: desktop は今どおり「center を起動」を選ぶと (a)。(b) の server につなぐ時だけ IP を入れる。(a) を選んだ時は IP を入れない。
 - #35 (a) の port の渡し方: desktop が決めた IP と port を config（`--config`。今 `write_config` が起動のたびに書く）に書き、center は設定から読む（決定済み。#24 に例外を作らない）。
-- #36 port の変更の入口: (b) の port・IP の範囲は server 側のメニューバーのみ。client は IP のみ入れ、port は変えた時だけ入れる。決定 6 の「client の上で設定は全部変えられる」の例外は、port と IP の範囲だけ（server 側のメニューバーで指定する。決定 3・7）。
+- #36 port の変更の入口: (b) の port・IP の範囲は server 側のメニューバーのみ。client は IP のみ入れ、port は変えた時だけ入れる。決定 6 の「client の上で設定の変更を全部できる」の例外は、port と IP の範囲だけ（server 側のメニューバーで指定する。決定 3・7）。
 
 前の版の #29（S での IP の範囲と port の置き場）と #30（S と D で同じ設定を使うか）は無くなった（(a) は desktop が決めて見せない。(b) はメニューバー）。番号は欠番にしてある。#26〜#28 も欠番で、利用者が話に出していないので扱わない。#19 は #32 に移した（決定済み。7 節に経緯）。
 
@@ -337,7 +337,7 @@ center（GraphQL を持つ backend の server。program は 1 つ、起動の形
 
 #### 2.7.6 消し方
 
-- 常駐をやめる: launchd の登録を外す（入口は #18）。状態 dir は消さない（#9）。
+- 常駐をやめる: launchd の登録を外す（入口は #18）。状態 dir は消さない（#9 の決定）。
 - app を削除した時（cask の uninstall）: 今の cask に launchd の登録を外す stanza は無い。登録が残って、実行 file の無い center の起動を launchd が試み続ける事になりうる。cask に `uninstall launchctl:`（label を指定）を足す案がある（cask の変更は別 task）。SMAppService の登録は app の削除で OS が扱うか【未確認】。
 
 #### 2.7.7 同じ Mac で (a) と (b) が両方動く時
@@ -364,7 +364,7 @@ app が無いので bantou-center.app は使えない。配り方は未決 #21�
 2. center は設定した port でしか起動しない。別の port に逃げない。
 3. (a) の IP と port は desktop が自分で決める。利用者に見せない（決定 3）。決め方の細部は実装の task が決める。決めた IP と port は、desktop が config に書き、center は設定から読む（#35。#24 に例外を作らない）。
 4. client は IP を入れる。(b) の port を変えた時だけ port も入れる（既定のままなら入れない）。
-5. 同じ host・同じ port の center は 1 つだけ。2 つ目の center は port が使用中で起動に失敗する。(a) と (b) が同じ Mac で同時に動く時の扱いは未決 #32。
+5. 同じ host・同じ port の center は 1 つだけ。2 つ目の center は port が使用中で起動に失敗する。(a) と (b) が同じ Mac で同時に動く時の扱いは #32 の決定（案 A、2.8.4）。
 6. port が他の program に使われていて起動できない時は、理由が分かる error を出す。
 7. test・開発で port を変えるのは、起動の関数の引数だけ。(b) の本番の起動は設定から読む（決定 8。#24）。
 8. 認証は鍵の方式（2.4）。(a) は desktop が起動時に鍵を渡す（#31）。
@@ -409,7 +409,7 @@ desktop は (a) を起動する前に、自分が決めた IP・port の状態�
 | 空き | (a) を起動する（今と同じ） |
 | 他の program が使用中（center と分からない応答・接続だけできる） | 起動せず、2.8.3 の error を出す |
 
-確認と起動の間に別の center が port を取った場合は、center の listen の失敗（2.8.2）が最後の守りになる。(b) の port は設定で変えられ、desktop はそれを知らない事がある。同じ Mac の (b) とどう付き合うかは #32 で決める。
+確認と起動の間に別の center が port を取った場合は、center の listen の失敗（2.8.2）が最後の守りになる。(b) の port は設定で変えられ、desktop はそれを知らない事がある。同じ Mac の (b) とどう付き合うかは #32 の決定（案 A）のとおり、動いていれば (a) を起こさずその center につなぐ。
 
 #### 2.8.5 同じ port の center は 1 つ
 
@@ -549,7 +549,7 @@ ui・desktop・web の画面側の呼び出しを grep で数え、3.1〜3.4 の
 
 - `session_resession` は session 自身が `/mcp/session` で呼ぶ tool で、GraphQL には出さない（2.3）。center の中の動き（引継ぎの保存、`Stop` の後の再起動、最初の入力）は、center が独立しても同じ。
 - 区切りの行は center の core の出力 queue に積まれ、`terminalOutput` の subscription でそのまま届く（`reset` は出力 queue が session の再起動をまたいで残る事と合わせて、`resession.md` 2.5 の前提を変えない）。
-- 引継ぎの保存先 file は center の host にある（`handoffs/` は状態 dir の下、`daemon.ts:218`）。状態 dir の置き場が service 化で変わると（未決 #9）、`handoffs/` と未取り出しの引継ぎも一緒に移す必要がある。
+- 引継ぎの保存先 file は center の host にある（`handoffs/` は状態 dir の下、`daemon.ts:218`）。状態 dir は今の `~/.local/share/bantou/` をそのまま使う（#9 の決定: 案 A）ので、`handoffs/` と未取り出しの引継ぎもそのまま残る。
 
 ## 6. test と実測の観点
 
@@ -638,11 +638,12 @@ code は書かないので、ここは実装の task が足す test と、実機
 - 案 C: 廃止する。
 - 推奨: A（利用者の指示は center の起動の仕組みで、これらは center と無関係。`docs/handoff.md` の Open にも、使われていない command がある）。web がこれらを出していない（web 設計の判断 5）のと同じ扱い。廃止の可否は別の決定。
 
-**#9 状態 dir の置き場と、設定の保存先（決定 6）**
-- 決定（利用者、決定 6）: 設定の保存先は server 側（center の host。今は mac200）。client が保存する設定は center の IP だけ（port は変えた時だけ）。以前の案の「`remote`（接続先 URL・token）は client のローカルの設定へ」は、token が鍵に置き換わり、client が center を MCP の server として指定する形が無くなるので、IP だけになる。
-- 状態 dir の案 A: 今 desktop が使う `~/.local/share/bantou/` をそのまま使う（`sessions.json`・`remotes.json`・`handoffs/`・`center-id` が引き継がれ、session・remote-cap の記録が残る）。
-- 案 B: service 用の新しい場所（`~/.config/bantou/` など。`packages/center/README.md` の既定）に作り直す。
-- 推奨: A。理由: 移行で session と cap の記録が消えない。`center-id`（cap_id の素、`docs/architecture.md`）が変わると cap の記録の対応が崩れる。設定（起動項目・port・IP の範囲・鍵）の置き場の細部は、(b) はメニューバーの設定（決定 3・7）、(a) は desktop が決める（決定 3）。
+**#9 設定の保存先（決定 6 で決定済み）と、状態 dir の置き場（決定済み。master-cap の決定: 案 A）**
+- 設定の保存先（決定済み。利用者、決定 6）: server 側（center の host。今は mac200）。client が保存する設定は center の IP だけ（port は変えた時だけ）。以前の案の「`remote`（接続先 URL・token）は client のローカルの設定へ」は、token が鍵に置き換わり、client が center を MCP の server として指定する形が無くなるので、IP だけになる。
+- 状態 dir の置き場（決定済み。master-cap の決定、案 A）: 今 desktop が使う `~/.local/share/bantou/` をそのまま使う（`sessions.json`・`remotes.json`・`handoffs/`・`center-id` が引き継がれ、session・remote-cap の記録が残る）。理由: 移行で session と cap の記録が消えない。`center-id`（cap_id の素、`docs/architecture.md`）が変わると cap の記録の対応が崩れる。
+- 経緯（採らなかった案）: 案 B（service 用の新しい場所（`~/.config/bantou/` など。`packages/center/README.md` の既定）に作り直す）。
+- 設定（起動項目・port・IP の範囲・鍵）の置き場の細部: (b) はメニューバーの設定（決定 3・7）、(a) は desktop が決める（決定 3）。
+
 **#10 Windows**
 - 案 A: center の同梱と常駐は mac の app だけを対象にする（今の cask は arm64 の macOS だけ、`packages/desktop/Casks/bantou.rb` の `depends_on`）。bantou-center も mac の app。Windows の desktop は client としてだけ使い、IP を指定して center に GraphQL で繋ぐ。
 - 案 B: Windows の center の常駐（Windows service）も扱う。
