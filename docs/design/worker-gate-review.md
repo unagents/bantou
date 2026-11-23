@@ -156,7 +156,7 @@
 | 方針の伝達 | cap が worker への指示に書く | master-cap が worker への指示・続きの指示で伝える |
 | review の往復 | cap が review worker を別に起動し、指摘を戻す（最大 3 回） | **worker の中で回る**: worker が reviewer のサブエージェントを起動し、直し、再 review する。tasks の終了条件で担保（5 節）。master-cap も server も指摘を戻さない |
 
-- master-cap は「方針を担う」層のままで、実作業はしない（`docs/concept.md` / 体制のルール）。worker の操作の tool を持つ事と、実装をする事は別。【推測】master-cap の指示文（`packages/center/instructions/master-cap.md` の `[委譲]` `[待ち方]`）に、worker の操作の決まりを移す改訂が要る。実装の task。
+- master-cap は「方針を担う」層のままで、実作業はしない（`docs/concept.md` / 体制のルール）。worker の操作の tool を持つ事と、実装をする事は別。【推測】master-cap の指示文（`packages/center/instructions/master-cap.md` の `[委譲]` `[待ち方]`）に、worker の操作のルールを移す改訂が要る。実装の task。
 - center → server の worker の口: 【事実】今ある center → server の経路は protocol の `resume_worker`（`worker_resume` tool）と `worker_reply`、`status`。worker の起動・停止・状態を center から直接行うメッセージを、この経路に足す（未決 #1 の推奨案 A を前提にした記述）。
 
 ### 3.3 server が openspec-mcp を機械的に実行して、門が開いたら次の worker を起こす流れ
