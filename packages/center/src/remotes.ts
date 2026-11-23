@@ -54,8 +54,11 @@ export interface RemoteSummary {
   stopped?: RemoteStopIssue[];
 }
 
+/** 控えの remote_id: parent-id（cap の名前）と server の名前の組 `<parent-id>@<server>`（session × server の 1 件で一意）。 */
+export const remoteIdOf = (parentId: string, server: string): string => `${parentId}@${server}`;
+
 /**
- * center が保持する控え。session × server ごとに 1 件。remote_id = parent-id = cap の名前（capSessionName(session)）。
+ * center が保持する控え。session × server ごとに 1 件。remote_id = `<parent-id>@<server>`（parent-id = cap の名前 = capSessionName(session)）。
  * メモリ + 状態ファイル。消すのは remote_stop だけ（再起動では消えない）。state と最後の書き込みの時刻は ws から出す（保存しない）。
  */
 export interface RemoteRecord {
@@ -102,7 +105,7 @@ export const workerReplySchema = {
 };
 
 export const remoteWaitSchema = {
-  remote_id: z.string().regex(OWNER_PATTERN, "英数字と _ - のみ").optional().describe("待つ cap。省略時は owner（session）の cap のどれか（最初に止まったもの）"),
+  remote_id: z.string().min(1).refine(noNul, noNulMsg).optional().describe("待つ cap（`<parent-id>@<server>`）。省略時は owner（session）の cap のどれか（最初に止まったもの）"),
   server: serverArg.optional().describe("cap のある server（絞り込み）"),
   timeout_sec: z.number().int().min(1).max(WAIT_MAX_SEC).optional().describe(`待つ秒数。既定 ${WAIT_DEFAULT_SEC}、上限 ${WAIT_MAX_SEC}。超えたら state=running のまま返す`),
 };
@@ -143,7 +146,7 @@ export interface RemoteReplyInput {
 }
 
 export interface RemoteManager {
-  /** 保存済みの控えを読み込む。cap の名前（remote_id）が今の規約に合わない旧 1.x の控えは捨てる。 */
+  /** 保存済みの控えを読み込む。remote_id が今の規約（`<parent-id>@<server>`）に合わない旧 1.x の控えは捨てる。 */
   restore(): Promise<void>;
   /** owner（session）の cap の名前を parent-id にして launch を送る。返り値は送った事だけ。 */
   send(input: RemoteSendInput): Promise<RemoteSendResult>;
@@ -162,11 +165,11 @@ export interface RemoteManager {
   summary(session: string): RemoteSummary;
   /**
    * session 名 name が remote の控えと衝突するか。衝突すれば理由、無ければ null。
-   * create: remote_id が capSessionName(name) の控えを別の session が持つ時。
-   * rename（oldName = 改名元）: 改名元以外の session の控えで、session が name か remote_id が capSessionName(name) の物がある時。
+   * create: parent-id（cap の名前）が capSessionName(name) の控えを別の session が持つ時。
+   * rename（oldName = 改名元）: 改名元以外の session の控えで、session が name か parent-id が capSessionName(name) の物がある時。
    */
   conflictsWith(name: string, mode: "create" | "rename", oldName?: string): string | null;
-  /** session の改名に合わせて控えを付け替える（session と、cap の名前 remote_id）。付け替えた件数を返す。 */
+  /** session の改名に合わせて控えを付け替える（session と、cap の名前を含む remote_id）。付け替えた件数を返す。 */
   renameSession(oldName: string, newName: string): Promise<number>;
   /**
    * cap の worker が止まる（ws の最後の書き込みから 60 秒無音）まで待って返す。remote_id・server 省略時は owner の cap のどれかが止まるまで。
@@ -206,11 +209,13 @@ export function createRemoteManager(opts: {
     return store.save(records).catch((e: unknown) => log(`remotes 保存失敗: ${e instanceof Error ? e.message : String(e)}`));
   };
 
-  const stateOf = (r: RemoteRecord): RemoteState => (tracker.stateOf(r.remote_id) === "running" ? "running" : "done");
+  /** 控えの parent-id（cap の名前）。ws の書き込みはこの名前で届く。 */
+  const parentOf = (r: RemoteRecord): string => capSessionName(r.session);
+  const stateOf = (r: RemoteRecord): RemoteState => (tracker.stateOf(parentOf(r)) === "running" ? "running" : "done");
 
   const viewOf = (r: RemoteRecord): RemoteView => {
     const state = stateOf(r);
-    const last = tracker.lastAt(r.remote_id);
+    const last = tracker.lastAt(parentOf(r));
     return {
       ...r,
       state,
@@ -273,7 +278,7 @@ export function createRemoteManager(opts: {
           OWNER_PATTERN.test(r.session) &&
           typeof r.server === "string" &&
           r.server.length > 0 &&
-          r.remote_id === capSessionName(r.session);
+          r.remote_id === remoteIdOf(capSessionName(r.session), r.server);
         if (!ok) {
           dropped++;
           continue;
@@ -310,10 +315,10 @@ export function createRemoteManager(opts: {
       tracker.launched(parentId);
       let rec = find(input.owner, input.server);
       if (!rec) {
-        rec = { remote_id: parentId, session: input.owner, server: input.server, serverName: input.server, model, createdAt: new Date(nowMs()).toISOString() };
+        rec = { remote_id: remoteIdOf(parentId, input.server), session: input.owner, server: input.server, serverName: input.server, model, createdAt: new Date(nowMs()).toISOString() };
         records.push(rec);
       } else {
-        rec.remote_id = parentId;
+        rec.remote_id = remoteIdOf(parentId, input.server);
         rec.model = model;
       }
       await persist();
@@ -322,26 +327,26 @@ export function createRemoteManager(opts: {
       log(`remote launch: parent-id=${parentId} server=${input.server} model=${model}`);
       // 版の確認（答えは版の表示にだけ使う。届かなくても launch は成功）
       void link.requestServerInfo(input.server).catch((e: unknown) => log(`server-info を送れない: ${input.server} ${e instanceof Error ? e.message : String(e)}`));
-      return { remote_id: parentId, server: input.server, model, sent: true };
+      return { remote_id: remoteIdOf(parentId, input.server), server: input.server, model, sent: true };
     },
 
     async stop({ owner, server }) {
       checkOwner(owner);
       checkServer(server);
       const rec = find(owner, server);
-      const parentId = rec?.remote_id ?? capSessionName(owner);
+      const parentId = capSessionName(owner);
       await link.stop(server, parentId);
       let forgotten = false;
       if (rec) {
         records.splice(records.indexOf(rec), 1);
         forgotten = true;
-        // 同じ cap の名前で他の server の控えが残っていなければ、ws の記録も消す
-        if (!records.some((r) => r.remote_id === parentId)) tracker.forget(parentId);
+        // 同じ cap の名前（同じ session）で他の server の控えが残っていなければ、ws の記録も消す
+        if (!records.some((r) => parentOf(r) === parentId)) tracker.forget(parentId);
         await persist();
       }
       wake();
       log(`remote stop: parent-id=${parentId} server=${server} forgotten=${forgotten}`);
-      return { remote_id: parentId, server, sent: true, forgotten };
+      return { remote_id: remoteIdOf(parentId, server), server, sent: true, forgotten };
     },
 
     async reply({ owner, server, session_id, order, content }) {
@@ -353,7 +358,7 @@ export function createRemoteManager(opts: {
       await link.reply(server, { sessionId: session_id, order, ...(content !== undefined ? { content } : {}) });
       if (owner !== undefined) {
         const rec = find(owner, server);
-        opts.memoryEvents?.reply(owner, { capId: rec?.remote_id ?? capSessionName(owner), workerId: session_id, text: order === "answer" ? (content ?? "") : order });
+        opts.memoryEvents?.reply(owner, { capId: rec?.remote_id ?? remoteIdOf(capSessionName(owner), server), workerId: session_id, text: order === "answer" ? (content ?? "") : order });
       }
       log(`remote reply: server=${server} session-id=${session_id} order=${order}`);
       return { server, session_id, order, sent: true };
@@ -363,8 +368,8 @@ export function createRemoteManager(opts: {
       const cid = capSessionName(name);
       for (const r of records) {
         if (mode === "create") {
-          if (r.remote_id === cid && r.session !== name) return `name の cap の名前（${cid}）を別の session（${r.session}）の remote の控えが持っている。remote_stop で消すまで再利用できない: ${name}`;
-        } else if (r.session !== oldName && (r.session === name || r.remote_id === cid)) {
+          if (parentOf(r) === cid && r.session !== name) return `name の cap の名前（${cid}）を別の session（${r.session}）の remote の控えが持っている。remote_stop で消すまで再利用できない: ${name}`;
+        } else if (r.session !== oldName && (r.session === name || parentOf(r) === cid)) {
           return `name に remote の控えが残っている（${r.remote_id} session=${r.session}）。remote_stop で消すまで再利用できない: ${name}`;
         }
       }
@@ -376,7 +381,7 @@ export function createRemoteManager(opts: {
       for (const r of records) {
         if (r.session !== oldName) continue;
         r.session = newName;
-        r.remote_id = capSessionName(newName);
+        r.remote_id = remoteIdOf(capSessionName(newName), r.server);
         n++;
       }
       if (n > 0) await persist();
@@ -419,7 +424,7 @@ export function createRemoteManager(opts: {
         const left = deadline - nowMs();
         if (left <= 0) return viewOf(alive[0]!);
         // 次に「止まっている」へ変わる時刻（最後の書き込み + 無音の長さ）か、書き込み・控えの変化か、timeout の早い方まで待つ
-        const nextStop = Math.min(...alive.map((t) => (tracker.lastAt(t.remote_id) ?? nowMs()) + tracker.silentMs - nowMs()));
+        const nextStop = Math.min(...alive.map((t) => (tracker.lastAt(parentOf(t)) ?? nowMs()) + tracker.silentMs - nowMs()));
         const waitMs = Math.max(10, Math.min(left, nextStop + 10));
         await new Promise<void>((resolve) => {
           const t = setTimeout(done, waitMs);

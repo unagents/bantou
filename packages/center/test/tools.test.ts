@@ -364,13 +364,13 @@ test("resolveOwner: header > query > 引数。不正な形式は投げる", () =
 
 test("task_status: session 向けは自分の owner の cap を cap ごとに 1 行で返し、server の版は link の控え（server-info の答え）から出す", async () => {
   const views = [
-    { remote_id: "pm1-cap", session: "pm1", server: "srv-a", serverName: "srv-a", createdAt: "x", state: "running", owners: ["pm1"], server_label: "srv-a" },
-    { remote_id: "pm2-cap", session: "pm2", server: "srv-a", serverName: "srv-a", createdAt: "x", state: "running", owners: ["pm2"], server_label: "srv-a" },
+    { remote_id: "pm1-cap@srv-a", session: "pm1", server: "srv-a", serverName: "srv-a", createdAt: "x", state: "running", owners: ["pm1"], server_label: "srv-a" },
+    { remote_id: "pm2-cap@srv-a", session: "pm2", server: "srv-a", serverName: "srv-a", createdAt: "x", state: "running", owners: ["pm2"], server_label: "srv-a" },
   ];
   const { sessionWithLink, calls, close } = await connect({}, { remotes: { list: (f: unknown) => (calls.push({ remoteList: f }), views) as never } });
   const c = await sessionWithLink("pm1", { serverVersionOf: (s: string) => (s === "srv-a" ? "1.2.3" : undefined) });
   const r = JSON.parse(text(await c.callTool({ name: "task_status", arguments: {} }))) as { caps: { remote_id: string; line: string }[]; servers: string[] };
-  assert.deepEqual(r.caps.map((x) => x.line), ["pm1-cap | srv-a | 実行中"]);
+  assert.deepEqual(r.caps.map((x) => x.line), ["pm1-cap@srv-a | 実行中"]);
   assert.deepEqual(r.servers, ["srv-a | server 1.2.3"]);
   assert.deepEqual(calls, [{ remoteList: { owner: "pm1", includeOutOfScope: true } }]);
   const none = JSON.parse(text(await (await sessionWithLink("pm1")).callTool({ name: "task_status", arguments: {} }))) as { servers: string[] };

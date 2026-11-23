@@ -6,7 +6,7 @@ import { buildTaskStatus, TASK_STATUS_MAX_LINES, TASK_STATUS_MAX_SERVERS } from 
 const NOW = Date.parse("2026-11-23T13:00:00.000Z");
 
 const view = (o: Partial<RemoteView> & { session: string; server: string }): RemoteView => ({
-  remote_id: `${o.session}-cap`,
+  remote_id: `${o.session}-cap@${o.server}`,
   serverName: o.server,
   createdAt: "2026-11-23T12:00:00.000Z",
   state: "running",
@@ -24,8 +24,8 @@ test("cap ごとに 1 行。running は「実行中」、止まっている（do
   const r = buildTaskStatus(views, "pm1", NOW);
   assert.equal(r.at, new Date(NOW).toISOString());
   assert.deepEqual(r.caps, [
-    { remote_id: "pm1-cap", server: "srv-a", line: "pm1-cap | srv-a | 実行中" },
-    { remote_id: "pm1-cap", server: "srv-b", line: "pm1-cap | srv-b | 止まっている | 最後の書き込み 5 分前" },
+    { remote_id: "pm1-cap@srv-a", server: "srv-a", line: "pm1-cap@srv-a | 実行中" },
+    { remote_id: "pm1-cap@srv-b", server: "srv-b", line: "pm1-cap@srv-b | 止まっている | 最後の書き込み 5 分前" },
   ]);
   assert.equal(r.truncated, false);
   assert.equal(r.omitted, 0);
@@ -34,7 +34,7 @@ test("cap ごとに 1 行。running は「実行中」、止まっている（do
 });
 
 test("servers: server ごとの版（server-info の答えを控えた物）。未取得は不明。同じ server は 1 行。版を出すのはここだけ", () => {
-  const views = [view({ session: "pm1", server: "srv-a" }), view({ session: "pm1", server: "srv-b" }), view({ session: "pm1", server: "srv-a", remote_id: "x-cap" })];
+  const views = [view({ session: "pm1", server: "srv-a" }), view({ session: "pm1", server: "srv-b" }), view({ session: "pm1", server: "srv-a", remote_id: "x-cap@srv-a" })];
   const r = buildTaskStatus(views, "pm1", NOW, undefined, (s) => (s === "srv-a" ? "1.2.3" : undefined));
   assert.deepEqual(r.servers, ["srv-a | server 1.2.3", "srv-b | server 不明"]);
   assert.deepEqual(buildTaskStatus(views, "pm1", NOW).servers, ["srv-a | server 不明", "srv-b | server 不明"]);

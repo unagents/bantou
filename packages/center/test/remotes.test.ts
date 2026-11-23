@@ -70,12 +70,12 @@ test("send: parent-id = cap の名前（<session>-cap）、model 省略は既定
   const s = setup();
   await s.manager.restore();
   const r = await s.manager.send({ owner: "pm1", server: "bantou-server-aaaaaaaaaa", prompt: "do it" });
-  assert.deepEqual(r, { remote_id: "pm1-cap", server: "bantou-server-aaaaaaaaaa", model: DEFAULT_WORKER_MODEL, sent: true });
+  assert.deepEqual(r, { remote_id: "pm1-cap@bantou-server-aaaaaaaaaa", server: "bantou-server-aaaaaaaaaa", model: DEFAULT_WORKER_MODEL, sent: true });
   const launch = s.calls.find((c) => c.op === "launch");
   assert.deepEqual(launch, { op: "launch", server: "bantou-server-aaaaaaaaaa", arg: { parentId: "pm1-cap", model: DEFAULT_WORKER_MODEL, prompt: "do it", ws: WS } });
   const list = s.manager.list({ owner: "pm1" });
   assert.equal(list.length, 1);
-  assert.equal(list[0]!.remote_id, "pm1-cap");
+  assert.equal(list[0]!.remote_id, "pm1-cap@bantou-server-aaaaaaaaaa");
   assert.equal(list[0]!.server, "bantou-server-aaaaaaaaaa");
   assert.equal(list[0]!.state, "running");
   assert.equal(list[0]!.finishedAt, undefined);
@@ -95,6 +95,9 @@ test("send: 同じ session × server は 1 件のまま（model は最後の lau
   const list = s.manager.list({ owner: "pm1" });
   assert.deepEqual(list.map((v) => [v.server, v.model]), [["srv-a", "sonnet"], ["srv-b", DEFAULT_WORKER_MODEL]]);
   assert.deepEqual(s.manager.list({ owner: "pm2" }), []);
+  // remote_id は parent-id と server の名前の組で一意（parent-id は同じ）
+  assert.deepEqual(list.map((v) => v.remote_id), ["pm1-cap@srv-a", "pm1-cap@srv-b"]);
+  assert.deepEqual(s.calls.filter((c) => c.op === "launch").map((c) => (c.arg as LaunchInput).parentId), ["pm1-cap", "pm1-cap", "pm1-cap"]);
 });
 
 test("send: 不正な入力・ws の宛先が無い・送信失敗は投げ、控えを作らず launch も送らない（失敗時は控え無し）", async () => {
@@ -144,7 +147,7 @@ test("stop: stop を送り、その cap の控えと ws の記録を消す。控
   const s = setup();
   await s.manager.send({ owner: "pm1", server: "srv", prompt: "x" });
   const r = await s.manager.stop({ owner: "pm1", server: "srv" });
-  assert.deepEqual(r, { remote_id: "pm1-cap", server: "srv", sent: true, forgotten: true });
+  assert.deepEqual(r, { remote_id: "pm1-cap@srv", server: "srv", sent: true, forgotten: true });
   assert.deepEqual(s.calls.filter((c) => c.op === "stop"), [{ op: "stop", server: "srv", arg: "pm1-cap" }]);
   assert.deepEqual(s.manager.list(), []);
   assert.equal(s.tracker.lastAt("pm1-cap"), undefined);
@@ -175,7 +178,7 @@ test("reply: answer / approve / reject を送る。owner 無し（desktop の ce
     { sessionId: "w-1", order: "approve" },
     { sessionId: "w-2", order: "reject" },
   ]);
-  assert.deepEqual(s.memoryCalls, ["reply:pm1:pm1-cap:w-1:yes", "reply:pm1:pm1-cap:w-1:approve"]);
+  assert.deepEqual(s.memoryCalls, ["reply:pm1:pm1-cap@srv-a:w-1:yes", "reply:pm1:pm1-cap@srv-a:w-1:approve"]);
   await assert.rejects(() => s.manager.reply({ owner: "pm1", server: "srv-zzz", session_id: "w-1", order: "approve" }), /この session の servers に無い/);
   await assert.rejects(() => s.manager.reply({ owner: "pm1", server: "srv-a", session_id: "", order: "approve" }), /session_id が不正/);
   await assert.rejects(() => s.manager.reply({ owner: "pm1", server: "srv-a", session_id: "w", order: "answer", content: "a\0" }), /content が不正/);
@@ -225,10 +228,10 @@ test("wait: 止まっている cap があれば即返す。動いている間は
   s.tracker.note("other-cap"); // 起こす
   const v = await waiting;
   assert.equal(v.state, "done");
-  assert.equal(v.remote_id, "pm1-cap");
+  assert.equal(v.remote_id, "pm1-cap@srv");
 
   // すでに止まっていれば即返す
-  const again = await s.manager.wait({ remote_id: "pm1-cap" });
+  const again = await s.manager.wait({ remote_id: "pm1-cap@srv" });
   assert.equal(again.state, "done");
 
   // 動いている cap は timeout で running のまま返す
@@ -271,7 +274,7 @@ test("renameSession: session と cap の名前（remote_id）を付け替える�
   await s.manager.send({ owner: "pm1", server: "srv-a", prompt: "x" });
   await s.manager.send({ owner: "pm1", server: "srv-b", prompt: "y" });
   assert.equal(await s.manager.renameSession("pm1", "pm2"), 2);
-  assert.deepEqual(s.manager.list({ owner: "pm2" }).map((v) => [v.session, v.remote_id]), [["pm2", "pm2-cap"], ["pm2", "pm2-cap"]]);
+  assert.deepEqual(s.manager.list({ owner: "pm2" }).map((v) => [v.session, v.remote_id]), [["pm2", "pm2-cap@srv-a"], ["pm2", "pm2-cap@srv-b"]]);
   assert.deepEqual(s.manager.list({ owner: "pm1" }), []);
   assert.deepEqual(s.mem.saved().map((r) => r.session), ["pm2", "pm2"]);
   assert.equal(await s.manager.renameSession("nobody", "x"), 0);
@@ -281,7 +284,7 @@ test("restore: 今の規約の控えは復元し、旧 1.x の形式（cap_id �
   const old = [
     { remote_id: "c-0a1b2c3d4e-pm1", session: "pm1", server: "srv-id", serverName: "bantou-server", state: "done", createdAt: "2026-11-01T00:00:00.000Z", pending: [] },
     { remote_id: "c-0a1b2c3d4e", server: "srv-id", serverName: "bantou-server", state: "done", createdAt: "2026-11-01T00:00:00.000Z", pending: [] },
-    { remote_id: "pm2-cap", session: "pm2", server: "srv-x", serverName: "ignored", model: "opus", state: "running", createdAt: "2026-11-02T00:00:00.000Z", pending: [{}], worker_reports: [{}] },
+    { remote_id: "pm2-cap@srv-x", session: "pm2", server: "srv-x", serverName: "ignored", model: "opus", state: "running", createdAt: "2026-11-02T00:00:00.000Z", pending: [{}], worker_reports: [{}] },
     { remote_id: "bad", session: "pm 3", server: "srv" },
   ] as unknown as RemoteRecord[];
   const s = setup({ initial: old });
@@ -289,7 +292,7 @@ test("restore: 今の規約の控えは復元し、旧 1.x の形式（cap_id �
   const list = s.manager.list();
   assert.equal(list.length, 1);
   assert.deepEqual({ ...list[0]! }, {
-    remote_id: "pm2-cap",
+    remote_id: "pm2-cap@srv-x",
     session: "pm2",
     server: "srv-x",
     serverName: "srv-x",
@@ -300,5 +303,5 @@ test("restore: 今の規約の控えは復元し、旧 1.x の形式（cap_id �
     server_label: "srv-x",
   } as unknown as (typeof list)[number]);
   // 保存し直されている（旧い欄は残らない）
-  assert.deepEqual(s.mem.saved(), [{ remote_id: "pm2-cap", session: "pm2", server: "srv-x", serverName: "srv-x", model: "opus", createdAt: "2026-11-02T00:00:00.000Z" }]);
+  assert.deepEqual(s.mem.saved(), [{ remote_id: "pm2-cap@srv-x", session: "pm2", server: "srv-x", serverName: "srv-x", model: "opus", createdAt: "2026-11-02T00:00:00.000Z" }]);
 });
