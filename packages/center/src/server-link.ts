@@ -100,8 +100,13 @@ export interface ServerLink {
    * peer が見つからない・送れない時は ok:false と理由を返す（投げない）。bantou protocol の message ではない。
    */
   notifyPeer(name: string, text: string, opts?: { mark?: PeerMark }): Promise<{ ok: true; to: string } | { ok: false; reason: string }>;
-  /** broker に protocol「bantou」で登録されている peer（server）の一覧。自分は除く。投げる事がある（未接続・列挙に非対応）。 */
+  /** broker に protocol「bantou」で登録されている peer（server）の一覧。自分は除く。投げる事がある（未接続・列挙に非対応）。見るたびに、1.x の peer への移行の橋（bridgeLegacy）も走る。 */
   listServers(): Promise<ServerListEntry[]>;
+  /**
+   * 移行の 1 回の橋: protocol「bantou」の 1.x を宣言している peer に、update_server を 1 回だけ送る（返事は待たず log に書く）。2.x の peer には送らない。
+   * 組の server の版が不明なら何もしない。投げない。
+   */
+  bridgeLegacy(): Promise<void>;
   /** 起床の直前に控える印（失敗は null）。 */
   peerMarkOf(name: string): Promise<PeerMark | null>;
   close(): Promise<void>;
@@ -134,11 +139,43 @@ function isNewerPeer(p: { id: string; registered_at?: string }, mark?: PeerMark)
   return mark.since === undefined || p.registered_at === undefined || p.registered_at >= mark.since;
 }
 
+/** 移行の橋の meta（1.x の server が受ける protocol の版）。 */
+export const LEGACY_BRIDGE_META: LinkMeta = { protocol: "bantou", version: "1.8.1" };
+
+/** 移行の橋が 1.x の server へ送る固定の形。 */
+export function legacyUpdateBody(version: string): string {
+  return JSON.stringify({ bantou: 1, type: "update_server", version });
+}
+
+/** peer が宣言している protocol「bantou」の版が 1.x か。 */
+function isLegacyPeer(p: LinkPeer): boolean {
+  const v = p.protocols?.find((d) => d.name === MESSENGER_PROTOCOL.protocol)?.version;
+  return typeof v === "string" && /^1\./.test(v);
+}
+
+/** 1.x の server の返事（update_result / error）を log 用に 1 行へ。それ以外は undefined。値は型・状態・版・code だけで、本文は載せない。 */
+function describeLegacyReply(text: string): string | undefined {
+  let v: unknown;
+  try {
+    v = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (typeof v !== "object" || v === null) return undefined;
+  const o = v as Record<string, unknown>;
+  const s = (x: unknown): string => (typeof x === "string" ? x.slice(0, 40) : "-");
+  if (o.type === "update_result") return `update_result ok=${String(o.ok === true)} state=${s(o.state)} from=${s(o.from)} to=${s(o.to)}`;
+  if (o.type === "error") return `error code=${s(o.code)}`;
+  return undefined;
+}
+
 export function createServerLink(opts: {
   /** center の名前（bantou-center-<key>）。 */
   name: string;
   log: Logger;
   clientFactory?: (name: string) => LinkClient;
+  /** 組の server の版（x.y.z）。移行の橋が 1.x の server へ指示する版。省略すると橋は送らない。 */
+  bridgeVersion?: string;
 }): ServerLink {
   const { log, name } = opts;
   const clientFactory = opts.clientFactory ?? ((n: string): LinkClient => createClient(n, log));
@@ -146,8 +183,11 @@ export function createServerLink(opts: {
   let unsubscribe: (() => void) | null = null;
   let closed = false;
   const versions = new Map<string, string>();
+  /** 橋を送った peer の id（center の起動中は覚える。1 つの peer に 1 回だけ）。 */
+  const bridged = new Set<string>();
+  const bridgedNames = new Set<string>();
 
-  const body = (b: LaunchMessage | StopMessage | AnswerMessage | ApproveMessage | RejectMessage | ServerInfoMessage): string => JSON.stringify(b);
+  const body =(b: LaunchMessage | StopMessage | AnswerMessage | ApproveMessage | RejectMessage | ServerInfoMessage): string => JSON.stringify(b);
 
   const clientOrThrow = (): LinkClient => {
     if (closed) throw new Error("center 終了");
@@ -160,13 +200,45 @@ export function createServerLink(opts: {
     log(`指示送信: to=${server} ${message.callType}/${message.order}`);
   };
 
+  /** 1.x の peer へ橋を送る（peers は listPeers の結果。自分は除いてある）。送る前に印を付ける（失敗しても再送しない）。 */
+  const bridgeTo = async (c: LinkClient, peers: LinkPeer[]): Promise<void> => {
+    const version = opts.bridgeVersion;
+    if (version === undefined) return;
+    for (const p of peers) {
+      if (!isLegacyPeer(p) || bridged.has(p.id)) continue;
+      bridged.add(p.id);
+      bridgedNames.add(p.name);
+      try {
+        await c.send(p.id, legacyUpdateBody(version), "push", LEGACY_BRIDGE_META);
+        log(`移行の橋: update_server を送った to=${p.name} version=${version}`);
+      } catch (e) {
+        log(`移行の橋: 送れない to=${p.name} ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  };
+
   return {
     name,
+    async bridgeLegacy() {
+      try {
+        const c = clientOrThrow();
+        if (!c.listPeers || opts.bridgeVersion === undefined) return;
+        const own = c.peer?.id ?? null;
+        await bridgeTo(c, (await c.listPeers("all", { protocol: MESSENGER_PROTOCOL.protocol })).filter((p) => p.id !== own));
+      } catch (e) {
+        log(`移行の橋: 一覧を取れない ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
     async connect() {
       if (client) return;
       const c = clientFactory(name);
       unsubscribe = c.onMessage((m) => {
         if (m.mode === "ping") return;
+        const legacy = bridgedNames.has(m.from_name) ? describeLegacyReply(stripWarning(m.text)) : undefined;
+        if (legacy) {
+          log(`移行の橋: 返事 from=${m.from_name} ${legacy}`);
+          return;
+        }
         const info = parseServerInfoReply(stripWarning(m.text));
         if (info) {
           versions.set(m.from_name, info.version);
@@ -197,6 +269,7 @@ export function createServerLink(opts: {
       if (!c.listPeers) throw new Error("broker が peer の列挙に対応していない");
       const own = c.peer?.id ?? null;
       const peers = (await c.listPeers("all", { protocol: MESSENGER_PROTOCOL.protocol })).filter((p) => p.id !== own);
+      await bridgeTo(c, peers);
       return peers.map((p) => ({
         name: p.name,
         host: p.hostname ?? null,

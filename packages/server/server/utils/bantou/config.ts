@@ -15,6 +15,16 @@ export const DEFAULT_MCP = {
   bind: "127.0.0.1",
 } as const;
 
+/**
+ * 自己更新。spec は取得元（{version} を版に置き換えて npx の --package に渡す）。
+ * checkIntervalMs は最新版を見る間隔、maxWaitMs は動いている worker を待つ上限（越えたら残りを止めて進む。既定は claude の 1 run の上限と同じ 30 分）。
+ */
+export const DEFAULT_UPDATE = {
+  spec: "bantou@{version}",
+  checkIntervalMs: 600_000,
+  maxWaitMs: 1_800_000,
+} as const;
+
 /** 名前の prefix（英小文字・数字 1〜16 文字）。 */
 export const NAME_PREFIX_PATTERN = /^[a-z0-9]{1,16}$/;
 
@@ -91,6 +101,8 @@ export interface Config {
   mcp: { port: number; bind: string };
   /** headless 実行（claude -p）の設定。 */
   session: SessionConfig;
+  /** 自己更新の設定。 */
+  update: { spec: string; checkIntervalMs: number; maxWaitMs: number };
   /** agent-messenger に登録する名前の prefix。起動 option --name-prefix が優先。 */
   namePrefix?: string;
   /** worker に載せる追加の stdio MCP。name → 定義。 */
@@ -137,6 +149,24 @@ function parseMcp(v: unknown, path: string): Config["mcp"] {
     throw new Error(`config の mcp.bind は空でない文字列: ${path}`);
   }
   return { port, bind };
+}
+
+function parseUpdate(v: unknown, path: string): Config["update"] {
+  if (v === undefined) return { ...DEFAULT_UPDATE };
+  if (!isRecord(v)) throw new Error(`config の update はオブジェクト: ${path}`);
+  const spec = v.spec ?? DEFAULT_UPDATE.spec;
+  if (typeof spec !== "string" || !spec.includes("{version}") || spec.startsWith("-") || spec.includes("\0")) {
+    throw new Error(`config の update.spec は {version} を含む文字列（- で始められない）: ${path}`);
+  }
+  const checkIntervalMs = v.checkIntervalMs ?? DEFAULT_UPDATE.checkIntervalMs;
+  if (typeof checkIntervalMs !== "number" || !Number.isInteger(checkIntervalMs) || checkIntervalMs < 1000) {
+    throw new Error(`config の update.checkIntervalMs は 1000 以上の整数（ms）: ${path}`);
+  }
+  const maxWaitMs = v.maxWaitMs ?? DEFAULT_UPDATE.maxWaitMs;
+  if (typeof maxWaitMs !== "number" || !Number.isInteger(maxWaitMs) || maxWaitMs <= 0) {
+    throw new Error(`config の update.maxWaitMs は正の整数: ${path}`);
+  }
+  return { spec, checkIntervalMs, maxWaitMs };
 }
 
 /** namePrefix（config の項目と起動 option で同じ検証）。不正なら投げる。 */
@@ -307,6 +337,7 @@ export async function loadConfig(path: string, cpus: number = availableCpus()): 
     broker: parseBroker(obj.broker, path),
     mcp: parseMcp(obj.mcp, path),
     session,
+    update: parseUpdate(obj.update, path),
     ...(namePrefix !== undefined ? { namePrefix } : {}),
     extraMcp: parseExtraMcp(obj.extraMcp, path),
     ...(obj.openspecUrl !== undefined ? { openspecUrl: obj.openspecUrl as string } : {}),

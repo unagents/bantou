@@ -7,6 +7,8 @@
  * - stop は queue で待っている物も外す。
  */
 
+import type { WorkerRunInput } from "./worker";
+
 export const QUEUE_POLL_MS = 5000;
 
 export interface Job {
@@ -15,6 +17,8 @@ export interface Job {
   parentId: string;
   /** worker の id（reply の起こし直しは、同じ worker の run が終わってから）。 */
   workerId: string;
+  /** 起こす入力（自己更新の再起動をまたいで queue の待ちを続けるため file に持つ）。 */
+  input?: WorkerRunInput;
   /** 起こす。返った Promise が終わった時が、その worker の終わり。reject しない。 */
   start(): Promise<void>;
   /** 動いている worker を止める。 */
@@ -39,6 +43,14 @@ export interface WorkQueue {
   stop(parentId: string): { running: number; queued: number };
   /** 今の数。 */
   counts(): { running: number; queued: number };
+  /** 新しい物を queue から取り出すのをやめる（動いている worker はそのまま。submit は受けて待たせる）。自己更新の待ちで使う。 */
+  pause(): void;
+  /** pause を解く（自己更新を取りやめた時）。 */
+  resume(): void;
+  /** queue で待っている物（取り出される順。reply が先）。 */
+  waiting(): Job[];
+  /** 動いている worker を全部止める。 */
+  abortRunning(): number;
   /** timer を止める（動いている worker は止めない）。 */
   close(): void;
 }
@@ -50,6 +62,7 @@ export function createWorkQueue(o: QueueOptions): WorkQueue {
   const running = new Set<Job>();
   let timer: ReturnType<typeof setInterval> | undefined;
   let closed = false;
+  let paused = false;
 
   const waiting = (): number => replies.length + launches.length;
 
@@ -64,7 +77,7 @@ export function createWorkQueue(o: QueueOptions): WorkQueue {
 
   /** 空きと負荷が許す限り先頭から起こす。 */
   const pump = (): void => {
-    while (!closed && waiting() > 0 && running.size < o.maxParallel && o.loadavg1() <= o.cpus()) {
+    while (!closed && !paused && waiting() > 0 && running.size < o.maxParallel && o.loadavg1() <= o.cpus()) {
       const job = next();
       if (job === undefined) break;
       running.add(job);
@@ -77,7 +90,7 @@ export function createWorkQueue(o: QueueOptions): WorkQueue {
         });
     }
     // 待っていて動かせない（負荷が高い・満席）間は、再確認の timer を持つ。満席は worker の終了で pump される
-    if (!closed && waiting() > 0) {
+    if (!closed && !paused && waiting() > 0) {
       if (timer === undefined) {
         timer = setInterval(pump, o.pollMs ?? QUEUE_POLL_MS);
         timer.unref?.();
@@ -114,6 +127,19 @@ export function createWorkQueue(o: QueueOptions): WorkQueue {
       return { running: stopped, queued };
     },
     counts: () => ({ running: running.size, queued: waiting() }),
+    pause() {
+      paused = true;
+      pump();
+    },
+    resume() {
+      paused = false;
+      pump();
+    },
+    waiting: () => [...replies, ...launches],
+    abortRunning() {
+      for (const j of running) j.abort();
+      return running.size;
+    },
     close() {
       closed = true;
       if (timer !== undefined) clearInterval(timer);

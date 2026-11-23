@@ -578,3 +578,92 @@ test("daemon: name-prefix は起動 option（deps.namePrefix）が設定 file �
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("daemon 自己更新: 新しい版を見て新しい launch を取り出さず、動いている worker の終了を待ち、queue の待ちを file に持ち、再起動後の daemon が続ける", { timeout: 60_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "bantou-daemon-selfupdate-"));
+  const origLog = console.log;
+  try {
+    const logs: string[] = [];
+    console.log = (m?: unknown) => {
+      logs.push(String(m));
+    };
+    const handlers: Array<(m: unknown) => void> = [];
+    const clientFor = ((): NonNullable<DaemonDeps["createClient"]> =>
+      (() => ({
+        peer: { id: "fake-id" },
+        onMessage: (h: (m: unknown) => void) => {
+          handlers.push(h);
+        },
+        connect: async () => {},
+        setProtocol: async () => ({ name: "bantou", version: "2.0.0", hash: "h" }),
+        unsetProtocol: async () => {},
+        send: async () => {},
+        close: async () => {},
+      })) as unknown as NonNullable<DaemonDeps["createClient"]>)();
+    const fail = { ok: false as const, sessionMissing: false, timedOut: false, detail: "x", durationMs: 1 };
+    const prompts1: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const runner1 = {
+      run: async (o: { prompt: string }) => {
+        prompts1.push(o.prompt);
+        await gate;
+        return fail;
+      },
+    };
+    const exits: string[] = [];
+    const configPath = await daemonConfig(dir, { session: { maxParallel: 1 }, update: { checkIntervalMs: 1000, maxWaitMs: 60_000 } });
+    const d1 = await startDaemon(configPath, {
+      machineId: () => "m",
+      startMcp: stubMcp,
+      createClient: clientFor,
+      serverVersion: "0.7.0",
+      runner: runner1 as unknown as DaemonDeps["runner"],
+      fetchLatest: async () => "0.8.0",
+      requestExit: (r) => exits.push(r),
+    });
+    const send = (h: (m: unknown) => void, prompt: string): void =>
+      h({
+        text: JSON.stringify({ protocol: "bantou", callType: "invoke", order: "launch", "parent-id": "cap-1", prompt, ws: "ws://h:7910/ws/worker?token=SECRET" }),
+        meta: { protocol: "bantou", version: "2.0.0" },
+        from_id: "c1",
+        from_name: "center",
+      });
+    send(handlers[0]!, "A");
+    await sleep(100);
+    assert.deepEqual(prompts1, ["A"]);
+    // 更新の確認は 1 間隔（1 秒）の後。待ちに入った後に来た launch は取り出されない
+    while (!logs.some((l) => l.includes("待っている（worker 1）"))) await sleep(50);
+    send(handlers[0]!, "B");
+    await sleep(150);
+    assert.deepEqual(prompts1, ["A"]);
+    assert.deepEqual(exits, []);
+    release();
+    while (exits.length === 0) await sleep(50);
+    await d1.stop();
+    console.log = origLog;
+
+    assert.deepEqual(prompts1, ["A"]);
+    assert.deepEqual(JSON.parse(await readFile(join(dir, "ws", "update.json"), "utf8")), { state: "restart", to: "0.8.0", spec: "bantou@0.8.0" });
+    assert.ok(logs.some((l) => l.includes("版 0.8.0 を見つけた")));
+    assert.ok(logs.some((l) => l.includes("入れ替える")));
+    assert.equal(logs.some((l) => l.includes("SECRET")), false, "ws の token は log に出ない");
+
+    // 再起動後の daemon が、file の待ちを続ける（file は消える）
+    const prompts2: string[] = [];
+    const runner2 = {
+      run: async (o: { prompt: string }) => {
+        prompts2.push(o.prompt);
+        return fail;
+      },
+    };
+    const d2 = await startDaemon(configPath, { machineId: () => "m", startMcp: stubMcp, createClient: clientFor, serverVersion: "0.8.0", runner: runner2 as unknown as DaemonDeps["runner"] });
+    while (prompts2.length === 0) await sleep(50);
+    assert.deepEqual(prompts2, ["B"]);
+    await assert.rejects(stat(join(dir, "ws", "pending-jobs.json")));
+    await d2.stop();
+  } finally {
+    console.log = origLog;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
