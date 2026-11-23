@@ -532,6 +532,10 @@ pub(crate) fn graphql_target_of(t: &Target) -> Result<GraphqlTarget, String> {
     if let Some(token) = t.token.as_deref() {
         headers.insert("authorization".to_string(), format!("Bearer {token}"));
     }
+    // Only our own sidecar gets the launcher key (as on the MCP calls): it lets `centerInfo { launcher }` say this screen started the center.
+    if let Some(k) = launcher_for(&t.url) {
+        headers.insert(LAUNCHER_HEADER.to_string(), k.to_string());
+    }
     Ok(GraphqlTarget { url: url.to_string(), headers })
 }
 
@@ -593,6 +597,20 @@ mod tests {
         assert_eq!(g.headers.get("authorization").map(String::as_str), Some("Bearer tok"));
         let none = Target { token: None, ..t };
         assert!(graphql_target_of(&none).unwrap().headers.is_empty());
+    }
+
+    #[test]
+    fn graphql_target_carries_the_launcher_key_only_for_the_own_sidecar() {
+        let _g = LAUNCHER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let own = Target { url: "http://127.0.0.1:7920/mcp".into(), token: Some("tok".into()), source: TargetSource::Sidecar };
+        let other = Target { url: "http://10.0.0.2:7920/mcp".into(), ..own.clone() };
+        set_launcher_url(Some(own.url.clone()));
+        let a = graphql_target_of(&own).unwrap();
+        let b = graphql_target_of(&other).unwrap();
+        set_launcher_url(None);
+        assert_eq!(a.headers.get(LAUNCHER_HEADER).map(String::as_str), Some(launcher_key()));
+        assert_eq!(b.headers.get(LAUNCHER_HEADER), None);
+        assert_eq!(graphql_target_of(&own).unwrap().headers.get(LAUNCHER_HEADER), None, "cleared when the sidecar stops");
     }
 
     #[test]

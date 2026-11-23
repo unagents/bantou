@@ -1,5 +1,6 @@
 import { graphql } from "./graphql";
 import { M_TERMINAL_INPUT, M_TERMINAL_RESIZE, S_TERMINAL_OUTPUT } from "./graphql-docs";
+import { createTerminalFeed, type TerminalEvent } from "./terminal-events";
 
 /** One output chunk (or a reset) of a session's terminal (subscription `terminalOutput`). */
 export interface SessionOutput {
@@ -16,13 +17,6 @@ export interface SessionOutputStatus {
   session: string;
   state: "connected" | "retrying" | "rejected";
   message: string | null;
-}
-
-interface TerminalEvent {
-  type: "output" | "reset" | "status";
-  id: number | null;
-  data: string | null;
-  status: string | null;
 }
 
 const outputHandlers = new Set<(p: SessionOutput) => void>();
@@ -48,18 +42,9 @@ const streams = new Map<string, () => void>();
 /** Open the output stream of a session; `after` = the last chunk id already held (null: from the start). A reopened one (a drop) continues from the last chunk it delivered. */
 export async function sessionOutputStart(session: string, after: number | null): Promise<void> {
   streams.get(session)?.();
-  let last = after;
-  const stop = graphql.subscribe<{ terminalOutput: TerminalEvent }>(S_TERMINAL_OUTPUT, () => ({ session, after: last }), {
-    onNext: ({ terminalOutput: ev }) => {
-      if (ev.type === "output" && ev.id !== null && ev.data !== null) {
-        last = ev.id;
-        emitOutput({ session, id: ev.id, data: ev.data, reset: false });
-      } else if (ev.type === "reset") {
-        last = null;
-        emitOutput({ session, id: 0, data: "", reset: true });
-      }
-      // `status` (end): the stream closes after it; the drop is reported as `retrying` and the stream is opened again
-    },
+  const feed = createTerminalFeed(session, after, emitOutput, emitStatus);
+  const stop = graphql.subscribe<{ terminalOutput: TerminalEvent }>(S_TERMINAL_OUTPUT, feed.variables, {
+    onNext: feed.onNext,
     onOpen: () => emitStatus({ session, state: "connected", message: null }),
     onStatus: (state, message) => emitStatus({ session, state, message }),
   });

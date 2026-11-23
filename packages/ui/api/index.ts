@@ -2,12 +2,12 @@
 // `~/api` and never call `invoke` or `fetch` directly. The center is reached by GraphQL (`graphql.ts`);
 // `invoke` is left for the desktop's own OS-side commands and the calls GraphQL does not have yet (see `center.ts`).
 export {
-  centerCall,
   centerCommonSettingsGet,
   centerCommonSettingsUpdate,
-  centerToolStrict,
+  centerLauncher,
   openExternalUrl,
   rcList,
+  remoteList,
   serverList,
   sessionLogin,
   sessionLoginCode,
@@ -21,7 +21,6 @@ export {
   centerGetSettings,
   centerSetSettings,
   centerStatus,
-  centerTool,
 } from "./center";
 export { GraphqlError } from "./graphql";
 export {

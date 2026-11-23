@@ -308,6 +308,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
       graphql: createGraphqlHandler(
         { config, supervisor, link, sessions, resession, remotes, login, core, events, ...(config.workspace ? { workspace: config.workspace } : {}), log },
         log,
+        launcherKey ? { launcherKey } : {},
       ),
       ...(config.workspace ? { workspace: config.workspace } : {}),
       port: args.port,

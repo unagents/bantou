@@ -109,7 +109,7 @@ async function loadCommon() {
   commonBaseline.value = null;
   try {
     const r = await centerCommonSettingsGet();
-    commonLauncher.value = r.launcher === true;
+    commonLauncher.value = r.launcher;
     common.value = draftOf(r.settings);
     guardrail.value = guardrailDraftOf(r.settings.guardrailSchemas);
     guardrailBaseline.value = cloneGuardrailDraft(guardrail.value);

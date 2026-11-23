@@ -39,9 +39,10 @@ export const queryResolvers: Record<string, Resolver> = {
 
   centerSettings: (_p, _a, { services }) => services.sessions.getCenterSettings().settings,
 
-  // center_info。launcher は返さない（決定 6）
-  centerInfo: (_p, _a, { services }) => ({
+  // center_info。launcher は画面の出し分けの印（権限ではない。決定 6）。centerSettings の中には入れない
+  centerInfo: (_p, _a, { services, launcher }) => ({
     workspace: services.config.workspace ?? null,
+    launcher,
     systemInstructions: describeSystemInstructions(),
   }),
 

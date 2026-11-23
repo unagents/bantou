@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // Phone screen, tab "server / cap" (design 7.1): the shared parts stacked as cards. The caps are the shared
-// RemoteActivity list (polls `remote_list`); the servers (version, rc state) are the shared CenterDialog, opened from a button.
+// RemoteActivity list (polls `remotes`); the servers (version, rc state) are the shared CenterDialog, opened from a button.
 const serverOpen = ref(false);
 </script>
 

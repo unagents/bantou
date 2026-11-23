@@ -1,7 +1,7 @@
 import { getPlatform, getTransport } from "~/tauri";
 import { graphql } from "./graphql";
-import { M_RESTART_SESSION, M_START_SESSION_LOGIN, M_SUBMIT_SESSION_LOGIN_CODE, Q_RC_STATUS, Q_REMOTES_SERVERS, toRc, toServer } from "./graphql-docs";
-import type { CenterConnection, CenterConnectSnippets, CenterIpStatus, CenterLoginCode, CenterLoginStart, CenterParsedConnect, CenterRcStatus, CenterServer, CenterCommonSettings, CenterSettings, CenterStatus, McpToolResult, ProjectSettings } from "../types";
+import { dropNulls, M_RESTART_SESSION, M_START_SESSION_LOGIN, M_SUBMIT_SESSION_LOGIN_CODE, M_UPDATE_CENTER_SETTINGS, Q_CENTER_LAUNCHER, Q_CENTER_SETTINGS, Q_RC_STATUS, Q_REMOTES, Q_REMOTES_SERVERS, toRc, toServer } from "./graphql-docs";
+import type { CenterConnection, CenterConnectSnippets, CenterIpStatus, CenterLoginCode, CenterLoginStart, CenterParsedConnect, CenterRcStatus, CenterRemoteRecord, CenterServer, CenterCommonSettings, CenterSettings, CenterStatus } from "../types";
 
 export const centerGetSettings = () => getTransport().invoke<CenterSettings>("center_get_settings");
 
@@ -28,38 +28,21 @@ export const centerStatus = () => getTransport().invoke<CenterStatus>("center_st
 
 export const centerConnection = () => getTransport().invoke<CenterConnection>("center_connection");
 
-export const centerCall = (name: string, args?: Record<string, unknown>) =>
-  getTransport().invoke<McpToolResult>("center_call", { name, arguments: args });
-
-/** The center-wide settings (`center_settings_get`): `{ settings }`, a session's project settings without `servers`. */
-export const centerCommonSettingsGet = () => centerTool<{ settings: CenterCommonSettings; launcher?: boolean }>("center_settings_get");
-
-/** Merge `settings` into the center-wide settings (`center_settings_update`; `null` removes an item). Returns the whole settings after. */
-export const centerCommonSettingsUpdate = (settings: CenterCommonSettings) =>
-  centerTool<{ settings: CenterCommonSettings; launcher?: boolean }>("center_settings_update", { settings });
-
-/** Call a center tool and parse its JSON text result. */
-export async function centerTool<T>(name: string, args?: Record<string, unknown>): Promise<T> {
-  const r = await centerCall(name, args);
-  const text = r.content.map((c) => c.text ?? "").join("");
-  return JSON.parse(text) as T;
+/** The center-wide settings (`centerSettings`: a session's project settings without `servers`) and whether this screen started the center (`centerInfo.launcher`). */
+export async function centerCommonSettingsGet(): Promise<{ settings: CenterCommonSettings; launcher: boolean }> {
+  const r = await graphql.request<{ centerSettings: CenterCommonSettings; centerInfo: { launcher: boolean } }>(Q_CENTER_SETTINGS);
+  return { settings: dropNulls(r.centerSettings), launcher: r.centerInfo.launcher === true };
 }
 
-/** Call a center tool; a result flagged `isError` (`{ error }` or a failed result) rejects with its text. */
-export async function centerToolStrict<T>(name: string, args?: Record<string, unknown>): Promise<T> {
-  const r = await centerCall(name, args);
-  const text = r.content.map((c) => c.text ?? "").join("");
-  if (r.isError) {
-    let message = text;
-    try {
-      const v = JSON.parse(text) as { error?: string };
-      if (typeof v.error === "string") message = v.error;
-    } catch {
-      // not JSON: keep the text
-    }
-    throw new Error(message || `${name} failed`);
-  }
-  return JSON.parse(text) as T;
+/** Whether this screen started the center (`centerInfo.launcher`). */
+export async function centerLauncher(): Promise<boolean> {
+  return (await graphql.request<{ centerInfo: { launcher: boolean } }>(Q_CENTER_LAUNCHER)).centerInfo.launcher === true;
+}
+
+/** Merge `settings` into the center-wide settings (`updateCenterSettings`; `null` removes an item). Returns the whole settings after. */
+export async function centerCommonSettingsUpdate(settings: CenterCommonSettings): Promise<{ settings: CenterCommonSettings }> {
+  const r = await graphql.request<{ updateCenterSettings: CenterCommonSettings }>(M_UPDATE_CENTER_SETTINGS, { settings });
+  return { settings: dropNulls(r.updateCenterSettings) };
 }
 
 /**
@@ -123,4 +106,11 @@ export async function serverList(): Promise<CenterServer[]> {
 /** The state of each session's claude process (`rcStatus`). */
 export async function rcList(): Promise<CenterRcStatus[]> {
   return (await graphql.request<{ rcStatus: Parameters<typeof toRc>[0][] }>(Q_RC_STATUS)).rcStatus.map(toRc);
+}
+
+/** The remote-caps' records (`remotes`): one per session × server. */
+export async function remoteList(): Promise<CenterRemoteRecord[]> {
+  return (await graphql.request<{ remotes: (Omit<CenterRemoteRecord, "session" | "model" | "finishedAt"> & { session: string | null; model: string | null; finishedAt: string | null })[] }>(Q_REMOTES)).remotes.map(
+    (r) => dropNulls(r) as CenterRemoteRecord,
+  );
 }

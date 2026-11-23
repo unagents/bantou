@@ -20,7 +20,13 @@ const SETTINGS_FIELDS = "instructions addDirs outputStyle servers mcpServers mem
 
 export const Q_SESSIONS = `query Sessions { sessions { reachable reason sessions { ${SESSION_FIELDS} } } }`;
 export const Q_SESSION_SETTINGS = `query SessionSettings($name: String!) { sessionSettings(name: $name) { ${SETTINGS_FIELDS} } }`;
+const CENTER_SETTINGS_FIELDS = "instructions addDirs outputStyle guardrailSchemas openspecUrl mcpServers memory projectMemory mcp mcpConnections mcpSecrets coordinator";
+
 export const Q_CENTER_INFO = "query CenterInfo { centerInfo { workspace } }";
+export const Q_CENTER_LAUNCHER = "query CenterLauncher { centerInfo { launcher } }";
+export const Q_CENTER_SETTINGS = `query CenterSettings { centerSettings { ${CENTER_SETTINGS_FIELDS} } centerInfo { launcher } }`;
+export const M_UPDATE_CENTER_SETTINGS = `mutation UpdateCenterSettings($settings: CenterSettingsInput!) { updateCenterSettings(settings: $settings) { ${CENTER_SETTINGS_FIELDS} } }`;
+export const Q_REMOTES = "query Remotes { remotes { remote_id session server state model createdAt finishedAt } }";
 export const Q_REMOTES_SERVERS = "query Servers { servers { name host protocol lastSeen } }";
 export const Q_RC_STATUS = "query RcStatus { rcStatus { project path state pid sessionUrl restarts lastError } }";
 
