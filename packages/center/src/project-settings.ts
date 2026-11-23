@@ -45,7 +45,7 @@ export interface ProjectSettings {
    */
   outputStyle?: string;
   /**
-   * この session が使ってよい server（host 名か server_id）。未設定 = 全部。空配列 = どの server も使わない。
+   * この session が使ってよい server（server の名前。remote_send の server に渡す値）。未設定 = 全部。空配列 = どの server も使わない。
    * session の設定だけで持つ（center 共通の設定には無い）。
    */
   servers?: string[];
@@ -408,15 +408,15 @@ export function composeOutputStyle(common: ProjectSettings | undefined, own: Pro
 }
 
 /**
- * session が使ってよい server の指定（host 名か server_id）。session の `servers` だけを見る（center 共通の設定は見ない）。
+ * session が使ってよい server の指定（server の名前）。session の `servers` だけを見る（center 共通の設定は見ない）。
  * 無ければ undefined（= 全部）。空配列は「どの server も使わない」。
  */
 export function composeServers(own: ProjectSettings | undefined): string[] | undefined {
   return readSettings(own).servers;
 }
 
-/** server（agent-messenger の名前。`host` に渡す）が `servers` の指定に入っているか。大文字小文字を区別しない。 */
+/** server（agent-messenger の名前。`host` に渡す）が `servers` の指定に入っているか。名前の完全一致（大文字小文字も区別する）。 */
 export function serverAllowed(servers: string[] | undefined, s: { host?: string }): boolean {
   if (servers === undefined) return true;
-  return servers.some((e) => s.host !== undefined && e.toLowerCase() === s.host.toLowerCase());
+  return servers.some((e) => s.host !== undefined && e === s.host);
 }

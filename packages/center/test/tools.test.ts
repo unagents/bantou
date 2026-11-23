@@ -41,6 +41,7 @@ async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partia
     requestServerInfo: async () => {},
     serverVersionOf: () => undefined,
     notifyPeer: async () => ({ ok: false, reason: "n/a" }),
+    listServers: async () => [],
     peerMarkOf: async () => null,
     close: async () => {},
     ...link,
@@ -79,14 +80,14 @@ async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partia
 
 const text = (r: unknown): string => (r as { content: { text: string }[] }).content[0].text;
 
-test("外向けの tool は 20 個。remote_create / remote_stop / remote_send / remote_delete / cap_kick は無い", async () => {
+test("外向けの tool は 21 個。remote_create / remote_stop / remote_send は無い", async () => {
   const { client, close } = await connect();
   const names = (await client.listTools()).tools.map((t) => t.name).sort();
   assert.deepEqual(names, [
-    "center_info", "center_settings_get", "center_settings_update", "rc_list", "rc_start", "rc_status", "rc_stop", "remote_list", "remote_wait",
+    "center_info", "center_settings_get", "center_settings_update", "rc_list", "rc_start", "rc_status", "rc_stop", "remote_list", "remote_wait", "server_list",
     "session_create", "session_delete", "session_list", "session_login", "session_login_code", "session_settings_get", "session_settings_update", "session_sleep", "session_update", "session_wake", "worker_reply",
   ]);
-  for (const gone of ["remote_create", "remote_send", "remote_stop", "remote_delete", "cap_kick"]) assert.ok(!names.includes(gone), gone);
+  for (const gone of ["remote_create", "remote_send", "remote_stop"]) assert.ok(!names.includes(gone), gone);
   await close();
 });
 
@@ -199,23 +200,23 @@ test("rc_status の例外は isError + {error}", async () => {
   await close();
 });
 
-test("cap_kick は外向けから呼べない", async () => {
-  const { client, calls, close } = await connect();
-  const r = await client.callTool({ name: "cap_kick", arguments: { server: "s", cap_id: "c-1", prompt: "go" } }).catch((e: unknown) => e);
-  assert.ok(r instanceof Error || (r as { isError?: boolean }).isError === true);
-  assert.equal(calls.length, 0);
+test("server_list は link.listServers の { name, host, protocol, last_seen } をそのまま返す。session 向けには無い", async () => {
+  const servers = [{ name: "srv-a", host: "h1", protocol: "2.0.0", last_seen: "2026-11-23T00:00:00.000Z" }];
+  const { client, session, close } = await connect({ listServers: async () => servers });
+  const r = await client.callTool({ name: "server_list", arguments: {} });
+  assert.notEqual(r.isError, true);
+  assert.deepEqual(JSON.parse(text(r)), servers);
+  const c = await session("pm1");
+  assert.ok(!(await c.listTools()).tools.some((t) => t.name === "server_list"));
+  await c.close();
   await close();
 });
 
-test("旧 1.x の道具（worker_resume / server_status / server_list / server_peers / server_retire）は無い", async () => {
-  const { client, session, close } = await connect();
-  const names = new Set((await client.listTools()).tools.map((t) => t.name));
-  const c = await session("pm1");
-  for (const n of ["worker_resume", "server_status", "server_list", "server_peers", "server_retire", "remote_delete"]) {
-    assert.ok(!names.has(n), n);
-    assert.ok(!(await c.listTools()).tools.some((t) => t.name === n), `session:${n}`);
-  }
-  await c.close();
+test("server_list: 一覧を取れない時は isError + {error}", async () => {
+  const { client, close } = await connect({ listServers: async () => { throw new Error("messenger に接続していない"); } });
+  const r = await client.callTool({ name: "server_list", arguments: {} });
+  assert.equal(r.isError, true);
+  assert.deepEqual(JSON.parse(text(r)), { error: "messenger に接続していない" });
   await close();
 });
 
@@ -331,7 +332,7 @@ test("worker_reply: session 向け・外向け（desktop の center_call）と�
   await close();
 });
 
-test("remote_stop / remote_list: remote_list は session 向けなら自分の owner。remote_stop は呼び出し元 session の owner を渡す（引数 owner は受けない。server は必須）。外向け remote_list は owner 引数で絞る（無ければ全件）。remote_delete は無い", async () => {
+test("remote_stop / remote_list: remote_list は session 向けなら自分の owner。remote_stop は呼び出し元 session の owner を渡す（引数 owner は受けない。server は必須）。外向け remote_list は owner 引数で絞る（無ければ全件）", async () => {
   const { client, session, calls, close } = await connect();
   const c = await session("pm1");
   await c.callTool({ name: "remote_list", arguments: {} });
@@ -347,7 +348,6 @@ test("remote_stop / remote_list: remote_list は session 向けなら自分の o
     { remoteList: { owner: "pm1", includeOutOfScope: true } },
     { remoteList: {} }, { remoteList: { owner: "pm1", includeOutOfScope: true } },
   ]);
-  assert.ok(!(await c.listTools()).tools.some((t) => t.name === "remote_delete"));
   await c.close();
   await close();
 });

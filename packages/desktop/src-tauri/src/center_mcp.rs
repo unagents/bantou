@@ -27,7 +27,7 @@ const SESSION_HEADER: &str = "mcp-session-id";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// `initialize` / `ping` / the initialized notification.
 const SHORT_TIMEOUT: Duration = Duration::from_secs(10);
-/// `tools/call`: `cap_kick` / `worker_resume` wait for the agent's result, which can take minutes.
+/// `tools/call`: a call can wait for the center for minutes.
 const CALL_TIMEOUT: Duration = Duration::from_secs(600);
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]

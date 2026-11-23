@@ -158,7 +158,7 @@ export interface ProjectSettings {
   addDirs?: string[] | null;
   /** The body (markdown) of claude's output style: the center writes it into the session's folder and selects it with `--settings`. A session's value replaces the center-wide one. */
   outputStyle?: string | null;
-  /** Servers the session may use (host names or server_ids). Absent / null = all (or the center-wide value); `[]` = none. */
+  /** Servers the session may use (server names). Absent / null = all (or the center-wide value); `[]` = none. */
   servers?: string[] | null;
   /**
    * Extra MCP servers (name → one entry of Claude Code's mcp.json `mcpServers`: stdio `{ command, args?, env? }`, http / sse
@@ -284,87 +284,13 @@ export interface CenterRcStatus {
   lastError?: string;
 }
 
-/** `server_list` entry (`packages/center` `ServerInfo`). */
-export interface CenterServerInfo {
+/** `server_list` entry (`packages/center` `ServerListEntry`): a peer registered on the broker with protocol "bantou". `name` is the value `remote_send` takes as `server`. */
+export interface CenterServer {
   name: string;
-  connected: boolean;
-  reachable: boolean;
-  peerId: string | null;
-  serverPeer: string | null;
-  /** What the link last heard from its server (hello_result / status_result). Absent when not learned yet or an old server. */
-  server_id?: string;
-  host?: string;
-  user?: string;
-  workspace?: string;
-}
-
-export interface CenterAgentState {
-  kind: "cap" | "worker";
-  id: string;
-  state: string;
-  [key: string]: unknown;
-}
-
-/** `server_status` result (bantou-server `status_result`, the part shown). */
-export interface CenterServerStatus {
-  ok?: boolean;
-  caps: CenterAgentState[];
-  workers: CenterAgentState[];
-}
-
-/** State of one server in `server_peers` (center `FollowState`). */
-export type CenterFollowState = "ok" | "unsupported" | "updating" | "mismatch" | "failed" | "lost" | "unknown";
-
-/** One server of `server_peers` (center `FollowEntry`): its version against the one paired with this build. */
-export interface CenterServerPeer {
-  key: string;
-  /** Current messenger peer id (changes when the server re-registers). The stable identity is `server_id`. */
-  id: string;
-  name: string;
-  hostname?: string;
-  /** Stable id the server reports (protocol 1.7.0, still sent by 1.8.0). Absent for an older server. */
-  server_id?: string;
-  /** Host name the server reports (shown first), with `user` / `workspace` to tell apart servers on the same host. */
-  host?: string;
-  user?: string;
-  workspace?: string;
-  server_version?: string;
-  protocol_version?: string;
-  state: CenterFollowState;
-  /** One-line reason to show. */
-  detail: string;
-  /** While updating: the target version and how many caps / workers are being waited for. */
-  update?: { to: string; running?: { caps: number; workers: number; reports: number } };
-  since: string;
-}
-
-/** `server_retire` result (center `RetireOutcome`): what the retired server stopped and what an operator does on the host. */
-export interface CenterRetireResult {
-  ok: true;
-  /** retiring = the server accepted; already_retiring = it was already retiring. */
-  state: "retiring" | "already_retiring";
-  server_id: string;
-  host?: string;
-  user?: string;
-  workspace?: string;
-  peer: string;
-  /** Not present for already_retiring. */
-  stopped?: { caps: number; workers: number };
-  exit_at?: string;
-  exit_code?: number;
-  /** Shell lines for root on the host: remove the service unit, the OS user, the workspace. */
-  host_steps?: string[];
-  service?: { manager: "systemd" | "launchd" | "none"; name?: string; detected?: boolean };
-  /** How many cap records (session x server) the center dropped. */
-  records_removed: number;
-  sessions: string[];
-  message: string;
-}
-
-/** `server_peers` result: the versions paired with this build (npm `bantou` and protocol `bantou`) and each server's state. */
-export interface CenterServerPeers {
-  pair: { server: string | null; protocol: string };
-  peers: CenterServerPeer[];
+  host: string | null;
+  /** Version of protocol "bantou" the peer declares. */
+  protocol: string | null;
+  last_seen: string | null;
 }
 
 /** `activity.agents[].state` of `remote_list` (bantou-server `ActivityState`). */
@@ -483,7 +409,7 @@ export interface CenterWorkerReport {
  */
 export interface CenterRemoteRecord {
   remote_id: string;
-  /** Session (master-cap) that owns this cap. Absent = the old shared cap (`c-<center-id>`) kept from before: no new instruction is sent, `remote_delete` removes it. */
+  /** Session (master-cap) that owns this cap. Absent = the old shared cap (`c-<center-id>`) kept from before: no new instruction is sent. */
   session?: string;
   /** Sessions with a pending instruction on this cap (oldest first). */
   owners: string[];
@@ -498,7 +424,7 @@ export interface CenterRemoteRecord {
   serverWorkspace?: string;
   /** Display label: host name first with the server_id (plus user and workspace when several servers share the host name). */
   server_label?: string;
-  state: "running" | "done" | "failed" | "unknown";
+  state: "running" | "stopped";
   /** Model given when the cap was created (absent = none). */
   model?: string;
   worker_model?: string;

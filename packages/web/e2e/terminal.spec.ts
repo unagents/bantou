@@ -62,7 +62,7 @@ test.describe("server / cap tab", () => {
   test("the cap card shows the center's remote_list", async ({ page, stack }) => {
     stack.setSessions(["alpha"]);
     stack.center.tools.set("remote_list", [
-      { remote_id: "r-5b-cap", owners: [], server: "srv-1", server_label: "host-a.example.test", session: "alpha", state: "done", createdAt: "2026-11-20T00:00:00Z", model: "m-5b" },
+      { remote_id: "r-5b-cap", owners: [], server: "srv-1", server_label: "host-a.example.test", session: "alpha", state: "stopped", createdAt: "2026-11-20T00:00:00Z", model: "m-5b" },
     ]);
     await page.goto("/");
     await page.getByTestId("tab-server").click();
@@ -74,17 +74,17 @@ test.describe("server / cap tab", () => {
     expect(await page.content()).not.toContain(TOKEN);
   });
 
-  test("an empty remote_list says so, and the server card opens the shared dialog without a retire button", async ({ page, stack }) => {
+  test("an empty remote_list says so, and the server card opens the shared dialog with the server list", async ({ page, stack }) => {
     stack.center.tools.set("remote_list", []);
     stack.center.tools.set("rc_list", []);
-    stack.center.tools.set("server_peers", { pair: { server: "1.0.0", protocol: "1" }, peers: [] });
-    stack.center.tools.set("server_list", [{ name: "srv-1", host: "host-a.example.test", reachable: true, connected: true, server_id: "sid-1" }]);
+    stack.center.tools.set("server_list", [{ name: "srv-1", host: "host-a.example.test", protocol: "2.0.0", last_seen: "2026-11-23T00:00:00Z" }]);
     await page.goto("/");
     await page.getByTestId("tab-server").click();
     await expect(page.getByTestId("center-remotes-none")).toBeVisible();
     await page.getByTestId("server-open").click();
     await expect(page.getByTestId("center-server-row")).toHaveCount(1);
     await expect(page.getByTestId("center-server-host")).toHaveText("host-a.example.test");
-    await expect(page.getByTestId("center-server-retire")).toHaveCount(0);
+    await expect(page.getByTestId("center-server-name")).toHaveText("srv-1");
+    await expect(page.getByTestId("center-server-version")).toHaveText("2.0.0");
   });
 });

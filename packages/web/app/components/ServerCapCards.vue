@@ -13,6 +13,6 @@ const serverOpen = ref(false);
       <span class="text-sm font-medium">server</span>
       <UButton class="ml-auto" size="sm" color="neutral" variant="soft" icon="i-lucide-server" label="server の一覧" data-testid="server-open" @click="serverOpen = true" />
     </section>
-    <CenterDialog v-model:open="serverOpen" hide-retire />
+    <CenterDialog v-model:open="serverOpen" />
   </div>
 </template>

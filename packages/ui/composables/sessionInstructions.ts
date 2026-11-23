@@ -15,7 +15,7 @@ export const OUTPUT_STYLE_MAX = 32_000;
 /** Max number of `servers` entries (same limit as the center). */
 export const SERVERS_MAX = 50;
 
-/** What a `servers` entry may be: a host name or a server_id (same patterns as the center). */
+/** What a `servers` entry may be: a server's name (same patterns as the center). */
 const SERVER_REF = /^(?:[A-Za-z0-9_-]{1,64}|[A-Za-z0-9][A-Za-z0-9._-]{0,252})$/;
 
 /**
@@ -29,7 +29,7 @@ export interface SettingsDraft {
   addDirs: string[];
   /** The body of claude's output style (markdown). */
   outputStyle: string;
-  /** Servers the session may use (host names or server_ids). null = not set (all, or the center-wide value); [] = none. */
+  /** Servers the session may use (server names). null = not set (all, or the center-wide value); [] = none. */
   servers: string[] | null;
   /** Extra MCP servers as JSON text (`{ "mcpServers": { … } }`, as in Claude Code's mcp.json). "" = none. Launcher only. */
   mcpServers: string;
@@ -156,7 +156,7 @@ export const draftError = (d: SettingsDraft): string | null => {
     const list = cleanServers(d.servers);
     if (list.length > SERVERS_MAX) return `server は ${SERVERS_MAX} 個以内`;
     const badServer = list.find((s) => !SERVER_REF.test(s));
-    if (badServer !== undefined) return `server は host 名か server_id（英数字と . _ - のみ）で指定する: ${badServer}`;
+    if (badServer !== undefined) return `server は server の名前（英数字と . _ - のみ）で指定する: ${badServer}`;
   }
   const ms = parseServersText(d.mcpServers);
   if ("error" in ms) return ms.error;

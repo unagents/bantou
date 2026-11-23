@@ -5,10 +5,10 @@ import { boardSeed } from "./seed";
 
 type Mock = {
   center: { enabled: boolean };
-  centerVersions: unknown;
+  centerServers: unknown;
   centerSettings: Record<string, Record<string, unknown>>;
   centerCommonSettings: Record<string, unknown>;
-  centerVersionsError: string | null;
+  centerServersError: string | null;
   calls: { cmd: string; args?: Record<string, unknown> }[];
 };
 
@@ -19,35 +19,31 @@ const mock = <T>(page: Page, fn: (m: Mock) => T) =>
     fn.toString(),
   ) as Promise<T>;
 
-const peer = (over: Record<string, unknown>) => ({
-  key: "k",
-  id: "p",
+const server = (over: Record<string, unknown>) => ({
   name: "bantou-server",
-  server_version: "0.1.42",
-  protocol_version: "1.8.0",
-  state: "ok",
-  detail: "版が一致",
-  since: "2026-11-10T00:00:00.000Z",
+  host: "mac200",
+  protocol: "2.0.0",
+  last_seen: "2026-11-23T00:00:00.000Z",
   ...over,
 });
 
-const PEERS = [
-  peer({ key: "a", id: "p-la", host: "lenovo", server_id: "srv-lenovo-a", user: "bantou-a", workspace: "/srv/a" }),
-  peer({ key: "b", id: "p-lb", host: "lenovo", server_id: "srv-lenovo-b", user: "bantou-b", workspace: "/srv/b" }),
-  peer({ key: "m", id: "p-mac", host: "mac200", server_id: "srv-mac" }),
+const SERVERS = [
+  server({ name: "srv-lenovo-a", host: "lenovo" }),
+  server({ name: "srv-lenovo-b", host: "lenovo" }),
+  server({ name: "srv-mac", host: "mac200" }),
 ];
 
 test.use({ seed: boardSeed });
 
 async function seedPeers(page: Page) {
-  await page.evaluate((p) => {
-    (window as unknown as { __BANTOU_MOCK__: { centerVersions: unknown } }).__BANTOU_MOCK__.centerVersions = { pair: { server: "0.1.42", protocol: "1.8.0" }, peers: p };
-  }, PEERS);
+  await page.evaluate((s) => {
+    (window as unknown as { __BANTOU_MOCK__: { centerServers: unknown } }).__BANTOU_MOCK__.centerServers = s;
+  }, SERVERS);
 }
 
 const openGear = (page: Page) => page.locator('[data-testid=session-settings-open][data-name="careery"]').click();
 
-test("project settings: 使う server is off (all servers) by default; turning it on lists the discovered servers, picks are saved as server_ids to the center", async ({ page }) => {
+test("project settings: 使う server is off (all servers) by default; turning it on lists the servers of server_list, picks are saved as server names to the center", async ({ page }) => {
   await page.goto("/");
   await seedPeers(page);
   await openGear(page);
@@ -59,11 +55,10 @@ test("project settings: 使う server is off (all servers) by default; turning i
   await dlg.getByTestId("settings-servers-limit").click();
   const opts = dlg.getByTestId("settings-server-option");
   await expect(opts).toHaveCount(3);
-  // two servers on one host are told apart by server_id, user and workspace
-  await expect(opts.nth(0)).toContainText("lenovo");
+  // each option shows the name (the value) and the host
   await expect(opts.nth(0)).toContainText("srv-lenovo-a");
-  await expect(opts.nth(0)).toContainText("bantou-a /srv/a");
-  await expect(opts.nth(1)).toContainText("bantou-b /srv/b");
+  await expect(opts.nth(0)).toContainText("lenovo");
+  await expect(opts.nth(1)).toContainText("srv-lenovo-b");
   // nothing picked while limited = no server at all; said so
   await expect(dlg.getByTestId("settings-servers-none")).toBeVisible();
   await opts.nth(1).getByRole("checkbox").click();
@@ -99,37 +94,37 @@ test("project settings: on with nothing picked is saved as an empty list (= no s
   await expect(dlg.getByTestId("settings-servers-none")).toBeVisible();
 });
 
-test("project settings: a host name or server_id can be typed; entries that match no discovered server are listed and removable; a bad entry blocks the save", async ({ page }) => {
+test("project settings: a server name can be typed; entries that match no listed server are listed and removable; a bad entry blocks the save", async ({ page }) => {
   await page.goto("/");
   await seedPeers(page);
   await mock(page, (m) => {
-    m.centerSettings.careery = { servers: ["gone-host", "mac200"] };
+    m.centerSettings.careery = { servers: ["gone-server", "srv-mac"] };
   });
   await openGear(page);
   const dlg = page.getByTestId("settings-dialog");
-  // the typed host "mac200" shows as the discovered server's checked box; "gone-host" is an extra row
+  // the typed name "srv-mac" shows as the listed server's checked box; "gone-server" is an extra row
   await expect(dlg.getByTestId("settings-server-option").nth(2).getByRole("checkbox")).toBeChecked();
   await expect(dlg.getByTestId("settings-server-other")).toHaveCount(1);
-  await expect(dlg.getByTestId("settings-server-other")).toHaveAttribute("data-server", "gone-host");
-  await dlg.getByTestId("settings-server-input").fill("lenovo");
+  await expect(dlg.getByTestId("settings-server-other")).toHaveAttribute("data-server", "gone-server");
+  await dlg.getByTestId("settings-server-input").fill("srv-lenovo-a");
   await dlg.getByTestId("settings-server-add").click();
   await expect(dlg.getByTestId("settings-server-option").nth(0).getByRole("checkbox")).toBeChecked();
   await dlg.getByTestId("settings-server-input").fill("bad host!");
   await dlg.getByTestId("settings-server-add").click();
-  await expect(dlg.getByTestId("settings-problem")).toContainText("host 名か server_id");
+  await expect(dlg.getByTestId("settings-problem")).toContainText("server の名前");
   await expect(dlg.getByTestId("settings-save")).toBeDisabled();
   await dlg.getByTestId("settings-server-other").filter({ hasText: "bad host!" }).getByTestId("settings-server-remove").click();
-  await dlg.getByTestId("settings-server-other").filter({ hasText: "gone-host" }).getByTestId("settings-server-remove").click();
+  await dlg.getByTestId("settings-server-other").filter({ hasText: "gone-server" }).getByTestId("settings-server-remove").click();
   await expect(dlg.getByTestId("settings-problem")).toHaveCount(0);
   await dlg.getByTestId("settings-save").click();
   await expect(dlg).toBeHidden();
-  expect(await mock(page, (m) => m.centerSettings)).toEqual({ careery: { servers: ["mac200", "lenovo"] } });
+  expect(await mock(page, (m) => m.centerSettings)).toEqual({ careery: { servers: ["srv-mac", "srv-lenovo-a"] } });
 });
 
 test("project settings: when the server list cannot be read, the reason is shown and servers can still be typed", async ({ page }) => {
   await page.goto("/");
   await mock(page, (m) => {
-    m.centerVersionsError = "peers unavailable";
+    m.centerServersError = "peers unavailable";
   });
   await openGear(page);
   const dlg = page.getByTestId("settings-dialog");
@@ -157,8 +152,8 @@ test("center-wide settings have no 使う server field: nothing is sent for it, 
   await expect(section.getByTestId("center-common-section-servers")).toHaveCount(0);
   await expect(section.getByTestId("center-common-servers-limit")).toHaveCount(0);
   await expect(section.getByTestId("center-common-server-input")).toHaveCount(0);
-  // the common form does not ask the center for the discovered servers (they are only a choice list for a session)
-  expect(await mock(page, (m) => m.calls.filter((c) => c.cmd === "center_call" && (c.args as { name: string }).name === "server_peers").length)).toBe(0);
+  // the common form does not ask the center for the server list (it is only a choice list for a session)
+  expect(await mock(page, (m) => m.calls.filter((c) => c.cmd === "center_call" && (c.args as { name: string }).name === "server_list").length)).toBe(0);
   await page.getByTestId("center-common-instructions").fill("共通 2");
   await page.getByTestId("settings-save").click();
   await expect(page.getByTestId("settings-dialog")).toBeHidden();
@@ -166,7 +161,7 @@ test("center-wide settings have no 使う server field: nothing is sent for it, 
   expect(sent).toEqual([{ name: "center_settings_update", arguments: { settings: { instructions: "共通 2", addDirs: null, outputStyle: null } } }]);
 });
 
-test("add session: 使う server is a checkbox list of the discovered servers (typing is the fallback); the picks go to session_create settings", async ({ page }) => {
+test("add session: 使う server is a checkbox list of the servers of server_list (typing is the fallback); the picks go to session_create settings", async ({ page }) => {
   await page.goto("/");
   await seedPeers(page);
   await page.getByTestId("open-add-session").click();

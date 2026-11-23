@@ -55,7 +55,7 @@ const noSecret = (v: unknown) => {
 test("only own command names are commands (404): unknown, tools, prototype keys, Cork, ip/snippet", async () => {
   const { c } = await withCenter();
   for (const cmd of ["nope", "constructor", "__proto__", "toString", "hasOwnProperty", "center_status", "center_regenerate_token",
-    "center_local_ips", "center_connect_snippets", "workspace_open", "session_output_start", "session_input", "server_retire", ""]) {
+    "center_local_ips", "center_connect_snippets", "workspace_open", "session_output_start", "session_input", ""]) {
     const r = await post(c, cmd);
     assert.equal(r.status, 404, cmd);
   }
@@ -99,7 +99,7 @@ test("center_call: allowed tool passes, tool outside the list is 404 and nothing
   const ok = await post(c, "center_call", { name: "remote_list", arguments: { a: 1 } });
   assert.equal(ok.status, 200);
   assert.deepEqual((ok.body as { content: { text: string }[] }).content[0]!.text, '{"ok":true}');
-  for (const name of ["server_retire", "session_delete", "nope"]) {
+  for (const name of ["rc_status", "session_delete", "nope"]) {
     const before = center.count("tools/call");
     const r = await post(c, "center_call", { name });
     assert.equal(r.status, 404, name);
