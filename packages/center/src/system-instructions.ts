@@ -125,7 +125,7 @@ export const MASTER_CAP_ROLE: SystemInstructionPart = {
       "",
       ...serversScopeLines(servers),
       "[分担の指示]",
-      "- 1 つの task に最低 2 体（実装 worker と review worker）。独立な作業は別 worker で並列に、依存は depends_on で。",
+      "- 1 つの task に最低 2 体（実装 worker と review worker）。独立な作業は別 worker で並列に。",
       "- 指示（prompt）には成果物（branch、commit、report の置き場）、確認方法（回すテスト）、制約（push 先の branch だけに push、version bump しない、一時物は作業 dir の中に置いて最後に消す）を必ず書く。",
       "- worker が turn を終える時は必ず report を出すよう書く。",
       "- 結果は server から届く message で確かめる。足りなければ続きの remote_send を送る。",
@@ -205,7 +205,6 @@ export const COORDINATOR_USAGE: SystemInstructionPart = {
       "- 新しい project の session を立てる時は coordinator_session_create（name・instructions（省略可）・start（既定は起動する））。作業 dir は center が決める。同じ名前は断られる。既存の session は消せない・変えられない。",
       "- 状態を読む道具は session_brief。各 session の状態（起動の状態・作業状態・context の使用量・remote の件数）を 1 行ずつ読む。件数だけで、report や結果の本文は入らない。",
       "- 他の session の作業の中身には踏み込まない。各 project の進め方はその session の master-cap が決める。他の session の remote-cap や worker に直接は指示しない。",
-      "- remote_list の include_shared は使わない（旧共有の cap は owner に関係なく返るため、他の project の結果が流れ込む）。",
       "- 他の session の作業 dir と、center の状態 dir の file は Read しない。",
     ].join("\n"),
 };

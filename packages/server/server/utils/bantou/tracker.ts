@@ -8,6 +8,9 @@ import { redactIn, redactUrl } from "./log";
 /** 書く間隔（ms）。 */
 export const TRACKER_INTERVAL_MS = 5000;
 
+/** 切れた ws に繋ぎ直す間隔（ms）。 */
+const RECONNECT_MS = 5000;
+
 /** ws に繋がる前に溜める行の上限（超えたら古い方を捨てる）。 */
 const MAX_PENDING = 100;
 
@@ -26,6 +29,8 @@ export interface TrackerOptions {
   parentId: string;
   ws: string;
   intervalMs?: number;
+  /** 切れた ws に繋ぎ直す間隔（ms）。既定は 5 秒。繋がるまで続け、上限は無い（tracker を閉じるまで）。 */
+  reconnectMs?: number;
   /** ws を開く。既定は global WebSocket。 */
   connect?: (url: string) => TrackerSocket;
   now?: () => Date;
@@ -44,41 +49,67 @@ export function createTracker(o: TrackerOptions): Tracker {
   const now = o.now ?? (() => new Date());
   const connect = o.connect ?? ((url: string): TrackerSocket => new WebSocket(url) as unknown as TrackerSocket);
   let sock: TrackerSocket | undefined;
+  /** 今の接続が切れた（または開けなかった）。繋ぎ直すまで書き込みは捨てる。 */
   let dead = false;
   let closed = false;
   let output = false;
   let pending: string[] = [];
+  let retry: ReturnType<typeof setTimeout> | undefined;
 
-  const flush = (): void => {
-    if (sock === undefined || sock.readyState !== OPEN) return;
+  const flush = (s: TrackerSocket): void => {
+    if (s !== sock || s.readyState !== OPEN) return;
     for (const line of pending) {
       try {
-        sock.send(line);
+        s.send(line);
       } catch (e) {
         log(`tracker: ws へ書けない: ${redactIn(e instanceof Error ? e.message : String(e), o.ws)}`);
-        dead = true;
-        break;
+        lost(s);
+        return;
       }
     }
     pending = [];
   };
 
-  try {
-    sock = connect(o.ws);
-    sock.addEventListener("open", flush);
-    sock.addEventListener("error", () => {
-      if (!dead) log(`tracker: ws の接続エラー: ${redactUrl(o.ws)}`);
-      dead = true;
-      pending = [];
-    });
-    sock.addEventListener("close", () => {
-      dead = true;
-      pending = [];
-    });
-  } catch (e) {
-    log(`tracker: ws を開けない: ${redactUrl(o.ws)} ${redactIn(e instanceof Error ? e.message : String(e), o.ws)}`);
+  /** 接続が切れた。まだ閉じていなければ、間隔を置いて繋ぎ直す（切れた間の書き込みは捨てる）。 */
+  const lost = (s: TrackerSocket | undefined): void => {
+    if (s !== sock || dead) return;
     dead = true;
-  }
+    pending = [];
+    if (closed || retry !== undefined) return;
+    retry = setTimeout(() => {
+      retry = undefined;
+      if (!closed) open();
+    }, o.reconnectMs ?? RECONNECT_MS);
+    retry.unref?.();
+  };
+
+  const open = (): void => {
+    dead = false;
+    let s: TrackerSocket;
+    try {
+      s = connect(o.ws);
+    } catch (e) {
+      log(`tracker: ws を開けない: ${redactUrl(o.ws)} ${redactIn(e instanceof Error ? e.message : String(e), o.ws)}`);
+      sock = undefined;
+      dead = true;
+      if (!closed && retry === undefined) {
+        retry = setTimeout(() => {
+          retry = undefined;
+          if (!closed) open();
+        }, o.reconnectMs ?? RECONNECT_MS);
+        retry.unref?.();
+      }
+      return;
+    }
+    sock = s;
+    s.addEventListener("open", () => flush(s));
+    s.addEventListener("error", () => {
+      if (s === sock && !dead) log(`tracker: ws の接続エラー: ${redactUrl(o.ws)}`);
+      lost(s);
+    });
+    s.addEventListener("close", () => lost(s));
+  };
+  open();
 
   const timer = setInterval(() => {
     if (!output) return;
@@ -86,7 +117,7 @@ export function createTracker(o: TrackerOptions): Tracker {
     if (dead || closed) return;
     pending.push(JSON.stringify({ "parent-id": o.parentId, at: now().toISOString() }));
     if (pending.length > MAX_PENDING) pending = pending.slice(-MAX_PENDING);
-    flush();
+    if (sock !== undefined) flush(sock);
   }, o.intervalMs ?? TRACKER_INTERVAL_MS);
   timer.unref?.();
 
@@ -98,6 +129,7 @@ export function createTracker(o: TrackerOptions): Tracker {
       if (closed) return;
       closed = true;
       clearInterval(timer);
+      if (retry !== undefined) clearTimeout(retry);
       try {
         if (sock !== undefined && (sock.readyState === OPEN || sock.readyState === CONNECTING)) sock.close();
       } catch {

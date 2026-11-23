@@ -66,7 +66,7 @@ test("部品 coordinator: 統括の MCP の server を設定に書いた session
   assert.match(co, /session_brief/);
   assert.match(co, /coordinator_session_create/);
   for (const absent of ["session_dispatch", "session_prompts"]) assert.ok(!co.includes(absent), absent);
-  assert.match(co, /include_shared/);
+  assert.doesNotMatch(co, /include_shared|depends_on/, "v1 の語は出さない");
   assert.match(co, /Read しない/);
 });
 

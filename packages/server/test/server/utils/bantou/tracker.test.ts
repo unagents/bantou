@@ -85,6 +85,66 @@ test("tracker: ws の error / close の後は書かない。close 後の touch �
   assert.deepEqual(b.sent, []);
 });
 
+test("tracker: ws が切れたら繋ぎ直す（間隔は reconnectMs、既定 5 秒）。切れている間の書き込みは捨てる。tracker を閉じたら繋ぎ直さない", async () => {
+  const socks: FakeSocket[] = [];
+  const connect = (): FakeSocket => {
+    const s = new FakeSocket();
+    socks.push(s);
+    return s;
+  };
+  const t = createTracker({ parentId: "c", ws: "ws://x", intervalMs: 20, reconnectMs: 40, connect });
+  socks[0]!.emit("open");
+  t.touch();
+  await sleep(30);
+  assert.equal(socks[0]!.sent.length, 1);
+  // 切れる → 切れている間（繋ぎ直す前）の出力は書かない・溜めない
+  socks[0]!.emit("close");
+  t.touch();
+  await sleep(25);
+  assert.equal(socks.length, 1, "間隔を置くまで繋ぎ直さない");
+  assert.equal(socks[0]!.sent.length, 1);
+  await sleep(60);
+  assert.equal(socks.length, 2, "繋ぎ直す");
+  socks[1]!.emit("open");
+  assert.deepEqual(socks[1]!.sent, [], "切れていた間の分は溜めていない");
+  t.touch();
+  await sleep(40);
+  assert.equal(socks[1]!.sent.length, 1, "繋ぎ直した後は書く");
+  // error でも繋ぎ直す。繋ぎ直しは繋がるまで続く
+  socks[1]!.emit("error");
+  await sleep(70);
+  assert.equal(socks.length, 3);
+  socks[2]!.emit("close");
+  await sleep(70);
+  assert.equal(socks.length, 4);
+  t.close();
+  socks[3]!.emit("close");
+  await sleep(100);
+  assert.equal(socks.length, 4, "閉じた後は繋ぎ直さない");
+});
+
+test("tracker: 開けない（connect が投げる）間も繋がるまで繋ぎ直す", async () => {
+  const sock = new FakeSocket();
+  let n = 0;
+  const t = createTracker({
+    parentId: "c",
+    ws: "ws://x",
+    intervalMs: 20,
+    reconnectMs: 30,
+    connect: () => {
+      if (++n < 3) throw new Error("refused");
+      return sock;
+    },
+  });
+  await sleep(120);
+  assert.equal(n, 3);
+  sock.emit("open");
+  t.touch();
+  await sleep(40);
+  assert.equal(sock.sent.length, 1);
+  t.close();
+});
+
 test("tracker: ws を開けない（connect が投げる）時もログだけで落ちない", async () => {
   const logs: string[] = [];
   const t = createTracker({
