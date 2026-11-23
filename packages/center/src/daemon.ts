@@ -10,7 +10,7 @@ import { createConnectionsStore } from "./mcp-connections.js";
 import { createSecretsStore } from "./mcp-secrets.js";
 import { existsSync, renameSync } from "node:fs";
 import { createMcpSource } from "./mcp-source.js";
-import { applySchemaDiscoveryEnv, launchSchemaOf, schemaSourceFromFile } from "./schema-server.js";
+import { applyOpenspec, applySchemaDiscoveryEnv, launchSchemaOf, schemaSourceFromFile } from "./schema-server.js";
 import { buildSessionMcp } from "./mcp-session.js";
 import { mkdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -101,6 +101,12 @@ export async function runDaemon(args: CliArgs): Promise<void> {
       const mcp = buildSessionMcp(data, mcpSecrets, name, coordState);
       // schema の MCP server（schema-discovery）の指し先を env に置く。openspec-mcp の接続の headers に `"x-schema-discovery": "${BANTOU_SCHEMA_DISCOVERY}"` と書くと claude の起動時に展開される。http で待ち受けていなければ置かない
       applySchemaDiscoveryEnv(mcp.env, { host: centerHostOf(args.bind), port: httpPort, token: config.token });
+      // center 共通の設定 openspecUrl があれば、openspec-mcp を schema-discovery の header 付きで自動で足す（master-cap・統括の session とも）
+      const openspecUrl = sessions.getCenterSettings().settings.openspecUrl;
+      applyOpenspec(mcp, {
+        openspecUrl: typeof openspecUrl === "string" ? openspecUrl : undefined,
+        schema: launchSchemaOf({ bind: args.bind, ...(config.publicHost ? { publicHost: config.publicHost } : {}), port: httpPort, token: config.token }),
+      });
       return mcp;
     },
     // sessions は supervisor の後に作るので、呼ばれる時に参照する

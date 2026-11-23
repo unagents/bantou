@@ -91,7 +91,12 @@ const commonError = ref<string | null>(null);
 const guardrail = ref<GuardrailRow[]>([]);
 const guardrailBaseline = ref<GuardrailRow[]>([]);
 const guardrailDirty = computed(() => JSON.stringify(guardrail.value) !== JSON.stringify(guardrailBaseline.value));
-const commonDirty = computed(() => commonBaseline.value !== null && (guardrailDirty.value || JSON.stringify(common.value) !== JSON.stringify(commonBaseline.value)));
+// The openspec-mcp URL (center-wide; empty = none).
+const openspecUrl = ref("");
+const openspecUrlBaseline = ref("");
+const commonDirty = computed(
+  () => commonBaseline.value !== null && (guardrailDirty.value || openspecUrl.value !== openspecUrlBaseline.value || JSON.stringify(common.value) !== JSON.stringify(commonBaseline.value)),
+);
 // The reference folders are left out of the form (and the update) while remoteOnly: a value in the draft is neither checked nor sent.
 const commonProblem = computed(() => draftError(remoteOnly.value ? { ...common.value, addDirs: [] } : common.value) ?? guardrailDraftError(guardrail.value));
 // The folder dialog picks on this PC: right for the own sidecar, not for a pasted remote center.
@@ -108,6 +113,7 @@ async function loadCommon() {
     common.value = draftOf(r.settings);
     guardrail.value = guardrailDraftOf(r.settings.guardrailSchemas);
     guardrailBaseline.value = cloneGuardrailDraft(guardrail.value);
+    openspecUrl.value = openspecUrlBaseline.value = r.settings.openspecUrl ?? "";
     commonBaseline.value = { ...common.value, addDirs: [...common.value.addDirs], servers: common.value.servers && [...common.value.servers] };
   } catch (e) {
     commonLauncher.value = false;
@@ -123,10 +129,13 @@ async function saveCommon() {
   // Only the changed schemas go (merged by name on the center); none changed → the item is left out (unchanged).
   const schemas = guardrailUpdate(guardrail.value, guardrailBaseline.value);
   if (schemas) body.guardrailSchemas = schemas;
+  // Only when changed ("" removes it on the center).
+  if (openspecUrl.value !== openspecUrlBaseline.value) body.openspecUrl = openspecUrl.value.trim();
   const r = await centerCommonSettingsUpdate(body);
   common.value = draftOf(r.settings);
   guardrail.value = guardrailDraftOf(r.settings.guardrailSchemas);
   guardrailBaseline.value = cloneGuardrailDraft(guardrail.value);
+  openspecUrl.value = openspecUrlBaseline.value = r.settings.openspecUrl ?? "";
   commonBaseline.value = { ...common.value, addDirs: [...common.value.addDirs], servers: common.value.servers && [...common.value.servers] };
 }
 
@@ -629,6 +638,11 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
           </fieldset>
           <fieldset :disabled="commonBaseline === null" class="min-w-0">
             <GuardrailSchemasField v-model="guardrail" id-prefix="center-guardrail" />
+          </fieldset>
+          <fieldset :disabled="commonBaseline === null" class="min-w-0">
+            <UFormField label="openspec-mcp の URL">
+              <UInput v-model="openspecUrl" class="w-full font-mono" autocomplete="off" data-testid="center-openspec-url" />
+            </UFormField>
           </fieldset>
           <p v-if="commonProblem" class="text-cork-danger-text text-xs" data-testid="center-common-problem">{{ commonProblem }}</p>
           <p v-if="commonError" class="text-cork-danger-text text-xs whitespace-pre-wrap" data-testid="center-common-error">

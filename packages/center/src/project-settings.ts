@@ -66,6 +66,8 @@ export interface ProjectSettings {
    * schema は schema.yaml の文字列、templates は templates/ からの相対 path → 中身の文字列。bantou は YAML も中身も解釈しない（そのまま保存して返す）。
    */
   guardrailSchemas?: Record<string, GuardrailSchema>;
+  /** openspec-mcp の URL。center 共通の設定だけで持つ（任意。既定なし）。あれば全 session に openspec の MCP を schema-discovery の header 付きで自動で渡す。 */
+  openspecUrl?: string;
   [key: string]: unknown;
 }
 
@@ -279,6 +281,8 @@ export function settingsIssues(patch: object | undefined, scope: "common" | "ses
 export const centerSettingsPatchSchema = projectSettingsPatchSchema
   .omit({ servers: true })
   .extend({
+    // openspec-mcp の URL（http / https の絶対 URL。空文字・null で削除）
+    openspecUrl: z.union([z.literal(""), memoryUrlSchema]).nullable().optional(),
     // 名前 → { schema（YAML の文字列）, templates?（相対 path → 中身の文字列）}。名前ごとに足す・変える（定義は丸ごと置き換え）。名前の値が null でその schema を消す。項目全体の null で全部消す
     guardrailSchemas: z
       .record(
@@ -321,7 +325,7 @@ export function mergeSettings(current: ProjectSettings | undefined, patch: Proje
   const out: ProjectSettings = { ...(current ?? {}) };
   for (const [k, v] of Object.entries(patch)) {
     if (v === undefined) continue;
-    if (v === null || ((k === "instructions" || k === "outputStyle") && v === "")) delete out[k];
+    if (v === null || ((k === "instructions" || k === "outputStyle" || k === "openspecUrl") && v === "")) delete out[k];
     else if (k === "addDirs") {
       const dirs = uniqueDirs(v);
       if (dirs.length) out.addDirs = dirs;
@@ -368,6 +372,7 @@ export function readSettings(raw: unknown): ProjectSettings {
   const dirs = uniqueDirs(out.addDirs);
   if (dirs.length) out.addDirs = dirs;
   else delete out.addDirs;
+  if (typeof out.openspecUrl !== "string" || out.openspecUrl === "") delete out.openspecUrl;
   // 外部記憶: 普通の MCP の設定の形にする（旧形式 { url, token, agentId } は読み替える）。object でなければ未設定
   const mem = memoryDefOf(out.memory);
   if (mem) out.memory = mem;

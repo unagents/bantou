@@ -14,6 +14,8 @@ import { connectionsFromSettings } from "../src/mcp-connections.js";
 import { expandEnvRefs } from "../src/mcp-server-def.js";
 import type { GuardrailSchema } from "../src/project-settings.js";
 import {
+  applyOpenspec,
+  OPENSPEC_SERVER_KEY,
   applySchemaDiscoveryEnv,
   SCHEMA_DISCOVERY_ENV,
   SCHEMA_DISCOVERY_HEADER,
@@ -336,4 +338,33 @@ test("つなぎ（偽の openspec-mcp）: mcpServers の 1 件の headers に ${
     await new Promise<void>((r) => fake.server.close(() => r()));
     await center.h.close();
   }
+});
+
+test("applyOpenspec: openspecUrl があれば session の MCP 設定に openspec が入り、header の中身は launchSchemaOf と同じ。allow に mcp__openspec__* が入る", () => {
+  const schema = launchSchemaOf({ bind: "192.168.1.9", port: 7910, token: TOKEN });
+  const mcp = buildSessionMcp(connectionsFromSettings({}, []).data, { get: () => undefined }, "s1");
+  applyOpenspec(mcp, { openspecUrl: "http://10.0.0.7:8080/mcp", schema });
+  const entry = mcp.servers[OPENSPEC_SERVER_KEY] as { type: string; url: string; headers: Record<string, string> };
+  assert.equal(entry.type, "http");
+  assert.equal(entry.url, "http://10.0.0.7:8080/mcp");
+  assert.ok(mcp.allow.includes("mcp__openspec__*"));
+  // 展開した header の値 = launch の schema の JSON（認証の実値は argv に出さず env で渡す）
+  const value = expandEnvRefs(entry.headers[SCHEMA_DISCOVERY_HEADER]!, mcp.env);
+  assert.deepEqual(JSON.parse(value), schema);
+  assert.ok(!JSON.stringify(mcp.servers).includes(TOKEN));
+});
+
+test("applyOpenspec: openspecUrl が無ければ入らない。schema が決まらない時は header 無しで url だけ", () => {
+  const schema = launchSchemaOf({ bind: "192.168.1.9", port: 7910, token: TOKEN });
+  const none = buildSessionMcp(connectionsFromSettings({}, []).data, { get: () => undefined }, "s1");
+  applyOpenspec(none, { openspecUrl: undefined, schema });
+  applyOpenspec(none, { openspecUrl: "", schema });
+  assert.deepEqual(none.servers, {});
+  assert.deepEqual(none.allow, []);
+  assert.deepEqual(none.env, {});
+  const noSchema = buildSessionMcp(connectionsFromSettings({}, []).data, { get: () => undefined }, "s1");
+  applyOpenspec(noSchema, { openspecUrl: "http://10.0.0.7:8080/mcp", schema: launchSchemaOf({ bind: "127.0.0.1", port: 7910, token: TOKEN }) });
+  assert.deepEqual(noSchema.servers[OPENSPEC_SERVER_KEY], { type: "http", url: "http://10.0.0.7:8080/mcp" });
+  assert.ok(noSchema.allow.includes("mcp__openspec__*"));
+  assert.equal(SCHEMA_DISCOVERY_ENV in noSchema.env, false);
 });

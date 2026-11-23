@@ -178,6 +178,8 @@ export type CenterCommonSettings = Omit<ProjectSettings, "servers"> & {
    * left out): a name with `null` deletes that schema, `guardrailSchemas: null` deletes all.
    */
   guardrailSchemas?: Record<string, { schema: string; templates?: Record<string, string> } | null> | null;
+  /** The openspec-mcp URL (center-wide only; optional). With it the center gives every session the openspec MCP with the schema-discovery header. An update with `""` or `null` deletes it. */
+  openspecUrl?: string | null;
 };
 
 /** The center's list as last fetched (mirror of `src-tauri/src/session.rs::SessionList`). Memory only. */
