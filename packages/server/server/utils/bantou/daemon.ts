@@ -85,9 +85,6 @@ export interface Dispatcher {
 
 /** center → server の message を処理する。server は断らない（空きが無ければ queue で待たせる）。 */
 export function createDispatcher(d: DispatchDeps): Dispatcher {
-  /** queue で待っている・動いている session（同じ session を二重に起こさない）。 */
-  const activeSessions = new Set<string>();
-
   const handle: Dispatcher["handle"] = async (m) => {
     if (m.mode === "ping") return;
     const from = `${m.from_name}(${m.from_id})`;
@@ -132,17 +129,12 @@ export function createDispatcher(d: DispatchDeps): Dispatcher {
           d.log(`無視(session-id の worker が無い): session-id=${sessionId}`);
           return;
         }
-        if (activeSessions.has(sessionId)) {
-          d.log(`無視(その session はすでに動いている・待っている): session-id=${sessionId}`);
-          return;
-        }
         const input = await resumeInput(found.dir, replyPrompt(msg.order, msg.order === "answer" ? msg.content : undefined));
         if (!input) {
           d.log(`無視(state が無い): session-id=${sessionId}`);
           return;
         }
-        activeSessions.add(sessionId);
-        d.queue.submit(d.makeJob(input, "reply", () => activeSessions.delete(sessionId)));
+        d.queue.submit(d.makeJob(input, "reply", () => {}));
         return;
       }
       case "server-info": {

@@ -218,7 +218,7 @@ test("dispatcher: reply（answer / approve / reject）は session-id の worker 
   }
 });
 
-test("dispatcher: reply の session-id が無ければログして無視。同じ session が動いている・待っている間の reply は無視、終われば受ける", async () => {
+test("dispatcher: reply の session-id が無ければログして無視。ある session の reply は queue に入る", async () => {
   const r = await drig();
   try {
     await seedWorker(r.ws, "w-a", "sess-a");
@@ -227,11 +227,7 @@ test("dispatcher: reply の session-id が無ければログして無視。同�
     await dsp.handle(ans("nope"));
     assert.equal(r.jobs.length, 0);
     await dsp.handle(ans("sess-a"));
-    await dsp.handle(ans("sess-a"));
     assert.equal(r.jobs.length, 1);
-    r.jobs[0]!.settle();
-    await dsp.handle(ans("sess-a"));
-    assert.equal(r.jobs.length, 2);
   } finally {
     await r.cleanup();
   }
