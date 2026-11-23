@@ -6,7 +6,7 @@ import { resolveDefaultConfig } from "./default-config.mjs";
 
 // --config 省略時: $BANTOU_HOME（無ければ $HOME）の config.json。無ければ旧既定 ~/.config/bantou/config.json（default-config.mjs）
 const DEFAULT_CONFIG = resolveDefaultConfig();
-/** 退役の印（daemon の retire.ts RETIRED_FILE と同じ名前。test が突き合わせる）。 */
+/** 退役の印（<workspace>/server.retired。supervisor.mjs の RETIRED_FILE と同じ名前）。v2 の server はこの印を書かない（印が在る workspace の起動拒否だけ残す）。 */
 const RETIRED_FILE = "server.retired";
 /** 退役済みの起動拒否の exit code。host lock の競合（EXIT_CONFLICT）と同じ 75 を使う: これまでに配った unit も RestartPreventExitStatus=75 を持つので、unit を更新していなくても再起動ループにならない。 */
 const EXIT_RETIRED_START = 75;
@@ -81,7 +81,7 @@ const configPath = resolve(args.config);
 if (!args.serve && !args.supervise) {
   // 既定: launcher。起動時に全コードを読み込み、supervisor（--supervise）を起動して見張る。以後 supervisor が入れ替わっても残る
   const launcher = await import("./launcher.mjs");
-  // 退役済み（<workspace>/server.retired がある）なら起動しない。exit 75 は systemd unit の RestartPreventExitStatus（旧 unit も 75 は持つ）で再起動ループにならない
+  // 退役済み（旧版の退役の指示が <workspace>/server.retired を書いた）なら起動しない。exit 75 は systemd unit の RestartPreventExitStatus（旧 unit も 75 は持つ）で再起動ループにならない
   try {
     const ws = launcher.workspaceOf(configPath);
     if (existsSync(join(ws, RETIRED_FILE))) {
@@ -131,7 +131,7 @@ if (args.supervise) {
   }
   // config の中身（token 等）は env に載せない。パスだけを Nitro の runtimeConfig へ渡す
   process.env.NUXT_BANTOU_CONFIG_PATH = configPath;
-  // 常駐本体へ自分の npm 版を渡す（hello_result の server_version）
+  // 常駐本体へ自分の npm 版を渡す（status の server-info の答えの version）
   process.env.NUXT_BANTOU_SERVER_VERSION = packageVersion();
   // npm package に同梱した protocol 定義（packages/server/protocol/、scripts/copy-protocol.mjs が作る）
   process.env.NUXT_BANTOU_PROTOCOL_DIR = join(binDir, "..", "protocol");

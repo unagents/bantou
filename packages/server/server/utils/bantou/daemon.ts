@@ -13,7 +13,7 @@ import {
   type ServerMessage,
 } from "@agent-hand/bantou-protocol";
 import { availableCpus, loadConfig } from "./config";
-import { log } from "./log";
+import { log, redactUrl } from "./log";
 import { setBashWorkspace } from "./bash";
 import { type McpListener } from "./mcp";
 import { buildServerName, readMachineId } from "./name";
@@ -50,7 +50,7 @@ export function brokerUrl(bind: string, port: number): string {
 export function describeMessage(msg: ServerMessage): string {
   switch (msg.order) {
     case "launch":
-      return `parent-id=${msg["parent-id"]} model=${msg.model} ws=${msg.ws} prompt=${ignoreText(msg.prompt).slice(0, 80)}`;
+      return `parent-id=${msg["parent-id"]} model=${msg.model} ws=${redactUrl(msg.ws)} prompt=${ignoreText(msg.prompt).slice(0, 80)}`;
     case "stop":
       return `parent-id=${msg["parent-id"]}`;
     case "answer":
@@ -189,6 +189,8 @@ export interface DaemonDeps {
   loadavg1?: () => number;
   /** claude の実行（テストで差し替える）。 */
   runner?: WorkerDeps["runner"];
+  /** agent-messenger の client の作り方（テストで差し替える）。 */
+  createClient?: typeof createMessengerClient;
 }
 
 /** 設定を読み込んで起動し、常駐物を返す。シグナルと exit は呼び出し側（plugin）が担う。 */
@@ -266,7 +268,7 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
   try {
     // 接続先は agent-messenger の通常の解決（env → config → UDP 発見 → ローカル fallback）に任せる。
     // 同じ名前の登録で error が返ったら、別の名前にせず起動しない（connect / setProtocol の例外はそのまま起動失敗）
-    client = createMessengerClient({
+    client = (deps.createClient ?? createMessengerClient)({
       name,
       summary: `${hostname()} ${config.workspace}`,
       autoStartBroker: false,
