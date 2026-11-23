@@ -21,19 +21,23 @@
    - test が落ちる、または足した test が変異で落ちない
    - 指示した範囲の外を変えている
 
-   それ以外は報告に残すだけ（完了を止めない）。
+   それ以外は報告に残すだけ（完了を止めない）。この基準は bantou の仕組みではなく、**schema 定義の中身**（5 節の例に入る物）。server は解釈しない（7 の決定）。
 5. schema 定義の足し方。bantou の guardrail の設定で足し、bantou の schema の MCP server から openspec-mcp に渡る。設計は `docs/design/guardrail-schema-server.md`。openspec-mcp の側の設計の出典は、vault のノート（名前は利用者の言葉のとおり。本書では参照しない）。プロトコルは openspec-mcp の project が決める。
 6. 順番。
    > reviewの仕組みの話は、gardrail機能の実装が終わって、schema定義を、bantou上で保守管理出来るようにしてからの話
 
    実装はその後。設計は並行で進める（この設計書がそれ）。
+7. 往復の上限の置き場（master-cap が利用者に往復の上限を置くかを聞いた時の、利用者の返事）。
+   > それはschemaの責務じゃないの？
+
+   往復の上限などの細部は schema 定義の中身で、schema 定義を書く側が定義ごとに決める。bantou の仕組み（server・guardrail）は持たない。指摘の数え方の基準（決まり 4）も同じ扱いで、仕組みではなく schema 定義の中身として書く。
 
 ### master-cap の指示（2026-11-23。レビューの指摘への直しとして）
 
 利用者の決まり 1〜6 を、master-cap が次のとおり具体にして、本書をそれに揃えた。**これは利用者の決定ではなく、master-cap の指示（設計の置き方の決め）**。
 
 - 次の worker を起こすのは **server**（決まり 2「server側のworker起動をゲートクリアで賄わせる」）。
-- 8 節の #1・#2・#4・#6 は master-cap が決めた（推奨どおり）。#3 は「依存の置き場」の問い（案 A を master-cap が選んだ）。#5（往復の上限）は未決。#7（決まり 1 の「center側のcap」の確認）は利用者への確認が要る。
+- 8 節の #1・#2・#4・#6 は master-cap が決めた（推奨どおり）。#3 は「依存の置き場」の問い（案 A を master-cap が選んだ）。#5（往復の上限）は利用者の決定で未決から外れた（0 節の 7。schema 定義の中身）。#7（決まり 1 の「center側のcap」の確認）は利用者への確認が要る。
 - server が openspec-mcp を実行する契機・門が開かなかった時の扱いは、openspec-mcp のプロトコルが決める（【openspec-mcp 待ち】）。
 - 直しと再 review の往復は、決まり 3 のとおり worker が schema の instruction に従って行う。server が行うのは、門の確認（openspec-mcp の実行）と、開いた時の次の worker の起動だけ。
 
@@ -209,7 +213,7 @@ tasks の instruction:
 
 - 終了条件は文で「review の指摘が基準で 0 件」と書くだけにする（構造化した項目にしない。項目の形は openspec-mcp が決める）。基準は (a)(b)(c)。重さ（high / medium / low）は条件に入れない（決まり 4）。
 - 「0 件」の数え方を機械的にするため、reviewer には 3 つの基準だけを渡す。基準に当たるかの判定の手順（(b) の「変異で落ちない」を何で確かめるか）は、reviewer のサブエージェントの手順に書く（6 節）。
-- 直しと再 review の往復は、終了条件が満たされるまで tasks を完了にしない事で担保する（決まり 2）。往復の上限を置くかは未決 #5（master-cap が利用者に聞いている）。
+- 直しと再 review の往復は、終了条件が満たされるまで tasks を完了にしない事で担保する（決まり 2）。往復の上限などの細部と、数える基準（(a)(b)(c)）は、この schema 定義の中身で、定義を書く側が定義ごとに決める。bantou の仕組み（server・guardrail）は持たず、server は解釈しない（0 節の 7）。
 
 ## 6. worker が reviewer のサブエージェントを起こす手順の置き場
 
@@ -273,7 +277,7 @@ tasks の instruction:
 
 ## 8. 未決（番号つき。各案と推奨）
 
-決まった事 1〜6 から出てくる物だけを載せる。#1・#2・#4・#6 は master-cap が決めた（推奨どおり。利用者の決定ではない）。#3・#5・#7 は未決。
+決まった事 1〜7 から出てくる物だけを載せる。#1・#2・#4・#6 は master-cap が決めた（推奨どおり。利用者の決定ではない）。#5 は利用者が決めた（0 節の 7。schema 定義の中身で、仕組みは持たない）。未決は #3・#7。
 
 **決定済み #1 center の master-cap が server の worker を操作する口（決まり 1）**
 - 案 A: center ↔ server の protocol（今の `resume_worker` / `worker_reply` / `status` と同じ経路）に、worker の起動・状態・停止のメッセージを足す。master-cap の tool は center の `/mcp/session` に足す。`worker_resume` はこの起動の tool に寄せる。
@@ -299,11 +303,8 @@ protocol の `kick_cap` / `stop_cap` / `task` / `task_result` / `cap_result`、`
 - 案 B: 旧メッセージを当面残し（受けても cap を起こさず `error` を返す）、後の版で消す。
 - **決定済み（master-cap）: B**。推奨: B。理由: server は desktop の版に揃う仕組み（`update_server`）で更新されるが、動いている cap・worker が終わるまで入れ替えを待つ（`docs/architecture.md` 13）ので、旧経路の task が残る間は壊さない方が安全。消すのは W4（7.2）。
 
-**未決 #5 review の往復の上限（決まり 3・4）**
-今の `CAP_GUIDE` は「実装と review の往復は最大 3 回。3 回で直らなければ残った問題として書いて止める」（`cap-orchestration.md`）。終了条件が「指摘 0 件」だと、0 件にならなければ完了しない。
-- 案 A: 上限を置く（値は未定。例: 今の cap の値の 3 回）。超えたら「完了にしない」まま止まり、master-cap（と利用者）に上げる。
-- 案 B: 上限を置かない。0 件になるまで回す。
-- 推奨: A（上限を置く案）。理由: 無限に回る事を避ける。**値は決めない**（利用者の決定ではない。「3 回」は今の cap の値の例）。上限を置くか・値・超えた時の扱いは、master-cap が利用者に聞いている。**未決のまま**。往復は worker の中で回る（3.3 の 4）ので、上限を置く時の数え手と止め方は、決まってから実装の task で詰める。
+**決定済み #5 往復の上限（決まり 3・4）**
+利用者の決定（0 節の 7）: 往復の上限などの細部は schema 定義の中身で、schema 定義を書く側が定義ごとに決める。bantou の仕組み（server・guardrail）は持たない。指摘の数え方の基準（決まり 4）も、仕組みではなく schema 定義の中身（5 節の例に入る物）で、server は解釈しない。未決ではない。
 
 **決定済み #6 reviewer の手順の置き場の細部（決まり 3・4・5）**
 6 節のとおり tasks の instruction に置く事は推奨だが、3 つの基準の判定手順（特に (b) の「足した test が変異で落ちない」を何で確かめるか）を、
