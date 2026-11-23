@@ -86,7 +86,7 @@ openspec-mcp（別 project。http stream で単独起動。schema-discovery を 
 ### 3.2 guardrail の設定（openspec 向けの schema 定義を任意に足す）
 
 - **持つ物**: schema 定義の一覧。1 件は「名前（`[schema-name]` になる）」と「定義の中身」。
-- **設定の持ち方**: center 共通の設定（1.3 の `center-settings.json`）の新しい項目として持つ。既知の項目として検証し、定義の中身は解釈しない（1.3 と同じ規則。`project-settings.md` の決定 2）。名前の規則・項目の形などの細部は、実装の task に委ねる（保存先は未決 #3）。
+- **設定の持ち方**: center 共通の設定（1.3 の `center-settings.json`）の新しい項目として持つ。既知の項目として検証し、定義の中身は解釈しない（1.3 と同じ規則。`project-settings.md` の決定 2）。名前の規則・項目の形などの細部は、実装の task に委ねる（保存先は未決 #2）。
 - **更新**: 今の設定と同じ規則（項目ごとのマージ、`null` で消す）。center 共通の設定の更新の口（`center_settings_update`。GraphQL では `updateCenterSettings`）に載せる。専用の口は足さない（`project-settings.md` の決定 4 の比較: 項目ごとの tool は増えるので採らない）。
 - **保存先**: center の host の `center-settings.json`（1.3）。client に保存しない（center-graphql-server の設計に合わせる）。定義は center が呼び出しの度に読み直すので、足した定義は center の再起動なしで schema の MCP server から返る（`mcp-source.ts` と同じ読み方。【推測】同じ読み方を使えば足りる。実装で確かめる）。
 - **画面での足し方**: 設定の画面（`SettingsDialog.vue`。今の center 共通の設定の画面）に「guardrail」の欄を足す。一覧（名前）・追加・編集・削除。定義の中身は text の入力（`ProjectSettingsFields.vue:175-183` の `mcpServers` の入力欄と同じ向き: 書いた物をそのまま保存する）。画面は client の設定の画面なので、desktop・web とも同じ画面（`packages/ui`）。center の設定は全部 client から変えられる、という center-graphql-server の決定に従い、launcher からだけ書ける形にはしない（center-graphql-server の「決定 6」に従う）。
@@ -106,8 +106,8 @@ openspec-mcp（別 project。http stream で単独起動。schema-discovery を 
 4. schema-discovery の header が無い接続では、openspec-mcp は標準の手順のまま動く（利用者の決定。0 節）。
 
 - **【プロトコル待ち】で決めない物**: header の名前、header に入れる「mcp-server の設定」の形、`/schemas/[schema-name]` の応答の形、openspec-mcp が schema の MCP server に何を問い合わせるか。プロトコルが出てから、この設計書の 3.1・4 節を更新する。
-- **center が openspec-mcp のアドレスをどこに持つか**・**誰が openspec-mcp につなぐか**は、利用者の指示にあるのは「bantou-center がつなげる」まで。細部は未決 #5。
-- 【事実】center の設定の `mcpServers` は、http の MCP server の `url` と `headers` を持てる（1.2）。openspec-mcp の接続先を `mcpServers` の 1 件で持てるかは、schema-discovery が header の形に依るので【プロトコル待ち】。#5 の案 A の前提。
+- **center が openspec-mcp のアドレスをどこに持つか**・**誰が openspec-mcp につなぐか**は、利用者の指示にあるのは「bantou-center がつなげる」まで。細部は未決 #3。
+- 【事実】center の設定の `mcpServers` は、http の MCP server の `url` と `headers` を持てる（1.2）。openspec-mcp の接続先を `mcpServers` の 1 件で持てるかは、schema-discovery が header の形に依るので【プロトコル待ち】。#3 の案 A の前提。
 
 ## 5. 実装の分け方
 
@@ -115,30 +115,30 @@ center-graphql-server の段階（A: GraphQL、B: client の差し替え、…�
 
 | 段 | 内容 | 前提 |
 |---|---|---|
-| S1 | guardrail の設定の項目を center 共通の設定に足す（検証・保存・読み直し・マージ更新・消去）。`packages/center/src/project-settings.ts` と `center-settings.json` | #3 の決定 |
+| S1 | guardrail の設定の項目を center 共通の設定に足す（検証・保存・読み直し・マージ更新・消去）。`packages/center/src/project-settings.ts` と `center-settings.json` | #2 の決定 |
 | S2 | schema の MCP server（center に内蔵）。`/schemas/[schema-name]` の口 | #1 の決定と、**openspec-mcp のプロトコル** |
 | S3 | 画面（`SettingsDialog.vue` に guardrail の欄。一覧・追加・編集・削除） | S1。center-graphql-server の段階 B（GraphQL の client）の後なら GraphQL、前なら今の `center_settings_update` の経路（どちらも同じ設定の項目を使う） |
-| S4 | center が openspec-mcp につなぐ時に schema-discovery を入れる | #5 の決定と、**openspec-mcp のプロトコル** |
+| S4 | center が openspec-mcp につなぐ時に schema-discovery を入れる | #3 の決定と、**openspec-mcp のプロトコル** |
 | S5 | docs の改訂（`docs/architecture.md` の center の項に、schema の MCP server と guardrail の設定を足す） | S1〜S4 |
 
-- S1 は #3 の決定が前提で、プロトコルには依らない。S3 は S1 の後（S1 の設定の項目を使う）で、プロトコルには依らない。S2・S4 はプロトコルが出てから。
+- S1 は #2 の決定が前提で、プロトコルには依らない。S3 は S1 の後（S1 の設定の項目を使う）で、プロトコルには依らない。S2・S4 はプロトコルが出てから。
 - 並行できる単位: S1 と S3 は file が別（center と ui）だが、S3 は S1 の項目の形が決まってから始める。S2 は S1 の読み出しの関数を使う。
 
 ## 6. 未決（番号つき。各案と推奨）
 
-利用者の指示から出てくる点だけを載せる。#2・#4 は取り下げた（欠番）。#4（schema 定義の中身の形）は、openspec-mcp のプロトコルが返す形に合わせる【プロトコル待ち】の 1 文にした（3.2）。
+利用者の指示から出てくる点だけを載せる。認証と、schema 定義の中身の形（1 つの text か複数の file か）は、利用者が話に出していない、または openspec-mcp のプロトコルが返す形に合わせる事なので、未決にしない（3.2）。
 
 **#1 schema の MCP server を center のどの口に載せるか**
 - 案 A: center の既存の http server に、新しい path（`/schemas/[schema-name]`）として足す（同じ port）。
 - 案 B: schema の MCP server 専用の port を別に持つ。
 - 推奨（暫定）: A。理由: center は今も 1 つの http server で `/mcp`・`/events`・`/mcp/session` を出しており（`http.ts:15-18`）、path を足すだけで済む。利用者の指示も「`/schemas/[schema-name]` で」と path の形で書いている。port を増やすと center-graphql-server の「center の port は 1 つ・設定で決まる」（同設計 2.8）と合わない。暫定なのは、schema-discovery のプロトコルが別の形（別の port など）を求めたら、プロトコルに合わせるため【プロトコル待ち】。
 
-**#3 guardrail の設定を center-settings.json のどこに持つか**
+**#2 guardrail の設定を center-settings.json のどこに持つか**
 - 案 A: center 共通の設定（`center-settings.json`）の新しい項目として持つ（1.3 の仕組みにそのまま載る）。
 - 案 B: 専用の file（例: 状態 dir の別の file）に持つ。
 - 推奨: A。理由: 設定は全部 client から変えて center の host に保存する、という center の形（1.3・1.4）に既に載っており、更新の口・検証・読み直し（`mcp-source.ts`）が揃っている。案 B は専用の更新の口と読み直しを足す事になる。項目名・形の細部（名前をキーにした object か、`{ name, … }` の配列か）は、実装の task で決める（`mcpServers` が名前をキーにした object なので、それに揃えるのを推奨）。
 
-**#5 center が openspec-mcp につなぐ形（接続先の持ち方と、誰がつなぐか）**
+**#3 center が openspec-mcp につなぐ形（接続先の持ち方と、誰がつなぐか）**
 - 案 A: openspec-mcp の接続先を、center の設定の `mcpServers` の 1 件（http の `url` と、schema-discovery を載せる `headers`）として持つ。session の claude に渡す MCP の仕組み（1.2）をそのまま使う。
 - 案 B: center が、guardrail の設定（3.2）の一部として openspec-mcp の接続先を持ち、center の中から openspec-mcp につなぐ。
 - 推奨（暫定）: A。理由: session の claude に MCP を渡す既存の仕組み（1.2）で足り、新しい仕組みを足さない。
@@ -152,7 +152,7 @@ code は書かないので、実装の task が足す test と、実測の一覧
 
 - guardrail の設定: 足す・読む・マージ更新・`null` で消す（`packages/center/test/project-settings.test.ts` と同じ流儀）。未知の項目が消えない（既存の性質を壊さない）。壊れた `center-settings.json` で fail closed（`mcp-source.ts` と同じ扱い。`packages/center/test/mcp-assign.test.ts` の流儀）。
 - schema の MCP server: 足した定義が `/schemas/[schema-name]` で返る。無い名前は「無い」と返る。定義を足した直後・消した直後が、center の再起動なしで反映される。他の設定が応答に出ない。応答の形の test は【プロトコル待ち】。
-- 画面: guardrail の欄の追加・編集・削除（`packages/ui/test/`）。desktop・web とも同じ画面で動く。
+- 画面: guardrail の欄の追加・編集・削除。desktop・web とも同じ画面で動く。【事実】`packages/ui/test/` には今 `session-status.test.ts` の 1 file だけで、画面（`.vue`）の component test の流儀は無い。画面の test をどの形で足すかは実装の task で決める（今の画面の確認は `packages/desktop/e2e/` と `packages/web/e2e/` の e2e）。
 - つなぎ: center が openspec-mcp につなぐ時に、schema の MCP server の情報が入る【プロトコル待ち】。schema-discovery の header が無い接続で、openspec-mcp が標準の手順のまま動く事（openspec-mcp 側の確認）。
 - 既存の center の test（`packages/center/test/*.test.ts`）が全部通ったまま（足すだけの変更）。
 
@@ -164,6 +164,6 @@ code は書かないので、実装の task が足す test と、実測の一覧
 
 ## 8. 次にやる事
 
-1. 利用者が、未決 #1・#3・#5 を決める（#1・#5 は暫定の推奨で、プロトコル待ち）。
-2. openspec-mcp の project が schema-discovery のプロトコルを出す。出たら、この設計書の 3.1・3.2・4 節と #1・#5 を更新する。
+1. 利用者が、未決 #1・#2・#3 を決める（#1・#3 は暫定の推奨で、プロトコル待ち）。
+2. openspec-mcp の project が schema-discovery のプロトコルを出す。出たら、この設計書の 3.1・3.2・4 節と #1・#3 を更新する。
 3. プロトコルを待たずに進められる S1（設定の項目）・S3（画面）を先に始められる。
