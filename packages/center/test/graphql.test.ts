@@ -141,10 +141,11 @@ test("graphql schema: 3.1〜3.3 の表の項目が query / mutation / subscripti
   assert.deepEqual(fieldsOf(schema.getSubscriptionType()), [...SUBSCRIPTION_FIELDS].sort());
   for (const f of Object.values(schema.getQueryType()!.getFields())) assert.equal(typeof f.resolve, "function", `Query.${f.name} の resolver`);
   for (const f of Object.values(schema.getMutationType()!.getFields())) assert.equal(typeof f.resolve, "function", `Mutation.${f.name} の resolver`);
-  // sleepSession の説明は実装（sleep() の完了を待って返す）と合っている（「受理して即返す」ではない）
+  // sleepSession の説明は実装（resession.requestSleep: 引継ぎを頼んで受理して即返す。断りは理由つきの error）と合っている
   const sleepDesc = schema.getMutationType()!.getFields().sleepSession.description ?? "";
-  assert.match(sleepDesc, /待って/);
-  assert.doesNotMatch(sleepDesc, /受理して即返す/);
+  assert.match(sleepDesc, /受理して即返す/);
+  assert.match(sleepDesc, /引継ぎ/);
+  assert.doesNotMatch(sleepDesc, /眠らせ終わるまで待って/);
   for (const f of Object.values(schema.getSubscriptionType()!.getFields())) assert.equal(typeof f.subscribe, "function", `Subscription.${f.name} の subscribe`);
 });
 

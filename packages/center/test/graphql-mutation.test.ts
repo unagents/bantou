@@ -11,6 +11,7 @@ import { createGraphqlHandler } from "../src/graphql/server.js";
 import { startHttpServer } from "../src/http.js";
 import { createCenterServer } from "../src/server.js";
 import { MAX_ATTACHMENT_BYTES } from "../src/attachments.js";
+import { SLEEP_REFUSED_PREFIX } from "../src/resession.js";
 import { mutationResolvers } from "../src/graphql/resolvers/mutation.js";
 
 const TOKEN = "test-token-0123456789";
@@ -61,6 +62,10 @@ async function boot(over: Partial<Record<string, unknown>> = {}, workspace?: str
     updateCenterSettings: rec("updateCenterSettings", async (p: unknown) => ({ settings: p })),
     list: rec("list", () => [] as unknown[]),
   };
+  // session_sleep と同じ入口（resession.requestSleep）。引継ぎを頼んで受理して即返す形を返す
+  const resession = {
+    requestSleep: rec("requestSleep", async (n: unknown) => ({ name: n, state: "connected", accepted: true, sleeping: false, pending: true })),
+  };
   const supervisor = {
     list: () => [],
     shutdown: async () => {},
@@ -79,6 +84,7 @@ async function boot(over: Partial<Record<string, unknown>> = {}, workspace?: str
     link,
     remotes,
     sessions,
+    resession,
     follow: undefined,
     login,
     core,
@@ -161,25 +167,61 @@ test("updateSession: newName / path / move を渡す", async () => {
   }
 });
 
-test("sleepSession: 受理済みで返し（Session ではない）、wakeSession は Session を返す", async () => {
+test("sleepSession: resession.requestSleep を通し（sessions.sleep は直接呼ばない）、受理して即返す形 { accepted, sleeping:false, pending:true } で返る", async () => {
   const t = await boot();
   try {
-    const r = await t.call(`mutation{ sleepSession(name:"a"){ name accepted pending } wakeSession(name:"a"){ name sleeping } }`);
+    const r = await t.call(`mutation{ sleepSession(name:"a"){ name state accepted sleeping pending } }`);
     assert.equal(r.errors, undefined);
-    assert.deepEqual(r.data!.sleepSession, { name: "a", accepted: true, pending: false });
-    assert.deepEqual(r.data!.wakeSession, { name: "a", sleeping: false });
-    assert.deepEqual(only(t.calls, "sleep")[0], ["sleep", "a"]);
-    assert.deepEqual(only(t.calls, "wake")[0], ["wake", "a"]);
+    assert.deepEqual(r.data!.sleepSession, { name: "a", state: "connected", accepted: true, sleeping: false, pending: true });
+    assert.deepEqual(only(t.calls, "requestSleep"), [["requestSleep", "a"]]);
+    assert.equal(only(t.calls, "sleep").length, 0, "sessions.sleep を直接呼ばない");
   } finally {
     await t.close();
   }
 });
 
-test("sleepSession: 拒否（service の error）は error で返る", async () => {
-  const t = await boot({ sessions: { sleep: async () => { throw new Error("作業中は眠らせられない"); } } });
+test("sleepSession: すでに眠っている時は { sleeping:true, pending:false } がそのまま返る", async () => {
+  const t = await boot({ resession: { requestSleep: async (n: string) => ({ name: n, state: "stopped", accepted: true, sleeping: true, pending: false }) } });
+  try {
+    const r = await t.call(`mutation{ sleepSession(name:"a"){ name state accepted sleeping pending } }`);
+    assert.deepEqual(r.data!.sleepSession, { name: "a", state: "stopped", accepted: true, sleeping: true, pending: false });
+  } finally {
+    await t.close();
+  }
+});
+
+test("sleepSession: 断り（SLEEP_REFUSED_PREFIX つきの理由）は、MCP の session_sleep と同じ理由の文のまま OPERATION_FAILED の error で返る", async () => {
+  const reason = SLEEP_REFUSED_PREFIX + "作業中は眠らせられない（turn・subagent・background が動いている。終わってから）";
+  const t = await boot({ resession: { requestSleep: async () => { throw new Error(reason); } } });
   try {
     const r = await t.call(`mutation{ sleepSession(name:"a"){ name } }`);
-    assert.equal(r.errors![0].message, "作業中は眠らせられない");
+    assert.equal(r.errors![0].message, reason);
+    assert.equal(r.errors![0].extensions.code, "OPERATION_FAILED");
+    assert.equal(r.data, null);
+  } finally {
+    await t.close();
+  }
+});
+
+test("sleepSession: 名前の誤りは requestSleep を呼ばず BAD_USER_INPUT", async () => {
+  const t = await boot();
+  try {
+    const r = await t.call(`mutation{ sleepSession(name:"a b"){ name } }`);
+    assert.equal(r.errors![0].extensions.code, "BAD_USER_INPUT");
+    assert.equal(only(t.calls, "requestSleep").length, 0);
+  } finally {
+    await t.close();
+  }
+});
+
+test("wakeSession: sessions.wake を通し（MCP の session_wake と同じ。引継ぎの有無は wake が決める）、Session を返す", async () => {
+  const t = await boot();
+  try {
+    const r = await t.call(`mutation{ wakeSession(name:"a"){ name sleeping } }`);
+    assert.equal(r.errors, undefined);
+    assert.deepEqual(r.data!.wakeSession, { name: "a", sleeping: false });
+    assert.deepEqual(only(t.calls, "wake"), [["wake", "a"]]);
+    assert.equal(only(t.calls, "requestSleep").length, 0);
   } finally {
     await t.close();
   }
@@ -218,6 +260,30 @@ test("updateCenterSettings: sessions.updateCenterSettings に渡し、settings �
     assert.equal(r.errors, undefined);
     assert.deepEqual(only(t.calls, "updateCenterSettings")[0][1], { outputStyle: "s", addDirs: null });
     assert.deepEqual(r.data!.updateCenterSettings, { outputStyle: "s", addDirs: null });
+  } finally {
+    await t.close();
+  }
+});
+
+test("updateCenterSettings: guardrailSchemas を MCP の center_settings_update と同じ検査で通す（名前・templates の path・形）", async () => {
+  const t = await boot();
+  try {
+    const ok = { "openspec-x.1": { schema: "name: x\n", templates: { "a/b.md": "# t" } }, gone: null };
+    const r = await t.call(`mutation($s: CenterSettingsInput!){ updateCenterSettings(settings:$s){ guardrailSchemas } }`, { s: { guardrailSchemas: ok } });
+    assert.equal(r.errors, undefined);
+    assert.deepEqual(only(t.calls, "updateCenterSettings")[0][1], { guardrailSchemas: ok });
+    assert.deepEqual(r.data!.updateCenterSettings, { guardrailSchemas: ok });
+    // templates 省略・guardrailSchemas 全部削除（null）も通る
+    const omit = await t.call(`mutation{ a: updateCenterSettings(settings:{ guardrailSchemas:{ s:{ schema:"y" } } }){ guardrailSchemas } b: updateCenterSettings(settings:{ guardrailSchemas:null }){ guardrailSchemas } }`);
+    assert.equal(omit.errors, undefined);
+    assert.equal(only(t.calls, "updateCenterSettings").length, 3);
+    // 名前の規則・templates の path・schema の型の誤りは service に渡さず BAD_USER_INPUT
+    const before = only(t.calls, "updateCenterSettings").length;
+    for (const bad of [{ "-x": { schema: "y" } }, { "a b": { schema: "y" } }, { s: { schema: 1 } }, { s: { schema: "y", templates: { "../x": "z" } } }, { s: { schema: "y", templates: { "/abs": "z" } } }, { s: { schema: "y", templates: { a: 1 } } }]) {
+      const e = await t.call(`mutation($s: CenterSettingsInput!){ updateCenterSettings(settings:$s){ guardrailSchemas } }`, { s: { guardrailSchemas: bad } });
+      assert.equal(e.errors![0].extensions.code, "BAD_USER_INPUT", JSON.stringify(bad));
+    }
+    assert.equal(only(t.calls, "updateCenterSettings").length, before);
   } finally {
     await t.close();
   }

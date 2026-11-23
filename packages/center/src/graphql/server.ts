@@ -32,7 +32,7 @@ export function createGraphqlHandler(services: GraphqlServices, log: Logger): Gr
     logging: false,
     maskedErrors: {
       maskError: (error, message) => {
-        // resolver が意図して投げた GraphQLError（入力の誤り・NOT_IMPLEMENTED など）はそのまま client へ返す
+        // resolver が意図して投げた GraphQLError（入力の誤り BAD_USER_INPUT・service の失敗 OPERATION_FAILED・NOT_FOUND など）はそのまま client へ返す
         if (isOriginalGraphQLError(error)) return error as Error;
         log(`graphql error: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`);
         return new GraphQLError(message, { extensions: { code: "INTERNAL_SERVER_ERROR" } });

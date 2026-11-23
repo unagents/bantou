@@ -123,6 +123,18 @@ test("query centerSettings: 共通の設定を絞らずに返し、launcher は�
   }
 });
 
+test("query centerSettings: guardrailSchemas（center_settings_get と同じ形）をそのまま返す", async () => {
+  const guardrailSchemas = { "openspec-x": { schema: "name: x\n", templates: { "a/b.md": "# t" } }, empty: { schema: "y", templates: {} } };
+  const { h, q } = await boot({ sessions: { getCenterSettings: () => ({ settings: { guardrailSchemas } }) } });
+  try {
+    const r = await q("{centerSettings{guardrailSchemas}}");
+    assert.equal(r.errors, undefined);
+    assert.deepEqual(r.data, { centerSettings: { guardrailSchemas } });
+  } finally {
+    await h.close();
+  }
+});
+
 test("query centerInfo / centerVersion: workspace・システム埋め込み指示の一覧・center の版", async () => {
   const withWs = await boot({}, { workspace: "/ws" });
   try {

@@ -84,10 +84,12 @@ export const typeDefs = /* GraphQL */ `
     reason: String
   }
 
-  """ session_sleep の応答の形（accepted / pending）。今の center は sleep() が終わるまで待ってから accepted: true / pending: false を返す（受理して即返す形は feat/sleep-resession の取り込み後）。眠った事は sessionsChanged（reason sleep）でも届く。 """
+  """ session_sleep の応答の形（{ name, state, accepted, sleeping, pending }）。pending: true は引継ぎを頼んだ段階で、まだ眠っていない（眠った事は sessionsChanged の reason sleep と Session.sleeping で分かる）。すでに眠っていれば sleeping: true・pending: false。 """
   type SleepSessionResult {
     name: String!
+    state: String
     accepted: Boolean
+    sleeping: Boolean
     pending: Boolean
   }
 
@@ -131,6 +133,8 @@ export const typeDefs = /* GraphQL */ `
     instructions: String
     addDirs: [String!]
     outputStyle: String
+    """ guardrail の schema 定義: 名前 → { schema（schema.yaml の文字列）, templates（templates/ からの相対 path → 中身） }。center 共通の設定だけ。 """
+    guardrailSchemas: JSON
     mcpServers: JSON
     memory: JSON
     projectMemory: JSON
@@ -144,6 +148,8 @@ export const typeDefs = /* GraphQL */ `
     instructions: String
     addDirs: [String!]
     outputStyle: String
+    """ 名前ごとにマージ（定義は丸ごと置き換え）。名前の値 null でその schema を消し、guardrailSchemas 自体が null で全部消す。 """
+    guardrailSchemas: JSON
     mcpServers: JSON
     memory: JSON
     projectMemory: JSON

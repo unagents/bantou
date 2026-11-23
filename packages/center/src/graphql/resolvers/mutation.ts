@@ -77,12 +77,11 @@ export const mutationResolvers: Record<string, Resolver> = {
       return services.sessions.update(input);
     }),
 
-  // 今の center の sleep() は眠らせ終わってから返る。完了を待ってから accepted: true / pending: false を返す（受理して即返す形は sleep-resession の取り込み時）
+  // MCP の session_sleep と同じ入口（resession.requestSleep）。引継ぎを頼んで受理して即返す。断る時（作業中など）は理由つきの error（OPERATION_FAILED）
   sleepSession: (_p, args, { services }) =>
     run(async () => {
       const { name } = parse({ name: sessionName }, args);
-      await services.sessions.sleep(name);
-      return { name, accepted: true, pending: false };
+      return services.resession.requestSleep(name);
     }),
 
   wakeSession: (_p, args, { services }) =>
