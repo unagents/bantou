@@ -15,6 +15,7 @@ import type { SchemaDiscovery } from "@agent-hand/bantou-protocol";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { ErrorCode, ListResourcesRequestSchema, ListResourceTemplatesRequestSchema, McpError, ReadResourceRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { readCached } from "./mcp-source.js";
+import { workerHostOf } from "./worker-ws.js";
 import { GUARDRAIL_SCHEMA_NAME, guardrailSchemasOf, type GuardrailSchema } from "./project-settings.js";
 
 /** center の http server でこの口を出す path。 */
@@ -63,6 +64,16 @@ export const schemaTokenOf = (centerToken: string): string => createHmac("sha256
 /** `x-schema-discovery` header の値（プロトコルの JSON 1 本。値は ASCII のみ）。 */
 export function schemaDiscoveryValue(url: string, centerToken: string): string {
   return JSON.stringify(schemaDiscoveryOf(url, centerToken));
+}
+
+/**
+ * launch の `schema`（center の schema server /mcp/schemas の指し先と認証）を組み立てる。host は ws と同じ元（publicHost か、loopback・wildcard 以外の bind）、port は http の port。
+ * http で待ち受けていない（port が null）・token が無い・host が決まらない時は undefined（launch に入れない）。
+ */
+export function launchSchemaOf(o: { bind: string; publicHost?: string; port: number | null; token: string | undefined }): SchemaDiscovery | undefined {
+  if (o.port === null || !o.token) return undefined;
+  const host = workerHostOf({ bind: o.bind, ...(o.publicHost ? { publicHost: o.publicHost } : {}) });
+  return host === undefined ? undefined : schemaDiscoveryOf(`http://${host}:${o.port}${SCHEMA_MCP_PATH}`, o.token);
 }
 
 /** 同じ中身の object（launch の `schema`）。Authorization の値は log に出さない。 */

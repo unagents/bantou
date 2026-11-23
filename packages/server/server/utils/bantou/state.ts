@@ -73,7 +73,8 @@ export async function writeState(dir: string, state: WorkerState): Promise<void>
   await mkdir(dir, { recursive: true });
   const tmp = join(dir, `.state.json.tmp-${process.pid}-${randomBytes(4).toString("hex")}`);
   try {
-    await writeFile(tmp, JSON.stringify(state, null, 2) + "\n");
+    // ws の token・schema の認証の値が生で入るので本人だけが読める mode（rename しても mode は残る）
+    await writeFile(tmp, JSON.stringify(state, null, 2) + "\n", { mode: 0o600 });
     await rename(tmp, stateFile(dir));
   } catch (e) {
     await unlink(tmp).catch(() => {});

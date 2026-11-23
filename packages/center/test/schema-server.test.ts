@@ -18,6 +18,7 @@ import {
   SCHEMA_DISCOVERY_ENV,
   SCHEMA_DISCOVERY_HEADER,
   SCHEMA_MCP_PATH,
+  launchSchemaOf,
   schemaDiscoveryOf,
   schemaDiscoveryValue,
   schemaSourceFromFile,
@@ -243,6 +244,21 @@ test("discovery: x-schema-discovery の値は JSON 1 本 { type: http, url, head
   assert.ok(/^[\x20-\x7e]*$/.test(v));
   assert.ok(!v.includes(TOKEN));
   assert.notEqual(schemaTokenOf(TOKEN), schemaTokenOf(TOKEN + "x"));
+});
+
+test("launchSchemaOf: host は ws と同じ元、port は http の port、認証は専用の値。port が null・token 無し（undefined・空）・host 未決定は undefined", () => {
+  const want = (url: string) => schemaDiscoveryOf(url, TOKEN);
+  assert.deepEqual(launchSchemaOf({ bind: "127.0.0.1", publicHost: "10.0.0.5", port: 7910, token: TOKEN }), want(`http://10.0.0.5:7910${SCHEMA_MCP_PATH}`));
+  assert.deepEqual(launchSchemaOf({ bind: "192.168.1.9", port: 7910, token: TOKEN }), want(`http://192.168.1.9:7910${SCHEMA_MCP_PATH}`));
+  assert.deepEqual(launchSchemaOf({ bind: "0.0.0.0", publicHost: "fd00::5", port: 1, token: TOKEN }), want(`http://[fd00::5]:1${SCHEMA_MCP_PATH}`));
+  // http で待ち受けていない（port 未確定）
+  assert.equal(launchSchemaOf({ bind: "192.168.1.9", port: null, token: TOKEN }), undefined);
+  // token が無い
+  assert.equal(launchSchemaOf({ bind: "192.168.1.9", port: 7910, token: undefined }), undefined);
+  assert.equal(launchSchemaOf({ bind: "192.168.1.9", port: 7910, token: "" }), undefined);
+  // host が決まらない（loopback / wildcard の bind で publicHost 無し）
+  assert.equal(launchSchemaOf({ bind: "127.0.0.1", port: 7910, token: TOKEN }), undefined);
+  assert.equal(launchSchemaOf({ bind: "0.0.0.0", port: 7910, token: TOKEN }), undefined);
 });
 
 test("discovery: launch の schema（schemaDiscoveryOf）は header の値と同じ中身で、専用の認証の値（center の token ではない）", () => {
