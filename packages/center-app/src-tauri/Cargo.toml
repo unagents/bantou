@@ -1,0 +1,33 @@
+[package]
+name = "bantou-center-app"
+version = "0.1.66"
+description = "bantou-center: windowless app that keeps the bantou center running (launchd agent)"
+authors = ["grrow"]
+edition = "2021"
+
+[lib]
+name = "bantou_center_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "=2.6.2", features = [] }
+
+[dependencies]
+# tray-icon: the menu bar item (#18). image-png: the icon of it.
+tauri = { version = "=2.11.2", features = ["tray-icon", "image-png"] }
+# A second launch (Finder while launchd already runs it) does nothing.
+tauri-plugin-single-instance = "=2.4.2"
+# SIGTERM from launchd: stop the center first, then exit.
+libc = "0.2"
+# The `port` of the config (to see whether another center uses it).
+serde_json = "1"
+signal-hook = "0.3"
+
+# Self-registration as a launchd agent (SMAppService.agent). macOS only.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "=0.6.4"
+objc2-foundation = { version = "=0.3.2", features = ["NSString", "NSError"] }
+objc2-service-management = { version = "=0.3.2", features = ["SMAppService"] }
+
+[profile.release]
+incremental = true

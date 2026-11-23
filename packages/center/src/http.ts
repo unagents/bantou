@@ -2,6 +2,7 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { KEY_PATH, type ClientKeys } from "./client-keys.js";
 import { LAUNCHER_HEADER, launcherMatches } from "./launcher.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
@@ -18,7 +19,7 @@ export const MCP_PATH = "/mcp";
 /** session（master-cap）向けの MCP 窓口。認証は session ごとの使い捨て token + header X-Bantou-Session。 */
 export const EVENTS_PATH = "/events";
 export const SESSION_MCP_PATH = "/mcp/session";
-/** GraphQL の endpoint（graphql/server.ts）。認証は今の Bearer（鍵の方式は段階 A3）。 */
+/** GraphQL の endpoint（graphql/server.ts）。認証は token か client の鍵（client-keys.ts）。 */
 export const GRAPHQL_PATH = "/graphql";
 /** 統括の道具だけを出す口。割り当てた session にだけ（呼び出しの度に判定）。認証は /mcp/session と同じ session token。 */
 const OWNER_HEADER = "x-bantou-session";
@@ -183,6 +184,10 @@ export async function startHttpServer(opts: {
   workerTracker?: WorkerTracker;
   /** GraphQL の handler（graphql/server.ts）。渡すと POST・GET /graphql を外向け token で提供する（subscription は SSE）。 */
   graphql?: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
+  /** client の鍵（client-keys.ts）。渡すと、外向けの経路（/mcp・/events・/graphql・core route）は token に加えて発行済みの鍵も通す。 */
+  clientKeys?: ClientKeys;
+  /** 鍵を渡してよい接続元か（client-keys.ts の createRangeCheck）。clientKeys と一緒に渡すと POST KEY_PATH を提供する。 */
+  keyRange?: (remote: string | undefined) => boolean;
   /** SSE の keep-alive 間隔（テスト用）。 */
   keepAliveMs?: number;
   port: number;
@@ -205,6 +210,31 @@ export async function startHttpServer(opts: {
   /** initialize 処理中（まだ sessions に入っていない）の数。上限判定に含める。 */
   let pending = 0;
   let allowed = allowedHostsFor(opts.bind, opts.port);
+
+  /** 外向けの経路の認証: token か、発行済みの client の鍵。 */
+  const externalAuthOk = (req: IncomingMessage): boolean =>
+    bearerMatches(req.headers.authorization, token) || (opts.clientKeys?.verify(req.headers.authorization) ?? false);
+
+  /** 鍵を取る接続（認証なし）。接続元が設定した IP の範囲に入る時だけ鍵を渡す。 */
+  const handleKeyIssue = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    if (req.method !== "POST") {
+      sendJson(res, 405, { error: "method not allowed" }, { allow: "POST" });
+      return;
+    }
+    if (allowed && !allowed.hosts.includes(req.headers.host ?? "")) {
+      sendJson(res, 403, { error: "forbidden host" });
+      return;
+    }
+    const remote = req.socket.remoteAddress;
+    if (!opts.keyRange!(remote)) {
+      log(`鍵を渡さない: 接続元 ${remote ?? "?"} は設定した IP の範囲の外`);
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    const key = await opts.clientKeys!.issue();
+    log(`鍵を渡した: 接続元 ${remote ?? "?"}`);
+    sendJson(res, 200, { key }, { "cache-control": "no-store" });
+  };
 
   /** ボディを読む。失敗時は応答済みで undefined を返す（413 は読み捨てて connection: close）。 */
   const readBody = async (req: IncomingMessage, res: ServerResponse): Promise<{ body: unknown } | undefined> => {
@@ -409,7 +439,7 @@ export async function startHttpServer(opts: {
     let launcher = false;
     if (path === MCP_PATH) {
       window = "external";
-      if (!bearerMatches(req.headers.authorization, token)) {
+      if (!externalAuthOk(req)) {
         sendJson(res, 401, { error: "unauthorized" }, { "www-authenticate": "Bearer" });
         return;
       }
@@ -451,7 +481,7 @@ export async function startHttpServer(opts: {
       await transport.handleRequest(req, res, r.body);
       return;
     } else if (path === EVENTS_PATH && opts.events) {
-      if (!bearerMatches(req.headers.authorization, token)) {
+      if (!externalAuthOk(req)) {
         sendJson(res, 401, { error: "unauthorized" }, { "www-authenticate": "Bearer" });
         return;
       }
@@ -485,7 +515,7 @@ export async function startHttpServer(opts: {
     } else if (path === GRAPHQL_PATH && opts.graphql) {
       // 画面（desktop の webview）の fetch の preflight（OPTIONS）は Authorization を載せない。yoga の CORS が答える（中身を返さない）
       const preflight = req.method === "OPTIONS";
-      if (!preflight && !bearerMatches(req.headers.authorization, token)) {
+      if (!preflight && !externalAuthOk(req)) {
         sendJson(res, 401, { error: "unauthorized" }, { "www-authenticate": "Bearer" });
         return;
       }
@@ -498,6 +528,9 @@ export async function startHttpServer(opts: {
       req.url = query ? `${GRAPHQL_PATH}?${query}` : GRAPHQL_PATH;
       await opts.graphql(req, res);
       return;
+    } else if (path === KEY_PATH && opts.clientKeys && opts.keyRange) {
+      await handleKeyIssue(req, res);
+      return;
     } else if (statusLineMatch) {
       await handleSessionJson(req, res, statusLineMatch[1], "statusLine", opts.onStatusLine!);
       return;
@@ -505,7 +538,7 @@ export async function startHttpServer(opts: {
       await handleSessionJson(req, res, hookMatch[1], "hook", opts.onHook!);
       return;
     } else if (coreMatch) {
-      if (!bearerMatches(req.headers.authorization, token)) {
+      if (!externalAuthOk(req)) {
         sendJson(res, 401, { error: "unauthorized" }, { "www-authenticate": "Bearer" });
         return;
       }

@@ -8,7 +8,8 @@ export const DEFAULT_BIND = "127.0.0.1";
 export interface CliArgs {
   config: string;
   transport: "stdio" | "http";
-  port: number;
+  /** `--port` を渡した時だけ入る（test・開発・今の desktop の起動）。無ければ config の `port`（既定 7910）で待ち受ける。 */
+  port?: number;
   bind: string;
 }
 
@@ -17,7 +18,7 @@ export const USAGE =
 
 /** 引数を解釈する。不正な引数・値は Error を投げる。`--port` / `--bind` は stdio では無視する。 */
 export function parseArgs(argv: string[]): CliArgs {
-  const out: CliArgs = { config: DEFAULT_CONFIG, transport: "stdio", port: DEFAULT_PORT, bind: DEFAULT_BIND };
+  const out: CliArgs = { config: DEFAULT_CONFIG, transport: "stdio", bind: DEFAULT_BIND };
   for (let i = 0; i < argv.length; i++) {
     const key = argv[i];
     if (key !== "--config" && key !== "--transport" && key !== "--port" && key !== "--bind") {

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>jp.grrow.bantou-center</string>
+  <key>BundleProgram</key>
+  <string>Contents/MacOS/bantou-center-app</string>
+  <key>AssociatedBundleIdentifiers</key>
+  <array>
+    <string>jp.grrow.bantou-center</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <!-- Restart only after an abnormal end. A center that ends normally (e.g. its port is in use) is not started again in a loop (docs/design/center-graphql-server.md #16). -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <!-- The center stops its session children for up to 5 s + 5 s; the app waits 15 s for it. -->
+  <key>ExitTimeOut</key>
+  <integer>20</integer>
+</dict>
+</plist>
