@@ -1,5 +1,5 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import type { CapResultReply, ErrorReply, TaskResultReply, WorkerReportNotice } from "@agent-hand/bantou-protocol";
+import type { CapResultReply, ChangeProgressNotice, ChangeReportNotice, ErrorReply, TaskResultReply, WorkerReportNotice } from "@agent-hand/bantou-protocol";
 import type { CliArgs } from "./args.js";
 import { resolveClaude } from "./claude-path.js";
 import { resolveSessionPath } from "./path-env.js";
@@ -20,6 +20,7 @@ import { watchParent } from "./parent-watch.js";
 import { createFollow } from "./follow.js";
 import { resolvePair } from "./pair.js";
 import { createRemoteManager } from "./remotes.js";
+import { createChangeManager } from "./changes.js";
 import { createRemoteControlSupervisor } from "./remote-control.js";
 import { createContextUsageTracker } from "./context-usage.js";
 import { createLoginFlow } from "./login.js";
@@ -118,6 +119,9 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   let applyLateReply: (r: CapResultReply | TaskResultReply | ErrorReply, fromId?: string) => void = () => {};
   let onActivity: (capId: string, fromId?: string) => void = () => {};
   let onWorkerReport: (n: WorkerReportNotice, fromId?: string) => void = () => {};
+  // changes は remotes の後に作るので、change の通知はここ経由で渡す
+  let onChangeReport: (n: ChangeReportNotice, fromId?: string) => void = () => {};
+  let onChangeProgress: (n: ChangeProgressNotice, fromId?: string) => void = () => {};
   const link = createServerLink({
     config,
     log,
@@ -125,6 +129,14 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     onNotice: (n, fromId) => {
       if (n.type === "worker_report") {
         onWorkerReport(n, fromId);
+        return;
+      }
+      if (n.type === "change_report") {
+        onChangeReport(n, fromId);
+        return;
+      }
+      if (n.type === "change_progress") {
+        onChangeProgress(n, fromId);
         return;
       }
       activity.apply(n, fromId ?? "");
@@ -260,6 +272,17 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   applyLateReply = (r, fromId) => void remotes.applyLateReply(r, fromId);
   onActivity = (id, fromId) => remotes.onActivity(id, fromId);
   onWorkerReport = (n, fromId) => remotes.onWorkerReport(n, fromId);
+  // change（server に step の範囲を登録して消化させる。remotes とは別の記録 changes.json）
+  const changes = createChangeManager({
+    link,
+    capId,
+    store: createJsonListStore(join(stateDir, "changes.json"), log),
+    log,
+    serversOf: (owner) => sessions.serversOf(owner),
+    notify: (owner, text) => link.notifyPeer(capSessionName(owner), text),
+  });
+  onChangeReport = (n, fromId) => changes.onChangeReport(n, fromId);
+  onChangeProgress = (n, fromId) => changes.onChangeProgress(n, fromId);
 
   let closing = false;
   let http: HttpHandle | null = null;
@@ -315,7 +338,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     http = await startHttpServer({
       createServer: (launcher) => makeServer(launcher === true),
       ...(launcherKey ? { launcherKey } : {}),
-      createSessionServer: (owner) => createSessionMcpServer({ remotes, follow, owner, resession }),
+      createSessionServer: (owner) => createSessionMcpServer({ remotes, changes, follow, owner, resession }),
       sessionAuth: sessionTokens,
       onStatusLine: (name, payload) => {
         const s = sessions.list().find((x) => x.name === name);
@@ -367,6 +390,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   // 古い記録の整理（同じ server_id の重複・長く確認できない到達先）。記録だけを消し、server には何も送らない
   const pruneTimer = setInterval(() => void remotes.prune().catch((e: unknown) => log(`remote 記録の整理失敗: ${e instanceof Error ? e.message : String(e)}`)), 10 * 60_000);
   pruneTimer.unref();
+  void changes.restore().catch((e: unknown) => log(`change 記録の復元失敗: ${e instanceof Error ? e.message : String(e)}`));
   void remotes.restore().catch((e: unknown) => log(`remote 記録の復元失敗: ${e instanceof Error ? e.message : String(e)}`));
   contextUsage.start();
   void sessions.restore().catch((e: unknown) => log(`session の復帰失敗: ${e instanceof Error ? e.message : String(e)}`));

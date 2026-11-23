@@ -8,12 +8,18 @@ import {
   parseServerNotice,
   parseServerReply,
   type CapResultReply,
+  type ChangeReplyCommand,
+  type ChangeReplyResultReply,
+  type ChangeStatusCommand,
+  type ChangeStatusResultReply,
   type ErrorReply,
   type ErrorCode,
   type HelloResultReply,
   type KickCapCommand,
   type ServerNotice,
   type ResumeWorkerCommand,
+  type RegisterChangeCommand,
+  type RegisterChangeResultReply,
   type RetireResultReply,
   type ServerCommandType,
   type TaskCommand,
@@ -22,6 +28,8 @@ import {
   type WorkerReplyResultReply,
   type StatusReply,
   type StopCapCommand,
+  type StopChangeCommand,
+  type StopChangeResultReply,
   type StopResultReply,
   type UpdateResultReply,
   type WorkerResultReply,
@@ -100,6 +108,10 @@ export type ResumeWorkerInput = Omit<ResumeWorkerCommand, "bantou" | "type">;
 export type StopCapInput = Omit<StopCapCommand, "bantou" | "type">;
 export type TaskInput = Omit<TaskCommand, "bantou" | "type">;
 export type WorkerReplyInput = Omit<WorkerReplyCommand, "bantou" | "type">;
+export type RegisterChangeInput = Omit<RegisterChangeCommand, "bantou" | "type">;
+export type ChangeStatusInput = Omit<ChangeStatusCommand, "bantou" | "type">;
+export type StopChangeInput = Omit<StopChangeCommand, "bantou" | "type">;
+export type ChangeReplyInput = Omit<ChangeReplyCommand, "bantou" | "type">;
 
 /** config.servers に依存せず、messenger の発見（protocol bantou）で選んだ server の peer。 */
 export interface ServerPeer extends ServerIdentity {
@@ -157,6 +169,14 @@ export interface ServerLink {
   statusOn(peer: ServerPeer, opts?: { cap_id?: string }): Promise<StatusReply | ErrorReply>;
   /** 指定 peer へ stop_cap を送り、返信（stop_result / error）まで待つ。 */
   stopCapOn(peer: ServerPeer, cmd: StopCapInput): Promise<StopResultReply | ErrorReply>;
+  /** 指定 peer へ register_change を送り、返信（register_change_result / error）を待つ（server は worker の完了を待たずに返す）。 */
+  registerChangeOn(peer: ServerPeer, cmd: RegisterChangeInput): Promise<RegisterChangeResultReply | ErrorReply>;
+  /** 指定 peer へ change_status を送り、返信（change_status_result / error）を待つ。change_id 省略で全ての change。 */
+  changeStatusOn(peer: ServerPeer, cmd?: ChangeStatusInput): Promise<ChangeStatusResultReply | ErrorReply>;
+  /** 指定 peer へ stop_change を送り、返信（stop_change_result / error）を待つ。 */
+  stopChangeOn(peer: ServerPeer, cmd: StopChangeInput): Promise<StopChangeResultReply | ErrorReply>;
+  /** 指定 peer へ change_reply を送り、返信（change_reply_result / error）を待つ。 */
+  changeReplyOn(peer: ServerPeer, cmd: ChangeReplyInput): Promise<ChangeReplyResultReply | ErrorReply>;
   /**
    * peers() に server_id / host / user / workspace を載せたもの。識別が未取得（hello 未確認）の peer へは hello を送って取得する
    * （旧 server の返信 = 識別なしも「取得済み」とし、再送しない。届かなかった peer は IDENTIFY_RETRY_MS 後に再試行）。
@@ -192,7 +212,7 @@ export interface ServerLink {
   close(): Promise<void>;
 }
 
-type ReplyKind = "cap_result" | "task_result" | "worker_reply_result" | "worker_result" | "stop_result" | "status_result" | "hello_result" | "update_result" | "retire_result";
+type ReplyKind = "cap_result" | "task_result" | "worker_reply_result" | "worker_result" | "stop_result" | "status_result" | "hello_result" | "update_result" | "retire_result" | "register_change_result" | "change_status_result" | "stop_change_result" | "change_reply_result";
 
 interface Pending {
   /** 送り先の peer id（発見で分かった時のみ）。status の返信を、別 server の status と取り違えないために使う。 */
@@ -250,6 +270,10 @@ const KIND_COMMAND: Record<ReplyKind, ServerCommandType> = {
   hello_result: "hello",
   update_result: "update_server",
   retire_result: "retire_server",
+  register_change_result: "register_change",
+  change_status_result: "change_status",
+  stop_change_result: "stop_change",
+  change_reply_result: "change_reply",
 };
 
 /** config.servers に無い、発見ベースの要求に使う内部 slot の名前。list / connectAll には出さない。 */
@@ -488,8 +512,21 @@ export function createServerLink(opts: {
     else if (r.type === "error" && r.command === "hello" && m.from_id !== undefined) learnIdentity(m.from_id, {});
     let target: Pending | undefined;
     // status は cap_id を付けないと server を区別できない（cap_id は session ごとに全 server で同じ）ので、送り先の peer と返信の送信元で照合する
-    const fromPeer = (p: Pending): boolean => p.kind !== "status_result" || p.peer === undefined || m.from_id === undefined || p.peer === m.from_id;
-    if (r.type === "cap_result") {
+    const fromPeer = (p: Pending): boolean => (p.kind !== "status_result" && p.kind !== "change_status_result") || p.peer === undefined || m.from_id === undefined || p.peer === m.from_id;
+    // change の返信・error は change_id で照合する（change_reply は change_id:worker_id。error の worker_id は照合に使わない）。change_id が無い error は command と送り元で照合する
+    const changeKind = (c: string | undefined): ReplyKind | undefined =>
+      c === "register_change" ? "register_change_result" : c === "change_status" ? "change_status_result" : c === "stop_change" ? "stop_change_result" : c === "change_reply" ? "change_reply_result" : undefined;
+    const changeIdOf = (p: Pending): string | undefined => p.key?.split(":")[0];
+    if (r.type === "register_change_result" || r.type === "stop_change_result") {
+      target = slot.pending.find((p) => p.kind === r.type && p.key === r.change_id);
+    } else if (r.type === "change_reply_result") {
+      target = slot.pending.find((p) => p.kind === "change_reply_result" && p.key === `${r.change_id}:${r.worker_id}`);
+    } else if (r.type === "change_status_result") {
+      target = slot.pending.find((p) => p.kind === "change_status_result" && fromPeer(p));
+    } else if (r.type === "error" && changeKind(r.command) !== undefined) {
+      const kind = changeKind(r.command);
+      target = slot.pending.find((p) => p.kind === kind && fromPeer(p) && (r.change_id === undefined || kind === "change_status_result" || changeIdOf(p) === r.change_id));
+    } else if (r.type === "cap_result") {
       target = slot.pending.find((p) => p.kind === "cap_result" && p.key === r.cap_id);
     } else if (r.type === "task_result") {
       target = slot.pending.find((p) => p.kind === "task_result" && p.key === r.cap_id && p.taskId === r.task_id);
@@ -891,6 +928,14 @@ export function createServerLink(opts: {
       request<StatusReply>(discoveryName, "status_result", undefined, opts?.cap_id !== undefined ? { cap_id: opts.cap_id } : {}, { target: peerTarget(peer), timeoutMs: FOLLOW_TIMEOUT_MS }),
     stopCapOn: (peer, cmd) =>
       request<StopResultReply>(discoveryName, "stop_result", cmd.cap_id, cmd, { target: peerTarget(peer), timeoutMs: STOP_TIMEOUT_MS }),
+    registerChangeOn: (peer, cmd) =>
+      request<RegisterChangeResultReply>(discoveryName, "register_change_result", cmd.change_id, cmd, { target: peerTarget(peer), timeoutMs: FOLLOW_TIMEOUT_MS }),
+    changeStatusOn: (peer, cmd) =>
+      request<ChangeStatusResultReply>(discoveryName, "change_status_result", undefined, cmd ?? {}, { target: peerTarget(peer), timeoutMs: FOLLOW_TIMEOUT_MS }),
+    stopChangeOn: (peer, cmd) =>
+      request<StopChangeResultReply>(discoveryName, "stop_change_result", cmd.change_id, cmd, { target: peerTarget(peer), timeoutMs: STOP_TIMEOUT_MS }),
+    changeReplyOn: (peer, cmd) =>
+      request<ChangeReplyResultReply>(discoveryName, "change_reply_result", `${cmd.change_id}:${cmd.worker_id}`, cmd, { target: peerTarget(peer), timeoutMs: FOLLOW_TIMEOUT_MS }),
     retireOn: (peer, cmd) =>
       request<RetireResultReply>(discoveryName, "retire_result", peer.id, cmd, { target: peerTarget(peer), timeoutMs: RETIRE_TIMEOUT_MS }),
     markRetired(peerId) {

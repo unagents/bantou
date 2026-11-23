@@ -7,6 +7,8 @@ import type { Logger } from "./log.js";
 import type { LoginFlow } from "./login.js";
 import type { Resessioner } from "./resession.js";
 import type { RemoteManager } from "./remotes.js";
+import type { ChangeManager } from "./changes.js";
+import { registerChangeTools } from "./change-tools.js";
 import type { RemoteControlSupervisor } from "./remote-control.js";
 import type { SessionManager } from "./sessions.js";
 import type { ServerLink } from "./server-link.js";
@@ -47,8 +49,9 @@ export function createCenterServer(deps: {
 }
 
 /** session 向け窓口（/mcp/session）の MCP server。owner = 認証済みの呼び出し元 session 名。 */
-export function createSessionMcpServer(deps: { remotes: RemoteManager; follow?: Follow; owner: string; resession?: Resessioner }): McpServer {
+export function createSessionMcpServer(deps: { remotes: RemoteManager; changes?: ChangeManager; follow?: Follow; owner: string; resession?: Resessioner }): McpServer {
   const server = new McpServer({ name: "bantou-center-session", version: packageVersion() });
   registerSessionTools(server, { remotes: deps.remotes, owner: deps.owner, ...(deps.follow ? { follow: deps.follow } : {}), ...(deps.resession ? { resession: deps.resession } : {}) });
+  if (deps.changes) registerChangeTools(server, { changes: deps.changes, owner: deps.owner });
   return server;
 }
