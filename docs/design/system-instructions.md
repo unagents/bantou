@@ -6,11 +6,11 @@
 
 center が master-cap（session の対話型 `claude --remote-control`）を起動するたびに、`--append-system-prompt` の値の**先頭**に付ける bantou 側の決まり文。利用者が設定で入れる追加指示（center 共通の `settings.instructions`、session ごとの `settings.instructions`）とは**別に管理**する。利用者の設定画面には出さず、編集もさせない。
 
-最初の部品は `master-cap-role`: master-cap は自分では実装・修正・長い調査をせず、remote-cap（server 上のオーケストレーター）に `remote_send` で指示を出し、report と `task_result` で結果を確かめ、利用者に報告する、という運用の案内（remote-cap 側の決まりは `docs/design/cap-orchestration.md`）。v3（2026-11-11）: 「計画と cap の起こし直し」の節を足した。master-cap は受けた指示の計画を立て（作業のまとまりに切り分け、順序と依存を決める）、作業のまとまりごとに cap を起こし直す（同じ cap を使い回し続けない）。まとまりが終わったら結果を確かめて `remote_delete` で cap を閉じる（server 側の会話も破棄される）。次のまとまりが前の結果を要する時は成果物と決定事項を goal に書いて渡す（閉じた会話は引き継がれない）。cap が failed の時は理由（`error` / `conversation.last_error_text` / `cap_last_error`）を見て、会話が大きすぎるなら閉じて起こし直す。起こし直す時期や条件の数値は書かない（判断は master-cap。`remote_list` の `conversation` が材料）。背景: 1 つの cap に 7 日間すべての task を流し続け、会話が上限を超えて cap が起動できなくなった（`docs/design/center-tools.md`）。同じ節で `remote_delete` の説明と「足りなければ同じ cap に続きの task」を「同じまとまりの中で」に直した。
+最初の部品は `master-cap-role`: master-cap は自分では実装・修正・長い調査をせず、cap（server 上のオーケストレーター）に `remote_send` で指示を出し、結果を確かめ、利用者に報告する、という運用の案内。v3（2026-11-11）: 「計画と cap の起こし直し」の節を足した。master-cap は受けた指示の計画を立て（作業のまとまりに切り分け、順序と依存を決める）、作業のまとまりごとに cap を起こし直す（同じ cap を使い回し続けない）。まとまりが終わったら結果を確かめて cap を閉じる（server 側の会話も破棄される）。次のまとまりが前の結果を要する時は成果物と決定事項を goal に書いて渡す（閉じた会話は引き継がれない）。cap が failed の時は理由（`error` / `conversation.last_error_text` / `cap_last_error`）を見て、会話が大きすぎるなら閉じて起こし直す。起こし直す時期や条件の数値は書かない（判断は master-cap。`remote_list` の `conversation` が材料）。背景: 1 つの cap に 7 日間すべての task を流し続け、会話が上限を超えて cap が起動できなくなった。同じ節で cap を閉じる説明と「足りなければ同じ cap に続きの task」を「同じまとまりの中で」に直した。
 
 v2（2026-11-10）: worker の progress report は push されない（push は ask / approve / done と完了通知）。進捗は `remote_list` で見る、の 1 行を道具の節に反映（center の config `remotes.pushProgress` で push する側に戻せるが、文面は既定に合わせる）。
 
-2 つ目の部品は `master-cap-availability`: master-cap は常に利用者の指示をいつでも受けられる状態で働く。ビルド・テスト・release・長い待ちで自分の turn を塞がず、時間のかかる作業は remote-cap に預ける。この Mac のローカルでしかできない作業（release の署名ビルド・publish など）は、ローカルのサブエージェント（Agent tool）か background 実行（`run_in_background`）に任せる（`master-cap-role` の「自分ではしない」の例外）。待つ時は turn を終えて通知で受け、並行の指示には普通に応える。
+2 つ目の部品は `master-cap-availability`: master-cap は常に利用者の指示をいつでも受けられる状態で働く。ビルド・テスト・release・長い待ちで自分の turn を塞がず、時間のかかる作業は cap に預ける。この Mac のローカルでしかできない作業（release の署名ビルド・publish など）は、ローカルのサブエージェント（Agent tool）か background 実行（`run_in_background`）に任せる（`master-cap-role` の「自分ではしない」の例外）。待つ時は turn を終えて通知で受け、並行の指示には普通に応える。
 
 3 つ目の部品は `memory`（2026-11-11）: 外部記憶（`settings.memory`）がある session だけに付く。起動時と判断の前に `mcp__memory__` の context / recall を呼ぶ運用の案内。書き込みは bantou が自動で渡すので自分では呼ばない（設計は `docs/design/external-memory.md`）。memory の設定が無い session では部品も label も出ず、出力は従来と同じ。
 
@@ -59,7 +59,7 @@ export const SYSTEM_INSTRUCTION_PARTS = [MASTER_CAP_ROLE, MASTER_CAP_AVAILABILIT
 1. **部品の有効・無効**: center 共通・session の `settings.systemInstructions.disabled: ["<id>"]` で外せるようにする。合成は `sessions.ts` の `composeInstructions` と同じ場所で、`build(ctx, { disabled })` に渡す。既定は全部有効。
 2. **適用条件**: 部品に `when?: (ctx) => boolean` を持たせる仕組みは 2026-11-11 に実装した（`memory@1` が使う。`applicableParts(ctx)`）。permissionMode や wrapper の有無、server の有無で出し分けるのは未実装（`ctx` に足す）。
 3. **文面の差し替え（上級者向け）**: config の `remoteControl.systemInstructionsOverride: { "<id>": "<文面>" }` で部品単位に差し替える。版の追跡が効かなくなるので、ログに `override` と出す。
-4. **remote-cap / worker 側との共有**: server の `CAP_GUIDE` / `WORKER_GUIDE` は server package にある。共通化するなら protocol package に「文面の部品」を置き、center と server が同じ版を参照する。今は役割が違う（master-cap は指示を出す側、cap は worker を回す側）ので分けたままにする。
+4. **cap / worker 側との共有**: server の `CAP_GUIDE` / `WORKER_GUIDE` は server package にある。共通化するなら protocol package に「文面の部品」を置き、center と server が同じ版を参照する。今は役割が違う（master-cap は指示を出す側、cap は worker を回す側）ので分けたままにする。
 
 ## 外した引数: `--no-chrome`
 

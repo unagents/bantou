@@ -18,7 +18,7 @@ const view = (o: Partial<RemoteView> & { session: string; server: string }): Rem
 test("cap ごとに 1 行。running は「実行中」、止まっている（done）は「止まっている」と最後の書き込みからの分。他の session の cap は出ない", () => {
   const views = [
     view({ session: "pm1", server: "srv-a" }),
-    view({ session: "pm1", server: "srv-b", state: "done", finishedAt: new Date(NOW - 5 * 60_000).toISOString() }),
+    view({ session: "pm1", server: "srv-b", state: "stopped", finishedAt: new Date(NOW - 5 * 60_000).toISOString() }),
     view({ session: "pm2", server: "srv-a" }),
   ];
   const r = buildTaskStatus(views, "pm1", NOW);

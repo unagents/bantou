@@ -13,7 +13,7 @@
 | memory の設計書 | bantou |
 |---|---|
 | 横断 PM | master-cap（session の対話型 `claude --remote-control`） |
-| 個別 PM | remote-cap（server 上のオーケストレーター）とその worker |
+| 個別 PM | cap（server 上のオーケストレーター）とその worker |
 | Agent ID | session 名（設定で `agentId` を上書きできる。session は改名できるため） |
 | AgentMessage の task_id / correlation_id | `remote_send` の remote_id / task_id |
 | Identity Memory | center の system-instructions + 設定の `instructions`（既存。変更なし） |
@@ -47,13 +47,13 @@ center を起動した所（desktop の sidecar の設定の画面）の「全 s
 ### 経路と形
 
 1. **cap 間・worker の往復**: 既存の tool / protocol の処理に埋め込む。新しい通信は足さない。
-   - center: `remote_send` の送信時（task）、`cap_result` / `task_result` の受信時（result）、`worker_report` の受信時（report）、`worker_reply` の送信時（reply）。session の記憶が無ければ何もしない（owner の session が無い旧共有 cap の report は書かない）。
+   - center: `remote_send` の送信時（task）、`cap_result` の受信時（result）、`worker_reply` の送信時（reply）。session の記憶が無ければ何もしない（owner の session が無い旧共有 cap の report は書かない）。
    - event の中身: 送り手・受け手（session 名 / cap_id / worker_id）、remote_id / task_id、種別（task / result / report / reply）、本文、時刻。`event_id` を冪等キーにする。
-2. **利用者の発言**: center が activity 用に全 session へ付けている hook（`bantou-center hook`）の payload に確定後の本文が入る。center はそれを event として渡す。
+2. **利用者の発言**: center が全 session へ付けている hook の payload に確定後の本文が入る。center はそれを event として渡す。
    - desktop からの発言も claude.ai の remote-control からの発言もこの hook を通る。pty の入力（`POST /sessions/<name>/input`）は生のキー入力で、remote-control 分も通らないため使わない。
    - hook の payload（公式 docs https://code.claude.com/docs/en/hooks で確認）: 共通の `session_id` / `prompt_id`（user prompt を表す UUID。最初の入力までは無い）/ `hook_event_name` など。`UserPromptSubmit` は `prompt`（貼り付けは展開済み。`<pasted_content id>` の行が付く場合がある）、`Stop` は `last_assistant_message`（transcript は最終 message を含まないことがあるので hook ではこちらを使う）と `stop_hook_active`。`StopFailure` の `last_assistant_message` は API の error 文なので使わない。`UserPromptSubmit` の公式の例の JSON には `prompt_id` が載っていないため、center は `prompt_id` があれば使い、無くても発火時刻（center の `hook` サブコマンドが付ける `bantou_ts`）で区別する。
    - master-cap の応答本文は `Stop` hook の payload の `last_assistant_message` から取る（claude 2.1.322 で実測。transcript は読まない）。pty の text は TUI の差分描画で空白・文字が落ちるので素材にしない。`--output-format stream-json` は `-p` 専用で `--remote-control` には付かない。
-   - hook は center が activity 用に既に全 session へ付けているもの。memory のために hook は増えない（payload を使い回す）。2026-11-11 に hook でよいと決めた。
+   - hook は center が既に全 session へ付けているもの。memory のために hook は増えない（payload を使い回す）。2026-11-11 に hook でよいと決めた。
 3. **送信は非同期・失敗しても bantou の処理を止めない**。center に小さな送信キュー: (owner, memory url, agent) ごとの FIFO、順序保持、失敗は 1s から倍々で最大 60s の backoff で再試行、上限 1000 件を超えたら古い分から捨てて log、memory が入力検証で拒否（`isError`）したものは log して捨てる（再試行しても直らない）。hook の処理はキューに積むだけで即 return する。log は eventId と理由のみ（本文・token・url は出さない）。
 
 ### eventId の設計
@@ -61,7 +61,7 @@ center を起動した所（desktop の sidecar の設定の画面）の「全 s
 `<ns>:<session か cap_id>:<種別>:<部品…>`（`[A-Za-z0-9_.-]` 以外は `_`、128 文字を超えたら末尾を digest）。満たす 2 条件:
 
 - **再送で同じ eventId**: 部品は出来事そのものから決まる値だけ（task_id、hook の発火時刻と prompt_id、server が付けた report の `at`、本文の digest）。キューの再試行は同じ event を再送するので同じ id。同じ hook 呼び出しや同じ通知が再度届いても同じ id になり、memory が `duplicate` で弾く。
-- **同じ内容の別の発言は別の eventId**: 発言は hook の発火時刻 ms（と prompt_id）を含むので、同じ本文でも別の発話は別 id。同じ task_id の別の結果（report 起因の task_result）は本文の digest で区別する（本文も同じなら同じ結果の再通知として 1 件にまとまる）。
+- **同じ内容の別の発言は別の eventId**: 発言は hook の発火時刻 ms（と prompt_id）を含むので、同じ本文でも別の発話は別 id。同じ task_id の別の結果は本文の digest で区別する（本文も同じなら同じ結果の再通知として 1 件にまとまる）。
 
 ## bantou がやらないこと
 

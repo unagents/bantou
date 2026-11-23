@@ -21,14 +21,13 @@ bantou の work session ↔ bantou メッセージの共通 TypeScript 型。
 - `messenger/protocol.json`（parse 後の値で比較。空白・改行は無関係）か `messenger/PROTOCOL.md`（1 byte でも）を変えたら hash が変わる。**必ず版を上げる**: `protocol.json` の `version` と `src/server.ts` の `MESSENGER_PROTOCOL.version` を上げ、`messenger/versions.json` に `"<版>": "<hash>"` を 1 行足す。optional 項目の追加・文言の直しも同じ。
 - hash は agent-messenger の `sha256(canonicalJSON({manifest, doc}))`。`test/versions.test.mjs` が「今の定義の hash = 今の版に記録した hash」を確かめる。版を上げずに定義を変えると落ちる。
 - 複数 hash を持てるのは過去の例外（1.6.0 / 1.8.0）だけ。test が固定している。同じ版の別定義は broker が `PROTOCOL_CONFLICT` で断り、後から更新された server が center の発見から消える（2026-11-11 の事故）。
-- 版を上げると center（major / minor が違う版）が旧版の server へ `task` / `status` を送らなくなる。server を先に publish する。patch だけの上げ（通信の形を変えない版の付け直し）は center が通す（下の「版の互換」）。
+- patch だけの上げ（通信の形を変えない版の付け直し）は center が通す（下の「版の互換」）。
 - 型・ガード・`docs/protocol.md` だけの変更は定義ではないので版は要らない。
 
 ## 版の互換
 
 - `isProtocolCompatible(a, b)`（`src/server.ts`）: major と minor が同じなら互換、patch の差は通す。形が崩れた版（空・非数・桁欠け・先頭 `v`・pre-release 付き・`undefined`）は互換でない（false）。
-- 使うのは center の送信前の門（`packages/center/src/server-link.ts`）だけ。server は版を見ていない。
-- 通信の形を変える定義の変更は minor 以上を上げる。patch は形を変えない付け直し専用（1.8.0 → 1.8.1 のような版の付け直し）。patch を上げても center は止まらない。
+- 通信の形を変える定義の変更は minor 以上を上げる。patch は形を変えない付け直し専用（1.8.0 → 1.8.1 のような版の付け直し）。
 - 定義の版（`protocol.json` / `versions.json`）の扱いは上の「定義を変える時」のまま。互換の判定は版の上げ方を緩めない。
 
 ## 未定義

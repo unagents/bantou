@@ -85,9 +85,6 @@ export interface Dispatcher {
 
 /** center → server の message を処理する。server は断らない（空きが無ければ queue で待たせる）。 */
 export function createDispatcher(d: DispatchDeps): Dispatcher {
-  /** queue で待っている・動いている session（同じ session を二重に起こさない）。 */
-  const activeSessions = new Set<string>();
-
   const handle: Dispatcher["handle"] = async (m) => {
     if (m.mode === "ping") return;
     const from = `${m.from_name}(${m.from_id})`;
@@ -132,17 +129,12 @@ export function createDispatcher(d: DispatchDeps): Dispatcher {
           d.log(`無視(session-id の worker が無い): session-id=${sessionId}`);
           return;
         }
-        if (activeSessions.has(sessionId)) {
-          d.log(`無視(その session はすでに動いている・待っている): session-id=${sessionId}`);
-          return;
-        }
         const input = await resumeInput(found.dir, replyPrompt(msg.order, msg.order === "answer" ? msg.content : undefined));
         if (!input) {
           d.log(`無視(state が無い): session-id=${sessionId}`);
           return;
         }
-        activeSessions.add(sessionId);
-        d.queue.submit(d.makeJob(input, "reply", () => activeSessions.delete(sessionId)));
+        d.queue.submit(d.makeJob(input, "reply", () => {}));
         return;
       }
       case "server-info": {
@@ -299,13 +291,6 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
   }
   setBashWorkspace(config.workspace);
 
-  // 前回の server が残した claude を止めた cap へ failed を返す（止めたのは指示を受け付ける前）
-  for (const parentId of reaped) {
-    await workerDeps.sendToCap(parentId, { status: "failed", content: REAPED_CONTENT }).catch((e: unknown) =>
-      log(`孤児回収の failed を返せない: to=${parentId} ${e instanceof Error ? e.message : String(e)}`),
-    );
-  }
-
   const stop = async (): Promise<void> => {
     if (closing) return;
     closing = true;
@@ -336,8 +321,6 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
   log(`常駐開始: name=${name} version=${serverVersion}`);
   return { stop, exitCode: () => 0, name };
 }
-
-const REAPED_CONTENT = "server の再起動で worker を止めた（最後の出力は無い）";
 
 /**
  * 起動時: workers/ の state.json の session で、まだ生きている claude -p を止める。

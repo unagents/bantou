@@ -25,11 +25,9 @@ export interface WorkerTracker {
   readonly silentMs: number;
   /** 書き込みを記録する（時刻は center が受けた時刻。tracker の `at` は検証だけに使う）。 */
   note(parentId: string): void;
-  /** launch を送った時刻の基準（まだ書き込みが無い間も、60 秒は running と見せる）。 */
-  launched(parentId: string): void;
   /** 記録を消す（remote_stop）。 */
   forget(parentId: string): void;
-  /** 最後の書き込み（無ければ launch）の時刻（ms）。無ければ undefined。 */
+  /** 最後の書き込みの時刻（ms）。無ければ undefined。 */
   lastAt(parentId: string): number | undefined;
   /** 最後の書き込みの時刻から SILENT_MS 以内なら running、それ以外は stopped。 */
   stateOf(parentId: string): WorkerState;
@@ -48,10 +46,6 @@ export function createWorkerTracker(opts: { now?: () => number; silentMs?: numbe
   return {
     silentMs,
     note(id) {
-      last.set(id, now());
-      emit(id);
-    },
-    launched(id) {
       last.set(id, now());
       emit(id);
     },
@@ -125,7 +119,7 @@ const reject = (socket: Duplex, status: string): void => {
  */
 export function attachWorkerWs(http: Server, opts: { token: string; tracker: WorkerTracker; log: Logger }): { close: () => void } {
   const { token, tracker, log } = opts;
-  const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
+  const wss = new WebSocketServer({ noServer: true });
   const onUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer): void => {
     let url: URL;
     try {
