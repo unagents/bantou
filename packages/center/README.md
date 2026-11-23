@@ -112,7 +112,7 @@ center は wrapper 経由の session（master-cap）を起動するたび（新�
 
 ## tools
 
-概念は `docs/concept.md`、設計の経緯は `docs/design/center-tools.md`。`session_*` が A（番頭が使う、center 上の master-cap）、`remote_*` が B（center が master-cap に持たせる、server への指示の道具）。`rc_*` `server_*` は従来の tool で、そのまま残している。窓口は 2 つに分かれる（「窓口の分離」）。外向け `/mcp` の tool は下の表のうち `remote_send` / `remote_create`（session 向け `/mcp/session` だけ）を除いたもの（`worker_reply` は両方にある。desktop は `center_call` で外向けの `worker_reply` を呼ぶ）。
+概念は `docs/concept.md`。`session_*` が A（番頭が使う、center 上の master-cap）、`remote_*` が B（center が master-cap に持たせる、server への指示の道具）。`rc_*` `server_*` は従来の tool で、そのまま残している。窓口は 2 つに分かれる（「窓口の分離」）。外向け `/mcp` の tool は下の表のうち `remote_send` / `remote_create`（session 向け `/mcp/session` だけ）を除いたもの（`worker_reply` は両方にある。desktop は `center_call` で外向けの `worker_reply` を呼ぶ）。
 
 出力は全て JSON 文字列を 1 つの text content に入れて返す。例外・失敗は `isError: true`（例外は `{ "error": "..." }`）。
 

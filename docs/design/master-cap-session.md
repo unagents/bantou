@@ -1,6 +1,6 @@
 # master-cap セッションの起動と出力配信（設計、2026-11-01）
 
-前提は `docs/concept.md`。center の tool 仕様は `docs/design/center-tools.md`。本書はユーザーと合意した方針と、その根拠になった実測をまとめる。未実装。
+前提は `docs/concept.md`。本書はユーザーと合意した方針と、その根拠になった実測をまとめる。未実装。
 
 ## 背景（経路テストの結果）
 

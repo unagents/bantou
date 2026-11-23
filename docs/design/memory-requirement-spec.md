@@ -75,7 +75,7 @@ requirement の状態の持ち方、requirement の category の最終一覧、1
 ### 1.6 remote の task の id の付き方
 
 - `task_id` は **center が `remote_send` ごとに採番**する: `t-<時刻の 36 進>-<乱数 3 byte の hex>`（`remotes.ts:306-307` の `newTaskId`、使用は `remotes.ts:1779`）。文字種は `TASK_ID_PATTERN = /^[A-Za-z0-9_-]+$/`（`packages/protocol/src/envelope.ts:27`）。
-- server は同じ cap の別の task を task ごとの指揮（lane）で並行に動かす（`docs/design/cap-orchestration.md:100-106`）。**server は task_id の重複を除かない**（`packages/center/src/tools.ts:436`、`remotes.ts:1755`）。
+- server は同じ cap の別の task を task ごとの指揮（lane）で並行に動かす。**server は task_id の重複を除かない**（`packages/center/src/tools.ts:436`、`remotes.ts:1755`）。
 - cap 内部で cap / worker が task をさらに分けても、それを表す id は protocol に無い（`task_id` は center の 1 回の `remote_send` に対応する 1 つだけ。上記の通り）。
 
 ## 2. 全体像

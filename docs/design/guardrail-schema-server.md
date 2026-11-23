@@ -4,7 +4,7 @@
 - 基点: `develop` 4d98817（0.1.62）
 - 範囲: 設計だけ。code・test・設定は変えていない。
 - 書き方: 【事実】は repo の code / docs を開いて確かめた事（`file:行`。repo root からの path）。【推測】は確かめていない解釈。【未確認】は実測・他 project の決定が要る事。決まっていない点は「未決 #N」（6 節）。
-- 関係する設計: `docs/design/center-graphql-server.md`（`origin/docs/center-graphql-server`。進行中の center の設計。設定は全部 client から変えて center の host に保存する。この設計はそれに合わせる）、`docs/design/project-settings.md`、`docs/design/center-tools.md`。
+- 関係する設計: `docs/design/center-graphql-server.md`（`origin/docs/center-graphql-server`。進行中の center の設計。設定は全部 client から変えて center の host に保存する。この設計はそれに合わせる）、`docs/design/project-settings.md`。
 
 ## 0. 利用者の指示（原文）と、この設計の範囲
 
