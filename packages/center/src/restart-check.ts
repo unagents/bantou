@@ -5,6 +5,7 @@
  * 最初の入力で「app が再起動した事」を知らせて状況の確認を促す。印は center の process 内だけに持つ（再起動をまたいで残さない）。
  * 1 回だけ: 送る前に印を消す。入力が届かなくても再送しない（U8 の A）。リセッション待ちの session には送らない（2.3）。
  */
+import { submitFirstInput } from "./first-input.js";
 import type { Logger } from "./log.js";
 
 /** 最初の入力の本文（1 行。改行を含めない。2.5）。 */
@@ -31,8 +32,6 @@ export interface RestartCheckDeps {
   submitDelayMs?: number;
 }
 
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
-
 export function createRestartChecker(deps: RestartCheckDeps): RestartChecker {
   const { log, core } = deps;
   const submitDelayMs = deps.submitDelayMs ?? 400;
@@ -46,10 +45,7 @@ export function createRestartChecker(deps: RestartCheckDeps): RestartChecker {
       return;
     }
     try {
-      // 本文は bracketed paste で 1 回の貼り付けとして入れ、Enter は少し置いて別に送る
-      if (!core.input(session, Buffer.from(`\u001b[200~${RESTART_CHECK_TEXT}\u001b[201~`))) throw new Error("session が実行中でない");
-      await sleep(submitDelayMs);
-      if (!core.input(session, Buffer.from("\r"))) throw new Error("session が実行中でない");
+      await submitFirstInput(core, session, RESTART_CHECK_TEXT, submitDelayMs);
       log(`app 再起動の確認の最初の入力を送った: session=${session}`);
     } catch (e) {
       log(`app 再起動の確認の最初の入力を送れない: session=${session} ${e instanceof Error ? e.message : String(e)}`);
@@ -76,4 +72,14 @@ export function createRestartChecker(deps: RestartCheckDeps): RestartChecker {
     },
     pending: (session) => marks.has(session),
   };
+}
+
+/**
+ * 印を付けたまま止まった・眠った・消えた・リセッションで起動し直した session の印を外す（U2 の A）。`events`（EventHub）の通知を見る。戻り値は購読の解除。
+ * `sleep` は眠った時と起きた時の両方で流れるが、起きた時は印が無いので何も起きない（`wake` は印を付けない）。
+ */
+export function cancelOnSessionEvents(events: { subscribe: (l: (ev: { reason: string; name: string }) => void) => () => void }, checker: Pick<RestartChecker, "cancel">): () => void {
+  return events.subscribe((ev) => {
+    if (ev.reason === "sleep" || ev.reason === "deleted" || ev.reason === "restarted") checker.cancel(ev.name);
+  });
 }
