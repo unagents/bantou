@@ -310,7 +310,6 @@ export function createRemoteManager(opts: {
       if (ws === undefined) throw new Error("launch を送れない: center の ws の宛先が決まらない（bind が loopback で、config の publicHost が無い。server から届く宛先を publicHost に書く）");
       const parentId = capSessionName(input.owner);
       await link.launch(input.server, { parentId, ...(model !== undefined ? { model } : {}), prompt: input.prompt, ws });
-      tracker.launched(parentId);
       let rec = find(input.owner, input.server);
       if (!rec) {
         rec = { remote_id: remoteIdOf(parentId, input.server), session: input.owner, server: input.server, serverName: input.server, ...(model !== undefined ? { model } : {}), createdAt: new Date(nowMs()).toISOString() };

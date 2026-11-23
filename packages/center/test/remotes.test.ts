@@ -71,6 +71,7 @@ test("send: parent-id = cap の名前（<session>-cap）、model 省略は既定
   await s.manager.restore();
   const r = await s.manager.send({ owner: "pm1", server: "bantou-server-aaaaaaaaaa", prompt: "do it" });
   assert.deepEqual(r, { remote_id: "pm1-cap@bantou-server-aaaaaaaaaa", server: "bantou-server-aaaaaaaaaa", sent: true });
+  s.tracker.note("pm1-cap");
   const launch = s.calls.find((c) => c.op === "launch");
   assert.deepEqual(launch, { op: "launch", server: "bantou-server-aaaaaaaaaa", arg: { parentId: "pm1-cap", prompt: "do it", ws: WS } });
   assert.equal("model" in (launch as { arg: object }).arg, false, "model を省くと launch に model を入れない");
@@ -121,6 +122,7 @@ test("send: 不正な入力・ws の宛先が無い・送信失敗は投げ、�
 test("state: ws の最後の書き込みから 60 秒以内は running、無音なら done + finishedAt（最後の書き込みの時刻）。書き込みで running に戻る", async () => {
   const s = setup();
   await s.manager.send({ owner: "pm1", server: "srv", prompt: "x" });
+  s.tracker.note("pm1-cap");
   s.clock.advance(59_000);
   assert.equal(s.manager.list()[0]!.state, "running");
   s.clock.advance(1_000);
@@ -136,6 +138,7 @@ test("state: ws の最後の書き込みから 60 秒以内は running、無音�
 test("summary の変化は onSummaryChange で知らせる（running の件数が変わった時だけ）", async () => {
   const s = setup();
   await s.manager.send({ owner: "pm1", server: "srv", prompt: "x" });
+  s.tracker.note("pm1-cap");
   assert.deepEqual(s.events, ["pm1"]);
   s.tracker.note("pm1-cap");
   assert.deepEqual(s.events, ["pm1"]);
@@ -162,6 +165,7 @@ test("stop: 同じ cap の名前で他の server の控えが残る間は、ws �
   const s = setup();
   await s.manager.send({ owner: "pm1", server: "srv-a", prompt: "x" });
   await s.manager.send({ owner: "pm1", server: "srv-b", prompt: "y" });
+  s.tracker.note("pm1-cap");
   await s.manager.stop({ owner: "pm1", server: "srv-a" });
   assert.notEqual(s.tracker.lastAt("pm1-cap"), undefined);
   s.failWith("send failed");
@@ -215,6 +219,7 @@ test("list / scopeOf: 範囲を狭めた後の範囲外の自分の cap は既�
 test("wait: 止まっている cap があれば即返す。動いている間は無音 60 秒で返る（書き込みで延びる）。timeout は running のまま返す", async () => {
   const s = setup();
   await s.manager.send({ owner: "pm1", server: "srv", prompt: "x" });
+  s.tracker.note("pm1-cap");
   // 実時間の待ちを短くするため、tracker / manager の時計は進めて待ちを起こす
   const waiting = s.manager.wait({ owner: "pm1", timeoutSec: 600 });
   let settled = false;
@@ -238,6 +243,7 @@ test("wait: 止まっている cap があれば即返す。動いている間は
   // 動いている cap は timeout で running のまま返す
   const t = setup();
   await t.manager.send({ owner: "pm1", server: "srv", prompt: "x" });
+  t.tracker.note("pm1-cap");
   const timeoutRun = t.manager.wait({ owner: "pm1", timeoutSec: 1 });
   t.clock.advance(1_000);
   t.tracker.note("pm1-cap");
@@ -250,6 +256,7 @@ test("wait: 対象が無い・owner 無しで remote_id 省略・待っている
   await assert.rejects(() => s.manager.wait({ owner: "pm1" }), /待つ remote が無い/);
   await assert.rejects(() => s.manager.wait({}), /owner/);
   await s.manager.send({ owner: "pm1", server: "srv", prompt: "x" });
+  s.tracker.note("pm1-cap");
   const waiting = s.manager.wait({ owner: "pm1", timeoutSec: 600 });
   const rejected = assert.rejects(() => waiting, /止められた/);
   await new Promise((r) => setTimeout(r, 20));
