@@ -6,17 +6,30 @@ with agent-messenger's own discovery order; bantou has no connection setting. Se
 tool, `to = "bantou-core"`, and put **one JSON object** in the text.
 
 This document covers two message families: work session ↔ `bantou-core`
-(`ask` / `ping`), and agent ↔ center (MCP tools,
-see "center tools"). The server protocol is `packages/protocol/messenger/PROTOCOL.md`.
+(`task` / `ask` / `ping`), and agent ↔ center (MCP tools,
+see "center tools").
 
 ## Common fields
 
 | key | required | meaning |
 |---|---|---|
 | `bantou` | yes | protocol version, always `1` |
-| `type` | yes | `ask` |
+| `type` | yes | `ask` or `task` |
 | `task_id` | yes | stable task id = frontmatter `id` of the task md. `[A-Za-z0-9_-]` only |
 | `session` | no | session name (= tag). Defaults to the sender's messenger name |
+
+## `task` — create / update a task
+
+```json
+{"bantou":1,"type":"task","task_id":"t-cr001","title":"xlsx 取込の列マッピング","status":"Doing"}
+```
+
+- Unknown `task_id`: a Cork-format md is created (`<title>.md`, frontmatter
+  `id` / `status` / `order` / `tags: [session]` / `date`).
+- `body` (what the work is: goal, concrete work, done condition) becomes the
+  md body; sending it again replaces the body.
+- Known `task_id`: `status` (and `body` if given) is updated. The title (= file name) is
+  never changed by messages.
 
 ## `ask` — wait for the user's reply
 
@@ -109,7 +122,8 @@ Changing the definition needs a new protocol
 ## center tools
 
 The center is an MCP server (stdio transport). An
-agent calls its tools to run `claude remote-control` per project. Config: `~/.config/bantou/center.json`.
+agent calls its tools to run `claude remote-control` per project and to operate
+caps and workers on servers. Config: `~/.config/bantou/center.json`.
 Tool outputs are JSON text. A failure sets `isError`.
 
 | tool | input | output |
@@ -119,6 +133,12 @@ Tool outputs are JSON text. A failure sets `isError`.
 | `rc_stop` | `project` | remote-control record |
 | `rc_status` | `project` | remote-control record |
 | `server_list` | none | `[{ name, connected, reachable, peerId, serverPeer }]` |
+| `remote_send` | `goal`, `repo?`, `branch?`, `deliverables?`, `verify?`, `constraints?`, `workers?`, `server?`, `worker_model?` | `{ remote_id, server, serverName, state: "running", created, worker_model? }` |
+| `remote_create` | same | alias of `remote_send` (same handling) |
+| `worker_reply` | `remote_id?`, `worker_id`, `text`, `server?` | `{ remote_id, server, worker_id, accepted: true }` (also on `/mcp` for the desktop). Only the caller's cap (no `remote_id` = the caller's cap) |
+| `remote_stop` | `remote_id?`, `server?`, `force?` | `{ remote_id, deleted, stopped, session_cleared, previous_session_id?, workers_stopped?, warning? }` Only the caller's cap, or the old shared cap named by `remote_id` |
+| `remote_list` | `include_shared?` | `RemoteView[]` of the caller's caps; `include_shared: true` adds the old shared cap (no session) |
+| `remote_wait` | `remote_id?`, `server?`, `timeout_sec?` | the finished `RemoteView`. Only the caller's caps (or the old shared cap named by `remote_id`) |
 
 Remote-control record:
 
