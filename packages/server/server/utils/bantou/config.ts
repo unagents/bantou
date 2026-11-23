@@ -95,6 +95,8 @@ export interface Config {
   namePrefix?: string;
   /** worker に載せる追加の stdio MCP。name → 定義。 */
   extraMcp?: Record<string, ExtraMcpServer>;
+  /** openspec-mcp の URL（http）。無ければ worker の mcp-config に openspec を足さない。 */
+  openspecUrl?: string;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -293,6 +295,9 @@ export async function loadConfig(path: string, cpus: number = availableCpus()): 
   }
   const session = parseSession(obj.session, path, cpus);
   const namePrefix = obj.namePrefix === undefined ? undefined : assertNamePrefix(obj.namePrefix, `config の namePrefix（${path}）`);
+  if (obj.openspecUrl !== undefined && (typeof obj.openspecUrl !== "string" || obj.openspecUrl.length === 0 || obj.openspecUrl.includes("\0"))) {
+    throw new Error(`config の openspecUrl は空でない文字列: ${path}`);
+  }
   // root 構成では claude の設定も root 配下に置く（明示指定があればそちら）
   if (rootMode && session.env.CLAUDE_CONFIG_DIR === undefined) {
     session.env.CLAUDE_CONFIG_DIR = join(ws, ".claude");
@@ -304,5 +309,6 @@ export async function loadConfig(path: string, cpus: number = availableCpus()): 
     session,
     ...(namePrefix !== undefined ? { namePrefix } : {}),
     extraMcp: parseExtraMcp(obj.extraMcp, path),
+    ...(obj.openspecUrl !== undefined ? { openspecUrl: obj.openspecUrl as string } : {}),
   };
 }

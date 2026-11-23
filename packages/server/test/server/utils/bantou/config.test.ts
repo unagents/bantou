@@ -48,6 +48,14 @@ test("config: capBashSandbox は既定 false、true / false を受ける", async
   assert.equal((await load({ workspace: "/w", session: { capBashSandbox: false } })).session.capBashSandbox, false);
 });
 
+test("config: openspecUrl は既定なし。置けば読む。空・文字列以外は拒否", async () => {
+  assert.equal((await load({ workspace: "/w" })).openspecUrl, undefined);
+  assert.equal("openspecUrl" in (await load({ workspace: "/w" })), false);
+  assert.equal((await load({ workspace: "/w", openspecUrl: "http://127.0.0.1:9000/mcp" })).openspecUrl, "http://127.0.0.1:9000/mcp");
+  await assert.rejects(() => load({ workspace: "/w", openspecUrl: "" }), /openspecUrl/);
+  await assert.rejects(() => load({ workspace: "/w", openspecUrl: 1 }), /openspecUrl/);
+});
+
 test("config: 既定値（bind は 127.0.0.1）", async () => {
   const c = await load({ workspace: "/w" });
   assert.deepEqual(c.broker, { port: 7901, bind: "127.0.0.1", discovery: "on", token: "" });

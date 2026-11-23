@@ -11,6 +11,7 @@
  * bantou は YAML の中身を解釈しない。
  */
 import { createHmac } from "node:crypto";
+import type { SchemaDiscovery } from "@agent-hand/bantou-protocol";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { ErrorCode, ListResourcesRequestSchema, ListResourceTemplatesRequestSchema, McpError, ReadResourceRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { readCached } from "./mcp-source.js";
@@ -61,7 +62,12 @@ export const schemaTokenOf = (centerToken: string): string => createHmac("sha256
 
 /** `x-schema-discovery` header の値（プロトコルの JSON 1 本。値は ASCII のみ）。 */
 export function schemaDiscoveryValue(url: string, centerToken: string): string {
-  return JSON.stringify({ type: "http", url, headers: { Authorization: `Bearer ${schemaTokenOf(centerToken)}` } });
+  return JSON.stringify(schemaDiscoveryOf(url, centerToken));
+}
+
+/** 同じ中身の object（launch の `schema`）。Authorization の値は log に出さない。 */
+export function schemaDiscoveryOf(url: string, centerToken: string): SchemaDiscovery {
+  return { type: "http", url, headers: { Authorization: `Bearer ${schemaTokenOf(centerToken)}` } };
 }
 
 /**

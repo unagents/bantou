@@ -100,10 +100,16 @@ const isLoopbackOrWildcard = (h: string): boolean => ["127.0.0.1", "localhost", 
  * host は publicHost（config）、無ければ bind（loopback・wildcard 以外の時だけ）。決まらなければ undefined。
  */
 export function workerWsUrl(opts: { bind: string; port: number; token: string; publicHost?: string }): string | undefined {
+  const h = workerHostOf(opts);
+  if (h === undefined) return undefined;
+  return `ws://${h}:${opts.port}${WORKER_WS_PATH}?token=${encodeURIComponent(opts.token)}`;
+}
+
+/** worker から見える center の host（URL に書ける形）。`ws` と同じ元: publicHost、無ければ bind（loopback・wildcard 以外の時だけ）。決まらなければ undefined。 */
+export function workerHostOf(opts: { bind: string; publicHost?: string }): string | undefined {
   const host = opts.publicHost ?? (isLoopbackOrWildcard(opts.bind) ? undefined : opts.bind);
   if (host === undefined) return undefined;
-  const h = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
-  return `ws://${h}:${opts.port}${WORKER_WS_PATH}?token=${encodeURIComponent(opts.token)}`;
+  return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
 }
 
 const digest = (s: string): Buffer => createHash("sha256").update(s).digest();

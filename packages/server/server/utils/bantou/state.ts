@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { isSchemaDiscovery, type SchemaDiscovery } from "@agent-hand/bantou-protocol";
 import { isValidWorkerId, stateFile, workerDir } from "./paths";
 
 /**
@@ -14,6 +15,8 @@ export interface WorkerState {
   parent_id: string;
   /** launch の ws。 */
   ws: string;
+  /** launch の schema（reply の起こし直しで openspec に渡す。ws と同じく生のまま持つ。log には出さない）。 */
+  schema?: SchemaDiscovery;
   /** launch の model。省略されたら無し（--model を付けない）。 */
   model?: string;
   last_started_at: string | null;
@@ -47,6 +50,7 @@ export async function readState(dir: string): Promise<WorkerState | undefined> {
     !isString(o.parent_id) ||
     !isString(o.ws) ||
     (o.model !== undefined && !isString(o.model)) ||
+    (o.schema !== undefined && !isSchemaDiscovery(o.schema)) ||
     !isNullableString(o.last_started_at) ||
     !isNullableString(o.last_finished_at)
   ) {
@@ -57,6 +61,7 @@ export async function readState(dir: string): Promise<WorkerState | undefined> {
     session_id: o.session_id,
     parent_id: o.parent_id,
     ws: o.ws,
+    ...(o.schema !== undefined ? { schema: o.schema } : {}),
     ...(o.model !== undefined ? { model: o.model } : {}),
     last_started_at: o.last_started_at,
     last_finished_at: o.last_finished_at,

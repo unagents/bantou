@@ -1,6 +1,7 @@
 import type { ChildProcess } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { SchemaDiscovery } from "@agent-hand/bantou-protocol";
 import { killGroup, type RunMode } from "./claude";
 import { stripNpxEnv } from "./child-env";
 import type { Config } from "./config";
@@ -35,6 +36,8 @@ export interface WorkerRunInput {
   dir: string;
   parentId: string;
   ws: string;
+  /** launch の schema。openspecUrl が在る時だけ worker の openspec に渡る。 */
+  schema?: SchemaDiscovery;
   /** 省略されたら --model を付けない。 */
   model?: string;
   mode: RunMode;
@@ -82,6 +85,7 @@ export function createWorkerJob(deps: WorkerDeps, input: WorkerRunInput, kind: "
         session_id: input.sessionId,
         parent_id: input.parentId,
         ws: input.ws,
+        ...(input.schema !== undefined ? { schema: input.schema } : {}),
         model: input.model,
         last_started_at: startedAt,
         last_finished_at: null,
@@ -97,7 +101,13 @@ export function createWorkerJob(deps: WorkerDeps, input: WorkerRunInput, kind: "
       const mcpConfigFile = join(logs, "mcp.json");
       const appendSystemPromptFile = join(logs, "system-prompt.md");
       const extra = buildExtraMcp(config.extraMcp ?? {}, "worker", log);
-      const mcpServers = { bantou: { type: "http", url, headers: { [WORKER_ID_HEADER]: input.workerId } }, ...extra.servers };
+      // schema（launch）と openspecUrl（config）が両方在る時だけ openspec を足す。schema の値は header に入れるだけで log には出さない
+      const openspec = config.openspecUrl !== undefined && input.schema !== undefined;
+      const mcpServers = {
+        bantou: { type: "http", url, headers: { [WORKER_ID_HEADER]: input.workerId } },
+        ...extra.servers,
+        ...(openspec ? { openspec: { type: "http", url: config.openspecUrl, headers: { "x-schema-discovery": JSON.stringify(input.schema) } } } : {}),
+      };
       // extraMcp の env を含みうるので本人だけが読める mode で書く
       await writeMcpConfigFile(mcpConfigFile, { mcpServers });
       await writeFile(appendSystemPromptFile, WORKER_GUIDE + "\n");
@@ -122,7 +132,7 @@ export function createWorkerJob(deps: WorkerDeps, input: WorkerRunInput, kind: "
         mcpConfigFile,
         appendSystemPromptFile,
         jsonSchema: WORKER_SCHEMA_JSON,
-        extraAllowedTools: ["mcp__bantou__bash", ...extra.allowedTools],
+        extraAllowedTools: ["mcp__bantou__bash", ...extra.allowedTools, ...(openspec ? ["mcp__openspec__*"] : [])],
         onSpawn: (c) => {
           child = c;
           // spawn の間に stop が来ていた
@@ -163,5 +173,5 @@ export function createWorkerJob(deps: WorkerDeps, input: WorkerRunInput, kind: "
 export async function resumeInput(dir: string, prompt: string): Promise<WorkerRunInput | undefined> {
   const st = await readState(dir);
   if (st === undefined) return undefined;
-  return { workerId: st.worker_id, dir, parentId: st.parent_id, ws: st.ws, ...(st.model !== undefined ? { model: st.model } : {}), mode: "resume", sessionId: st.session_id, prompt };
+  return { workerId: st.worker_id, dir, parentId: st.parent_id, ws: st.ws, ...(st.schema !== undefined ? { schema: st.schema } : {}), ...(st.model !== undefined ? { model: st.model } : {}), mode: "resume", sessionId: st.session_id, prompt };
 }

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import type { SchemaDiscovery } from "@agent-hand/bantou-protocol";
 import { createRemoteManager, type RemoteManager, type RemoteRecord } from "../src/remotes.js";
 import type { LaunchInput, ReplyInput, ServerLink } from "../src/server-link.js";
 import { createWorkerTracker } from "../src/worker-ws.js";
@@ -43,7 +44,7 @@ function memStore(initial: RemoteRecord[] = []) {
   };
 }
 
-function setup(o: { initial?: RemoteRecord[]; servers?: Record<string, string[] | undefined>; ws?: string | undefined } = {}) {
+function setup(o: { initial?: RemoteRecord[]; servers?: Record<string, string[] | undefined>; ws?: string | undefined; schema?: SchemaDiscovery } = {}) {
   let t = 1_000_000;
   const clock = { now: () => t, advance: (ms: number) => void (t += ms) };
   const tracker = createWorkerTracker({ now: clock.now, silentMs: 60_000 });
@@ -57,6 +58,7 @@ function setup(o: { initial?: RemoteRecord[]; servers?: Record<string, string[] 
     log: () => {},
     tracker,
     wsUrl: () => ("ws" in o ? o.ws : WS),
+    ...(o.schema !== undefined ? { schema: () => o.schema } : {}),
     serversOf: (owner) => o.servers?.[owner],
     memoryEvents: { task: (s, x) => void memoryCalls.push(`task:${s}:${x.capId}:${x.goal}`), reply: (s, x) => void memoryCalls.push(`reply:${s}:${x.capId}:${x.workerId}:${x.text}`) },
     onSummaryChange: (s) => void events.push(s),
@@ -86,6 +88,18 @@ test("send: parent-id = cap の名前（<session>-cap）、model 省略は既定
   // server-info は版の表示のために送る
   assert.ok(s.calls.some((c) => c.op === "server-info" && c.server === "bantou-server-aaaaaaaaaa"));
   assert.deepEqual(s.manager.summary("pm1"), { running: 1, waitingReply: 0 });
+});
+
+test("send: schema の指し先が在れば launch に載せる（無ければ schema を入れない）", async () => {
+  const schema: SchemaDiscovery = { type: "http", url: "http://10.0.0.5:7910/mcp/schemas", headers: { Authorization: "Bearer x" } };
+  const s = setup({ schema });
+  await s.manager.restore();
+  await s.manager.send({ owner: "pm1", server: "bantou-server-aaaaaaaaaa", prompt: "do it" });
+  assert.deepEqual(s.calls.find((c) => c.op === "launch"), { op: "launch", server: "bantou-server-aaaaaaaaaa", arg: { parentId: "pm1-cap", prompt: "do it", ws: WS, schema } });
+  const n = setup();
+  await n.manager.restore();
+  await n.manager.send({ owner: "pm1", server: "bantou-server-aaaaaaaaaa", prompt: "do it" });
+  assert.equal("schema" in (n.calls.find((c) => c.op === "launch") as { arg: object }).arg, false);
 });
 
 test("send: 同じ session × server は 1 件のまま（model は最後の launch の値）。別 server は別の控え", async () => {

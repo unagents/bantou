@@ -10,14 +10,14 @@ import { createConnectionsStore } from "./mcp-connections.js";
 import { createSecretsStore } from "./mcp-secrets.js";
 import { existsSync, renameSync } from "node:fs";
 import { createMcpSource } from "./mcp-source.js";
-import { applySchemaDiscoveryEnv, schemaSourceFromFile } from "./schema-server.js";
+import { SCHEMA_MCP_PATH, applySchemaDiscoveryEnv, schemaDiscoveryOf, schemaSourceFromFile } from "./schema-server.js";
 import { buildSessionMcp } from "./mcp-session.js";
 import { mkdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { log, setLogFile } from "./log.js";
 import { watchParent } from "./parent-watch.js";
 import { createRemoteManager } from "./remotes.js";
-import { createWorkerTracker, workerWsUrl } from "./worker-ws.js";
+import { createWorkerTracker, workerHostOf, workerWsUrl } from "./worker-ws.js";
 import { createRemoteControlSupervisor } from "./remote-control.js";
 import { createContextUsageTracker } from "./context-usage.js";
 import { createLoginFlow } from "./login.js";
@@ -208,6 +208,12 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     tracker,
     // launch の ws（http で待ち受けていれば、実際の port を使う）。宛先の host が決まらなければ undefined（remote_send が error）
     wsUrl: () => (httpPort === null || !config.token ? undefined : workerWsUrl({ bind: args.bind, port: httpPort, token: config.token, ...(config.publicHost ? { publicHost: config.publicHost } : {}) })),
+    // launch の schema（schema server /mcp/schemas の指し先。host は ws と同じ元、port は http の port）。値は log に出さない
+    schema: () => {
+      if (httpPort === null || !config.token) return undefined;
+      const host = workerHostOf({ bind: args.bind, ...(config.publicHost ? { publicHost: config.publicHost } : {}) });
+      return host === undefined ? undefined : schemaDiscoveryOf(`http://${host}:${httpPort}${SCHEMA_MCP_PATH}`, config.token);
+    },
     store: createJsonListStore(join(stateDir, "remotes.json"), log),
     log,
     onSummaryChange: (name) => events.publish({ reason: "remote", name }),

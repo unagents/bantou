@@ -18,6 +18,7 @@ import {
   SCHEMA_DISCOVERY_ENV,
   SCHEMA_DISCOVERY_HEADER,
   SCHEMA_MCP_PATH,
+  schemaDiscoveryOf,
   schemaDiscoveryValue,
   schemaSourceFromFile,
   schemaTokenOf,
@@ -242,6 +243,13 @@ test("discovery: x-schema-discovery の値は JSON 1 本 { type: http, url, head
   assert.ok(/^[\x20-\x7e]*$/.test(v));
   assert.ok(!v.includes(TOKEN));
   assert.notEqual(schemaTokenOf(TOKEN), schemaTokenOf(TOKEN + "x"));
+});
+
+test("discovery: launch の schema（schemaDiscoveryOf）は header の値と同じ中身で、専用の認証の値（center の token ではない）", () => {
+  const o = schemaDiscoveryOf("http://10.0.0.5:7910/mcp/schemas", TOKEN);
+  assert.equal(JSON.stringify(o), schemaDiscoveryValue("http://10.0.0.5:7910/mcp/schemas", TOKEN));
+  assert.deepEqual(o, { type: "http", url: "http://10.0.0.5:7910/mcp/schemas", headers: { Authorization: `Bearer ${schemaTokenOf(TOKEN)}` } });
+  assert.ok(!JSON.stringify(o).includes(TOKEN));
 });
 
 test("discovery の env: http で待ち受けている時だけ置く。host・port は center が組み立てる", () => {

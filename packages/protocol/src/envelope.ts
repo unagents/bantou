@@ -16,6 +16,14 @@ export interface MessageBase {
   order: string;
 }
 
+/** `schema` of launch: the JSON object put as-is in the `x-schema-discovery` header of openspec-mcp. */
+export interface SchemaDiscovery {
+  type: "http";
+  /** URL of the center's `/mcp/schemas`. Non-empty. */
+  url: string;
+  headers: { Authorization: string };
+}
+
 /** center -> server: start a worker for the cap `parent-id`. */
 export interface LaunchMessage extends MessageBase {
   callType: "invoke";
@@ -28,6 +36,8 @@ export interface LaunchMessage extends MessageBase {
   prompt: string;
   /** Destination of the center's ws. Non-empty. */
   ws: string;
+  /** Where the center's schema server is. Optional. */
+  schema?: SchemaDiscovery;
 }
 
 /** center -> server: stop the workers of the cap `parent-id`. */

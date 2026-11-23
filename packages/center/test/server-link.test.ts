@@ -75,6 +75,20 @@ test("connect: center の名前で client を作る。登録に失敗（同名�
   await assert.rejects(() => b.link.stop("srv", "pm1-cap"), /接続していない/);
 });
 
+test("launch: schema があれば本文に入る（guard を通る）。無ければ schema を入れない", async () => {
+  const { link, client } = setup();
+  await link.connect();
+  const schema = { type: "http" as const, url: "http://h:7910/mcp/schemas", headers: { Authorization: "Bearer x" } };
+  await link.launch("srv", { parentId: "pm1-cap", prompt: "p", ws: "ws://h/ws/worker", schema });
+  await link.launch("srv", { parentId: "pm1-cap", prompt: "p", ws: "ws://h/ws/worker" });
+  const a: unknown = JSON.parse(client.sent[0]!.text);
+  const b = JSON.parse(client.sent[1]!.text) as Record<string, unknown>;
+  assert.deepEqual((a as { schema: unknown }).schema, schema);
+  assert.ok(isLaunchMessage(a));
+  assert.equal("schema" in b, false);
+  await link.close();
+});
+
 test("launch: 宛先は server の名前そのまま。本文は 1 つの JSON（invoke / launch）で、meta = bantou protocol", async () => {
   const { link, client } = setup();
   await link.connect();
