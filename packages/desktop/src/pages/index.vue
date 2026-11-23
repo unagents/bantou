@@ -223,11 +223,11 @@ watch(modalOpen, (v) => {
                 size="xs"
                 icon="i-lucide-moon"
                 :aria-label="`${g.name} をスリープさせる`"
-                :disabled="g.sleeping"
-                :title="g.sleeping ? 'スリープ中（開くと起きる）' : 'スリープさせる（引継ぎを書かせてから claude を止めて空ける。開くと新しい会話で起き、引継ぎが渡される）'"
+                :disabled="sleepButtonState(g).disabled"
+                :title="sleepButtonState(g).title"
                 data-testid="session-sleep"
                 :data-name="g.name"
-                @click="sleep(g.name)"
+                @click="clickSleep(g, sleep)"
               />
             </li>
           </ul>

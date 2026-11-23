@@ -40,7 +40,7 @@ export const updateSession = (name: string, change: { newName?: string; path?: s
     moveDir: change.path?.trim() ? (change.move ?? null) : null,
   });
 
-/** Ask the center to put a session to sleep (`session_sleep`): it has the agent write a handoff and stops the claude after the turn. Answers at once (`accepted`/`pending`); only `name` is read here. */
+/** Ask the center to put a session to sleep (`session_sleep`). A refusal comes back as an error (the caller shows it). */
 export const sleepSession = (name: string) => getTransport().invoke<Session>("session_sleep", { name });
 
 /** Wake a sleeping session (`session_wake`): its claude starts as a new conversation and the center hands it the sleep handoff. Called when the session is opened. */
