@@ -3,7 +3,7 @@
  * - 同時に動かす worker は maxParallel 本まで（reply の起こし直しも数える）。
  * - 負荷平均（1 分）が CPU 数を超えている間は、空きが在っても新しく起こさない。
  * - launch は来た順の queue。空きが在ればすぐ起こし、worker が終わるたびに先頭を 1 本起こす。
- * - reply の起こし直しは queue では新しい launch より先（reply 同士は来た順）。同じ session の run が終わっていること。
+ * - reply の起こし直しは queue では新しい launch より先（reply 同士は来た順）。同じ worker の run が終わっていること。
  * - stop は queue で待っている物も外す。
  */
 
@@ -13,8 +13,8 @@ export interface Job {
   kind: "launch" | "reply";
   /** 起こした cap の名前（stop の照合用）。 */
   parentId: string;
-  /** claude の session（reply の起こし直しは、同じ session の run が終わってから）。 */
-  sessionId: string;
+  /** worker の id（reply の起こし直しは、同じ worker の run が終わってから）。 */
+  workerId: string;
   /** 起こす。返った Promise が終わった時が、その worker の終わり。reject しない。 */
   start(): Promise<void>;
   /** 動いている worker を止める。 */
@@ -53,12 +53,12 @@ export function createWorkQueue(o: QueueOptions): WorkQueue {
 
   const waiting = (): number => replies.length + launches.length;
 
-  /** 同じ session の run が動いている間は、その reply の起こし直しは起こせない。 */
-  const sessionRunning = (sessionId: string): boolean => [...running].some((j) => j.sessionId === sessionId);
+  /** 同じ worker の run が動いている間は、その reply の起こし直しは起こせない。 */
+  const workerRunning = (workerId: string): boolean => [...running].some((j) => j.workerId === workerId);
 
-  /** 起こす物: reply（同じ session の run が終わっている物の先頭）、無ければ launch の先頭。 */
+  /** 起こす物: reply（同じ worker の run が終わっている物の先頭。待っている reply は飛ばす）、無ければ launch の先頭。 */
   const next = (): Job | undefined => {
-    const i = replies.findIndex((r) => !sessionRunning(r.sessionId));
+    const i = replies.findIndex((r) => !workerRunning(r.workerId));
     return i >= 0 ? replies.splice(i, 1)[0] : launches.shift();
   };
 

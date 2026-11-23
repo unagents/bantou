@@ -3,13 +3,13 @@ import assert from "node:assert/strict";
 import { createWorkQueue, type Job } from "../../../../server/utils/bantou/queue";
 
 /** 手で終わらせられる job。 */
-function makeJob(kind: "launch" | "reply", parentId: string, name: string, events: string[], sessionId: string = name): Job & { finish(): void; aborted: boolean; cancelledCalled: boolean } {
+function makeJob(kind: "launch" | "reply", parentId: string, name: string, events: string[], workerId: string = name): Job & { finish(): void; aborted: boolean; cancelledCalled: boolean } {
   let done!: () => void;
   const p = new Promise<void>((r) => (done = r));
   const job = {
     kind,
     parentId,
-    sessionId,
+    workerId,
     aborted: false,
     cancelledCalled: false,
     start: () => {
@@ -83,23 +83,48 @@ test("queue: reply は queue で新しい launch より先（reply 同士は来�
   q.close();
 });
 
-test("queue: 動いている session への reply は、その run の終了後に起動する（空きが在っても待ち、終われば launch より先）", async () => {
+test("queue: running の同じ worker への reply は、その run の終了後に起きる（空きが在っても待ち、終われば launch より先。reply 同士は来た順）", async () => {
   const ev: string[] = [];
   const q = createWorkQueue(opts({ maxParallel: 3 }));
-  const run = makeJob("launch", "cap", "run", ev, "sess-1");
-  const reply = makeJob("reply", "cap", "reply", ev, "sess-1");
-  const other = makeJob("launch", "cap", "other", ev, "sess-2");
+  const run = makeJob("launch", "cap", "run", ev, "w-1");
+  const reply1 = makeJob("reply", "cap", "reply1", ev, "w-1");
+  const reply2 = makeJob("reply", "cap", "reply2", ev, "w-1");
+  const other = makeJob("launch", "cap", "other", ev, "w-2");
   q.submit(run);
-  q.submit(reply);
-  assert.deepEqual(ev, ["start:run"], "空きが在っても、同じ session の run が終わるまで reply は起こさない");
-  assert.deepEqual(q.counts(), { running: 1, queued: 1 });
+  q.submit(reply1);
+  q.submit(reply2);
+  assert.deepEqual(ev, ["start:run"], "空きが在っても、同じ worker の run が終わるまで reply は起こさない");
+  assert.deepEqual(q.counts(), { running: 1, queued: 2 });
   q.submit(other);
-  assert.deepEqual(ev, ["start:run", "start:other"], "別の session の launch は待たされない");
+  assert.deepEqual(ev, ["start:run", "start:other"], "別の worker の launch は待たされない");
   run.finish();
   await tick();
-  assert.deepEqual(ev, ["start:run", "start:other", "start:reply"]);
-  reply.finish();
+  assert.deepEqual(ev, ["start:run", "start:other", "start:reply1"], "run の終了後に先頭の reply が起きる。reply2 は reply1 の run が終わるまで待つ");
+  reply1.finish();
+  await tick();
+  assert.deepEqual(ev, ["start:run", "start:other", "start:reply1", "start:reply2"]);
+  reply2.finish();
   other.finish();
+  await tick();
+  q.close();
+});
+
+test("queue: 別の worker の reply は、空きが在れば即起きる（待っている reply を飛ばす）", async () => {
+  const ev: string[] = [];
+  const q = createWorkQueue(opts({ maxParallel: 3 }));
+  const run = makeJob("launch", "cap", "run", ev, "w-1");
+  const blocked = makeJob("reply", "cap", "blocked", ev, "w-1");
+  const free = makeJob("reply", "cap", "free", ev, "w-2");
+  q.submit(run);
+  q.submit(blocked);
+  q.submit(free);
+  assert.deepEqual(ev, ["start:run", "start:free"]);
+  assert.deepEqual(q.counts(), { running: 2, queued: 1 });
+  run.finish();
+  await tick();
+  assert.deepEqual(ev, ["start:run", "start:free", "start:blocked"]);
+  blocked.finish();
+  free.finish();
   await tick();
   q.close();
 });
@@ -149,7 +174,7 @@ test("queue: job の start が reject しても queue は止まらない", async
   const ev: string[] = [];
   const logs: string[] = [];
   const q = createWorkQueue(opts({ maxParallel: 1, log: (m) => logs.push(m) }));
-  const bad: Job = { kind: "launch", parentId: "cap", sessionId: "bad", start: () => Promise.reject(new Error("boom")), abort() {} };
+  const bad: Job = { kind: "launch", parentId: "cap", workerId: "bad", start: () => Promise.reject(new Error("boom")), abort() {} };
   const good = makeJob("launch", "cap", "g", ev);
   q.submit(bad);
   q.submit(good);
