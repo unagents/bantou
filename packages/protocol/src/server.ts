@@ -93,10 +93,8 @@ export type ServerCommandType =
   | "task"
   | "worker_reply"
   | "retire_server"
-  | "register_change"
-  | "change_status"
-  | "stop_change"
-  | "change_reply";
+  | "worker_stop"
+  | "register_change";
 
 export interface ServerCommandBase {
   /** Protocol version, always 1. */
@@ -249,12 +247,30 @@ export interface TaskCommand extends ServerCommandBase {
  */
 export interface WorkerReplyCommand extends ServerCommandBase {
   type: "worker_reply";
-  /** AGENT_ID_PATTERN. The cap that owns the worker. */
-  cap_id: string;
+  /** AGENT_ID_PATTERN. The cap that owns the worker. Exactly one of `cap_id` / `change_id`. */
+  cap_id?: string;
+  /** AGENT_ID_PATTERN. The change whose step the worker runs (a worker of a change has no cap). Exactly one of `cap_id` / `change_id`. */
+  change_id?: string;
   /** AGENT_ID_PATTERN. */
   worker_id: string;
   /** Non-empty. */
   text: string;
+}
+
+/**
+ * Stop one worker: the server's existing worker stop (process group kill; a reserved worker's reservation is cancelled).
+ * For a worker of a change the server also records the step and the change as stopped. Reply: worker_stop_result, or error.
+ */
+export interface WorkerStopCommand extends ServerCommandBase {
+  type: "worker_stop";
+  /** AGENT_ID_PATTERN. The cap that owns the worker. Exactly one of `cap_id` / `change_id`. */
+  cap_id?: string;
+  /** AGENT_ID_PATTERN. The change whose step the worker runs. Exactly one of `cap_id` / `change_id`. */
+  change_id?: string;
+  /** AGENT_ID_PATTERN. */
+  worker_id: string;
+  /** AGENT_ID_PATTERN. Cap workers only: refuse a worker of another running task of the cap. */
+  task_id?: string;
 }
 
 /**
@@ -272,7 +288,7 @@ export interface RetireServerCommand extends ServerCommandBase {
   reason?: string;
 }
 
-// -- change (register / status / stop / reply / notices) ---------------------
+// -- change (register / notices) ---------------------------------------------
 // A change is registered with a scope: an ordered list of step references. The server walks the steps in order and
 // never interprets a reference (no step name or kind such as "tasks" is fixed here). The cap-based messages above stay
 // as they are; these are additional messages.
@@ -306,39 +322,9 @@ export interface RegisterChangeCommand extends ServerCommandBase {
   notify_id: string;
 }
 
-/** Ask for the progress of one change, or of all changes when `change_id` is absent. Reply: change_status_result, or error. */
-export interface ChangeStatusCommand extends ServerCommandBase {
-  type: "change_status";
-  /** AGENT_ID_PATTERN. Optional. */
-  change_id?: string;
-}
-
-/** Stop a change: stop its running worker, drop its queued requests. Reply: stop_change_result, or error. */
-export interface StopChangeCommand extends ServerCommandBase {
-  type: "stop_change";
-  /** AGENT_ID_PATTERN. */
-  change_id: string;
-}
-
-/**
- * Answer a worker's question (ask / approve): the worker of a `waiting_reply` step is started again in its session.
- * Reply: change_reply_result, or error.
- */
-export interface ChangeReplyCommand extends ServerCommandBase {
-  type: "change_reply";
-  /** AGENT_ID_PATTERN. */
-  change_id: string;
-  /** AGENT_ID_PATTERN. */
-  worker_id: string;
-  /** Non-empty. */
-  text: string;
-}
-
 export type ServerCommand =
   | RegisterChangeCommand
-  | ChangeStatusCommand
-  | StopChangeCommand
-  | ChangeReplyCommand
+  | WorkerStopCommand
   | RetireServerCommand
   | KickCapCommand
   | ResumeWorkerCommand
@@ -359,10 +345,8 @@ export type ServerReplyType =
   | "task_result"
   | "worker_reply_result"
   | "retire_result"
+  | "worker_stop_result"
   | "register_change_result"
-  | "change_status_result"
-  | "stop_change_result"
-  | "change_reply_result"
   | "error";
 
 /**
@@ -523,7 +507,9 @@ export interface WorkerReplyResultReply {
   bantou: typeof PROTOCOL_VERSION;
   type: "worker_reply_result";
   ok: true;
-  cap_id: string;
+  /** Exactly one of `cap_id` / `change_id`, the one of the command. */
+  cap_id?: string;
+  change_id?: string;
   worker_id: string;
   accepted: true;
 }
@@ -538,56 +524,16 @@ export interface RegisterChangeResultReply {
   state: ChangeState;
 }
 
-/** One step of a change as the server records it. */
-export interface ChangeStepInfo {
-  /** The scope entry, as registered. */
-  ref: string;
-  /** Absent until a worker was started for the step. */
-  worker_id?: string;
-  /** Session of that worker (what the step position is tied to). Absent until known. */
-  session_id?: string;
-  state: StepState;
-}
-
-/** One change as the server records it. */
-export interface ChangeInfo {
-  change_id: string;
-  state: ChangeState;
-  /** Index (0-based) of the current step in `steps`. */
-  step: number;
-  steps: ChangeStepInfo[];
-  /** Why the change is `stopped`. */
-  reason?: string;
-  /** Server clock, ISO 8601. */
-  updated_at: string;
-}
-
-/** Reply to change_status. `board` is the same server board as status_result.board (queue length, resources). */
-export interface ChangeStatusResultReply {
+/** Reply to worker_stop. `stopped` is false when there was nothing to stop (the worker was not running). */
+export interface WorkerStopResultReply {
   bantou: typeof PROTOCOL_VERSION;
-  type: "change_status_result";
+  type: "worker_stop_result";
   ok: true;
-  changes: ChangeInfo[];
-  board?: Record<string, unknown>;
-}
-
-/** Reply to stop_change. */
-export interface StopChangeResultReply {
-  bantou: typeof PROTOCOL_VERSION;
-  type: "stop_change_result";
-  ok: true;
-  change_id: string;
-  stopped: boolean;
-}
-
-/** Reply to change_reply: the worker's start (resume) was queued with the text. */
-export interface ChangeReplyResultReply {
-  bantou: typeof PROTOCOL_VERSION;
-  type: "change_reply_result";
-  ok: true;
-  change_id: string;
+  /** Exactly one of `cap_id` / `change_id`, the one of the command. */
+  cap_id?: string;
+  change_id?: string;
   worker_id: string;
-  accepted: true;
+  stopped: boolean;
 }
 
 /** What the server stopped for a retire. */
@@ -828,7 +774,7 @@ export interface ErrorReply {
   worker_id?: string;
   /** `task_id` of the failed `task`, when known. */
   task_id?: string;
-  /** `change_id` of the failed register_change / stop_change / change_reply / change_status, when known. */
+  /** `change_id` of the failed register_change / worker_reply / worker_stop, when known. */
   change_id?: string;
   /** Machine-readable cause, when there is one. */
   code?: ErrorCode;
@@ -860,9 +806,7 @@ export type ServerReply =
   | WorkerReplyResultReply
   | RetireResultReply
   | RegisterChangeResultReply
-  | ChangeStatusResultReply
-  | StopChangeResultReply
-  | ChangeReplyResultReply
+  | WorkerStopResultReply
   | ErrorReply;
 
 /** Liveness of one cap / worker as seen from its `claude -p` stream-json output. */
@@ -919,8 +863,11 @@ export const WORKER_REPORT_KINDS: readonly WorkerReportKind[] = ["progress", "as
 export interface WorkerReportNotice {
   bantou: typeof PROTOCOL_VERSION;
   type: "worker_report";
-  cap_id: string;
-  /** task_id of the latest `task` of the cap; absent when the cap has had no `task` (only kick_cap). */
+  /** Exactly one of `cap_id` / `change_id`. */
+  cap_id?: string;
+  /** AGENT_ID_PATTERN. The change whose step the worker runs. Only ask / approve of a change worker are sent. */
+  change_id?: string;
+  /** task_id of the latest `task` of the cap; absent when the cap has had no `task` (only kick_cap), and for a change. */
   task_id?: string;
   worker_id: string;
   kind: WorkerReportKind;
@@ -931,28 +878,8 @@ export interface WorkerReportNotice {
 }
 
 /**
- * Notice from server to center: a worker of a change asked a question (ask / approve). The worker's session is closed
- * and its step is `waiting_reply` until a change_reply arrives. progress / done reports are not sent.
- */
-export interface ChangeReportNotice {
-  bantou: typeof PROTOCOL_VERSION;
-  type: "change_report";
-  /** AGENT_ID_PATTERN. Key given at register_change. */
-  notify_id: string;
-  change_id: string;
-  worker_id: string;
-  /** Index (0-based) of the step in the change's `steps`. */
-  step: number;
-  kind: "ask" | "approve";
-  /** The report text as the worker sent it. */
-  text: string;
-  /** Server clock, ISO 8601. */
-  at: string;
-}
-
-/**
- * Notice from server to center: the change was stopped (stop_change) or finished the registered scope (completed).
- * Starts and passes of single steps are not sent (ask change_status).
+ * Notice from server to center: the change was stopped (a worker of it was stopped by worker_stop, or it ended abnormally)
+ * or finished the registered scope (completed). Starts and passes of single steps are not sent.
  */
 export interface ChangeProgressNotice {
   bantou: typeof PROTOCOL_VERSION;
@@ -968,7 +895,7 @@ export interface ChangeProgressNotice {
   reason?: string;
 }
 
-export type ServerNotice = ActivityNotice | WorkerReportNotice | ChangeReportNotice | ChangeProgressNotice;
+export type ServerNotice = ActivityNotice | WorkerReportNotice | ChangeProgressNotice;
 
 // -- guards -------------------------------------------------------------------
 
@@ -1013,10 +940,8 @@ function isCommandType(v: unknown): v is ServerCommandType {
     v === "task" ||
     v === "worker_reply" ||
     v === "retire_server" ||
-    v === "register_change" ||
-    v === "change_status" ||
-    v === "stop_change" ||
-    v === "change_reply"
+    v === "worker_stop" ||
+    v === "register_change"
   );
 }
 
@@ -1028,32 +953,14 @@ export function isStepState(v: unknown): v is StepState {
   return typeof v === "string" && (STEP_STATES as readonly string[]).includes(v);
 }
 
+/** Exactly one of `cap_id` / `change_id` is present, and it is a valid id (the owner of a worker: a cap, or a change). */
+function isCapOrChange(v: Record<string, unknown>): boolean {
+  return (v.cap_id === undefined) !== (v.change_id === undefined) && isValidAgentId(v.cap_id ?? v.change_id);
+}
+
 /** A non-negative integer (a step index). */
 function isIndex(v: unknown): boolean {
   return typeof v === "number" && Number.isInteger(v) && v >= 0;
-}
-
-function isChangeStepInfo(v: unknown): v is ChangeStepInfo {
-  return (
-    isRecord(v) &&
-    typeof v.ref === "string" &&
-    (v.worker_id === undefined || isValidAgentId(v.worker_id)) &&
-    optString(v.session_id) &&
-    isStepState(v.state)
-  );
-}
-
-function isChangeInfo(v: unknown): v is ChangeInfo {
-  return (
-    isRecord(v) &&
-    isValidAgentId(v.change_id) &&
-    isChangeState(v.state) &&
-    isIndex(v.step) &&
-    Array.isArray(v.steps) &&
-    v.steps.every(isChangeStepInfo) &&
-    optString(v.reason) &&
-    typeof v.updated_at === "string"
-  );
 }
 
 /** Absent, or an array whose entries are all strings without NUL. */
@@ -1202,7 +1109,9 @@ export function isServerCommand(v: unknown): v is ServerCommand {
     case "task":
       return isTaskCommandBody(v);
     case "worker_reply":
-      return isValidAgentId(v.cap_id) && isValidAgentId(v.worker_id) && nonEmptyString(v.text);
+      return isCapOrChange(v) && isValidAgentId(v.worker_id) && nonEmptyString(v.text);
+    case "worker_stop":
+      return isCapOrChange(v) && isValidAgentId(v.worker_id) && (v.task_id === undefined || (v.change_id === undefined && isValidAgentId(v.task_id)));
     case "register_change":
       return (
         isValidAgentId(v.change_id) &&
@@ -1214,12 +1123,6 @@ export function isServerCommand(v: unknown): v is ServerCommand {
         optModel(v.worker_model) &&
         isValidAgentId(v.notify_id)
       );
-    case "change_status":
-      return v.change_id === undefined || isValidAgentId(v.change_id);
-    case "stop_change":
-      return isValidAgentId(v.change_id);
-    case "change_reply":
-      return isValidAgentId(v.change_id) && isValidAgentId(v.worker_id) && nonEmptyString(v.text);
     case "retire_server":
       return (v.server_id === undefined || (typeof v.server_id === "string" && SERVER_ID_PATTERN.test(v.server_id))) && optPlainString(v.reason);
     default:
@@ -1241,18 +1144,6 @@ export function isWorkerReplyCommand(v: unknown): v is WorkerReplyCommand {
 
 export function isRegisterChangeCommand(v: unknown): v is RegisterChangeCommand {
   return isServerCommand(v) && v.type === "register_change";
-}
-
-export function isChangeStatusCommand(v: unknown): v is ChangeStatusCommand {
-  return isServerCommand(v) && v.type === "change_status";
-}
-
-export function isStopChangeCommand(v: unknown): v is StopChangeCommand {
-  return isServerCommand(v) && v.type === "stop_change";
-}
-
-export function isChangeReplyCommand(v: unknown): v is ChangeReplyCommand {
-  return isServerCommand(v) && v.type === "change_reply";
 }
 
 export function isKickCapCommand(v: unknown): v is KickCapCommand {
@@ -1473,7 +1364,7 @@ export function isServerReply(v: unknown): v is ServerReply {
         optString(v.error)
       );
     case "worker_reply_result":
-      return v.ok === true && isValidAgentId(v.cap_id) && isValidAgentId(v.worker_id) && v.accepted === true;
+      return v.ok === true && isCapOrChange(v) && isValidAgentId(v.worker_id) && v.accepted === true;
     case "retire_result":
       return (
         v.ok === true &&
@@ -1493,17 +1384,8 @@ export function isServerReply(v: unknown): v is ServerReply {
       );
     case "register_change_result":
       return v.ok === true && isValidAgentId(v.change_id) && v.accepted === true && isChangeState(v.state);
-    case "change_status_result":
-      return (
-        v.ok === true &&
-        Array.isArray(v.changes) &&
-        v.changes.every(isChangeInfo) &&
-        (v.board === undefined || isRecord(v.board))
-      );
-    case "stop_change_result":
-      return v.ok === true && isValidAgentId(v.change_id) && typeof v.stopped === "boolean";
-    case "change_reply_result":
-      return v.ok === true && isValidAgentId(v.change_id) && isValidAgentId(v.worker_id) && v.accepted === true;
+    case "worker_stop_result":
+      return v.ok === true && isCapOrChange(v) && isValidAgentId(v.worker_id) && typeof v.stopped === "boolean";
     case "error":
       return (
         v.ok === false &&
@@ -1557,21 +1439,11 @@ export function isServerNotice(v: unknown): v is ServerNotice {
   if (!isRecord(v) || v.bantou !== PROTOCOL_VERSION) return false;
   if (v.type === "worker_report") {
     return (
-      isValidAgentId(v.cap_id) &&
+      isCapOrChange(v) &&
+      (v.change_id === undefined || v.task_id === undefined) &&
       (v.task_id === undefined || isValidAgentId(v.task_id)) &&
       isValidAgentId(v.worker_id) &&
       isWorkerReportKind(v.kind) &&
-      typeof v.text === "string" &&
-      typeof v.at === "string"
-    );
-  }
-  if (v.type === "change_report") {
-    return (
-      isValidAgentId(v.notify_id) &&
-      isValidAgentId(v.change_id) &&
-      isValidAgentId(v.worker_id) &&
-      isIndex(v.step) &&
-      (v.kind === "ask" || v.kind === "approve") &&
       typeof v.text === "string" &&
       typeof v.at === "string"
     );
