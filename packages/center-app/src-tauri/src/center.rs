@@ -19,7 +19,7 @@ use tauri::AppHandle;
 
 /// The bundled center binary (`externalBin`, placed next to this app's executable).
 const SIDECAR: &str = "bantou-center";
-const CONFIG_NAME: &str = "center-server.json";
+pub const CONFIG_NAME: &str = "center-server.json";
 /// SIGTERM to SIGKILL. The center's own shutdown waits up to 5 s for its children and hard-exits after another 5 s
 /// (`packages/desktop/src-tauri/src/center.rs` `STOP_GRACE` has the same reasoning), so this must outlast that.
 const STOP_GRACE: Duration = Duration::from_secs(15);

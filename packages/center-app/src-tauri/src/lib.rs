@@ -9,6 +9,7 @@
 mod center;
 mod log;
 mod login_item;
+mod tray;
 
 use tauri::RunEvent;
 
@@ -22,6 +23,7 @@ pub fn run() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             log::line("start");
             login_item::ensure_registered();
+            tray::setup(app.handle());
             center::start(app.handle().clone());
             Ok(())
         })

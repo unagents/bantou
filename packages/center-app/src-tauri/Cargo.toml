@@ -13,7 +13,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "=2.6.2", features = [] }
 
 [dependencies]
-tauri = { version = "=2.11.2", features = [] }
+# tray-icon: the menu bar item (#18). image-png: the icon of it.
+tauri = { version = "=2.11.2", features = ["tray-icon", "image-png"] }
 # A second launch (Finder while launchd already runs it) does nothing.
 tauri-plugin-single-instance = "=2.4.2"
 # SIGTERM from launchd: stop the center first, then exit.

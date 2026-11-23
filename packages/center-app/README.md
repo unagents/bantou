@@ -11,6 +11,8 @@
 - `SMAppService.agent(plistName: "jp.grrow.bantou-center.plist")` で登録する。登録済みなら何もしない。承認待ち・無効（System Settings の Login Items）は強制せず、log に出す。
 - plist（`src-tauri/launchd/`）は bundle の `Contents/Library/LaunchAgents/` に入る（`tauri.conf.json` の `bundle.macOS.files`）。`KeepAlive` は `SuccessfulExit: false`: 異常終了だけ launchd が再起動する。
 - center が終わると app も同じ状態で終わる（正常終了 = 0、それ以外 = 1）。port が使用中で center が正常終了した時に、再起動し続けない。
+- menu bar に項目が出る（#18 = A）。「止める」は center を止めて app を正常終了（0）する。KeepAlive は `SuccessfulExit: false` なので launchd は再起動しない。
+- 「設定の file を開く」は `~/.local/share/bantou/center-server.json` を既定の app で開く（`open`）。設定画面・状態の表示は無い。
 - 二重に起動しても何もしない（single-instance）。SIGTERM（launchd の停止）では center を止めてから終わる（最大 15 秒）。
 
 ## build
