@@ -99,12 +99,14 @@ const fields: Record<string, SubscriptionField> = {
       });
     },
   },
-  // 画面が remote_list を取り直す契機。今の画面は SessionsEvent の reason = remote と activity で取り直している（設計書 2.3）
+  // 画面が remote_list を取り直す契機。reason = remote は RemoteManager の onSummaryChange（running の件数が変わった時）で、
+  // worker の ws（/ws/worker）の書き込みで running になった時と、60 秒無音で止まっている（done）になった時（周期の確認）を含む。
+  // reason = activity は session の作業状態（hook）で remote と関係が無いので流さない。
   remotesChanged: {
     subscribe: (_p, _a, { services }) =>
       listen((emit) =>
         services.events.subscribe((ev) => {
-          if (ev.reason === "remote" || ev.reason === "activity") emit(ev);
+          if (ev.reason === "remote") emit(ev);
         }),
       ),
   },

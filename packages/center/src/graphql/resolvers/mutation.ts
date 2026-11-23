@@ -4,7 +4,6 @@ import { ATTACHMENT_TYPES, AttachmentError, MAX_ATTACHMENT_BYTES, matchesMagic, 
 import { LOGIN_CODE } from "../../login.js";
 import { centerSettingsPatchSchema, projectSettingsPatchSchema } from "../../project-settings.js";
 import { workerReplySchema } from "../../remotes.js";
-import { retireServer } from "../../retire.js";
 import { SESSION_NAME } from "../../sessions.js";
 import type { GraphqlContext } from "../context.js";
 
@@ -129,15 +128,9 @@ export const mutationResolvers: Record<string, Resolver> = {
 
   replyWorker: (_p, args, { services }) =>
     run(async () => {
-      const input = parse(workerReplySchema, { remote_id: args.remoteId, server: args.server, worker_id: args.workerId, text: args.text });
-      await services.remotes.workerReply(dropNull(input));
+      const input = parse(workerReplySchema, dropNull({ server: args.server, session_id: args.sessionId, order: args.order, content: args.content }));
+      await services.remotes.reply(input);
       return true;
-    }),
-
-  retireServer: (_p, args, { services }) =>
-    run(async () => {
-      const { serverId } = parse({ serverId: z.string().min(1) }, args);
-      return retireServer({ link: services.link, remotes: services.remotes, log: services.log }, { server: serverId });
     }),
 
   terminalInput: (_p, args, ctx) =>

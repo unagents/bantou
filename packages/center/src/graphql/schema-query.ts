@@ -15,10 +15,8 @@ export const queryTypeDefs = /* GraphQL */ `
     centerVersion: CenterVersion!
     """ remote-cap の記録（remote_list）。 """
     remotes: [RemoteRecord!]!
-    """ server の一覧（server_list）。 """
+    """ remote の控えにある server の一覧と、server-info の答えの版。 """
     servers: [ServerInfo!]!
-    """ server の版の突き合わせ（server_peers）。 """
-    serverPeers(refresh: Boolean): ServerPeers!
     """ rc の状態（rc_list）。 """
     rcStatus: [RcStatus!]!
     """ 端末の出力の取り直し（GET /sessions/<n>/output?after=）。通常は subscription terminalOutput を使う。 """

@@ -50,23 +50,9 @@ export const queryResolvers: Record<string, Resolver> = {
   // remote_list（owner を付けない呼び出し = 全件）
   remotes: (_p, _a, { services }) => services.remotes.list({}),
 
-  servers: async (_p, _a, { services }) => {
-    try {
-      return await services.link.list();
-    } catch (e) {
-      return fail(e);
-    }
-  },
-
-  serverPeers: async (_p, args, { services }) => {
-    try {
-      if (!services.follow) throw new Error("版の確認が無効");
-      if (args.refresh) await services.follow.check();
-      return services.follow.snapshot();
-    } catch (e) {
-      return fail(e);
-    }
-  },
+  // v2 の center は server の一覧の道具を持たない。控え（remote_list）にある server を重複なしで、server-info の答えの版を添えて返す
+  servers: (_p, _a, { services }) =>
+    [...new Set(services.remotes.list({}).map((r) => r.server))].map((name) => ({ name, version: services.link.serverVersionOf(name) ?? null })),
 
   rcStatus: (_p, _a, { services }) => services.supervisor.list(),
 

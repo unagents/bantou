@@ -1,7 +1,6 @@
 import type { Config } from "../config.js";
 import type { Core } from "../core.js";
 import type { EventHub } from "../events.js";
-import type { Follow } from "../follow.js";
 import type { LoginFlow } from "../login.js";
 import type { Logger } from "../log.js";
 import type { Resessioner } from "../resession.js";
@@ -23,7 +22,6 @@ export interface GraphqlServices {
   /** session を眠らせる入口（引継ぎを書かせてから眠らせる。MCP の session_sleep と同じ resession.requestSleep。sessions.sleep は直接呼ばない）。 */
   resession: Pick<Resessioner, "requestSleep">;
   remotes: RemoteManager;
-  follow: Follow;
   login: LoginFlow;
   /** pty 出力の queue と入力・サイズ変更の受け口（terminal 系）。 */
   core: Core;

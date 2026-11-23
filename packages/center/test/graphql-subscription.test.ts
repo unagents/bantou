@@ -11,7 +11,8 @@ import { createCenterServer } from "../src/server.js";
 import type { RemoteControlSupervisor } from "../src/remote-control.js";
 import type { ServerLink } from "../src/server-link.js";
 import type { SessionManager } from "../src/sessions.js";
-import type { RemoteManager } from "../src/remotes.js";
+import { createRemoteManager, type RemoteManager } from "../src/remotes.js";
+import { createWorkerTracker } from "../src/worker-ws.js";
 
 const TOKEN = "test-token-0123456789";
 const AUTH = { authorization: `Bearer ${TOKEN}` };
@@ -65,7 +66,7 @@ async function boot() {
   const services = {
     config,
     supervisor: { list: () => [], shutdown: async () => {} } as unknown as RemoteControlSupervisor,
-    link: { list: async () => [] } as unknown as ServerLink,
+    link: {} as unknown as ServerLink,
     sessions: {} as unknown as SessionManager,
     remotes: {} as unknown as RemoteManager,
     core,
@@ -166,7 +167,7 @@ test("subscription sessionMessage: 最後の応答が届く。切断で購読が
   }
 });
 
-test("subscription remotesChanged: remote と activity だけを運ぶ", async () => {
+test("subscription remotesChanged: reason が remote の物だけを運ぶ", async () => {
   const { h, events, active, url } = await boot();
   try {
     const s = await subscribe(url, "subscription{remotesChanged{reason name}}");
@@ -175,11 +176,51 @@ test("subscription remotesChanged: remote と activity だけを運ぶ", async (
     events.publish({ reason: "remote", name: "a" });
     events.publish({ reason: "context", name: "x" });
     events.publish({ reason: "activity", name: "b" });
+    events.publish({ reason: "remote", name: "c" });
     assert.deepEqual((await s.next())?.data, { remotesChanged: { reason: "remote", name: "a" } });
-    assert.deepEqual((await s.next())?.data, { remotesChanged: { reason: "activity", name: "b" } });
+    assert.deepEqual((await s.next())?.data, { remotesChanged: { reason: "remote", name: "c" } });
     s.abort();
     await until(() => active.events === 0, "切断で購読が外れる");
   } finally {
+    await h.close();
+  }
+});
+
+test("subscription remotesChanged: 実の RemoteManager・tracker につなぐと、launch・ws の書き込み（running）・60 秒無音（止まっている）で届く", async () => {
+  const { h, events, active, url } = await boot();
+  let t = 1_000_000;
+  const tracker = createWorkerTracker({ now: () => t, silentMs: 60_000 });
+  const link = { launch: async () => {}, requestServerInfo: async () => {} } as unknown as ServerLink;
+  const manager = createRemoteManager({
+    link,
+    store: { load: async () => [], save: async () => {} },
+    log: () => {},
+    tracker,
+    wsUrl: () => "ws://10.0.0.5:7910/ws/worker?token=tok",
+    onSummaryChange: (name) => events.publish({ reason: "remote", name }),
+    now: () => t,
+    summaryCheckMs: 20,
+  });
+  try {
+    await manager.restore();
+    const s = await subscribe(url, "subscription{remotesChanged{reason name}}");
+    await until(() => active.events === 1, "購読が張られる");
+    const got = async () => (await s.next())?.data;
+    await manager.send({ owner: "a", server: "srv", prompt: "p" });
+    assert.deepEqual(await got(), { remotesChanged: { reason: "remote", name: "a" } });
+    assert.equal(manager.list({})[0].state, "running");
+    // 60 秒無音（周期の確認が見つける）: 止まっている
+    t += 61_000;
+    assert.deepEqual(await got(), { remotesChanged: { reason: "remote", name: "a" } });
+    assert.equal(manager.list({})[0].state, "done");
+    // /ws/worker の書き込み（tracker.note）: running に戻る
+    tracker.note(manager.list({})[0].remote_id.split("@")[0]);
+    assert.deepEqual(await got(), { remotesChanged: { reason: "remote", name: "a" } });
+    assert.equal(manager.list({})[0].state, "running");
+    s.abort();
+    await until(() => active.events === 0, "切断で購読が外れる");
+  } finally {
+    manager.close();
     await h.close();
   }
 });

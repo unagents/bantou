@@ -14,9 +14,8 @@ export const mutationTypeDefs = /* GraphQL */ `
     submitSessionLoginCode(name: String!, code: String!): LoginCodeResult!
     """ 再起動（今は rc_stop → rc_start(resume) の 2 手）。 """
     restartSession(name: String!): Boolean!
-    replyWorker(remoteId: String!, server: String!, workerId: String!, text: String!): Boolean!
-    """ server の退役（取り返しがつかない）。 """
-    retireServer(serverId: String!): RetireResult!
+    """ worker_reply と同じ。server の名前と worker の session-id を指して reply を送る。order は answer / approve / reject（answer は content が本文）。送れたら true。 """
+    replyWorker(server: String!, sessionId: String!, order: String!, content: String): Boolean!
     """ dataB64 = 端末へ送る bytes の base64。 """
     terminalInput(session: String!, dataB64: String!): Boolean!
     terminalResize(session: String!, cols: Int!, rows: Int!): Boolean!

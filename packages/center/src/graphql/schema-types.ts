@@ -13,16 +13,9 @@ export const typeDefs = /* GraphQL */ `
   """ needs-input は GraphQL の名前に使えないので needs_input（内部の値は resolvers/enums.ts で写す）。 """
   enum SessionActivityState { working needs_input idle unknown }
   enum AuthState { ok login_required keychain_locked }
-  enum FollowState { ok unsupported updating mismatch failed lost unknown }
-  enum ActivityState { running stalled idle done failed lost }
+  """ running = worker の ws の最後の書き込みから 60 秒以内 / done = 止まっている（60 秒無音）。failed・unknown は v2 の center は出さない（画面の値の写し）。 """
   enum RemoteState { running done failed unknown }
-  enum AgentKind { cap worker }
-  enum WorkerReportKind { progress ask approve done }
   enum RemoteIssueKind { failed no_result }
-  enum RetireState { retiring already_retiring }
-  enum ReviewSeverity { high medium low }
-  enum ReviewVerdict { ok issues unknown }
-  enum TaskResultState { done failed }
   enum RcState { stopped starting connected error }
   enum CenterRunState { stopped running restarting error }
 
@@ -177,175 +170,24 @@ export const typeDefs = /* GraphQL */ `
 
   # ---- remote / server / rc ----
 
-  type PendingInstruction {
-    at: String!
-    owner: String!
-    prompt: String!
-  }
-
-  type AgentActivity {
-    kind: AgentKind!
-    id: String!
-    cap_id: String!
-    state: ActivityState!
-    task: String!
-    last_activity: String
-    last_output_at: String
-    silent_ms: Float!
-    started_at: String
-    finished_at: String
-    error: String
-    model: String
-  }
-
-  type RemoteActivity {
-    at: String!
-    received_ms_ago: Float!
-    stale: Boolean!
-    agents: [AgentActivity!]!
-  }
-
-  type ResourceSample {
-    at: String!
-    load1: Float!
-    load5: Float!
-    load15: Float!
-    cpus: Int!
-    mem_total: Float!
-    mem_free: Float!
-    disk_total: Float
-    disk_free: Float
-    workers: Int!
-  }
-
-  type ServerBoard {
-    at: String!
-    caps: Int!
-    workers: Int!
-    reserved: Int!
-    max_parallel_tasks: Int
-    resources: ResourceSample
-  }
-
-  type TaskResultWorker {
-    worker_id: String!
-    role: String!
-    state: ActivityState!
-    branch: String
-    commit: String
-    tests: String
-    report_path: String
-    result: String!
-  }
-
-  type ReviewItem {
-    severity: ReviewSeverity!
-    text: String!
-    resolved: Boolean!
-  }
-
-  type TaskReview {
-    verdict: ReviewVerdict!
-    items: [ReviewItem!]!
-    rounds: Int!
-  }
-
-  type TaskResult {
-    cap_id: String!
-    task_id: String!
-    state: TaskResultState!
-    summary: String!
-    workers: [TaskResultWorker!]!
-    review: TaskReview!
-    remaining: [String!]!
-    error: String
-  }
-
-  type WorkerReport {
-    cap_id: String!
-    task_id: String
-    worker_id: String!
-    kind: WorkerReportKind!
-    text: String!
-    at: String!
-  }
-
+  """ remote_list の 1 件（session × server の cap）。state は worker の ws の最後の書き込みから（running / done = 止まっている）。finishedAt は止まっている時の最後の書き込みの時刻。 """
   type RemoteRecord {
     remote_id: String!
     session: String
     owners: [String!]!
     server: String!
-    server_id: String
-    peer: String
     serverName: String
-    serverHost: String
-    serverUser: String
-    serverWorkspace: String
     server_label: String
     state: RemoteState!
     model: String
-    worker_model: String
     createdAt: String!
     finishedAt: String
-    result: String
-    result_at: String
-    error: String
-    error_at: String
-    pending: [PendingInstruction!]
-    activity: RemoteActivity
-    server_board: ServerBoard
-    task_result: TaskResult
-    worker_reports: [WorkerReport!]
   }
 
+  """ server（agent-messenger の名前）と、server-info の答えで控えた npm bantou の版（未取得は null）。 """
   type ServerInfo {
     name: String!
-    connected: Boolean!
-    reachable: Boolean!
-    peerId: String
-    serverPeer: String
-    server_id: String
-    host: String
-    user: String
-    workspace: String
-  }
-
-  type ServerPeerUpdate {
-    to: String!
-    running: ServerPeerUpdateRunning
-  }
-
-  type ServerPeerUpdateRunning {
-    caps: Int!
-    workers: Int!
-    reports: Int!
-  }
-
-  type ServerPeer {
-    key: String!
-    id: String!
-    name: String!
-    hostname: String
-    server_id: String
-    host: String
-    user: String
-    workspace: String
-    server_version: String
-    protocol_version: String
-    state: FollowState!
-    detail: String!
-    update: ServerPeerUpdate
-    since: String!
-  }
-
-  type ServerPair {
-    server: String
-    protocol: String!
-  }
-
-  type ServerPeers {
-    pair: ServerPair!
-    peers: [ServerPeer!]!
+    version: String
   }
 
   type RcStatus {
@@ -370,35 +212,6 @@ export const typeDefs = /* GraphQL */ `
     ok: Boolean!
     auth: AuthState!
     error: String
-  }
-
-  type RetireStopped {
-    caps: Int!
-    workers: Int!
-  }
-
-  type RetireService {
-    manager: String!
-    name: String
-    detected: Boolean
-  }
-
-  type RetireResult {
-    ok: Boolean!
-    state: RetireState!
-    server_id: String!
-    host: String
-    user: String
-    workspace: String
-    peer: String!
-    stopped: RetireStopped
-    exit_at: String
-    exit_code: Int
-    host_steps: [String!]
-    service: RetireService
-    records_removed: Int!
-    sessions: [String!]!
-    message: String!
   }
 
   """ 添付の保存結果（POST /sessions/<n>/attachments の 201。#7 の形が決まるまでの仮の形）。 """

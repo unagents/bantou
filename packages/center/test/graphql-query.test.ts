@@ -23,10 +23,9 @@ async function boot(over: Overrides = {}, configRaw: Json = {}) {
   const services = {
     config,
     supervisor: { list: () => [], shutdown: async () => {} },
-    link: { list: async () => [] },
+    link: {},
     sessions: {},
     remotes: {},
-    follow: undefined,
     login: undefined,
     core,
     events,
@@ -163,21 +162,17 @@ test("query centerInfo / centerVersion: workspace・システム埋め込み指�
 
 test("query remotes: remote_list（owner 無し）の全件。filter は空で呼ぶ", async () => {
   const calls: unknown[] = [];
-  const rec = {
-    remote_id: "c-1-s", session: "s", owners: ["s"], server: "srv", server_id: "sid", peer: "p", server_label: "host", state: "running", createdAt: "2026-11-23T00:00:00Z",
-    pending: [{ at: "2026-11-23T00:00:01Z", owner: "s", prompt: "do" }],
-    activity: { at: "t", received_ms_ago: 5, stale: false, agents: [{ kind: "cap", id: "c", cap_id: "c-1-s", state: "running", task: "t", silent_ms: 3 }] },
-    worker_reports: [{ cap_id: "c-1-s", worker_id: "w", kind: "ask", text: "?", at: "t" }],
-  };
-  const { h, q } = await boot({ remotes: { list: (f: unknown) => (calls.push(f), [rec]) } });
+  const running = { remote_id: "s-cap@srv", session: "s", owners: ["s"], server: "srv", serverName: "srv", server_label: "srv", state: "running", model: "sonnet", createdAt: "2026-11-23T00:00:00Z" };
+  const done = { remote_id: "t-cap@srv2", session: "t", owners: ["t"], server: "srv2", serverName: "srv2", server_label: "srv2", state: "done", finishedAt: "2026-11-23T00:01:00.000Z", createdAt: "2026-11-23T00:00:30Z" };
+  const { h, q } = await boot({ remotes: { list: (f: unknown) => (calls.push(f), [running, done]) } });
   try {
-    const r = await q("{remotes{remote_id session owners server server_id peer server_label state createdAt pending{owner prompt} activity{stale agents{kind state silent_ms}} worker_reports{worker_id kind text}}}");
+    const r = await q("{remotes{remote_id session owners server serverName server_label state model createdAt finishedAt}}");
     assert.equal(r.errors, undefined);
     assert.deepEqual(r.data, {
-      remotes: [{
-        remote_id: "c-1-s", session: "s", owners: ["s"], server: "srv", server_id: "sid", peer: "p", server_label: "host", state: "running", createdAt: "2026-11-23T00:00:00Z",
-        pending: [{ owner: "s", prompt: "do" }], activity: { stale: false, agents: [{ kind: "cap", state: "running", silent_ms: 3 }] }, worker_reports: [{ worker_id: "w", kind: "ask", text: "?" }],
-      }],
+      remotes: [
+        { ...running, finishedAt: null },
+        { ...done, model: null },
+      ],
     });
     assert.deepEqual(calls, [{}]);
   } finally {
@@ -185,56 +180,20 @@ test("query remotes: remote_list（owner 無し）の全件。filter は空で�
   }
 });
 
-test("query servers / rcStatus: server_list・rc_list の写し。link が投げたら message つきの error", async () => {
-  let fail = false;
+test("query servers / rcStatus: servers は控えの server（重複なし）と server-info の版。rc_list の写し", async () => {
+  const mk = (server: string) => ({ remote_id: `x@${server}`, server });
   const { h, q } = await boot({
-    link: { list: async () => { if (fail) throw new Error("broker に繋がらない"); return [{ name: "srv", connected: true, reachable: true, peerId: "me", serverPeer: "p", server_id: "sid", host: "h", user: "u", workspace: "/w" }]; } },
+    remotes: { list: () => [mk("srv"), mk("srv2"), mk("srv")] },
+    link: { serverVersionOf: (s: string) => (s === "srv" ? "0.2.0" : undefined) },
     supervisor: { list: () => [{ project: "a", path: "/w/a", state: "error", pid: null, sessionUrl: null, restarts: 3, lastError: "boom" }] },
   });
   try {
-    assert.deepEqual((await q("{servers{name connected reachable peerId serverPeer server_id host user workspace}}")).data, {
-      servers: [{ name: "srv", connected: true, reachable: true, peerId: "me", serverPeer: "p", server_id: "sid", host: "h", user: "u", workspace: "/w" }],
-    });
+    assert.deepEqual((await q("{servers{name version}}")).data, { servers: [{ name: "srv", version: "0.2.0" }, { name: "srv2", version: null }] });
     assert.deepEqual((await q("{rcStatus{project path state pid sessionUrl restarts lastError}}")).data, {
       rcStatus: [{ project: "a", path: "/w/a", state: "error", pid: null, sessionUrl: null, restarts: 3, lastError: "boom" }],
     });
-    fail = true;
-    const e = await q("{servers{name}}");
-    assert.equal(e.errors?.[0].message, "broker に繋がらない");
   } finally {
     await h.close();
-  }
-});
-
-test("query serverPeers: refresh: true の時だけ check してから snapshot。follow が無ければ error", async () => {
-  const order: string[] = [];
-  const snap = {
-    pair: { server: "0.2.0", protocol: "1.9.0" },
-    peers: [{ key: "k", id: "i", name: "n", state: "updating", detail: "d", since: "t", update: { to: "0.2.0", running: { caps: 1, workers: 2, reports: 3 } } }],
-  };
-  const follow = { check: async () => void order.push("check"), snapshot: () => (order.push("snapshot"), snap) };
-  const { h, q } = await boot({ follow });
-  try {
-    const sel = "{pair{server protocol} peers{key id name state detail since update{to running{caps workers reports}}}}";
-    const a = await q(`{serverPeers${sel}}`);
-    assert.equal(a.errors, undefined);
-    assert.deepEqual(a.data, { serverPeers: snap });
-    assert.deepEqual(order, ["snapshot"]);
-    order.length = 0;
-    await q(`{serverPeers(refresh:true)${sel}}`);
-    assert.deepEqual(order, ["check", "snapshot"]);
-    order.length = 0;
-    await q(`{serverPeers(refresh:false)${sel}}`);
-    assert.deepEqual(order, ["snapshot"]);
-  } finally {
-    await h.close();
-  }
-  const none = await boot();
-  try {
-    const e = await none.q("{serverPeers{pair{protocol}}}");
-    assert.equal(e.errors?.[0].message, "版の確認が無効");
-  } finally {
-    await none.h.close();
   }
 });
 

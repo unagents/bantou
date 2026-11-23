@@ -72,8 +72,8 @@ async function boot(over: Partial<Record<string, unknown>> = {}, workspace?: str
     stop: rec("stop", async () => ({})),
     start: rec("start", async () => ({})),
   };
-  const link = { list: async () => [], selectPeer: rec("selectPeer", async (s: unknown) => { throw new Error(`曖昧: ${s as string}`); }) };
-  const remotes = { workerReply: rec("workerReply", async (i: unknown) => ({ ...(i as object), accepted: true })) };
+  const link = {};
+  const remotes = { reply: rec("reply", async (i: unknown) => ({ ...(i as object), sent: true })) };
   const login = {
     start: rec("loginStart", async (n: unknown) => ({ name: n, loginUrl: "https://login.example/x" })),
     code: rec("loginCode", async (n: unknown, c: unknown) => ({ name: n, ok: c === "good", auth: c === "good" ? "ok" : "login_required", error: c === "good" ? null : "Invalid code" })),
@@ -85,7 +85,6 @@ async function boot(over: Partial<Record<string, unknown>> = {}, workspace?: str
     remotes,
     sessions,
     resession,
-    follow: undefined,
     login,
     core,
     events,
@@ -343,31 +342,20 @@ test("restartSession: スリープ中の session は start でなく wake で起
   }
 });
 
-test("replyWorker: remotes.workerReply に snake_case で渡す", async () => {
+test("replyWorker: remotes.reply に worker_reply と同じ形（server・session_id・order・content）で渡す", async () => {
   const t = await boot();
   try {
-    const r = await t.call(`mutation{ replyWorker(remoteId:"c-1-a", server:"srv", workerId:"w1", text:"ok") }`);
+    const r = await t.call(`mutation{ replyWorker(server:"srv", sessionId:"w1", order:"answer", content:"ok") }`);
     assert.equal(r.data!.replyWorker, true);
-    assert.deepEqual(only(t.calls, "workerReply")[0][1], { remote_id: "c-1-a", server: "srv", worker_id: "w1", text: "ok" });
-    const bad = await t.call(`mutation{ replyWorker(remoteId:"c-1-a", server:"srv", workerId:"w 1", text:"ok") }`);
+    assert.deepEqual(only(t.calls, "reply")[0][1], { server: "srv", session_id: "w1", order: "answer", content: "ok" });
+    // approve は content なし（null は指定なしと同じ）
+    await t.call(`mutation{ replyWorker(server:"srv", sessionId:"w1", order:"approve", content:null) }`);
+    assert.deepEqual(only(t.calls, "reply")[1][1], { server: "srv", session_id: "w1", order: "approve" });
+    const bad = await t.call(`mutation{ replyWorker(server:"srv", sessionId:"w1", order:"maybe") }`);
     assert.equal(bad.errors![0].extensions.code, "BAD_USER_INPUT");
-    const nul = await t.call(`mutation($t:String!){ replyWorker(remoteId:"c", server:"s", workerId:"w", text:$t) }`, { t: "a\u0000b" });
+    const nul = await t.call(`mutation($t:String!){ replyWorker(server:"s", sessionId:"w", order:"answer", content:$t) }`, { t: "a\u0000b" });
     assert.equal(nul.errors![0].extensions.code, "BAD_USER_INPUT");
-    assert.equal(only(t.calls, "workerReply").length, 1);
-  } finally {
-    await t.close();
-  }
-});
-
-test("retireServer: serverId で server を選び、選べなければ理由つきの error（記録は消さない）", async () => {
-  const t = await boot();
-  try {
-    const r = await t.call(`mutation{ retireServer(serverId:"srv-x"){ ok } }`);
-    assert.equal(r.errors![0].message, "曖昧: srv-x");
-    assert.deepEqual(only(t.calls, "selectPeer")[0], ["selectPeer", "srv-x"]);
-    const empty = await t.call(`mutation{ retireServer(serverId:""){ ok } }`);
-    assert.equal(empty.errors![0].extensions.code, "BAD_USER_INPUT");
-    assert.equal(only(t.calls, "selectPeer").length, 1);
+    assert.equal(only(t.calls, "reply").length, 2);
   } finally {
     await t.close();
   }

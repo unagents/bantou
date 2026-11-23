@@ -20,11 +20,11 @@ const AUTH = { authorization: `Bearer ${TOKEN}` };
 
 /** 設計書 3.1〜3.3 の表（変更後の名前）。schema がこれを漏れなく持つ事を確かめる。 */
 const QUERY_FIELDS = [
-  "sessions", "session", "sessionSettings", "centerSettings", "centerInfo", "centerVersion", "remotes", "servers", "serverPeers", "rcStatus", "terminalOutputSince",
+  "sessions", "session", "sessionSettings", "centerSettings", "centerInfo", "centerVersion", "remotes", "servers", "rcStatus", "terminalOutputSince",
 ];
 const MUTATION_FIELDS = [
   "createSession", "updateSession", "sleepSession", "wakeSession", "updateSessionSettings", "updateCenterSettings", "startSessionLogin", "submitSessionLoginCode",
-  "restartSession", "replyWorker", "retireServer", "terminalInput", "terminalResize", "attachToSession",
+  "restartSession", "replyWorker","terminalInput", "terminalResize", "attachToSession",
 ];
 const SUBSCRIPTION_FIELDS = ["sessionsChanged", "sessionMessage", "terminalOutput", "remotesChanged", "centerStatus"];
 
@@ -35,10 +35,9 @@ async function boot(extra: { bind?: string; withGraphql?: boolean } = {}) {
   const services = {
     config,
     supervisor: { list: () => [], shutdown: async () => {} } as unknown as RemoteControlSupervisor,
-    link: { list: async () => [] } as unknown as ServerLink,
+    link: {} as unknown as ServerLink,
     sessions: {} as unknown as SessionManager,
     remotes: {} as unknown as RemoteManager,
-    follow: undefined,
     login: undefined,
     core,
     events,
