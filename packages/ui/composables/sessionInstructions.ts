@@ -156,7 +156,7 @@ export const draftError = (d: SettingsDraft): string | null => {
     const list = cleanServers(d.servers);
     if (list.length > SERVERS_MAX) return `server は ${SERVERS_MAX} 個以内`;
     const badServer = list.find((s) => !SERVER_REF.test(s));
-    if (badServer !== undefined) return `server は server の名前（英数字と . _ - のみ）で指定する:${badServer}`;
+    if (badServer !== undefined) return `server は server の名前（英数字と . _ - のみ）で指定する: ${badServer}`;
   }
   const ms = parseServersText(d.mcpServers);
   if ("error" in ms) return ms.error;

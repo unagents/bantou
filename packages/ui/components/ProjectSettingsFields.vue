@@ -215,7 +215,7 @@ async function pickAdd() {
           <span class="text-cork-muted">（今は見つかっていない）</span>
           <UButton icon="i-lucide-x" color="neutral" variant="ghost" size="xs" :aria-label="`${e} を外す`" :data-testid="`${idPrefix}-server-remove`" @click="removeServer(e)" />
         </div>
-        <p v-if="choicesError" class="text-cork-muted pl-6 text-xs" :data-testid="`${idPrefix}-servers-error`">server の一覧を取れない（server の名前を入力して追加できる）:{{ choicesError }}</p>
+        <p v-if="choicesError" class="text-cork-muted pl-6 text-xs" :data-testid="`${idPrefix}-servers-error`">server の一覧を取れない（server の名前を入力して追加できる）: {{ choicesError }}</p>
         <div class="flex gap-2 pl-6">
           <UInput v-model="serverInput" class="flex-1" size="xs" placeholder="server の名前" :data-testid="`${idPrefix}-server-input`" @keydown.enter.prevent="addServer" />
           <UButton size="xs" label="追加" color="neutral" variant="outline" :data-testid="`${idPrefix}-server-add`" @click="addServer" />
