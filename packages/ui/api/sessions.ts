@@ -40,10 +40,10 @@ export const updateSession = (name: string, change: { newName?: string; path?: s
     moveDir: change.path?.trim() ? (change.move ?? null) : null,
   });
 
-/** Put a session to sleep on the center (`session_sleep`): its claude stops, the conversation and settings stay. */
+/** Ask the center to put a session to sleep (`session_sleep`): it has the agent write a handoff and stops the claude after the turn. Answers at once (`accepted`/`pending`); only `name` is read here. */
 export const sleepSession = (name: string) => getTransport().invoke<Session>("session_sleep", { name });
 
-/** Wake a sleeping session (`session_wake`): its claude starts again with the same conversation. Called when the session is opened. */
+/** Wake a sleeping session (`session_wake`): its claude starts as a new conversation and the center hands it the sleep handoff. Called when the session is opened. */
 export const wakeSession = (name: string) => getTransport().invoke<Session>("session_wake", { name });
 
 /** For the add dialog's folder field: the center's default parent folder and whether this PC's folder dialog applies. */

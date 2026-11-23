@@ -60,7 +60,7 @@ test("buildSystemInstructions: 出力で master-cap-availability の文面が ma
 });
 
 test("describeSystemInstructions: 既定は 6 件（base-spec, role, availability, memory, coordinator, resession の順）。memory・coordinator は条件付きだと title で分かる", () => {
-  assert.deepEqual(describeSystemInstructions().map((d) => `${d.id}@${d.version}`), ["base-spec@1", "master-cap-role@6", "master-cap-availability@2", "memory@1", "coordinator@4", "resession@2"]);
+  assert.deepEqual(describeSystemInstructions().map((d) => `${d.id}@${d.version}`), ["base-spec@1", "master-cap-role@6", "master-cap-availability@2", "memory@1", "coordinator@4", "resession@3"]);
   assert.ok(describeSystemInstructions()[3]!.title.includes("設定がある session だけ"));
   assert.ok(describeSystemInstructions()[4]!.title.includes("統括の MCP の server"));
 });
@@ -158,11 +158,11 @@ test("基盤仕様: 3 層共通の md は server の指示文の元と同じ内�
 
 test("resession v2: session_resession が付く session（resession: true）だけに付く。最初の入力の本文を読む一本化で、memory の有無で文が変わらず、handoff を引かせない", async () => {
   const { RESESSION_USAGE } = await import("../src/system-instructions.js");
-  assert.equal(partLabel(RESESSION_USAGE), "resession@2");
+  assert.equal(partLabel(RESESSION_USAGE), "resession@3");
   assert.ok(!applicableParts({ session: "s" }).includes(RESESSION_USAGE));
   assert.ok(applicableParts({ session: "s", resession: true }).includes(RESESSION_USAGE));
   const t = RESESSION_USAGE.text({ session: "s", resession: true, memory: true });
-  for (const w of ["session_resession", "handoff", "返事を待っている時", "turn を終える", "center が渡した引継ぎの本文", "取り出せなかった"]) assert.ok(t.includes(w), w);
+  for (const w of ["session_resession", "handoff", "返事を待っている時", "turn を終える", "center が渡した引継ぎの本文", "取り出せなかった", "スリープの依頼", "スリープから起こした"]) assert.ok(t.includes(w), w);
   // 引かせる指示が無い（center が渡す）。memory の有無で文が変わらない
   assert.ok(!t.includes("mcp__memory__"));
   assert.ok(!t.includes("eventId"));

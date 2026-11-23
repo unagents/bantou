@@ -55,18 +55,18 @@ export function useSessionBoard(board: Pick<Board, "sessions" | "centerList" | "
 
   // --- sleep / wake -----------------------------------------------------------
 
-  /** Put a session to sleep (its claude stops; the conversation stays). */
+  /** Ask the center to put a session to sleep: the agent writes a handoff, then its claude stops (no new conversation is started; waking opens a new one that gets the handoff). The center answers right away with `pending`; the list shows it asleep once it stopped. */
   async function sleep(name: string) {
     try {
       await sleepSession(name);
-      toast.add({ title: `${name} をスリープさせた`, color: "success" });
+      toast.add({ title: `${name} にスリープを依頼した（引継ぎを書かせてから眠る）`, color: "success" });
     } catch (e) {
       toast.add({ title: `${name} をスリープさせられない`, description: String(e), color: "error" });
     }
     void refreshSessions();
   }
   const waking = new Set<string>();
-  /** Opening (selecting) a sleeping session wakes it: its claude starts again with the same conversation. */
+  /** Opening (selecting) a sleeping session wakes it: its claude starts again as a new conversation whose first input is the handoff. */
   async function wakeIfSleeping(name: string | null) {
     if (name === null || waking.has(name)) return;
     if (!sessions.value.find((g) => g.name === name)?.sleeping) return;

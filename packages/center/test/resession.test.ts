@@ -15,7 +15,7 @@ import { parseConfig, type Config } from "../src/config.js";
 import { createCore } from "../src/core.js";
 import { createCenterMemoryEvents } from "../src/memory-events.js";
 import { createRemoteControlSupervisor, type ChildLike, type SpawnImpl } from "../src/remote-control.js";
-import { AWAIT_START_STALE_MS, createResessioner, firstInputText, RESESSION_DIVIDER, type Resessioner, type ResessionDeps } from "../src/resession.js";
+import { AWAIT_START_STALE_MS, createResessioner, firstInputText, RESESSION_DIVIDER, WAKE_DIVIDER, type Resessioner, type ResessionDeps } from "../src/resession.js";
 import { MEMORY_BODY_MAX } from "../src/memory.js";
 import type { SessionInfo } from "../src/sessions.js";
 import { createSessionActivityTracker } from "../src/session-activity.js";
@@ -97,6 +97,8 @@ interface Rig {
   starts: { resume: boolean }[];
   /** sessions.events に流れた reason。 */
   published: string[];
+  /** 次の「--continue 無しの起動」を 1 回だけ失敗させる（スリープから起こす起動の失敗の test）。 */
+  ctl: { failNextFresh: boolean };
   /** 身代わり peer の置き外し（onSleepChange）の履歴。 */
   standIn: string[];
   /** hook を center が受ける順（activity → resession）で流す。 */
@@ -124,12 +126,17 @@ async function rig(opts: { withMemory?: boolean; failFresh?: boolean } = {}): Pr
   });
   // --continue 無しの起動（リセッションの新しい会話）だけ失敗させられる supervisor
   const starts: { resume: boolean }[] = [];
+  const ctl = { failNextFresh: false };
   const published: string[] = [];
   const supervisor = {
     ...sup,
     start: async (name: string, o?: { resume?: boolean }) => {
       starts.push({ resume: o?.resume === true });
       if (opts.failFresh && starts.length > 1 && o?.resume !== true) throw new Error("新しい会話で起動できない");
+      if (ctl.failNextFresh && o?.resume !== true) {
+        ctl.failNextFresh = false;
+        throw new Error("新しい会話で起動できない（1 回だけ）");
+      }
       return sup.start(name, o);
     },
   };
@@ -146,11 +153,16 @@ async function rig(opts: { withMemory?: boolean; failFresh?: boolean } = {}): Pr
     activity: (name, startedAt, running) => tracker.get(name, startedAt, running),
     remote: () => ({ ...remote }),
     onSleepChange: (n, sl) => void standIn.push(`${n}:${sl}`),
+    // スリープの起床（daemon.ts と同じ配線）。res は後で作るので、呼ばれる時に参照する
+    onWake: (n, h) => res.armWake(n, h),
+    onWakeAbort: (n) => res.disarmWake(n),
   });
   const memoryEvents = createCenterMemoryEvents({ memoryOf: () => memoryDef, log: (m) => void logs.push(m) });
-  const res = createResessioner({
+  const res: Resessioner = createResessioner({
     info: (name) => sessions.list().find((x) => x.name === name),
     restartFresh: (name) => sessions.restartFresh(name),
+    sleepNow: (name, ref) => sessions.sleep(name, ref ? { handoff: ref } : undefined),
+    afterWakeDelivered: (name, id) => sessions.clearSleepHandoff(name, id),
     saveToMemory: (name, h) => memoryEvents.handoff(name, h, 3000),
     readFromMemory: (name, id) => memoryEvents.readHandoff(name, id, 3000),
     secretsOf: () => [mem.url, `Bearer ${mem.token}`],
@@ -161,7 +173,7 @@ async function rig(opts: { withMemory?: boolean; failFresh?: boolean } = {}): Pr
   });
   const startedAt = (): string | null => sessions.list().find((s) => s.name === "pm1")?.startedAt ?? null;
   return {
-    core, sessions, res, tracker, remote, logs, starts, published, standIn, startedAt,
+    core, sessions, res, tracker, remote, logs, starts, published, standIn, startedAt, ctl,
     // daemon.ts の onHook と同じ順: 作業状態 → resession
     hook: (payload) => {
       tracker.apply("pm1", payload, startedAt());
@@ -754,4 +766,337 @@ test("firstInputText: 取り出せた時は本文入りで handoff を引かせ�
   assert.ok(!ok.includes("mcp__memory__handoff") && !ok.includes("自分で"));
   const ng = firstInputText({ id: "c1:x", stored: "file", session: "s", file: "/d/s.json", result: { ok: false, reason: "R" } });
   assert.ok(!ng.includes("\n") && ng.includes("取り出せなかった: R") && ng.includes("本文は渡していない"));
+});
+
+
+// ---- スリープ = 起動しないリセッション（docs/design/sleep-resession.md） ----
+
+const savedFile = async (): Promise<{ name: string; sleeping?: boolean; sleepHandoff?: { id: string; stored: string } }[]> =>
+  JSON.parse(await readFile(join(dir, "sessions.json"), "utf8"));
+const wakeInputs = (w: FakeWrapper): string[] => w.inputs();
+const ASK = "スリープの依頼";
+
+/** 眠らせるところまで通す（working の turn の中で依頼 → Stop で頼む → 引継ぎ → Stop で停止）。 */
+async function sleepThrough(r: Rig, w: FakeWrapper): Promise<{ id: string; stored: string }> {
+  await r.res.requestSleep("pm1");
+  r.hook(hookOf("Stop"));
+  await until(() => w.inputs().length === 2);
+  r.hook(hookOf("UserPromptSubmit", { prompt: "ask" }));
+  const got = await r.res.request("pm1", HANDOFF);
+  r.hook(hookOf("Stop", { last_assistant_message: "眠る" }));
+  await until(() => r.sessions.list()[0]!.sleeping);
+  return { id: got.handoff_id, stored: got.stored };
+}
+
+test("T1/T3: requestSleep は受理して即返す（まだ眠らない）。turn が動いていれば Stop で引継ぎを頼む 1 行を貼り、引継ぎを受けても Stop までは止めない。Stop で止める（新しい会話は起動しない）。sleeping と sleepHandoff が保存される", async () => {
+  const r = await rig();
+  const w1 = await boot(r);
+  const q = await r.res.requestSleep("pm1");
+  assert.deepEqual({ accepted: q.accepted, sleeping: q.sleeping, pending: q.pending }, { accepted: true, sleeping: false, pending: true });
+  // working の間は頼まない・止めない
+  await sleep(60);
+  assert.deepEqual(w1.inputs(), []);
+  assert.equal(r.sessions.list()[0]!.sleeping, false);
+  // turn の終わりで頼む 1 行（bracketed paste + Enter）
+  r.hook(hookOf("Stop"));
+  await until(() => w1.inputs().length === 2);
+  assert.ok(w1.inputs()[0]!.includes(ASK) && w1.inputs()[0]!.includes("session_resession"));
+  assert.equal(w1.inputs()[1], "\r");
+  // 頼んだ間（引継ぎを受ける前）は止めない
+  r.hook(hookOf("UserPromptSubmit", { prompt: "ask" }));
+  r.hook(hookOf("Stop"));
+  await sleep(60);
+  assert.equal(w1.stopped(), false);
+  assert.equal(r.sessions.list()[0]!.sleeping, false);
+  assert.equal(r.res.pending("pm1"), true);
+  r.hook(hookOf("UserPromptSubmit", { prompt: "ask" }));
+  const got = await r.res.request("pm1", HANDOFF);
+  assert.ok(got.restart.includes("眠らせる"), "眠らせる為の返事");
+  // tool の呼び出しの後、Stop の前: まだ止めない
+  await sleep(60);
+  assert.equal(w1.stopped(), false);
+  assert.equal(r.sessions.list()[0]!.sleeping, false);
+  r.hook(hookOf("Stop", { last_assistant_message: "眠る" }));
+  await until(() => r.sessions.list()[0]!.sleeping);
+  assert.equal(w1.stopped(), true);
+  assert.equal(launches.length, 1, "新しい会話を立ち上げない");
+  assert.deepEqual(r.starts, [{ resume: false }], "起動は最初の 1 回だけ（再起動も --continue も無い）");
+  const rec = (await savedFile())[0]!;
+  assert.equal(rec.sleeping, true);
+  assert.deepEqual(rec.sleepHandoff, { id: got.handoff_id, stored: "memory" });
+  assert.deepEqual(r.standIn, ["pm1:true"]);
+  assert.equal(r.res.pending("pm1"), false);
+  assert.ok(r.published.includes("sleep"));
+  await r.close();
+});
+
+test("T1: idle の session は依頼の場で引継ぎを頼む 1 行を貼る", async () => {
+  const r = await rig();
+  const w1 = await boot(r);
+  r.hook(hookOf("Stop"));
+  assert.equal(r.sessions.list()[0]!.activity, "idle");
+  await r.res.requestSleep("pm1");
+  assert.ok(w1.inputs()[0]!.includes(ASK));
+  assert.equal(w1.inputs().length, 2);
+  await r.close();
+});
+
+test("T2: 引継ぎは memory に保存する（stored=memory・file は書かない）。届かない時は file（stored=file・本文は file にある）。sleepHandoff の stored もそれに従う", async () => {
+  const r = await rig();
+  const w1 = await boot(r);
+  const ref = await sleepThrough(r, w1);
+  assert.equal(ref.stored, "memory");
+  const evs = mem.recorded().filter((e) => e.kind === "handoff");
+  assert.equal(evs.length, 1);
+  assert.equal(evs[0]!.body, HANDOFF);
+  await assert.rejects(readFile(join(dir, "handoffs", "pm1.json"), "utf8"), /ENOENT/);
+  await r.close();
+
+  mem.setDown(true);
+  const r2 = await rig();
+  const w2 = await boot(r2);
+  const ref2 = await sleepThrough(r2, w2);
+  assert.equal(ref2.stored, "file");
+  const file = JSON.parse(await readFile(join(dir, "handoffs", "pm1.json"), "utf8")) as { id: string; body: string };
+  assert.equal(file.body, HANDOFF);
+  assert.equal(file.id, ref2.id);
+  assert.deepEqual((await savedFile())[0]!.sleepHandoff, { id: ref2.id, stored: "file" });
+  await r2.close();
+});
+
+test("T4: 書けない時は眠らせず理由を返す: needs-input・remote 未完了・未返答・動いていない session。印は残らず入力も貼らない", async () => {
+  const r = await rig();
+  const w1 = await boot(r);
+  r.hook(hookOf("PermissionRequest"));
+  await assert.rejects(r.res.requestSleep("pm1"), /needs-input/);
+  r.hook(hookOf("PostToolUse"));
+  r.remote.running = 1;
+  await assert.rejects(r.res.requestSleep("pm1"), /未完了の remote/);
+  r.remote.running = 0;
+  r.remote.waitingReply = 1;
+  await assert.rejects(r.res.requestSleep("pm1"), /worker_reply/);
+  r.remote.waitingReply = 0;
+  assert.equal(r.res.pending("pm1"), false);
+  assert.deepEqual(w1.inputs(), []);
+  assert.equal(r.sessions.list()[0]!.sleeping, false);
+  // 動いていない session
+  const r2 = await rig();
+  await r2.sessions.create({ name: "pm1", start: false });
+  await assert.rejects(r2.res.requestSleep("pm1"), /動いていない/);
+  assert.equal(r2.res.pending("pm1"), false);
+  await r2.close();
+  await r.close();
+});
+
+test("T4: 引継ぎの申告の後に利用者の入力が来て会話が進んだ時は止めない（印を戻す）。頼んだ後に Stop で見直して working なら止めない", async () => {
+  const r = await rig();
+  const w1 = await boot(r);
+  await r.res.requestSleep("pm1");
+  r.hook(hookOf("Stop"));
+  await until(() => w1.inputs().length === 2);
+  r.hook(hookOf("UserPromptSubmit", { prompt: "ask" }));
+  await r.res.request("pm1", HANDOFF);
+  r.hook(hookOf("UserPromptSubmit", { prompt: "やっぱり続けて" }));
+  assert.equal(r.res.pending("pm1"), false, "印が戻った");
+  r.hook(hookOf("Stop"));
+  await sleep(80);
+  assert.equal(w1.stopped(), false);
+  assert.equal(r.sessions.list()[0]!.sleeping, false);
+  await r.close();
+});
+
+test("T4: 見直し（Stop の後の check）が通らない時は止めない（Stop の後に remote の指示が走っていた）", async () => {
+  const r = await rig();
+  const w1 = await boot(r);
+  await r.res.requestSleep("pm1");
+  r.hook(hookOf("Stop"));
+  await until(() => w1.inputs().length === 2);
+  r.hook(hookOf("UserPromptSubmit", { prompt: "ask" }));
+  await r.res.request("pm1", HANDOFF);
+  r.remote.running = 1;
+  r.hook(hookOf("Stop"));
+  await sleep(80);
+  assert.equal(w1.stopped(), false);
+  assert.equal(r.res.pending("pm1"), false);
+  assert.ok(r.logs.some((l) => l.includes("スリープ見送り")));
+  await r.close();
+});
+
+test("T5/T9: 起こすと --continue 無しの新しい会話で起動し、SessionStart(startup) の最初の入力に引継ぎの本文が入る（paste → Enter。入力は合計 2 回 = 状況確認の別の入力は無い）。渡した後は sleepHandoff が外れ、区切りの行が積まれる", async () => {
+  const r = await rig();
+  const w1 = await boot(r);
+  const ref = await sleepThrough(r, w1);
+  await r.sessions.wake("pm1");
+  assert.deepEqual(r.starts.at(-1), { resume: false });
+  assert.ok(!launches[1]!.args.includes("--continue"));
+  assert.equal(r.res.pending("pm1"), true, "起こす起動の前に印が付く");
+  const w2 = launches[1]!.child;
+  const evs: string[] = [];
+  r.core.subscribe("pm1", undefined, (e) => e.type === "chunk" && evs.push(e.data.toString()))!();
+  w2.connect("two");
+  await sleep(60);
+  assert.deepEqual(wakeInputs(w2), [], "SessionStart を見るまで送らない");
+  r.hook(hookOf("SessionStart", { source: "startup" }));
+  await until(() => w2.inputs().length === 2);
+  const [text, enter] = w2.inputs();
+  assert.equal(enter, "\r");
+  assert.ok(text!.includes("スリープから起こした") && !text!.includes("リセッションで再起動した"));
+  assert.ok(text!.includes(ref.id) && text!.includes(HANDOFF));
+  await sleep(120);
+  assert.equal(w2.inputs().length, 2, "状況確認の別の入力は送らない");
+  assert.equal(r.res.pending("pm1"), false);
+  // 渡した後は参照が外れる
+  assert.equal((await savedFile())[0]!.sleepHandoff, undefined);
+  assert.ok(evs.includes(WAKE_DIVIDER), "区切りの行");
+  assert.equal((await savedFile())[0]!.sleeping, undefined);
+  await r.close();
+});
+
+test("T9: 渡した後の 2 回目の眠り（引継ぎ無し）→ 起こしでは古い引継ぎを渡さない。--continue で元の会話を起こす（T11 の分岐）", async () => {
+  const r = await rig();
+  const w1 = await boot(r);
+  await sleepThrough(r, w1);
+  await r.sessions.wake("pm1");
+  const w2 = launches[1]!.child;
+  w2.connect("two");
+  r.hook(hookOf("SessionStart", { source: "startup" }));
+  await until(() => w2.inputs().length === 2);
+  await sleep(50);
+  r.hook(hookOf("Stop"));
+  await r.sessions.sleep("pm1");
+  assert.equal((await savedFile())[0]!.sleepHandoff, undefined);
+  await r.sessions.wake("pm1");
+  assert.deepEqual(r.starts.at(-1), { resume: true }, "引継ぎが無い眠りは今までどおり --continue");
+  assert.ok(launches[2]!.args.includes("--continue"));
+  launches[2]!.child.connect("three");
+  r.hook(hookOf("SessionStart", { source: "startup" }));
+  await sleep(120);
+  assert.deepEqual(launches[2]!.child.inputs(), [], "古い引継ぎを渡さない");
+  await r.close();
+});
+
+test("T6: 取り出せない時（memory が読めない）は本文を渡さず、事・理由・置き場を書いた 1 行を送る。参照は外す（U5 の B）", async () => {
+  const r = await rig();
+  const w1 = await boot(r);
+  const ref = await sleepThrough(r, w1);
+  mem.setDown(true);
+  await r.sessions.wake("pm1");
+  const w2 = launches[1]!.child;
+  w2.connect("two");
+  r.hook(hookOf("SessionStart", { source: "startup" }));
+  await until(() => w2.inputs().length === 2);
+  const text = w2.inputs()[0]!;
+  assert.ok(text.includes("スリープから起こした") && text.includes("取り出せなかった") && text.includes(ref.id));
+  assert.ok(text.includes("agent=pm1") && text.includes(`eventId=${ref.id}`), "置き場");
+  assert.ok(!text.includes("仕掛かり: x") && !text.includes(mem.token) && !text.includes(mem.url));
+  assert.ok(!text.includes("\n"));
+  for (let i = 0; i < 100 && (await savedFile())[0]!.sleepHandoff !== undefined; i++) await sleep(10);
+  assert.equal((await savedFile())[0]!.sleepHandoff, undefined, "取り出せなくても参照は外す");
+  await r.close();
+});
+
+test("T6: file の保存で id が違う時も、本文を渡さず理由を書く", async () => {
+  mem.setDown(true);
+  const r = await rig();
+  const w1 = await boot(r);
+  await sleepThrough(r, w1);
+  await writeFile(join(dir, "handoffs", "pm1.json"), JSON.stringify({ id: "古い", body: "古い本文" }));
+  await r.sessions.wake("pm1");
+  const w2 = launches[1]!.child;
+  w2.connect("two");
+  r.hook(hookOf("SessionStart", { source: "startup" }));
+  await until(() => w2.inputs().length === 2);
+  assert.ok(w2.inputs()[0]!.includes("id が違う") && !w2.inputs()[0]!.includes("古い本文"));
+  await r.close();
+});
+
+test("T7: 起こす起動に失敗したら眠ったままに戻る（sleeping・sleepHandoff が残り、印は外れ、身代わりは戻る）。次の wake でまた引継ぎを渡せる", async () => {
+  const r = await rig();
+  const w1 = await boot(r);
+  const ref = await sleepThrough(r, w1);
+  r.ctl.failNextFresh = true;
+  await assert.rejects(r.sessions.wake("pm1"), /新しい会話で起動できない/);
+  assert.equal(r.sessions.list()[0]!.sleeping, true);
+  const rec = (await savedFile())[0]!;
+  assert.equal(rec.sleeping, true);
+  assert.deepEqual(rec.sleepHandoff, { id: ref.id, stored: "memory" });
+  assert.equal(r.res.pending("pm1"), false, "印は外れる");
+  assert.deepEqual(r.standIn, ["pm1:true", "pm1:false", "pm1:true"]);
+  // もう一度起こすと渡せる
+  await r.sessions.wake("pm1");
+  const w2 = launches.at(-1)!.child;
+  w2.connect("two");
+  r.hook(hookOf("SessionStart", { source: "startup" }));
+  await until(() => w2.inputs().length === 2);
+  assert.ok(w2.inputs()[0]!.includes(HANDOFF));
+  await r.close();
+});
+
+test("T11: この仕組みの前に眠った session（sleepHandoff 無し）は --continue で起こし、最初の入力は送らない", async () => {
+  const r = await rig();
+  await boot(r);
+  await r.sessions.sleep("pm1");
+  assert.equal((await savedFile())[0]!.sleepHandoff, undefined);
+  await r.sessions.wake("pm1");
+  assert.deepEqual(r.starts.at(-1), { resume: true });
+  assert.ok(launches[1]!.args.includes("--continue"));
+  assert.equal(r.res.pending("pm1"), false);
+  launches[1]!.child.connect("two");
+  r.hook(hookOf("SessionStart", { source: "startup" }));
+  await sleep(100);
+  assert.deepEqual(launches[1]!.child.inputs(), []);
+  await r.close();
+});
+
+test("requestSleep: 眠っている・config 由来・未定義の session は今までの扱い（何もしない / 拒否）。引継ぎは頼まない", async () => {
+  const r = await rig();
+  const w1 = await boot(r);
+  await r.sessions.sleep("pm1");
+  const again = await r.res.requestSleep("pm1");
+  assert.deepEqual({ sleeping: again.sleeping, pending: again.pending }, { sleeping: true, pending: false });
+  assert.deepEqual(w1.inputs(), []);
+  await assert.rejects(r.res.requestSleep("nobody"), /未定義の session/);
+  await r.close();
+});
+
+test("T13: リセッション（restart の印）は今までどおり再起動し、スリープ（sleep の印）は停止する。同じ session に両方の印は立たない", async () => {
+  const r = await rig();
+  const w1 = await boot(r);
+  await r.res.request("pm1", HANDOFF);
+  await assert.rejects(r.res.requestSleep("pm1"), /途中/);
+  r.hook(hookOf("Stop"));
+  await until(() => launches.length === 2);
+  assert.equal(r.sessions.list()[0]!.sleeping, false, "restart は眠らせない");
+  assert.equal(w1.stopped(), true);
+  await r.close();
+});
+
+test("T14: pending は依頼（queued）・頼んだ間（asking）・起こした後の最初の入力待ち（wake）でも true。終われば false", async () => {
+  const r = await rig();
+  const w1 = await boot(r);
+  assert.equal(r.res.pending("pm1"), false);
+  await r.res.requestSleep("pm1");
+  assert.equal(r.res.pending("pm1"), true, "queued");
+  r.hook(hookOf("Stop"));
+  await until(() => w1.inputs().length === 2);
+  assert.equal(r.res.pending("pm1"), true, "asking");
+  r.hook(hookOf("UserPromptSubmit", { prompt: "ask" }));
+  await r.res.request("pm1", HANDOFF);
+  r.hook(hookOf("Stop"));
+  await until(() => r.sessions.list()[0]!.sleeping);
+  assert.equal(r.res.pending("pm1"), false);
+  await r.sessions.wake("pm1");
+  assert.equal(r.res.pending("pm1"), true, "wake");
+  launches[1]!.child.connect("two");
+  r.hook(hookOf("SessionStart", { source: "startup" }));
+  await until(() => launches[1]!.child.inputs().length === 2);
+  assert.equal(r.res.pending("pm1"), false);
+  await r.close();
+});
+
+test("firstInputText: kind=wake は先頭の語が「スリープから起こした」。取り出せなかった時の 1 行も同じ", () => {
+  const ok = firstInputText({ id: "c1:x", stored: "memory", session: "s", file: "/d/s.json", result: { ok: true, body: "本文" }, kind: "wake" });
+  assert.ok(ok.includes("スリープから起こした") && ok.includes("--- 引継ぎ ---\n本文\n--- ここまで ---") && !ok.includes("リセッションで"));
+  const ng = firstInputText({ id: "c1:x", stored: "file", session: "s", file: "/d/s.json", result: { ok: false, reason: "R" }, kind: "wake" });
+  assert.ok(ng.includes("スリープから起こした") && ng.includes("取り出せなかった: R") && !ng.includes("\n"));
 });

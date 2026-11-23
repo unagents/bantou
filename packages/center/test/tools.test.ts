@@ -21,7 +21,7 @@ const rc = (project: string): RcStatus => ({
   auth: "ok", loginUrl: null, loginError: null,
 });
 
-async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partial<SessionManager>; remotes?: Partial<RemoteManager>; follow?: Follow; login?: LoginFlow; workspace?: string; systemInstructions?: { id: string; version: number; title: string }[]; launcher?: boolean } = {}) {
+async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partial<SessionManager>; remotes?: Partial<RemoteManager>; follow?: Follow; login?: LoginFlow; workspace?: string; systemInstructions?: { id: string; version: number; title: string }[]; launcher?: boolean; resession?: { requestSleep: (name: string) => Promise<never> } } = {}) {
   const calls: unknown[] = [];
   const supervisor: RemoteControlSupervisor = {
     start: async (p) => rc(p),
@@ -56,7 +56,7 @@ async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partia
     scopeOf: () => ({ servers: undefined, out_of_scope: 0 }),
     ...mgrs.remotes,
   } as unknown as RemoteManager;
-  const server = createCenterServer({ ...(mgrs.systemInstructions ? { systemInstructions: mgrs.systemInstructions } : {}), config: parseConfig(mgrs.workspace ? { workspace: mgrs.workspace } : {}, "/x/c.json"), supervisor, link: fullLink, sessions, remotes, follow: mgrs.follow, login: mgrs.login, ...(mgrs.launcher !== undefined ? { launcher: mgrs.launcher } : {}) });
+  const server = createCenterServer({ ...(mgrs.systemInstructions ? { systemInstructions: mgrs.systemInstructions } : {}), config: parseConfig(mgrs.workspace ? { workspace: mgrs.workspace } : {}, "/x/c.json"), supervisor, link: fullLink, sessions, remotes, follow: mgrs.follow, login: mgrs.login, ...(mgrs.launcher !== undefined ? { launcher: mgrs.launcher } : {}), ...(mgrs.resession ? { resession: mgrs.resession } : {}) });
   const [ct, st] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "t", version: "0" });
   await Promise.all([server.connect(st), client.connect(ct)]);
@@ -651,6 +651,42 @@ test("session_sleep / session_wake は SessionManager へ名前を委譲し、�
   const bad = await client.callTool({ name: "session_sleep", arguments: { name: "a b" } }).catch((e: unknown) => e);
   assert.ok(bad instanceof Error || (bad as { isError?: boolean }).isError === true);
   assert.deepEqual(seen, ["sleep:pm1", "wake:pm1", "sleep:cfg"]);
+  await close();
+});
+
+test("T12: session_sleep は resession.requestSleep（引継ぎを書かせてから眠らせる）を呼び、受理の形（accepted / pending）をそのまま返す。拒否は isError で理由を返す。sessions.sleep は直接呼ばない", async () => {
+  const seen: string[] = [];
+  let direct = 0;
+  const { client, close } = await connect({}, {
+    sessions: { sleep: async () => { direct++; return {} as never; } },
+    resession: {
+      requestSleep: async (n) => {
+        seen.push(`req:${n}`);
+        if (n === "busy") throw new Error("利用者の入力待ち（needs-input）の間はリセッションしない");
+        return { name: n, state: "connected", accepted: true, sleeping: false, pending: true } as never;
+      },
+    },
+  });
+  assert.deepEqual(JSON.parse(text(await client.callTool({ name: "session_sleep", arguments: { name: "pm1" } }))), { name: "pm1", state: "connected", accepted: true, sleeping: false, pending: true });
+  const busy = await client.callTool({ name: "session_sleep", arguments: { name: "busy" } });
+  assert.equal(busy.isError, true);
+  assert.match(text(busy), /needs-input/);
+  assert.deepEqual(seen, ["req:pm1", "req:busy"]);
+  assert.equal(direct, 0);
+  await close();
+});
+
+test("T12: session_sleep・session_wake の description は「元の会話のまま」を含まず、引継ぎ・新しい会話・状況確認の入力が無い事を書く", async () => {
+  const { client, close } = await connect();
+  const tools = (await client.listTools()).tools;
+  const sleepD = tools.find((t) => t.name === "session_sleep")!.description ?? "";
+  const wakeD = tools.find((t) => t.name === "session_wake")!.description ?? "";
+  for (const d of [sleepD, wakeD]) {
+    assert.ok(!d.includes("元の会話のまま"), d);
+    assert.ok(d.includes("新しい会話") && d.includes("引継ぎ"), d);
+  }
+  assert.ok(sleepD.includes("session_resession") && sleepD.includes("accepted") && sleepD.includes("pending"));
+  assert.ok(wakeD.includes("状況確認の別の入力は送らない"));
   await close();
 });
 

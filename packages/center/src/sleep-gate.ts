@@ -3,7 +3,7 @@
  *
  * session をスリープさせると claude が止まり、claude の messenger peer（名前 = capSessionName(session)）は登録から消える。
  * center が同じ名前の身代わりの peer を登録しておくと、その session 宛の message（他の session・remote の完了通知など）は身代わりに届く。
- * 届いたら (1) 身代わりを外す (2) session を元の会話のまま起こす (3) 起きた claude の peer が現れるまで待って、届いた message を渡す。
+ * 届いたら (1) 身代わりを外す (2) session を起こす（新しい会話。眠る時の引継ぎが最初の入力で渡る） (3) 起きた claude の peer が現れるまで待って、届いた message を渡す。
  * 眠っていない session には身代わりを置かない（同名の peer が並ばない）。broker に繋がらない間は定期的に登録をやり直す。
  */
 import type { LinkClient, LinkInbound, PeerMark } from "./server-link.js";

@@ -135,8 +135,8 @@ export function centerBackend(opts: { url: string; token: string }): Pick<Coordi
       return { name: String(v.name ?? input.name), state: String(v.state ?? "") };
     },
     sleepSession: async (name) => {
-      const v = (await call("session_sleep", { name })) as { name?: string; state?: string; sleeping?: boolean };
-      return { name: String(v.name ?? name), state: String(v.state ?? ""), sleeping: v.sleeping === true };
+      const v = (await call("session_sleep", { name })) as { name?: string; state?: string; sleeping?: boolean; accepted?: boolean; pending?: boolean };
+      return { name: String(v.name ?? name), state: String(v.state ?? ""), sleeping: v.sleeping === true, accepted: v.accepted !== false, pending: v.pending === true };
     },
   };
 }

@@ -28,13 +28,25 @@ export interface SavedSession {
   createdAt: string;
   /** スリープ中（claude の process を止めてある。会話・設定は残る）。起こすのは wake()。center 再起動でも眠ったまま。 */
   sleeping?: boolean;
+  /**
+   * 眠らせた時に渡された引継ぎの参照（保存先 stored と id）。起こす時（wake）は `--continue` でなく新しい会話で起動し、最初の入力で center がこれを取り出して渡す。
+   * 渡し終えたら外す（clearSleepHandoff）。無い記録（この仕組みの前に眠った session）は今までどおり `--continue` で元の会話を起こす。
+   * 眠りは center の再起動をまたぐので、リセッションの印（process 内）と違い、保存した記録に持つ。
+   */
+  sleepHandoff?: SleepHandoffRef;
+}
+
+/** スリープの引継ぎの参照。stored = memory は外部記憶（id で読む）、file は center の引継ぎの file（session ごと。id 一致を確かめて読む）。 */
+export interface SleepHandoffRef {
+  id: string;
+  stored: "memory" | "file";
 }
 
 export interface SessionInfo {
   name: string;
   path: string;
   state: RcStatus["state"];
-  /** スリープ中か（claude の process は止まっていて state は stopped。会話は残り、開く・messenger の宛先になる・wake で元の会話のまま起き直す）。 */
+  /** スリープ中か（claude の process は止まっていて state は stopped。開く・messenger の宛先になる・wake で、新しい会話で起き直し、眠る時に書かせた引継ぎが最初の入力で渡される）。 */
   sleeping: boolean;
   pid: number | null;
   sessionUrl: string | null;
@@ -113,12 +125,18 @@ export interface SessionManager {
   update(input: SessionUpdateInput): Promise<SessionInfo>;
   delete(name: string): Promise<{ name: string; deleted: true }>;
   /**
-   * session をスリープさせる（claude の process を止める。会話・設定・remote の記録は残す）。session_create で作った session のみ。眠っている session には何もしない。
-   * 起こすのは wake()（--continue で元の会話に復帰）。center の再起動後も眠ったまま。
+   * session を止めて眠らせる primitive（claude の process を止める。設定・remote の記録は残す）。session_create で作った session のみ。眠っている session には何もしない。
+   * handoff を渡すと、その参照を保存した記録に載せる（先に persist。止められなければ戻す）。起こすのは wake()。center の再起動後も眠ったまま。
+   * 引継ぎを書かせる入口は resession.requestSleep（session_sleep はそこへ行く）。handoff 無しは、引継ぎの無い眠り（起こす時は `--continue`）。
    */
-  sleep(name: string): Promise<SessionInfo>;
-  /** スリープ中の session を元の会話のまま起こす（resume）。眠っていなければ何もしない（今の状態を返す）。 */
+  sleep(name: string, opts?: { handoff?: SleepHandoffRef }): Promise<SessionInfo>;
+  /**
+   * スリープ中の session を起こす。記録に sleepHandoff があれば新しい会話（`--continue` 無し）で起動し、起動の前に onWake で引継ぎを渡す印を付ける。
+   * 無ければ（この仕組みの前に眠った session）`--continue` で元の会話を起こす。眠っていなければ何もしない（今の状態を返す）。
+   */
   wake(name: string): Promise<SessionInfo>;
+  /** 引継ぎを渡し終えた（取り出せなかった時も含む）ので、記録の sleepHandoff を外す（id が一致する時だけ。二度目の起こしで古い引継ぎを渡さない）。 */
+  clearSleepHandoff(name: string, id: string): Promise<void>;
   /**
    * リセッションの再起動: claude を止め、`--continue` 無し（新しい会話）で起動し直す。session_create で作った session のみ。眠っている session は不可。
    * 止めてから新しい claude が接続するまでの間は、スリープと同じ messenger の身代わりを置く（取りこぼしを防ぐ。設計 U6 の A）。
@@ -175,6 +193,10 @@ export function createSessionManager(opts: {
   notifyServersChanged?: (name: string, text: string) => Promise<{ ok: boolean; reason?: string }>;
   /** スリープ状態が変わった時（sleeping = 今眠っているか。restore で眠ったままの session にも呼ぶ）。messenger の身代わり peer の登録・解除に使う。失敗しても本体は成功にする。 */
   onSleepChange?: (name: string, sleeping: boolean) => void;
+  /** 引継ぎつきの眠りを新しい会話で起こす直前（起動の前）に呼ぶ。引継ぎを最初の入力で渡す印を付ける先（SessionStart を取りこぼさないよう先に付ける）。失敗しても本体は成功にする。 */
+  onWake?: (name: string, handoff: SleepHandoffRef) => void;
+  /** 起こす起動に失敗して眠ったままに戻した時に呼ぶ（onWake で付けた印を外す）。 */
+  onWakeAbort?: (name: string) => void;
 }): SessionManager {
   const { config, supervisor, store, log } = opts;
   const waitMs = opts.waitMs ?? 15_000;
@@ -773,6 +795,8 @@ export function createSessionManager(opts: {
         const wasSleeping = rec.sleeping === true;
         const newRec: SavedSession = { ...rec, name: newName, path: newPath };
         delete newRec.sleeping;
+        // 名前・path の変更で起きる時は元の会話（resume）で起動する。渡さない引継ぎの参照は持ち越さない
+        delete newRec.sleepHandoff;
         const doMove = moving && input.move === true;
         let renamedRemotes = false;
         let moved = false;
@@ -856,24 +880,33 @@ export function createSessionManager(opts: {
         return { name, deleted: true as const };
       }),
 
-    sleep: (name) =>
+    sleep: (name, sleepOpts) =>
       serial(async () => {
         const rec = savedOrThrow(name);
         if (rec.sleeping === true && supervisor.status(name).state === "stopped") return info(supervisor.status(name));
-        // 先にフラグを保存する（止めている途中で center が落ちても、次の起動で眠ったまま復帰する）
+        // 先にフラグと引継ぎの参照を保存する（止めている途中で center が落ちても、次の起動で眠ったまま復帰し、起こす時に引継ぎを取り出せる）
+        // 引継ぎ無しの眠りは、前の（渡し終えていない）参照を引き継がない
+        const prevHandoff = rec.sleepHandoff;
+        if (sleepOpts?.handoff) rec.sleepHandoff = { id: sleepOpts.handoff.id, stored: sleepOpts.handoff.stored };
+        else delete rec.sleepHandoff;
+        const undo = (): void => {
+          delete rec.sleeping;
+          if (prevHandoff) rec.sleepHandoff = prevHandoff;
+          else delete rec.sleepHandoff;
+        };
         rec.sleeping = true;
         try {
           await persist();
         } catch (e) {
-          delete rec.sleeping;
+          undo();
           throw new Error(`状態ファイルに保存できない: ${(e as Error).message}`);
         }
         let st: RcStatus;
         try {
           st = await supervisor.stop(name);
         } catch (e) {
-          // 止められなかった（claude が残っているかもしれない）。眠った事にしない: フラグを戻し、身代わりは立てない（フラグと身代わりを食い違わせない）
-          delete rec.sleeping;
+          // 止められなかった（claude が残っているかもしれない）。眠った事にしない: フラグと参照を戻し、身代わりは立てない（フラグと身代わりを食い違わせない）
+          undo();
           await persist().catch((pe) => log(`スリープの取り消しを保存できない: ${name} ${(pe as Error).message}`));
           log(`session スリープ失敗（停止できない）: ${name} ${(e as Error).message}`);
           throw e;
@@ -888,6 +921,7 @@ export function createSessionManager(opts: {
       serial(async () => {
         const rec = savedOrThrow(name);
         if (rec.sleeping !== true) return info(supervisor.status(name));
+        const handoff = rec.sleepHandoff;
         delete rec.sleeping;
         try {
           await persist();
@@ -897,12 +931,27 @@ export function createSessionManager(opts: {
         }
         // 身代わりを先に外す（外さないと、起きた claude の peer と同名が並ぶ）
         notifySleep(name, false);
+        // 引継ぎつきの眠りは、新しい会話で起動する（`--continue` を付けない）。最初の入力で引継ぎを渡す印は、起動の前に付ける
+        if (handoff) {
+          try {
+            opts.onWake?.(name, handoff);
+          } catch (e) {
+            log(`起床の引継ぎの印を付けられない: ${name} ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
         let st: RcStatus;
         try {
-          st = await supervisor.start(name, { resume: true });
+          st = await (handoff ? supervisor.start(name) : supervisor.start(name, { resume: true }));
         } catch (e) {
-          // 起こせなかった。眠ったままに戻す（フラグと身代わりを元に戻す。身代わりが預かった message を引き継げるように）
+          // 起こせなかった。眠ったままに戻す（フラグと身代わりを元に戻す。引継ぎの参照は記録に残る。身代わりが預かった message を引き継げるように）
           rec.sleeping = true;
+          if (handoff) {
+            try {
+              opts.onWakeAbort?.(name);
+            } catch (ae) {
+              log(`起床の引継ぎの印を外せない: ${name} ${ae instanceof Error ? ae.message : String(ae)}`);
+            }
+          }
           await persist().catch((pe) => log(`起床の取り消しを保存できない: ${name} ${(pe as Error).message}`));
           notifySleep(name, true);
           opts.events?.publish({ reason: "sleep", name });
@@ -910,8 +959,16 @@ export function createSessionManager(opts: {
           throw e;
         }
         opts.events?.publish({ reason: "sleep", name });
-        log(`session 起床: ${name}`);
+        log(`session 起床: ${name}${handoff ? "（新しい会話。引継ぎを最初の入力で渡す）" : ""}`);
         return info(await settle(name, st));
+      }),
+
+    clearSleepHandoff: (name, id) =>
+      serial(async () => {
+        const rec = saved.get(name);
+        if (!rec || rec.sleepHandoff?.id !== id) return;
+        delete rec.sleepHandoff;
+        await persist().catch((e) => log(`スリープの引継ぎの参照を外せない: ${name} ${(e as Error).message}`));
       }),
 
     restartFresh: (name) =>

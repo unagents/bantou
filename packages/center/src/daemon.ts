@@ -188,6 +188,9 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     notifyServersChanged: (name, text) => link.notifyPeer(capSessionName(name), text),
     // スリープの出入りで messenger の身代わり peer を置く・外す（gate は sessions の後に作るので、呼ばれる時に参照する）
     onSleepChange: (name, sleeping) => sleepGate.sync(name, sleeping),
+    // 引継ぎつきの眠りを新しい会話で起こす時: 起動の前に引継ぎを最初の入力で渡す印を付ける（失敗したら外す）。resession は後で作るので、呼ばれる時に参照する
+    onWake: (name, handoff) => resession.armWake(name, handoff),
+    onWakeAbort: (name) => resession.disarmWake(name),
     log,
   });
   // スリープ中の session 宛の message で、その session を起こす（身代わり peer。link は messenger の broker 1 つに繋がる）
@@ -206,6 +209,9 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   const resession = createResessioner({
     info: (name) => sessions.list().find((x) => x.name === name),
     restartFresh: (name) => sessions.restartFresh(name),
+    // スリープ: 引継ぎを受けた後に会話を止める（新しい会話は起動しない）。ref 無しは引継ぎの無い眠り
+    sleepNow: (name, ref) => sessions.sleep(name, ref ? { handoff: ref } : undefined),
+    afterWakeDelivered: (name, id) => sessions.clearSleepHandoff(name, id),
     saveToMemory: (name, h) => memoryEvents.handoff(name, h),
     readFromMemory: (name, id) => memoryEvents.readHandoff(name, id),
     // 取り出せなかった理由の文から除く値: 外部記憶の url と、header の値（展開前・展開後。token は Authorization の中）
@@ -291,7 +297,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   process.stderr.on("error", () => {});
   process.stdout.on("error", () => {});
 
-  const makeServer = (launcher: boolean) => createCenterServer({ config, supervisor, link, sessions, remotes, follow, login, log, launcher });
+  const makeServer = (launcher: boolean) => createCenterServer({ config, supervisor, link, sessions, remotes, follow, login, log, launcher, resession });
   if (args.transport === "http") {
     if (!config.token || config.token.length < MIN_TOKEN_LEN) {
       throw new Error(`http transport には config の token（${MIN_TOKEN_LEN} 文字以上）が必要: ${configPath}`);
