@@ -13,10 +13,12 @@ cask "bantou" do
   depends_on macos: :sequoia
 
   app "bantou.app"
+  app "bantou-center.app"
 
   preflight_steps do
     # ad-hoc 署名アプリのため quarantine 属性のみ除去する（再署名は hardened runtime のフラグを壊すため行わない）
     run "xattr", args: ["-dr", "com.apple.quarantine", "{{staged_path}}/bantou.app"]
+    run "xattr", args: ["-dr", "com.apple.quarantine", "{{staged_path}}/bantou-center.app"]
   end
 
   zap trash: [

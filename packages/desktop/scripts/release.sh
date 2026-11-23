@@ -142,6 +142,8 @@ fi
 (cd packages/desktop && TAURI_SIGNING_PRIVATE_KEY="$(cat "$KEY")" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" CI=true bun run tauri build)
 BUNDLE="packages/desktop/src-tauri/target/release/bundle"
 DMG="$BUNDLE/dmg/bantou_${VERSION}_aarch64.dmg"
+# bantou-center.app を build して dmg に足す（updater の tar.gz には入らない）
+packages/desktop/scripts/bundle-center-app.sh "$DMG"
 APP_DR="$(codesign -d -r- "$BUNDLE/macos/bantou.app" 2>&1 | grep '^designated' || true)"
 echo "designated requirement: $APP_DR"
 # identity を指定した（"-" = ad-hoc 以外）のに DR が読めない、または cdhash（ad-hoc）のままなら、許可が更新で外れる署名になっている。
