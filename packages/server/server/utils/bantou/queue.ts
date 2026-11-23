@@ -43,7 +43,7 @@ export interface WorkQueue {
   stop(parentId: string): { running: number; queued: number };
   /** 今の数。 */
   counts(): { running: number; queued: number };
-  /** 新しい物を queue から取り出すのをやめる（動いている worker はそのまま。submit は受けて待たせる）。自己更新の待ちで使う。 */
+  /** 新しい launch を queue から取り出すのをやめる（動いている worker と reply の起こし直しはそのまま。submit は受けて待たせる）。自己更新の待ちで使う。 */
   pause(): void;
   /** pause を解く（自己更新を取りやめた時）。 */
   resume(): void;
@@ -72,12 +72,14 @@ export function createWorkQueue(o: QueueOptions): WorkQueue {
   /** 起こす物: reply（同じ worker の run が終わっている物の先頭。待っている reply は飛ばす）、無ければ launch の先頭。 */
   const next = (): Job | undefined => {
     const i = replies.findIndex((r) => !workerRunning(r.workerId));
-    return i >= 0 ? replies.splice(i, 1)[0] : launches.shift();
+    if (i >= 0) return replies.splice(i, 1)[0];
+    // pause 中は新しい launch だけ取り出さない（reply は取り出す）
+    return paused ? undefined : launches.shift();
   };
 
   /** 空きと負荷が許す限り先頭から起こす。 */
   const pump = (): void => {
-    while (!closed && !paused && waiting() > 0 && running.size < o.maxParallel && o.loadavg1() <= o.cpus()) {
+    while (!closed && waiting() > 0 && running.size < o.maxParallel && o.loadavg1() <= o.cpus()) {
       const job = next();
       if (job === undefined) break;
       running.add(job);
@@ -90,7 +92,7 @@ export function createWorkQueue(o: QueueOptions): WorkQueue {
         });
     }
     // 待っていて動かせない（負荷が高い・満席）間は、再確認の timer を持つ。満席は worker の終了で pump される
-    if (!closed && !paused && waiting() > 0) {
+    if (!closed && (paused ? replies.length > 0 : waiting() > 0)) {
       if (timer === undefined) {
         timer = setInterval(pump, o.pollMs ?? QUEUE_POLL_MS);
         timer.unref?.();

@@ -4,7 +4,7 @@ import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createWorkQueue, type Job } from "../../../../server/utils/bantou/queue";
-import { PENDING_FILE, takePending, writePending } from "../../../../server/utils/bantou/pending";
+import { PENDING_FILE, clearPending, takePending, writePending } from "../../../../server/utils/bantou/pending";
 import { buildSpec, compareVersions, createSelfUpdater, fetchLatestVersion, readUpdateFile, writeUpdateFile } from "../../../../server/utils/bantou/update";
 import { workerDir } from "../../../../server/utils/bantou/paths";
 import type { WorkerRunInput } from "../../../../server/utils/bantou/worker";
@@ -84,6 +84,10 @@ test("pending: 待ちの launch / reply を 0600 の file に持ち、読むと�
     assert.deepEqual(got.jobs.map((j) => [j.kind, j.input.workerId]), [["reply", "w-r1"], ["launch", "w-l1"]]);
     assert.equal(got.jobs[0]!.input.mode, "resume");
     assert.equal(got.skipped, 0);
+    // 読んでも file は消えない（全部 submit し終えてから clearPending で消す）
+    assert.equal((await stat(join(ws, PENDING_FILE))).isFile(), true);
+    assert.equal((await takePending(ws)).jobs.length, 2);
+    await clearPending(ws);
     assert.deepEqual(await takePending(ws), { jobs: [], skipped: 0 });
     run.finish();
     q.close();
@@ -98,7 +102,30 @@ test("pending: 待ちの launch / reply を 0600 の file に持ち、読むと�
   });
 });
 
-test("queue: pause すると新しい物を取り出さない（submit は待たせる）。resume で再開する", async () => {
+test("queue: pause 中も reply の起こし直しは取り出す（新しい launch だけ止める）", async () => {
+  const q = createWorkQueue(qopts(3));
+  const ev: string[] = [];
+  const a = job("launch", input("/w", "w-a"), ev);
+  q.submit(a);
+  q.pause();
+  const l = job("launch", input("/w", "w-l"), ev);
+  const r = job("reply", input("/w", "w-r", { mode: "resume" }), ev);
+  q.submit(l);
+  q.submit(r);
+  assert.deepEqual(ev, ["start:w-a", "start:w-r"]);
+  assert.deepEqual(q.waiting().map((j) => j.workerId), ["w-l"]);
+  // 同じ worker が動いている間の reply は待つ（pause 中でも、終われば取り出す）
+  const r2 = job("reply", input("/w", "w-a", { mode: "resume" }), ev);
+  q.submit(r2);
+  assert.deepEqual(ev, ["start:w-a", "start:w-r"]);
+  a.finish();
+  await tick(20);
+  assert.deepEqual(ev, ["start:w-a", "start:w-r", "start:w-a"]);
+  for (const j of [r, r2]) j.finish();
+  q.close();
+});
+
+test("queue: pause すると新しい launch を取り出さない（submit は待たせる）。resume で再開する", async () => {
   const q = createWorkQueue(qopts(2));
   const ev: string[] = [];
   const ws = "/w";
@@ -214,7 +241,7 @@ test("自己更新: 入れ替えの終了の途中で増えた待ちも flush �
     await u.check();
     assert.equal(u.updating(), true);
     const ev: string[] = [];
-    q.submit(job("reply", input(ws, "w-after", { mode: "resume" }), ev));
+    q.submit(job("launch", input(ws, "w-after"), ev));
     await u.flush();
     const p = await takePending(ws);
     assert.deepEqual(p.jobs.map((j) => j.input.workerId), ["w-after"]);
@@ -254,15 +281,19 @@ test("自己更新: 最新版を確認できなければ log に残して続け�
 
 test("自己更新: 取り消し（close）されたら待ちを解いて queue を再開する", async () => {
   await withWs(async (ws) => {
-    const { q, u, exits } = updaterSetup(ws);
+    const { q, u, exits, logs } = updaterSetup(ws);
     const ev: string[] = [];
     const a = job("launch", input(ws, "w-a"), ev);
     q.submit(a);
     const checking = u.check();
     await tick(20);
     u.close();
+    // 停止が来た後に worker が終わっても「入れ替える」に進まない
+    a.finish();
     await checking;
     assert.deepEqual(exits, []);
+    assert.equal(logs.some((l) => l.startsWith("入れ替える:")), false);
+    assert.deepEqual(await readUpdateFile(ws), undefined);
     a.finish();
     q.close();
     assert.equal(u.updating(), false);

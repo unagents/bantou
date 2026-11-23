@@ -42,7 +42,7 @@ export async function writePending(workspace: string, jobs: Job[]): Promise<numb
   return items.length;
 }
 
-/** file から読み、file を消す（読めた分だけ返す。壊れた項目は読み飛ばす）。無ければ空。 */
+/** file から読む（読めた分だけ返す。壊れた項目は読み飛ばす）。無ければ空。file は消さない: 続きの job を全部 submit し終えてから clearPending で消す。 */
 export async function takePending(workspace: string): Promise<{ jobs: PendingJob[]; skipped: number }> {
   const path = join(workspace, PENDING_FILE);
   let raw: string;
@@ -51,7 +51,6 @@ export async function takePending(workspace: string): Promise<{ jobs: PendingJob
   } catch {
     return { jobs: [], skipped: 0 };
   }
-  await rm(path, { force: true });
   let list: unknown[] = [];
   try {
     const d = JSON.parse(raw) as { jobs?: unknown };
@@ -67,7 +66,7 @@ export async function takePending(workspace: string): Promise<{ jobs: PendingJob
   return { jobs, skipped: list.length - jobs.length };
 }
 
-/** 更新を取りやめた時などに file を消す。 */
+/** file を消す（読んだ待ちを全部 submit し終えた後）。 */
 export async function clearPending(workspace: string): Promise<void> {
   await rm(join(workspace, PENDING_FILE), { force: true });
 }

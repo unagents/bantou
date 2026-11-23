@@ -187,7 +187,7 @@ export function createServerLink(opts: {
   const bridged = new Set<string>();
   const bridgedNames = new Set<string>();
 
-  const body =(b: LaunchMessage | StopMessage | AnswerMessage | ApproveMessage | RejectMessage | ServerInfoMessage): string => JSON.stringify(b);
+  const body = (b: LaunchMessage | StopMessage | AnswerMessage | ApproveMessage | RejectMessage | ServerInfoMessage): string => JSON.stringify(b);
 
   const clientOrThrow = (): LinkClient => {
     if (closed) throw new Error("center 終了");
