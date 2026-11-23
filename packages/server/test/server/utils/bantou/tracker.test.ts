@@ -102,12 +102,48 @@ test("tracker: ws を開けない（connect が投げる）時もログだけで
   assert.ok(logs.some((l) => l.includes("bad url")));
 });
 
+test("tracker: log に ws の token（?token=...）を出さない（接続エラー・開けない・書けない）", async () => {
+  const url = "ws://center.example:9/ws?token=SECRET123";
+  // 接続エラー
+  const logs1: string[] = [];
+  const s = new FakeSocket();
+  const t1 = createTracker({ parentId: "c", ws: url, intervalMs: 20, connect: () => s, log: (m) => logs1.push(m) });
+  s.emit("error");
+  t1.close();
+  assert.ok(logs1.length === 1 && logs1[0]!.includes("ws://center.example:9/ws?***"), logs1.join("|"));
+  // connect が URL 入りの文言で投げる
+  const logs2: string[] = [];
+  const t2 = createTracker({
+    parentId: "c",
+    ws: url,
+    connect: () => {
+      throw new Error(`Invalid URL: ${url}`);
+    },
+    log: (m) => logs2.push(m),
+  });
+  t2.close();
+  assert.ok(logs2.length === 1 && logs2[0]!.includes("Invalid URL: ws://center.example:9/ws?***"), logs2.join("|"));
+  // send が URL 入りの文言で投げる
+  const logs3: string[] = [];
+  const s3 = new FakeSocket();
+  s3.send = () => {
+    throw new Error(`write failed to ${url}`);
+  };
+  const t3 = createTracker({ parentId: "c", ws: url, intervalMs: 20, connect: () => s3, log: (m) => logs3.push(m) });
+  s3.emit("open");
+  t3.touch();
+  await sleep(50);
+  t3.close();
+  assert.ok(logs3.length === 1 && !logs3[0]!.includes("SECRET123"), logs3.join("|"));
+  for (const l of [...logs1, ...logs2, ...logs3]) assert.ok(!l.includes("SECRET123"), l);
+});
+
 test("tracker: 実 WebSocket（global）で ws の受け側に 1 行届く", async () => {
   const received: string[] = [];
   // 受け側は最小の WebSocket サーバ（ws パッケージ無し）: handshake して text frame を読む
   const { createHash } = await import("node:crypto");
   const server = createServer();
-  const sockets = new Set<import("node:net").Socket>();
+  const sockets = new Set<import("node:stream").Duplex>();
   server.on("upgrade", (req, socket) => {
     sockets.add(socket);
     const key = req.headers["sec-websocket-key"] as string;

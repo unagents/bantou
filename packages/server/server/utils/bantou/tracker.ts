@@ -3,6 +3,7 @@
  * 間隔ごとに「その間に出力が在った時だけ」launch の ws へ 1 行書く: { "parent-id", "at" }。無音の間は書かない。
  * state の判定・要約はしない。
  */
+import { redactIn, redactUrl } from "./log";
 
 /** 書く間隔（ms）。 */
 export const TRACKER_INTERVAL_MS = 5000;
@@ -54,7 +55,7 @@ export function createTracker(o: TrackerOptions): Tracker {
       try {
         sock.send(line);
       } catch (e) {
-        log(`tracker: ws へ書けない: ${e instanceof Error ? e.message : String(e)}`);
+        log(`tracker: ws へ書けない: ${redactIn(e instanceof Error ? e.message : String(e), o.ws)}`);
         dead = true;
         break;
       }
@@ -66,7 +67,7 @@ export function createTracker(o: TrackerOptions): Tracker {
     sock = connect(o.ws);
     sock.addEventListener("open", flush);
     sock.addEventListener("error", () => {
-      if (!dead) log(`tracker: ws の接続エラー: ${o.ws}`);
+      if (!dead) log(`tracker: ws の接続エラー: ${redactUrl(o.ws)}`);
       dead = true;
       pending = [];
     });
@@ -75,7 +76,7 @@ export function createTracker(o: TrackerOptions): Tracker {
       pending = [];
     });
   } catch (e) {
-    log(`tracker: ws を開けない: ${o.ws} ${e instanceof Error ? e.message : String(e)}`);
+    log(`tracker: ws を開けない: ${redactUrl(o.ws)} ${redactIn(e instanceof Error ? e.message : String(e), o.ws)}`);
     dead = true;
   }
 

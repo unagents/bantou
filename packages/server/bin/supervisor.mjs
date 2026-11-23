@@ -1,4 +1,5 @@
 // bantou-server の supervisor。`--supervise` で起動し、子（常駐本体、--serve）を 1 つだけ持つ。Nitro は読まない。
+// （v2 の server は更新の指示を持たず update.json を書かない。以下は旧版の更新の取り決めを、版をまたぐ互換のために残している物。）
 // 自己更新では (1) 子が全部終わるのを待って update.json に restart を書き exit 0、(2) supervisor が新版の supervisor へ引き継ぐ
 // （`bantou --handoff-protocol` が "1" を返す版のみ。返さない版は従来どおり子だけ入れ替える）。
 // 引き継ぎ: 旧 supervisor（S2）が lock に next:{token} を付けて新版の `--supervise` を起動 → 新 supervisor（S3）が試行モードで
@@ -14,9 +15,9 @@ export const LOCK_FILE = "server.lock";
 export const READY_FILE = "server.ready";
 export const UPDATE_FILE = "update.json";
 export const EXIT_FILE = "server.exit";
-/** 退役の印（daemon の retire.ts RETIRED_FILE、bin/bantou.mjs と同じ名前）。在れば更新の再起動をしない。 */
+/** 退役の印（bin/bantou.mjs と同じ名前）。在れば更新の再起動をしない。 */
 export const RETIRED_FILE = "server.retired";
-/** 退役した子の終了コード（retire.ts EXIT_RETIRED、protocol の RETIRE_EXIT_CODE）。 */
+/** 退役した子の終了コード（旧版の退役の指示が使っていた値）。 */
 export const EXIT_RETIRED = 76;
 /** 更新後の子が ready になるまでの猶予。超えたら直前の版へ巻き戻す。 */
 export const READY_TIMEOUT_MS = 120_000;
@@ -570,7 +571,7 @@ export async function runSupervisor(opts) {
       const ex = await run.exited;
       log(`子が終了 code=${ex.code} signal=${ex.signal}`);
       const upd = readJson(updatePath);
-      // 退役の印が在れば、update.json が残っていても次の版を起動しない（retire_server が更新の再起動と重なった時の多層防御）。
+      // 退役の印が在れば、update.json が残っていても次の版を起動しない（旧版の退役の指示が更新の再起動と重なった時の多層防御）。
       // 印の有無は --serve / --supervise の経路が見ないので、ここで止める。launcher へは server.exit 経由で 76 が伝わる
       if (!stopping && upd && upd.state === "restart" && existsSync(join(workspace, RETIRED_FILE))) {
         log("退役済み（server.retired）のため更新の再起動をしない");

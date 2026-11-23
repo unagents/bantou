@@ -17,6 +17,7 @@ import {
   createDispatcher,
   describeMessage,
   startDaemon,
+  type DaemonDeps,
   type DispatchDeps,
 } from "../../../../server/utils/bantou/daemon";
 import { handleMcpRequest, startMcpListener } from "../../../../server/utils/bantou/mcp";
@@ -51,6 +52,12 @@ test("describeMessage: prompt・content は先頭 80 文字だけ", () => {
   assert.ok(line.includes(`prompt=${"x".repeat(80)}`) && !line.includes("x".repeat(81)));
   const a = describeMessage({ protocol: "bantou", callType: "reply", order: "answer", "session-id": "s", content: long });
   assert.ok(a.includes("session-id=s") && !a.includes("x".repeat(81)));
+});
+
+test("describeMessage: ws の token（?token=...）は log に出ない", () => {
+  const line = describeMessage({ protocol: "bantou", callType: "invoke", order: "launch", "parent-id": "cap", model: "sonnet", prompt: "p", ws: "ws://user:pw@center.example:8080/ws?token=SECRET123#frag" });
+  assert.ok(!line.includes("SECRET123") && !line.includes("pw@") && !line.includes("frag"), line);
+  assert.ok(line.includes("ws=ws://***@center.example:8080/ws?***"), line);
 });
 
 // -- dispatcher -------------------------------------------------------------------
@@ -381,7 +388,7 @@ test("daemon 通し: launch → ask（message）→ answer → success（report�
     const sessionId = askBody["session-id"] as string;
     assert.match(sessionId, /^[0-9a-f-]{36}$/);
     // launch に返事は無い
-    assert.deepEqual(centerGot, []);
+    assert.equal(centerGot.length, 0);
 
     // 2. answer → 同じ session で --resume、cap に report（success、session-id 無し）
     await send({ ...base, callType: "reply", order: "answer", "session-id": sessionId, content: "A案で" });
@@ -464,6 +471,78 @@ test("daemon: 機械の ID を読めなければ起動しない（broker も立�
       /機械の ID を読めない/,
     );
     await assert.rejects(stat(join(dir, "ws", "broker.json")));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+/** agent-messenger の client の差し替え。connect が connectError を投げれば、同名の登録で error が返った時の形。 */
+function fakeClientFactory(opts: { connectError?: Error }): { create: NonNullable<DaemonDeps["createClient"]>; names: string[]; closed: () => boolean } {
+  const names: string[] = [];
+  let closed = false;
+  const create = ((o: { name?: string }) => {
+    names.push(o.name ?? "");
+    return {
+      peer: { id: "fake-id" },
+      onMessage: () => {},
+      connect: async () => {
+        if (opts.connectError) throw opts.connectError;
+      },
+      setProtocol: async () => ({ name: "bantou", version: "2.0.0", hash: "h" }),
+      unsetProtocol: async () => {},
+      send: async () => {},
+      close: async () => {
+        closed = true;
+      },
+    };
+  }) as unknown as NonNullable<DaemonDeps["createClient"]>;
+  return { create, names, closed: () => closed };
+}
+
+async function daemonConfig(dir: string, extra: Record<string, unknown> = {}): Promise<string> {
+  const configPath = join(dir, "config.json");
+  await writeFile(
+    configPath,
+    JSON.stringify({ workspace: join(dir, "ws"), broker: { port: 0, bind: "127.0.0.1", discovery: "off" }, mcp: { port: 0, bind: "127.0.0.1" }, ...extra }),
+  );
+  return configPath;
+}
+
+const stubMcp: DaemonDeps["startMcp"] = async () => ({ port: 1, close: async () => {} });
+
+test("daemon: 同じ名前の登録で error が返ったら起動しない（別の名前にしない・常駐しない）", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "bantou-daemon-dup-"));
+  try {
+    const f = fakeClientFactory({ connectError: new Error("name already registered (テスト)") });
+    await assert.rejects(
+      startDaemon(await daemonConfig(dir), { machineId: () => "m", startMcp: stubMcp, createClient: f.create }),
+      /name already registered/,
+    );
+    assert.equal(f.names.length, 1, "名前を変えて作り直さない");
+    assert.ok(f.closed(), "client を閉じる");
+    await assert.rejects(stat(join(dir, "ws", "server.ready")), "ready の合図は書かない");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("daemon: name-prefix は起動 option（deps.namePrefix）が設定 file より優先、どちらも無ければ prefix 無し", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "bantou-daemon-prefix-"));
+  const key = buildServerName("m", undefined);
+  try {
+    const run = async (extra: Record<string, unknown>, namePrefix: string | undefined): Promise<string> => {
+      const f = fakeClientFactory({});
+      const d = await startDaemon(await daemonConfig(dir, extra), { machineId: () => "m", startMcp: stubMcp, createClient: f.create, ...(namePrefix !== undefined ? { namePrefix } : {}) });
+      try {
+        assert.deepEqual(f.names, [d.name]);
+        return d.name;
+      } finally {
+        await d.stop();
+      }
+    };
+    assert.equal(await run({ namePrefix: "cfg" }, "opt"), `opt-${key}`);
+    assert.equal(await run({ namePrefix: "cfg" }, undefined), `cfg-${key}`);
+    assert.equal(await run({}, undefined), key);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
