@@ -1,7 +1,6 @@
 <script setup lang="ts">
-import { centerTool, pickDirectory } from "../api";
+import { pickDirectory, serverList } from "../api";
 import { INSTRUCTIONS_NOTE, type SettingsDraft } from "../composables/sessionInstructions";
-import type { CenterServer } from "../types";
 
 // One section per project-settings item. A future item (skills, output style) is another section here.
 const draft = defineModel<SettingsDraft>({ required: true });
@@ -48,7 +47,7 @@ const choicesError = ref<string | null>(null);
 const serverInput = ref("");
 async function loadChoices() {
   try {
-    const r = await centerTool<CenterServer[]>("server_list");
+    const r = await serverList();
     choices.value = r.map((s) => ({ value: s.name, label: [s.name, s.host].filter(Boolean).join("  ") }));
     choicesError.value = null;
   } catch (e) {

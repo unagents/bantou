@@ -128,6 +128,8 @@ export const typeDefs = /* GraphQL */ `
     outputStyle: String
     """ guardrail の schema 定義: 名前 → { schema（schema.yaml の文字列）, templates（templates/ からの相対 path → 中身） }。center 共通の設定だけ。 """
     guardrailSchemas: JSON
+    """ openspec-mcp の URL。あれば全 session に openspec の MCP を自動で渡す。 """
+    openspecUrl: String
     mcpServers: JSON
     memory: JSON
     projectMemory: JSON
@@ -141,6 +143,8 @@ export const typeDefs = /* GraphQL */ `
     instructions: String
     addDirs: [String!]
     outputStyle: String
+    """ openspec-mcp の URL（http / https の絶対 URL）。"" または null で消す。 """
+    openspecUrl: String
     """ 名前ごとにマージ（定義は丸ごと置き換え）。名前の値 null でその schema を消し、guardrailSchemas 自体が null で全部消す。 """
     guardrailSchemas: JSON
     mcpServers: JSON
@@ -160,6 +164,8 @@ export const typeDefs = /* GraphQL */ `
 
   type CenterInfo {
     workspace: String
+    """ この呼び出し元が center を起動した所か（desktop が自分の sidecar へ渡す起動元の鍵 X-Bantou-Launcher が合う時だけ true）。画面が出す項目を決めるだけで、権限は変えない（決定 6）。 """
+    launcher: Boolean!
     systemInstructions: [SystemInstructionPart!]!
   }
 

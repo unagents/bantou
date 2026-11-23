@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { GraphQLError } from "graphql";
 import { createYoga } from "graphql-yoga";
 import { GRAPHQL_PATH } from "../http.js";
+import { LAUNCHER_HEADER, launcherMatches } from "../launcher.js";
 import type { Logger } from "../log.js";
 import type { GraphqlContext, GraphqlServices } from "./context.js";
 import { buildSchema } from "./schema.js";
@@ -20,14 +21,15 @@ function isOriginalGraphQLError(error: unknown): boolean {
  * GraphQL の endpoint（graphql-yoga。query・mutation は HTTP、subscription は SSE。設計書 #1 案 A）。
  * 静的 import にする（cli.ts の注記: bun build --compile で動的 import は依存を遅延初期化に包んで落ちる）。
  */
-export function createGraphqlHandler(services: GraphqlServices, log: Logger): GraphqlHandler {
+export function createGraphqlHandler(services: GraphqlServices, log: Logger, opts: { launcherKey?: string } = {}): GraphqlHandler {
   const yoga = createYoga<{ req: IncomingMessage; res: ServerResponse }, GraphqlContext>({
     schema: buildSchema(),
     graphqlEndpoint: GRAPHQL_PATH,
     // 画面は無い。GraphiQL・landing page は出さない
     graphiql: false,
     landingPage: false,
-    context: () => ({ services }),
+    // token の検査は http.ts が済ませている。起動元かどうかは /mcp と同じ鍵の比較（launcher.ts）
+    context: ({ req }) => ({ services, launcher: launcherMatches(req.headers[LAUNCHER_HEADER], opts.launcherKey) }),
     // yoga 自身の log は使わない（console に出る）。想定外の error は mask する時に center の log へ残す
     logging: false,
     maskedErrors: {

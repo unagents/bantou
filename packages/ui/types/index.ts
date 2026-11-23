@@ -269,12 +269,6 @@ export interface CenterConnection {
   lastError?: string;
 }
 
-/** MCP `tools/call` result as returned by `center_call`. */
-export interface McpToolResult {
-  content: { type: string; text?: string }[];
-  isError?: boolean;
-}
-
 /** `rc_list` entry (`packages/center` `RcStatus`, the part shown). */
 export interface CenterRcStatus {
   project: string;
@@ -295,156 +289,19 @@ export interface CenterServer {
   last_seen: string | null;
 }
 
-/** `activity.agents[].state` of `remote_list` (bantou-server `ActivityState`). */
-export type CenterActivityState = "running" | "stalled" | "idle" | "done" | "failed" | "lost";
-
-/** One cap / worker of `remote_list` `activity.agents` (bantou-server `AgentActivity`). */
-export interface CenterAgentActivity {
-  kind: "cap" | "worker";
-  id: string;
-  cap_id: string;
-  state: CenterActivityState;
-  task: string;
-  last_activity: string | null;
-  last_output_at: string | null;
-  /** ms since the last output as of the center's reply (shown with the time elapsed since the fetch). */
-  silent_ms: number;
-  started_at: string | null;
-  finished_at: string | null;
-  error?: string;
-  /** Model the agent runs with (`--model`). null / absent = none given (or a server that does not report it). */
-  model?: string | null;
-}
-
-/** Host resources a server measured (protocol `ResourceSample`). The server only shows them; it judges nothing (the cap decides). */
-export interface CenterResourceSample {
-  at: string;
-  load1: number;
-  load5: number;
-  load15: number;
-  cpus: number;
-  /** Bytes. */
-  mem_total: number;
-  mem_free: number;
-  disk_total: number | null;
-  disk_free: number | null;
-  /** Workers running now on the server. */
-  workers: number;
-}
-
-/** `remote_list[].server_board` (center `ServerBoardSummary`): counts and resources of the cap's server. Absent from an older server. */
-export interface CenterServerBoard {
-  at: string;
-  /** Caps on the server. */
-  caps: number;
-  /** Workers running now. */
-  workers: number;
-  /** Worker reservations waiting for resources. */
-  reserved: number;
-  /** User-set limit of tasks run at once per cap; null = no limit. */
-  max_parallel_tasks: number | null;
-  resources: CenterResourceSample | null;
-}
-
-/** `remote_list[].activity` (center `RemoteActivity`). Omitted until the first notice arrives. */
-export interface CenterRemoteActivity {
-  at: string;
-  received_ms_ago: number;
-  /** running / stalled agents exist but notices stopped arriving (server or path may be down). */
-  stale: boolean;
-  agents: CenterAgentActivity[];
-}
-
-/** A pending (not yet completed) instruction of a remote-cap (center `PendingInstruction`). Removed once completed; no history is kept. */
-export interface CenterPendingInstruction {
-  at: string;
-  /** Session that sent the instruction (the one notified on completion). */
-  owner: string;
-  /** Head of the prompt (at most 200 characters). */
-  prompt: string;
-}
-
-/** One worker in `task_result` (protocol `TaskResultWorker`). */
-export interface CenterTaskResultWorker {
-  worker_id: string;
-  role: string;
-  state: CenterActivityState;
-  branch?: string;
-  commit?: string;
-  tests?: string;
-  report_path?: string;
-  /** Head of the worker's result (at most 500 chars). */
-  result: string;
-}
-
-export interface CenterReviewItem {
-  severity: "high" | "medium" | "low";
-  text: string;
-  resolved: boolean;
-}
-
-/** `remote_list[].task_result` (protocol `TaskResultReply`, the part shown). */
-export interface CenterTaskResult {
-  cap_id: string;
-  task_id: string;
-  state: "done" | "failed";
-  summary: string;
-  workers: CenterTaskResultWorker[];
-  review: { verdict: "ok" | "issues" | "unknown"; items: CenterReviewItem[]; rounds: number };
-  remaining: string[];
-  error?: string;
-}
-
-/** `remote_list[].worker_reports` element (protocol `WorkerReportNotice`): latest 20, in arrival order. */
-export interface CenterWorkerReport {
-  cap_id: string;
-  task_id?: string;
-  worker_id: string;
-  kind: "progress" | "ask" | "approve" | "done";
-  text: string;
-  at: string;
-}
-
-/**
- * `remote_list` element (center `RemoteView`, the part shown): one remote-cap per session × server (`remote_id` = cap_id = `c-<center-id>-<session>`),
- * with the latest result / error and the pending instructions. No history is kept; old-format records (one cap per task) are cleaned up by center.
- */
+/** `remotes` element (center `RemoteRecord`, the part shown): one remote-cap per session × server. A null of the schema is absent here. */
 export interface CenterRemoteRecord {
   remote_id: string;
-  /** Session (master-cap) that owns this cap. Absent = the old shared cap (`c-<center-id>`) kept from before: no new instruction is sent. */
+  /** Session (master-cap) that owns this cap. Absent = the old shared cap kept from before. */
   session?: string;
-  /** Sessions with a pending instruction on this cap (oldest first). */
-  owners: string[];
-  /** `server_id` (an old record whose server_id is unknown keeps the peer id). */
   server: string;
-  server_id?: string;
-  /** Current reachable peer id; absent after the server was not seen for a long time. */
-  peer?: string;
-  serverName?: string;
-  serverHost?: string;
-  serverUser?: string;
-  serverWorkspace?: string;
-  /** Display label: host name first with the server_id (plus user and workspace when several servers share the host name). */
-  server_label?: string;
+  /** `running`, or `stopped` (no write from the worker's ws for 60 seconds). */
   state: "running" | "stopped";
   /** Model given when the cap was created (absent = none). */
   model?: string;
-  worker_model?: string;
   createdAt: string;
+  /** When `stopped`: the time of the last write. */
   finishedAt?: string;
-  /** Latest `cap_result` text. */
-  result?: string;
-  result_at?: string;
-  error?: string;
-  error_at?: string;
-  pending?: CenterPendingInstruction[];
-  activity?: CenterRemoteActivity;
-  /** Board of the cap's server (caps, workers, resources, reservations). */
-  server_board?: CenterServerBoard;
-  /** Latest `task_result` of the cap (absent until a `task` finished). */
-  task_result?: CenterTaskResult;
-  /** Latest worker reports (at most 20, arrival order). */
-  worker_reports?: CenterWorkerReport[];
 }
 
 /** State machine of the in-app updater (`useUpdater`). Mirrors Cork's `UpdaterState`. */

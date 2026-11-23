@@ -11,6 +11,7 @@ import { createCenterSettings, type CenterSettingsHandle } from "./center-settin
 import { CommandError, createCommands, toCommandError, type CommandTable } from "./commands.ts";
 import { CENTER_SESSION_MESSAGE_EVENT, createCenterEvents, type CenterEvents } from "./events.ts";
 import { createFileSettingsStore } from "./file-store.ts";
+import { createGraphqlRelay, type GraphqlRelay } from "./graphql.ts";
 import { createCenterMcp, NO_TARGET, type CenterMcp, type McpLogger } from "./mcp.ts";
 import { createRedactor, type Redactor } from "./redact.ts";
 import { createTerminals, type Terminals } from "./terminal.ts";
@@ -62,6 +63,8 @@ export interface CenterClient {
   readonly terminal: Terminals;
   /** Image attachments typed into a terminal (built on `terminal`). */
   readonly attachments: ReturnType<typeof createAttachments>;
+  /** `POST /api/graphql`: the browser's GraphQL document forwarded to the center's `/graphql` with the center's token. */
+  readonly graphql: GraphqlRelay;
   /** Command table (name -> handler). Its keys are the allow-list of `rpc`. */
   readonly commands: CommandTable;
   readonly redactor: Redactor;
@@ -101,6 +104,7 @@ export function createCenterClient(opts: CenterClientOptions = {}): CenterClient
   const events = createCenterEvents({ settings, fetch: opts.fetch, logger });
   const terminal = createTerminals({ getTarget: () => settings.selectTarget(), fetch: opts.fetch, log: logger });
   const attachments = createAttachments(terminal, { fetch: opts.fetch, log: logger });
+  const graphql = createGraphqlRelay({ getTarget: () => settings.selectTarget(), fetch: opts.fetch, log: logger, redactor });
 
   const raw = createCommands({
     settings,
@@ -207,6 +211,7 @@ export function createCenterClient(opts: CenterClientOptions = {}): CenterClient
     events,
     terminal,
     attachments,
+    graphql,
     commands: raw,
     redactor,
     rpc,

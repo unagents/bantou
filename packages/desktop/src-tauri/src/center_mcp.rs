@@ -519,6 +519,39 @@ pub async fn center_call(
         .map_err(CommandError::Other)
 }
 
+/// Where the webview's GraphQL client sends its documents: `<origin of the MCP url>/graphql` and the Bearer header of the center in use.
+#[derive(PartialEq, Serialize)]
+pub struct GraphqlTarget {
+    pub url: String,
+    pub headers: std::collections::BTreeMap<String, String>,
+}
+
+// `headers` holds the Bearer token and the launcher key: `{:?}` (a log, an `assert_eq!` failure) shows the names only.
+impl std::fmt::Debug for GraphqlTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let masked: std::collections::BTreeMap<&str, &str> = self.headers.keys().map(|k| (k.as_str(), "***")).collect();
+        f.debug_struct("GraphqlTarget").field("url", &self.url).field("headers", &masked).finish()
+    }
+}
+
+pub(crate) fn graphql_target_of(t: &Target) -> Result<GraphqlTarget, String> {
+    let url = crate::terminal::center_url(&t.url, &["graphql"])?;
+    let mut headers = std::collections::BTreeMap::new();
+    if let Some(token) = t.token.as_deref() {
+        headers.insert("authorization".to_string(), format!("Bearer {token}"));
+    }
+    // Only our own sidecar gets the launcher key (as on the MCP calls): it lets `centerInfo { launcher }` say this screen started the center.
+    if let Some(k) = launcher_for(&t.url) {
+        headers.insert(LAUNCHER_HEADER.to_string(), k.to_string());
+    }
+    Ok(GraphqlTarget { url: url.to_string(), headers })
+}
+
+#[tauri::command]
+pub fn center_graphql_target(app: tauri::AppHandle) -> CmdResult<GraphqlTarget> {
+    graphql_target_of(&target(&app)?).map_err(CommandError::Other)
+}
+
 /// Which center the desktop talks to now (own sidecar / pasted remote). Err: no target.
 pub(crate) fn current_source(app: &tauri::AppHandle) -> CmdResult<TargetSource> {
     select_target(&load_settings(app)?).map(|t| t.source).ok_or_else(|| CommandError::other(NO_TARGET))
@@ -562,6 +595,38 @@ mod tests {
             token: "sidecar-token-123".into(),
             ..CenterSettings::default()
         }
+    }
+
+    #[test]
+    fn graphql_target_is_the_graphql_path_of_the_mcp_origin_with_the_bearer() {
+        let t = Target { url: "http://127.0.0.1:7920/mcp".into(), token: Some("tok".into()), source: TargetSource::Sidecar };
+        let g = graphql_target_of(&t).unwrap();
+        assert_eq!(g.url, "http://127.0.0.1:7920/graphql");
+        assert_eq!(g.headers.get("authorization").map(String::as_str), Some("Bearer tok"));
+        let none = Target { token: None, ..t };
+        assert!(graphql_target_of(&none).unwrap().headers.is_empty());
+    }
+
+    #[test]
+    fn graphql_target_debug_does_not_show_the_header_values() {
+        let t = Target { url: "http://127.0.0.1:7920/mcp".into(), token: Some("tok-SECRET".into()), source: TargetSource::Sidecar };
+        let shown = format!("{:?}", graphql_target_of(&t).unwrap());
+        assert!(!shown.contains("tok-SECRET") && !shown.contains("Bearer"), "{shown}");
+        assert!(shown.contains("authorization") && shown.contains("/graphql"), "{shown}");
+    }
+
+    #[test]
+    fn graphql_target_carries_the_launcher_key_only_for_the_own_sidecar() {
+        let _g = LAUNCHER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let own = Target { url: "http://127.0.0.1:7920/mcp".into(), token: Some("tok".into()), source: TargetSource::Sidecar };
+        let other = Target { url: "http://10.0.0.2:7920/mcp".into(), ..own.clone() };
+        set_launcher_url(Some(own.url.clone()));
+        let a = graphql_target_of(&own).unwrap();
+        let b = graphql_target_of(&other).unwrap();
+        set_launcher_url(None);
+        assert_eq!(a.headers.get(LAUNCHER_HEADER).map(String::as_str), Some(launcher_key()));
+        assert_eq!(b.headers.get(LAUNCHER_HEADER), None);
+        assert_eq!(graphql_target_of(&own).unwrap().headers.get(LAUNCHER_HEADER), None, "cleared when the sidecar stops");
     }
 
     #[test]

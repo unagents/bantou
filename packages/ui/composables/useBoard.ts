@@ -6,8 +6,8 @@ import {
   listSessions,
   listTasks,
   listThreads,
+  onSessionListChanged,
   PINGS_CHANGED_EVENT,
-  SESSIONS_CHANGED_EVENT,
   THREADS_CHANGED_EVENT,
 } from "../api";
 import { rowSleepBlock } from "./sleepButton";
@@ -208,7 +208,7 @@ export function useBoard(dir: Ref<string | null>) {
     unlistenPings = await getTransport().listen<string>(PINGS_CHANGED_EVENT, async (p) => {
       if (p === dir.value) setPings(await listPings());
     });
-    unlistenSessions = await getTransport().listen(SESSIONS_CHANGED_EVENT, async () => {
+    unlistenSessions = onSessionListChanged(async () => {
       setCenterList(await listSessions());
     });
     // A change before the listener was registered has no event: read once more now.

@@ -483,7 +483,9 @@ export async function startHttpServer(opts: {
       });
       return;
     } else if (path === GRAPHQL_PATH && opts.graphql) {
-      if (!bearerMatches(req.headers.authorization, token)) {
+      // 画面（desktop の webview）の fetch の preflight（OPTIONS）は Authorization を載せない。yoga の CORS が答える（中身を返さない）
+      const preflight = req.method === "OPTIONS";
+      if (!preflight && !bearerMatches(req.headers.authorization, token)) {
         sendJson(res, 401, { error: "unauthorized" }, { "www-authenticate": "Bearer" });
         return;
       }

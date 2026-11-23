@@ -16,7 +16,7 @@ type Json = Record<string, unknown>;
 type Overrides = Partial<{ [K in keyof GraphqlServices]: unknown }>;
 
 /** 設計書 3 節の query 側の service を、中身の分かる fake で置いた center。 */
-async function boot(over: Overrides = {}, configRaw: Json = {}) {
+async function boot(over: Overrides = {}, configRaw: Json = {}, launcherKey?: string) {
   const config = parseConfig(configRaw, "/x/c.json");
   const core = createCore();
   const events = createEventHub();
@@ -34,7 +34,8 @@ async function boot(over: Overrides = {}, configRaw: Json = {}) {
   } as unknown as GraphqlServices;
   const h = await startHttpServer({
     createServer: () => createCenterServer({ config, supervisor: services.supervisor, link: services.link, sessions: services.sessions, remotes: services.remotes }),
-    graphql: createGraphqlHandler(services, () => {}),
+    graphql: createGraphqlHandler(services, () => {}, launcherKey ? { launcherKey } : {}),
+    ...(launcherKey ? { launcherKey } : {}),
     core,
     events,
     port: 0,
@@ -43,9 +44,9 @@ async function boot(over: Overrides = {}, configRaw: Json = {}) {
     log: () => {},
   });
   const url = `http://127.0.0.1:${h.port}/graphql`;
-  const q = async (query: string): Promise<{ data?: Json; errors?: { message: string; extensions?: { code?: string } }[] }> =>
-    (await (await fetch(url, { method: "POST", headers: { "content-type": "application/json", ...AUTH }, body: JSON.stringify({ query }) })).json()) as never;
-  return { h, q, core };
+  const q = async (query: string, headers: Record<string, string> = {}): Promise<{ data?: Json; errors?: { message: string; extensions?: { code?: string } }[] }> =>
+    (await (await fetch(url, { method: "POST", headers: { "content-type": "application/json", ...AUTH, ...headers }, body: JSON.stringify({ query }) })).json()) as never;
+  return { h, q, core, url };
 }
 
 const session = (name: string, extra: Json = {}) => ({
@@ -119,6 +120,39 @@ test("query centerSettings: 共通の設定を絞らずに返し、launcher は�
     assert.ok(l.errors, "launcher は schema に無い");
   } finally {
     await h.close();
+  }
+});
+
+test("query centerSettings: openspecUrl も返す", async () => {
+  const { h, q } = await boot({ sessions: { getCenterSettings: () => ({ settings: { openspecUrl: "http://o/mcp" } }) } });
+  try {
+    assert.deepEqual((await q("{centerSettings{openspecUrl}}")).data, { centerSettings: { openspecUrl: "http://o/mcp" } });
+  } finally {
+    await h.close();
+  }
+});
+
+test("query centerInfo.launcher: 起動元の鍵が合う時だけ true（無い・違う・center に鍵が無い時は false）。preflight は X-Bantou-Launcher を許す", async () => {
+  const KEY = "launcher-key-0123456789abcdef";
+  const withKey = await boot({}, {}, KEY);
+  try {
+    const ask = (headers?: Record<string, string>) => withKey.q("{centerInfo{launcher}}", headers);
+    assert.deepEqual((await ask({ "x-bantou-launcher": KEY })).data, { centerInfo: { launcher: true } });
+    assert.deepEqual((await ask()).data, { centerInfo: { launcher: false } });
+    assert.deepEqual((await ask({ "x-bantou-launcher": "wrong-wrong-wrong-wrong" })).data, { centerInfo: { launcher: false } });
+    const pre = await fetch(withKey.url, {
+      method: "OPTIONS",
+      headers: { origin: "tauri://localhost", "access-control-request-method": "POST", "access-control-request-headers": "authorization,content-type,x-bantou-launcher" },
+    });
+    assert.match(pre.headers.get("access-control-allow-headers") ?? "", /x-bantou-launcher/i);
+  } finally {
+    await withKey.h.close();
+  }
+  const noKey = await boot();
+  try {
+    assert.deepEqual((await noKey.q("{centerInfo{launcher}}", { "x-bantou-launcher": KEY })).data, { centerInfo: { launcher: false } });
+  } finally {
+    await noKey.h.close();
   }
 });
 

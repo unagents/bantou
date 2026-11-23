@@ -35,4 +35,6 @@ export interface GraphqlServices {
 /** resolver の第 3 引数。リクエストごとに作る。認証は http.ts が済ませてから渡す。 */
 export interface GraphqlContext {
   services: GraphqlServices;
+  /** 呼び出し元が center を起動した所か（launcher.ts の鍵が header と合う）。画面の出し分けにだけ使う。 */
+  launcher: boolean;
 }

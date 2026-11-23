@@ -76,6 +76,23 @@ test("graphql: token 無し・違う token は 401、token 付きは応答する
   }
 });
 
+test("graphql: preflight（OPTIONS）は token 無しで答え、中身は返さない（webview の fetch 用）。他の method は token 無しなら 401 のまま", async () => {
+  const { h, url } = await boot();
+  try {
+    const r = await fetch(url, {
+      method: "OPTIONS",
+      headers: { origin: "tauri://localhost", "access-control-request-method": "POST", "access-control-request-headers": "authorization,content-type" },
+    });
+    assert.ok(r.status === 200 || r.status === 204, `status ${r.status}`);
+    assert.ok(r.headers.get("access-control-allow-origin"));
+    assert.match(r.headers.get("access-control-allow-headers") ?? "", /authorization/i);
+    assert.equal(await r.text(), "");
+    assert.equal((await fetch(url, { method: "POST", headers: { "content-type": "application/json", origin: "tauri://localhost" }, body: '{"query":"{__typename}"}' })).status, 401);
+  } finally {
+    await h.close();
+  }
+});
+
 test("graphql: `//graphql`・`/graphql/` も受ける（req.url を正規化して yoga に渡す）", async () => {
   const { h, url } = await boot();
   try {

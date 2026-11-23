@@ -15,9 +15,17 @@ export interface InvokeOptions {
   body?: Uint8Array;
 }
 
+/** Where the ui's GraphQL client sends its documents (`packages/ui/api/graphql.ts`). */
+export interface GraphqlTarget {
+  url: string;
+  headers?: Record<string, string>;
+}
+
 export interface Transport {
   invoke<T>(cmd: string, args?: Record<string, unknown>, opts?: InvokeOptions): Promise<T>;
   listen<T>(event: string, handler: (payload: T) => void): Promise<UnlistenFn>;
+  /** The GraphQL endpoint. Web: the backend's `POST /api/graphql` (it adds the center's token; the browser holds none). */
+  graphqlTarget(): Promise<GraphqlTarget>;
 }
 
 /** A failed command. `String(e)` is the backend's message alone, like the string a Tauri `invoke` rejects with. */
@@ -286,6 +294,8 @@ async function listen<T>(event: string, handler: (payload: T) => void): Promise<
   };
 }
 
-const httpTransport: Transport = { invoke, listen };
+export const GRAPHQL_PATH = "/api/graphql";
+
+const httpTransport: Transport = { invoke, listen, graphqlTarget: async () => ({ url: GRAPHQL_PATH }) };
 
 export const getTransport = (): Transport => httpTransport;
