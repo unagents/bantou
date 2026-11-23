@@ -195,7 +195,7 @@
 
 ### 3.2 cap（center 側）
 
-- change を作り、消化する step の範囲（scope）を付けて server に登録する（0 節の 9・10。4.2 の `change_register`）。
+- change を作り、消化する step の範囲（scope）を付けて server に登録する（0 節の 9・10。4.2 の `change_register`）。change を誰がどこでどう作るか（openspec の change の作り方）の形は openspec 側の話で、この設計書は決めない。
 - change の進み（どの step まで進んだか・返答待ちか・止まっているか）を見る（`change_status`）。止める・続きを頼む（`change_stop`）。worker の質問に返答する（`worker_reply`）。
 - worker を起こさない。分担を決めない。資源を見て起こすかを判断しない（server が持つ。3.6）。
 - 実作業をしない（体制のルール）。
@@ -207,6 +207,7 @@
 - 作業範囲は 1 step の中が基本（0 節の 8）。次の step には進まない。次を起こすのは server。
 - openspec のインストラクションに従って作業する（0 節の 3）。review を tasks の作業として含む場合は、そのインストラクションに従って reviewer のサブエージェントを起動する（5・6 節）。
 - 質問・承認依頼は `report`（ask / approve）で出す（今の仕組みのまま。0 節の 11）。出したら turn を終える（今の `report` tool のとおり）。
+- `worker.md` の `[進め方]`（「質問しない。止まらず最後まで進む。」）との関係は未確認で、実装 task で扱う（決定 11 は worker が `report(ask)` で質問を出す前提。未決には足さない。利用者が話に出していないため。1.6）。
 - `packages/server/instructions/worker.md` は今の worker 共通のルール（`[範囲]` `[進め方]` `[終わる時]`）。review の手順は入れない。【推測】「1 step の範囲」を worker に伝える所は、server が起動時に渡す prompt（どの change のどの step か）に書く。実装の task。
 
 ### 3.4 step の消化と門
@@ -238,18 +239,38 @@
 
 **足す物**:
 
-1. server が worker の状態を持つ。change の step ごとに、`worker_id`・`session_id`（worker の `state.json` の値）・状態を change の記録に持つ。状態は次の案（名前は仮）:
-   - `queued`: queue に積まれ、まだ起きていない。
-   - `running`: worker が動いている。
-   - `waiting_reply`: worker が ask / approve を出し、session を閉じて、cap の返答を待っている。
-   - `checking`: worker の run が終わり、server が終わりの判定を実行している。
-   - `passed`: 判定が通った。
-   - `blocked`: 止まっている（失敗・判定が通らない・停止の指示など。理由を持つ）。
+> **この節の状態名・記録の項目・置き場は、設計書の案であり、利用者の決定ではない。名前は仮。** 決定に出ているのは、server が worker の状態を持つ事と、step の位置を worker の session-id と結び付けて持つ事だけ（0 節の 11）。
+
+1. server が状態を持つ。change の step ごとに、`worker_id`・`session_id`（worker の `state.json` の値）・step の状態を change の記録に持つ。状態は **change の状態** と **step の状態** の 2 つに分ける（名前は仮）。
+
+   change の状態（change 全体）:
+
+   | 状態 | 意味 |
+   |---|---|
+   | `registered` | 登録直後。まだ最初の step の worker が動いていない |
+   | `in_progress` | 進行中（どれかの step が `queued` / `running` / `waiting_reply` / `checking`） |
+   | `completed` | scope の最後の step が通った |
+   | `stopped` | 止めた。`stop_change`（cap（center 側）の指示）で止めた |
+   | `blocked` | 判定が通らず止まった。server が止めた（終わりの判定が通らない、worker が失敗して終わった、など。理由を持つ。未決 #4） |
+
+   step の状態:
+
+   | 状態 | 意味 |
+   |---|---|
+   | `queued` | queue に積まれ、まだ起きていない（資源待ちを含む） |
+   | `running` | worker が動いている |
+   | `waiting_reply` | worker が ask / approve を出し、session を閉じて、cap の返答を待っている |
+   | `checking` | worker の run が終わり、server が終わりの判定を実行している |
+   | `passed` | 判定が通った |
+   | `blocked` | 判定が通らない・worker の失敗で止まった（change の `blocked` の原因になった step） |
+   | `stopped` | `stop_change` で止めた |
+
+   「止めた」（`stopped`。cap の指示）と「判定が通らず止まった」（`blocked`。server の判定）は別の状態として持つ。理由・次の動きが違う（`blocked` は未決 #4）。
 2. step の位置と session-id の結び付き: change の記録に「現在の step の番号」と、各 step の `worker_id` / `session_id` を持つ（0 節の 11「stepの位置はworkerのsession−idと紐付けて持ってる必要がある」）。server が再起動しても、この記録から続きを起こせる（今の `reservations.ts` と `owner.json` と同じく、ファイルに残す）。
 3. 流れ:
-   - worker が `report`（ask / approve）→ server は状態を `waiting_reply` にして、center へ通知（`worker_report` の形を change つきにしたもの。4.3）。worker の process は終わっている（session は閉じている）。この間、process が無いので資源を使わない。
-   - cap（center 側）が `worker_reply` → server が受け取り、`waiting_reply` の step の worker を、記録している session_id で起こし直す（`--resume`）。状態は `running`（起こすのも queue と資源の判定を通る。順序は未決 #2）。
-   - `worker_reply` は、返答先の worker が `waiting_reply` でない時は error を返す（4.1）。
+   - worker が `report`（ask / approve）→ server は step の状態を `waiting_reply` にして、center へ通知（`worker_report` の形を change つきにしたもの。4.3）。worker の process は終わっている（session は閉じている）。この間、process が無いので資源を使わない。
+   - cap（center 側）が `worker_reply` → server が受け取り、`waiting_reply` の step の worker を、記録している session_id で起こし直す（`--resume`）。step の状態は `queued` → `running`（起こすのも queue と資源の判定を通る。順序は未決 #2）。
+   - `worker_reply` は、返答先の worker の step が `waiting_reply` でない時は error を返す（4.1）。
 
 ### 3.6 資源の管理と queue
 
@@ -263,9 +284,11 @@
 2. server が、worker の並行実行に責任を持つ: queue の先頭の worker を起こしてよいかを、資源の状況から server が判定し、よい時だけ起こす。今のように「cap が足りないと判断して予約を付ける」のではない。
 3. queue: 全ての worker 起動の依頼（change の step の worker の起動、返答での起こし直し）が queue を通る。来た順に処理する（順序は未決 #2）。queue は再起動後も残す（今の `reservations.ts` と同じ）。
 4. 判定に使う値（並行の上限、メモリの下限など）は未決 #3。
-5. cap（center 側）は、起こすかどうかを判断しない。見るだけ: change の状態に `queued`（資源待ち）が出る（4.1・4.3）。今の `peer_status` / `server_board` は、掲示として残せる（center から見る材料）。
+5. cap（center 側）は、起こすかどうかを判断しない。見るだけ: step の状態に `queued`（資源待ちを含む）が出る（3.5・4.1・4.3）。今の `peer_status` / `server_board` は、掲示として残せる（center から見る材料）。
 
 ## 4. server が出す道具と、center と server の間のやり取り
+
+> **この節は設計書の案であり、利用者の決定ではない。メッセージ名・tool 名・引数・状態名・置き場は仮。** 決定に出ているのは、cap が change を scope つきで server に登録する事、進みを見る事、質問に返答する事、server が資源と queue と状態を持つ事まで（0 節の 9〜12）。以下は、それを今の protocol と center の tool の上に置いた時の一案。状態名は 3.5 の 2 つの表（change の状態と step の状態）に従う。
 
 cap（center 側）は center の tool（4.2）を使い、center が protocol（messenger の `bantou`。今の `task` / `status` / `worker_reply` と同じ経路）で server に送る。server は cap 向けの MCP を持たない（3.1）ので、server の「出す道具」は protocol のメッセージ（4.1）。
 
@@ -275,10 +298,10 @@ cap（center 側）は center の tool（4.2）を使い、center が protocol�
 
 | メッセージ（名前は仮） | 引数 | 返り値（成功） | 失敗（`ErrorReply.message` の内容） |
 |---|---|---|---|
-| `register_change`（change の登録） | `change_id`（AGENT_ID_PATTERN と同じ文字）、`scope`（消化する step の範囲。形は未決 #1）、`repo`、`branch?`、`worker_model?`（MODEL_PATTERN。step の worker の `--model` の既定）、通知先の鍵（今の `cap_id` と同じ形の id。center が付ける） | `{ type: "register_change_result", ok: true, change_id, accepted: true, state: "queued" \| "running" }`。受けて保存したら、worker の完了は待たずにすぐ返す（今の `worker_start` と同じ） | `change_id` が不正 / 登録済み / `scope` が空 / `repo` が不正 / 更新中（`ErrorCode` の `updating`）・退役中（`ErrorReply.retiring`） |
-| `change_status`（進みの照会） | `change_id?`（省略で全ての change） | `{ type: "change_status_result", ok: true, changes: [{ change_id, state, step（現在の step の番号）, steps: [{ ref, worker_id, session_id, state }], blocked_reason?, queued_reason?, updated_at }] }`。あわせて server の掲示（`board`。今の `status_result.board`）に queue の長さと資源を載せる | `change_id` が無い |
-| `stop_change`（止める） | `change_id` | `{ type: "stop_change_result", ok: true, change_id, stopped: boolean }`。動いている worker を止め（今の `stop` と同じく process group kill）、queue の依頼を取り下げ、change を `blocked`（止めた）にする | `change_id` が無い |
-| `worker_reply`（質問への返答の受け口。今ある物の変更） | `worker_id`、`text`、`change_id`（今の `cap_id` の代わり） | `{ type: "worker_reply_result", ok: true, change_id, worker_id, accepted: true }`。同じ session で起こし直す依頼を queue に積んで、すぐ返す | `worker_id` が change の step の worker でない / `waiting_reply` でない / `change_id` が違う |
+| `register_change`（change の登録） | `change_id`（AGENT_ID_PATTERN と同じ文字）、`scope`（消化する step の範囲。形は未決 #1）、`repo`、`branch?`、`worker_model?`（MODEL_PATTERN。step の worker の `--model` の既定）、通知先の鍵（今の `cap_id` と同じ形の id。center が付ける） | `{ type: "register_change_result", ok: true, change_id, accepted: true, state: "registered" \| "in_progress" }`（`state` は **change の状態**）。受けて保存したら、worker の完了は待たずにすぐ返す（今の `worker_start` と同じ） | `change_id` が不正 / 登録済み / `scope` が空 / `repo` が不正 / 更新中（`ErrorCode` の `updating`）・退役中（`ErrorReply.retiring`） |
+| `change_status`（進みの照会） | `change_id?`（省略で全ての change） | `{ type: "change_status_result", ok: true, changes: [{ change_id, state（**change の状態**）, step（現在の step の番号）, steps: [{ ref, worker_id, session_id, state（**step の状態**） }], reason?（`blocked` / `stopped` の理由）, updated_at }] }`。あわせて server の掲示（`board`。今の `status_result.board`）に queue の長さと資源を載せる | `change_id` が無い |
+| `stop_change`（止める） | `change_id` | `{ type: "stop_change_result", ok: true, change_id, stopped: boolean }`。動いている worker を止め（今の `stop` と同じく process group kill）、queue の依頼を取り下げ、change を `stopped`（**止めた**。server の判定で止まった `blocked` とは別）にし、動いていた step を `stopped` にする | `change_id` が無い / 動いている worker を止められなかった（`ErrorReply.message` に `worker_id` と理由。change の状態は変えない） |
+| `worker_reply`（質問への返答の受け口。今ある物の変更） | `worker_id`、`text`、`change_id`（今の `cap_id` の代わり） | `{ type: "worker_reply_result", ok: true, change_id, worker_id, accepted: true }`。同じ session で起こし直す依頼を queue に積んで、すぐ返す | `worker_id` が change の step の worker でない / step の状態が `waiting_reply` でない / `change_id` が違う |
 | `status` / `hello` / `update_server` / `retire_server`（今ある物） | 変えない。`status` の結果に change と queue・資源を足す（4.3） | — | — |
 
 - 続きの指示（change の scope に step を足す・step をやり直させる）は、利用者が話に出していないので、メッセージとして足さない。
@@ -291,9 +314,9 @@ cap（center 側）は center の tool（4.2）を使い、center が protocol�
 | `remote_send`（別名 `remote_create`） | `change_register` に置き換わる | 引数: `server`（今のまま）、`change_id`、`scope`、`repo`、`branch?`、`worker_model?`。返り値: server の `register_change_result` + center の記録（受付を確かめられたか）。失敗: server の `error` はそのまま `isError` で返す（今の `remote_send` と同じく、受付を確かめられなかった時は `{ delivered: false, ... }` を `isError` で） |
 | `remote_list` | `change_list` に置き換わる | change の一覧と、server の `server_board`・`reachability`・`server_version_state`（残す）。cap の項目（`cap_state` / `cap_last_error` / `conversation`）は無くなる |
 | `task_status`（`buildTaskStatus`） | `change_status` に置き換わる | change ごとの 1 行表示（step の位置・状態・返答待ちの有無） |
-| `remote_wait` | `change_wait` に置き換わる | 待つ対象: change が `waiting_reply` / `blocked` / 完了のどれかになるまで（待ちの道具の形は今のとおり center の tool で待つ。shell の loop は作らない）。`timeout_sec` を残す |
-| `remote_delete`（`stop_cap`） | `change_stop` に置き換わる | `stop_change` を送る。「閉じた cap は起き直さない」の仕組みは不要 |
-| `worker_reply` | 残る。宛先を `change_id` + `worker_id` にする | `remote_id`（cap）で絞る所は `change_id` で絞る形に変わる。center の `waitingReply`（返答待ちの数）は、change の `waiting_reply` から数える |
+| `remote_wait` | `change_wait` に置き換わる | 今の `remote_wait`（cap が done / failed になるまで待つ）に対応させただけの案。待つ対象: change の状態が `completed` / `stopped` / `blocked` になる、または現在の step が `waiting_reply` になるまで（「完了」= change の `completed`。待ちの道具の形は今のとおり center の tool で待つ。shell の loop は作らない）。`timeout_sec` を残す |
+| `remote_delete`（`stop_cap`） | `change_stop` に置き換わる | 今の `remote_delete`（cap を閉じる）に対応させただけの案。`stop_change` を送る。「閉じた cap は起き直さない」の仕組みは不要 |
+| `worker_reply` | 残る。宛先を `change_id` + `worker_id` にする | `remote_id`（cap）で絞る所は `change_id` で絞る形に変わる。center の `waitingReply`（返答待ちの数）は、step の状態 `waiting_reply` から数える |
 | `worker_resume`（`resume_worker`） | 無くなる | 1.3 のとおり server が受けない経路 |
 | `server_list` / `server_peers` / `server_status` / `server_retire` | 残る | `server_status` の cap の部分は change の部分になる |
 | `session_*` / `center_settings_*` / `rc_*` | 変えない | guardrail の設定は `docs/design/guardrail-schema-server.md` が `center_settings_update` に載せる |
@@ -302,7 +325,7 @@ cap（center 側）は center の tool（4.2）を使い、center が protocol�
 
 - `activity` 通知: 今の `AgentActivity` は `cap_id`（必須）を持つ（1.4）。change つきの形にする: worker の項目に `change_id` と `step` を足し、`cap_id` は通知先の鍵として残す案（未決 #5）。
 - `worker_report` 通知: 今の `cap_id` / `task_id` に代えて `change_id` / `step` を持つ。worker の `report` ごとに送る（今と同じ。ask / approve も同じ形）。
-- `change_progress` 通知（新規）: change の状態が変わった時（step の開始・通過・`waiting_reply`・`blocked`・完了）に `{ change_id, step, state, at, reason? }` を送る。center はこれで `change_wait` を解き、`waiting_reply` の数を数える。
+- `change_progress` 通知（新規）: change または step の状態が変わった時（step の開始・通過・`waiting_reply`・`blocked`・`stopped`、change の `completed`）に `{ change_id, step, change_state, step_state, at, reason? }` を送る（`change_state` は change の状態、`step_state` は step の状態。「完了」= change の `completed`）。center はこれで `change_wait` を解き、`waiting_reply` の数を数える。
 - `status_result` の `board`: queue の長さ（`queued`）・資源（今の `resources`）・動いている worker の数・並行の上限（未決 #3 の値）を載せる。
 
 ## 5. review を入れた schema 定義の例
@@ -341,11 +364,13 @@ tasks の instruction:
 
 ## 7. 今の機能との対応・移行の段取り・並行できる単位・test の観点
 
+> この節に出る `register_change` / `change_*` / `stop_change` などの名前と、`registered` / `in_progress` / `waiting_reply` などの状態名は、3.5・4 節の**案の名前**。名前が変われば、この節の記述もその名前に読み替える（利用者の決定ではない）。
+
 ### 7.1 今の機能との対応表
 
 | 今の機能（実在） | 置き場 | 変えた後 |
 |---|---|---|
-| `remote_send`（別名 `remote_create`） | center `tools.ts`、`remotes.ts` の `send` | `change_register`（4.2）。`goal` / `deliverables` / `verify` / `constraints` / `workers.items` は、change の中身（openspec の change・tasks）と scope に移る。`depends_on` は、step の順（scope の順）に置き換わる |
+| `remote_send`（別名 `remote_create`） | center `tools.ts`、`remotes.ts` の `send` | `change_register`（4.2）。`goal` / `deliverables` / `verify` / `constraints` / `workers.items` は、change の中身（openspec の change・tasks）と scope に移る（change を誰がどこでどう作るかの形は openspec 側の話で、この設計書は決めない）。`depends_on` は、step の順（scope の順）に置き換わる |
 | `remote_list` / `task_status` / `remote_wait` | center `tools.ts` | `change_list` / `change_status` / `change_wait`（4.2） |
 | `remote_delete`（protocol `stop_cap`） | center `tools.ts` | `change_stop`（protocol `stop_change`） |
 | `worker_reply` | center `tools.ts`、server `daemon.ts` | 残る。宛先は今も worker。持ち主の鍵が cap から change になる（4.1） |
@@ -385,7 +410,7 @@ tasks の instruction:
 | 項目 | 内容 |
 |---|---|
 | 切替の判定 | 旧経路（cap 経由の `task`）と新経路（`register_change`）のどちらで動くかを何で決めるか（未決 #5 に含める） |
-| 動いている cap・worker | server の更新は、動いている cap・worker が終わるのを待つ（`docs/architecture.md` の更新の節）。旧経路の task が終わるまで旧経路を残す（未決 #5 の案 B） |
+| 動いている cap・worker | server の更新は、動いている cap・worker が終わるのを待つ（`docs/architecture.md` の更新の節）。既に動いている旧経路の task が終わるまで、その経路は動かし続ける。新しく来る旧メッセージ（新しい `task` / `kick_cap` など）は `error` で断る（未決 #5 の案 B） |
 | `<workspace>/caps/<cap-id>/` の既存 dir | cap の会話・`state.json`・`logs/` が残る。`requireCap` が cap の dir を要求する（1.4）ので、dir を消す前に worker の持ち主の鍵を付け替える（未決 #5 に含める） |
 | `logs/owner.json`（`{ cap_id, task_id? }`） | 旧 worker の持ち主の記録。新しい持ち主（change）に変える時、旧形式を読み続けるか移すか（未決 #5 に含める） |
 
@@ -394,8 +419,8 @@ tasks の instruction:
 - 登録: `register_change` が保存して即返す／不正な `change_id`・重複・空の scope は `error`。
 - queue: 来た順に処理される。再起動後も残る。`stop_change` で取り下げられる。
 - 資源・並行: 判定が起こせない時は起きない／起こせる時に先頭だけ起きる。測定が取れない時の扱い（値が出た後に決める。未決 #3）。
-- step の進行: step 1 が通るまで step 2 が起きない／通ったら 1 回だけ起きる（二重に起きない）。scope の最後で change が完了になる。server が判定の中身を解釈せず、結果だけに従う。openspec-mcp が落ちている・遅い時に、次の step を起こさず止まる。
-- 質問: `report`（ask）で `waiting_reply` になり、worker の process が終わっている。`worker_reply` で同じ session_id で起き直す。`waiting_reply` でない worker への返答は `error`。server を再起動しても、change の記録から step の位置と session_id を復元して続けられる。
+- step の進行: step 1 が通るまで step 2 が起きない／通ったら 1 回だけ起きる（二重に起きない）。scope の最後で change が `completed` になる。`stop_change` で止めた change は `stopped`、判定が通らず止まった change は `blocked` で、区別される。server が判定の中身を解釈せず、結果だけに従う。openspec-mcp が落ちている・遅い時に、次の step を起こさず止まる。
+- 質問: `report`（ask）で step の状態が `waiting_reply` になり、worker の process が終わっている。`worker_reply` で同じ session_id で起き直す。`waiting_reply` でない worker への返答は `error`。server を再起動しても、change の記録から step の位置と session_id を復元して続けられる。
 - 数え方・門（schema の中身）: 0 節の 4 の 3 つの基準だけが数えられる、重さは影響しない、「足した test が変異で落ちない」の検出手段は reviewer の手順（schema の instruction）で決める。**これは schema 定義の側の確認で、bantou の code の test には、手順を解釈する test を置かない**（bantou は schema の中身を解釈しない）。
 - 往復の上限が bantou の側に無い事: server・center に往復の回数を数える仕組みが入っていない。
 - 移行: 旧経路の task がある間に新経路を入れても、動いている task が壊れない。protocol の版が合わない server の扱い（`docs/architecture.md` の「版が合わない server には `hello` / `update_server` 以外を送らない」）。
@@ -433,7 +458,7 @@ worker の run が終わったが、終わりの判定が通らなかった時�
 **未決 #5 cap を無くす時の protocol と記録の扱い（0 節の 1・9）**
 protocol の `kick_cap` / `stop_cap` / `task` / `task_result` / `cap_result`、`task_result` の `review.items[].severity`、`AgentActivity.cap_id` / `WorkerReportNotice.cap_id`（通知先の鍵として残すか。4.3）、center の記録（remote の `pending` / `cap_state` / `server_version_state` 内の cap と worker の件数）、server の `<workspace>/caps/`・`logs/owner.json` の `cap_id` が残る（1.4）。切替の判定・既存の `caps/` dir・旧形式の `owner.json` の扱い（7.4）も、この未決に含める。
 - 案 A: protocol の版を上げ、旧メッセージを廃止する。旧版の server・center との組は `hello` の版の確認（`docs/architecture.md` の「版が合わない server には `hello` / `update_server` 以外を送らない」）で弾く。
-- 案 B: 旧メッセージを当面残し（受けても cap を起こさず `error` を返す）、後の版で消す。
+- 案 B: 旧メッセージの型を当面残す。既に動いている旧経路の task は、終わるまで動かし続ける。新しく来る旧メッセージ（新しい `task` / `kick_cap` など）は cap を起こさず `error` で断る。型は後の版で消す。
 - 推奨: B。理由: server は更新の時、動いている cap・worker が終わるまで入れ替えを待つので、旧経路の task が残る間は壊さない方が安全。消すのは W6（7.3）。
 
 **未決 #6 「center 側の cap」は何を指すか（0 節の 1）**
