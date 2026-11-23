@@ -25,9 +25,12 @@ function parseArgs(argv) {
   let supervise = false;
   let version = false;
   let handoffProtocol = false;
+  let namePrefix;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--config" && i + 1 < argv.length) {
       config = argv[++i];
+    } else if (argv[i] === "--name-prefix" && i + 1 < argv.length) {
+      namePrefix = argv[++i];
     } else if (argv[i] === "--serve") {
       serve = true;
     } else if (argv[i] === "--supervise") {
@@ -41,13 +44,25 @@ function parseArgs(argv) {
     }
   }
   if (serve && supervise) return null;
-  return { config, serve, supervise, version, handoffProtocol };
+  return { config, serve, supervise, version, handoffProtocol, namePrefix };
 }
+
+/** 名前の prefix（英小文字・数字 1〜16 文字。server/utils/bantou/config.ts NAME_PREFIX_PATTERN と同じ）。 */
+const NAME_PREFIX_PATTERN = /^[a-z0-9]{1,16}$/;
 
 const args = parseArgs(process.argv.slice(2));
 if (!args) {
-  console.error("usage: bantou [--config <path>] | bantou --version");
+  console.error("usage: bantou [--config <path>] [--name-prefix <a-z0-9 1-16 chars>] | bantou --version");
   process.exit(2);
+}
+
+if (args.namePrefix !== undefined) {
+  if (!NAME_PREFIX_PATTERN.test(args.namePrefix)) {
+    console.error("--name-prefix は英小文字・数字 1〜16 文字");
+    process.exit(2);
+  }
+  // launcher → supervisor → 常駐本体は env を引き継ぐ。常駐本体（plugin）が読む。config の namePrefix より優先
+  process.env.BANTOU_NAME_PREFIX = args.namePrefix;
 }
 
 if (args.version) {

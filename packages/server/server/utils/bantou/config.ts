@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { availableParallelism } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
 export const DEFAULT_BROKER = {
@@ -8,16 +9,14 @@ export const DEFAULT_BROKER = {
   token: "",
 } as const;
 
-/** worker 報告の受け口（MCP）。既定は固定 port（worker は cap より長く生きるため、再起動で変わらない値にする）。 */
+/** worker の bash 道具の受け口（MCP）。既定は固定 port（worker は server の再起動をまたいで生きうるので、変わらない値にする）。 */
 export const DEFAULT_MCP = {
   port: 7902,
   bind: "127.0.0.1",
 } as const;
 
-/** 自己更新の取得元。{version} を更新先の版に置き換えて npx の --package に渡す。 */
-export const DEFAULT_UPDATE = {
-  spec: "bantou@{version}",
-} as const;
+/** 名前の prefix（英小文字・数字 1〜16 文字）。 */
+export const NAME_PREFIX_PATTERN = /^[a-z0-9]{1,16}$/;
 
 /** `claude --permission-mode` の選択肢。 */
 export const PERMISSION_MODES = [
@@ -29,23 +28,24 @@ export const PERMISSION_MODES = [
   "plan",
 ] as const;
 
+/** この host の CPU 数。 */
+export const availableCpus = (): number => availableParallelism();
+
+/** 同時に動かす worker の数の既定: CPU 数 − 1（最低 1）。 */
+export function defaultMaxParallel(cpus: number): number {
+  return Math.max(1, cpus - 1);
+}
+
 export const DEFAULT_SESSION = {
   claude: "claude",
   permissionMode: "auto",
   timeoutMs: 1_800_000,
-  maxRetries: 1,
   allowedTools: [] as string[],
   disallowedTools: [] as string[],
   extraArgs: [] as string[],
   capBashSandbox: false,
-  workerKeepMs: 1_800_000,
-  exitResumeMax: 3,
-  exitRecoverMs: 3_600_000,
   env: {} as Record<string, string>,
 };
-
-/** host の資源の再測定の周期（ms。掲示のためだけ。予約の起動の契機ではない）。 */
-export const DEFAULT_RESOURCE = { sampleMs: 30_000 };
 
 export interface SessionConfig {
   /** claude 実行ファイル。 */
@@ -54,8 +54,6 @@ export interface SessionConfig {
   permissionMode: string;
   /** 1 回の実行の打ち切り時間（ms）。 */
   timeoutMs: number;
-  /** タイムアウト・起動失敗時の再試行回数。 */
-  maxRetries: number;
   /** 空でなければ `--allowedTools`。 */
   allowedTools: string[];
   /** 空でなければ `--disallowedTools`。 */
@@ -64,17 +62,8 @@ export interface SessionConfig {
   extraArgs: string[];
   /** true なら cap の Bash sandbox を claude の設定のまま（有効なら worker が cap と共に死ぬ）。false（既定）は `--settings {"sandbox":{"enabled":false}}` を付けて切る。 */
   capBashSandbox: boolean;
-  /** 終わった worker の dir を掃除するまでの待ち時間（ms）。0 は掃除しない。 */
-  workerKeepMs: number;
-  /** 1 つの task で、worker の異常終了を理由に cap を再開する上限回数。超えたら再開せず task の結果に error を載せる。0 は再開しない。 */
-  exitResumeMax: number;
-  /** server 起動時に、直近この時間（ms）に終わった未通知の worker を拾う。0 は拾わない。 */
-  exitRecoverMs: number;
-  /**
-   * 利用者が置いた時だけ効く、1 つの cap で同時に動かす task の上限（1 以上）。既定は無し（上限なし）。置くと超えた分は前の task が終わるまで待つ。
-   * 同じ deliverables.branch の task は待たせない（cap に知らせる）。
-   */
-  maxParallelTasks?: number;
+  /** 同時に動かす worker の数（reply の起こし直しも数える）。既定は CPU 数 − 1（最低 1）。 */
+  maxParallel: number;
   /** spawn する claude に追加で渡す環境変数。自身の環境変数に上書きで合成する。 */
   env: Record<string, string>;
 }
@@ -98,15 +87,13 @@ export interface Config {
   workspace: string;
   /** 内蔵 messenger broker の設定。 */
   broker: { port: number; bind: string; discovery: "on" | "off"; token: string };
-  /** worker 報告の受け口（MCP over HTTP、/mcp）。 */
+  /** worker の bash 道具の受け口（MCP over HTTP、/mcp）。 */
   mcp: { port: number; bind: string };
   /** headless 実行（claude -p）の設定。 */
   session: SessionConfig;
-  /** 自己更新の設定。 */
-  update: { spec: string; maxWaitMs?: number };
-  /** host の資源の測定の設定。省略は既定。 */
-  resource?: { sampleMs: number };
-  /** cap / worker に載せる追加の stdio MCP。name → 定義。 */
+  /** agent-messenger に登録する名前の prefix。起動 option --name-prefix が優先。 */
+  namePrefix?: string;
+  /** worker に載せる追加の stdio MCP。name → 定義。 */
   extraMcp?: Record<string, ExtraMcpServer>;
 }
 
@@ -150,28 +137,12 @@ function parseMcp(v: unknown, path: string): Config["mcp"] {
   return { port, bind };
 }
 
-function parseUpdate(v: unknown, path: string): Config["update"] {
-  if (v === undefined) return { ...DEFAULT_UPDATE };
-  if (!isRecord(v)) throw new Error(`config の update はオブジェクト: ${path}`);
-  const spec = v.spec ?? DEFAULT_UPDATE.spec;
-  if (typeof spec !== "string" || !spec.includes("{version}") || spec.startsWith("-") || spec.includes("\0")) {
-    throw new Error(`config の update.spec は {version} を含む文字列（- で始められない）: ${path}`);
+/** namePrefix（config の項目と起動 option で同じ検証）。不正なら投げる。 */
+export function assertNamePrefix(v: unknown, where: string): string {
+  if (typeof v !== "string" || !NAME_PREFIX_PATTERN.test(v)) {
+    throw new Error(`${where} は英小文字・数字 1〜16 文字: ${String(v)}`);
   }
-  const maxWaitMs = v.maxWaitMs;
-  if (maxWaitMs !== undefined && (typeof maxWaitMs !== "number" || !Number.isInteger(maxWaitMs) || maxWaitMs <= 0)) {
-    throw new Error(`config の update.maxWaitMs は正の整数: ${path}`);
-  }
-  return { spec, ...(maxWaitMs !== undefined ? { maxWaitMs } : {}) };
-}
-
-function parseResource(v: unknown, path: string): { sampleMs: number } {
-  if (v === undefined) return { ...DEFAULT_RESOURCE };
-  if (!isRecord(v)) throw new Error(`config の resource はオブジェクト: ${path}`);
-  const sampleMs = v.sampleMs ?? DEFAULT_RESOURCE.sampleMs;
-  if (typeof sampleMs !== "number" || !Number.isInteger(sampleMs) || sampleMs < 1000) {
-    throw new Error(`config の resource.sampleMs は 1000 以上の整数（ms）: ${path}`);
-  }
-  return { sampleMs };
+  return v;
 }
 
 /** 名前の衝突判定用。- と _ を同一視し、大小を区別しない。 */
@@ -257,8 +228,8 @@ function parseEnv(v: unknown, path: string): Record<string, string> {
   return { ...(v as Record<string, string>) };
 }
 
-function parseSession(v: unknown, path: string): SessionConfig {
-  if (v === undefined) return structuredClone(DEFAULT_SESSION);
+function parseSession(v: unknown, path: string, cpus: number): SessionConfig {
+  if (v === undefined) return { ...structuredClone(DEFAULT_SESSION), maxParallel: defaultMaxParallel(cpus) };
   if (!isRecord(v)) throw new Error(`config の session はオブジェクト: ${path}`);
   if ("command" in v) {
     throw new Error("config の session.command は廃止。session.claude を使う");
@@ -275,49 +246,29 @@ function parseSession(v: unknown, path: string): SessionConfig {
   if (typeof timeoutMs !== "number" || !Number.isInteger(timeoutMs) || timeoutMs <= 0) {
     throw new Error(`config の session.timeoutMs は正の整数: ${path}`);
   }
-  const maxRetries = v.maxRetries ?? DEFAULT_SESSION.maxRetries;
-  if (typeof maxRetries !== "number" || !Number.isInteger(maxRetries) || maxRetries < 0) {
-    throw new Error(`config の session.maxRetries は 0 以上の整数: ${path}`);
-  }
   const capBashSandbox = v.capBashSandbox ?? DEFAULT_SESSION.capBashSandbox;
   if (typeof capBashSandbox !== "boolean") {
     throw new Error(`config の session.capBashSandbox は真偽値: ${path}`);
   }
-  const workerKeepMs = v.workerKeepMs ?? DEFAULT_SESSION.workerKeepMs;
-  if (typeof workerKeepMs !== "number" || !Number.isInteger(workerKeepMs) || workerKeepMs < 0) {
-    throw new Error(`config の session.workerKeepMs は 0 以上の整数（0 は掃除しない）: ${path}`);
-  }
-  const exitResumeMax = v.exitResumeMax ?? DEFAULT_SESSION.exitResumeMax;
-  if (typeof exitResumeMax !== "number" || !Number.isInteger(exitResumeMax) || exitResumeMax < 0) {
-    throw new Error(`config の session.exitResumeMax は 0 以上の整数（0 は再開しない）: ${path}`);
-  }
-  const exitRecoverMs = v.exitRecoverMs ?? DEFAULT_SESSION.exitRecoverMs;
-  if (typeof exitRecoverMs !== "number" || !Number.isInteger(exitRecoverMs) || exitRecoverMs < 0) {
-    throw new Error(`config の session.exitRecoverMs は 0 以上の整数（0 は拾わない）: ${path}`);
-  }
-  const maxParallelTasks = v.maxParallelTasks;
-  if (maxParallelTasks !== undefined && (typeof maxParallelTasks !== "number" || !Number.isInteger(maxParallelTasks) || maxParallelTasks < 1)) {
-    throw new Error(`config の session.maxParallelTasks は 1 以上の整数（省略 = 上限なし）: ${path}`);
+  const maxParallel = v.maxParallel ?? defaultMaxParallel(cpus);
+  if (typeof maxParallel !== "number" || !Number.isInteger(maxParallel) || maxParallel < 1) {
+    throw new Error(`config の session.maxParallel は 1 以上の整数（省略 = CPU 数 − 1、最低 1）: ${path}`);
   }
   return {
     claude,
     permissionMode,
     timeoutMs,
-    maxRetries,
     allowedTools: parseStringList(v.allowedTools, "allowedTools", path),
     disallowedTools: parseStringList(v.disallowedTools, "disallowedTools", path),
     extraArgs: parseStringList(v.extraArgs, "extraArgs", path),
     capBashSandbox,
-    workerKeepMs,
-    exitResumeMax,
-    exitRecoverMs,
-    ...(maxParallelTasks !== undefined ? { maxParallelTasks } : {}),
+    maxParallel,
     env: parseEnv(v.env, path),
   };
 }
 
-/** config.json を読み込んで検証する。 */
-export async function loadConfig(path: string): Promise<Config> {
+/** config.json を読み込んで検証する。cpus は maxParallel の既定の計算用（テストで差し替える）。 */
+export async function loadConfig(path: string, cpus: number = availableCpus()): Promise<Config> {
   let raw: string;
   try {
     raw = await readFile(path, "utf8");
@@ -340,7 +291,8 @@ export async function loadConfig(path: string): Promise<Config> {
   if (!isAbsolute(ws)) {
     throw new Error(`config の workspace は絶対パス: ${ws}`);
   }
-  const session = parseSession(obj.session, path);
+  const session = parseSession(obj.session, path, cpus);
+  const namePrefix = obj.namePrefix === undefined ? undefined : assertNamePrefix(obj.namePrefix, `config の namePrefix（${path}）`);
   // root 構成では claude の設定も root 配下に置く（明示指定があればそちら）
   if (rootMode && session.env.CLAUDE_CONFIG_DIR === undefined) {
     session.env.CLAUDE_CONFIG_DIR = join(ws, ".claude");
@@ -350,8 +302,7 @@ export async function loadConfig(path: string): Promise<Config> {
     broker: parseBroker(obj.broker, path),
     mcp: parseMcp(obj.mcp, path),
     session,
-    update: parseUpdate(obj.update, path),
-    resource: parseResource(obj.resource, path),
+    ...(namePrefix !== undefined ? { namePrefix } : {}),
     extraMcp: parseExtraMcp(obj.extraMcp, path),
   };
 }

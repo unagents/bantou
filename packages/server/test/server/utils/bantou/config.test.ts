@@ -3,14 +3,17 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, DEFAULT_SESSION } from "../../../../server/utils/bantou/config";
+import { loadConfig, defaultMaxParallel, DEFAULT_SESSION } from "../../../../server/utils/bantou/config";
 
-async function load(obj: unknown) {
+/** maxParallel の既定の計算に使う CPU 数（host に依らず固定）。 */
+const CPUS = 4;
+
+async function load(obj: unknown, cpus = CPUS) {
   const dir = await mkdtemp(join(tmpdir(), "bantou-config-test-"));
   try {
     const p = join(dir, "config.json");
     await writeFile(p, JSON.stringify(obj));
-    return await loadConfig(p);
+    return await loadConfig(p, cpus);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -25,19 +28,14 @@ test("config: 全項目指定はそのまま返る", async () => {
       claude: "/usr/bin/claude",
       permissionMode: "acceptEdits",
       timeoutMs: 1000,
-      maxRetries: 0,
       allowedTools: ["Bash"],
       disallowedTools: ["Edit"],
       extraArgs: ["--model", "x"],
       capBashSandbox: true,
-      workerKeepMs: 60000,
-      exitResumeMax: 5,
-      exitRecoverMs: 120000,
-      maxParallelTasks: 3,
+      maxParallel: 7,
       env: { CLAUDE_CONFIG_DIR: "/c" },
     },
-    update: { spec: "file:/x/bantou-{version}.tgz" },
-    resource: { sampleMs: 5000 },
+    namePrefix: "prod1",
     extraMcp: { fs: { command: "npx", args: ["-y", "p"], env: { A: "b" }, targets: ["worker"] } },
   };
   assert.deepEqual(await load(full), full);
@@ -54,9 +52,9 @@ test("config: 既定値（bind は 127.0.0.1）", async () => {
   const c = await load({ workspace: "/w" });
   assert.deepEqual(c.broker, { port: 7901, bind: "127.0.0.1", discovery: "on", token: "" });
   assert.deepEqual(c.mcp, { port: 7902, bind: "127.0.0.1" });
-  assert.deepEqual(c.session, DEFAULT_SESSION);
+  assert.deepEqual(c.session, { ...DEFAULT_SESSION, maxParallel: 3 });
+  assert.equal(c.namePrefix, undefined);
   assert.equal(c.session.timeoutMs, 1_800_000);
-  assert.equal(c.session.maxRetries, 1);
   assert.equal(c.session.permissionMode, "auto");
   assert.equal(c.session.claude, "claude");
   assert.deepEqual(c.session.env, {});
@@ -65,7 +63,7 @@ test("config: 既定値（bind は 127.0.0.1）", async () => {
 test("config: broker / session 一部指定は残りが既定値", async () => {
   const c = await load({ workspace: "/w", broker: { port: 8000 }, session: { timeoutMs: 5 } });
   assert.deepEqual(c.broker, { port: 8000, bind: "127.0.0.1", discovery: "on", token: "" });
-  assert.deepEqual(c.session, { ...DEFAULT_SESSION, timeoutMs: 5 });
+  assert.deepEqual(c.session, { ...DEFAULT_SESSION, timeoutMs: 5, maxParallel: 3 });
 });
 
 const bad: [string, unknown, RegExp][] = [
@@ -91,8 +89,15 @@ const bad: [string, unknown, RegExp][] = [
   ["timeoutMs 0", { workspace: "/w", session: { timeoutMs: 0 } }, /session\.timeoutMs/],
   ["timeoutMs 小数", { workspace: "/w", session: { timeoutMs: 1.5 } }, /session\.timeoutMs/],
   ["timeoutMs 文字列", { workspace: "/w", session: { timeoutMs: "1" } }, /session\.timeoutMs/],
-  ["maxRetries 負", { workspace: "/w", session: { maxRetries: -1 } }, /session\.maxRetries/],
-  ["maxRetries 小数", { workspace: "/w", session: { maxRetries: 0.5 } }, /session\.maxRetries/],
+  ["maxParallel 0", { workspace: "/w", session: { maxParallel: 0 } }, /session\.maxParallel/],
+  ["maxParallel 負", { workspace: "/w", session: { maxParallel: -1 } }, /session\.maxParallel/],
+  ["maxParallel 小数", { workspace: "/w", session: { maxParallel: 1.5 } }, /session\.maxParallel/],
+  ["maxParallel 文字列", { workspace: "/w", session: { maxParallel: "2" } }, /session\.maxParallel/],
+  ["namePrefix 大文字", { workspace: "/w", namePrefix: "Prod" }, /namePrefix/],
+  ["namePrefix 空", { workspace: "/w", namePrefix: "" }, /namePrefix/],
+  ["namePrefix 17 文字", { workspace: "/w", namePrefix: "a".repeat(17) }, /namePrefix/],
+  ["namePrefix ハイフン", { workspace: "/w", namePrefix: "a-b" }, /namePrefix/],
+  ["namePrefix 数値", { workspace: "/w", namePrefix: 1 }, /namePrefix/],
   ["allowedTools 非配列", { workspace: "/w", session: { allowedTools: "Bash" } }, /session\.allowedTools/],
   ["allowedTools 要素が数値", { workspace: "/w", session: { allowedTools: ["a", 1] } }, /session\.allowedTools/],
   ["disallowedTools 要素が数値", { workspace: "/w", session: { disallowedTools: [1] } }, /session\.disallowedTools/],
@@ -109,33 +114,25 @@ for (const [label, cfg, re] of bad) {
   });
 }
 
-test("config: update.spec は既定 bantou@{version}、{version} 必須、- 始まりは拒否", async () => {
-  assert.deepEqual((await load({ workspace: "/w" })).update, { spec: "bantou@{version}" });
-  assert.deepEqual((await load({ workspace: "/w", update: {} })).update, { spec: "bantou@{version}" });
-  assert.equal((await load({ workspace: "/w", update: { spec: "file:/t/b-{version}.tgz" } })).update.spec, "file:/t/b-{version}.tgz");
-  for (const spec of ["bantou", "", 1, "-x{version}"]) {
-    await assert.rejects(load({ workspace: "/w", update: { spec } }), /update\.spec/, String(spec));
-  }
-  await assert.rejects(load({ workspace: "/w", update: "x" }), /update はオブジェクト/);
+test("config: maxParallel の既定は CPU 数 − 1（最低 1）。置けば効く", async () => {
+  assert.equal(defaultMaxParallel(1), 1);
+  assert.equal(defaultMaxParallel(2), 1);
+  assert.equal(defaultMaxParallel(4), 3);
+  assert.equal(defaultMaxParallel(0), 1);
+  assert.equal((await load({ workspace: "/w" }, 1)).session.maxParallel, 1);
+  assert.equal((await load({ workspace: "/w", session: {} }, 8)).session.maxParallel, 7);
+  assert.equal((await load({ workspace: "/w", session: { maxParallel: 2 } }, 8)).session.maxParallel, 2);
 });
 
-test("config: exitResumeMax は既定 3（0 は再開しない）、exitRecoverMs は既定 1 時間、負・小数は拒否", async () => {
-  assert.equal((await load({ workspace: "/w" })).session.exitResumeMax, 3);
-  assert.equal((await load({ workspace: "/w" })).session.exitRecoverMs, 3_600_000);
-  assert.equal((await load({ workspace: "/w", session: { exitResumeMax: 0 } })).session.exitResumeMax, 0);
-  for (const bad of [-1, 1.5, "1"]) {
-    await assert.rejects(load({ workspace: "/w", session: { exitResumeMax: bad } }), /exitResumeMax/);
-    await assert.rejects(load({ workspace: "/w", session: { exitRecoverMs: bad } }), /exitRecoverMs/);
-  }
-});
-
-test("config: workerKeepMs は既定 30 分、0 は掃除しない、負・小数・文字列は拒否", async () => {
-  assert.equal((await load({ workspace: "/w" })).session.workerKeepMs, 1_800_000);
-  assert.equal((await load({ workspace: "/w", session: { workerKeepMs: 0 } })).session.workerKeepMs, 0);
-  assert.equal((await load({ workspace: "/w", session: { workerKeepMs: 5000 } })).session.workerKeepMs, 5000);
-  for (const bad of [-1, 1.5, "10"]) {
-    await assert.rejects(load({ workspace: "/w", session: { workerKeepMs: bad } }), /workerKeepMs/);
-  }
+test("config: v1 の項目（update / resource / maxRetries / workerKeepMs など）は読まない（置いても無視）", async () => {
+  const c = await load({
+    workspace: "/w",
+    update: { spec: "x" },
+    resource: { sampleMs: 1 },
+    session: { maxRetries: -1, workerKeepMs: -1, exitResumeMax: -1, exitRecoverMs: -1, maxParallelTasks: 0 },
+  });
+  assert.deepEqual(c.session, { ...DEFAULT_SESSION, maxParallel: 3 });
+  assert.ok(!("update" in c) && !("resource" in c));
 });
 
 test("config: workspace 省略は config.json のある dir が root。CLAUDE_CONFIG_DIR は <root>/.claude", async () => {
@@ -153,16 +150,5 @@ test("config: workspace 省略は config.json のある dir が root。CLAUDE_CO
     assert.deepEqual((await loadConfig(p)).session.env, {});
   } finally {
     await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test("config: maxParallelTasks は既定で無し（上限なし）。置いた時だけ効く。0・負・小数・文字列は拒否。resource.sampleMs の既定は 30 秒", async () => {
-  assert.equal((await load({ workspace: "/w" })).session.maxParallelTasks, undefined);
-  assert.equal((await load({ workspace: "/w" })).resource?.sampleMs, 30_000);
-  await assert.rejects(load({ workspace: "/w", resource: { sampleMs: 10 } }), /sampleMs/);
-  assert.equal((await load({ workspace: "/w", session: { maxParallelTasks: 1 } })).session.maxParallelTasks, 1);
-  assert.equal((await load({ workspace: "/w", session: { maxParallelTasks: 4 } })).session.maxParallelTasks, 4);
-  for (const bad of [0, -1, 1.5, "2"]) {
-    await assert.rejects(load({ workspace: "/w", session: { maxParallelTasks: bad } }), /maxParallelTasks/);
   }
 });

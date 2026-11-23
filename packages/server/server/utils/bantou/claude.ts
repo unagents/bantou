@@ -34,6 +34,8 @@ export interface ClaudeRunOptions {
   mcpConfigFile?: string;
   /** `--append-system-prompt-file <file>`。 */
   appendSystemPromptFile?: string;
+  /** `--json-schema <schema>`（最後の result の structured_output がこの形になる）。 */
+  jsonSchema?: string;
   /** allowedTools に足す。 */
   extraAllowedTools?: string[];
   /** 子の exit から close（stdout / stderr が閉じる）を待つ上限 ms。既定 CLOSE_GRACE_MS。 */
@@ -55,7 +57,7 @@ export interface ResultUsage {
 }
 
 export type ClaudeRunResult =
-  | { ok: true; sessionId: string; resultText: string; durationMs: number; usage?: ResultUsage }
+  | { ok: true; sessionId: string; resultText: string; structuredOutput?: unknown; durationMs: number; usage?: ResultUsage }
   | {
       ok: false;
       sessionMissing: boolean;
@@ -92,6 +94,7 @@ export function buildClaudeArgs(o: ClaudeRunOptions): string[] {
     // 本文を argv に直書きすると " -- " を含む時に孤児回収（matchesSession）が照合できなくなるのでファイルで渡す
     ...(o.mcpConfigFile ? ["--mcp-config", o.mcpConfigFile] : []),
     ...(o.appendSystemPromptFile ? ["--append-system-prompt-file", o.appendSystemPromptFile] : []),
+    ...(o.jsonSchema ? ["--json-schema", o.jsonSchema] : []),
     ...o.extraArgs,
     ...(o.model ? ["--model", o.model] : []),
     o.mode === "new" ? "--session-id" : "--resume",
@@ -104,7 +107,7 @@ export function buildClaudeArgs(o: ClaudeRunOptions): string[] {
 /** stream-json の最終行（result envelope）を読む。成功以外は null。 */
 export function readResultEnvelope(
   lastLine: string,
-): { ok: true; sessionId: string | null; resultText: string } | null {
+): { ok: true; sessionId: string | null; resultText: string; structuredOutput?: unknown } | null {
   let d: unknown;
   try {
     d = JSON.parse(lastLine);
@@ -118,6 +121,7 @@ export function readResultEnvelope(
     ok: true,
     sessionId: typeof e.session_id === "string" ? e.session_id : null,
     resultText: typeof e.result === "string" ? e.result : "",
+    ...(e.structured_output !== undefined ? { structuredOutput: e.structured_output } : {}),
   };
 }
 
@@ -343,6 +347,7 @@ export function runClaude(o: ClaudeRunOptions): Promise<ClaudeRunResult> {
           ok: true,
           sessionId: env.sessionId ?? o.sessionId,
           resultText: env.resultText,
+          ...(env.structuredOutput !== undefined ? { structuredOutput: env.structuredOutput } : {}),
           durationMs: Date.now() - started,
           ...(details.usage ? { usage: details.usage } : {}),
         });

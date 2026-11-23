@@ -1,16 +1,16 @@
 import { lstat, realpath, rm, unlink } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
-import { isValidAgentId } from "@agent-hand/bantou-protocol";
-import { KEEP_ENTRIES, agentDir } from "./paths";
-import { readOwner } from "./workers";
+import { KEEP_ENTRIES, workerDir } from "./paths";
 
 /**
  * MCP tool `bash`。任意のシェル文字列は受けず、action ごとの handler 表にある操作だけを、
  * 呼び出し元の自分の path の範囲に限って行う。今の action は rm のみ（足す時は HANDLERS に 1 つ足す）。
  */
 
-/** 呼び出し元（MCP の header から決まる）。worker は workerId の path、cap は capId の path と自分の worker の path が範囲。 */
-export type BashCaller = { kind: "cap"; capId: string } | { kind: "worker"; capId: string; workerId: string };
+/** 呼び出し元（MCP の header から決まる）。worker は workerId の path が範囲。 */
+export interface BashCaller {
+  workerId: string;
+}
 
 export interface BashArgs {
   action: string;
@@ -43,7 +43,6 @@ export function getBashWorkspace(): string | undefined {
 // -- rm ----------------------------------------------------------------------------
 
 const PROTECTED_MSG = "logs/ と state.json は server の記録なので消せない";
-const WORKER_PREFIX = "worker:";
 
 const errCode = (e: unknown): string | undefined => (e as NodeJS.ErrnoException).code;
 const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
@@ -56,7 +55,7 @@ type Rejected = { reason: string };
 /**
  * path 1 つを消す。判定の順序:
  *  1. 文字列の検査（NUL・絶対パス・~・drive・バックスラッシュ）
- *  2. 範囲の決定（自分の path / cap なら `worker:<id>/` の worker の path。持ち主を logs/owner.json で確認）
+ *  2. 範囲の決定（自分の worker の path）
  *  3. 字面の正規化（`.` と空を落とし、`..` は拒否）。何も残らない = path そのもの → 拒否
  *  4. 先頭要素が logs / state.json（大文字小文字を区別しない）なら拒否
  *  5. 親を realpath で解決し、範囲の realpath の中か確認（symlink 経由の脱出を拒否）。解決後の先頭要素も 4 と同じ検査
@@ -72,26 +71,13 @@ async function rmOne(ws: string, caller: BashCaller, raw: string, recursive: boo
   if (raw.includes("\\")) return { reason: "バックスラッシュは不可" };
 
   let rootDir: string;
-  let rest = raw;
   try {
-    if (raw.startsWith(WORKER_PREFIX)) {
-      if (caller.kind !== "cap") return { reason: "worker: 接頭辞は cap だけが使える" };
-      const slash = raw.indexOf("/");
-      const id = raw.slice(WORKER_PREFIX.length, slash < 0 ? undefined : slash);
-      rest = slash < 0 ? "" : raw.slice(slash + 1);
-      if (!isValidAgentId(id)) return { reason: `worker_id が不正: ${id}` };
-      const owner = await readOwner(ws, id);
-      if (owner === undefined) return { reason: `worker が存在しない: ${id}` };
-      if (owner !== caller.capId) return { reason: `別の cap の worker: ${id}` };
-      rootDir = agentDir(ws, "worker", id);
-    } else {
-      rootDir = caller.kind === "cap" ? agentDir(ws, "cap", caller.capId) : agentDir(ws, "worker", caller.workerId);
-    }
+    rootDir = workerDir(ws, caller.workerId);
   } catch (e) {
     return { reason: errMsg(e) };
   }
 
-  const segs = rest.split("/").filter((s) => s !== "" && s !== ".");
+  const segs = raw.split("/").filter((s) => s !== "" && s !== ".");
   if (segs.includes("..")) return { reason: ".. は不可" };
   if (segs.length === 0) return { reason: "path の dir そのものは消せない" };
   if (isProtected(segs[0])) return { reason: PROTECTED_MSG };

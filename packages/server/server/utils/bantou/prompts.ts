@@ -1,121 +1,19 @@
 /**
- * cap と worker の system prompt（--append-system-prompt-file で渡す）。
+ * worker の system prompt（--append-system-prompt-file で渡す）と、reply の起こし直しの prompt。
  * 本文に " -- " を含めない（ファイル渡しなので必須ではないが、argv 照合の前提としてテストで固定する）。
  */
-import {
-  PROTOCOL_VERSION,
-  REVIEW_SEVERITIES,
-  REVIEW_VERDICTS,
-  WORKER_ROLES,
-  isActivityState,
-  isServerReply,
-  isValidAgentId,
-  type ReviewItem,
-  type ReviewSeverity,
-  type RunOutcome,
-  type TaskCommand,
-  type TaskResultReply,
-  type TaskResultWorker,
-  type WorkerRole,
-} from "@agent-hand/bantou-protocol";
-import { COMMON_MD, REMOTE_CAP_MD, WORKER_MD } from "./instructions.generated";
-
-/** md（`[見出し]` の行で始まる節の並び）を、見出し → 節の本文（見出し行を含む）に分ける。 */
-export function parseSections(md: string): Map<string, string> {
-  const out = new Map<string, string>();
-  let name: string | undefined;
-  let lines: string[] = [];
-  const flush = (): void => {
-    if (name !== undefined) out.set(name, lines.join("\n").trim());
-  };
-  for (const line of md.split("\n")) {
-    const m = /^\[(.+)\]$/.exec(line);
-    if (m) {
-      flush();
-      name = m[1]!;
-      lines = [line];
-    } else lines.push(line);
-  }
-  flush();
-  return out;
-}
+import { COMMON_MD, WORKER_MD } from "./instructions.generated";
 
 /** 基盤仕様の文面（instructions/*.md が正本。build の時に instructions.generated.ts へ取り込む。共通の文面は packages/center/instructions/common.md の 1 つだけ）。 */
 export const COMMON_TEXT = COMMON_MD.trim();
-export const REMOTE_CAP_SECTIONS = parseSections(REMOTE_CAP_MD);
 export const WORKER_TEXT = WORKER_MD.trim();
 
-/** remote-cap.md の節を 1 つ取る（extra を渡すと、その節の末尾に足す）。見出しが無ければ例外。 */
-function capSection(name: string, extra: readonly string[] = []): string {
-  const body = REMOTE_CAP_SECTIONS.get(name);
-  if (body === undefined) throw new Error(`remote-cap.md に節が無い: ${name}`);
-  return [body, ...extra].join("\n");
-}
-
-/** 本文の正本は docs/design/cap-orchestration.md。変える時は両方。基盤仕様の部分は instructions/*.md。 */
-export const CAP_GUIDE = [
-  "あなたは bantou の remote-cap。作業を束ねるオーケストレーターで、自分では実装しない。",
-  "作業は必ず worker にさせる。cap がするのは、分割・指示・結果の確認・次の指示・まとめだけ。",
-  "「密結合だから worker は 1 体」と丸投げしない。",
-  "",
-  COMMON_TEXT,
-  "",
-  capSection("役割"),
-  "",
-  capSection("自分の層で直し切る"),
-  "",
-  capSection("完了の判定"),
-  "",
-  "[道具]",
-  "worker の起動と続きの指示は mcp__bantou__worker_start を使う。worker_id を省けば新規、同じ worker_id を渡せば続きの指示になる。",
-  "状態は mcp__bantou__worker_status、停止は mcp__bantou__worker_stop を使う。",
-  "Bash で claude を直接起動しない。",
-  "一時物は作業 dir の中に置く。$TMPDIR（自分の path の tmp/）を使い、/tmp 直書きはしない。一時物の削除は Bash の rm でなく mcp__bantou__bash の rm（action: rm、paths は自分の path からの相対。自分の worker は worker:<id>/<path>、dir は recursive: true）を使う。",
-  "worker の報告は「worker <id> から <kind>: <text>」として届く。",
-  "worker_start は完了を待たずに返る。起動したらターンを終えてよい。",
-  "同じ cap の別の task は、別の会話の指揮が並行して受け持つ。worker_status（worker_id 省略）は自分の task の worker だけを返す。動いている別の task の worker は worker_start / worker_stop できない。",
-  "server は worker の本数を制限せず、host に空きがあるかも判定しない。何本並行させるかは自分で決める。mcp__bantou__peer_status で host の負荷・メモリ・ディスク・worker の数・他の cap の様子（数だけ）を見て、可能な限り並行させる。host に空きが無いと判断した時は worker_start に reserve: true を付ける（server が来た順に貯め、worker が 1 本終わるたびに起こす。worker_status の state は reserved。worker_stop で取り消せる）。",
-  "最初の指示に [同じ branch の task] があれば、同じ branch に push する別の task が動いている。server は待たせない。衝突しないよう、branch の分け方や push の順序を worker への指示で決める。",
-  "",
-  "[分担]",
-  "最小の分担は 2 体。実装 worker と review worker。",
-  "review worker は実装 worker の push 後に、別 clone で差分を読み、テストを回し、仕様とのずれ・壊れ・抜けを report する。",
-  "review の指摘は、実装 worker に同じ worker_id で worker_start して戻す。直るまで回す。実装と review の往復は最大 3 回。3 回で直らなければ、残った問題として最終返答に書いて止める。",
-  "独立な部分（例: center と desktop、実装と docs、別 package）は別 worker で並列に起動する。依存がある部分は、前の worker の完了を確認してから次を起動する。",
-  "同じ branch に複数の worker が push する場合は、先に rebase して衝突を解消してから push するよう指示する。",
-  "",
-  "[worker への指示]",
-  "指示には必ず次を含める。",
-  "- 成果物: branch、commit、report の置き場",
-  "- 確認方法: どのテストを回すか（review worker には、回すテストと見る差分の範囲）",
-  "- 後始末: 終わったら（push と report の内容を確かめた後に）自分の clone・node_modules・ビルド生成物と、自分で置いた一時物を自分で消す。logs/ と state.json は消さない",
-  "kick_cap の prompt にある制約（repo 引数を使わない、一時物の置き場、GIT_CONFIG_GLOBAL、push 先の branch、version bump しない など）は、worker への指示にも書き写す。worker は cap の prompt を見ない。",
-  "",
-  "[model]",
-  "worker の model は、cap への指示の worker_model か prompt の指定に従う。",
-  "指定が無ければ、実装 worker は既定、review worker は実装と同じか軽いものにする。",
-  "",
-  "[最終返答]",
-  "各 worker の結果、review の結論、残った問題を書く。",
-  "指示が [task <task_id>] で始まる時（task 指示）は、最終返答を task_result の JSON 1 つで返す。JSON は ```json のコードブロックに入れ、ブロックの前後に説明を書いてよい。形式:",
-  '{"state":"done または failed","summary":"結果の要約","workers":[{"worker_id":"...","role":"implement|review|docs|test|other","state":"done|failed|idle|running|stalled|lost","branch":"...","commit":"...","tests":"回したテストと結果","report_path":"...","result":"worker の結果の先頭"}],"review":{"verdict":"ok|issues|unknown","items":[{"severity":"high|medium|low","text":"指摘","resolved":true}],"rounds":0},"remaining":["残った問題"]}',
-  "branch / commit / tests / report_path は分かるものだけ書く。review の結果が無い時は verdict を unknown にする。",
-  "",
-  capSection("見張り", [
-    "指示が [worker 終了通知] で始まる時は、server が worker の失敗・時間切れ・done 無しの終了を知らせている。worker_status と git で状態を確かめ、同じ worker_id で worker_start して続きから起こし直すか、起こし直さず最終返答に原因と残りを書いて終える。",
-    "再開の回数には上限がある（超えると server は cap を起こさず task を failed にする）。同じ失敗の繰り返しは起こし直さず終える。",
-    "worker が report を送らずに idle になった時（worker_status が idle で、その worker の report が届いていない）は、同じ worker_id で worker_start して report を送るよう指示し、再開させる。",
-  ]),
-  "",
-  capSection("残った問題"),
-  "",
-  capSection("窓口を預かっている時"),
-].join("\n");
-
 export const WORKER_GUIDE = [
-  "あなたは bantou の worker。remote-cap から作業を任されている。",
-  "進捗・完了は mcp__bantou__report で送る（kind: progress | done）。",
-  "report はすぐ accepted を返す。送ったらターンを終える。",
+  "あなたは bantou の worker。cap から作業を任されている。",
+  "終わる時（質問・承認の依頼・完了・失敗のどれでも）は、最後の返答を指定の JSON schema の形で返す。",
+  '- 質問・承認の依頼: {"lastType":"message","status":"ask" か "request_approve","content":"文"}。返事が届くまでターンは止まり、返事で再開する',
+  '- 完了・失敗: {"lastType":"report","status":"success" か "failed","content":"文"}',
+  "lastType・status・content は全部必須。content には、結果の要約と、下の [終わる時] の報告に書く物を入れる。",
   "",
   COMMON_TEXT,
   "",
@@ -125,174 +23,21 @@ export const WORKER_GUIDE = [
   "一時物は作業 dir の中に置く。$TMPDIR（自分の path の tmp/）を使い、/tmp 直書きはしない。一時物の削除は Bash の rm でなく mcp__bantou__bash の rm（action: rm、paths は自分の path からの相対、dir は recursive: true）を使う。",
   "",
   "[常設の制約]",
-  "bantou-server / bantou-center を install・起動・停止・再起動しない。必要なら report で報告するだけにする。",
+  "bantou-server / bantou-center を install・起動・停止・再起動しない。必要なら最後の返答（lastType: message）で報告するだけにする。",
 ].join("\n");
 
-// -- task 指示 --------------------------------------------------------------------
+/** reply（approve）の起こし直しの prompt。文の形は server が固定で持つ。 */
+export const APPROVE_PROMPT = "承認された。依頼した内容を進める。";
 
-const bullets = (items: readonly string[] | undefined): string[] => (items ?? []).map((x) => `- ${x}`);
+/** reply（reject）の起こし直しの prompt。 */
+export const REJECT_PROMPT = "却下された。依頼した内容は行わない。別の方法を考えるか、止まって報告する。";
 
-/**
- * task（center → server）から cap の最初の指示を組み立てる。文面の正本は docs/design/cap-orchestration.md の
- * 「task 指示の文面」。変える時は両方。先頭行は `[task <task_id>]` で固定（CAP_GUIDE が見分ける）。
- */
-export function buildTaskPrompt(t: TaskCommand): string {
-  const out: string[] = [`[task ${t.task_id}]`, "", "[目的]", t.goal];
-  const base = [t.repo ? `repo: ${t.repo}` : "", t.branch ? `branch: ${t.branch}` : ""].filter((x) => x !== "");
-  if (base.length > 0) out.push("", "[作業の base]", ...base);
-  const d = t.deliverables;
-  const deliverables = [
-    ...(d.branch ? [`push 先 branch: ${d.branch}`] : []),
-    ...(d.report_path ? [`report の置き場: ${d.report_path}`] : []),
-    ...(d.other ?? []),
-  ];
-  out.push("", "[成果物]", ...(deliverables.length > 0 ? bullets(deliverables) : ["- 指定なし（cap が決めて worker に指示する）"]));
-  const verify = [...(t.verify.tests ?? []).map((x) => `回すテスト: ${x}`), ...(t.verify.steps ?? []).map((x) => `手順: ${x}`)];
-  out.push("", "[確認方法]", ...(verify.length > 0 ? bullets(verify) : ["- 指定なし（cap が決めて worker に指示する）"]));
-  out.push("", "[制約]", ...(t.constraints.length > 0 ? bullets(t.constraints) : ["- なし"]));
-  out.push("", "[分担]");
-  const items = t.workers.items ?? [];
-  if (items.length === 0) {
-    out.push("最低 2 体: 実装 worker と review worker。分割は cap が決める。");
-  } else {
-    out.push("次の分担に従って worker を起動する。依存（depends_on）がある worker は、その完了を確認してから起動する。");
-    items.forEach((it, i) => {
-      const parts = [`role=${it.role}`, `scope=${it.scope}`];
-      if (it.model) parts.push(`model=${it.model}`);
-      if (it.depends_on && it.depends_on.length > 0) parts.push(`depends_on=${it.depends_on.join(",")}`);
-      out.push(`- ${it.id ?? `#${i + 1}`}: ${parts.join(" ")}`);
-    });
-    if (!items.some((it) => it.role === "implement") || !items.some((it) => it.role === "review")) {
-      out.push("実装と review が分担に無い時は、足りない方の worker を cap が追加する。");
-    }
-  }
-  if (t.worker_model) out.push("", "[worker の model]", `worker_model: ${t.worker_model}（worker_start で model を省く時の既定。分担の model が優先）`);
-  out.push(
-    "",
-    "[最終返答]",
-    "最終返答は task_result の JSON 1 つで返す（形式は system prompt の [最終返答]）。task_id は返さなくてよい。",
-  );
-  return out.join("\n");
-}
+/** reply（answer）で content が空の時の prompt（空の prompt では claude を起こせないため）。 */
+export const EMPTY_ANSWER_PROMPT = "（空の回答）";
 
-const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
-const str = (v: unknown): string | undefined => (typeof v === "string" && v !== "" ? v : undefined);
-
-/** worker の result の先頭の上限（文字数）。 */
-export const MAX_WORKER_RESULT_HEAD = 500;
-
-/** 本文から JSON オブジェクトの候補を後ろ側から順に返す（```json ブロック、無ければ文中の最後の {...}）。 */
-function jsonCandidates(text: string): string[] {
-  const out: string[] = [];
-  const fence = /```(?:json)?[ \t]*\r?\n([\s\S]*?)```/g;
-  for (const m of text.matchAll(fence)) out.push(m[1]!.trim());
-  out.reverse();
-  // 文中の {...}: 後ろの '{' から順に、対応する '}' までを候補にする
-  let from = text.length;
-  for (let n = 0; n < 20; n++) {
-    const start = text.lastIndexOf("{", from - 1);
-    if (start < 0) break;
-    from = start;
-    let depth = 0;
-    let inStr = false;
-    for (let i = start; i < text.length; i++) {
-      const c = text[i]!;
-      if (inStr) {
-        if (c === "\\") i++;
-        else if (c === '"') inStr = false;
-      } else if (c === '"') inStr = true;
-      else if (c === "{") depth++;
-      else if (c === "}" && --depth === 0) {
-        out.push(text.slice(start, i + 1));
-        break;
-      }
-    }
-  }
-  return out;
-}
-
-function normWorker(v: unknown): TaskResultWorker | undefined {
-  if (!isRecord(v) || !isValidAgentId(v.worker_id)) return undefined;
-  const w: TaskResultWorker = {
-    worker_id: v.worker_id,
-    role: (WORKER_ROLES as readonly unknown[]).includes(v.role) ? (v.role as WorkerRole) : "other",
-    state: isActivityState(v.state) ? v.state : "idle",
-    result: (typeof v.result === "string" ? v.result : "").slice(0, MAX_WORKER_RESULT_HEAD),
-  };
-  for (const k of ["branch", "commit", "tests", "report_path"] as const) {
-    const x = str(v[k]);
-    if (x !== undefined) w[k] = x;
-  }
-  return w;
-}
-
-function normItem(v: unknown): ReviewItem | undefined {
-  if (!isRecord(v) || typeof v.text !== "string") return undefined;
-  const severity = (REVIEW_SEVERITIES as readonly unknown[]).includes(v.severity) ? (v.severity as ReviewSeverity) : "medium";
-  return { severity, text: v.text, resolved: v.resolved === true };
-}
-
-/**
- * cap の返答から task_result の中身を取り出す。`summary`（文字列）を持つ JSON オブジェクトだけを採る。
- * 形が少し崩れていても取れる分は拾う（worker の role / state、review の severity は既定値で補う）。
- * 取り出せなければ undefined。
- */
-export function extractTaskResult(
-  capId: string,
-  taskId: string,
-  text: string,
-): TaskResultReply | undefined {
-  for (const c of jsonCandidates(text)) {
-    let v: unknown;
-    try {
-      v = JSON.parse(c);
-    } catch {
-      continue;
-    }
-    if (!isRecord(v) || typeof v.summary !== "string") continue;
-    const rv = isRecord(v.review) ? v.review : {};
-    const reply: TaskResultReply = {
-      bantou: PROTOCOL_VERSION,
-      type: "task_result",
-      cap_id: capId,
-      task_id: taskId,
-      state: v.state === "failed" ? "failed" : "done",
-      summary: v.summary,
-      workers: (Array.isArray(v.workers) ? v.workers : []).map(normWorker).filter((w): w is TaskResultWorker => w !== undefined),
-      review: {
-        verdict: (REVIEW_VERDICTS as readonly unknown[]).includes(rv.verdict) ? (rv.verdict as "ok" | "issues" | "unknown") : "unknown",
-        items: (Array.isArray(rv.items) ? rv.items : []).map(normItem).filter((i): i is ReviewItem => i !== undefined),
-        rounds: typeof rv.rounds === "number" && Number.isInteger(rv.rounds) && rv.rounds >= 0 ? rv.rounds : 0,
-      },
-      remaining: (Array.isArray(v.remaining) ? v.remaining : []).filter((x): x is string => typeof x === "string"),
-    };
-    const err = str(v.error);
-    if (err !== undefined) reply.error = err;
-    if (isServerReply(reply)) return reply;
-  }
-  return undefined;
-}
-
-/**
- * task 指示の実行結果を task_result にする。取り出せなければ summary に生の返答、review.verdict は unknown。
- * 実行が失敗（ok=false）なら state は failed（JSON が取れても failed に寄せる）。
- */
-export function buildTaskResult(capId: string, taskId: string, r: RunOutcome): TaskResultReply {
-  const extracted = r.ok ? extractTaskResult(capId, taskId, r.result_text) : undefined;
-  const base: TaskResultReply = extracted ?? {
-    bantou: PROTOCOL_VERSION,
-    type: "task_result",
-    cap_id: capId,
-    task_id: taskId,
-    state: r.ok ? "done" : "failed",
-    summary: r.result_text,
-    workers: [],
-    review: { verdict: "unknown", items: [], rounds: 0 },
-    remaining: [],
-  };
-  if (!r.ok) {
-    base.state = "failed";
-    base.error = r.error ?? "cap の実行に失敗";
-  }
-  return base;
+/** reply 1 つから起こし直しの prompt を作る。 */
+export function replyPrompt(order: "answer" | "approve" | "reject", content?: string): string {
+  if (order === "approve") return APPROVE_PROMPT;
+  if (order === "reject") return REJECT_PROMPT;
+  return content !== undefined && content.trim() !== "" ? content : EMPTY_ANSWER_PROMPT;
 }
