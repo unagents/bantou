@@ -34,6 +34,26 @@ test.describe("session sleep", () => {
     await expect(sideRow(page, "stroke-board").getByTestId("side-sleeping")).toHaveCount(0);
   });
 
+  test("the sleep button is disabled while work is going on (same conditions the center refuses), and enabled again when idle", async ({ page }) => {
+    await page.goto("/");
+    await pickSession(page, "stroke-board");
+    const patch = (p: Record<string, unknown>) =>
+      withMock(page, (m, a) => void Object.assign(m.centerSessions.find((x) => x.name === "agent-messenger") ?? {}, a), p);
+    await patch({ state: "connected", activity: "working" });
+    await act(page);
+    await expect(sleepButton(page, "agent-messenger")).toBeDisabled();
+    await patch({ activity: "idle", background: { subagents: 1, tasks: 0 } });
+    await act(page);
+    await expect(sleepButton(page, "agent-messenger")).toBeDisabled();
+    await patch({ activity: "needs-input", background: { subagents: 0, tasks: 0 } });
+    await act(page);
+    await expect(sleepButton(page, "agent-messenger")).toBeDisabled();
+    await patch({ activity: "idle" });
+    await act(page);
+    await expect(sleepButton(page, "agent-messenger")).toBeEnabled();
+    expect(await calls(page, "session_sleep")).toEqual([]);
+  });
+
   test("opening a sleeping session wakes it (session_wake); a session that is awake is not woken", async ({ page }) => {
     await page.goto("/");
     await pickSession(page, "stroke-board");

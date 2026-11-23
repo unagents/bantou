@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { capActivity, sessionProgress } from "../composables/sessionStatus";
+import { capActivity, sessionProgress, sleepBlock } from "../composables/sessionStatus";
 import type { Session } from "../types";
 
 const sess = (o: Partial<Session> = {}): Session => ({
@@ -75,5 +75,37 @@ describe("(A) work in progress", () => {
     assert.equal(sessionProgress(sess({ remote: { running: 1, waitingReply: 0, unreachable: [issue] } }), true), null);
     assert.equal(sessionProgress(sess({ state: "stopped", background: bg(1, 0) }), true), null);
     assert.equal(sessionProgress(sess({ background: bg(1, 0) }), false), null);
+  });
+});
+
+describe("sleep button: disabled exactly when the center refuses (U2 A)", () => {
+  const blocked = (o: Partial<Session>, needsInput = false) => sleepBlock(sess(o), true, needsInput) !== null;
+  test("an idle connected session can be put to sleep", () => {
+    assert.equal(sleepBlock(sess(), true), null);
+    assert.equal(sleepBlock(sess({ state: "starting" }), true), null);
+  });
+  test("working / subagents / background runs: blocked", () => {
+    assert.ok(blocked({ activity: "working" }));
+    assert.ok(blocked({ background: { subagents: 1, tasks: 0 } }));
+    assert.ok(blocked({ background: { subagents: 0, tasks: 2 } }));
+  });
+  test("needs-input (own, or a waiting thread): blocked", () => {
+    assert.ok(blocked({ activity: "needs-input" }));
+    assert.ok(blocked({}, true));
+  });
+  test("remote running / unanswered: blocked, even when the remote is unreachable", () => {
+    const rem = (o: object) => ({ running: 0, waitingReply: 0, unreachable: [], lost: [], stopped: [], ...o }) as unknown as Session["remote"];
+    assert.ok(blocked({ remote: rem({ running: 1 }) }));
+    assert.ok(blocked({ remote: rem({ waitingReply: 1 }) }));
+    assert.ok(blocked({ remote: rem({ running: 1, unreachable: [{ server: "s", remoteId: "r" }] }) }));
+  });
+  test("asleep / not running: blocked; center unreachable or session unlisted: not blocked here", () => {
+    assert.ok(blocked({ sleeping: true }));
+    assert.ok(blocked({ state: "stopped" }));
+    assert.equal(sleepBlock(sess({ activity: "working" }), false), null);
+    assert.equal(sleepBlock(undefined, true), null);
+  });
+  test("the reason is shown (button title)", () => {
+    assert.match(sleepBlock(sess({ activity: "working" }), true) ?? "", /作業中/);
   });
 });
