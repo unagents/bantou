@@ -84,7 +84,7 @@ export const typeDefs = /* GraphQL */ `
     reason: String
   }
 
-  """ 受理して即返す形（session_sleep の応答。眠りは後で sessionsChanged（reason sleep）で届く）。 """
+  """ session_sleep の応答の形（accepted / pending）。今の center は sleep() が終わるまで待ってから accepted: true / pending: false を返す（受理して即返す形は feat/sleep-resession の取り込み後）。眠った事は sessionsChanged（reason sleep）でも届く。 """
   type SleepSessionResult {
     name: String!
     accepted: Boolean

@@ -3,7 +3,7 @@ export const mutationTypeDefs = /* GraphQL */ `
   type Mutation {
     createSession(name: String!, path: String, settings: ProjectSettingsInput): Session!
     updateSession(name: String!, newName: String, path: String, move: Boolean): Session!
-    """ 受理して即返す（眠りは sessionsChanged（reason sleep）で届く。拒否は error で返す）。 """
+    """ 眠らせ終わるまで待ってから accepted: true / pending: false を返す（今の center の sleep() は同期完了型）。拒否は error で返す。眠った事は sessionsChanged（reason sleep）でも届く。 """
     sleepSession(name: String!): SleepSessionResult!
     wakeSession(name: String!): Session!
     """ settings の null = 項目を消す。 """

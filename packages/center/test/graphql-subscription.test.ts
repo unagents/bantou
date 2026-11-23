@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { startHttpServer } from "../src/http.js";
 import { createCore } from "../src/core.js";
@@ -191,6 +192,9 @@ test("subscription centerStatus: 購読した時点の状態を返し、切断�
     assert.equal(first.running, true);
     assert.equal(first.authRequired, null);
     assert.match(first.version, /^\d+\.\d+\.\d+/);
+    // package.json の version と同じ（0.0.0 の取得失敗値ではない。compile した binary でも同じ取得元 = version.ts）
+    assert.equal(first.version, (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version);
+    assert.notEqual(first.version, "0.0.0");
     s.abort();
   } finally {
     await h.close();

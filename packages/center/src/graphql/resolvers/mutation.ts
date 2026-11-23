@@ -18,6 +18,8 @@ type Resolver = (parent: unknown, args: Record<string, unknown>, ctx: GraphqlCon
 
 const sessionName = z.string().regex(SESSION_NAME, "英数字と _ - のみ");
 const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
+/** 空でなく、4 文字ずつで、padding は末尾だけの base64（terminalInput。空の入力・長さの不正は通さない）。 */
+const BASE64_STRICT = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
 /** 入力の誤り（client が直せる）。extensions.code = BAD_USER_INPUT。 */
 function badInput(message: string): GraphQLError {
@@ -75,7 +77,7 @@ export const mutationResolvers: Record<string, Resolver> = {
       return services.sessions.update(input);
     }),
 
-  // 今の center の sleep() は眠らせてから返す。受理して即返す形（sleep-resession）に合わせ、受理済み・待ちなしで返す
+  // 今の center の sleep() は眠らせ終わってから返る。完了を待ってから accepted: true / pending: false を返す（受理して即返す形は sleep-resession の取り込み時）
   sleepSession: (_p, args, { services }) =>
     run(async () => {
       const { name } = parse({ name: sessionName }, args);
@@ -141,7 +143,7 @@ export const mutationResolvers: Record<string, Resolver> = {
 
   terminalInput: (_p, args, ctx) =>
     run(() => {
-      const { session, dataB64 } = parse({ session: sessionName, dataB64: z.string().regex(BASE64, "base64 文字列") }, args);
+      const { session, dataB64 } = parse({ session: sessionName, dataB64: z.string().min(1, "base64 文字列").regex(BASE64_STRICT, "base64 文字列") }, args);
       requireTerminal(ctx, session);
       if (!ctx.services.core.input(session, Buffer.from(dataB64, "base64"))) throw notRunning();
       return true;
