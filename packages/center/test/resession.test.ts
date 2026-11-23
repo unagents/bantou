@@ -837,7 +837,7 @@ test("依頼が流れた: 引継ぎを渡さず turn が終わった（Stop）�
   // 依頼の turn が始まる前の Stop（前の turn の遅れた物）では外さない
   r.hook(hookOf("Stop"));
   assert.equal(r.res.pending("pm1"), true);
-  await assert.rejects(r.res.requestSleep("pm1"), /すでに.*途中/);
+  await assert.rejects(r.res.requestSleep("pm1"), (e: Error) => e.message.startsWith(SLEEP_REFUSED_PREFIX) && /すでに.*途中/.test(e.message));
   // 依頼の turn が session_resession を呼ばずに終わった
   r.hook(hookOf("UserPromptSubmit", { prompt: "ask" }));
   assert.equal(r.res.pending("pm1"), true);
@@ -901,10 +901,10 @@ test("T4: 書けない時は眠らせず理由を返す: needs-input・remote �
   await assert.rejects(r.res.requestSleep("pm1"), (e: Error) => e.message.startsWith(SLEEP_REFUSED_PREFIX) && /needs-input/.test(e.message));
   r.hook(hookOf("PostToolUse"));
   r.remote.running = 1;
-  await assert.rejects(r.res.requestSleep("pm1"), /未完了の remote/);
+  await assert.rejects(r.res.requestSleep("pm1"), (e: Error) => e.message.startsWith(SLEEP_REFUSED_PREFIX) && /未完了の remote/.test(e.message));
   r.remote.running = 0;
   r.remote.waitingReply = 1;
-  await assert.rejects(r.res.requestSleep("pm1"), /worker_reply/);
+  await assert.rejects(r.res.requestSleep("pm1"), (e: Error) => e.message.startsWith(SLEEP_REFUSED_PREFIX) && /worker_reply/.test(e.message));
   r.remote.waitingReply = 0;
   assert.equal(r.res.pending("pm1"), false);
   assert.deepEqual(w1.inputs(), []);
@@ -912,7 +912,7 @@ test("T4: 書けない時は眠らせず理由を返す: needs-input・remote �
   // 動いていない session
   const r2 = await rig();
   await r2.sessions.create({ name: "pm1", start: false });
-  await assert.rejects(r2.res.requestSleep("pm1"), /動いていない/);
+  await assert.rejects(r2.res.requestSleep("pm1"), (e: Error) => e.message.startsWith(SLEEP_REFUSED_PREFIX) && /動いていない/.test(e.message));
   assert.equal(r2.res.pending("pm1"), false);
   await r2.close();
   await r.close();
@@ -1093,7 +1093,7 @@ test("T13: リセッション（restart の印）は今までどおり再起動�
   const r = await rig();
   const w1 = await boot(r);
   await r.res.request("pm1", HANDOFF);
-  await assert.rejects(r.res.requestSleep("pm1"), /途中/);
+  await assert.rejects(r.res.requestSleep("pm1"), (e: Error) => e.message.startsWith(SLEEP_REFUSED_PREFIX) && /途中/.test(e.message));
   r.hook(hookOf("Stop"));
   await until(() => launches.length === 2);
   assert.equal(r.sessions.list()[0]!.sleeping, false, "restart は眠らせない");
