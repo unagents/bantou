@@ -180,18 +180,34 @@ test("query remotes: remote_list（owner 無し）の全件。filter は空で�
   }
 });
 
-test("query servers / rcStatus: servers は控えの server（重複なし）と server-info の版。rc_list の写し", async () => {
-  const mk = (server: string) => ({ remote_id: `x@${server}`, server });
+test("query servers / rcStatus: servers は broker の protocol「bantou」の peer（listServers）と server-info の版。link が投げたら message つきの error。rc_list の写し", async () => {
+  let fail = false;
+  const peers = [
+    { name: "srv", host: "h1", protocol: "2.0.0", lastSeen: "2026-11-23T00:00:00Z" },
+    { name: "srv2", host: null, protocol: null, lastSeen: null },
+  ];
   const { h, q } = await boot({
-    remotes: { list: () => [mk("srv"), mk("srv2"), mk("srv")] },
-    link: { serverVersionOf: (s: string) => (s === "srv" ? "0.2.0" : undefined) },
+    link: {
+      listServers: async () => {
+        if (fail) throw new Error("broker に繋がらない");
+        return peers;
+      },
+      serverVersionOf: (s: string) => (s === "srv" ? "0.2.0" : undefined),
+    },
     supervisor: { list: () => [{ project: "a", path: "/w/a", state: "error", pid: null, sessionUrl: null, restarts: 3, lastError: "boom" }] },
   });
   try {
-    assert.deepEqual((await q("{servers{name version}}")).data, { servers: [{ name: "srv", version: "0.2.0" }, { name: "srv2", version: null }] });
+    assert.deepEqual((await q("{servers{name host protocol lastSeen version}}")).data, {
+      servers: [
+        { name: "srv", host: "h1", protocol: "2.0.0", lastSeen: "2026-11-23T00:00:00Z", version: "0.2.0" },
+        { name: "srv2", host: null, protocol: null, lastSeen: null, version: null },
+      ],
+    });
     assert.deepEqual((await q("{rcStatus{project path state pid sessionUrl restarts lastError}}")).data, {
       rcStatus: [{ project: "a", path: "/w/a", state: "error", pid: null, sessionUrl: null, restarts: 3, lastError: "boom" }],
     });
+    fail = true;
+    assert.equal((await q("{servers{name}}")).errors?.[0].message, "broker に繋がらない");
   } finally {
     await h.close();
   }

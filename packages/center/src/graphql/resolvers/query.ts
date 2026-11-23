@@ -50,9 +50,20 @@ export const queryResolvers: Record<string, Resolver> = {
   // remote_list（owner を付けない呼び出し = 全件）
   remotes: (_p, _a, { services }) => services.remotes.list({}),
 
-  // v2 の center は server の一覧の道具を持たない。控え（remote_list）にある server を重複なしで、server-info の答えの版を添えて返す
-  servers: (_p, _a, { services }) =>
-    [...new Set(services.remotes.list({}).map((r) => r.server))].map((name) => ({ name, version: services.link.serverVersionOf(name) ?? null })),
+  // broker に protocol「bantou」で登録されている peer（ServerLink.listServers = listPeers(protocol: "bantou")）。version は server-info の答えの控え
+  servers: async (_p, _a, { services }) => {
+    try {
+      return (await services.link.listServers()).map((s) => ({
+        name: s.name,
+        host: s.host,
+        protocol: s.protocol,
+        lastSeen: s.last_seen,
+        version: services.link.serverVersionOf(s.name) ?? null,
+      }));
+    } catch (e) {
+      return fail(e);
+    }
+  },
 
   rcStatus: (_p, _a, { services }) => services.supervisor.list(),
 

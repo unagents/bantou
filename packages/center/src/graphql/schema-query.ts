@@ -15,7 +15,7 @@ export const queryTypeDefs = /* GraphQL */ `
     centerVersion: CenterVersion!
     """ remote-cap の記録（remote_list）。 """
     remotes: [RemoteRecord!]!
-    """ remote の控えにある server の一覧と、server-info の答えの版。 """
+    """ broker に protocol「bantou」で登録されている peer の一覧（listPeers）。 """
     servers: [ServerInfo!]!
     """ rc の状態（rc_list）。 """
     rcStatus: [RcStatus!]!

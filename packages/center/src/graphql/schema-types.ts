@@ -184,9 +184,13 @@ export const typeDefs = /* GraphQL */ `
     finishedAt: String
   }
 
-  """ server（agent-messenger の名前）と、server-info の答えで控えた npm bantou の版（未取得は null）。 """
+  """ broker に protocol「bantou」で登録されている peer（server）。version は server-info の答えで控えた npm bantou の版（未取得は null）。 """
   type ServerInfo {
     name: String!
+    host: String
+    """ peer が宣言している protocol「bantou」の版。 """
+    protocol: String
+    lastSeen: String
     version: String
   }
 
