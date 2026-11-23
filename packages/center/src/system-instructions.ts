@@ -97,7 +97,7 @@ export function serversScopeLines(servers: readonly string[] | undefined): strin
   ];
 }
 
-/** master-cap の役割: 自分では作業せず、remote-cap に指示を出す。文面の根拠は docs/design/cap-orchestration.md と center の session 向け tool。 */
+/** master-cap の役割: 自分では作業せず、remote-cap に指示を出す。文面の根拠は center の session 向け tool。 */
 export const MASTER_CAP_ROLE: SystemInstructionPart = {
   id: "master-cap-role",
   version: 7,
