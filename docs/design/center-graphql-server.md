@@ -83,15 +83,21 @@ center は GraphQL の endpoint を持つ backend の server。client の app（
 
 ### 未決（7 節に各案と推奨）
 
+- #25 `/graphql` の Host の検査
 - #26 鍵の失効と再発行
 - #27 メニューバーの無い環境での IP の範囲の指定
 - #28 中継越しの接続元 IP
 - #31 (a) の時の鍵の扱い
 - #32 (a) と (b) が同じ mac で同時に動く時の扱い
-- #33 (a) の workspace・claudePath の扱い
-- #34 「(a) を選ぶ」の入力は何か
-- #35 (a) で desktop が決めた port を center にどう渡すか
-- #36 port も client から変えるか、server 側のメニューバーだけか
+
+（このほかの未決 #1〜#5・#7〜#18・#21 などは 7 節。#6・#9・#20・#22〜#24 は決定済みで 7 節に経緯だけ残してある。）
+
+master-cap が決定 1〜8 から導いて決めた点（review gql-final-review の指摘。7 節に経緯を残してある）:
+
+- #33 (a) の workspace・claudePath: 接続の設定ではなく、session の作業に関わる設定。(a)・(b) とも client の画面で変えられ、保存先は center の host。(a) で見せないのは起動と接続の設定（IP・port・bind・鍵・鍵を渡す IP の範囲）だけ。
+- #34 「(a) を選ぶ」の入力: desktop は今どおり「center を起動」を選ぶと (a)。(b) の server につなぐ時だけ IP を入れる。(a) を選んだ時は IP を入れない。
+- #35 (a) の port の渡し方: desktop が決めた IP と port を、起動の時に desktop から center に渡す（今の sidecar の起動と同じ経路。引数か config かは実装の task が決める）。
+- #36 port の変更の入口: (b) の port・IP の範囲は server 側のメニューバーのみ。client は IP のみ入れ、port は変えた時だけ入れる。
 
 前の版の #29（S での IP の範囲と port の置き場）と #30（S と D で同じ設定を使うか）は無くなった（(a) は desktop が決めて見せない。(b) はメニューバー）。番号は欠番にしてある。
 
@@ -194,7 +200,7 @@ center（GraphQL を持つ backend の server。program は 1 つ、起動の形
 | 操作 | 形（案。細部は未決） |
 |---|---|
 | 入れ方 | `bantou-center.app` を入れる（配り方は未決 #3）。**初回の起動で app が自分を launchd に登録する**（手段は未決 #14）。利用者の操作は app を起動する 1 回だけ。冪等（登録済みで起動しても二重に登録しない）。 |
-| 起動 | 初回は利用者が app を起動した時。以後は launchd が起動する（login 時など）。中身は center の process（`--transport http --bind --config`。**port は設定で決まり（既定 7910）、CLI の引数と環境変数では変えられない**、2.8・#24。(a) の port を center に渡す道は #35）。認証は鍵の方式（2.4）で、今の config の `token` に代わる。種別（LaunchAgent / LaunchDaemon）は未決 #2。 |
+| 起動 | 初回は利用者が app を起動した時。以後は launchd が起動する（login 時など）。中身は center の process（`--transport http --bind --config`。**(b)（bantou-center・launchd）の起動では、port は設定で決まり（既定 7910）、CLI の引数と環境変数では変えられない**、2.8・#24。(a) は desktop が決めた IP と port を、起動の時に desktop から center に渡す。今の sidecar の起動と同じ経路で、引数か config かは実装の task が決める。#35）。認証は鍵の方式（2.4）で、今の config の `token` に代わる。種別（LaunchAgent / LaunchDaemon）は未決 #2。 |
 | 親の監視 | center は 2 秒ごとに `ppid` を見て、起動時から変わったら終わる（`parent-watch.ts`）。bantou-center の作り方（未決 #15）で親が変わる: shell が center を子として起動する形なら、shell が死ねば center も終わる（今の (a) と同じ）。center が launchd の直下なら `ppid` は変わらず何もしない【推測。6 節で実測】。 |
 | 止め方 | 窓が無い app の止め方は未決 #18。launchd が止める時は SIGTERM。center は子の claude を止めてから終わる（待ちは `stopGraceMs` + hard exit、`daemon.ts:258 付近（`stopGraceMs + HARD_EXIT_MARGIN_MS`）`）。service の停止待ちはそれより長く取る（web 設計 9.1）。 |
 | 更新 | center は app に同梱で、版も app と一緒。bantou-center.app を更新しても、動いている center は旧 binary のまま。再起動して初めて新しい版になる。更新の配り方は #3、再起動の入口は #18。再起動で session は `--continue` で戻る（`restore()`）。 |
@@ -263,18 +269,20 @@ center（GraphQL を持つ backend の server。program は 1 つ、起動の形
   2. 「鍵を渡してよい接続元の IP の範囲」は server 側のメニューバーの設定で指定する（server 側で指定する設定はこれだけ）。bantou-center（b）は窓の無い常駐で、設定はメニューバーのメニューから開く。メニューバーの無い環境は未決 #27、中継越しの接続元 IP は未決 #28。
   3. 今の Bearer token（desktop が生成して config に書く。接続設定で貼る）は、この方式に置き換わる。鍵の失効と再発行は未決 #26。
   4. (a) の時の鍵の扱いは未決 #31（(a) は desktop が IP も port も決めて起動し、設定は利用者に見せない。決定 3）。
+  5. port・IP の範囲は server 側のメニューバーのみで指定する（#36）。client の画面からは変えない。client は IP のみ入れ、port は変えた時だけ入れる（決定 5）。
 - 「launcher 鍵」の置き換え（決定 6）: 今は desktop が sidecar を起動した事を、起動ごとの鍵で証明する。起動元だけが `memory`・`mcpServers` を読み書きでき、`projectMemory` を読める（書きは `bantou-center memory set --session`・移行・設定 file の直接編集だけ）。旧設定の `mcp`・`mcpConnections`・`mcpSecrets`・`coordinator` は誰からも MCP では書けない。守る項目は合わせて 7 つ（`CENTER_ONLY_KEYS`: `packages/center-client/src/tool-policy.ts:45`、`packages/center/src/project-settings.ts` の `LAUNCHER_KEYS` + `LEGACY_INTERNAL_KEYS` + `FILE_ONLY_KEYS`）。書きは `assertCenterOnly`、読みは `withoutLauncherKeys` が絞る（定義は `project-settings.ts`、`tools.ts`・`sessions.ts` が呼ぶ）。決定 6 で、client の app の上で、この 7 項目を含む設定の変更を全部できる形になる。起動元の証明（launcher 鍵）で client を分ける形は無くなり、見え方は (a) でも (b) でも web でも同じになる。7 項目の GraphQL 上の形は #6。
-- 設定の保存先は center の host（今は mac200）。client が保存する設定は center の IP だけ（port は変えた時だけ。決定 5・6）。client が center を MCP の server として指定する形は無くなる。(a)・(b) の両方に当てはまる。
+- 設定の保存先は center の host（今は mac200）。client が保存する接続の設定は center の IP だけ（port は変えた時だけ。決定 5・6）。client が center を MCP の server として指定する形は無くなる。「client で入れる唯一の設定は IP」は、「(b) につなぐ時に入れる接続の設定が IP だけ」の意味で、(a)/(b) の選択（#34）とは別。desktop は今どおり「center を起動」を選ぶと (a) になり、その時は IP を入れない。(b) の server につなぐ時だけ IP を入れる。
+- 設定の見え方（決定 6。#33）: (a) でも (b) でも、client の画面で見せるのは同じ。見せないのは (a) の起動と接続の設定（IP・port・bind・鍵・鍵を渡す IP の範囲）だけ。workspace・claudePath は session の作業に関わる設定なので、(a)・(b) とも client の画面で変えられ、保存先は center の host。
 - 取り返しのつかない操作（`retireServer`、`deleteSession`）を鍵の持ち主の中で区別する決定は無い。今は desktop だけ（web は許可 list から外す）。区別を足すかは利用者が決める（web の形は #4）。
 
 ### 2.5 client 側（desktop は何を持ち何を捨てるか。web との共有）
 
 | 部品 | 扱い |
 |---|---|
-| (a) の center の起動・監視・自動再起動・終了時の停止（`center.rs` の spawn / backoff / `Center::stop`、`lib.rs` の `RunEvent::Exit`）、同梱 binary（`externalBin`、`build-sidecar.ts`）、`center_status` / `center_set_settings` の起動項目（enabled・bind・workspace・claudePath）、`bantou://center-running` | **残す**（(a) は今と同じ。「center を起動」を選んだ時の裏の起動）。ただし (a) の IP・port・bind・token は desktop が決め、画面に出さない（決定 3） |
+| (a) の center の起動・監視・自動再起動・終了時の停止（`center.rs` の spawn / backoff / `Center::stop`、`lib.rs` の `RunEvent::Exit`）、同梱 binary（`externalBin`、`build-sidecar.ts`）、`center_status` / `center_set_settings` の起動の選択（`enabled`）と bind、`bantou://center-running` | **残す**（(a) は今と同じ。「center を起動」を選んだ時の裏の起動）。ただし (a) の IP・port・bind・鍵は desktop が決め、画面に出さない（決定 3）。workspace・claudePath は起動の設定ではなく、client の画面で変えられる（#33） |
 | MCP client（`center_mcp.rs`）、SSE 購読（`center_events.rs`）、`SessionCache`（`session.rs`）、端末の中継（`terminal.rs`） | **捨てる**（webview が GraphQL を直接叩く。(a) の center にも (b) の center にも同じ形で繋がる。Rust の中継層が無くなる） |
 | 添付（`attachment.rs`: `session_attach_bytes` / `session_attach_paths` / `session_attach_pick`） | **分ける**。消す: center への中継（`upload` = reqwest で `POST /sessions/<n>/attachments`、`run` の接続先の選択 `select_target`・`load_settings`、保存した path を pty に打つ `post(.. "input" ..)`・`input_text`・`b64`）。webview が GraphQL（`attachToSession`・`terminalInput`）か、残す HTTP route（#7）で行う。残す: desktop の OS 側の入口 = `session_attach_pick`（file dialog、`rfd`）、`session_attach_paths`（drop された path の受け取り）、`load`（path から bytes を読む）、画像の型の見分け `sniff_type`・大きさの検査 `check_size`（`MAX_BYTES` = 20 MB。center も同じ検査をする）。この 2 つの command は「保存まで行う」から「読んだ bytes と名前を webview に返す」形に変わる（形は未決 #7）。`session_attach_bytes` は clipboard の bytes を webview が既に持つので、command ごと不要 |
-| 接続先の指定 | **center の IP の指定だけ**（固定。自動の発見は使わない。決定 4）。port は (b) の port を変えた時だけ入れる（既定 7910。決定 5）。初めてつないだ時に center が渡す鍵を覚える（決定 7）。(a) を使う時の接続先は desktop が自分で決める（利用者に見せない。決定 3。鍵の扱いは #31）。今の `remote`（URL + token）の入力と、client が center を MCP の server として指定する形は無くなる（決定 6） |
+| 接続先の指定 | **(b) につなぐ時に入れるのは center の IP だけ**（固定。自動の発見は使わない。決定 4）。(a) を選んだ時は IP を入れない（#34）。port は (b) の port を変えた時だけ入れる（既定 7910。決定 5）。初めてつないだ時に center が渡す鍵を覚える（決定 7）。(a) を使う時の接続先は desktop が自分で決める（利用者に見せない。決定 3。鍵の扱いは #31）。今の `remote`（URL + token）の入力と、client が center を MCP の server として指定する形は無くなる（決定 6） |
 | 接続設定の共有（`center_snippet.rs`: `center_connect_snippets` / `center_parse_connect` / `center_local_ips`。`center.rs:744` の `center_ip_status` も同じ用途） | **無くなる**（token 入りの URL を別 host の desktop に貼る形は、鍵の方式に置き換わる。2.4。`center_local_ips` などの OS 側の補助を残すかは実装の task） |
 | updater・relaunch（app 自身の更新） | **残す**。bantou-center.app の更新は別の問題（未決 #3） |
 | 画面の native 機能: folder 選択（`pick_directory`）・file drop（`onFilesDropped`）・fs watch（`watchDir`）・window / `bantou <path>` の CLI・menu・OS の sleep 復帰 / network 変化 event・log file | **残す**（desktop 固有。`~/tauri` の `Platform` に残る。web は browser の API で代える） |
@@ -283,7 +291,7 @@ center（GraphQL を持つ backend の server。program は 1 つ、起動の形
 | web の BFF（`center-client` + Nitro） | 未決 #4。BFF を残す（鍵をブラウザに出さない・Cloudflare Access 前提を維持）案と、薄い proxy にする案、ブラウザが直接叩く案 |
 
 - 共有: desktop と web は同じ `packages/ui` を使い、GraphQL client も 1 つにする（`packages/ui/api/*.ts` の中身が GraphQL の document になる）。desktop と web の差は `Platform` だけ（`centerSidecar` は今のまま: desktop は (a) の center を起動できる = true、web は false）。
-- 設定画面（`SettingsDialog.vue`）: 「自分の center を使う（(a)）」か「(b) の server に IP でつなぐ」かを選ぶ。選ぶ入力が何かは #34、(a) の workspace・claudePath を出すかは #33。(a) の起動と接続の設定（IP・port・bind・token）は見せない（決定 3）。「接続先」は IP の指定だけ（port は (b) の port を変えた時だけ）。server 側に保存する設定（7 項目を含む）は、この画面から全部変えられる（決定 6）。IP の範囲（決定 7）は server 側のメニューバーで指定する。desktop は launchd に触らないので、(b) の登録・解除の操作は設定画面に持たない（入口は #18）。(a) と (b) が同じ Mac で動く時の画面の出し方は #32。
+- 設定画面（`SettingsDialog.vue`）: 「自分の center を使う（(a)）」か「(b) の server に IP でつなぐ」かを選ぶ。今どおり「center を起動」を選ぶと (a)、(b) につなぐ時だけ IP を入れる（#34）。workspace・claudePath は (a)・(b) とも出して変えられる（#33）。(a) の起動と接続の設定（IP・port・bind・鍵）は見せない（決定 3）。「接続先」は IP の指定だけ（port は (b) の port を変えた時だけ）。port・IP の範囲は server 側のメニューバーのみ（#36）。server 側に保存する設定（7 項目を含む）は、この画面から全部変えられる（決定 6）。IP の範囲（決定 7）は server 側のメニューバーで指定する。desktop は launchd に触らないので、(b) の登録・解除の操作は設定画面に持たない（入口は #18）。(a) と (b) が同じ Mac で動く時の画面の出し方は #32。
 
 ### 2.6 session の claude と MCP は center に残るか
 
@@ -315,7 +323,7 @@ center（GraphQL を持つ backend の server。program は 1 つ、起動の形
 
 #### 2.7.3 desktop から見つける（IP のみ）
 
-- desktop の設定で、center の IP を指定する（client で入れる設定はこれだけ。決定 6）。(b) の port は既定 7910 で、変えた時だけ入れる（決定 5）。初回の接続で center が鍵を渡し、desktop が覚える（2.4）。自動の発見（mDNS・broadcast・同じ Mac の process 探索）は使わない。
+- desktop の設定で、center の IP を指定する（(b) につなぐ時に入れる接続の設定はこれだけ。決定 6。(a) を選んだ時は入れない。#34）。(b) の port は既定 7910 で、変えた時だけ入れる（決定 5）。初回の接続で center が鍵を渡し、desktop が覚える（2.4）。自動の発見（mDNS・broadcast・同じ Mac の process 探索）は使わない。
 - 同じ Mac の (b) の center に繋ぐ時も、IP（`127.0.0.1` など）を指定する。desktop が config file を読んで認証情報を拾う、といった発見の代わりになる自動化は、利用者が決めていないので入れない。
 - center は全アドレスで待ち受ける（`docs/architecture.md`）ので、同じ LAN の別 host の desktop も、同じ指定で繋げる。鍵を取れるのは、設定した IP の範囲に入る接続元だけ（決定 7、2.4）。
 
@@ -355,13 +363,13 @@ app が無いので bantou-center.app は使えない。配り方は未決 #21�
 
 決める事:
 
-1. (b) の port は設定で変えられる。既定は 7910（決定 8）。基本は固定で、変える時だけ設定する。設定はメニューバーから開く（決定 3）。client の画面からも変えるかは未決 #36。
+1. (b) の port は設定で変えられる。既定は 7910（決定 8）。基本は固定で、変える時だけ設定する。設定はメニューバーから開く（決定 3）。port は server 側のメニューバーのみで変え、client の画面からは変えない（#36）。
 2. center は設定した port でしか起動しない。別の port に逃げない。
-3. (a) の IP と port は desktop が自分で決める。利用者に見せない（決定 3）。決め方の細部は実装の task が決める。決めた port を center に渡す道は未決 #35。
+3. (a) の IP と port は desktop が自分で決める。利用者に見せない（決定 3）。決め方の細部は実装の task が決める。決めた IP と port は、起動の時に desktop から center に渡す（今の sidecar の起動と同じ経路。引数か config かは実装の task が決める。#35）。
 4. client は IP を入れる。(b) の port を変えた時だけ port も入れる（既定のままなら入れない）。
 5. 同じ host・同じ port の center は 1 つだけ。2 つ目の center は port が使用中で起動に失敗する。(a) と (b) が同じ Mac で同時に動く時の扱いは未決 #32。
 6. port が他の program に使われていて起動できない時は、理由が分かる error を出す。
-7. test・開発で port を変えるのは、起動の関数の引数だけ。本番の起動は設定から読む（決定 8。#24）。
+7. test・開発で port を変えるのは、起動の関数の引数だけ。(b) の本番の起動は設定から読む（決定 8。#24）。
 8. 認証は鍵の方式（2.4。(a) は #31）。
 
 #### 2.8.1 今の port の扱い（変わる所）
@@ -370,7 +378,7 @@ app が無いので bantou-center.app は使えない。配り方は未決 #21�
 - 【事実】desktop の `CenterSettings.port` も既定 7910（`center.rs` の `DEFAULT_PORT`）で、設定画面から変えられる（`packages/ui/components/SettingsDialog.vue` の `centerSetSettings`）。port の変更は center の再起動を要する（`center.rs` の `needs_restart`）。
 - 【事実】bind の失敗は、center の log から見分けて `CenterStatus.bindFailed` に出している（`center.rs:332` の `looks_like_bind_failure`、`packages/ui/types/index.ts` の `CenterStatus`）。
 - 【事実】test は `--port 0` を使う（`packages/center/test/args.test.ts`・`http.test.ts`）。`packages/center/scripts/e2e.ts` は `node:net` を使う（空き port を取る用途と読める【推測】）。
-- 変わる事: (b) の port の設定項目は残る（決定 5）。保存先は center の host の設定（決定 6）。center は本番の起動で、CLI の引数と環境変数では port を受けず、設定から読む（決定 8）。client の入力欄は、port を変えた時だけ使う。(a) の port は desktop が決め、今の設定画面の port の項目は出さない（決定 3）。test・開発は、起動の関数の引数で port を渡す（決定 8）。
+- 変わる事: (b) の port の設定項目は残る（決定 5）。保存先は center の host の設定（決定 6）。(b)（bantou-center・launchd）の本番の起動では、center は CLI の引数と環境変数では port を受けず、設定から読む（決定 8）。(a) は desktop が決めた port を起動の時に center に渡す（#35）。client の入力欄は、port を変えた時だけ使う。(a) の port は desktop が決め、今の設定画面の port の項目は出さない（決定 3）。test・開発は、起動の関数の引数で port を渡す（決定 8）。
 
 #### 2.8.2 center の起動の順（2 つ目の center が何にも触らない事）
 
@@ -429,10 +437,11 @@ desktop は (a) を起動する前に、自分が決めた IP・port の状態�
 | `session_sleep` / `session_wake` | `sleepSession` / `wakeSession` | mutation `sleepSession` / `wakeSession` |
 | `session_path_hints` | `sessionPathHints`（`canPick` は client の `Platform` が決める） | query `centerInfo`（workspace）+ client 側の `canPick` |
 | `session_get_settings` / `session_update_settings` | `getSessionSettings` / `updateSessionSettings` | query `sessionSettings` / mutation `updateSessionSettings` |
-| `center_get_settings` / `center_set_settings`（center.rs） | `centerGetSettings` / `centerSetSettings`（`packages/ui/api/center.ts`） | 残す。「自分の center を使う（(a)）」か「(b) の server に IP でつなぐ」かの選択の入力（今の `enabled`）と IP の関係は未決 #34。(a) の IP・port・bind・token は desktop が決め、画面に出さない（決定 3）。workspace・claudePath の扱いは未決 #33。接続先は IP の指定（port は変えた時だけ）になる（`remote` の url の置き換え。2.5）。server 側に保存する設定は、client の画面から全部変えられる（決定 6、#9） |
+| `center_get_settings` / `center_set_settings`（center.rs） | `centerGetSettings` / `centerSetSettings`（`packages/ui/api/center.ts`） | 残す。「自分の center を使う（(a)）」か「(b) の server に IP でつなぐ」かの選択（今の `enabled`）は、今どおり「center を起動」を選ぶと (a)。(b) につなぐ時だけ IP を入れ、(a) を選んだ時は IP を入れない（#34）。(a) の IP・port・bind・鍵は desktop が決め、画面に出さない。見せないのは起動と接続の設定だけで、workspace・claudePath は session の作業に関わる設定なので、(a)・(b) とも client の画面で変えられ、保存先は center の host（決定 6。#33）。接続先は IP の指定（port は変えた時だけ）になる（`remote` の url の置き換え。2.5）。server 側に保存する設定は、client の画面から全部変えられる（決定 6、#9） |
 | `center_status`（center.rs） | `centerStatus` | (a) の子 process の状態として残す。(b) の center の状態は GraphQL の `centerStatus`（2.3）で見る |
 | `center_regenerate_token` | `centerRegenerateToken` | 鍵の方式に置き換わる（2.4）。鍵の失効と再発行は未決 #26 |
-| `center_local_ips` / `center_connect_snippets` / `center_parse_connect`（center_snippet.rs）、`center_ip_status`（center.rs:744） | 同名 | 無くなる（token 入りの URL を貼る形は、鍵の方式に置き換わる。2.4。`center_local_ips` などの OS 側の補助を残すかは実装の task） |
+| `center_ip_status`（center.rs:744） | 同名 | 無くなる（下の center_snippet.rs の 3 つと同じ用途。token 入りの URL を貼る形が鍵の方式に置き換わる。2.4） |
+| `center_local_ips` / `center_connect_snippets` / `center_parse_connect`（center_snippet.rs） | 同名 | 無くなる（token 入りの URL を貼る形は、鍵の方式に置き換わる。2.4。`center_local_ips` などの OS 側の補助を残すかは実装の task） |
 | `center_call`（center_mcp.rs） | `centerCall` / `centerTool` / `centerToolStrict`（12 個の tool、3.2） | 3.2 の各 query / mutation に分ける。汎用の `center_call` は無くす |
 | `center_connection`（center_mcp.rs） | `centerConnection` | client のローカルの接続状態（GraphQL の疎通。`CenterConnection`） |
 | `session_output_start` / `session_output_stop`（terminal.rs） | `sessionOutputStart` / `sessionOutputStop`（`packages/ui/api/terminal.ts`） | subscription `terminalOutput` の開始・解除 |
@@ -480,7 +489,7 @@ desktop は (a) を起動する前に、自分が決めた IP・port の状態�
 
 `/mcp`（外向け MCP。未決 #5）、`/mcp/session`（master-cap 向け。残す）、`/events`（SSE。subscription に置き換え）、`/sessions/<n>/output|input|resize`（subscription / mutation に置き換え）、`/sessions/<n>/attachments`（未決 #7）、`/sessions/<n>/status-line|hook`（session 向け。残す）。`packages/center/src/http.ts:15-32`。
 
-Host の検査: `/events` と `/sessions/<n>/output|input|resize|attachments` は Bearer に加えて、Host の検査（`allowedHostsFor`、不一致は 403 `forbidden host`、`http.ts:84-91`・`:423`・`:461`）を持つ。`/mcp` も同じ検査を `enableDnsRebindingProtection` で行う（`:524`）。ただし検査は bind が loopback の時だけ有効で、loopback 以外では `allowedHostsFor` が null を返して検査しない（`http.ts:80-86`、README の http transport の節）。今は (a) も (b) も全アドレスで待ち受けるので、通常の形では検査は無く Bearer だけで守る（変更後の認証は決定 7 の鍵。2.4）。`/graphql` がこの検査を引き継ぐかは未決 #25。`docs/architecture.md:57` の「Host / Origin を絞らず Bearer だけで守る」は全アドレスで待ち受ける形の説明で、loopback bind の時の検査には触れていない（食い違いというより抜け。docs の改訂（段階 G）で直す）。
+Host の検査: `/events` と `/sessions/<n>/output|input|resize|attachments` は Bearer に加えて、Host の検査（`allowedHostsFor`、不一致は 403 `forbidden host`、`http.ts:84-91`・`:423`・`:461`）を持つ。`/mcp` も同じ検査を `enableDnsRebindingProtection` で行う（`:524`）。ただし検査は bind が loopback の時だけ有効で、loopback 以外では `allowedHostsFor` が null を返して検査しない（`http.ts:80-86`、README の http transport の節）。(a) も (b) も全アドレスで待ち受けるので、通常の形では検査は無く、今は Bearer だけで守る（変更後は決定 7 の鍵。2.4）。`/graphql` がこの検査を引き継ぐかは未決 #25。`docs/architecture.md:57` の「Host / Origin を絞らず Bearer だけで守る」は全アドレスで待ち受ける形の説明で、loopback bind の時の検査には触れていない（食い違いというより抜け。docs の改訂（段階 G）で直す）。
 
 ### 3.6 網羅性の確かめ（grep で数えた結果）
 
@@ -709,9 +718,9 @@ code は書かないので、ここは実装の task が足す test と、実機
 - 残る点は #26〜#28。TLS（平文のまま）と待ち受けの範囲（全アドレス）は、利用者が決めていないので今のまま。
 
 **#24 test・開発用の port（決定 8: 案 B）**
-- 決定（master-cap、決定 8）: 案 B。本番の経路（(a)・(b)・launchd の起動）では、center の port は設定でだけ決まる（(a) で desktop が決めた port の渡し方は #35）。CLI の引数と環境変数では受けない。test・開発用の起動の関数の引数（`startHttpServer` の `port` option など）でだけ別の port を使える。
+- 決定（master-cap、決定 8）: 案 B。(b)（bantou-center・launchd）の本番の起動では、center の port は設定でだけ決まる。CLI の引数と環境変数では受けない。(a) は desktop が決めた IP と port を、起動の時に desktop から center に渡す（今の sidecar の起動と同じ経路。引数か config かは実装の task が決める。#35）。test・開発用の起動の関数の引数（`startHttpServer` の `port` option など）でだけ別の port を使える。
 - 理由: `packages/center/test/` と `scripts/e2e.ts` が `--port 0` で動いており、設定の port にすると開発中の center と衝突する。
-- 決定 5（設定で変えられる）との関係: 設定で変えられるのは本番の経路の port の設定だけ。CLI の引数で逃げられる形は取らない（「設定した port でしか起動しない」）。
+- 決定 5（設定で変えられる）との関係: 設定で変えられるのは (b) の本番の経路の port の設定だけ。CLI の引数で逃げられる形は取らない（「設定した port でしか起動しない」）。
 - 旧案 A（`--port` を廃止し、test も同じ port）と旧案 C（`--port` を残す）は採らない。
 
 **#25 `/graphql` の Host の検査**
@@ -759,37 +768,25 @@ code は書かないので、ここは実装の task が足す test と、実機
 - 付随の点（前の #19 の残りと同じ推奨）: bantou-center が port の使用中で失敗した時は、正常終了として終わり、launchd が再起動し続けないようにする（#16）。(a) が止まった後、(b) が自動で戻る仕組みは足さない（次の login か、利用者が bantou-center を起動した時に起動する）。
 - 推奨: A。理由: 状態 dir・`center-id`・peer 名の奪い合いが起きず、決定 3 の「desktop は (a) か (b) のどちらか」に合う。ただし desktop は (b) の port（設定で変えられる）を知らない事があり、その時の確認の仕方は実装の task で確かめる【未確認】。確認をすり抜けた時は、同じ port なら listen の失敗（2.8.2）が守る。
 
-**#33 (a) の workspace・claudePath の扱い**
-- 背景: 決定 3 は、(a) の center の起動と接続の設定（IP・port・鍵を渡す IP の範囲など）を利用者に見せないとする。決定 6 は、client の画面から設定の変更を全部できるとする。今の `CenterSettings` の `workspace`・`claudePath` は、desktop が center を起動する時に渡す設定で（`center.rs` の `write_config`・`sidecar_args`）、どちらの決定に入るか、決定からは読み切れない。
-- 案 A: (a) の起動の設定として見せない。desktop が持つ値を使う（画面の項目は無くなる）。
-- 案 B: center の設定として、client の画面に出し、変えられる（決定 6。保存先は center の host）。見せないのは IP・port・鍵・IP の範囲などの接続の設定だけ。
-- 案 C: 項目ごとに決める（例: workspace は見せ、claudePath は見せない）。
-- 推奨: B。理由: workspace・claudePath は接続の設定ではなく、決定 3 が挙げた例（IP・port・IP の範囲）に入らない。決定 6 の「設定変更を全部」に合う。(a) と (b) で見え方が同じになる（決定 6）。決定 3 の「起動の設定」にこれらを含める読みなら A になる。利用者が決める。
+**#33 (a) の workspace・claudePath の扱い（master-cap の決定。決定 3・6 から導いた物）**
+- 決定: workspace・claudePath は、center の起動と接続の設定（IP・port・bind・鍵・鍵を渡す IP の範囲）ではなく、session の作業に関わる設定。決定 6 のとおり、(a)・(b) とも client の画面で変えられ、保存先は center の host。(a) で見せないのは「起動と接続の設定だけ」。
+- 経緯（採らなかった案）: 案 A（(a) の起動の設定として見せない）、案 C（項目ごとに決める）。決定 3 の「起動の設定」にこれらを含める読みなら A になるが、決定 3 が挙げた例（IP・port・IP の範囲）は接続の設定で、この読みは採らない。
 
-**#34 「(a) を選ぶ」の入力は何か**
-- 背景: 決定 3 は、desktop の app で「center を起動」を選ぶと (a) になるとする。決定 6 は、client で入れる唯一の設定は center の IP とする。今の `enabled`（`center_set_settings` の項目。3.1）と、IP の入力の関係が決まっていない。
-- 案 A: IP が未指定なら (a)（自分の center）、IP が入っていれば (b) につなぐ。選択の入力は IP の有無だけで、`enabled` は無くなる。
-- 案 B: 「center を起動」の選択（今の `enabled`）を別に残す。IP は (b) につなぐ時だけ入れる。「唯一の設定」は、接続先として入れる値が IP だけ、という読み。
-- 案 C: IP に `127.0.0.1` などを入れた時は、(a) を desktop が起動して使う（IP が自分を指す時だけ (a)）。
-- 推奨: B。理由: 決定 3 が「center を起動を選ぶ」と、明示の選択を前提に書いている。IP の有無に意味を持たせる（A）と、IP を消し忘れた時に意図せず (a) が起動する。今の `enabled` と画面をそのまま使える。A は決定 6 の「唯一」を字義どおりに読む案。利用者が決める。
+**#34 「(a) を選ぶ」の入力は何か（master-cap の決定）**
+- 決定: desktop は今どおり「center を起動」を選ぶと (a)（今の `enabled`）。(b) の server につなぐ時だけ IP を入れる。(a) を選んだ時は IP を入れない。決定 6 の「client で入れる唯一の設定は IP」は、「(b) につなぐ時に入れる接続の設定が IP だけ」の意味。
+- 経緯（採らなかった案）: 案 A（IP の有無で (a)/(b) を決める。IP を消し忘れると意図せず (a) が起動する）、案 C（IP が自分を指す時だけ (a)）。決定 3 が「center を起動を選ぶ」と明示の選択を前提にしている。
 
-**#35 (a) で desktop が決めた port を center にどう渡すか**
-- 背景: 今の desktop は `--port` を CLI の引数で渡す（`center.rs` の `sidecar_args`）。2.2・#24（決定 8）は、本番の起動では port を CLI の引数と環境変数で受けず、設定から読むとする。(a) の port は desktop が決める（決定 3）ので、決めた値を center に渡す道が要る。port は listen の前に要る。
-- 案 A: desktop が、center の config file（`--config`。今 `write_config` が起動のたびに書く）に port を書き、center は設定から読む。#24 の形のまま。
-- 案 B: (a) だけは CLI の引数 `--port` を残す。#24 の「CLI の引数で受けない」に (a) の例外ができる。
-- 案 C: 起動後に GraphQL で設定として渡す。ただし port は listen の前に要るので、成り立たない（案から外す根拠として書く）。
-- 推奨: A。理由: #24 の規則（本番は設定から読む）に例外を作らず、config の経路は今も使っている。(b) と (a) で center の port の読み方が同じになる。
+**#35 (a) で desktop が決めた port を center にどう渡すか（master-cap の決定）**
+- 決定: (a) では desktop が決めた IP と port を、起動の時に desktop から center に渡す（今の sidecar の起動と同じ経路。引数か config かは実装の task が決める）。2.2 と #24 の「CLI の引数・環境変数で port を受けない」は (b)（bantou-center・launchd）の起動の話。
+- 経緯: 案 A（config file に書く）、案 B（(a) だけ CLI の引数を残す）のどちらも「今の経路」に含まれる。起動後に GraphQL で渡す案は、port が listen の前に要るので成り立たない。
 - 影響: 2.2 の「起動」の行、#24、2.8.1。
 
-**#36 port も client から変えるか、server 側のメニューバーだけか**
-- 背景: 決定 3 は、(b) の設定（port・鍵を渡す IP の範囲）をメニューバーから開くとする。決定 6 は、client の画面から設定の変更を全部できるとする。決定 7 は、「server 側で指定する設定は（IP の範囲）だけ」とする。port がどの決定に入るか、決定どうしで読みが分かれる。
-- 案 A: port は server 側のメニューバーだけ。client は IP を入れ、port を変えた時だけ port も入れる（決定 5）。
-- 案 B: port も client の画面から変えられる。変えると center は再起動が要り（`needs_restart`）、client は繋ぎ直す。
-- 案 C: A と B の両方（メニューバーでも client でも変えられる）。
-- 推奨: A。理由: 決定 3 が port をメニューバーの設定に挙げている。port の変更は center の再起動と client の繋ぎ直しを伴うので、client から変える（B）と、変えた client 自身の接続が切れる。決定 5 の「固定が基本」に合う。決定 6 を「port も含む全部」と読むなら B になる。利用者が決める。
+**#36 port も client から変えるか、server 側のメニューバーだけか（master-cap の決定）**
+- 決定: (b) の port・IP の範囲は server 側のメニューバーのみ（2.4）。client は IP のみ入れ、port は変えた時だけ入れる（決定 5）。
+- 経緯（採らなかった案）: 案 B（client の画面から port も変える）は、変えた client 自身の接続が切れ（center の再起動が要る）、決定 3 が port をメニューバーの設定に挙げている事とも合わない。案 C は両方で変えられる形で、同じ理由で採らない。
 
 ## 8. 次にやる事（推奨の順）
 
-1. 利用者が決める未決: #26（鍵の失効と再発行）・#27（メニューバーの無い環境）・#28（中継越しの IP）・#31（(a) の時の鍵）・#32（(a) と (b) の同時）・#33〜#36（(a) の workspace・claudePath、「(a) を選ぶ」の入力、(a) の port の渡し方、port を client から変えるか）。#25（`/graphql` の Host の検査）。#2・#3・#14・#15（bantou-center の作り方・登録）、#4（web の BFF）・#7（端末・添付）。#11 は進行中の 2 branch の merge の前に決める。
+1. 利用者が決める未決: #25（`/graphql` の Host の検査）・#26（鍵の失効と再発行）・#27（メニューバーの無い環境）・#28（中継越しの IP）・#31（(a) の時の鍵）・#32（(a) と (b) の同時）。（#33〜#36 は master-cap が決めた。7 節）#2・#3・#14・#15（bantou-center の作り方・登録）、#4（web の BFF）・#7（端末・添付）。#11 は進行中の 2 branch の merge の前に決める。
 2. 段階 A の worker を、query / mutation / subscription に分けて並行で出す（schema の合意、2.3 を先に固める）。段階 A3（鍵の方式）は #26〜#28・#31 の決定の後。
 3. 並行して段階 C の実測（`SMAppService` の登録が ad-hoc 署名の app で通るか、launchd 下で center が `claude` の認証を通すか、窓無し app の Local Network の許可）を行う。結果で #2・#14・#15 が決まる。
