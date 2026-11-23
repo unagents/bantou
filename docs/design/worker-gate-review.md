@@ -11,7 +11,7 @@
 1. server の仕組みの方向。
    > serverをworkerを起動するだけの仕組みに集約し、workerコントロールはcenter側のcapが受け持つ
 
-   remote-cap（server 側の判断の層）は無くす。「center側のcap」は **master-cap**（session bantou の cap）を指す。利用者との会話で、master-cap が worker を直接動かす話として出た事を、master-cap が聞いて確かめた。
+   remote-cap（server 側の判断の層）は無くす。「center側のcap」は center 側の cap。**master-cap を指すと読んでいる（推測）が、利用者への確認が要る**（未決 #7）。本書は、確認が取れるまで master-cap と読んで書く。
 2. 門（ゲート）の持ち方。
    > 直しと再review部分をopnespec−mcpのschemaで担保するような構造にし、serverはopenspec-mcpを機械的に実行させる事で、server側のworker起動をゲートクリアで賄わせる
 3. review の置き方。
@@ -22,20 +22,20 @@
    - 指示した範囲の外を変えている
 
    それ以外は報告に残すだけ（完了を止めない）。
-5. schema 定義の足し方。bantou の guardrail の設定で足し、bantou の schema の MCP server から openspec-mcp に渡る。設計は `docs/design/guardrail-schema-server.md`。openspec-mcp の側の設計は vault のノートで、プロトコルは openspec-mcp の project が決める。
+5. schema 定義の足し方。bantou の guardrail の設定で足し、bantou の schema の MCP server から openspec-mcp に渡る。設計は `docs/design/guardrail-schema-server.md`。openspec-mcp の側の設計の出典は、vault のノート（名前は利用者の言葉のとおり。本書では参照しない）。プロトコルは openspec-mcp の project が決める。
 6. 順番。
    > reviewの仕組みの話は、gardrail機能の実装が終わって、schema定義を、bantou上で保守管理出来るようにしてからの話
 
    実装はその後。設計は並行で進める（この設計書がそれ）。
 
-### master-cap の決定（2026-11-23。レビューの指摘への直しとして）
+### master-cap の指示（2026-11-23。レビューの指摘への直しとして）
 
-利用者の決まり 1〜6 を、master-cap が次のとおり具体にした。本書は以下に揃える。
+利用者の決まり 1〜6 を、master-cap が次のとおり具体にして、本書をそれに揃えた。**これは利用者の決定ではなく、master-cap の指示（設計の置き方の決め）**。
 
-- 次の worker を起こすのは **server**（決まり 2「server側のworker起動をゲートクリアで賄わせる」）。master-cap が持つのは、何を作るかの指示、決定の伝達、止める・続きの指示だけ。
-- 未決 #1 は A、#2 は A、#3 は A、#4 は B、#6 は A で**決定済み**（8 節）。#5（review の往復の上限）は、master-cap が利用者に聞いている最中なので未決のまま。
-- server が openspec-mcp を実行する契機は、openspec-mcp のプロトコルが決まるまで決めない（【openspec-mcp 待ち】）。
-- 直しと再 review の往復は、worker の中で回る。server は門が開いたかを見るだけで、worker に直しを戻さない。
+- 次の worker を起こすのは **server**（決まり 2「server側のworker起動をゲートクリアで賄わせる」）。
+- 8 節の #1・#2・#4・#6 は master-cap が決めた（推奨どおり）。#3 は「依存の置き場」の問い（案 A を master-cap が選んだ）。#5（往復の上限）は未決。#7（決まり 1 の「center側のcap」の確認）は利用者への確認が要る。
+- server が openspec-mcp を実行する契機・門が開かなかった時の扱いは、openspec-mcp のプロトコルが決める（【openspec-mcp 待ち】）。
+- 直しと再 review の往復は、決まり 3 のとおり worker が schema の instruction に従って行う。server が行うのは、門の確認（openspec-mcp の実行）と、開いた時の次の worker の起動だけ。
 
 ### この設計書の範囲
 
@@ -72,7 +72,7 @@
 5. **依存（`depends_on`）は server が強制していない**: `depends_on` は protocol の `TaskWorkerItem`（`packages/protocol/src/server.ts`）の項目で、`buildTaskPrompt` が `depends_on=<id,...>` を cap の指示文に文字で書くだけ（`prompts.ts` の `[分担]`。「依存がある worker は、その完了を確認してから起動する」）。完了を確認して次を起こすのは cap の判断。
 6. review: `CAP_GUIDE` の `[分担]` が「最小の分担は 2 体。実装 worker と review worker」「review の指摘は、実装 worker に同じ worker_id で worker_start して戻す。直るまで回す。実装と review の往復は最大 3 回」と cap に指示する（`cap-orchestration.md`）。review worker も server 側の worker。
 7. 報告: worker は `report`（`kind`: progress / ask / approve / done、`text`）を呼ぶ（`mcp.ts`）。`createReportHub` が受けて、(a) cap を `--resume` で起こし（prompt は `buildReportPrompt` = `worker <id> から <kind>: <text>`）、(b) center に `worker_report` 通知を送る。worker が report せずに終わった時は `createWorkerExitWatcher` が cap を起こし直す。
-8. 完了: cap の最終返答を `extractTaskResult` / `buildTaskResult`（`prompts.ts`）が `task_result`（worker ごとの branch / commit / tests、`review` の `verdict` と `items[].severity`（high / medium / low）、`remaining`）にして center に返す。
+8. 完了: cap の最終返答を `extractTaskResult` / `buildTaskResult`（`prompts.ts`）が `task_result`（worker ごとの branch / commit / tests、`review` の `verdict` と `items[].severity`（`ReviewSeverity` = high / medium / low。`packages/protocol/src/server.ts` の `review` 配下）、`remaining`）にして center に返す。
 9. center 側の返答: ask / approve には `worker_reply`（`tools.ts` の `worker_reply`、処理は `tools.ts` の `workerReplyHandler`）。protocol の `worker_reply`（server）が同じ `worker_id` で worker を起動し直して text を渡す。
 
 ### 1.3 center が持つ物（`packages/center/src/`）
@@ -145,7 +145,7 @@
 
 ### 3.2 center の cap（master-cap）が直接持つ worker の操作
 
-決まり 1 の「workerコントロールはcenter側のcapが受け持つ」の「center側のcap」は master-cap（0 節）。master-cap が持つのは次の 3 つだけ: **何を作るかの指示、決定の伝達、止める・続きの指示**。今 remote-cap が持つ操作のうち、この 3 つに当たる物を、master-cap の tool（`/mcp/session`）が server の worker に直接行う形にする。**次の worker を起こす事は master-cap の仕事にしない**（3.3、server が門で行う）。
+決まり 1 の「workerコントロールはcenter側のcapが受け持つ」の「center側のcap」は master-cap と読む（推測。0 節・未決 #7）。master-cap が持つのは次の 3 つだけ: **何を作るかの指示、決定の伝達、止める・続きの指示**。今 remote-cap が持つ操作のうち、この 3 つに当たる物を、master-cap の tool（`/mcp/session`）が server の worker に直接行う形にする。**次の worker を起こす事は master-cap の仕事にしない**（3.3、server が門で行う）。
 
 | 操作 | 今 | 後 |
 |---|---|---|
@@ -167,14 +167,14 @@
 1. master-cap（center）が、worker を起動する。起動した worker は openspec のインストラクションに従って作業する（決まり 3）。
 2. server が openspec-mcp を実行する。**実行する契機（worker の報告・終了・一定間隔など、何を引き金にするか）は決めない**。openspec-mcp のプロトコルが決まってから決める【openspec-mcp 待ち】。何を渡して何を受けるか（呼び出しの形式・返り値）も openspec-mcp が決める。
 3. openspec-mcp の判断（schema の tasks の終了条件が満たされたか＝ review 指摘 0 件か）で、「門が開いた / 開いていない」が決まる。判断するのは schema と openspec-mcp。**server は門の条件を解釈しない・判断しない**（機械的に実行して結果に従うだけ）。
-4. 門が開いたら、server は次の worker を起こす。開いていなければ、server は何もしない（**server は worker に直しを戻さない**）。直しと再 review の往復は、worker の中で回る（決まり 3: worker が openspec のインストラクションに従い、tasks を終了にする前に reviewer のサブエージェントを起動する）。往復を schema が担保する（決まり 2）とは、終了条件が満たされるまで tasks が完了にならない事を指す。server は門が開いたかを見るだけ。
-5. 「次の worker」は、**依存を schema の tasks の門で表す**（決定済みの #3 A）。今の `depends_on`（1.2 の 5。文字の指示）がこの門に置き換わる。master-cap は依存を渡さない。**openspec-mcp の schema が依存を表せるかは、openspec-mcp のプロトコル待ち**（【openspec-mcp 待ち】）。表せない事が分かったら、この決定を見直す（master-cap が決める）。
+4. 門が開いたら、server は次の worker を起こす（決まり 2）。門が開いていない時に server が何をするか（待つ・再実行するなど）は、openspec-mcp のプロトコルが決める【openspec-mcp 待ち】。直しと再 review の往復は、**worker 自身が**行う（決まり 3: worker が schema の instruction に従い、tasks を終了ステータスにする前に reviewer のサブエージェントを起動し、指摘 0 件になるまで直す）。server が行うのは、門の確認（openspec-mcp の実行）と、開いた時の次の worker の起動だけ。
+5. 「次の worker」が何か（依存を誰がどこに持つか）は、未決 #3 の問い。この流れ（server が門の結果で次を起こす）は、#3 のどの案でも変わらない。今の `depends_on`（1.2 の 5。文字の指示）は、server が強制していない。
 
 ## 4. 今の機能との対応表
 
 | 今の機能（実在） | 置き場 | 変えた後 |
 |---|---|---|
-| `remote_send`（別名 `remote_create`） | center `tools.ts`、`remotes.ts` の `send` | master-cap が worker を起動する tool に置き換わる（remote-cap へ task を送る形は無くなる）。`goal` / `deliverables` / `verify` / `constraints` は master-cap が worker への指示に書く（決定済みの #2 A）。`workers.items` の `depends_on` は門に置き換わる（#3 A） |
+| `remote_send`（別名 `remote_create`） | center `tools.ts`、`remotes.ts` の `send` | master-cap が worker を起動する tool に置き換わる（remote-cap へ task を送る形は無くなる）。`goal` / `deliverables` / `verify` / `constraints` は master-cap が worker への指示に書く（決定済みの #2 A）。`workers.items` の `depends_on` は門に置き換わる（依存の置き場は未決 #3） |
 | `remote_list` | center `tools.ts` | cap の一覧でなく、worker の一覧・状態を返す物に置き換わる（cap の項目 `cap_state` / `cap_last_error` / `conversation` は無くなる）。`server_board`・`reachability`・`server_version_state` は残る |
 | `task_status` | center `tools.ts`（`buildTaskStatus`） | task の単位を残す（決定済みの #2 A）ので、worker・門の状態の 1 行表示に置き換わる |
 | `remote_wait` | center `tools.ts` | 「cap が done / failed」を待つ物でなくなる。待つ対象（worker の完了か、門が開く事か）に付け替える（待ちの道具の形は実装の task） |
@@ -185,7 +185,7 @@
 | `session_*` / `center_settings_*` / `rc_*` | center `tools.ts` | 変えない（guardrail の設定は `docs/design/guardrail-schema-server.md` が `center_settings_update` に載せる） |
 | `worker_start` / `worker_status` / `worker_stop` / `peer_status`（cap 向け MCP） | server `mcp.ts`（`registerWorkerTools`） | cap 向けの口としては無くなる。同じ機能は 3.2 のとおり center の master-cap が持つ（口は決定済みの #1 A: protocol にメッセージを足す） |
 | `report`（worker 向け MCP） | server `mcp.ts` | 残る。worker が進捗・質問・承認依頼・完了を送る口。送る先は cap の再開でなく center への通知 |
-| task_result の `review.items[].severity`（high / medium / low） | `packages/protocol/src/server.ts`、`prompts.ts` の `buildTaskResult` | 決まり 4 により、完了の判定には使わない（重さでなく 3 つの基準で数える）。形式は旧メッセージとして当面残す（決定済みの #4 B） |
+| task_result の `review.items[].severity`（`review` 配下の `ReviewSeverity` = high / medium / low） | `packages/protocol/src/server.ts`、`prompts.ts` の `buildTaskResult` | 決まり 4 により、完了の判定には使わない（重さでなく 3 つの基準で数える）。形式は旧メッセージとして当面残す（決定済みの #4 B） |
 | `kick_cap` / `cap_result` | protocol / center `remotes.ts` | cap が無いので不要。旧メッセージは当面残し、受けても cap を起こさず `error` を返す（決定済みの #4 B） |
 
 ## 5. review を入れた schema 定義の例
@@ -227,8 +227,17 @@ tasks の instruction:
 
 ### 7.1 順番（決まり 6）
 
-1. **前提**: guardrail 機能の実装（`docs/design/guardrail-schema-server.md` の S1〜S5）が終わり、schema 定義を bantou 上で保守管理できる。
-2. この設計の実装は、その後に始める。**設計（この書面と openspec-mcp 側）は今から並行で進める**。
+決まり 6 の順序を表にする。
+
+| 段階 | 内容 | 状態・前提 |
+|---|---|---|
+| 0 | 設計（この書面、guardrail-schema-server、openspec-mcp 側） | **今。並行で進める** |
+| 1 | guardrail 機能の実装（`docs/design/guardrail-schema-server.md` の S1〜S5） | 段階 2 の前提。S1（設定の項目）・S3（画面）・S5（docs）は openspec-mcp のプロトコルに依らない。**S2（schema の MCP server）・S4（openspec-mcp につなぐ）は openspec-mcp のプロトコル待ち** |
+| 2 | schema 定義を bantou 上で保守管理できる（guardrail の設定に schema 定義を足す・見る・直す・消すが画面から出来る） | 段階 1 の完了。**S2・S4 が openspec-mcp のプロトコル待ちなので、段階 2 の完了もプロトコル待ちに連なる** |
+| 3 | review の仕組みの実装（7.2 の W1〜W5） | 段階 2 の後（決まり 6）。W3 も openspec-mcp のプロトコル待ち |
+
+- 段階 1 の中で、プロトコルに依らない S1・S3・S5 は先に進められる。S2・S4 はプロトコルが出てから。段階 3 の W2（center 側）は、プロトコルに依らないが、決まり 6 により段階 2 の後に始める。
+- openspec-mcp のプロトコルが出る時期は、openspec-mcp の project が決める。この設計書は決めない。
 
 ### 7.2 実装の単位（前提 7.1 の後）
 
@@ -236,16 +245,26 @@ tasks の instruction:
 |---|---|---|---|
 | W1 | review を入れた schema 定義を guardrail の設定に足す（5 節の例を openspec-mcp のプロトコルの形に直して）。reviewer の手順を置く（6 節） | guardrail の実装完了、**openspec-mcp のプロトコル** | W2・W3 と別 file |
 | W2 | center の master-cap の worker 操作の tool を足す（3.2。protocol にメッセージを足す）。`remote_list` / `task_status` / `remote_wait` の置き換え（4 節）。`master-cap.md` の改訂 | 決定済みの #1 A・#2 A | W3 と別 package（center と server） |
-| W3 | server に openspec-mcp を機械的に実行する層を足し、門が開いたら次の worker を起こす（3.3）。`workers.ts` / `reservations.ts` / `reports.ts` の持ち主の鍵の付け替えを含む（3.1） | **openspec-mcp のプロトコル**（契機・門の読み方・依存を表せるか）。決定済みの #3 A | W2 と別 package |
+| W3 | server に openspec-mcp を機械的に実行する層を足し、門が開いたら次の worker を起こす（3.3）。`workers.ts` / `reservations.ts` / `reports.ts` の持ち主の鍵の付け替えを含む（3.1） | **openspec-mcp のプロトコル**（契機・門の読み方・依存を表せるか）。未決 #3（依存の置き場） | W2 と別 package |
 | W4 | server の remote-cap の層を捨てる（3.1 の捨てる物）。`kick_cap` / `stop_cap` / `task` の protocol の扱い（決定済みの #4 B: 旧メッセージは残して error を返し、後の版で消す） | W2・W3 が動いた後 | 最後（W2・W3 の後） |
 | W5 | docs の改訂（`docs/architecture.md` の server の実行モデル・`cap-orchestration.md` の廃止・`protocol.md`） | W1〜W4 | 最後 |
 
 - W2 と W3 は、片方（center）と もう片方（server）の file が別で並行できる。W4 は両方が動いて、旧経路（cap 経由）と新経路を並走で確かめた後に行う（旧経路を先に捨てない）。
 
-### 7.3 test の観点
+### 7.3 旧経路と新経路の切替・既存の cap と worker の扱い（段取り）
+
+| 項目 | 内容 | 案が要るか |
+|---|---|---|
+| 切替の判定 | 旧経路（cap 経由の `task`）と新経路（center が直接 worker を起動）のどちらで動くかを、何で決めるか | 案が要る（#4 に含める） |
+| 動いている cap・worker | server の更新は、動いている cap・worker が終わるのを待つ（`docs/architecture.md` 13）。旧経路の task が終わるまで旧経路を残す（#4 B） | 決定済みの #4 B の範囲 |
+| `<workspace>/caps/<cap-id>/` の既存 dir | cap の会話・`state.json`・`logs/` が残っている。消すか残すか。`worker_status` 等が `requireCap` で cap の dir を要求する（3.1）ので、cap の dir を消す前に worker の持ち主の鍵を付け替える必要がある | 案が要る（#4 に含める） |
+| `logs/owner.json`（worker の持ち主。`{ cap_id, task_id? }`） | 旧 worker の `owner.json` は `cap_id` を持つ。新しい持ち主の定義（task か worker か）に変える時、旧形式を読み続けるか、移すか | 案が要る（#4 に含める） |
+
+### 7.4 test の観点
 
 - 起動の機械化: worker の起動・resume・停止・孤児回収が、cap 無しで center の指示だけで動く（`workers.ts` / `reservations.ts` の既存 test を cap 無しの経路に付け替える）。
 - 門: 門が開いていない間は次の worker が起きない／開いたら 1 回だけ起きる（二重に起きない）。server が門の条件を解釈していない事（openspec-mcp の返りだけに従う事）。openspec-mcp が落ちている・遅い時に、次の worker を起こさず止まる事（起こして先へ進まない）。
+- 「足した test が変異で落ちない」を検出する手段は、reviewer の手順（6 節。schema の instruction）で決める。**設計書では決めない**。この検出の test は、reviewer の手順の側（schema 定義の例に対する確認）に置き、bantou の code の test（`packages/server/test/` など）には、手順を解釈する test を置かない（bantou は schema の中身を解釈しない。guardrail-schema-server の 3.3）。
 - 数え方（決まり 4）: 3 つの基準に当たる指摘だけが数えられ、それ以外は数えずに報告に残る。重さ（high / medium / low）は終了条件に影響しない。「足した test が変異で落ちない」が検出される。「指示した範囲の外」の変更が検出される。
 - 終了条件: 指摘が 1 件でもあれば tasks が完了にならない／0 件で完了になる。直しと再 review が往復する。
 - 移行: 旧経路（cap 経由）の task がある間に新経路を入れても、動いている task が壊れない。protocol の版が合わない server の扱い（`docs/architecture.md` の 13「版が合わない server には `hello` / `update_server` 以外を送らない」）。
@@ -254,11 +273,11 @@ tasks の instruction:
 
 ## 8. 未決（番号つき。各案と推奨）
 
-決まった事 1〜6 から出てくる物だけを載せる。#1〜#4・#6 は master-cap が決定済み（推奨どおり。#3 は A）。未決として残るのは #5 だけ。
+決まった事 1〜6 から出てくる物だけを載せる。#1・#2・#4・#6 は master-cap が決めた（推奨どおり。利用者の決定ではない）。#3・#5・#7 は未決。
 
 **決定済み #1 center の master-cap が server の worker を操作する口（決まり 1）**
 - 案 A: center ↔ server の protocol（今の `resume_worker` / `worker_reply` / `status` と同じ経路）に、worker の起動・状態・停止のメッセージを足す。master-cap の tool は center の `/mcp/session` に足す。`worker_resume` はこの起動の tool に寄せる。
-- 案 B: master-cap が server の `/mcp`（今の cap 向けの `worker_start` 等）を直接叩く。
+- 案 B: master-cap が server の `/mcp`（今の cap 向けの `worker_start` 等）を直接叩く。欠点: 今の `/mcp` は header `x-bantou-cap-id`（`mcp.ts` の `CAP_ID_HEADER`）で呼び出し元を識別し、cap にだけ `worker_*` を載せる（x-bantou-cap-id があり x-bantou-worker-id が無い接続）。cap が無くなると、この識別が成り立たない。
 - **決定済み（master-cap）: A**。推奨: A。理由: center → server の既存の経路（`server-link.ts`、messenger の protocol `bantou`）で足り、center が server の発見・版・到達性を既に持つ（1.3）。B は server の MCP listener が既定で `127.0.0.1` の bind（`docs/architecture.md` 6）で、別 host の center から叩く経路を足す事になる。
 
 **決定済み #2 「task」の単位を残すか（決まり 1・2）**
@@ -267,30 +286,35 @@ tasks の instruction:
 - 案 B: 残さない。worker 単位だけで追う。
 - **決定済み（master-cap）: A**。推奨: A。理由: `worker_report` の `task_id`・`resession.ts`・`task_status` が既にこの単位で動いており、`server` の `owner.json` にも `taskId` がある。外せば center 側の追跡を作り直す事になる。
 
-**決定済み #3 次の worker の依存（`depends_on`）の置き場（決まり 2）**
-今は protocol の `TaskWorkerItem.depends_on` が文字の指示で cap に渡るだけ（1.2 の 5）。
-- 案 A: 依存を schema の tasks の門として表し、門が開いたら **server** が次の worker を起こす。master-cap は依存を渡さない。
-- 案 B: 依存は master-cap が持ち、master-cap が起こす順を決める。
-- **決定（master-cap）: A**。理由: 次の worker を起こすのは server（決まり 2「server側のworker起動をゲートクリアで賄わせる」）。master-cap が持つのは、何を作るかの指示、決定の伝達、止める・続きの指示だけ。
-- 残る条件: openspec-mcp の schema が依存を表せるかは、openspec-mcp のプロトコル待ち（【openspec-mcp 待ち】）。表せないと分かったら master-cap が見直す。
+**未決 #3 依存（`depends_on`）の置き場（決まり 2）**
+問いは「依存を誰がどこに持つか」だけ。**次の worker を起こす主体は server（決まり 2）で、この問いの対象ではない**。今は protocol の `TaskWorkerItem.depends_on` が文字の指示で cap に渡るだけ（1.2 の 5）。
+- 案 A: 依存を schema の tasks の門として表す。依存が満たされた（門が開いた）結果で、server が次の worker を起こす。
+- 案 B: 依存を center の task の指示（master-cap が書く）に持ち、server に渡す。server は依存が満たされたかを門の結果で確かめ、満たされたら次の worker を起こす。
+- 推奨: A（master-cap が A を選んだ）。理由: 門で賄う（決まり 2）なら依存も同じ所にあるのが自然。
+- 残る条件: openspec-mcp の schema が依存を表せるかは、openspec-mcp のプロトコル待ち（【openspec-mcp 待ち】）。表せなければ B。決まるのはプロトコルが出てから。
 
 **決定済み #4 cap を無くす時の protocol と記録の扱い（決まり 1）**
-protocol の `kick_cap` / `stop_cap` / `task` / `task_result` / `cap_result`、`task_result.review.items[].severity`、center の記録（remote の `pending` / `cap_state` / `server_version_state` 内の cap と worker の件数）、server の `<workspace>/caps/`・`logs/owner.json` の cap の項目が残る。
+protocol の `kick_cap` / `stop_cap` / `task` / `task_result` / `cap_result`、`task_result` の `review.items[].severity`（`ReviewSeverity`）、center の記録（remote の `pending` / `cap_state` / `server_version_state` 内の cap と worker の件数）、server の `<workspace>/caps/`・`logs/owner.json` の cap の項目が残る。特に `OwnerRecord { capId; taskId? }` と `writeOwner` / `readOwner`（`workers.ts`）、`WorkerHub.start` / `status` / `stop` の `capId` 引数は、cap が無くなると持ち主の鍵（task か worker か）の再定義が要る（3.1）。切替の判定・既存の `caps/` dir・旧形式の `owner.json` の扱い（7.3）も、この未決に含める。
 - 案 A: protocol の版を上げ、旧メッセージを廃止する。旧版の server・center との組は `hello` の版の確認（`docs/architecture.md` 13）で弾く。
 - 案 B: 旧メッセージを当面残し（受けても cap を起こさず `error` を返す）、後の版で消す。
 - **決定済み（master-cap）: B**。推奨: B。理由: server は desktop の版に揃う仕組み（`update_server`）で更新されるが、動いている cap・worker が終わるまで入れ替えを待つ（`docs/architecture.md` 13）ので、旧経路の task が残る間は壊さない方が安全。消すのは W4（7.2）。
 
 **未決 #5 review の往復の上限（決まり 3・4）**
 今の `CAP_GUIDE` は「実装と review の往復は最大 3 回。3 回で直らなければ残った問題として書いて止める」（`cap-orchestration.md`）。終了条件が「指摘 0 件」だと、0 件にならなければ完了しない。
-- 案 A: 上限を置く（今と同じ 3 回など）。超えたら「完了にしない」まま止まり、master-cap（と利用者）に上げる。
+- 案 A: 上限を置く（値は未定。例: 今の cap の値の 3 回）。超えたら「完了にしない」まま止まり、master-cap（と利用者）に上げる。
 - 案 B: 上限を置かない。0 件になるまで回す。
-- 推奨: A。理由: 無限に回る事を避ける。値（今は 3 回）は推奨欄の暫定で、決めない。上限を置くか・値・超えた時の扱いは、master-cap が今、利用者に聞いている。**未決のまま**。往復は worker の中で回る（3.3 の 4）ので、上限を置く時の数え手と止め方は、決まってから実装の task で詰める。
+- 推奨: A（上限を置く案）。理由: 無限に回る事を避ける。**値は決めない**（利用者の決定ではない。「3 回」は今の cap の値の例）。上限を置くか・値・超えた時の扱いは、master-cap が利用者に聞いている。**未決のまま**。往復は worker の中で回る（3.3 の 4）ので、上限を置く時の数え手と止め方は、決まってから実装の task で詰める。
 
 **決定済み #6 reviewer の手順の置き場の細部（決まり 3・4・5）**
 6 節のとおり tasks の instruction に置く事は推奨だが、3 つの基準の判定手順（特に (b) の「足した test が変異で落ちない」を何で確かめるか）を、
 - 案 A: 同じ schema 定義の instruction に全部書く。
 - 案 B: reviewer 用の手順を別の定義（guardrail の設定に足す別の項目）に分け、instruction から参照する。
 - **決定済み（master-cap）: A**。推奨: A。理由: guardrail の設定は schema 定義の一覧だけを持つ（guardrail-schema-server の 3.2）ので、別の項目を足すと設計が広がる。変異の実行手段は利用者が決めていないので、手順に手段を固定せず、実装の task で決める。
+
+**未決 #7 決まり 1 の「center側のcap」は何を指すか（前提の確認。決まり 1）**
+- 案 A: master-cap と読む（今の center の session の cap）。
+- 案 B: 別の層を新設する（worker 操作専用の cap など）。
+- 推奨: A。理由: 利用者の言葉は「center側のcap」で、center の cap は今 master-cap だけ（`packages/center/instructions/master-cap.md`）。B は利用者が話に出していない層を足す事になる。ただし利用者への確認が要る（本書は A と読んで書いている）。
 
 ## 9. この設計書を書く時に確かめた事・code と食い違った点
 
