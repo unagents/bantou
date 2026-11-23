@@ -63,29 +63,60 @@ export interface ProjectSettings {
    */
   memory?: McpServerDef;
   /**
-   * guardrail の設定: openspec 向けの schema 定義（名前 → 定義の中身）。center 共通の設定だけで持つ。
-   * 定義の中身は不透明な JSON の値（bantou は解釈しない。そのまま保存して返す）。
+   * guardrail の設定: openspec 向けの schema 定義（名前 → { schema, templates }）。center 共通の設定だけで持つ。
+   * schema は schema.yaml の文字列、templates は templates/ からの相対 path → 中身の文字列。bantou は YAML も中身も解釈しない（そのまま保存して返す）。
    */
-  guardrailSchemas?: Record<string, unknown>;
+  guardrailSchemas?: Record<string, GuardrailSchema>;
   [key: string]: unknown;
 }
 
-/** guardrail の schema の名前の規則（`/schemas/[schema-name]` の path に載るので、英数字と _ - のみ。既存の接続名と同じ規則）。 */
-export const GUARDRAIL_SCHEMA_NAME = /^[A-Za-z0-9_-]+$/;
+/** guardrail の schema 定義 1 件（schema-discovery の `resources/read` の応答の `schema` と `templates` になる）。 */
+export interface GuardrailSchema {
+  /** schema.yaml の文字列。 */
+  schema: string;
+  /** templates/ からの相対 path → 中身の文字列。無ければ空。 */
+  templates: Record<string, string>;
+}
+
+/** guardrail の schema の名前の規則（schema-discovery のプロトコル: `[A-Za-z0-9][A-Za-z0-9._-]*`。大文字小文字を区別する）。 */
+export const GUARDRAIL_SCHEMA_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
-/** 保存済みの設定から guardrail の schema 定義（名前 → 中身）を取り出す。名前の規則に合わない物・null は含めない。壊れていれば空。 */
-export function guardrailSchemasOf(settings: unknown): Record<string, unknown> {
-  const raw = isRecord(settings) ? settings.guardrailSchemas : undefined;
-  if (!isRecord(raw)) return {};
-  // fromEntries は own property として作る（名前が __proto__ でも prototype を書き換えない）
-  return Object.fromEntries(Object.entries(raw).filter(([name, def]) => GUARDRAIL_SCHEMA_NAME.test(name) && def !== null && def !== undefined));
+/** templates の path が templates/ からの相対 path か（空でない・絶対でない・`.` `..` や空の区間を含まない・`\` と NUL を含まない）。 */
+export function isTemplatePath(p: string): boolean {
+  if (p === "" || p.includes("\\") || p.includes("\0")) return false;
+  return p.split("/").every((seg) => seg !== "" && seg !== "." && seg !== "..");
 }
 
-/** 名前を指して定義の中身を 1 件返す（無ければ undefined）。 */
-export function guardrailSchemaOf(settings: unknown, name: string): unknown {
-  return Object.hasOwn(guardrailSchemasOf(settings), name) ? guardrailSchemasOf(settings)[name] : undefined;
+/** 1 件の定義として読める形に整える（schema が文字列・templates が 相対 path → 文字列。templates 省略は空）。読めなければ undefined。 */
+export function guardrailSchemaValue(v: unknown): GuardrailSchema | undefined {
+  if (!isRecord(v) || typeof v.schema !== "string") return undefined;
+  const rawT = v.templates === undefined ? {} : v.templates;
+  if (!isRecord(rawT)) return undefined;
+  const entries = Object.entries(rawT);
+  if (!entries.every(([path, body]) => isTemplatePath(path) && typeof body === "string")) return undefined;
+  // fromEntries は own property として作る（path が __proto__ でも prototype を書き換えない）
+  return { schema: v.schema, templates: Object.fromEntries(entries as [string, string][]) };
+}
+
+/** 保存済みの設定から guardrail の schema 定義（名前 → 中身）を取り出す。名前の規則・形に合わない物は含めない。壊れていれば空。 */
+export function guardrailSchemasOf(settings: unknown): Record<string, GuardrailSchema> {
+  const raw = isRecord(settings) ? settings.guardrailSchemas : undefined;
+  if (!isRecord(raw)) return {};
+  const out: [string, GuardrailSchema][] = [];
+  for (const [name, def] of Object.entries(raw)) {
+    const v = GUARDRAIL_SCHEMA_NAME.test(name) ? guardrailSchemaValue(def) : undefined;
+    if (v) out.push([name, v]);
+  }
+  // fromEntries は own property として作る
+  return Object.fromEntries(out);
+}
+
+/** 名前を指して定義 1 件を返す（無ければ undefined）。 */
+export function guardrailSchemaOf(settings: unknown, name: string): GuardrailSchema | undefined {
+  const all = guardrailSchemasOf(settings);
+  return Object.hasOwn(all, name) ? all[name] : undefined;
 }
 
 /** schema 定義の一覧（名前の昇順）。 */
@@ -249,8 +280,19 @@ export function settingsIssues(patch: object | undefined, scope: "common" | "ses
 export const centerSettingsPatchSchema = projectSettingsPatchSchema
   .omit({ servers: true })
   .extend({
-    // 名前 → 定義の中身（不透明な JSON）。名前ごとに足す・変える。名前の値が null でその schema を消す。項目全体の null で全部消す
-    guardrailSchemas: z.record(z.string().regex(GUARDRAIL_SCHEMA_NAME, "schema の名前は英数字と _ - のみ"), z.unknown()).nullable().optional(),
+    // 名前 → { schema（YAML の文字列）, templates?（相対 path → 中身の文字列）}。名前ごとに足す・変える（定義は丸ごと置き換え）。名前の値が null でその schema を消す。項目全体の null で全部消す
+    guardrailSchemas: z
+      .record(
+        z.string().regex(GUARDRAIL_SCHEMA_NAME, "schema の名前は英数字で始まり、英数字と . _ - のみ"),
+        z
+          .object({
+            schema: z.string(),
+            templates: z.record(z.string().refine(isTemplatePath, { message: "templates の path は templates/ からの相対 path" }), z.string()).optional(),
+          })
+          .nullable(),
+      )
+      .nullable()
+      .optional(),
   })
   .passthrough();
 export type CenterSettingsPatch = z.infer<typeof centerSettingsPatchSchema>;
@@ -290,10 +332,13 @@ export function mergeSettings(current: ProjectSettings | undefined, patch: Proje
     else if (k === "guardrailSchemas") {
       const patchEntries = Object.entries(isRecord(v) ? v : {}).filter(([name]) => GUARDRAIL_SCHEMA_NAME.test(name));
       const removed = new Set(patchEntries.filter(([, def]) => def === null || def === undefined).map(([name]) => name));
-      const merged = Object.fromEntries([
-        ...Object.entries(guardrailSchemasOf(out)).filter(([name]) => !removed.has(name)),
-        ...patchEntries.filter(([name]) => !removed.has(name)),
-      ]);
+      // 定義は丸ごと置き換える。読めない形の値（zod を通らない経路）は入れない
+      const added = patchEntries.flatMap(([name, def]): [string, GuardrailSchema][] => {
+        const g = guardrailSchemaValue(def);
+        return g ? [[name, g]] : [];
+      });
+      const replaced = new Set(added.map(([name]) => name));
+      const merged = Object.fromEntries([...Object.entries(guardrailSchemasOf(out)).filter(([name]) => !removed.has(name) && !replaced.has(name)), ...added]);
       if (Object.keys(merged).length) out.guardrailSchemas = merged;
       else delete out.guardrailSchemas;
     }

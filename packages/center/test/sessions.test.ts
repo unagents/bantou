@@ -1163,14 +1163,16 @@ test("guardrailSchemas: updateCenterSettings で足す・変える・消すが c
   const first = setup();
   await first.mgr.restore();
   await first.mgr.updateCenterSettings({ instructions: "共通", future: 1 });
-  assert.deepEqual(await first.mgr.updateCenterSettings({ guardrailSchemas: { a: "A", b: { k: [1] } } }), { settings: { instructions: "共通", future: 1, guardrailSchemas: { a: "A", b: { k: [1] } } } });
-  await first.mgr.updateCenterSettings({ guardrailSchemas: { a: "A2", c: "C" } });
+  assert.deepEqual(await first.mgr.updateCenterSettings({ guardrailSchemas: { a: { schema: "A" }, b: { schema: "B", templates: { "x/t.md": "T" } } } }), {
+    settings: { instructions: "共通", future: 1, guardrailSchemas: { a: { schema: "A", templates: {} }, b: { schema: "B", templates: { "x/t.md": "T" } } } },
+  });
+  await first.mgr.updateCenterSettings({ guardrailSchemas: { a: { schema: "A2" }, c: { schema: "C" } } });
   await first.mgr.updateCenterSettings({ guardrailSchemas: { b: null } });
   const onDisk = JSON.parse(await readFile(join(dir, "center-settings.json"), "utf8")) as Record<string, unknown>;
-  assert.deepEqual(onDisk, { instructions: "共通", future: 1, guardrailSchemas: { a: "A2", c: "C" } });
+  assert.deepEqual(onDisk, { instructions: "共通", future: 1, guardrailSchemas: { a: { schema: "A2", templates: {} }, c: { schema: "C", templates: {} } } });
   const second = setup();
   await second.mgr.restore();
-  assert.deepEqual(second.mgr.getCenterSettings(), { settings: { instructions: "共通", future: 1, guardrailSchemas: { a: "A2", c: "C" } } });
+  assert.deepEqual(second.mgr.getCenterSettings(), { settings: { instructions: "共通", future: 1, guardrailSchemas: { a: { schema: "A2", templates: {} }, c: { schema: "C", templates: {} } } } });
   await second.mgr.updateCenterSettings({ guardrailSchemas: null });
   assert.deepEqual(JSON.parse(await readFile(join(dir, "center-settings.json"), "utf8")), { instructions: "共通", future: 1 });
 });
@@ -1178,8 +1180,8 @@ test("guardrailSchemas: updateCenterSettings で足す・変える・消すが c
 test("guardrailSchemas: 他の項目の更新は schema 定義を消さない。名前の規則に合わない更新は断る", async () => {
   const { mgr } = setup();
   await mgr.restore();
-  await mgr.updateCenterSettings({ guardrailSchemas: { a: "A" } });
+  await mgr.updateCenterSettings({ guardrailSchemas: { a: { schema: "A" } } });
   await mgr.updateCenterSettings({ instructions: "x" });
-  assert.deepEqual(mgr.getCenterSettings().settings.guardrailSchemas, { a: "A" });
-  assert.equal(centerSettingsPatchSchema.safeParse({ guardrailSchemas: { "a b": "x" } }).success, false);
+  assert.deepEqual(mgr.getCenterSettings().settings.guardrailSchemas, { a: { schema: "A", templates: {} } });
+  assert.equal(centerSettingsPatchSchema.safeParse({ guardrailSchemas: { "a b": { schema: "x" } } }).success, false);
 });
