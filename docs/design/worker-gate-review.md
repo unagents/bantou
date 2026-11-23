@@ -284,7 +284,7 @@ step の終わりの確かめに通らない事は、知らせる場面に入れ
 
 **review の条件（決定 3・10 の 1）との関係**: schema に review の 0 件を書く項目は無い（上の事実）。だから今の openspec で review の条件が成り立つのは、「条件を満たすまで、その作業の checkbox に印を付けない」と instruction に書く形である。worker は instruction に従い、条件を満たすまで印を付けず、印が全部付けば apply の進みが complete になり、server の判定が通る。review の中身を server が見るのではない。
 
-**step の指す物**: scope（M1。順序つきの step の並び）の step は、artifact の id と apply の段を指す。どの artifact・どの段が step になるか、いくつ在るかは schema が決める（決定 21）。
+**step の指す物**: scope（M1。順序つきの step の並び）の step は、artifact の id と apply の段を指す。どの artifact・どの段が step になるか、いくつ在るかは schema が決める（決定 21）。参照の中身は bantou が解釈しない。server は、openspec-mcp が返す状態（artifact の done / ready / blocked、apply の進み）を読むだけ。
 
 **門の形（併存する。選ばない）**: 0 節の 10 の 2 つは、schema の組み方で作れるゲートの形として並んでいる。
 
@@ -421,7 +421,7 @@ apply の instruction（数える file は apply.tracks で選ぶ。例では ta
 
 ## 6. worker が reviewer のサブエージェントを起こす手順の置き場
 
-0 節の 3 は「worker セッションは openspec のインストラクションに従って作業する」ので、手順は**インストラクション（= schema 定義の tasks の instruction）に置く**。0 節の 10 の 1 も「reviewのサブエージェントの実行をタスクとしてインストラクション指示にする」。review の条件が成り立つのは、「条件を満たすまで、その作業の checkbox に印を付けない」と instruction に書く形（3.4）。
+0 節の 3 は「worker セッションは openspec のインストラクションに従って作業する」ので、手順は**インストラクション（= schema 定義の instruction。apply の instruction など）に置く**。0 節の 10 の 1 も「reviewのサブエージェントの実行をタスクとしてインストラクション指示にする」。review の条件が成り立つのは、「条件を満たすまで、その作業の checkbox に印を付けない」と instruction に書く形（3.4）。
 
 | 置き場 | 内容 | メモ |
 |---|---|---|
@@ -438,7 +438,7 @@ apply の instruction（数える file は apply.tracks で選ぶ。例では ta
 
 | 今の機能（実在） | 置き場 | 変えた後 |
 |---|---|---|
-| `remote_send`（別名 `remote_create`） | center `tools.ts`、`remotes.ts` の `send` | `change_register`（4.2）。`goal` / `deliverables` / `verify` / `constraints` / `workers.items` は、change の中身（openspec の change・tasks）と scope に移る（change を誰がどこで作るかは 8 節。書式は openspec 側の話で、この設計書は決めない）。`depends_on` は、step の順（scope の順）に置き換わる |
+| `remote_send`（別名 `remote_create`） | center `tools.ts`、`remotes.ts` の `send` | `change_register`（4.2）。`goal` / `deliverables` / `verify` / `constraints` / `workers.items` は、change の中身（openspec の change。proposal・design・tasks など。例）と scope に移る（change を誰がどこで作るかは 8 節。書式は openspec 側の話で、この設計書は決めない）。`depends_on` は、step の順（scope の順）に置き換わる |
 | `remote_list` / `task_status` / `remote_wait` | center `tools.ts` | `change_list` / `change_status` / `change_wait`（4.2） |
 | `remote_delete`（protocol `stop_cap`） | center `tools.ts` | `change_stop`（protocol `stop_change`） |
 | `worker_reply` | center `tools.ts`、server `daemon.ts` | 残る。宛先は今も worker。持ち主の鍵が cap から change になる（4.1） |
@@ -528,9 +528,9 @@ apply の instruction（数える file は apply.tracks で選ぶ。例では ta
 
 （design・tasks は決定 17 の利用者の言葉の例。どんな step が在り、いくつに切るかは schema が決める。server は tasks などを決め打ちで持たない。決定 21）
 
-1. design と tasks までを step の範囲にして、server に 1 回登録する（`change_register`。proposal は master-cap が書く。proposal を remote の側に書かせてもよい（決定 18）が、change の登録の前に server の worker をどう起こすかは【未確定】で、この設計書は決めない）。
+1. design と tasks までを（決定 17 の利用者の言葉の例。step の中身は schema が決める）step の範囲にして、server に 1 回登録する（`change_register`。proposal は master-cap が書く。proposal を remote の側に書かせてもよい（決定 18）が、change の登録の前に server の worker をどう起こすかは【未確定】で、この設計書は決めない）。
 2. 戻ってきたら（change の状態が `completed`）、中身を確かめる。確かめる人は master-cap が選ぶ（自分・サブエージェントなど）。
-3. 問題なければ、tasks の実行を step の範囲にして、同じ change にもう 1 回登録する（決定 17 の範囲。再登録の細部は案で、3.5）。
+3. 問題なければ、tasks の実行を（決定 17 の利用者の言葉の例）step の範囲にして、同じ change にもう 1 回登録する（決定 17 の範囲。再登録の細部は案で、3.5）。
 
 **知見の永続化**: 仕様・設計の知見は、openspec-mcp の change（proposal・design・tasks）に残り、会話に依らずに読める（決定 16。決定 15 の方向とも合う）。
 
