@@ -15,10 +15,12 @@
         "@agent-hand/bantou-protocol": "^0.2.0",
         "@modelcontextprotocol/sdk": "1.32.2",
         "@unagents/messenger-client": "0.10.0",
+        "ws": "^8.18.0",
         "zod": "^4.0.0",
       },
       "devDependencies": {
         "@types/node": "^22.0.0",
+        "@types/ws": "^8.5.0",
         "tsx": "^4.19.0",
         "typescript": "^5.6.0",
       },
@@ -92,7 +94,7 @@
     },
     "packages/server": {
       "name": "bantou",
-      "version": "0.6.4",
+      "version": "0.6.12",
       "bin": {
         "bantou": "bin/bantou.mjs",
       },
@@ -644,6 +646,8 @@
     "@types/resolve": ["@types/resolve@1.20.2", "", {}, "sha512-60BCwRFOZCQhDncwQdxxeOEEkbc5dIMccYLwbxsS4TUNeVECQ/pBJ0j09mrHOl/JJvpRPGwO9SvE4nR2Nb/a4Q=="],
 
     "@types/web-bluetooth": ["@types/web-bluetooth@0.0.21", "", {}, "sha512-oIQLCGWtcFZy2JW77j9k8nHzAOpqMHLQejDA48XXMWH6tjCQHz5RCFz1bzsmROyL6PUm+LLnUiI4BCn221inxA=="],
+
+    "@types/ws": ["@types/ws@8.18.2", "", { "dependencies": { "@types/node": "*" } }, "sha512-67MQl+fpWKVTT1NYdnmo3U4sc/xPo/zQBncVnI74qmQa0z/b+1g6iYqNmGCPbxO+zz2aklb08a0oHfegiVd0/w=="],
 
     "@unagents/bantou-memory": ["@unagents/bantou-memory@workspace:packages/memory"],
 

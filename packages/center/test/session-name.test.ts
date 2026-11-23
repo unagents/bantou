@@ -1,7 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { capSessionName } from "../src/session-name.js";
-import { sessionCapId } from "../src/center-id.js";
 
 test("capSessionName: <project>-cap。既に -cap で終わるなら足さない", () => {
   assert.equal(capSessionName("bantou"), "bantou-cap");
@@ -11,7 +10,7 @@ test("capSessionName: <project>-cap。既に -cap で終わるなら足さない
   assert.equal(capSessionName("my-cap-x"), "my-cap-x-cap");
 });
 
-test("内部の識別子は変えない: cap_id は project 名のまま（-cap を含まない）", () => {
-  assert.equal(sessionCapId("c-0123456789", "bantou"), "c-0123456789-bantou");
-  assert.notEqual(sessionCapId("c-0123456789", "bantou"), sessionCapId("c-0123456789", capSessionName("bantou")));
+test("parent-id（remote_id）は cap の名前 = capSessionName(session)。同じ cap の名前になる session 名は区別される（remotes の conflictsWith が拒否）", () => {
+  assert.equal(capSessionName("bantou"), "bantou-cap");
+  assert.equal(capSessionName("bantou"), capSessionName("bantou-cap"));
 });

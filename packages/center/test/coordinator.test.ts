@@ -56,11 +56,11 @@ test("coordinator: 旧設定の coordinator は center 共通の設定として�
 
 test("部品 coordinator: 統括の MCP の server を設定に書いた session だけに付く。未設定の時の指示文は今と同じ（部品が増えない）", () => {
   const plain = { session: "a", memory: false };
-  assert.deepEqual(applicableParts(plain).map(partLabel), ["base-spec@1", "master-cap-role@6", "master-cap-availability@2"]);
-  assert.deepEqual(applicableParts({ ...plain, coordinator: false }).map(partLabel), ["base-spec@1", "master-cap-role@6", "master-cap-availability@2"]);
+  assert.deepEqual(applicableParts(plain).map(partLabel), ["base-spec@1", "master-cap-role@7", "master-cap-availability@2"]);
+  assert.deepEqual(applicableParts({ ...plain, coordinator: false }).map(partLabel), ["base-spec@1", "master-cap-role@7", "master-cap-availability@2"]);
   assert.equal(buildSystemInstructions({ ...plain, coordinator: false }), buildSystemInstructions(plain));
   const co = buildSystemInstructions({ ...plain, coordinator: true });
-  assert.deepEqual(applicableParts({ ...plain, coordinator: true }).map(partLabel), ["base-spec@1", "master-cap-role@6", "master-cap-availability@2", "coordinator@4"]);
+  assert.deepEqual(applicableParts({ ...plain, coordinator: true }).map(partLabel), ["base-spec@1", "master-cap-role@7", "master-cap-availability@2", "coordinator@4"]);
   assert.ok(co.startsWith(buildSystemInstructions(plain)));
   // 文面はその時点で出す道具（session_brief と coordinator_session_create）だけ。まだ無い道具の名前は出ない
   assert.match(co, /session_brief/);

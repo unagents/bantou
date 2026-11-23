@@ -24,7 +24,7 @@ const AUTH_WITH = (name: string): Record<string, string> => ({ ...AUTH, "x-banto
 
 const TOOLS = [
   "center_info", "center_settings_get", "center_settings_update", "rc_list", "rc_start", "rc_status", "rc_stop", "remote_list", "remote_wait",
-  "server_list", "server_peers", "server_retire", "server_status", "session_create", "session_delete", "session_list", "session_login", "session_login_code", "session_settings_get", "session_settings_update", "session_sleep", "session_update", "session_wake", "worker_reply", "worker_resume",
+  "session_create", "session_delete", "session_list", "session_login", "session_login_code", "session_settings_get", "session_settings_update", "session_sleep", "session_update", "session_wake", "worker_reply",
 ];
 
 async function boot(
@@ -35,12 +35,12 @@ async function boot(
     list: () => [],
     shutdown: async () => {},
   } as unknown as RemoteControlSupervisor;
-  const link = { list: async () => [] } as unknown as ServerLink;
+  const link = { serverVersionOf: () => undefined } as unknown as ServerLink;
   const sessions = {} as unknown as SessionManager;
   const remotes = {
     scopeOf: () => ({ servers: undefined, out_of_scope: 0 }),
-    list: (f?: { owner?: string }) => [{ remote_id: "c-1", owner: f?.owner ?? "(all)", worker_reports: [], pending: [] }],
-    send: async (i: { owner: string }) => ({ remote_id: "c-9", server: "s", serverName: "n", state: "running", owner: i.owner }),
+    list: (f?: { owner?: string }) => [{ remote_id: "pm-cap", owner: f?.owner ?? "(all)" }],
+    send: async (i: { owner: string }) => ({ remote_id: "pm-cap", server: "s", model: "sonnet", sent: true, owner: i.owner }),
   } as unknown as RemoteManager;
   const tokens = createSessionTokens();
   const core = createCore();
@@ -48,7 +48,7 @@ async function boot(
   const created: unknown[] = [];
   const remotes2 = {
     ...remotes,
-    send: async (i: { owner: string }) => (created.push(i), { remote_id: "c-9", server: "s", serverName: "n", state: "running", owner: i.owner }),
+    send: async (i: { owner: string }) => (created.push(i), { remote_id: "pm-cap", server: "s", model: "sonnet", sent: true, owner: i.owner }),
   } as unknown as RemoteManager;
   const h = await startHttpServer({
     createServer: () => createCenterServer({ config, supervisor, link, sessions, remotes }),
@@ -342,7 +342,7 @@ test("http: owner は header X-Bantou-Session > URL query session > 引数 owner
     assert.equal(await owner(none), "(all)"); // 分からなければ全件
     // 作成は外向けから消えた（session 向けの窓口だけ）
     await assert.rejects(async () => {
-      const r = await hdr.callTool({ name: "remote_create", arguments: { prompt: "p" } });
+      const r = await hdr.callTool({ name: "remote_create", arguments: { server: "s", prompt: "p" } });
       if (r.isError) throw new Error("tool error");
     });
   } finally {
@@ -373,14 +373,14 @@ const sessionClient = async (base: string, token: string, name: string) => {
   return c;
 };
 
-test("/mcp/session: 窓口は remote_send / remote_create / remote_delete / remote_list / remote_wait / worker_reply / task_status だけ。owner は header の session 名", async () => {
+test("/mcp/session: 窓口は remote_send / remote_create / remote_stop / remote_list / remote_wait / worker_reply / task_status だけ。owner は header の session 名", async () => {
   const { h, tokens, created, base } = await boot();
   const t = tokens.issue("pm1");
   const c = await sessionClient(base, t, "pm1");
   try {
-    assert.deepEqual((await c.listTools()).tools.map((x) => x.name).sort(), ["remote_create", "remote_delete", "remote_list", "remote_send", "remote_wait", "task_status", "worker_reply"]);
-    await c.callTool({ name: "remote_create", arguments: { goal: "p", owner: "evil" } });
-    assert.deepEqual(created, [{ owner: "pm1", goal: "p" }]);
+    assert.deepEqual((await c.listTools()).tools.map((x) => x.name).sort(), ["remote_create", "remote_list", "remote_send", "remote_stop", "remote_wait", "task_status", "worker_reply"]);
+    await c.callTool({ name: "remote_create", arguments: { server: "s", prompt: "p", owner: "evil" } });
+    assert.deepEqual(created, [{ owner: "pm1", server: "s", prompt: "p" }]);
     const l = await c.callTool({ name: "remote_list", arguments: {} });
     assert.equal((JSON.parse((l.content as { text: string }[])[0].text) as { owner: string }[])[0].owner, "pm1");
   } finally {
