@@ -69,7 +69,7 @@ export interface SessionConfig {
 }
 
 /** server が組む MCP の名前（追加の道具は同名にできない）。 */
-export const RESERVED_MCP_NAMES = ["bantou"] as const;
+export const RESERVED_MCP_NAMES = ["bantou", "openspec"] as const;
 
 export type ExtraMcpTarget = "cap" | "worker";
 
