@@ -1,64 +1,100 @@
 /**
- * Work session -> bantou messages. Spec of record: docs/protocol.md.
- * One JSON object goes in the messenger `send_message` text, `to = "bantou-core"`.
+ * bantou protocol v2 messages. Spec of record: messenger/PROTOCOL.md (schemas: messenger/protocol.json).
+ * One JSON object goes in the messenger message text. The sender attaches `meta = MESSENGER_PROTOCOL`
+ * ({ protocol: "bantou", version }). The destination is a center or a server only; the body never names a server or a worker.
  */
 
-/** bantou's messenger peer name. */
-export const CORE_NAME = "bantou-core";
+/** Body field `protocol`, always "bantou". */
+export const PROTOCOL_NAME = "bantou" as const;
 
-/** Protocol version carried in `bantou`. */
-export const PROTOCOL_VERSION = 1 as const;
+/** `callType` values. `exec` is accepted as a callType but has no defined `order` (a message with it is ignored). */
+export type CallType = "invoke" | "reply" | "status" | "exec";
 
-/** `type` values of an envelope. `ping` is a messenger mode, not an envelope type. */
-export type MessageType = "task" | "ask";
-
-/** Common fields (docs/protocol.md "Common fields"). */
-export interface EnvelopeBase {
-  /** Protocol version, always 1. */
-  bantou: typeof PROTOCOL_VERSION;
-  type: MessageType;
-  /** Stable task id = frontmatter `id` of the task md. `[A-Za-z0-9_-]` only. */
-  task_id: string;
-  /** Session name (= tag). Defaults to the sender's messenger name. */
-  session?: string;
+export interface MessageBase {
+  protocol: typeof PROTOCOL_NAME;
+  callType: CallType;
+  order: string;
 }
 
-/** Pattern of a valid `task_id`. */
-export const TASK_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
-
-/** `task`: create / update a task. */
-export interface TaskMessage extends EnvelopeBase {
-  type: "task";
-  /** Task title (= md file name). Never changed by messages for a known task. */
-  title: string;
-  /** Cork status, e.g. "Todo" | "Doing" | "Done". Defaults to "Todo" on create. */
-  status?: string;
-  /** What the work is. Becomes the md body; sending again replaces it. */
-  body?: string;
+/** center -> server: start a worker for the cap `parent-id`. */
+export interface LaunchMessage extends MessageBase {
+  callType: "invoke";
+  order: "launch";
+  /** Name of the cap. Non-empty. */
+  "parent-id": string;
+  /** Model of the worker (MODEL_PATTERN). */
+  model: string;
+  /** The work to do. Non-empty. */
+  prompt: string;
+  /** Destination of the center's ws. Non-empty. */
+  ws: string;
 }
 
-/** One choice of an `ask`. */
-export interface AskOption {
-  label: string;
-  description?: string;
+/** center -> server: stop the workers of the cap `parent-id`. */
+export interface StopMessage extends MessageBase {
+  callType: "invoke";
+  order: "stop";
+  /** Name of the cap. Non-empty. */
+  "parent-id": string;
 }
 
-/** `ask`: wait for the user's reply. */
-export interface AskMessage extends EnvelopeBase {
-  type: "ask";
-  title?: string;
-  question: string;
-  /** May be empty (free answer only). The user can always answer in free text. */
-  options?: AskOption[];
+/** center -> server: the answer to a worker's question. */
+export interface AnswerMessage extends MessageBase {
+  callType: "reply";
+  order: "answer";
+  /** Non-empty. */
+  "session-id": string;
+  /** The answer text (may be empty). */
+  content: string;
 }
 
-export type Envelope = TaskMessage | AskMessage;
+/** center -> server: approve what the worker asked to do. */
+export interface ApproveMessage extends MessageBase {
+  callType: "reply";
+  order: "approve";
+  /** Non-empty. */
+  "session-id": string;
+}
+
+/** center -> server: reject what the worker asked to do. */
+export interface RejectMessage extends MessageBase {
+  callType: "reply";
+  order: "reject";
+  /** Non-empty. */
+  "session-id": string;
+}
+
+/** center -> server: ask for the server's version. The server answers with ServerInfoReply. */
+export interface ServerInfoMessage extends MessageBase {
+  callType: "status";
+  order: "server-info";
+}
+
+/** server -> the sender of server-info: the npm `bantou` version of the running server. */
+export interface ServerInfoReply extends MessageBase {
+  callType: "status";
+  order: "server-info";
+  /** x.y.z */
+  version: string;
+}
+
+/** Messages a server receives (center -> server). */
+export type ServerMessage =
+  | LaunchMessage
+  | StopMessage
+  | AnswerMessage
+  | ApproveMessage
+  | RejectMessage
+  | ServerInfoMessage;
+
+/** All 7 messages of the protocol. */
+export type BantouMessage = ServerMessage | ServerInfoReply;
 
 // -- ping ---------------------------------------------------------------------
 
 /**
- * `ping` is not a JSON envelope. The session calls the messenger `send_ping`
- * tool (`to = "bantou-core"`) and the broker delivers it with `mode: "ping"`.
+ * `ping` is not a JSON message. The session calls the messenger `send_ping`
+ * tool and the broker delivers it with `mode: "ping"`.
  * The payload is a task id or an exact task title, read from `text`, then `subject`.
  */
 export const PING_MODE = "ping" as const;
@@ -84,7 +120,7 @@ export function pingSubject(msg: Pick<PingMessage, "text" | "subject">): string 
   return subject ? subject : undefined;
 }
 
-// -- reply from bantou --------------------------------------------------------
+// -- reply text ---------------------------------------------------------------
 
 /** Heading of the user's answer in the reply text. */
 export const REPLY_ANSWER_HEADING = "【ユーザー回答（原文）】";
@@ -93,7 +129,7 @@ export const REPLY_ANSWER_HEADING = "【ユーザー回答（原文）】";
 export const REPLY_INSTRUCTION_HEADING = "【bantou 指示】";
 
 /**
- * Reply text sent to the asking peer (`from_name` of the `ask`):
+ * Reply text sent to the asking peer:
  *
  *     【ユーザー回答（原文）】
  *     <answer>

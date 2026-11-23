@@ -1,50 +1,111 @@
-import { PROTOCOL_VERSION, TASK_ID_PATTERN } from "./envelope.js";
-import type { AskMessage, Envelope, TaskMessage } from "./envelope.js";
+import { PROTOCOL_NAME } from "./envelope.js";
+import type {
+  AnswerMessage,
+  ApproveMessage,
+  BantouMessage,
+  LaunchMessage,
+  RejectMessage,
+  ServerInfoMessage,
+  ServerInfoReply,
+  ServerMessage,
+  StopMessage,
+} from "./envelope.js";
+import { isValidModel } from "./server.js";
+
+/** Version string of server-info's answer: x.y.z. */
+export const SERVER_VERSION_PATTERN = /^\d+\.\d+\.\d+$/;
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-function optString(v: unknown): boolean {
-  return v === undefined || typeof v === "string";
+/** A non-empty string without NUL. */
+function nonEmpty(v: unknown): v is string {
+  return typeof v === "string" && v.length > 0 && !v.includes("\0");
 }
 
-/** Common fields of an envelope: `bantou: 1`, known `type`, valid `task_id`, optional `session`. */
-export function isEnvelope(v: unknown): v is Envelope {
-  if (!isRecord(v)) return false;
-  if (v.bantou !== PROTOCOL_VERSION) return false;
-  if (v.type !== "task" && v.type !== "ask") return false;
-  if (typeof v.task_id !== "string" || !TASK_ID_PATTERN.test(v.task_id)) return false;
-  if (!optString(v.session)) return false;
-  return v.type === "task" ? hasTaskFields(v) : hasAskFields(v);
+function isBase(v: Record<string, unknown>, callType: string, order: string): boolean {
+  return v.protocol === PROTOCOL_NAME && v.callType === callType && v.order === order;
 }
 
-function hasTaskFields(v: Record<string, unknown>): boolean {
-  return typeof v.title === "string" && optString(v.status) && optString(v.body);
-}
-
-function hasAskFields(v: Record<string, unknown>): boolean {
-  if (typeof v.question !== "string" || !optString(v.title)) return false;
-  if (v.options === undefined) return true;
+export function isLaunchMessage(v: unknown): v is LaunchMessage {
   return (
-    Array.isArray(v.options) &&
-    v.options.every((o) => isRecord(o) && typeof o.label === "string" && optString(o.description))
+    isRecord(v) &&
+    isBase(v, "invoke", "launch") &&
+    nonEmpty(v["parent-id"]) &&
+    isValidModel(v.model) &&
+    nonEmpty(v.prompt) &&
+    nonEmpty(v.ws)
   );
 }
 
-export function isTaskMessage(v: unknown): v is TaskMessage {
-  return isEnvelope(v) && v.type === "task";
+export function isStopMessage(v: unknown): v is StopMessage {
+  return isRecord(v) && isBase(v, "invoke", "stop") && nonEmpty(v["parent-id"]);
 }
 
-export function isAskMessage(v: unknown): v is AskMessage {
-  return isEnvelope(v) && v.type === "ask";
+export function isAnswerMessage(v: unknown): v is AnswerMessage {
+  return (
+    isRecord(v) &&
+    isBase(v, "reply", "answer") &&
+    nonEmpty(v["session-id"]) &&
+    typeof v.content === "string" &&
+    !v.content.includes("\0")
+  );
 }
 
-/** Parse message text as an envelope; `undefined` means "non-JSON message" (goes to inbox.jsonl). */
-export function parseEnvelope(text: string): Envelope | undefined {
+export function isApproveMessage(v: unknown): v is ApproveMessage {
+  return isRecord(v) && isBase(v, "reply", "approve") && nonEmpty(v["session-id"]);
+}
+
+export function isRejectMessage(v: unknown): v is RejectMessage {
+  return isRecord(v) && isBase(v, "reply", "reject") && nonEmpty(v["session-id"]);
+}
+
+export function isServerInfoMessage(v: unknown): v is ServerInfoMessage {
+  return isRecord(v) && isBase(v, "status", "server-info") && v.version === undefined;
+}
+
+export function isServerInfoReply(v: unknown): v is ServerInfoReply {
+  return (
+    isRecord(v) &&
+    isBase(v, "status", "server-info") &&
+    typeof v.version === "string" &&
+    SERVER_VERSION_PATTERN.test(v.version)
+  );
+}
+
+/** A message a server receives (center -> server). Anything else, including `callType: "exec"`, is not a message: ignore it. */
+export function isServerMessage(v: unknown): v is ServerMessage {
+  return (
+    isLaunchMessage(v) ||
+    isStopMessage(v) ||
+    isAnswerMessage(v) ||
+    isApproveMessage(v) ||
+    isRejectMessage(v) ||
+    isServerInfoMessage(v)
+  );
+}
+
+/** Any of the 7 messages. */
+export function isBantouMessage(v: unknown): v is BantouMessage {
+  return isServerMessage(v) || isServerInfoReply(v);
+}
+
+/** Parse message text as a server message; `undefined` for non-JSON or anything that is not one of the 6. */
+export function parseServerMessage(text: string): ServerMessage | undefined {
   try {
     const v: unknown = JSON.parse(text.trim());
-    return isEnvelope(v) ? v : undefined;
+    return isServerMessage(v) ? v : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Parse message text as server-info's answer; `undefined` for non-JSON or anything else. */
+export function parseServerInfoReply(text: string): ServerInfoReply | undefined {
+  try {
+    const v: unknown = JSON.parse(text.trim());
+    return isServerInfoReply(v) ? v : undefined;
   } catch {
     return undefined;
   }
