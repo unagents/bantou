@@ -96,8 +96,8 @@ export function retiringError(cmd: ServerCommand): ServerReply {
   const id =
     cmd.type === "task"
       ? { cap_id: cmd.cap_id, task_id: cmd.task_id }
-      : cmd.type === "worker_reply"
-        ? { cap_id: cmd.cap_id, worker_id: cmd.worker_id }
+      : cmd.type === "worker_reply" || cmd.type === "worker_stop"
+        ? { ...(cmd.cap_id !== undefined ? { cap_id: cmd.cap_id } : {}), ...(cmd.change_id !== undefined ? { change_id: cmd.change_id } : {}), worker_id: cmd.worker_id }
         : cmd.type === "kick_cap" || cmd.type === "stop_cap"
           ? { cap_id: cmd.cap_id }
           : cmd.type === "resume_worker"

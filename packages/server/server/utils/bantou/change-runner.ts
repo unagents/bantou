@@ -1,10 +1,4 @@
-import type {
-  ChangeInfo,
-  ChangeProgressNotice,
-  ChangeReportNotice,
-  ChangeState,
-  StepState,
-} from "@agent-hand/bantou-protocol";
+import type { ChangeProgressNotice, ChangeState, StepState, WorkerReportNotice } from "@agent-hand/bantou-protocol";
 import { judgeStep, type ChangeGate } from "./change-gate";
 import type { Admission } from "./change-resources";
 import type { ChangeRecord, ChangeStore, NotifyTarget, StepRecord } from "./change-store";
@@ -14,11 +8,23 @@ import type { ChangeRecord, ChangeStore, NotifyTarget, StepRecord } from "./chan
  * change の登録を受け、step を 1 つずつ worker に実行させる。順序は scope の並び（M1）、queue は来た順（M2）、
  * 起こす数は admission（M3）が決める。step の終わりは gate（openspec-mcp）で確かめ、通れば次の step、通らなければ同じ worker
  * （同じ session）を起こし直して続きをやらせる（決定 19。回数は数えない）。
- * center に知らせるのは 3 つだけ: worker の質問（change_report）、止められた・範囲を終えた（change_progress）。
+ * center に知らせるのは 2 つだけ: worker の質問（今の worker_report に change_id を付けた物。ask / approve だけ）、止められた・範囲を終えた（change_progress）。
+ * 質問への返答（worker_reply）と worker の停止（worker_stop）は、今の cap の worker と同じ命令で受ける。
  * remote-cap の経路（task・worker_start・予約）には触れない。
  */
 
-export type ChangeNotice = ChangeReportNotice | ChangeProgressNotice;
+export type ChangeNotice = WorkerReportNotice | ChangeProgressNotice;
+
+/** server が持つ change の記録の読み出し（照会の命令は無い。server 内の確認と test 用）。 */
+export interface ChangeSnapshot {
+  change_id: string;
+  state: ChangeState;
+  /** 現在の step の位置（0 始まり）。 */
+  step: number;
+  steps: Array<{ ref: string; worker_id?: string; session_id?: string; state: StepState }>;
+  reason?: string;
+  updated_at: string;
+}
 
 /** worker を 1 回起こす（run の終わりまで待つ）。daemon が manager.invoke("worker", …) につなぐ。 */
 export interface LaunchRequest {
@@ -64,8 +70,12 @@ export interface RegisterInput {
 
 export interface ChangeRunner {
   register(input: RegisterInput): Promise<{ state: ChangeState }>;
-  status(changeId?: string): ChangeInfo[];
-  stop(changeId: string, notifyTo?: NotifyTarget): Promise<{ stopped: boolean }>;
+  status(changeId?: string): ChangeSnapshot[];
+  /**
+   * 今の worker_stop の処理（worker を止める）を change の worker に当てる。止めた worker が受け持っていた step と change を
+   * 「止められた」と記録し、queue の依頼を取り下げて center に知らせる。止められなければ投げる（記録は変えない）。
+   */
+  stopWorker(changeId: string, workerId: string, notifyTo?: NotifyTarget): Promise<{ stopped: boolean }>;
   reply(changeId: string, workerId: string, text: string, notifyTo?: NotifyTarget): Promise<void>;
   /** worker の report（change の worker が /mcp の report を呼んだ）。ask / approve は質問として center へ知らせる。 */
   reported(changeId: string, workerId: string, kind: "progress" | "ask" | "approve" | "done", text: string): Promise<void>;
@@ -110,7 +120,7 @@ export function createChangeRunner(deps: ChangeRunnerDeps): ChangeRunner {
   let seq = 0;
   let inflight = 0;
   let closing = false;
-  /** stop_change の最中の change（止める間に終わった run を異常終了と見ない）。 */
+  /** stopWorker の最中の change（止める間に終わった run を異常終了と見ない）。 */
   const stopping = new Set<string>();
   const ops = new Set<Promise<unknown>>();
 
@@ -159,7 +169,7 @@ export function createChangeRunner(deps: ChangeRunnerDeps): ChangeRunner {
     step.queued_seq = ++seq;
   }
 
-  /** change を止める（stop_change・異常終了の共通）。動いている worker の停止は呼ぶ側が済ませてある。 */
+  /** change を止める（worker_stop・異常終了の共通）。動いている worker の停止は呼ぶ側が済ませてある。 */
   function markStopped(rec: ChangeRecord, reason: string): void {
     rec.state = "stopped";
     rec.reason = reason;
@@ -254,7 +264,7 @@ export function createChangeRunner(deps: ChangeRunnerDeps): ChangeRunner {
     if (step.launches !== token) return;
     if (r.session_id !== undefined) step.session_id = r.session_id;
     if (step.state === "waiting_reply") {
-      // 質問を出して session を閉じた。返答（change_reply）を待つ
+      // 質問を出して session を閉じた。返答（worker_reply）を待つ
       touch(rec);
       return;
     }
@@ -345,7 +355,7 @@ export function createChangeRunner(deps: ChangeRunnerDeps): ChangeRunner {
     return rec;
   };
 
-  function toInfo(rec: ChangeRecord): ChangeInfo {
+  function toInfo(rec: ChangeRecord): ChangeSnapshot {
     return {
       change_id: rec.change_id,
       state: rec.state,
@@ -361,29 +371,28 @@ export function createChangeRunner(deps: ChangeRunnerDeps): ChangeRunner {
     };
   }
 
-  function status(changeId?: string): ChangeInfo[] {
+  function status(changeId?: string): ChangeSnapshot[] {
     if (changeId !== undefined) return [toInfo(need(changeId))];
     return [...changes.values()].sort((a, b) => (a.change_id < b.change_id ? -1 : 1)).map(toInfo);
   }
 
-  async function stop(changeId: string, notifyTo?: NotifyTarget): Promise<{ stopped: boolean }> {
+  async function stopWorker(changeId: string, workerId: string, notifyTo?: NotifyTarget): Promise<{ stopped: boolean }> {
     const rec = need(changeId);
+    const step = rec.steps.find((s) => s.worker_id === workerId);
+    if (!step) throw new Error(`change の step の worker でない: change_id=${changeId} worker_id=${workerId}`);
     if (notifyTo) rec.notify_to = notifyTo;
-    if (rec.state !== "in_progress") return { stopped: false };
+    // 止める物が無い（change が終わっている・その step が通った / 止められた後）
+    if (rec.state !== "in_progress" || TERMINAL_STEP.includes(step.state)) return { stopped: false };
     stopping.add(changeId);
     try {
-      let any = false;
-      for (const s of rec.steps) {
-        if (s.state === "running" && s.worker_id !== undefined) {
-          // 止められなければ投げる（change の状態は変えない）
-          const r = await deps.stopWorker(s.worker_id).catch((e: unknown) => {
-            throw new Error(`動いている worker を止められなかった: worker_id=${s.worker_id} ${errMsg(e)}`);
-          });
-          any = any || r.stopped;
-        }
+      if (step.state === "running") {
+        // 止められなければ投げる（change の状態は変えない）
+        await deps.stopWorker(workerId).catch((e: unknown) => {
+          throw new Error(`worker を止められなかった: worker_id=${workerId} ${errMsg(e)}`);
+        });
       }
-      if (rec.state !== "in_progress") return { stopped: any };
-      markStopped(rec, "stop_change");
+      if (rec.state !== "in_progress") return { stopped: false };
+      markStopped(rec, `worker が止められた（worker_stop worker_id=${workerId}）`);
       return { stopped: true };
     } finally {
       stopping.delete(changeId);
@@ -404,8 +413,7 @@ export function createChangeRunner(deps: ChangeRunnerDeps): ChangeRunner {
 
   async function reported(changeId: string, workerId: string, kind: "progress" | "ask" | "approve" | "done", text: string): Promise<void> {
     const rec = need(changeId);
-    const index = rec.steps.findIndex((s) => s.worker_id === workerId);
-    const step = rec.steps[index];
+    const step = rec.steps.find((s) => s.worker_id === workerId);
     if (!step) throw new Error(`change の step の worker でない: change_id=${changeId} worker_id=${workerId}`);
     step.last_report = { kind, at: new Date(now()).toISOString() };
     if (kind === "progress" || kind === "done") {
@@ -419,11 +427,9 @@ export function createChangeRunner(deps: ChangeRunnerDeps): ChangeRunner {
     touch(rec);
     send(rec, {
       bantou: 1,
-      type: "change_report",
-      notify_id: rec.notify_id,
+      type: "worker_report",
       change_id: rec.change_id,
       worker_id: workerId,
-      step: index,
       kind,
       text,
       at: new Date(now()).toISOString(),
@@ -467,7 +473,7 @@ export function createChangeRunner(deps: ChangeRunnerDeps): ChangeRunner {
   return {
     register,
     status,
-    stop,
+    stopWorker,
     reply,
     reported,
     load,

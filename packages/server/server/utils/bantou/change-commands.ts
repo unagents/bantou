@@ -1,33 +1,28 @@
 import {
   PROTOCOL_VERSION,
-  type ChangeReplyCommand,
   type RegisterChangeCommand,
   type ServerCommand,
   type ServerReply,
-  type StopChangeCommand,
-  type ChangeStatusCommand,
+  type WorkerReplyCommand,
+  type WorkerStopCommand,
 } from "@agent-hand/bantou-protocol";
 import type { ChangeRunner } from "./change-runner";
 import type { NotifyTarget } from "./change-store";
 
-/** 新しい経路（change）の指示。remote-cap の経路の指示（task・worker_reply など）はここでは扱わない。 */
-export type ChangeCommand = RegisterChangeCommand | ChangeStatusCommand | StopChangeCommand | ChangeReplyCommand;
+/**
+ * 新しい経路（change）の指示。登録（register_change）と、今の worker_reply / worker_stop のうち change_id を持つ物
+ * （change の worker は cap を持たない）。cap_id を持つ worker_reply / worker_stop と remote-cap の経路の指示はここでは扱わない。
+ */
+export type ChangeCommand = RegisterChangeCommand | (WorkerReplyCommand & { change_id: string }) | (WorkerStopCommand & { change_id: string });
 
 export function isChangeCommand(cmd: ServerCommand): cmd is ChangeCommand {
-  return cmd.type === "register_change" || cmd.type === "change_status" || cmd.type === "stop_change" || cmd.type === "change_reply";
-}
-
-/** 指示が指す change_id（change_status は省略がありうる）。 */
-export function commandChangeId(cmd: ChangeCommand): string | undefined {
-  return cmd.change_id;
+  return cmd.type === "register_change" || ((cmd.type === "worker_reply" || cmd.type === "worker_stop") && cmd.change_id !== undefined);
 }
 
 export interface ChangeCommandContext {
   runner: ChangeRunner;
   /** 指示を送ってきた center（通知先として覚える）。 */
   from: NotifyTarget;
-  /** change_status_result の board（queue の長さ・資源など）。 */
-  board?: () => Record<string, unknown> | Promise<Record<string, unknown>>;
 }
 
 /** 指示の概要（log 用）。本文（text）は先頭 80 文字だけ。 */
@@ -35,12 +30,10 @@ export function describeChangeCommand(cmd: ChangeCommand): string {
   switch (cmd.type) {
     case "register_change":
       return `change_id=${cmd.change_id} steps=${cmd.scope.length} repo=${cmd.repo.replace(/:\/\/[^/\s"@]*@/g, "://***@")}${cmd.branch ? ` branch=${cmd.branch}` : ""}`;
-    case "change_status":
-      return cmd.change_id ? `change_id=${cmd.change_id}` : "";
-    case "stop_change":
-      return `change_id=${cmd.change_id}`;
-    case "change_reply":
+    case "worker_reply":
       return `change_id=${cmd.change_id} worker_id=${cmd.worker_id} text=${cmd.text.replace(/\s+/g, " ").trim().slice(0, 80)}`;
+    case "worker_stop":
+      return `change_id=${cmd.change_id} worker_id=${cmd.worker_id}`;
   }
 }
 
@@ -52,8 +45,8 @@ export function changeError(cmd: ChangeCommand, message: string, extra: { code?:
     ok: false,
     message,
     command: cmd.type,
-    ...(cmd.change_id !== undefined ? { change_id: cmd.change_id } : {}),
-    ...(cmd.type === "change_reply" ? { worker_id: cmd.worker_id } : {}),
+    change_id: cmd.change_id,
+    ...(cmd.type !== "register_change" ? { worker_id: cmd.worker_id } : {}),
     ...extra,
   };
 }
@@ -76,17 +69,13 @@ export async function executeChange(cmd: ChangeCommand, ctx: ChangeCommandContex
         // worker の完了は待たずにすぐ返す
         return { bantou: PROTOCOL_VERSION, type: "register_change_result", ok: true, change_id: cmd.change_id, accepted: true, state: r.state };
       }
-      case "change_status": {
-        const board = ctx.board ? await ctx.board() : undefined;
-        return { bantou: PROTOCOL_VERSION, type: "change_status_result", ok: true, changes: runner.status(cmd.change_id), ...(board !== undefined ? { board } : {}) };
-      }
-      case "stop_change": {
-        const r = await runner.stop(cmd.change_id, ctx.from);
-        return { bantou: PROTOCOL_VERSION, type: "stop_change_result", ok: true, change_id: cmd.change_id, stopped: r.stopped };
-      }
-      case "change_reply": {
+      case "worker_reply": {
         await runner.reply(cmd.change_id, cmd.worker_id, cmd.text, ctx.from);
-        return { bantou: PROTOCOL_VERSION, type: "change_reply_result", ok: true, change_id: cmd.change_id, worker_id: cmd.worker_id, accepted: true };
+        return { bantou: PROTOCOL_VERSION, type: "worker_reply_result", ok: true, change_id: cmd.change_id, worker_id: cmd.worker_id, accepted: true };
+      }
+      case "worker_stop": {
+        const r = await runner.stopWorker(cmd.change_id, cmd.worker_id, ctx.from);
+        return { bantou: PROTOCOL_VERSION, type: "worker_stop_result", ok: true, change_id: cmd.change_id, worker_id: cmd.worker_id, stopped: r.stopped };
       }
     }
   } catch (e) {

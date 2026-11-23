@@ -109,41 +109,46 @@ const parse = (o: object): ChangeCommand => {
   return c;
 };
 
-test("change の指示: 返信は protocol の型に合い、register → status → reply 失敗 → stop の流れが通る", async () => {
+test("change の指示: 返信は protocol の型に合い、register → worker_reply 失敗 → worker_stop の流れが通る", async () => {
   await withCommandRunner(async (runner) => {
     const from = { id: "p1", name: "bantou-center" };
-    const ctx = { runner, from, board: () => ({ queued: 0 }) };
+    const ctx = { runner, from };
     const reg = await executeChange(parse({ type: "register_change", change_id: "ch1", scope: ["a", "b"], repo: "https://x.invalid/r.git", notify_id: "n1" }), ctx);
     assert.ok(isServerReply(reg));
     assert.deepEqual(reg, { bantou: 1, type: "register_change_result", ok: true, change_id: "ch1", accepted: true, state: "in_progress" });
-
-    const st = await executeChange(parse({ type: "change_status", change_id: "ch1" }), ctx);
-    assert.ok(isServerReply(st));
-    assert.equal(st.type, "change_status_result");
-    if (st.type === "change_status_result") {
-      assert.equal(st.changes[0]!.steps[0]!.worker_id, "ch1-s0");
-      assert.deepEqual(st.board, { queued: 0 });
-    }
-    const all = await executeChange(parse({ type: "change_status" }), ctx);
-    assert.ok(isServerReply(all) && all.type === "change_status_result" && all.changes.length === 1);
 
     const dup = await executeChange(parse({ type: "register_change", change_id: "ch1", scope: ["a"], repo: "r", notify_id: "n1" }), ctx);
     assert.ok(isServerReply(dup));
     assert.equal(dup.type, "error");
     if (dup.type === "error") assert.deepEqual([dup.ok, dup.command, dup.change_id], [false, "register_change", "ch1"]);
 
-    const bad = await executeChange(parse({ type: "change_reply", change_id: "ch1", worker_id: "ch1-s0", text: "x" }), ctx);
+    // 返答待ちではない worker への返答は error（返信に change_id と worker_id が付く）
+    const bad = await executeChange(parse({ type: "worker_reply", change_id: "ch1", worker_id: "ch1-s0", text: "x" }), ctx);
     assert.ok(isServerReply(bad));
-    if (bad.type === "error") assert.deepEqual([bad.command, bad.change_id, bad.worker_id], ["change_reply", "ch1", "ch1-s0"]);
+    if (bad.type === "error") assert.deepEqual([bad.command, bad.change_id, bad.worker_id], ["worker_reply", "ch1", "ch1-s0"]);
     else assert.fail("error のはず");
 
-    const noSuch = await executeChange(parse({ type: "change_status", change_id: "zz" }), ctx);
-    assert.equal(noSuch.type, "error");
+    const noWorker = await executeChange(parse({ type: "worker_stop", change_id: "ch1", worker_id: "zz" }), ctx);
+    assert.ok(isServerReply(noWorker));
+    if (noWorker.type === "error") assert.deepEqual([noWorker.command, noWorker.change_id, noWorker.worker_id], ["worker_stop", "ch1", "zz"]);
+    else assert.fail("error のはず");
 
-    const stop = await executeChange(parse({ type: "stop_change", change_id: "ch1" }), ctx);
+    const stop = await executeChange(parse({ type: "worker_stop", change_id: "ch1", worker_id: "ch1-s0" }), ctx);
     assert.ok(isServerReply(stop));
-    assert.deepEqual(stop, { bantou: 1, type: "stop_change_result", ok: true, change_id: "ch1", stopped: true });
+    assert.deepEqual(stop, { bantou: 1, type: "worker_stop_result", ok: true, change_id: "ch1", worker_id: "ch1-s0", stopped: true });
   });
+});
+
+test("change の指示: cap_id を持つ worker_reply / worker_stop は change の経路に入らない（今の経路のまま）", () => {
+  for (const o of [
+    { type: "worker_reply", cap_id: "c1", worker_id: "w1", text: "x" },
+    { type: "worker_stop", cap_id: "c1", worker_id: "w1" },
+    { type: "kick_cap", cap_id: "c1", prompt: "p" },
+  ]) {
+    const c = parseServerCommand(JSON.stringify({ bantou: 1, ...o })) as ServerCommand | null;
+    assert.ok(c, JSON.stringify(o));
+    assert.equal(isChangeCommand(c), false, JSON.stringify(o));
+  }
 });
 
 test("change の指示: 送ってきた center が通知先として記録される", async () => {
@@ -161,8 +166,8 @@ test("change の指示: 送ってきた center が通知先として記録され
       log: () => {},
     });
     await executeChange(parse({ type: "register_change", change_id: "ch1", scope: ["a"], repo: "r", notify_id: "n9" }), { runner, from: { id: "peer-1", name: "bantou-center" } });
-    // 別の peer id から stop が来たら、その peer を通知先にする（center の再起動後）
-    await executeChange(parse({ type: "stop_change", change_id: "ch1" }), { runner, from: { id: "peer-2", name: "bantou-center" } });
+    // 別の peer id から worker_stop が来たら、その peer を通知先にする（center の再起動後）
+    await executeChange(parse({ type: "worker_stop", change_id: "ch1", worker_id: "ch1-s0" }), { runner, from: { id: "peer-2", name: "bantou-center" } });
     assert.deepEqual(seen, [{ notify_id: "n9", target: { id: "peer-2", name: "bantou-center" } }]);
     await store.flush();
   } finally {

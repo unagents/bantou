@@ -83,7 +83,9 @@ export function maskUserinfo(text: string): string {
 
 /** 指示が指す cap_id。cap を指さない指示（hello / update_server / cap_id 無しの status など）は undefined。 */
 export function commandCapId(cmd: ServerCommand): string | undefined {
-  if (cmd.type === "task" || cmd.type === "kick_cap" || cmd.type === "worker_reply" || cmd.type === "stop_cap") return cmd.cap_id;
+  if (cmd.type === "task" || cmd.type === "kick_cap" || cmd.type === "stop_cap") return cmd.cap_id;
+  // worker_reply / worker_stop は change の worker だと cap_id が無い
+  if (cmd.type === "worker_reply" || cmd.type === "worker_stop") return cmd.cap_id;
   if (cmd.type === "status") return cmd.cap_id;
   return undefined;
 }
@@ -94,6 +96,7 @@ export function describeCommand(cmd: ServerCommand): string {
   if (cmd.type === "status") return cmd.cap_id ? `cap_id=${cmd.cap_id}` : "";
   if (cmd.type === "update_server") return `version=${cmd.version}`;
   if (cmd.type === "worker_reply") return `cap_id=${cmd.cap_id} worker_id=${cmd.worker_id} text=${ignoreText(cmd.text).slice(0, 80)}`;
+  if (cmd.type === "worker_stop") return `cap_id=${cmd.cap_id} worker_id=${cmd.worker_id}${cmd.task_id ? ` task_id=${cmd.task_id}` : ""}`;
   if (cmd.type === "task") {
     const parts = [`cap_id=${cmd.cap_id}`, `task_id=${cmd.task_id}`];
     if (cmd.repo) parts.push(`repo=${maskUserinfo(cmd.repo)}`);
@@ -137,10 +140,16 @@ export function taskInvokeInput(cmd: Extract<ServerCommand, { type: "task" }>, s
 }
 
 /** 指示を実行して返信内容を作る。失敗は ErrorReply にする。 */
+/** cap の worker への命令（worker_reply / worker_stop）の cap_id。change の worker（change_id）は execute に来ない。 */
+function capOf(cmd: { cap_id?: string }): string {
+  if (cmd.cap_id === undefined) throw new Error("cap_id が必要");
+  return cmd.cap_id;
+}
+
 export async function execute(
   cmd: ServerCommand,
   manager: AgentManager,
-  workers?: Pick<WorkerHub, "start">,
+  workers?: Pick<WorkerHub, "start"> & Partial<Pick<WorkerHub, "stop">>,
   /** status_result に載せる server の identity と版（protocol 1.7.0）。省略なら載せない（旧形式の返信）。 */
   identity?: StatusIdentity,
   /**
@@ -169,8 +178,14 @@ export async function execute(
     if (cmd.type === "worker_reply") {
       if (!workers) throw new Error("server が起動中のため受け付けられない");
       // その worker を同じ worker_id で worker_start（持ち主の cap でなければ「別の cap の worker」で失敗）
-      const r = await workers.start(cmd.cap_id, { worker_id: cmd.worker_id, prompt: cmd.text });
+      const r = await workers.start(capOf(cmd), { worker_id: cmd.worker_id, prompt: cmd.text });
       return { bantou: PROTOCOL_VERSION, type: "worker_reply_result", ok: true, cap_id: cmd.cap_id, worker_id: r.worker_id, accepted: true };
+    }
+    if (cmd.type === "worker_stop") {
+      if (!workers?.stop) throw new Error("server が起動中のため受け付けられない");
+      // 今の worker_stop の処理（workers.stop。cap の worker を止める / 予約を取り消す）にそのまま渡す
+      const r = await workers.stop(capOf(cmd), cmd.worker_id, cmd.task_id);
+      return { bantou: PROTOCOL_VERSION, type: "worker_stop_result", ok: true, cap_id: cmd.cap_id, worker_id: r.worker_id, stopped: r.stopped };
     }
     if (cmd.type === "stop_cap") {
       // 止めるだけでなく会話（session_id）も破棄する。次の task は新しい会話で始まる。
@@ -211,7 +226,7 @@ export async function execute(
     const id =
       cmd.type === "task"
         ? { cap_id: cmd.cap_id, task_id: cmd.task_id }
-        : cmd.type === "worker_reply"
+        : cmd.type === "worker_reply" || cmd.type === "worker_stop"
           ? { cap_id: cmd.cap_id, worker_id: cmd.worker_id }
           : cmd.type === "kick_cap" || cmd.type === "stop_cap"
             ? { cap_id: cmd.cap_id }
@@ -621,15 +636,6 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
     }),
     log,
   });
-  const changeBoard = async (): Promise<Record<string, unknown>> => {
-    await resources.sample().catch(() => undefined);
-    return {
-      ...changeRunner.counts(),
-      max_parallel_workers: config.change?.maxParallelWorkers ?? null,
-      min_free_memory_bytes: config.change?.minFreeMemoryBytes ?? null,
-      resources: resources.latest(),
-    };
-  };
   // 資源が空くのを待っている queue を、測定の周期で見直す（周期は resource.sampleMs。新しい値は足さない）
   const changePump = setInterval(() => changeRunner.pump(), config.resource?.sampleMs ?? DEFAULT_RESOURCE.sampleMs);
   changePump.unref();
@@ -711,12 +717,12 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
       } else if (cmd.type === "hello" || cmd.type === "update_server") {
         reply = await executeUpdate(cmd, update);
       } else if (isChangeCommand(cmd)) {
-        // 新しい経路（change）。更新待機中は登録だけ断る（再起動後に再送できる）。照会・停止・返答は通す
+        // 新しい経路（change の登録と、change の worker への worker_reply / worker_stop）。更新待機中は登録だけ断る（再起動後に再送できる）。返答・停止は通す
         if (cmd.type === "register_change" && update.isUpdating()) {
           const p = update.progress();
           reply = changeError(cmd, `server 更新待ち（${p?.from ?? serverVersion}→${p?.to ?? "?"}）。再起動後に再送`, { code: "updating", retryable: true });
         } else {
-          reply = await executeChange(cmd, { runner: changeRunner, from: { id: m.from_id, ...(m.from_name ? { name: m.from_name } : {}) }, board: changeBoard });
+          reply = await executeChange(cmd, { runner: changeRunner, from: { id: m.from_id, ...(m.from_name ? { name: m.from_name } : {}) } });
         }
       } else if ((cmd.type === "kick_cap" || cmd.type === "task") && update.isUpdating()) {
         // 更新待機中は新しい指示を受け付けず、理由付きで断る（center は再起動後に再送できる）

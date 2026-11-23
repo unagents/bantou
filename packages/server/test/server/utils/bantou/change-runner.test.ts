@@ -184,16 +184,19 @@ test("確かめに通らない: 同じ worker・同じ step を、通らなか�
   });
 });
 
-test("質問: waiting_reply にして change_report を知らせ、run が終わっても確かめない。返答で同じ worker を起こし直す", async () => {
+test("質問: waiting_reply にして worker_report（change_id つき）を知らせ、run が終わっても確かめない。返答で同じ worker を起こし直す", async () => {
   await withRunner(async (f) => {
     await f.runner.register(reg("ch1", ["a"]));
     await f.runner.reported("ch1", "ch1-s0", "ask", "どちらにする？");
     assert.equal(f.runner.status("ch1")[0]!.steps[0]!.state, "waiting_reply");
     assert.equal(f.notices.length, 1);
     const n = f.notices[0]!;
-    assert.equal(n.type, "change_report");
-    if (n.type === "change_report") {
-      assert.deepEqual([n.change_id, n.worker_id, n.step, n.kind, n.text], ["ch1", "ch1-s0", 0, "ask", "どちらにする？"]);
+    assert.equal(n.type, "worker_report");
+    if (n.type === "worker_report") {
+      assert.deepEqual([n.change_id, n.worker_id, n.kind, n.text], ["ch1", "ch1-s0", "ask", "どちらにする？"]);
+      // change の worker は cap を持たない（cap の worker_report と同じ形で、cap_id の代わりに change_id）
+      assert.equal(n.cap_id, undefined);
+      assert.equal(n.task_id, undefined);
     }
     await endRun(f, 0, { ok: true, session_id: "sess-q" });
     assert.deepEqual(f.gateCalls, []);
@@ -243,32 +246,33 @@ test("progress / done の report は知らせず、change の状態も変えな�
   });
 });
 
-test("stop_change: 動いている worker を止め、step を stopped にし、止められた事を 1 度だけ知らせる。以後は起こさない", async () => {
+test("worker_stop: 動いている worker を止め、その step と change を「止められた」にし、1 度だけ知らせる。以後は起こさない", async () => {
   await withRunner(async (f) => {
     await f.runner.register(reg("ch1", ["a", "b"]));
-    const r = await f.runner.stop("ch1");
+    const r = await f.runner.stopWorker("ch1", "ch1-s0");
     assert.deepEqual(r, { stopped: true });
     assert.deepEqual(f.stopped, ["ch1-s0"]);
     const [info] = f.runner.status("ch1");
     assert.equal(info!.state, "stopped");
-    assert.equal(info!.reason, "stop_change");
+    assert.equal(info!.reason, "worker が止められた（worker_stop worker_id=ch1-s0）");
     assert.deepEqual(info!.steps.map((s) => s.state), ["stopped", "stopped"]);
     assert.equal(f.notices.length, 1);
     const n = f.notices[0]!;
     assert.equal(n.type, "change_progress");
-    if (n.type === "change_progress") assert.deepEqual([n.change_state, n.step_state, n.reason], ["stopped", "stopped", "stop_change"]);
+    if (n.type === "change_progress") assert.deepEqual([n.change_state, n.step_state, n.reason], ["stopped", "stopped", "worker が止められた（worker_stop worker_id=ch1-s0）"]);
     // 止められた worker の run の終わりは、異常終了とも確かめとも見ない
     await endRun(f, 0, { ok: false, error: "stop により停止" });
     assert.equal(f.notices.length, 1);
     assert.deepEqual(f.gateCalls, []);
     assert.equal(f.launches.length, 1);
     // もう止まっている change は stopped: false
-    assert.deepEqual(await f.runner.stop("ch1"), { stopped: false });
-    await assert.rejects(() => f.runner.stop("nope"), /change が無い/);
+    assert.deepEqual(await f.runner.stopWorker("ch1", "ch1-s0"), { stopped: false });
+    await assert.rejects(() => f.runner.stopWorker("nope", "ch1-s0"), /change が無い/);
+    await assert.rejects(() => f.runner.stopWorker("ch1", "nope"), /step の worker でない/);
   });
 });
 
-test("stop_change: worker を止められなければ error で、change の状態は変えない", async () => {
+test("worker_stop: worker を止められなければ error で、change の状態は変えない", async () => {
   const dir = await mkdtemp(join(tmpdir(), "bantou-change-test-"));
   try {
     const launches: Array<() => void> = [];
@@ -286,13 +290,43 @@ test("stop_change: worker を止められなければ error で、change の状�
       log: () => {},
     });
     await runner.register(reg("ch1", ["a"]));
-    await assert.rejects(() => runner.stop("ch1"), /worker_id=ch1-s0.*kill 失敗/);
+    await assert.rejects(() => runner.stopWorker("ch1", "ch1-s0"), /worker_id=ch1-s0.*kill 失敗/);
     assert.equal(runner.status("ch1")[0]!.state, "in_progress");
     assert.deepEqual(notices, []);
     await store.flush();
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("worker_stop: 返答待ちの worker は止める process が無くても、step と change を止められた事にする", async () => {
+  await withRunner(async (f) => {
+    await f.runner.register(reg("ch1", ["a", "b"]));
+    await f.runner.reported("ch1", "ch1-s0", "ask", "どちら？");
+    await endRun(f, 0, { ok: true });
+    assert.deepEqual(await f.runner.stopWorker("ch1", "ch1-s0"), { stopped: true });
+    assert.deepEqual(f.stopped, []);
+    const [info] = f.runner.status("ch1");
+    assert.equal(info!.state, "stopped");
+    assert.deepEqual(info!.steps.map((s) => s.state), ["stopped", "stopped"]);
+    // 返答はもう通らない
+    await assert.rejects(() => f.runner.reply("ch1", "ch1-s0", "A"), /返答待ちではない/);
+  });
+});
+
+test("worker_stop: 通った step の worker は止める物が無い（change は動いたまま）", async () => {
+  await withRunner(async (f) => {
+    await f.runner.register(reg("ch1", ["a", "b"]));
+    await endRun(f, 0);
+    assert.equal(f.runner.status("ch1")[0]!.steps[1]!.state, "running");
+    assert.deepEqual(await f.runner.stopWorker("ch1", "ch1-s0"), { stopped: false });
+    assert.deepEqual(f.stopped, []);
+    assert.equal(f.runner.status("ch1")[0]!.state, "in_progress");
+    // 今動いている worker を止めると、その step（2 番目）と change が止められた事になる
+    assert.deepEqual(await f.runner.stopWorker("ch1", "ch1-s1"), { stopped: true });
+    assert.deepEqual(f.stopped, ["ch1-s1"]);
+    assert.deepEqual(f.runner.status("ch1")[0]!.steps.map((s) => s.state), ["passed", "stopped"]);
+  });
 });
 
 test("worker の異常終了（仮の扱い）: change を止めて知らせる。起こし直さない", async () => {
@@ -381,7 +415,7 @@ test("再登録: completed の change に新しい scope を足せる。前の s
 test("再登録: stopped の change も動かし直せる", async () => {
   await withRunner(async (f) => {
     await f.runner.register(reg("ch1", ["a"]));
-    await f.runner.stop("ch1");
+    await f.runner.stopWorker("ch1", "ch1-s0");
     await f.runner.register(reg("ch1", ["a"]));
     const [info] = f.runner.status("ch1");
     assert.equal(info!.state, "in_progress");
@@ -517,7 +551,7 @@ test("close 後は、終わった run の結果で記録を変えず、次を起
   });
 });
 
-test("change_status: 引数なしで全部、change_id で 1 つ。無ければ error", async () => {
+test("status（server 内の読み出し）: 引数なしで全部、change_id で 1 つ。無ければ error", async () => {
   await withRunner(async (f) => {
     await f.runner.register(reg("b1", ["a"]));
     await f.runner.register(reg("a1", ["a"]));

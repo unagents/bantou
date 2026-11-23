@@ -2,7 +2,7 @@ import type { ChangeNotice } from "./change-runner";
 import type { NotifyTarget } from "./change-store";
 
 /**
- * change の通知（change_report / change_progress）を center へ送る。
+ * change の通知（worker_report（change_id つき）/ change_progress）を center へ送る。
  * center は名前で覚え、送る時に messenger の今の peer id へ引く（center の再起動で peer id が変わる）。remote-cap の
  * 通知（reports.ts の centerOf）と同じ流儀だが、cap の記録には触れない。
  */

@@ -214,6 +214,31 @@ test("worker_reply: 失敗は error（cap_id・worker_id 付き）。worker 機�
   assert.equal((e2 as { command?: string }).command, "worker_reply");
 });
 
+test("worker_stop: 今の worker の停止の処理（workers.stop）にそのまま渡し、worker_stop_result を返す", async () => {
+  const calls: unknown[] = [];
+  const workers = {
+    start: async () => ({ worker_id: "w-1", accepted: true as const }),
+    stop: async (capId: string, workerId: string, taskId?: string) => (calls.push([capId, workerId, taskId]), { worker_id: workerId, stopped: true }),
+  };
+  const cmd = { bantou: 1 as const, type: "worker_stop" as const, cap_id: "c1", worker_id: "w-1", task_id: "t-1" };
+  const r = await execute(cmd, {} as unknown as AgentManager, workers);
+  assert.deepEqual(r, { bantou: 1, type: "worker_stop_result", ok: true, cap_id: "c1", worker_id: "w-1", stopped: true });
+  assert.deepEqual(calls, [["c1", "w-1", "t-1"]]);
+  assert.equal(describeCommand(cmd), "cap_id=c1 worker_id=w-1 task_id=t-1");
+  assert.equal(commandCapId(cmd), "c1");
+});
+
+test("worker_stop: 失敗は error（cap_id・worker_id 付き）。worker 機構が無い間・cap_id が無い（change の worker）指示も error", async () => {
+  const cmd = { bantou: 1 as const, type: "worker_stop" as const, cap_id: "c1", worker_id: "w-1" };
+  const start = async () => ({ worker_id: "w-1", accepted: true as const });
+  const e1 = await execute(cmd, {} as unknown as AgentManager, { start, stop: async () => { throw new Error("別の cap の worker: w-1"); } });
+  assert.deepEqual(e1, { bantou: 1, type: "error", ok: false, message: "別の cap の worker: w-1", command: "worker_stop", cap_id: "c1", worker_id: "w-1" });
+  const e2 = await execute(cmd, {} as unknown as AgentManager, { start });
+  assert.equal(e2.type, "error");
+  const e3 = await execute({ bantou: 1, type: "worker_stop", change_id: "ch1", worker_id: "w-1" }, {} as unknown as AgentManager, { start, stop: async () => ({ worker_id: "w-1", stopped: true }) });
+  assert.equal(e3.type, "error");
+});
+
 test("protocol 1.8.1: 返信 meta と hello の版は 1.8.1（1.8.0 の center / server とは版違いになる）", () => {
   assert.equal(REPLY_META.version, "1.8.1");
 });

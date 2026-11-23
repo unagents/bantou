@@ -9,7 +9,7 @@ import { isChangeState, isStepState, isValidAgentId, type ChangeState, type Step
  * 今の cap / task の記録（caps/・workers/<id>/logs/owner.json）には触らない。
  */
 
-/** 通知先の center（register_change / change_reply / stop_change を送ってきた peer）。名前で覚え、送る時に今の peer id へ引く。 */
+/** 通知先の center（register_change / worker_reply / worker_stop を送ってきた peer）。名前で覚え、送る時に今の peer id へ引く。 */
 export interface NotifyTarget {
   id: string;
   name?: string;

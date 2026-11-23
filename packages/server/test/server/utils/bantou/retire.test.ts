@@ -171,6 +171,7 @@ test("retiringError: 退役中と分かる message・retiring:true・retryable:f
     { bantou: 1, type: "kick_cap", cap_id: "c1", prompt: "p" },
     { bantou: 1, type: "worker_reply", cap_id: "c1", worker_id: "w1", text: "x" },
     { bantou: 1, type: "update_server", version: "0.7.0" },
+    { bantou: 1, type: "worker_stop", change_id: "ch1", worker_id: "w2" },
   ];
   for (const c of cmds) {
     const e = retiringError(c);
@@ -182,6 +183,9 @@ test("retiringError: 退役中と分かる message・retiring:true・retryable:f
   }
   assert.equal((retiringError(cmds[0]!) as { task_id?: string }).task_id, "t1");
   assert.equal((retiringError(cmds[2]!) as { worker_id?: string }).worker_id, "w1");
+  // change の worker への命令は change_id を引き継ぐ（cap_id は無い）
+  const ce = retiringError(cmds[4]!) as { change_id?: string; cap_id?: string; worker_id?: string };
+  assert.deepEqual([ce.change_id, ce.cap_id, ce.worker_id], ["ch1", undefined, "w2"]);
 });
 
 test("allowedWhileRetiring: 照会と停止だけ通し、task / kick_cap / worker_reply / update_server / resume_worker は断る", () => {
