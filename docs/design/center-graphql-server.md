@@ -92,7 +92,7 @@ desktop (Tauri 2 + Nuxt 4)                          web (Nuxt SPA + Nitro BFF)
 
 - 【事実】session の実体は、center が `pty-wrapper`（`packages/pty-wrapper`、Rust）経由で動かす対話型 `claude --remote-control <名前>`（`packages/center/src/wrapper.ts`、`remote-control.ts`、`docs/design/master-cap-session.md`）。出力は center の `core`（`packages/center/src/core.ts`）が session ごとに queue（上限は `CORE_QUEUE_MAX_BYTES`）で持ち、購読者へ配る。入力・サイズ変更は wrapper へ渡る（最後にサイズを送った側が勝つ）。
 - 【事実】session の claude には MCP が 2 系統付く: `/mcp/session`（master-cap 向け。`session_resession` など。session token で認証、`packages/center/src/session-auth.ts`、`mcp-session.ts`）と、`/mcp`（外向け。token）。加えて center の設定の `memory`・`mcpServers` が全 session の `--mcp-config` に足される（`docs/design/external-memory.md`、`packages/center/src/mcp-source.ts`）。hook / statusLine は `POST /sessions/<n>/hook|status-line`（session token）で center に届く（`http.ts:30-31`）。
-- 【事実】center の MCP tool は `packages/center/src/tools.ts` に `registerTool` が 34 箇所ある（同名を含む。名前は下記）。session 系（`session_create` `session_delete` `session_sleep` `session_wake` `session_update` `session_settings_get/update` `session_list` `session_login` `session_login_code` `session_resession`）、center 系（`center_settings_get/update` `center_info`）、remote 系（`remote_list` `remote_send` `remote_create` `remote_delete` `remote_wait` `task_status` `worker_reply` `worker_resume`）、rc 系（`rc_list` `rc_start` `rc_stop` `rc_status`）、server 系（`server_list` `server_peers` `server_status` `server_retire`）。
+- 【事実】center の MCP tool は `packages/center/src/tools.ts` の `registerTool(` の呼び出しは 33 箇所（`registerTools(` の定義は数えない）で、異なる名前は 30 個（`worker_reply`・`remote_list`・`remote_wait` が 2 回ずつ登録される）。名前は下記。session 系（`session_create` `session_delete` `session_sleep` `session_wake` `session_update` `session_settings_get/update` `session_list` `session_login` `session_login_code` `session_resession`）、center 系（`center_settings_get/update` `center_info`）、remote 系（`remote_list` `remote_send` `remote_create` `remote_delete` `remote_wait` `task_status` `worker_reply` `worker_resume`）、rc 系（`rc_list` `rc_start` `rc_stop` `rc_status`）、server 系（`server_list` `server_peers` `server_status` `server_retire`）。
 - 【事実】center → remote の経路は agent-messenger の protocol `bantou`（`packages/center/src/server-link.ts`、`docs/protocol.md`）。desktop・web はこれに関わらない。
 
 ### 1.6 app の更新で center が上がる流れ
@@ -112,7 +112,7 @@ desktop (Tauri 2 + Nuxt 4)                          web (Nuxt SPA + Nitro BFF)
 ### 2.1 全体
 
 ```
-client（desktop / web / 将来のスマホ）  = 同じ Nuxt 画面（packages/ui）
+client（desktop / web）  = 同じ Nuxt 画面（packages/ui）
    │   GraphQL over HTTP（query・mutation）+ subscription
    │   見つけ方は IP の指定だけ（固定。自動の発見は無い）。port は規定 port（2.8）
    ▼
@@ -139,9 +139,9 @@ S は今と同じ（desktop が子 process として起動・監視・停止す�
 | 操作 | 形（案。細部は未決） |
 |---|---|
 | 入れ方 | `bantou-center.app` を入れる（配り方は未決 #3）。**初回の起動で app が自分を launchd に登録する**（手段は未決 #14）。利用者の操作は app を起動する 1 回だけ。冪等（登録済みで起動しても二重に登録しない）。 |
-| 起動 | 初回は利用者が app を起動した時。以後は launchd が起動する（login 時など）。中身は center の process（`--transport http --bind --config`。**port は規定 port で、引数で変えられない**、2.8・#24）。token は config（`token`、12 文字以上、無いと起動しない `daemon.ts:212-214`）。D の token の作り方・渡し方は未決 #20。種別（LaunchAgent / LaunchDaemon）は未決 #2。 |
+| 起動 | 初回は利用者が app を起動した時。以後は launchd が起動する（login 時など）。中身は center の process（`--transport http --bind --config`。**port は規定 port で、引数で変えられない**、2.8・#24）。token は config（`token`、12 文字以上、無いと起動しない `daemon.ts:296-297`）。D の token の作り方・渡し方は未決 #20。種別（LaunchAgent / LaunchDaemon）は未決 #2。 |
 | 親の監視 | center は 2 秒ごとに `ppid` を見て、起動時から変わったら終わる（`parent-watch.ts`）。bantou-center の作り方（未決 #15）で親が変わる: shell が center を子として起動する形なら、shell が死ねば center も終わる（今の S と同じ）。center が launchd の直下なら `ppid` は変わらず何もしない【推測。6 節で実測】。 |
-| 止め方 | 窓が無い app の止め方は未決 #18。launchd が止める時は SIGTERM。center は子の claude を止めてから終わる（待ちは `stopGraceMs` + hard exit、`daemon.ts:171-175`）。service の停止待ちはそれより長く取る（web 設計 9.1）。 |
+| 止め方 | 窓が無い app の止め方は未決 #18。launchd が止める時は SIGTERM。center は子の claude を止めてから終わる（待ちは `stopGraceMs` + hard exit、`daemon.ts:258 付近（`stopGraceMs + HARD_EXIT_MARGIN_MS`）`）。service の停止待ちはそれより長く取る（web 設計 9.1）。 |
 | 更新 | center は app に同梱で、版も app と一緒。bantou-center.app を更新しても、動いている center は旧 binary のまま。再起動して初めて新しい版になる。更新の配り方は #3、再起動の入口は #18。再起動で session は `--continue` で戻る（`restore()`）。 |
 | 消し方 | 常駐をやめる（launchd の登録を外す）。状態 dir（`sessions.json` など）は消さない既定にし、消すのは別の明示の操作にする（`docs/ops/server-install.md` の退役と同じ向き）。app を消した時に登録が残る問題は 2.7.6。入口は #18。 |
 | ログ | S は今 desktop が `center_status` に末尾を出す（`center.rs`）。D は center のログ file（`logDir`、`packages/center/src/log.ts`）と launchd の stdout / stderr 設定。画面の「center の状態」は GraphQL で返す（3 節）。 |
@@ -160,14 +160,14 @@ S は今と同じ（desktop が子 process として起動・監視・停止す�
 |---|---|---|
 | `sessions` | `SessionList`（`sessions[]`、`reachable`、`reason`）。`Session` = name / state / sessionUrl / source / lastError / path / contextUsage / instructions / activity / activityAt / background / remote / auth / loginUrl / loginError / sleeping | MCP `session_list`、`list_sessions`・`refresh_sessions` |
 | `session(name)` | 1 session | 同上 |
-| `sessionSettings(name)` | `ProjectSettings`（instructions / addDirs / outputStyle / servers。`memory` / `mcpServers` は権限が要る、未決 #6） | `session_settings_get` |
-| `centerSettings` | center 共通の設定（`CenterCommonSettings` + `launcher` 相当の権限の印） | `center_settings_get` |
-| `centerInfo` | workspace（`session_path_hints` の素） | `center_info` |
+| `sessionSettings(name)` | `ProjectSettings`（instructions / addDirs / outputStyle / servers）。launcher 鍵が守る 7 項目（memory / mcpServers / projectMemory / mcp / mcpConnections / mcpSecrets / coordinator）は公開しない、または権限が要る（未決 #6） | `session_settings_get` |
+| `centerSettings` | center 共通の設定（`CenterCommonSettings`）+ `launcher`（呼び出し元が起動元か。`center_settings_get` が返す。型は `packages/ui/api/center.ts` の `{ settings, launcher? }`） | `center_settings_get` |
+| `centerInfo` | `{ workspace, systemInstructions[]（id / version / title）, launcher }`（`center_info` が返す形。`session_path_hints` の素は workspace。`launcher` は呼び出し元が起動元か、#6） | `center_info` |
 | `remotes` | `CenterRemoteRecord[]`（state・未完了の指示・最新の result / error・`task_result`・`worker_reports`・activity） | `remote_list` |
 | `servers` | `CenterServerInfo[]`（server の一覧と版・follow 状態） | `server_list` |
 | `serverPeers(refresh)` | `CenterServerPeers`（版の突き合わせ） | `server_peers` |
 | `rcStatus` | `CenterRcStatus[]` | `rc_list` |
-| `terminalOutput(session, after)` | 端末の出力の取り直し（`after` 以降のチャンク）。通常は subscription を使う | `GET /sessions/<n>/output?after=` |
+| `terminalOutputSince(session, after)` | 端末の出力の取り直し（`after` 以降のチャンク）。通常は subscription `terminalOutput` を使う。root type が別なので同名の field も書けるが、混同を避けて Query 側の名前を分ける | `GET /sessions/<n>/output?after=` |
 
 **Mutation**
 
@@ -183,6 +183,7 @@ S は今と同じ（desktop が子 process として起動・監視・停止す�
 | `restartSession(name)` | 再起動（今は `rc_stop` → `rc_start(resume)` の 2 手、`packages/ui/api/center.ts:118-121`）。1 つの操作にする案 | `rc_stop` + `rc_start` |
 | `replyWorker(remoteId, server, workerId, text)` | worker への返答 | `worker_reply` |
 | `retireServer(serverId)` | server の退役（取り返しがつかない。web には出さない扱いを引き継ぐ。権限は未決 #4・#6） | `server_retire` |
+| `regenerateCenterToken` | center の token を作り直し、center を再起動する（D の center 用）。今の `center_regenerate_token` は Rust の command で、center の MCP tool には無い。S は今の Rust の command が残る。mutation にするか CLI（`bantou-center` の subcommand）にするかは未決 #20・#18。token が変わるので、client の接続は切れ、新しい token を入れ直す | `center_regenerate_token`（Rust、`center.rs`） |
 | `terminalInput(session, dataB64)` / `terminalResize(session, cols, rows)` | 端末の入力・サイズ | `POST /sessions/<n>/input|resize` |
 | `attachToSession(session, …)` | 画像の添付。bytes を GraphQL に載せるか、既存の HTTP route を残すかは未決 #7 | `POST /sessions/<n>/attachments` |
 
@@ -203,15 +204,16 @@ S は今と同じ（desktop が子 process として起動・監視・停止す�
 
 - 今: center の `/mcp` は `Authorization: Bearer <token>`（定時間比較、欠落・不一致は 401）。token は desktop が生成して center の config に書く。web は BFF が token を持ち、前段の Cloudflare Access が守る。待ち受けは `0.0.0.0` で TLS 無し（`docs/architecture.md`）。
 - 変更後の最小形: GraphQL の endpoint も同じ Bearer token（今の仕組みを移す）。S の token は今のまま desktop が生成して center の config に書く。D は desktop が起動しない（desktop 無しで center が起動する）ので、token は bantou-center 側で作る必要があり、desktop への渡し方が要る。未決 #20。別 host の client への配り方は今の接続設定の共有（未決 #4）。
-- 「launcher 鍵」: 今は desktop が sidecar を起動した事を、起動ごとの鍵で証明し、`memory`・`mcpServers` の書き込みを許す。**S は今のまま**。D の center は desktop が起動しないので、desktop は「起動した所」ではない。D の center への書き込みの権限の持ち方は未決 #6。
+- 「launcher 鍵」: 今は desktop が sidecar を起動した事を、起動ごとの鍵で証明する。起動元だけが `memory`・`mcpServers` を読み書きでき、`projectMemory` を読める（書きは `bantou-center memory set --session`・移行・設定 file の直接編集だけ）。旧設定の `mcp`・`mcpConnections`・`mcpSecrets`・`coordinator` は誰からも MCP では書けない。守る項目は合わせて 7 つ（`CENTER_ONLY_KEYS`: `packages/center-client/src/tool-policy.ts:45`、`packages/center/src/project-settings.ts` の `LAUNCHER_KEYS` + `LEGACY_INTERNAL_KEYS` + `FILE_ONLY_KEYS`）。書きは `assertCenterOnly`、読みは `withoutLauncherKeys` が絞る（定義は `project-settings.ts`、`tools.ts`・`sessions.ts` が呼ぶ）。**S は今のまま**。D の center は desktop が起動しないので、desktop は「起動した所」ではない。7 項目それぞれの扱いは未決 #6。
 - 取り返しのつかない操作（`retireServer`、`deleteSession`）を誰に許すか: 今は desktop だけ（web は許可 list から外す）。権限の単位は未決 #4。
 
 ### 2.5 client 側（desktop は何を持ち何を捨てるか。web との共有）
 
 | 部品 | 扱い |
 |---|---|
-| S の center の起動・監視・自動再起動・終了時の停止（`center.rs` の spawn / backoff / `Center::stop`、`lib.rs` の `RunEvent::Exit`）、同梱 binary（`externalBin`、`build-sidecar.ts`）、`center_status` / `center_set_settings` の起動項目（enabled・bind・workspace・claudePath）、token の生成・regenerate、launcher 鍵、`bantou://center-running` | **残す**（S は今と同じ。「center を起動」を選んだ時の裏の起動） |
-| MCP client（`center_mcp.rs`）、SSE 購読（`center_events.rs`）、`SessionCache`（`session.rs`）、端末の中継（`terminal.rs`）、添付の中継（`attachment.rs`） | **捨てる**（webview が GraphQL を直接叩く。S の center にも D の center にも同じ形で繋がる。Rust の中継層が無くなる） |
+| S の center の起動・監視・自動再起動・終了時の停止（`center.rs` の spawn / backoff / `Center::stop`、`lib.rs` の `RunEvent::Exit`）、同梱 binary（`externalBin`、`build-sidecar.ts`）、`center_status` / `center_set_settings` の起動項目（enabled・bind・workspace・claudePath）、S の token の生成・regenerate（desktop が config を書き直して center を再起動する、今のまま。D の token は desktop からは作らず、center 側へ移す形。#4・#20）、launcher 鍵、`bantou://center-running` | **残す**（S は今と同じ。「center を起動」を選んだ時の裏の起動） |
+| MCP client（`center_mcp.rs`）、SSE 購読（`center_events.rs`）、`SessionCache`（`session.rs`）、端末の中継（`terminal.rs`） | **捨てる**（webview が GraphQL を直接叩く。S の center にも D の center にも同じ形で繋がる。Rust の中継層が無くなる） |
+| 添付（`attachment.rs`: `session_attach_bytes` / `session_attach_paths` / `session_attach_pick`） | **分ける**。消す: center への中継（`upload` = reqwest で `POST /sessions/<n>/attachments`、`run` の接続先の選択 `select_target`・`load_settings`、保存した path を pty に打つ `post(.. "input" ..)`・`input_text`・`b64`）。webview が GraphQL（`attachToSession`・`terminalInput`）か、残す HTTP route（#7）で行う。残す: desktop の OS 側の入口 = `session_attach_pick`（file dialog、`rfd`）、`session_attach_paths`（drop された path の受け取り）、`load`（path から bytes を読む）、画像の型の見分け `sniff_type`・大きさの検査 `check_size`（`MAX_BYTES` = 20 MB。center も同じ検査をする）。この 2 つの command は「保存まで行う」から「読んだ bytes と名前を webview に返す」形に変わる（形は未決 #7）。`session_attach_bytes` は clipboard の bytes を webview が既に持つので、command ごと不要 |
 | 接続先の指定 | **IP の指定だけ**（固定。自動の発見は使わない）。port は規定 port で入力しない（2.8）。S で「center を起動」を選んだ時の接続先は自分（`127.0.0.1`）。別 host の center・D の center は IP と token を入れる。今の `remote`（URL + token）の入力の置き換え。token は今の接続設定のまま【未決 #20】 |
 | 接続設定の共有（`center_snippet.rs`: `center_connect_snippets` / `center_parse_connect` / `center_local_ips` / `center_ip_status`） | **残す**（S の center が自分の接続設定を出す、今のまま。D の center が出す側の入口は未決 #20） |
 | updater・relaunch（app 自身の更新） | **残す**。bantou-center.app の更新は別の問題（未決 #3） |
@@ -227,7 +229,7 @@ S は今と同じ（desktop が子 process として起動・監視・停止す�
 
 - 残る。session の claude（pty-wrapper 経由）、core、`/mcp/session`、hook / status-line、coordinator-mcp（子 process）、server-link は center の process の中・子として今のまま動く（`docs/concept.md` の原則 6）。
 - 変わるのは center の起動の形（S に D が加わる）と、画面への出し方（MCP + SSE + 個別 HTTP → GraphQL）だけ。
-- 影響する点: D で session の claude の cwd・PATH・認証（keychain）が launchd の環境で成り立つか（2.2、6 節）。center と session が desktop と別の host になっても、`/mcp/session` は loopback の center URL（`daemon.ts:329` の `centerUrl`）で動く。
+- 影響する点: D で session の claude の cwd・PATH・認証（keychain）が launchd の環境で成り立つか（2.2、6 節）。center と session が desktop と別の host になっても、`/mcp/session` は loopback の center URL（`daemon.ts:330` の `centerUrl`）で動く。
 ### 2.7 bantou-center（窓の無い app。D の形）
 
 利用者の決定: desktop の app とは別に、desktop の app として `bantou-center` を用意する。窓が無く、起動すると center の process だけが動く。初回の起動で自分を launchd に常駐として登録する。
@@ -376,7 +378,7 @@ desktop は S を起動する前に、`127.0.0.1` と規定 port の状態を確
 | `center_connection`（center_mcp.rs） | `centerConnection` | client のローカルの接続状態（GraphQL の疎通。`CenterConnection`） |
 | `session_output_start` / `session_output_stop`（terminal.rs） | `sessionOutputStart` / `sessionOutputStop`（`packages/ui/api/terminal.ts`） | subscription `terminalOutput` の開始・解除 |
 | `session_input` / `session_resize` | `sessionInput` / `sessionResize` | mutation `terminalInput` / `terminalResize` |
-| `session_attach_bytes` / `session_attach_paths` / `session_attach_pick`（attachment.rs） | `sessionAttachBytes` / `sessionAttachPaths` / `sessionAttachPick`（`packages/ui/api/attachment.ts`） | `attachToSession`（未決 #7）。`paths` / `pick` は desktop の OS 側（folder 選択・file のパス）で、読んだ bytes を送る形になる（center が別 host だと client の path は center から読めない。今の desktop は読んで POST している【未確認：`attachment.rs` の細部】） |
+| `session_attach_bytes` / `session_attach_paths` / `session_attach_pick`（attachment.rs） | `sessionAttachBytes` / `sessionAttachPaths` / `sessionAttachPick`（`packages/ui/api/attachment.ts`） | `attachToSession`（未決 #7）。`session_attach_bytes` は不要（webview が持つ bytes を `attachToSession` へ直接）。`session_attach_paths` / `session_attach_pick` は desktop の OS 側の入口として残し、読んだ bytes を返す形に変える（保存・pty への入力は webview が `attachToSession` + `terminalInput` で行う）。center が別 host だと client の path は center から読めないので、bytes を送る（今の `load` も bytes を読んで POST している）。2.5 の「分ける」と同じ |
 | `pick_directory` / `set_workspace_directory` / `get_workspace_directory` / `list_workspace_history`（workspace.rs） | `pickDirectory` ほか（`packages/ui/api/workspace.ts`） | **変わらない**（desktop の window の folder。center と無関係の OS 機能） |
 | `list_tasks` / `get_statuses`（task.rs） | `listTasks` / `getStatuses`（`useBoard.ts`） | **変わらない**（Cork の task md。未決 #8） |
 | `list_threads` / `get_thread`（thread.rs） | `listThreads` / `getThread` | **変わらない**（未決 #8） |
@@ -419,6 +421,8 @@ desktop は S を起動する前に、`127.0.0.1` と規定 port の状態を確
 
 `/mcp`（外向け MCP。未決 #5）、`/mcp/session`（master-cap 向け。残す）、`/events`（SSE。subscription に置き換え）、`/sessions/<n>/output|input|resize`（subscription / mutation に置き換え）、`/sessions/<n>/attachments`（未決 #7）、`/sessions/<n>/status-line|hook`（session 向け。残す）。`packages/center/src/http.ts:15-32`。
 
+Host の検査: `/events` と `/sessions/<n>/output|input|resize|attachments` は Bearer に加えて、Host の検査（`allowedHostsFor`、不一致は 403 `forbidden host`、`http.ts:84-91`・`:423`・`:461`）を持つ。`/mcp` も同じ検査を `enableDnsRebindingProtection` で行う（`:524`）。ただし検査は bind が loopback の時だけ有効で、loopback 以外では `allowedHostsFor` が null を返して検査しない（`http.ts:80-86`、README の http transport の節）。S も D も全アドレスで待ち受けるので、通常の形では検査は無く Bearer だけで守る。`/graphql` がこの検査を引き継ぐかは未決 #25。`docs/architecture.md:57` の「Host / Origin を絞らず Bearer だけで守る」は全アドレスで待ち受ける形の説明で、loopback bind の時の検査には触れていない（食い違いというより抜け。docs の改訂（段階 G）で直す）。
+
 ### 3.6 網羅性の確かめ（grep で数えた結果）
 
 ui・desktop・web の画面側の呼び出しを grep で数え、3.1〜3.4 の行と突き合わせた。
@@ -439,7 +443,7 @@ ui・desktop・web の画面側の呼び出しを grep で数え、3.1〜3.4 の
 | A2 | center の起動を規定 port だけにする（規定 port の番号は #22。`--port` の扱いは #24）。listen を状態への書き込みより先にし、失敗した時の error（使用中が center か他の program か）を出す（2.8.2・2.8.3）。S の desktop は port の設定項目を外し、起動前に規定 port を確かめる（2.8.4） | S は規定 port で今のまま動く。規定 port が使用中なら、理由の分かる error が出る | `--port` を戻す |
 | B | `packages/ui/api/*.ts` を GraphQL client に差し替える。web の `~/tauri` の transport を GraphQL にする（BFF の形は未決 #4）。desktop の `src/tauri/transport.ts` は、center 系の command を GraphQL へ、native 系（workspace・updater・Cork）と S の起動の操作だけ Tauri に残す。接続先を IP の指定（port は規定 port）にする（2.5・2.8）。subscription は `terminalOutput`・`sessionsChanged`・`sessionMessage` | web が GraphQL で動く。desktop は S の center にも別 host の center にも GraphQL で繋がる | 差し替えを feature flag か branch 単位にすれば戻せる。center 側は無変更 |
 | C | bantou-center.app を作る: C1 = app の実体（#15）と同梱・build・配り方（#3、cask の構成）、C2 = 初回の自己登録（#14）と登録の状態の扱い（#17）、C3 = 窓の無い app の操作の入口（止める・更新・登録解除・接続情報の表示。#18・#20。center の subcommand と GraphQL の mutation）、C4 = 規定 port の使用中の判定と error（2.8・#19。desktop 側と bantou-center 側の両方） | bantou-center.app を起動すると center が動き、登録され、desktop が IP で繋がる。S は今のまま動く | app を使わなければ S だけの今の形 |
-| D | desktop の Rust の中継層（`center_mcp.rs`・`center_events.rs`・`session.rs` の cache・`terminal.rs`・`attachment.rs`）を外す（webview が GraphQL を直接叩く）。**S の起動・監視（`center.rs`）・同梱 binary・launcher 鍵は残す** | desktop の Rust は center の中継をしない。S は今どおり起動できる | D の前の release に戻せる |
+| D | desktop の Rust の中継層（`center_mcp.rs`・`center_events.rs`・`session.rs` の cache・`terminal.rs`・`attachment.rs` の upload・接続先の選択・pty への input の中継。OS 側の入口 `pick` / `paths` と `load`・型・大きさの検査は残す、2.5）を外す（webview が GraphQL を直接叩く）。**S の起動・監視（`center.rs`）・同梱 binary・launcher 鍵は残す** | desktop の Rust は center の中継をしない。S は今どおり起動できる | D の前の release に戻せる |
 | E | D の center への書き込みの権限（#6）と、`/mcp` の残し方（#5）の整理 | `memory` / `mcpServers` の読み書きが、S と D の両方で動く | 権限の方式を旧に戻す |
 | F | 更新の入口（#18・#12）: 版の違いの検出と、D の center の再起動の入口。bantou-center.app の更新の配り（#3） | app を更新すれば center も同じ版に揃う（D の再起動は #18 の入口） | 手動の再起動に戻す |
 | G | docs の改訂: `docs/concept.md`・`docs/architecture.md`・`CLAUDE.md` の Map（「center は desktop に sidecar 同梱」→「center は app に同梱。desktop が裏で起こす形（S）と、bantou-center.app が launchd に常駐する形（D）」）・`docs/protocol.md` の desktop ↔ center の節・`packages/center/README.md` の起動・`packages/desktop/README.md`・`docs/ops/` に D の手順書を足す | docs が実装と合う | — |
@@ -466,13 +470,13 @@ ui・desktop・web の画面側の呼び出しを grep で数え、3.1〜3.4 の
 
 ### 5.2 `feat/sleep-resession`（スリープを起動しないリセッションに）
 
-- 内容: `origin/feat/sleep-resession`（`docs/design/sleep-resession.md`、`packages/ui/composables/sleepButton.ts`・`sessionStatus.ts` の `sleepBlock`、`packages/ui/api/sessions.ts` の注記、`packages/desktop/src/pages/index.vue`、`packages/desktop/e2e/session-sleep.spec.ts`）。眠らせる = 引継ぎを書かせて保存してから止める。起こす = 新しい会話で引継ぎを渡す。`session_sleep` は「受理して即返す」（その設計の U3 = A、拒否は同期で返す）。ボタンは作業中・needs-input・remote の未完了・未返答・動いていない時は押せない（`sleepBlock`）。
+- 内容: `origin/feat/sleep-resession`（設計書 `docs/design/sleep-resession.md`）。眠らせる = 引継ぎを書かせて保存してから止める。起こす = 新しい会話で引継ぎを渡す。`session_sleep` は「受理して即返す」（設計書の U3 = A、拒否は同期で返す）。ボタンは作業中・needs-input・remote の未完了・未返答・動いていない時は押せない（`sleepBlock`）。branch の実装の差分は、この設計書の初版（4edee56）を書いた時点と今で違う: (1) 初版の時点は ui / desktop / docs / test の 10 file で、center は触っていなかった（center の変更は設計書の予定だけ）。(2) 今（`origin/feat/sleep-resession` 634c2f1、`git diff --stat origin/develop...`）は 27 file（+1222 -69）で、center の実装も入っている（`sessions.ts`・`resession.ts`・`daemon.ts`・`tools.ts`・`server.ts`・`sleep-gate.ts`・`coordinator.ts`・`coordinator-mcp.ts`・`system-instructions.ts` と test）。desktop の `session.rs` も変わり、`session_sleep` の応答を「受理して即返す」形（`accepted` / `pending` と `name`。`name` だけ必須）で受ける。
 - この設計との関係:
   - 【事実】この branch は `packages/ui` を触る（`sessionStatus.ts` の `sleepBlock`、`sleepButton.ts`、`useBoard.ts`、`useSessionBoard.ts`、`api/sessions.ts`）。段階 B（`packages/ui/api/*.ts` の差し替え）と同じ file を触るので、**B の前に merge する**か、B の worker が最新の develop に追従する。
   - GraphQL の `Session` 型は、`sleepBlock` が読む field（`state`・`activity`・`background`・`remote.waitingReply`・`remote.running`・`sleeping`）を落とさずに持つ。`sleepBlock` は client の純関数のまま使える（center に判断を移さない。center の `check` は拒否を同期で返すので二重の守り）。
-  - `sleepSession` の mutation は「受理して即返す」に合わせ、返り値を「眠った後の `Session`」にしない（眠りは後で `sessionsChanged`（reason `sleep`）で届く）。拒否（作業中など）は mutation の error / payload の理由で返す。今の `session_sleep` は `Session` を返す（`center-client` の `commands.ts`）ので、返り値の形が変わる所は両設計で 1 回だけ合わせる。
+  - 【事実】`sleepSession` の mutation は、center の `session_sleep` が今この branch で「受理して即返す」応答（`accepted` / `pending` と `name`）を返すので、その形を引き継ぐ。返り値を「眠った後の `Session`」にしない（眠りは後で `sessionsChanged`（reason `sleep`）で届く）。拒否（作業中など）は mutation の error / payload の理由で返す。
   - `restore()`・`wake` の振る舞いは center の中の変更で、GraphQL の形には影響しない。スリープ中の session を center の起動で起こさない点も変わらない。
-- 衝突: center 側（`sessions.ts`・`resession.ts`・`daemon.ts`・`tools.ts`）は `app-restart-check` と同じ file を触ると、その設計の 6 節に書いてある。GraphQL の resolver は `tools.ts` の関数でなく `SessionManager` の API を呼ぶ形にすると、`tools.ts` の変更の影響を受けにくい【案】。
+- 衝突（実装の差分と設計書の予定を分けて書く）: 【実装の差分】`app-restart-check`（`origin/feat/app-restart-check` ba9a609）は `packages/center/src/restart-check.ts`・その test・設計書の 3 file だけ（`sessions.ts` の `restore()` の変更は別 branch `feat/app-restart-check-sessions`）。`sleep-resession`（634c2f1）は center の `sessions.ts`・`resession.ts`・`daemon.ts`・`tools.ts` などを実際に変えている（上の 27 file）。【設計書の予定】`sleep-resession.md` の 3 節（変更点）と 6 節、`app-restart-check.md` の 3 節が、同じ file（`sessions.ts`・`resession.ts`・`daemon.ts`）を触る予定を書いている。この設計の GraphQL の resolver は `tools.ts` の関数でなく `SessionManager` や `resession` の API を呼ぶ形にすると、`tools.ts` の変更の影響を受けにくい【案】。
 
 ### 5.3 リセッション（`docs/design/resession.md`）
 
@@ -544,18 +548,29 @@ code は書かないので、ここは実装の task が足す test と、実機
 - 案 B: `/mcp` を GraphQL に統合して廃止。
 - 推奨: A。理由: `/mcp` は master-cap・外部のエージェントが使う入口で、`docs/design/center-tools.md` の設計がある。画面（GraphQL）と エージェント（MCP）は別の利用者。`session_delete` は desktop の UI が使っていない（web も許可していない）ので、GraphQL には出さず MCP だけにする案を推奨。
 
-**#6 launcher 鍵（`memory`・`mcpServers` の書き込み権）の扱い（D の center）**
+**#6 launcher 鍵が守る 7 項目の扱い（D の center）**
+- 守る項目は 7 つ: `memory` / `mcpServers` / `projectMemory` / `mcp` / `mcpConnections` / `mcpSecrets` / `coordinator`（`packages/center-client/src/tool-policy.ts:45` の `CENTER_ONLY_KEYS`。center 側は `packages/center/src/project-settings.ts` の `LAUNCHER_KEYS` + `LEGACY_INTERNAL_KEYS` + `FILE_ONLY_KEYS` で、同じ 7 つ）。2 か所に別々の定義があるので、GraphQL の層は 1 か所にそろえる。書きは `assertCenterOnly`（`project-settings.ts:176`。`tools.ts:113・175・198` と `sessions.ts:237` が呼ぶ）、読みは `withoutLauncherKeys`（`:184`。`tools.ts:98` の `shown`）が絞る。
+- 今の扱い（項目ごと）:
+
+| 項目 | 分類 | 起動元 | 起動元以外 |
+|---|---|---|---|
+| `memory`・`mcpServers` | `LAUNCHER_KEYS` | 読み書きできる | 書くと error。読みの応答から除く |
+| `projectMemory` | `FILE_ONLY_KEYS` | 読める。書きは設定の更新（MCP）では誰もできず、`bantou-center memory set --session`・移行・設定 file の直接編集だけ | 書くと error。読みの応答から除く |
+| `mcp`・`mcpConnections`・`coordinator` | `LEGACY_INTERNAL_KEYS`（旧設定） | 誰からも MCP では書けない（起動元にも別の error）。読みの応答からは `withoutLauncherKeys` は除かない（旧設定が残っていれば応答に出うる【未確認】） | 書くと error |
+| `mcpSecrets` | 同上 | settings の key としては同上。鍵の実体は別 file `mcp-secrets.json`（0600）で、入れるのは `bantou-center mcp secret`（標準入力か file）だけ。値は表示・log・error に出さない（`packages/center/src/mcp-secrets.ts` の冒頭）。どの経路でも値は読めない | 同上 |
+
 - 前提: S は今のまま（desktop が起動ごとの鍵で証明する）。D の center は desktop が起動しないので、desktop は「起動した所」ではない。bantou-center が起動元になる。
-- 案 A: bantou-center が初回に鍵を作って保存する（0600 の file など。center は env から取り出して消す `takeLauncherKey` の形）。同じ Mac の desktop は、その file を読んで header を付ける（IP の指定とは別に、同じ user の file を読む）。別 host の desktop・web は書けない（今と同じ）。
-- 案 B: center の host の CLI（`bantou-center memory` / `bantou-center mcp`、`packages/center/src/cli.ts`・`memory-settings.ts`・`mcp-cli.ts`）だけで書く。GraphQL は読み取りだけ。
-- 案 C: admin 権限の token を別に持ち、繋いだ client だけが GraphQL で書ける。
-- 推奨: B（権限の仕組みを新しく足さない。CLI は既にある。desktop が同じ Mac の file を読む A は、利用者が決めた「IP の指定だけ」の線引き（自動の発見をしない）と近い所に踏み込む）。D の center の `memory` / `mcpServers` を desktop の画面から書きたい要望があれば、A か C を別の決定にする。その間、D の center の desktop の設定画面は「center の host で設定する」案内になる（S は今のまま画面から書ける。画面の体験が S と D で違う点なので、決定を要する）。
+- 案 A: bantou-center が初回に鍵を作って保存する（0600 の file など。center は env から取り出して消す `takeLauncherKey` の形）。同じ Mac の desktop は、その file を読んで header を付ける。項目ごと: `memory`・`mcpServers` は GraphQL で読み書きできる。`projectMemory` は読めるが書きは今のまま CLI など。旧設定 4 項目（`mcp`・`mcpConnections`・`mcpSecrets`・`coordinator`）は GraphQL でも書けない。`mcpSecrets` の値は読めず、入れるのは CLI の標準入力だけ。別 host の desktop・web は 7 項目とも読み書きできない（今と同じ）。
+- 案 B: GraphQL では 7 項目すべてを読み書きしない（今の web と同じ。書くと error、読みの応答から除く。schema の `ProjectSettings` も 7 項目を持たない）。`memory`・`mcpServers`・`projectMemory` は center の host の CLI（`bantou-center memory` / `bantou-center mcp`、`cli.ts`・`memory-settings.ts`・`mcp-cli.ts`）で書く。`mcpSecrets` の値は今どおり CLI の `mcp secret` だけ。旧設定 4 項目は書かない。
+- 案 C: admin 権限の token を別に持つ。admin で繋いだ client だけ、`memory`・`mcpServers` を読み書き、`projectMemory` を読める。それ以外の項目は案 A と同じ。
+- 推奨: B（権限の仕組みを新しく足さない。CLI は既にある。A は desktop が同じ Mac の file を読む形で、利用者が決めた「IP の指定だけ」の線引き（自動の発見をしない）と近い所に踏み込む）。D の center の外部記憶・追加の MCP を desktop の画面から書きたい要望があれば、A か C を別の決定にする。その間、D の center の desktop の設定画面は「center の host で設定する」案内になる（S は今のまま画面から書ける。画面の体験が S と D で違う点なので、決定を要する）。
 
 **#7 端末の入出力と添付を GraphQL に載せる範囲**
 - 案 A: 出力は subscription、入力・サイズは mutation、添付の画像（bytes）は既存の HTTP route `POST /sessions/<n>/attachments` を残す。
 - 案 B: 全部 GraphQL（添付は GraphQL multipart upload か base64 の mutation）。
 - 案 C: 端末の出力・入力も既存の HTTP route を残し、GraphQL は一覧と操作だけ。
 - 推奨: A。理由: 出力は `id` / `after` / `reset` の再開付きの stream で、今の SSE の振る舞い（`Last-Event-ID`）を subscription で再現できる【未確認】。画像の bytes は GraphQL に載せにくい。C は「画面が使う物は GraphQL で漏れなく」の方針から外れる。
+- 添付の bytes を webview に渡す形（2.5 で残す OS 側の入口 `session_attach_paths` / `session_attach_pick` の形）: 案 A: Tauri の command が file を読んで bytes と名前を返し、webview が `attachToSession`（または残す HTTP route）で送る（Rust に center への通信が残らない）。案 B: 今どおり Rust が読んで center に直接 upload する（Rust の中継層（reqwest・接続先・token）が添付の分だけ残る）。推奨 A（中継層をなくす方針）。大きい画像（20 MB まで）を IPC で返す形は【未確認】（今の `session_attach_bytes` は JSON 配列にしないため raw body を使っている。`attachment.rs` の doc）。
 
 **#8 Cork の task・旧 broker・thread・agent（desktop ローカル）の扱い**
 - 案 A: この設計では触らず、desktop ローカルの機能として残す。
@@ -578,6 +593,7 @@ code は書かないので、ここは実装の task が足す test と、実機
 - 案 B: A に加えて、client（desktop）が繋ぎ直した時にも確認を送る。
 - 案 C: 確認を止める。
 - 推奨: A。
+- 参照: `app-restart-check` の設計書 `docs/design/app-restart-check.md` の U4「center だけが再起動した時も対象にするか」（A: 対象にする = center の起動を app の再起動と扱う、B: desktop が「app の起動」を center に知らせる口を足し、その時だけ送る。推奨 A）と同じ論点。この設計の案 A は U4 の A、案 B（client が繋ぎ直した時にも送る）は U4 の B に当たる（center が client の接続を知る口が要る）。D で desktop と center が独立しても、U4 の推奨 A の根拠（区別する材料が center に無い）は変わらない。
 
 **#12 center の更新で session が中断される事（1.6）**
 - 案 A: 今と同じ（更新の再起動で session は `--continue` で戻る。人が空いている時にやる）。
@@ -656,9 +672,15 @@ code は書かないので、ここは実装の task が足す test と、実機
 - 案 B: 本番の経路（S・D・launchd の起動）では port を変えられず、test・開発用の起動の関数の引数（`startHttpServer` の `port` option など）でだけ変えられる。CLI の引数と環境変数では受けない。
 - 案 C: 今のまま `--port` を残す。→ 「別の port に逃げない」の決定に反する（誤って別 port で起動できる）ので案から外す。
 - 推奨: B（`packages/center/test/` と `scripts/e2e.ts` が `--port 0` で動いており、規定 port にすると開発中の center と衝突する。本番の起動の経路だけが規定 port に縛られる）。
+**#25 `/graphql` の Host の検査**
+- 事実: `/events`・core route・`/mcp` は、bind が loopback の時だけ Host を検査する（3.5）。S も D も全アドレスで待ち受けるので、通常は検査が無い。
+- 案 A: 今の `/mcp`・`/events` と同じにする（loopback bind の時だけ検査する）。
+- 案 B: 常に検査する（IP で繋ぐので、許可する Host の集め方が要る）。
+- 案 C: 検査しない（Bearer だけ）。
+- 推奨: A（今と同じ強さにそろえる。全アドレス待ち受けと規定 port の下での強化は #23）。
 
 ## 8. 次にやる事（推奨の順）
 
-1. 未決 #22（規定 port の番号。利用者が決める）・#23（LAN の認証）・#24（test の port）と、#2・#3・#14・#15・#20（bantou-center の作り方・登録・token）、#4・#6・#7 の決定（schema と配布の形に効く）。#11 は進行中の 2 branch の merge の前に決める。
+1. 未決 #22（規定 port の番号。利用者が決める）・#23（LAN の認証）・#24（test の port）・#25（/graphql の Host の検査）と、#2・#3・#14・#15・#20（bantou-center の作り方・登録・token）、#4・#6・#7 の決定（schema と配布の形に効く）。#11 は進行中の 2 branch の merge の前に決める。
 2. 段階 A の worker を、query / mutation / subscription に分けて並行で出す（schema の合意、2.3 を先に固める）。
 3. 並行して段階 C の実測（`SMAppService` の登録が ad-hoc 署名の app で通るか、launchd 下で center が `claude` の認証を通すか、窓無し app の Local Network の許可）を行う。結果で #2・#14・#15 が決まる。
