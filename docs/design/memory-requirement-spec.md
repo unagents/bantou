@@ -7,7 +7,7 @@
 ## 0. 利用者の原文（要件の全文）
 
 > メモリ保存の仕組みについて、今回のような作業指示等で、明確な実装の指示や、このメッセージに含まれる仕様については、typeを分けて明確な管理として登録するようにする。内容としては2つ。作業指示と仕様・設計の2点。
-> 作業指示については、今回もそうだがメッセージ内容に複数の作業の指示が混ざってる場合はまず1登録に対して1つの作業（＝requirement）として登録して扱う。で、1 requirementに対して、master-capかremote-cap、又は両方はrequirementをタスクに分解する。タスクはrequiremntと親子関係になるようにする事。また、ユーザーのrequirmentへの対応として、master-capがremote-capにrequirmentを出すみたいなのも、ユーザーrequiremntを親に、ツリーで広がるようにする。
+> 作業指示については、今回もそうだがメッセージ内容に複数の作業の指示が混ざってる場合はまず1登録に対して1つの作業（＝requirement）として登録して扱う。で、1 requirementに対して、master-capかcap、又は両方はrequirementをタスクに分解する。タスクはrequiremntと親子関係になるようにする事。また、ユーザーのrequirmentへの対応として、master-capがcapにrequirmentを出すみたいなのも、ユーザーrequiremntを親に、ツリーで広がるようにする。
 > 仕様・設計では、ユーザーからの指示としてrequirementにそのまま設計が含まれている場合は、requirementとの相互関係がわかるように紐付けだけし、仕様・設計にまとめた形のメモリを一つ登録する。
 > この仕様・設計に対して、深堀りや精緻化、エージェントの判断としての決めなどを経て、実装するうえで纒めた設計をさっきのユーザーの指示としてあった設計や仕様を親にする形でツリーにする。typeは設計扱い、種類？はエージェントの推論や判断による設計とわかるようにする。
 > 尚、requirementも仕様・設計のどちらにおいても、categoryみたいなのを用意する事。requirementのcategoryはちょっとまだ柔らかい状態だが、例えば環境構築・整備とか。メンテナンスとか。要求された依頼の種類を定義。
@@ -25,8 +25,8 @@
 |---|---|---|
 | R1 | 明確な作業指示と、メッセージに含まれる仕様を、type を分けて登録する。type は 2 つ: 作業指示、仕様・設計 | 1 段落 |
 | R2 | 1 つのメッセージに複数の作業指示が混ざる時は、1 登録 = 1 作業（= requirement）として登録する | 2 段落 |
-| R3 | 1 requirement を、master-cap か remote-cap（又は両方）がタスクに分解する。タスクは requirement の子 | 2 段落 |
-| R4 | 利用者の requirement への対応として master-cap が remote-cap に出す requirement も、利用者の requirement を親にしたツリーに載せる | 2 段落 |
+| R3 | 1 requirement を、master-cap か cap（又は両方）がタスクに分解する。タスクは requirement の子 | 2 段落 |
+| R4 | 利用者の requirement への対応として master-cap が cap に出す requirement も、利用者の requirement を親にしたツリーに載せる | 2 段落 |
 | R5 | 利用者の指示の中に設計が含まれる時は、requirement と紐付けだけして、仕様・設計にまとめたメモリを 1 つ登録する | 3 段落 |
 | R6 | 仕様・設計を深掘り・精緻化・エージェントの判断で決めた設計は、利用者の仕様・設計を親にしたツリーにする。type は設計、種類はエージェントの推論・判断による設計と分かるようにする | 4 段落 |
 | R7 | requirement にも仕様・設計にも category を持つ。requirement の category は柔らかい（例: 環境構築・整備、メンテナンス。依頼の種類）。仕様・設計の category は 5 つ（presentation / business / data / infrastructure / cross-cutting） | 5 段落以降 |
@@ -69,16 +69,14 @@ requirement の状態の持ち方、requirement の category の最終一覧、1
 - center が記録するのは master-cap の記憶だけ（agent = session の agentId か session 名。eventId の名前空間 `c1`）。cap 側の記憶は書かない（`packages/center/src/memory-events.ts:1-6`、`docs/design/external-memory.md:39` `:43-44`）。
 - 利用者の発言は hook（`UserPromptSubmit` の `prompt`）から `user_prompt` event になる（`memory-events.ts:119-141`、eventId は session・種別・prompt_id・時刻・本文 digest で決まる `:132`）。master-cap の応答は `Stop` hook の `last_assistant_message` から `assistant_message`。
 - `remote_send` の送信時に `memoryEvents.task()`（`packages/center/src/remotes.ts:1837`）→ `kind: task` の event（`memory-events.ts:144-157`。sender = session、recipient = capId、`remoteId`・`taskId` 付き、eventId = `c1:<session>:task:<taskId>`）。
-- 結果は `task_result`（`taskId` あり）または `cap_result`（**`taskId` 無し**。`memory-events.ts:159-186`）、worker の report は `n.task_id` があれば付く（`:189-200`）、worker への返答は `reply`（`remotes.ts:1968`）。
+- 結果は `cap_result`（**`taskId` 無し**。`memory-events.ts:159-186`）、worker への返答は `reply`（`remotes.ts:1968`）。
 - 送信は非同期キューで、失敗しても center の処理は止まらない（`external-memory.md:57`）。
 
 ### 1.6 remote の task の id の付き方
 
 - `task_id` は **center が `remote_send` ごとに採番**する: `t-<時刻の 36 進>-<乱数 3 byte の hex>`（`remotes.ts:306-307` の `newTaskId`、使用は `remotes.ts:1779`）。文字種は `TASK_ID_PATTERN = /^[A-Za-z0-9_-]+$/`（`packages/protocol/src/envelope.ts:27`）。
-- server への `task` 命令に載り、`task_result`・`worker_report` に echo される（`packages/protocol/src/server.ts:221-226` の `TaskCommand`、`:435` の `TaskResultReply`、`:720-725` の `WorkerReportNotice`）。
 - server は同じ cap の別の task を task ごとの指揮（lane）で並行に動かす（`docs/design/cap-orchestration.md:100-106`）。**server は task_id の重複を除かない**（`packages/center/src/tools.ts:436`、`remotes.ts:1755`）。
-- `worker_report` の `task_id` は worker を起動した task の id。旧 server は最後に受けた task の id（`tools.ts:436`）。
-- cap 内部で remote-cap / worker が task をさらに分けても、それを表す id は protocol に無い（`task_id` は center の 1 回の `remote_send` に対応する 1 つだけ。上記の通り）。
+- cap 内部で cap / worker が task をさらに分けても、それを表す id は protocol に無い（`task_id` は center の 1 回の `remote_send` に対応する 1 つだけ。上記の通り）。
 
 ## 2. 全体像
 
@@ -88,12 +86,12 @@ requirement の状態の持ち方、requirement の category の最終一覧、1
 master-cap ──(remote_send)──▶ task event ────┘                                   │
         │ task_id（center 採番）                                                   │
         ▼                                                                         ▼
-   remote-cap ─▶ worker ─▶ result / report event                  requirement のツリー ＋ 仕様・設計のツリー
+   cap ─▶ worker ─▶ result / report event                  requirement のツリー ＋ 仕様・設計のツリー
 ```
 
 本書が決めたい事は 2 つの木とその紐付け。
 
-- 木 A（作業指示）: 利用者の requirement を根に、master-cap → remote-cap の requirement、その下のタスク。
+- 木 A（作業指示）: 利用者の requirement を根に、master-cap → cap の requirement、その下のタスク。
 - 木 B（仕様・設計）: 利用者の仕様・設計を根に、エージェントの推論・判断の設計。
 - 木 A と木 B は、requirement ↔ 仕様・設計の紐付けでつなぐ（親子ではなく相互関係）。
 
@@ -115,7 +113,7 @@ master-cap ──(remote_send)──▶ task event ────┘              
 | category | 依頼の種類（3.4 の候補） | R7 |
 | parent | 親の requirement（木 A。利用者の requirement は親なし） | R3 R4 |
 | 起点 | 利用者の発言由来か、エージェントが出した物か（3.5。**推測**: 原文は区別を求めていないが、R4 の「ユーザーrequirementを親に」から必要になる） | R4 |
-| task_id | center が採番した `remote_send` の task_id（master-cap → remote-cap の requirement だけ） | §1.6、R4 |
+| task_id | center が採番した `remote_send` の task_id（master-cap → cap の requirement だけ） | §1.6、R4 |
 | 出典 | 既存の `memory_sources`（event との対応） | `001_init.sql:63-69` |
 | status 等 | 既存の status（confirmed / inferred …）。requirement の進み具合（未着手・完了）をどこに持つかは決定 #9 | — |
 
@@ -163,7 +161,7 @@ role（requirement とタスクの区別）: 原文は「タスクは requiremen
 ### 3.5 起点（利用者の発言由来か、エージェントが出したか）
 
 - 利用者の requirement: 出典が `user_prompt`（§1.5）。
-- master-cap が remote-cap に出す requirement: 出典が `task` event（`remote_send` の送信。§1.5）。既存の規則だと出典が `user_prompt` だけでない item は `inferred` に落ちる（`extract.ts:184-186`）。**「エージェントが実際に出した指示」を `inferred`（推測）と呼ぶのは意味が合わない**ので、status（根拠の強さ）と起点は別の項目にする案。決定 #5 で扱う。
+- master-cap が cap に出す requirement: 出典が `task` event（`remote_send` の送信。§1.5）。既存の規則だと出典が `user_prompt` だけでない item は `inferred` に落ちる（`extract.ts:184-186`）。**「エージェントが実際に出した指示」を `inferred`（推測）と呼ぶのは意味が合わない**ので、status（根拠の強さ）と起点は別の項目にする案。決定 #5 で扱う。
 
 ## 4. (2) 1 つの発言から複数の requirement を分けて登録する仕組み
 
@@ -187,14 +185,14 @@ role（requirement とタスクの区別）: 原文は「タスクは requiremen
 - 1 登録 = 1 作業（R2）。1 つのメッセージに複数の作業が混ざる時は、混ざった分だけ requirement を登録する。
 - メッセージに設計が含まれる時は、requirement とは別に仕様・設計のメモリを **1 つ**登録し、紐付ける（R5）。作業ごとに設計を割るかは原文に無い（推測では 1 つにまとめる）。
 
-## 5. (3) requirement → タスク、利用者 → master-cap → remote-cap の木と center の remote_send・task_id
+## 5. (3) requirement → タスク、利用者 → master-cap → cap の木と center の remote_send・task_id
 
 ### 5.1 木 A の形
 
 ```
 R-user（利用者の requirement。出典 = user_prompt）
- ├─ R-send-1（master-cap が remote-cap に出した requirement。task_id = t-… 、出典 = task event）
- │    ├─ T-1（remote-cap / worker が分解したタスク）
+ ├─ R-send-1（master-cap が cap に出した requirement。task_id = t-… 、出典 = task event）
+ │    ├─ T-1（cap / worker が分解したタスク）
  │    └─ T-2
  ├─ R-send-2（別の remote_send。別の task_id）
  └─ T-3（master-cap が自分で分解したタスク。remote_send 無し）
@@ -205,20 +203,19 @@ R-user（利用者の requirement。出典 = user_prompt）
 
 ### 5.2 center の task_id との結び方
 
-- master-cap → remote-cap の requirement 1 件 = `remote_send` 1 回 = `task_id` 1 つ。requirement のノードに `task_id` を持たせ、同じ `task_id` を持つ event（`task` / `result` / `report` / `reply`。§1.5）と対応づける。`memory_events` には `task_id` の index が既にある（`001_init.sql:38`）。
+- master-cap → cap の requirement 1 件 = `remote_send` 1 回 = `task_id` 1 つ。requirement のノードに `task_id` を持たせ、同じ `task_id` を持つ event（`task` / `result` / `report` / `reply`。§1.5）と対応づける。`memory_events` には `task_id` の index が既にある（`001_init.sql:38`）。
 - `task` event の eventId は `c1:<session>:task:<taskId>`（`memory-events.ts:147`）なので、ノードと出典 event の対応は task_id から一意に引ける。
 - `result` / `report` の task_id の取りこぼし（実装上の事実）:
   - `cap_result` の event には task_id が付かない（`memory-events.ts:175-185`）。
-  - 旧 server の `worker_report` の task_id は「最後に受けた task の id」で、別の task のものになりうる（`tools.ts:436`）。
   - server は task_id の重複を除かない（`tools.ts:436`、`remotes.ts:1755`）。center は受付未確認の同じ指示を 10 分は再送しないが、再送されれば別の task_id の別の子になる。
 - 親（利用者の requirement）をどの `remote_send` に結ぶかは決定 #6。
 
-### 5.3 remote-cap / worker が分解したタスク（決定 #8）
+### 5.3 cap / worker が分解したタスク（決定 #8）
 
-- 今、center が記録するのは master-cap の記憶だけで、server（remote-cap）は書かない（`external-memory.md:44`）。remote-cap の中の分解（worker ごとの分担、task の中の手順）は、master-cap の記憶には `result` の本文（`summary` / `remaining`。`memory.ts:106-110` の `formatTaskResultBody`）と `report` の本文として入るだけ。
-- 「remote-cap もタスクに分解する」（R3）をノードとして持つ案:
-  - 案 A: master-cap の記憶の中だけで持つ。remote-cap の分解は `result` / `report` の本文から抽出する（A は #5 の抽出と同じ経路）。利点: 利用者の決定「外部記憶の書き込みは master-cap の記憶だけ」（`external-memory.md:39`）を変えない。欠点: 抽出の LLM 頼みで、分解の粒度は本文に書かれた分だけ。
-  - 案 B: remote-cap の記憶（agent = cap_id）にも書き、その木を別 agent の行として持つ。利点: cap の分解を直接記録。欠点: 利用者の決定（master-cap だけ）を変える。RLS が agent ごとに行を隔てる（`001_init.sql:118`）ので、親（master-cap の記憶の requirement）を cap 側の木から辿れない（共有する仕組みは scope の shared / 昇格だが未実装。`memory-design.md:489-504`）。
+- 今、center が記録するのは master-cap の記憶だけで、server（cap）は書かない（`external-memory.md:44`）。cap の中の分解（worker ごとの分担、task の中の手順）は、master-cap の記憶には `result` の本文（`summary` / `remaining`。`memory.ts:106-110` の `formatTaskResultBody`）と `report` の本文として入るだけ。
+- 「cap もタスクに分解する」（R3）をノードとして持つ案:
+  - 案 A: master-cap の記憶の中だけで持つ。cap の分解は `result` / `report` の本文から抽出する（A は #5 の抽出と同じ経路）。利点: 利用者の決定「外部記憶の書き込みは master-cap の記憶だけ」（`external-memory.md:39`）を変えない。欠点: 抽出の LLM 頼みで、分解の粒度は本文に書かれた分だけ。
+  - 案 B: cap の記憶（agent = cap_id）にも書き、その木を別 agent の行として持つ。利点: cap の分解を直接記録。欠点: 利用者の決定（master-cap だけ）を変える。RLS が agent ごとに行を隔てる（`001_init.sql:118`）ので、親（master-cap の記憶の requirement）を cap 側の木から辿れない（共有する仕組みは scope の shared / 昇格だが未実装。`memory-design.md:489-504`）。
   - 案 C: 親子の参照だけ `(agent_id, item_id)` の文字列で持ち、読めるのは各 agent 自身の範囲だけにする。欠点: 木が agent をまたいで読めない。
 - 推奨: 案 A。理由: 既決の範囲内で動き、RLS を触らない。cap 側の記憶が要る時は `external-memory.md:44` の「将来足す」で別に扱う。
 
@@ -394,10 +391,10 @@ resession 設計は「その設計が出たら照合する」として 3 点を�
   - 案 B: タスクを別 type にする。利点: type で区別できる。欠点: 原文の「type は 2 つ」と合わない（推測。原文はタスクの type を言っていない）。
 - **決定: 推奨どおり**。木は `parent_id`（案 A）、紐付けは関連の表 `memory_relations`（案 A）、タスクの区別は `role`（案 A）。理由: 木は 1 親で足り、紐付けは多対多になりうる（推測）。
 
-### 決定 #8: remote-cap / worker が分解したタスクの記録
+### 決定 #8: cap / worker が分解したタスクの記録
 
 §5.3。
-- 案 A（推奨）: master-cap の記憶の中だけ（result / report から抽出）。利点: 利用者の決定（書き込みは master-cap の記憶だけ。`external-memory.md:39`）を変えず、RLS（`001_init.sql:118`）も触らない。欠点: 抽出の LLM 頼みで、分解の粒度は result / report の本文に書かれた分だけ。remote-cap の中の分解は漏れうる。
+- 案 A（推奨）: master-cap の記憶の中だけ（result / report から抽出）。利点: 利用者の決定（書き込みは master-cap の記憶だけ。`external-memory.md:39`）を変えず、RLS（`001_init.sql:118`）も触らない。欠点: 抽出の LLM 頼みで、分解の粒度は result / report の本文に書かれた分だけ。cap の中の分解は漏れうる。
 - 案 B: cap の記憶（agent = cap_id）にも書く。利点: cap 側の分解を直接記録できる。欠点: 利用者の決定（`external-memory.md:39` `:44`）を変える。RLS が agent ごとに行を隔てる（`001_init.sql:118`）ので、親（master-cap の記憶の requirement）を cap 側の木から辿れず、木が分断される。cap 側の抽出の LLM 呼び出しが増える（`external-memory.md:44` の理由）。
 - 案 C: 親の参照だけ `(agent_id, item_id)` の文字列で持つ。利点: 書き込みの決まりを変えずに cap 側の分解を持てる。欠点: 親を読めるのは各 agent 自身の範囲だけで、木として読めない。
 - **決定: A**。

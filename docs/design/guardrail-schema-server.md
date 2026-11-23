@@ -9,7 +9,7 @@
 ## 0. 利用者の指示（原文）と、この設計の範囲
 
 > openspec-mcp自体をhttp streamで単独起動出来るようにする。openspec-mcpに対して、schema-discoveryをヘッダー情報として設定を受け入れるようにする。schema-discoveryはmcp-serverの設定を入れられる形でプロトコルを設計。schema-discoveryのプロトコルとして、/schemas/[schema-name]で、schemaの中身を問い合わせ出来る形にする。
-> bantouは、schema-discoverプロトコルに則ったmcp−serverを新規に内蔵する。bantou-centerはopenspec-mcpのschema-discoveryに自分のschema−mcp−serverの情報をセットしてつなげる。
+> bantouは、schema-discoverプロトコルに則ったmcp−serverを新規に内蔵する。centerはopenspec-mcpのschema-discoveryに自分のschema−mcp−serverの情報をセットしてつなげる。
 > bantou側は新たにgardrail設定機能で、openspec向けのschema定義を任意に追加する機能を入れる
 
 ### 持ち分
@@ -25,7 +25,7 @@
 
 ### 背景（前提。この設計の対象ではない）
 
-- 順番: review の仕組み（schema の tasks の終了条件に「指摘 0 件」を置く事、reviewer のサブエージェント、指摘の数え方）と、bantou の server を worker の起動だけにする変更（remote-cap の判断の層を無くす事を含む）は、guardrail の機能の実装が終わり、schema 定義を bantou の上で保守できるようになった後の話（上の 1 つ目の決定）。この設計書の対象外で、今は作業にしない。
+- 順番: review の仕組み（schema の tasks の終了条件に「指摘 0 件」を置く事、reviewer のサブエージェント、指摘の数え方）と、bantou の server を worker の起動だけにする変更（cap の判断の層を無くす事を含む）は、guardrail の機能の実装が終わり、schema 定義を bantou の上で保守できるようになった後の話（上の 1 つ目の決定）。この設計書の対象外で、今は作業にしない。
 - 前提: schema-discovery の header が無い接続では、標準の手順がそのまま採用される（上の 2 つ目の決定。openspec-mcp の振る舞いで、bantou の設計では決めない）。
 - 用語の注意: 【事実】bantou には過去に「guardrail」があった（plugin の hooks `guard.mjs` と `docs/guardrail.md`）。2026-10-31 に廃止済み（`docs/history/20261031-1700-retire-guardrail/report.md`）。この設計の「guardrail 設定」は、それとは別の新しい機能（利用者の指示の「gardrail設定機能」）で、hook の仕組みは戻さない。
 
@@ -34,7 +34,7 @@
 ### 1.1 openspec との今の関係
 
 - 【事実】bantou の code（`packages/` 配下の `.ts` `.vue` `.md`）は、openspec を呼ばない・知らない。`openspec` を含むのは `packages/desktop/e2e/seed.ts:22` の画面確認用の task の題（"openspec change 一覧画面"）と `packages/desktop/fixtures/demo-ws/openspec change 一覧画面.md` だけ（grep で確かめた）。`schema-discovery` を含む file は無い。
-- 【事実】worker に渡る指示の置き場は `packages/server/instructions/worker.md`・`remote-cap.md`、center 側は `packages/center/instructions/common.md`・`master-cap.md`。いずれにも schema の語は無い。
+- 【事実】worker に渡る指示の置き場は `packages/server/instructions/worker.md`、center 側は `packages/center/instructions/common.md`・`master-cap.md`。いずれにも schema の語は無い。
 - したがって「今 bantou が openspec-mcp とつながる口」は無い。この設計が足す。
 
 ### 1.2 center の MCP
@@ -57,7 +57,7 @@
 
 - center は GraphQL の endpoint（`/graphql`【案】）を持つ backend の server になる。client（desktop・web）はそれを叩く。
 - 設定は全部 client の画面から変えられ、保存先は center の host（同設計 2.4 の「設定の保存先は center の host」）。
-- center の起動の形は (a) desktop 専用と (b) server（bantou-center）の 2 つ。center の中身は同じ。
+- center の起動の形は (a) desktop 専用と (b) server の 2 つ。center の中身は同じ。
 
 ## 2. 変えた後の形（全体）
 
@@ -65,7 +65,7 @@
 client（desktop / web）                      …… 設定の画面（guardrail の設定を足す・見る）
    │  GraphQL（center-graphql-server の設計）
    ▼
-center（bantou-center。(a)(b) 共通）
+center（(a)(b) 共通）
    ├ guardrail の設定（openspec 向けの schema 定義の一覧）  … center の host に保存（3.2）
    ├ schema の MCP server（新規・内蔵）                    … /schemas/[schema-name] で定義の中身を返す（3.1）
    └ openspec-mcp への接続                                  … つなぐ時機・schema-discovery に入れる中身はプロトコル待ち（4 節）
@@ -74,7 +74,7 @@ openspec-mcp（別 project。http stream で単独起動。schema-discovery を 
    └ 受けた schema の MCP server に /schemas/[schema-name] を問い合わせて schema の中身を得る【プロトコル待ち】
 ```
 
-- 利用者の指示は「bantou-center は openspec-mcp の schema-discovery に自分の schema の MCP server の情報をセットしてつなげる」まで。時機（いつ入れるか）と中身（何を入れるか）は【プロトコル待ち】。
+- 利用者の指示は「center は openspec-mcp の schema-discovery に自分の schema の MCP server の情報をセットしてつなげる」まで。時機（いつ入れるか）と中身（何を入れるか）は【プロトコル待ち】。
 - guardrail の設定が「何を持つか」= schema 定義の一覧。schema の MCP server が「何を返すか」= その一覧のうち問い合わせられた 1 つの中身。center が「どうつなぐか」= openspec-mcp の schema-discovery に schema の MCP server の情報を入れる（何を入れるかは【プロトコル待ち】）。
 - 利用者が話に出していない事は、仕様にも未決にも足さない。
 
@@ -102,14 +102,14 @@ openspec-mcp（別 project。http stream で単独起動。schema-discovery を 
 
 ## 4. center が openspec-mcp につなぐ流れ
 
-利用者の指示: 「bantou-center は openspec-mcp の schema-discovery に自分の schema-mcp-server の情報をセットしてつなげる」。
+利用者の指示: 「center は openspec-mcp の schema-discovery に自分の schema-mcp-server の情報をセットしてつなげる」。
 
 1. center は、openspec-mcp の schema-discovery（header で受ける設定）に、自分の schema の MCP server の情報を入れてつなぐ。いつ入れるか（接続のたびか、他か）と、何を入れるか（アドレスだけか、他も要るか）は【プロトコル待ち】。
 2. openspec-mcp は、その情報を使って schema の MCP server に `/schemas/[schema-name]` を問い合わせる【プロトコル待ち】。
 3. 利用者が guardrail の設定に schema 定義を足すと、次の問い合わせから返る（3.2。center の再起動は要らない見込み）。
 
 - **【プロトコル待ち】で決めない物**: header の名前、header に入れる「mcp-server の設定」の形、`/schemas/[schema-name]` の応答の形、openspec-mcp が schema の MCP server に何を問い合わせるか。プロトコルが出てから、この設計書の 3.1・3.2・4 節と #1・#3 を更新する。
-- **center が openspec-mcp のアドレスをどこに持つか**・**誰が openspec-mcp につなぐか**は、利用者の指示にあるのは「bantou-center がつなげる」まで。細部は未決 #3。
+- **center が openspec-mcp のアドレスをどこに持つか**・**誰が openspec-mcp につなぐか**は、利用者の指示にあるのは「center がつなげる」まで。細部は未決 #3。
 - 【事実】center の設定の `mcpServers` は、http の MCP server の `url` と `headers` を持てる（1.2）。openspec-mcp の接続先を `mcpServers` の 1 件で持てるかは、schema-discovery が header の形に依るので【プロトコル待ち】。#3 の案 A の前提。
 
 ## 5. 実装の分け方
