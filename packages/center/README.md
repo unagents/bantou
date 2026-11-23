@@ -33,7 +33,7 @@ bantou-center [--config <path>] [--transport stdio|http] [--port <n>] [--bind <a
 
 ### http transport
 
-- エンドポイントは `http://<bind>:<port>/mcp`（外向け。MCP Streamable HTTP。POST / GET / DELETE）。pty 出力の配信は `/sessions/<name>/{output,input,resize,attachments}`（下記「core」「添付画像」）。statusLine の受信は `POST /sessions/<name>/status-line`、claude の hook の受信は `POST /sessions/<name>/hook`（どちらも session token。下記「context 使用量」「作業状態（activity）」）。それ以外は 404。
+- エンドポイントは `http://<bind>:<port>/mcp`（外向け。MCP Streamable HTTP。POST / GET / DELETE）と `/mcp/session`（master-cap 向け）。pty 出力の配信は `/sessions/<name>/{output,input,resize,attachments}`（下記「core」「添付画像」）。statusLine の受信は `POST /sessions/<name>/status-line`、claude の hook の受信は `POST /sessions/<name>/hook`（どちらも session token。下記「context 使用量」「作業状態（activity）」）。それ以外は 404。
 - **認証は Bearer token**。`/mcp` へのリクエスト（POST / GET / DELETE すべて）は `Authorization: Bearer <config の token>` が必要で、欠落・形式違い・不一致は 401（`WWW-Authenticate: Bearer`）。比較は定時間。token が無い・12 文字未満だと http は起動しない。既定は loopback にだけ bind する。`--bind 0.0.0.0` 等で外に出しても、token を知らない相手は rc_start などを呼べない（ただし TLS は無いので平文。信頼できる LAN だけで使う）。
 - MCP session ごとに McpServer を作る。supervisor と server 接続は全 session で共有。
 - SIGTERM / SIGINT で http server・全 session・全 project を停止して exit 0。http では stdin を見ない（親が `/dev/null` を渡しても落ちない。親は SIGTERM で止める）。
@@ -166,7 +166,7 @@ center は wrapper 経由の session（master-cap）を起動するたび（新�
 - `session_create`: pty wrapper 経由の対話型 `claude --remote-control <name> --permission-mode <permissionMode> --mcp-config '<JSON>'`（再起動時は `--continue` 付き）を `path` で起動し、supervisor に動的に足す（起動の詳細は「master-cap の起動（wrapper）」）。`path` 省略時は config の `workspace` の下の `<name>`（無ければ作る）。`workspace` が無ければ `path` が必須。`permissionMode` の既定は `auto`。`name` の重複、既存 project 名との衝突、他の project / session と同じ path は拒否。接続（URL 取得）か早期終了まで最大 15 秒待って状態を返す（待ちきれなければ `starting`）。
 - `session_update`: `session_create` で作ったものだけ（config 由来・未定義は `session_delete` と同じ文言で拒否）。`newName`（既存の session / project 名と重複不可）と `path`（他の session / project と重複不可、絶対パス）を変える。`newName` も `path` も実質変わらない呼び出しは拒否。手順: (1) 検証 (2) `supervisor.remove`（停止・core / token の解除） (3) `path` 指定時は、`move: true` なら今のフォルダを新しい `path` へ `fs.rename` で移動（親 dir は作る。EXDEV など失敗したら error にして何も変えない。コピーはしない）、そうでなければ新しい `path` を作るだけ（今のフォルダは残す。`move` は `path` が無ければ無視） (4) `sessions.json` の `name` / `path` を更新（`settings`・並び順はそのまま） (5) 名前を変えたら remotes の記録を付け替え (6) 新しい名前で `add` → `start(resume)` (7) `session_create` と同じ待ちで `SessionInfo` を返し、`GET /events` に `reason: "updated"`（`name` = 新しい名前）を流す。途中で失敗したら記録・フォルダの移動・remotes の付け替えを戻し、元の名前で起動し直す（best effort。失敗は center.log）。`instructions` / `addDirs` は新しい名前へ引き継ぐ。
   - **path を変えると `--continue` が効かない**: claude の会話は path ごとに保存されるため、新しい path では `--continue` が「会話が無い」で落ち、既存の fallback で素の起動（新しい会話）になる（仕様）。名前だけ変えた時は同じ path なので会話は続く。`move: true` でフォルダを移しても会話の保存先（`~/.claude/projects/<path を変換した dir>`）は移らない。
-  - **別の session の remote 記録と衝突する名前は使えない**: (a) 改名後、旧名の cap_id を新しい名前の記録が持つので、旧名での `session_create` と、別の session から旧名への改名は拒否（改名した session 自身が旧名へ戻す改名は、その記録が改名元のものなので許す: pm1 → pm2 → pm1）。(b) 削除済み session の記録が残る名前への改名も拒否。許す: `session_delete` 後に**同じ名前で `session_create`** した時は、その名前の記録を続きとして引き継ぐ（旧 cap を使う。従来どおり）。
+  - **別の session の remote 記録と衝突する名前は使えない**: 削除済み session の記録が残る名前への改名も拒否。許す: `session_delete` 後に**同じ名前で `session_create`** した時は、その名前の記録を続きとして引き継ぐ（旧 cap を使う。従来どおり）。
   - 名前を変えると remote-control 名・messenger の peer 名・ログ名（`<name>.log`）・statusLine の URL も新しい名前になる。旧名前宛ての messenger 通知は届かない。
 - `session_delete`: `session_create` で作ったものだけ。remote-control を停止（SIGTERM → `stopGraceMs` 後 SIGKILL）して監視と保存から外す。path は消さない。config 由来の project は拒否。
 - `session_list`: config の project と session の全部。`source` が `config` / `session`。`instructions`（真偽。その session を起動した時に `--append-system-prompt`（session の `instructions`）を付けたか。本文は出さない。`rc_status` の `instructions` と同じで、`rc_status` の `args` でも値は `<N 文字>` に伏せる）が付く。`contextUsage`（`{ usedTokens, windowTokens, percent, updatedAt, model? }`。`model` は statusLine 由来の時だけ。まだ分からない時は `null`）が付く。取得の仕組みは「context 使用量」。
@@ -193,7 +193,7 @@ center は wrapper 経由の session（master-cap）を起動するたび（新�
 
 ### remote（B）
 
-- **原則（2026-11-04 に改訂）: cap は session × server に 1 つ**（session = master-cap と cap は 1 対 1）。作業が何であれ、center はその session の cap に次の指示を送る（作業ごとに cap を作らない）。記録は「session × server の cap」単位で、`remote_id` = cap_id、`session` を持つ。以下の「server ごとに 1 つ」「center ごとに固定の cap_id」はこの原則に読み替える。他の session の cap とその指示・結果は見えない・触れない。
+- **原則（2026-11-04 に改訂）: cap は session × server に 1 つ**（session = master-cap と cap は 1 対 1）。作業が何であれ、center はその session の cap に次の指示を送る（作業ごとに cap を作らない）。記録は「session × server の cap」単位で、`remote_id` = cap_id、`session` を持つ。他の session の cap とその指示・結果は見えない・触れない。
 - **境界**: 「他 session から見えない・触れない」を保証するのは `/mcp/session`（session ごとの使い捨て token + `X-Bantou-Session` の照合）だけ。外向け `/mcp`（center token。desktop 用）の `remote_list` / `remote_wait` / `worker_reply` は owner を自己申告でき、省略で全件。desktop は全件を取って client 側で選択中 session に絞る。
 - **session を消しても cap は残る**: `session_delete` は cap の記録・server の cap・worker に触れない（通知は届かず失敗ログのみ）。同名の session を作り直すと同じ cap_id で旧 cap を引き継ぐ。
 - **既知の制約**: server の FS が大文字小文字を区別しない（macOS など）と、session `Main` と `main` の cap が同じ dir になりうる。
