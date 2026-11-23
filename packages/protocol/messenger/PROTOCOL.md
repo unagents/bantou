@@ -8,7 +8,7 @@ Send every message with `meta: {protocol: "bantou", version: "<protocol version>
 
 ## Messages (center to server)
 
-- `launch`: `{"protocol":"bantou","callType":"invoke","order":"launch","parent-id":"<cap name>","model":"<worker model>","prompt":"<the work>","ws":"<destination of the center's ws>"}`. Starts a worker. `model` matches `^[A-Za-z0-9._\[\]][A-Za-z0-9._\[\]-]*$`.
+- `launch`: `{"protocol":"bantou","callType":"invoke","order":"launch","parent-id":"<cap name>","model":"<worker model>","prompt":"<the work>","ws":"<destination of the center's ws>"}`. Starts a worker. `model` is optional; when present it matches `^[A-Za-z0-9._\[\]][A-Za-z0-9._\[\]-]*$`, and when absent the server does not pass `--model`.
 - `stop`: `{"protocol":"bantou","callType":"invoke","order":"stop","parent-id":"<cap name>"}`.
 - `answer`: `{"protocol":"bantou","callType":"reply","order":"answer","session-id":"<id>","content":"<the answer>"}`.
 - `approve`: `{"protocol":"bantou","callType":"reply","order":"approve","session-id":"<id>"}`.

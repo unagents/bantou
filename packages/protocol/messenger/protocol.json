@@ -6,13 +6,13 @@
     "launch": {
       "type": "object",
       "description": "center to server. Start a worker for the cap `parent-id`.",
-      "required": ["protocol", "callType", "order", "parent-id", "model", "prompt", "ws"],
+      "required": ["protocol", "callType", "order", "parent-id", "prompt", "ws"],
       "properties": {
         "protocol": { "const": "bantou" },
         "callType": { "const": "invoke" },
         "order": { "const": "launch" },
         "parent-id": { "type": "string", "minLength": 1, "description": "Name of the cap." },
-        "model": { "type": "string", "pattern": "^[A-Za-z0-9._\\[\\]][A-Za-z0-9._\\[\\]-]*$", "description": "Model of the worker." },
+        "model": { "type": "string", "pattern": "^[A-Za-z0-9._\\[\\]][A-Za-z0-9._\\[\\]-]*$", "description": "Model of the worker. Optional; when absent the server does not pass --model." },
         "prompt": { "type": "string", "minLength": 1, "description": "The work to do." },
         "ws": { "type": "string", "minLength": 1, "description": "Destination of the center's ws." }
       },

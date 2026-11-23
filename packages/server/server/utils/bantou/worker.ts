@@ -35,7 +35,8 @@ export interface WorkerRunInput {
   dir: string;
   parentId: string;
   ws: string;
-  model: string;
+  /** 省略されたら --model を付けない。 */
+  model?: string;
   mode: RunMode;
   /** new はこの id で作る。resume はこの id を --resume する。 */
   sessionId: string;
@@ -162,5 +163,5 @@ export function createWorkerJob(deps: WorkerDeps, input: WorkerRunInput, kind: "
 export async function resumeInput(dir: string, prompt: string): Promise<WorkerRunInput | undefined> {
   const st = await readState(dir);
   if (st === undefined) return undefined;
-  return { workerId: st.worker_id, dir, parentId: st.parent_id, ws: st.ws, model: st.model, mode: "resume", sessionId: st.session_id, prompt };
+  return { workerId: st.worker_id, dir, parentId: st.parent_id, ws: st.ws, ...(st.model !== undefined ? { model: st.model } : {}), mode: "resume", sessionId: st.session_id, prompt };
 }

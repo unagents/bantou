@@ -14,7 +14,8 @@ export interface WorkerState {
   parent_id: string;
   /** launch の ws。 */
   ws: string;
-  model: string;
+  /** launch の model。省略されたら無し（--model を付けない）。 */
+  model?: string;
   last_started_at: string | null;
   last_finished_at: string | null;
 }
@@ -45,7 +46,7 @@ export async function readState(dir: string): Promise<WorkerState | undefined> {
     !isString(o.session_id) ||
     !isString(o.parent_id) ||
     !isString(o.ws) ||
-    !isString(o.model) ||
+    (o.model !== undefined && !isString(o.model)) ||
     !isNullableString(o.last_started_at) ||
     !isNullableString(o.last_finished_at)
   ) {
@@ -56,7 +57,7 @@ export async function readState(dir: string): Promise<WorkerState | undefined> {
     session_id: o.session_id,
     parent_id: o.parent_id,
     ws: o.ws,
-    model: o.model,
+    ...(o.model !== undefined ? { model: o.model } : {}),
     last_started_at: o.last_started_at,
     last_finished_at: o.last_finished_at,
   };

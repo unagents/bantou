@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createRemoteManager, DEFAULT_WORKER_MODEL, type RemoteManager, type RemoteRecord } from "../src/remotes.js";
+import { createRemoteManager, type RemoteManager, type RemoteRecord } from "../src/remotes.js";
 import type { LaunchInput, ReplyInput, ServerLink } from "../src/server-link.js";
 import { createWorkerTracker } from "../src/worker-ws.js";
 
@@ -70,9 +70,10 @@ test("send: parent-id = cap の名前（<session>-cap）、model 省略は既定
   const s = setup();
   await s.manager.restore();
   const r = await s.manager.send({ owner: "pm1", server: "bantou-server-aaaaaaaaaa", prompt: "do it" });
-  assert.deepEqual(r, { remote_id: "pm1-cap@bantou-server-aaaaaaaaaa", server: "bantou-server-aaaaaaaaaa", model: DEFAULT_WORKER_MODEL, sent: true });
+  assert.deepEqual(r, { remote_id: "pm1-cap@bantou-server-aaaaaaaaaa", server: "bantou-server-aaaaaaaaaa", sent: true });
   const launch = s.calls.find((c) => c.op === "launch");
-  assert.deepEqual(launch, { op: "launch", server: "bantou-server-aaaaaaaaaa", arg: { parentId: "pm1-cap", model: DEFAULT_WORKER_MODEL, prompt: "do it", ws: WS } });
+  assert.deepEqual(launch, { op: "launch", server: "bantou-server-aaaaaaaaaa", arg: { parentId: "pm1-cap", prompt: "do it", ws: WS } });
+  assert.equal("model" in (launch as { arg: object }).arg, false, "model を省くと launch に model を入れない");
   const list = s.manager.list({ owner: "pm1" });
   assert.equal(list.length, 1);
   assert.equal(list[0]!.remote_id, "pm1-cap@bantou-server-aaaaaaaaaa");
@@ -93,7 +94,7 @@ test("send: 同じ session × server は 1 件のまま（model は最後の lau
   await s.manager.send({ owner: "pm1", server: "srv-a", prompt: "two", model: "sonnet" });
   await s.manager.send({ owner: "pm1", server: "srv-b", prompt: "three" });
   const list = s.manager.list({ owner: "pm1" });
-  assert.deepEqual(list.map((v) => [v.server, v.model]), [["srv-a", "sonnet"], ["srv-b", DEFAULT_WORKER_MODEL]]);
+  assert.deepEqual(list.map((v) => [v.server, v.model]), [["srv-a", "sonnet"], ["srv-b", undefined]]);
   assert.deepEqual(s.manager.list({ owner: "pm2" }), []);
   // remote_id は parent-id と server の名前の組で一意（parent-id は同じ）
   assert.deepEqual(list.map((v) => v.remote_id), ["pm1-cap@srv-a", "pm1-cap@srv-b"]);

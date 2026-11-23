@@ -50,7 +50,7 @@ export function brokerUrl(bind: string, port: number): string {
 export function describeMessage(msg: ServerMessage): string {
   switch (msg.order) {
     case "launch":
-      return `parent-id=${msg["parent-id"]} model=${msg.model} ws=${redactUrl(msg.ws)} prompt=${ignoreText(msg.prompt).slice(0, 80)}`;
+      return `parent-id=${msg["parent-id"]} model=${msg.model ?? "(指定なし)"} ws=${redactUrl(msg.ws)} prompt=${ignoreText(msg.prompt).slice(0, 80)}`;
     case "stop":
       return `parent-id=${msg["parent-id"]}`;
     case "answer":
@@ -110,7 +110,7 @@ export function createDispatcher(d: DispatchDeps): Dispatcher {
           dir: workerDir(d.workspace, workerId),
           parentId: msg["parent-id"],
           ws: msg.ws,
-          model: msg.model,
+          ...(msg.model !== undefined ? { model: msg.model } : {}),
           mode: "new",
           sessionId: randomUUID(),
           prompt: msg.prompt,

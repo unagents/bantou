@@ -53,7 +53,8 @@ export interface LinkClient {
 /** launch の入力（center が組み立てる。本文の protocol / callType / order は link が付ける）。 */
 export interface LaunchInput {
   parentId: string;
-  model: string;
+  /** 省略すると launch に model を入れない。 */
+  model?: string;
   prompt: string;
   ws: string;
 }
@@ -168,7 +169,7 @@ export function createServerLink(opts: {
       client = c;
       log(`messenger 接続: name=${name} peer=${c.peer?.id ?? "?"}`);
     },
-    launch: (server, i) => sendTo(server, { protocol: "bantou", callType: "invoke", order: "launch", "parent-id": i.parentId, model: i.model, prompt: i.prompt, ws: i.ws }),
+    launch: (server, i) => sendTo(server, { protocol: "bantou", callType: "invoke", order: "launch", "parent-id": i.parentId, ...(i.model !== undefined ? { model: i.model } : {}), prompt: i.prompt, ws: i.ws }),
     stop: (server, parentId) => sendTo(server, { protocol: "bantou", callType: "invoke", order: "stop", "parent-id": parentId }),
     reply: (server, i) =>
       i.order === "answer"

@@ -33,7 +33,7 @@ export function isLaunchMessage(v: unknown): v is LaunchMessage {
     isRecord(v) &&
     isBase(v, "invoke", "launch") &&
     nonEmpty(v["parent-id"]) &&
-    isValidModel(v.model) &&
+    (v.model === undefined || isValidModel(v.model)) &&
     nonEmpty(v.prompt) &&
     nonEmpty(v.ws)
   );

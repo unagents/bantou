@@ -18,8 +18,6 @@ export const OWNER_PATTERN = /^[A-Za-z0-9_-]+$/;
 /** remote_wait の既定・上限（秒）。 */
 export const WAIT_DEFAULT_SEC = 600;
 export const WAIT_MAX_SEC = 1800;
-/** remote_send で model を省いた時に launch へ載せるモデル（launch は model が必須）。 */
-export const DEFAULT_WORKER_MODEL = "sonnet";
 /** 集計の変化（running の件数）を見直す間隔（ms）。60 秒の無音で「止まっている」へ変わる時は、書き込みの event が無い。 */
 export const SUMMARY_CHECK_MS = 5_000;
 
@@ -89,7 +87,7 @@ const noNulMsg = { message: "NUL 文字を含められない" };
 /** remote_send の入力（remote_create も同じ）。 */
 export const remoteSendSchema = {
   server: serverArg,
-  model: z.string().regex(MODEL_PATTERN, "英数字と . _ [ ] - のみ（先頭は - 不可）").optional().describe(`worker のモデル。省略時は ${DEFAULT_WORKER_MODEL}`),
+  model: z.string().regex(MODEL_PATTERN, "英数字と . _ [ ] - のみ（先頭は - 不可）").optional().describe("worker のモデル。省略すると launch に model を入れない（server は --model を付けない）"),
   prompt: z.string().min(1).refine(noNul, noNulMsg).describe("worker にさせる作業"),
 };
 
@@ -124,7 +122,7 @@ export interface RemoteSendInput {
 export interface RemoteSendResult {
   remote_id: string;
   server: string;
-  model: string;
+  model?: string;
   sent: true;
 }
 
@@ -305,29 +303,30 @@ export function createRemoteManager(opts: {
       checkOwner(input.owner);
       checkServer(input.server);
       if (input.prompt.length === 0 || input.prompt.includes("\0")) throw new Error("prompt が不正（空・NUL 文字は不可）");
-      const model = input.model ?? DEFAULT_WORKER_MODEL;
-      if (!MODEL_PATTERN.test(model)) throw new Error("model が不正: 英数字と . _ [ ] - のみ（先頭は - 不可）");
+      const model = input.model;
+      if (model !== undefined && !MODEL_PATTERN.test(model)) throw new Error("model が不正: 英数字と . _ [ ] - のみ（先頭は - 不可）");
       checkScope(input.owner, input.server);
       const ws = opts.wsUrl();
       if (ws === undefined) throw new Error("launch を送れない: center の ws の宛先が決まらない（bind が loopback で、config の publicHost が無い。server から届く宛先を publicHost に書く）");
       const parentId = capSessionName(input.owner);
-      await link.launch(input.server, { parentId, model, prompt: input.prompt, ws });
+      await link.launch(input.server, { parentId, ...(model !== undefined ? { model } : {}), prompt: input.prompt, ws });
       tracker.launched(parentId);
       let rec = find(input.owner, input.server);
       if (!rec) {
-        rec = { remote_id: remoteIdOf(parentId, input.server), session: input.owner, server: input.server, serverName: input.server, model, createdAt: new Date(nowMs()).toISOString() };
+        rec = { remote_id: remoteIdOf(parentId, input.server), session: input.owner, server: input.server, serverName: input.server, ...(model !== undefined ? { model } : {}), createdAt: new Date(nowMs()).toISOString() };
         records.push(rec);
       } else {
         rec.remote_id = remoteIdOf(parentId, input.server);
-        rec.model = model;
+        if (model !== undefined) rec.model = model;
+        else delete rec.model;
       }
       await persist();
       wake();
       opts.memoryEvents?.task(input.owner, { capId: parentId, taskId: newLaunchId(), goal: input.prompt });
-      log(`remote launch: parent-id=${parentId} server=${input.server} model=${model}`);
+      log(`remote launch: parent-id=${parentId} server=${input.server} model=${model ?? "(指定なし)"}`);
       // 版の確認（答えは版の表示にだけ使う。届かなくても launch は成功）
       void link.requestServerInfo(input.server).catch((e: unknown) => log(`server-info を送れない: ${input.server} ${e instanceof Error ? e.message : String(e)}`));
-      return { remote_id: remoteIdOf(parentId, input.server), server: input.server, model, sent: true };
+      return { remote_id: remoteIdOf(parentId, input.server), server: input.server, ...(model !== undefined ? { model } : {}), sent: true };
     },
 
     async stop({ owner, server }) {

@@ -134,6 +134,19 @@ test("dispatcher: launch は新しい worker（session-id を自前で作る）�
   }
 });
 
+test("dispatcher: launch の model は省略できる（job の input に model が無い = --model を付けない）", async () => {
+  const r = await drig();
+  try {
+    const { model: _omit, ...noModel } = launchBody;
+    await createDispatcher(r.d).handle(msg(noModel));
+    assert.equal(r.jobs.length, 1);
+    assert.equal("model" in r.jobs[0]!.input, false);
+    assert.equal(r.jobs[0]!.input.model, undefined);
+  } finally {
+    await r.cleanup();
+  }
+});
+
 test("dispatcher: stop は parent-id で queue.stop。返事は無い", async () => {
   const r = await drig();
   try {

@@ -46,7 +46,10 @@ test("guards reject invalid input", () => {
   assert.equal(isLaunchMessage({ ...launch, callType: "reply" }), false);
   assert.equal(isLaunchMessage({ ...launch, "parent-id": "" }), false);
   assert.equal(isLaunchMessage({ ...launch, model: "-x" }), false);
-  assert.equal(isLaunchMessage({ ...launch, model: undefined }), false);
+  assert.equal(isLaunchMessage({ ...launch, model: null }), false);
+  assert.equal(isLaunchMessage({ ...launch, model: "" }), false);
+  const { model: _omit, ...noModel } = launch;
+  assert.equal(isLaunchMessage(noModel), true, "model は省略できる");
   assert.equal(isLaunchMessage({ ...launch, prompt: "" }), false);
   assert.equal(isLaunchMessage({ ...launch, prompt: "a\0b" }), false);
   assert.equal(isLaunchMessage({ ...launch, ws: "" }), false);
@@ -113,7 +116,9 @@ test("protocol.json required fields agree with the guards", () => {
   const m = manifest.messages;
   const samples = { launch, stop, answer, approve, reject, "server-info": serverInfo, "server-info_reply": serverInfoReply };
   for (const [k, v] of Object.entries(samples)) {
-    assert.deepEqual([...m[k].required].sort(), Object.keys(v).sort(), k);
+    // launch の model は省略できる（required に入らない）
+    const expected = Object.keys(v).filter((f) => !(k === "launch" && f === "model"));
+    assert.deepEqual([...m[k].required].sort(), expected.sort(), k);
     for (const f of Object.keys(v)) {
       if (f === "protocol" || f === "callType" || f === "order") assert.equal(m[k].properties[f].const, v[f], `${k}.${f}`);
       else assert.ok(f in m[k].properties, `${k}.${f}`);

@@ -22,8 +22,8 @@ export interface LaunchMessage extends MessageBase {
   order: "launch";
   /** Name of the cap. Non-empty. */
   "parent-id": string;
-  /** Model of the worker (MODEL_PATTERN). */
-  model: string;
+  /** Model of the worker (MODEL_PATTERN). Optional; absent means no --model. */
+  model?: string;
   /** The work to do. Non-empty. */
   prompt: string;
   /** Destination of the center's ws. Non-empty. */
