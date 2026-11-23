@@ -121,7 +121,10 @@ async function subscribe(url: string, query: string) {
       buf += dec.decode(r.value, { stream: true }).replace(/\r\n/g, "\n");
     }
   };
-  return { next, abort: () => ac.abort(), ended: () => ended };
+  // 届かない時にテストが固まらないよう上限を付ける（失敗として落とす）
+  const nextOrFail = () =>
+    Promise.race([next(), new Promise<never>((_, rej) => setTimeout(() => rej(new Error("SSE が 3 秒届かない")), 3000).unref())]);
+  return { next: nextOrFail, abort: () => ac.abort(), ended: () => ended };
 }
 
 /** 条件が成り立つまで待つ（上限つき）。 */
