@@ -242,10 +242,22 @@ test("query terminalOutputSince: after より後のチャンク（base64）。�
     assert.equal((ahead.data as { terminalOutputSince: { reset: boolean } }).terminalOutputSince.reset, true);
     const none = await q('{terminalOutputSince(session:"nope"){reset}}');
     assert.equal(none.errors?.[0].message, "未定義の session");
-    // 取り直しは購読を残さない（次の push で listener が溜まらない）
+    // 取り直しは購読を残さない（subscribe した数だけ解除される）
+    let live = 0;
+    const orig = core.subscribe.bind(core);
+    core.subscribe = (n, a, l) => {
+      const u = orig(n, a, l);
+      if (!u) return u;
+      live++;
+      return () => {
+        live--;
+        u();
+      };
+    };
     core.push("t", Buffer.from("d"));
     const after = await q('{terminalOutputSince(session:"t",after:3){chunks{id}}}');
     assert.deepEqual(after.data, { terminalOutputSince: { chunks: [{ id: 4 }] } });
+    assert.equal(live, 0);
   } finally {
     await h.close();
   }
