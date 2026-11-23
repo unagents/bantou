@@ -114,7 +114,7 @@ test("graphql: 今の /mcp は並べて動く（GraphQL を足しても変わら
   }
 });
 
-test("graphql schema: 3.1〜3.3 の表の項目が query / mutation / subscription に漏れなく有り、resolver の stub が 1 対 1 で付く", () => {
+test("graphql schema: 3.1〜3.3 の表の項目が query / mutation / subscription に漏れなく有り、resolver が 1 対 1 で付く", () => {
   const schema = buildSchema();
   const fieldsOf = (t: GraphQLObjectType | null | undefined) => Object.keys(t?.getFields() ?? {}).sort();
   assert.deepEqual(fieldsOf(schema.getQueryType()), [...QUERY_FIELDS].sort());
@@ -125,11 +125,9 @@ test("graphql schema: 3.1〜3.3 の表の項目が query / mutation / subscripti
   for (const f of Object.values(schema.getSubscriptionType()!.getFields())) assert.equal(typeof f.subscribe, "function", `Subscription.${f.name} の subscribe`);
 });
 
-test("graphql: 土台の stub は NOT_IMPLEMENTED を返す（mutation・subscription(SSE)。query は実装済みで graphql-query.test.ts）", async () => {
+test("graphql: 土台の stub は NOT_IMPLEMENTED を返す（subscription(SSE)。query は graphql-query.test.ts、mutation は graphql-mutation.test.ts で実装済み）", async () => {
   const { h, url } = await boot();
   try {
-    const m = (await (await gql(url, 'mutation{wakeSession(name:"a"){name}}')).json()) as { errors: { extensions: { code: string } }[] };
-    assert.equal(m.errors[0].extensions.code, "NOT_IMPLEMENTED");
     const s = await gql(url, "subscription{sessionMessage{session}}", AUTH, { accept: "text/event-stream" });
     assert.equal(s.status, 200);
     assert.match(s.headers.get("content-type") ?? "", /text\/event-stream/);
