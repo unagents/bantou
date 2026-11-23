@@ -10,6 +10,7 @@ import { createSchemaServer, SCHEMA_MCP_PATH, schemaTokenOf, type SchemaSource }
 import type { Core } from "./core.js";
 import type { EventHub } from "./events.js";
 import type { SessionTokens } from "./session-auth.js";
+import { attachWorkerWs, type WorkerTracker } from "./worker-ws.js";
 import type { Logger } from "./log.js";
 import { ATTACHMENT_TYPES, AttachmentError, MAX_ATTACHMENT_BYTES, matchesMagic, mediaType, readBytes, saveAttachment } from "./attachments.js";
 
@@ -176,6 +177,8 @@ export async function startHttpServer(opts: {
   schemas?: SchemaSource;
   /** セッション増減の通知。渡すと GET /events（外向け token）を提供する。 */
   events?: EventHub;
+  /** 渡すと worker の ws の口（WORKER_WS_PATH。認証は token の query）を提供し、受けた書き込みをここへ記録する。 */
+  workerTracker?: WorkerTracker;
   /** SSE の keep-alive 間隔（テスト用）。 */
   keepAliveMs?: number;
   port: number;
@@ -603,6 +606,8 @@ export async function startHttpServer(opts: {
   allowed = allowedHostsFor(opts.bind, port);
   log(`MCP http 待受: http://${opts.bind.includes(":") ? `[${opts.bind}]` : opts.bind}:${port}${MCP_PATH} (Bearer 認証${allowed ? "" : "、Host 検査なし"})`);
 
+  const workerWs = opts.workerTracker ? attachWorkerWs(http, { token, tracker: opts.workerTracker, log }) : undefined;
+
   const sweep = setInterval(() => {
     const now = Date.now();
     for (const [id, s] of [...sessions]) {
@@ -617,6 +622,7 @@ export async function startHttpServer(opts: {
     port,
     close: async () => {
       clearInterval(sweep);
+      workerWs?.close();
       const closed = new Promise<void>((resolve) => http.close(() => resolve()));
       http.closeAllConnections();
       for (const s of [...sessions.values()]) {

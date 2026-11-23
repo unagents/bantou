@@ -31,12 +31,12 @@ test("master-cap-role: session 名が入り、作業は remote-cap に回す旨�
   const t = MASTER_CAP_ROLE.text({ session: "pm-x" });
   assert.ok(t.includes("「pm-x-cap」"));
   assert.ok(t.includes("自分では実装"));
-  for (const tool of ["remote_send", "remote_wait", "remote_list", "worker_reply", "remote_delete"]) assert.ok(t.includes(tool), tool);
-  assert.ok(t.includes("repo / branch の引数は使わず"));
-  assert.ok(t.includes("progress は push されない。進捗は remote_list で見る"));
-  assert.ok(t.includes("worker の report（ask / approve / done）は messenger の push"));
-  assert.ok(!t.includes("（progress / ask / approve / done）"));
-  assert.equal(MASTER_CAP_ROLE.version, 6);
+  for (const tool of ["remote_send", "remote_wait", "remote_list", "worker_reply", "remote_stop"]) assert.ok(t.includes(tool), tool);
+  assert.ok(t.includes("引数は server・prompt・model"));
+  assert.ok(t.includes("動きは remote_list で見る"));
+  assert.ok(t.includes("server から cap の名前（この session）に直接届く（center は転送しない）"));
+  assert.ok(!t.includes("remote_delete"));
+  assert.equal(MASTER_CAP_ROLE.version, 7);
 });
 
 test("master-cap-availability: 2 つ目に並び、いつでも受けられる・remote_send・background・turn を塞がない旨がある。label は master-cap-availability@2", () => {
@@ -60,7 +60,7 @@ test("buildSystemInstructions: 出力で master-cap-availability の文面が ma
 });
 
 test("describeSystemInstructions: 既定は 6 件（base-spec, role, availability, memory, coordinator, resession の順）。memory・coordinator は条件付きだと title で分かる", () => {
-  assert.deepEqual(describeSystemInstructions().map((d) => `${d.id}@${d.version}`), ["base-spec@1", "master-cap-role@6", "master-cap-availability@2", "memory@1", "coordinator@4", "resession@3"]);
+  assert.deepEqual(describeSystemInstructions().map((d) => `${d.id}@${d.version}`), ["base-spec@1", "master-cap-role@7", "master-cap-availability@2", "memory@1", "coordinator@4", "resession@3"]);
   assert.ok(describeSystemInstructions()[3]!.title.includes("設定がある session だけ"));
   assert.ok(describeSystemInstructions()[4]!.title.includes("統括の MCP の server"));
 });
@@ -70,9 +70,9 @@ test("memory@1: memory 設定がある session だけに付く。context / recal
   assert.ok(!MEMORY_USAGE.title.includes("\n"));
   const t = MEMORY_USAGE.text({ session: "s", memory: true });
   for (const w of ["mcp__memory__", "context", "recall", "起動した時", "判断する前", "自動で渡す", "自分では書き込み"]) assert.ok(t.includes(w), w);
-  assert.deepEqual(applicableParts({ session: "s" }).map(partLabel), ["base-spec@1", "master-cap-role@6", "master-cap-availability@2"]);
-  assert.deepEqual(applicableParts({ session: "s", memory: false }).map(partLabel), ["base-spec@1", "master-cap-role@6", "master-cap-availability@2"]);
-  assert.deepEqual(applicableParts({ session: "s", memory: true }).map(partLabel), ["base-spec@1", "master-cap-role@6", "master-cap-availability@2", "memory@1"]);
+  assert.deepEqual(applicableParts({ session: "s" }).map(partLabel), ["base-spec@1", "master-cap-role@7", "master-cap-availability@2"]);
+  assert.deepEqual(applicableParts({ session: "s", memory: false }).map(partLabel), ["base-spec@1", "master-cap-role@7", "master-cap-availability@2"]);
+  assert.deepEqual(applicableParts({ session: "s", memory: true }).map(partLabel), ["base-spec@1", "master-cap-role@7", "master-cap-availability@2", "memory@1"]);
 });
 
 test("buildSystemInstructions: memory 無しの出力は base + role + availability のみ。memory ありは末尾に memory@1 が空行区切りで付く", () => {
@@ -106,10 +106,10 @@ test("buildSystemInstructions: 部品を順に空行で結合。空の部品は�
 });
 
 test("master-cap-role v3: 受けた指示の計画を立て、作業のまとまりごとに cap を起こし直す・まとまりが終わったら閉じる旨があり、数値の決まりは書かない", () => {
-  assert.equal(MASTER_CAP_ROLE.version, 6);
-  assert.equal(partLabel(MASTER_CAP_ROLE), "master-cap-role@6");
+  assert.equal(MASTER_CAP_ROLE.version, 7);
+  assert.equal(partLabel(MASTER_CAP_ROLE), "master-cap-role@7");
   const t = MASTER_CAP_ROLE.text({ session: "s" });
-  for (const w of ["[計画と cap の起こし直し]", "計画を立てる", "作業のまとまりごとに起こし直す", "使い回し続けない", "remote_delete で cap を閉じる", "新しい会話", "last_error_text", "master-cap が決める"]) assert.ok(t.includes(w), w);
+  for (const w of ["[計画と cap の起こし直し]", "計画を立てる", "作業のまとまりごとに起こし直す", "使い回し続けない", "remote_stop で止める", "新しい worker", "master-cap が決める"]) assert.ok(t.includes(w), w);
   const section = t.slice(t.indexOf("[計画と cap の起こし直し]"), t.indexOf("[自分でしてよいこと]"));
   assert.ok(!/\d/.test(section), "数値の決まりを書かない");
 });
@@ -167,4 +167,15 @@ test("resession v2: session_resession が付く session（resession: true）だ�
   assert.ok(!t.includes("mcp__memory__"));
   assert.ok(!t.includes("eventId"));
   assert.equal(RESESSION_USAGE.text({ session: "s", resession: true }), t);
+});
+
+test("指示文: 範囲の指定がある session だけ「使う server の範囲」の節が出る（範囲・置き場・remote_stop の片付け）。指定が無ければ出ない", () => {
+  const on = buildSystemInstructions({ session: "s", servers: ["srv-a", "srv-x"] });
+  assert.match(on, /\[使う server の範囲\]/);
+  assert.match(on, /srv-a, srv-x（server の名前）/);
+  assert.match(on, /settings\.servers/);
+  assert.match(on, /server を指して remote_stop/);
+  assert.doesNotMatch(on, /remote_delete/);
+  assert.match(buildSystemInstructions({ session: "s", servers: [] }), /使える server は無い/);
+  assert.doesNotMatch(buildSystemInstructions({ session: "s" }), /使う server の範囲\]/);
 });

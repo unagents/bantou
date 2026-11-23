@@ -1,6 +1,5 @@
 import { isAbsolute } from "node:path";
 import { z } from "zod";
-import { SERVER_ID_PATTERN } from "@agent-hand/bantou-protocol";
 import { SESSION_INSTRUCTIONS_MAX } from "./config.js";
 import { memoryDefIssues, memoryDefOf, type McpServerDef } from "./mcp-server-def.js";
 
@@ -8,7 +7,7 @@ import { memoryDefIssues, memoryDefOf, type McpServerDef } from "./mcp-server-de
 export const ADD_DIRS_MAX = 20;
 /** session が使う server の指定（`servers`）の最大数（1 つの設定あたり）。 */
 export const SERVERS_MAX = 50;
-/** host 名の形式（英数字で始まり、英数字と . _ - のみ。253 文字以内）。server_id は SERVER_ID_PATTERN。 */
+/** server の名前（agent-messenger の名前）の形式（英数字で始まり、英数字と . _ - のみ。253 文字以内）。 */
 export const HOST_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$/;
 
 /** 出力スタイル本文の最大文字数。 */
@@ -126,7 +125,7 @@ export function guardrailSchemaNames(settings: unknown): string[] {
 
 const serverRefSchema = z
   .string()
-  .refine((v) => SERVER_ID_PATTERN.test(v) || HOST_NAME_PATTERN.test(v), { message: "server の指定は host 名か server_id（英数字と . _ - のみ）" });
+  .refine((v) => HOST_NAME_PATTERN.test(v), { message: "server の指定は server の名前（agent-messenger の名前。英数字と . _ - のみ）" });
 
 const addDirSchema = z.string().min(1).refine((p) => isAbsolute(p), { message: "参照フォルダは絶対パスで指定する" });
 
@@ -416,8 +415,8 @@ export function composeServers(own: ProjectSettings | undefined): string[] | und
   return readSettings(own).servers;
 }
 
-/** server（server_id と host 名）が `servers` の指定に入っているか。server_id は完全一致、host 名は大文字小文字を区別しない。 */
-export function serverAllowed(servers: string[] | undefined, s: { server_id?: string; host?: string }): boolean {
+/** server（agent-messenger の名前。`host` に渡す）が `servers` の指定に入っているか。大文字小文字を区別しない。 */
+export function serverAllowed(servers: string[] | undefined, s: { host?: string }): boolean {
   if (servers === undefined) return true;
-  return servers.some((e) => (s.server_id !== undefined && e === s.server_id) || (s.host !== undefined && e.toLowerCase() === s.host.toLowerCase()));
+  return servers.some((e) => s.host !== undefined && e.toLowerCase() === s.host.toLowerCase());
 }

@@ -96,6 +96,12 @@ export const configSchema = z
     workspace: absPath.optional(),
     /** http transport の `/mcp` が要求する Bearer token。stdio では使わない。無い・短い時は http が起動しない。 */
     token: z.string().optional(),
+    /**
+     * server から届く center の宛先（host。launch の `ws` = `ws://<host>:<port>/ws/worker?token=<token>` に使う）。
+     * 指定があればそれを使う。無ければ、bind が loopback でも wildcard（0.0.0.0 / ::）でもない時だけその bind を宛先にする。
+     * どちらも無い時は launch を送らず error（remote_send）。
+     */
+    publicHost: z.string().min(1).optional(),
   })
   .superRefine((cfg, ctx) => {
     for (const key of ["projects", "servers"] as const) {
@@ -126,6 +132,8 @@ export interface Config {
   workspace?: string;
   /** http transport の Bearer token（未設定なら undefined）。 */
   token?: string;
+  /** server から届く center の宛先 host（未設定なら undefined）。 */
+  publicHost?: string;
 }
 
 /** zod の検証結果から Config を作る（logDir の既定は config と同じ場所の center-logs）。 */
@@ -143,12 +151,13 @@ export function parseConfig(data: unknown, configPath: string, warn?: (msg: stri
       .join("; ");
     throw new Error(`config が不正: ${issues}`);
   }
-  const { logDir, token, workspace, ...rest } = r.data;
+  const { logDir, token, workspace, publicHost, ...rest } = r.data;
   return {
     ...rest,
     logDir: logDir ?? join(dirname(resolve(configPath)), "center-logs"),
     ...(workspace ? { workspace } : {}),
     ...(token ? { token } : {}),
+    ...(publicHost ? { publicHost } : {}),
   };
 }
 

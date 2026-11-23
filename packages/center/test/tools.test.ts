@@ -11,7 +11,6 @@ import type { SessionManager } from "../src/sessions.js";
 import { resolveOwner } from "../src/tools.js";
 import { CENTER_ONLY_MCP_ERROR, LEGACY_KEYS_ERROR } from "../src/project-settings.js";
 import type { ServerLink } from "../src/server-link.js";
-import type { Follow } from "../src/follow.js";
 import type { LoginFlow } from "../src/login.js";
 
 const rc = (project: string): RcStatus => ({
@@ -21,7 +20,7 @@ const rc = (project: string): RcStatus => ({
   auth: "ok", loginUrl: null, loginError: null,
 });
 
-async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partial<SessionManager>; remotes?: Partial<RemoteManager>; follow?: Follow; login?: LoginFlow; workspace?: string; systemInstructions?: { id: string; version: number; title: string }[]; launcher?: boolean; resession?: { requestSleep: (name: string) => Promise<never> } } = {}) {
+async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partial<SessionManager>; remotes?: Partial<RemoteManager>; login?: LoginFlow; workspace?: string; systemInstructions?: { id: string; version: number; title: string }[]; launcher?: boolean; resession?: { requestSleep: (name: string) => Promise<never> } } = {}) {
   const calls: unknown[] = [];
   const supervisor: RemoteControlSupervisor = {
     start: async (p) => rc(p),
@@ -34,29 +33,28 @@ async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partia
     shutdown: async () => {},
   };
   const fullLink: ServerLink = {
-    connectAll: async () => {},
-    list: async () => [{ name: "s", connected: true, reachable: true, peerId: "x" }],
-    kickCap: async (s, cmd) => {
-      calls.push({ s, cmd });
-      return { bantou: 1, type: "cap_result", cap_id: cmd.cap_id, session_id: "sid", ok: true, result_text: "done" };
-    },
-    resumeWorker: async (_s, cmd) => ({
-      bantou: 1, type: "worker_result", worker_id: cmd.worker_id, session_id: "sid", ok: false, result_text: "", error: "bad",
-    }),
-    status: async () => ({ bantou: 1, type: "error", ok: false, message: "ng", command: "status" }),
+    name: "bantou-center-0123456789",
+    connect: async () => {},
+    launch: async () => {},
+    stop: async () => {},
+    reply: async () => {},
+    requestServerInfo: async () => {},
+    serverVersionOf: () => undefined,
+    notifyPeer: async () => ({ ok: false, reason: "n/a" }),
+    peerMarkOf: async () => null,
     close: async () => {},
     ...link,
   };
   const sessions = { create: async (i: unknown) => ({ called: "create", i }), getSettings: (n: string) => ({ called: "get", n, settings: {} }), updateSettings: async (n: string, p: unknown) => ({ called: "update", n, p, settings: {} }), delete: async (n: string) => ({ name: n, deleted: true }), list: () => [], ...mgrs.sessions } as unknown as SessionManager;
   const remotes = {
-    send: async (i: unknown) => (calls.push({ remoteSend: i }), { remote_id: "c-1", server: "id", serverName: "n", state: "running", created: false, task_id: "t-1" }),
-    workerReply: async (i: unknown) => (calls.push({ workerReply: i }), { remote_id: "c-1", server: "id", worker_id: "w-1", accepted: true }),
-    delete: async (i: unknown) => (calls.push({ remoteDelete: i }), { remote_id: "r-1", deleted: true, stopped: true }),
+    send: async (i: unknown) => (calls.push({ remoteSend: i }), { remote_id: "pm1-cap", server: (i as { server: string }).server, model: (i as { model?: string }).model ?? "sonnet", sent: true }),
+    reply: async (i: unknown) => (calls.push({ reply: i }), { server: "srv-a", session_id: "s-1", order: "answer", sent: true }),
+    stop: async (i: unknown) => (calls.push({ remoteStop: i }), { remote_id: "pm1-cap", server: (i as { server: string }).server, sent: true, forgotten: true }),
     list: (f: unknown) => (calls.push({ remoteList: f }), []),
     scopeOf: () => ({ servers: undefined, out_of_scope: 0 }),
     ...mgrs.remotes,
   } as unknown as RemoteManager;
-  const server = createCenterServer({ ...(mgrs.systemInstructions ? { systemInstructions: mgrs.systemInstructions } : {}), config: parseConfig(mgrs.workspace ? { workspace: mgrs.workspace } : {}, "/x/c.json"), supervisor, link: fullLink, sessions, remotes, follow: mgrs.follow, login: mgrs.login, ...(mgrs.launcher !== undefined ? { launcher: mgrs.launcher } : {}), ...(mgrs.resession ? { resession: mgrs.resession } : {}) });
+  const server = createCenterServer({ ...(mgrs.systemInstructions ? { systemInstructions: mgrs.systemInstructions } : {}), config: parseConfig(mgrs.workspace ? { workspace: mgrs.workspace } : {}, "/x/c.json"), supervisor, link: fullLink, sessions, remotes, login: mgrs.login, ...(mgrs.launcher !== undefined ? { launcher: mgrs.launcher } : {}), ...(mgrs.resession ? { resession: mgrs.resession } : {}) });
   const [ct, st] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "t", version: "0" });
   await Promise.all([server.connect(st), client.connect(ct)]);
@@ -68,19 +66,27 @@ async function connect(link: Partial<ServerLink> = {}, mgrs: { sessions?: Partia
     await Promise.all([s.connect(s2), cl.connect(c2)]);
     return cl;
   };
-  return { client, calls, session, close: () => client.close() };
+  /** 同じ、版の控え（link.serverVersionOf）を渡した session 向け窓口。省略時は版が全部不明。 */
+  const sessionWithLink = async (owner: string, linkLike: Pick<ServerLink, "serverVersionOf"> = { serverVersionOf: () => undefined }) => {
+    const s = createSessionMcpServer({ remotes, link: linkLike, owner });
+    const [c2, s2] = InMemoryTransport.createLinkedPair();
+    const cl = new Client({ name: "ts", version: "0" });
+    await Promise.all([s.connect(s2), cl.connect(c2)]);
+    return cl;
+  };
+  return { client, calls, session, sessionWithLink, close: () => client.close() };
 }
 
 const text = (r: unknown): string => (r as { content: { text: string }[] }).content[0].text;
 
-test("外向けの tool は 25 個。remote_create / remote_delete / remote_send / cap_kick は無い", async () => {
+test("外向けの tool は 20 個。remote_create / remote_stop / remote_send / remote_delete / cap_kick は無い", async () => {
   const { client, close } = await connect();
   const names = (await client.listTools()).tools.map((t) => t.name).sort();
   assert.deepEqual(names, [
     "center_info", "center_settings_get", "center_settings_update", "rc_list", "rc_start", "rc_status", "rc_stop", "remote_list", "remote_wait",
-    "server_list", "server_peers", "server_retire", "server_status", "session_create", "session_delete", "session_list", "session_login", "session_login_code", "session_settings_get", "session_settings_update", "session_sleep", "session_update", "session_wake", "worker_reply", "worker_resume",
+    "session_create", "session_delete", "session_list", "session_login", "session_login_code", "session_settings_get", "session_settings_update", "session_sleep", "session_update", "session_wake", "worker_reply",
   ]);
-  for (const gone of ["remote_create", "remote_send", "remote_delete", "cap_kick"]) assert.ok(!names.includes(gone), gone);
+  for (const gone of ["remote_create", "remote_send", "remote_stop", "remote_delete", "cap_kick"]) assert.ok(!names.includes(gone), gone);
   await close();
 });
 
@@ -148,9 +154,8 @@ test("全 tool の inputSchema の pattern は u で compile でき、文字 cla
     assert.ok(tools.length > 0, label);
     for (const t of tools) collectPatterns(t.inputSchema, `${label}:${t.name}`, found);
   }
-  // remote_send の worker_model / items[].model まで辿れている事（辿り漏れの検出）
-  assert.ok(found.some((f) => f.path.startsWith("session:remote_send") && f.path.endsWith(".worker_model")), "worker_model");
-  assert.ok(found.some((f) => f.path.startsWith("session:remote_send") && f.path.includes(".items.") && f.path.endsWith(".model")), "items[].model");
+  // remote_send の model まで辿れている事（辿り漏れの検出）
+  assert.ok(found.some((f) => f.path.startsWith("session:remote_send") && f.path.endsWith(".model")), "model");
   if (process.env.PATTERN_DUMP) console.log("PATTERN_DUMP " + JSON.stringify(found));
   assert.deepEqual(badPatterns(found), []);
   await c.close();
@@ -170,10 +175,10 @@ test("center_info は { workspace, systemInstructions, launcher } を返す。�
   await b.close();
 });
 
-test("session 向けの tool は remote_send / remote_create（別名）/ remote_delete / remote_list / remote_wait / worker_reply / task_status の 7 つだけ", async () => {
+test("session 向けの tool は remote_send / remote_create（別名）/ remote_stop / remote_list / remote_wait / worker_reply / task_status の 7 つだけ", async () => {
   const { session, close } = await connect();
   const c = await session("pm1");
-  assert.deepEqual((await c.listTools()).tools.map((t) => t.name).sort(), ["remote_create", "remote_delete", "remote_list", "remote_send", "remote_wait", "task_status", "worker_reply"]);
+  assert.deepEqual((await c.listTools()).tools.map((t) => t.name).sort(), ["remote_create", "remote_list", "remote_send", "remote_stop", "remote_wait", "task_status", "worker_reply"]);
   await c.close();
   await close();
 });
@@ -202,58 +207,20 @@ test("cap_kick は外向けから呼べない", async () => {
   await close();
 });
 
-test("worker_resume: 入力検証エラー（worker_id / prompt / repo / branch）", async () => {
-  const { client, calls, close } = await connect();
-  const bad = [
-    { server: "s", worker_id: "a/b", prompt: "x" },
-    { server: "s", worker_id: "ok", prompt: "" },
-    { server: "s", worker_id: "ok", prompt: "x", repo: "--upload-pack=evil" },
-    { server: "s", worker_id: "ok", prompt: "x", branch: "-b" },
-  ];
-  for (const args of bad) {
-    let isError = false;
-    try {
-      const r = await client.callTool({ name: "worker_resume", arguments: args });
-      isError = r.isError === true;
-    } catch {
-      isError = true;
-    }
-    assert.ok(isError, JSON.stringify(args));
+test("旧 1.x の道具（worker_resume / server_status / server_list / server_peers / server_retire）は無い", async () => {
+  const { client, session, close } = await connect();
+  const names = new Set((await client.listTools()).tools.map((t) => t.name));
+  const c = await session("pm1");
+  for (const n of ["worker_resume", "server_status", "server_list", "server_peers", "server_retire", "remote_delete"]) {
+    assert.ok(!names.has(n), n);
+    assert.ok(!(await c.listTools()).tools.some((t) => t.name === n), `session:${n}`);
   }
-  assert.equal(calls.length, 0);
+  await c.close();
   await close();
 });
 
-test("worker_resume は NUL を含む prompt / repo / branch / id を拒否", async () => {
+test("rc_start / rc_stop", async () => {
   const { client, close } = await connect();
-  for (const extra of [{ prompt: "a\0" }, { repo: "u\0" }, { branch: "b\0" }, { worker_id: "w\0" }]) {
-    const args = { server: "s", worker_id: "w", prompt: "x", ...extra };
-    let isError = false;
-    try {
-      isError = (await client.callTool({ name: "worker_resume", arguments: args })).isError === true;
-    } catch {
-      isError = true;
-    }
-    assert.ok(isError, JSON.stringify(args));
-  }
-  await close();
-});
-
-test("worker_resume の ok:false と server_status の error 返信は isError", async () => {
-  const { client, close } = await connect();
-  const w = await client.callTool({ name: "worker_resume", arguments: { server: "s", worker_id: "w", prompt: "x" } });
-  assert.equal(w.isError, true);
-  assert.equal((JSON.parse(text(w)) as { error: string }).error, "bad");
-  const s = await client.callTool({ name: "server_status", arguments: { server: "s" } });
-  assert.equal(s.isError, true);
-  assert.equal((JSON.parse(text(s)) as { type: string }).type, "error");
-  await close();
-});
-
-test("server_list / rc_start / rc_stop", async () => {
-  const { client, close } = await connect();
-  const l = await client.callTool({ name: "server_list", arguments: {} });
-  assert.equal((JSON.parse(text(l)) as { name: string }[])[0].name, "s");
   const a = await client.callTool({ name: "rc_start", arguments: { project: "a" } });
   assert.equal((JSON.parse(text(a)) as RcStatus).state, "connected");
   const b = await client.callTool({ name: "rc_stop", arguments: { project: "a" } });
@@ -309,86 +276,78 @@ test("session_update は SessionManager に引数をそのまま委譲し、例�
   await close();
 });
 
-test("remote_send / remote_create（別名）: owner は session の認証済み名で固定。同じ処理。goal 以外の task の項目と worker_model は渡せる。引数 owner・model は受けない", async () => {
+test("remote_send / remote_create（別名）: owner は session の認証済み名で固定。同じ処理・同じ入力 { server, model?, prompt }。引数 owner は受けない。返り値は送った事だけ", async () => {
   const { session, calls, close } = await connect();
   const c = await session("pm1");
-  const ok = await c.callTool({ name: "remote_send", arguments: { goal: "go", server: "id" } });
-  assert.deepEqual(JSON.parse(text(ok)), { remote_id: "c-1", server: "id", serverName: "n", state: "running", created: false, task_id: "t-1" });
-  const alias = await c.callTool({ name: "remote_create", arguments: { goal: "go2" } });
-  assert.deepEqual(JSON.parse(text(alias)), JSON.parse(text(ok)));
-  // 自己申告の owner・model は schema に無いので、渡しても無視される
-  await c.callTool({ name: "remote_send", arguments: { goal: "go3", owner: "evil", model: "opus", worker_model: "haiku", repo: "https://x/y.git", branch: "main" } });
-  const full = { deliverables: { branch: "f" }, verify: { tests: ["t"] }, constraints: ["c"], workers: { items: [{ role: "review", scope: "s" }] } };
-  await c.callTool({ name: "remote_create", arguments: { goal: "go4", worker_model: "sonnet", ...full } });
+  const ok = await c.callTool({ name: "remote_send", arguments: { server: "srv-a", prompt: "go" } });
+  assert.deepEqual(JSON.parse(text(ok)), { remote_id: "pm1-cap", server: "srv-a", model: "sonnet", sent: true });
+  const alias = await c.callTool({ name: "remote_create", arguments: { server: "srv-a", prompt: "go2", model: "opus" } });
+  assert.equal(alias.isError, undefined);
+  // 自己申告の owner は schema に無いので、渡しても無視される
+  await c.callTool({ name: "remote_send", arguments: { server: "srv-b", prompt: "go3", model: "claude-sonnet-5-5", owner: "evil" } });
   assert.deepEqual(calls, [
-    { remoteSend: { owner: "pm1", goal: "go", server: "id" } },
-    { remoteSend: { owner: "pm1", goal: "go2" } },
-    { remoteSend: { owner: "pm1", goal: "go3", repo: "https://x/y.git", branch: "main", worker_model: "haiku" } },
-    { remoteSend: { owner: "pm1", goal: "go4", worker_model: "sonnet", ...full } },
+    { remoteSend: { owner: "pm1", server: "srv-a", prompt: "go" } },
+    { remoteSend: { owner: "pm1", server: "srv-a", prompt: "go2", model: "opus" } },
+    { remoteSend: { owner: "pm1", server: "srv-b", prompt: "go3", model: "claude-sonnet-5-5" } },
   ]);
-  // prompt だけ（旧形式）・形式が不正な worker_model は schema で拒否され、remotes.send は呼ばれない
-  const old = await c.callTool({ name: "remote_send", arguments: { prompt: "x" } });
-  assert.equal(old.isError, true);
-  const bad = await c.callTool({ name: "remote_send", arguments: { goal: "x", worker_model: "a b" } });
-  assert.equal(bad.isError, true);
-  assert.equal(calls.length, 4);
-  await c.close();
-  await close();
-});
-
-test("remote_send: parent_requirement_id（任意の uuid）は remotes.send へ渡る。省略時は今までと同じ呼び方。uuid でない値は拒否", async () => {
-  const { session, calls, close } = await connect();
-  const c = await session("pm1");
-  const pid = "3f2b1c64-8a52-4d6e-9f60-0a1b2c3d4e5f";
-  await c.callTool({ name: "remote_send", arguments: { goal: "g1", parent_requirement_id: pid } });
-  await c.callTool({ name: "remote_create", arguments: { goal: "g2", parent_requirement_id: pid } });
-  await c.callTool({ name: "remote_send", arguments: { goal: "g3" } });
-  assert.deepEqual(calls, [
-    { remoteSend: { owner: "pm1", goal: "g1", parent_requirement_id: pid } },
-    { remoteSend: { owner: "pm1", goal: "g2", parent_requirement_id: pid } },
-    { remoteSend: { owner: "pm1", goal: "g3" } },
-  ]);
-  const bad = await c.callTool({ name: "remote_send", arguments: { goal: "x", parent_requirement_id: "not-a-uuid" } });
-  assert.equal(bad.isError, true);
+  // 旧形式（goal だけ）・server 無し・prompt 無し・形式が不正な model は schema で拒否され、remotes.send は呼ばれない
+  assert.equal((await c.callTool({ name: "remote_send", arguments: { goal: "x" } })).isError, true);
+  assert.equal((await c.callTool({ name: "remote_send", arguments: { prompt: "x" } })).isError, true, "server は必須");
+  assert.equal((await c.callTool({ name: "remote_send", arguments: { server: "srv-a" } })).isError, true, "prompt は必須");
+  assert.equal((await c.callTool({ name: "remote_send", arguments: { server: "srv-a", prompt: "x", model: "a b" } })).isError, true);
+  assert.equal((await c.callTool({ name: "remote_send", arguments: { server: "srv-a", prompt: "a\0b" } })).isError, true);
   assert.equal(calls.length, 3);
   await c.close();
   await close();
 });
 
-test("worker_reply: session 向け・外向け（desktop の center_call）とも {remote_id?, worker_id, text, server?} を remotes.workerReply へ渡す。不正な worker_id・空の text は拒否。失敗は isError", async () => {
-  const { client, session, calls, close } = await connect(undefined, { remotes: { workerReply: async (i: unknown) => { calls.push({ workerReply: i }); if ((i as { text: string }).text === "boom") throw new Error("版が合わない"); return { remote_id: "c-1", server: "id", worker_id: "w-1", accepted: true } as never; } } });
+test("remote_send の失敗（送れない・範囲外など）は isError + {error}", async () => {
+  const { session, close } = await connect({}, { remotes: { send: async () => { throw new Error("launch を送れない"); } } });
   const c = await session("pm1");
-  const r = await c.callTool({ name: "worker_reply", arguments: { worker_id: "w-1", text: "OK 進めて" } });
-  assert.deepEqual(JSON.parse(text(r)), { remote_id: "c-1", server: "id", worker_id: "w-1", accepted: true });
-  const o = await client.callTool({ name: "worker_reply", arguments: { remote_id: "c-1", worker_id: "w-1", text: "はい", server: "id" } });
-  assert.equal(o.isError, undefined);
-  // session 向けは呼び出し元 session の owner を渡す。外向け（desktop）は渡さない
-  assert.deepEqual(calls.slice(0, 2), [{ workerReply: { owner: "pm1", worker_id: "w-1", text: "OK 進めて" } }, { workerReply: { remote_id: "c-1", worker_id: "w-1", text: "はい", server: "id" } }]);
-  assert.equal((await c.callTool({ name: "worker_reply", arguments: { worker_id: "a b", text: "x" } })).isError, true);
-  assert.equal((await c.callTool({ name: "worker_reply", arguments: { worker_id: "w-1", text: "" } })).isError, true);
-  const e = await c.callTool({ name: "worker_reply", arguments: { worker_id: "w-1", text: "boom" } });
-  assert.equal(e.isError, true);
-  assert.match(text(e), /版が合わない/);
+  const r = await c.callTool({ name: "remote_send", arguments: { server: "srv-a", prompt: "x" } });
+  assert.equal(r.isError, true);
+  assert.deepEqual(JSON.parse(text(r)), { error: "launch を送れない" });
   await c.close();
   await close();
 });
 
-test("remote_delete / remote_list: remote_list は session 向けなら自分の owner。remote_delete は呼び出し元 session の owner を渡す（引数 owner は受けない）。include_shared で旧共有 cap も。外向け remote_list は owner 引数で絞る（無ければ全件）", async () => {
+test("worker_reply: session 向け・外向け（desktop の center_call）とも {server, session_id, order, content?} を remotes.reply へ渡す。order は answer / approve / reject のみ。失敗は isError", async () => {
+  const { client, session, calls, close } = await connect(undefined, { remotes: { reply: async (i: unknown) => { calls.push({ reply: i }); if ((i as { content?: string }).content === "boom") throw new Error("送れない"); return { server: "srv-a", session_id: "s-1", order: (i as { order: string }).order, sent: true } as never; } } });
+  const c = await session("pm1");
+  const r = await c.callTool({ name: "worker_reply", arguments: { server: "srv-a", session_id: "s-1", order: "answer", content: "OK 進めて" } });
+  assert.deepEqual(JSON.parse(text(r)), { server: "srv-a", session_id: "s-1", order: "answer", sent: true });
+  const o = await client.callTool({ name: "worker_reply", arguments: { server: "srv-a", session_id: "s-1", order: "approve" } });
+  assert.equal(o.isError, undefined);
+  // session 向けは呼び出し元 session の owner を渡す。外向け（desktop）は渡さない
+  assert.deepEqual(calls.slice(0, 2), [{ reply: { owner: "pm1", server: "srv-a", session_id: "s-1", order: "answer", content: "OK 進めて" } }, { reply: { server: "srv-a", session_id: "s-1", order: "approve" } }]);
+  assert.equal((await c.callTool({ name: "worker_reply", arguments: { server: "srv-a", session_id: "s-1", order: "maybe" } })).isError, true);
+  assert.equal((await c.callTool({ name: "worker_reply", arguments: { server: "srv-a", order: "approve" } })).isError, true, "session_id は必須");
+  assert.equal((await c.callTool({ name: "worker_reply", arguments: { session_id: "s-1", order: "approve" } })).isError, true, "server は必須");
+  assert.equal((await c.callTool({ name: "worker_reply", arguments: { server: "srv-a", session_id: "", order: "approve" } })).isError, true);
+  const e = await c.callTool({ name: "worker_reply", arguments: { server: "srv-a", session_id: "s-1", order: "answer", content: "boom" } });
+  assert.equal(e.isError, true);
+  assert.match(text(e), /送れない/);
+  await c.close();
+  await close();
+});
+
+test("remote_stop / remote_list: remote_list は session 向けなら自分の owner。remote_stop は呼び出し元 session の owner を渡す（引数 owner は受けない。server は必須）。外向け remote_list は owner 引数で絞る（無ければ全件）。remote_delete は無い", async () => {
   const { client, session, calls, close } = await connect();
   const c = await session("pm1");
   await c.callTool({ name: "remote_list", arguments: {} });
-  await c.callTool({ name: "remote_delete", arguments: {} });
-  await c.callTool({ name: "remote_delete", arguments: { remote_id: "c-1", server: "id", force: true, owner: "evil" } });
-  await c.callTool({ name: "remote_list", arguments: { include_shared: true } });
+  const s = await c.callTool({ name: "remote_stop", arguments: { server: "srv-a", owner: "evil" } });
+  assert.deepEqual(JSON.parse(text(s)), { remote_id: "pm1-cap", server: "srv-a", sent: true, forgotten: true });
+  assert.equal((await c.callTool({ name: "remote_stop", arguments: {} })).isError, true, "server は必須");
+  await c.callTool({ name: "remote_list", arguments: { include_out_of_scope: true } });
   await client.callTool({ name: "remote_list", arguments: {} });
   await client.callTool({ name: "remote_list", arguments: { owner: "pm1" } });
   assert.deepEqual(calls, [
     { remoteList: { owner: "pm1" } },
-    { remoteDelete: { owner: "pm1" } },
-    { remoteDelete: { owner: "pm1", remote_id: "c-1", server: "id", force: true } },
-    { remoteList: { owner: "pm1", includeShared: true } },
+    { remoteStop: { owner: "pm1", server: "srv-a" } },
+    { remoteList: { owner: "pm1", includeOutOfScope: true } },
     { remoteList: {} }, { remoteList: { owner: "pm1", includeOutOfScope: true } },
   ]);
+  assert.ok(!(await c.listTools()).tools.some((t) => t.name === "remote_delete"));
   await c.close();
   await close();
 });
@@ -403,27 +362,20 @@ test("resolveOwner: header > query > 引数。不正な形式は投げる", () =
   assert.throws(() => resolveOwner({ requestInfo: { headers: { "x-bantou-session": "a b" } } }), /owner/);
 });
 
-test("server_peers: follow の snapshot（pair と server ごとの状態）をそのまま返す。refresh: true なら先に確認する", async () => {
-  const checks: string[] = [];
-  const snap = {
-    pair: { server: "0.3.1", protocol: "1.3.0" },
-    peers: [{ key: "h /ws", id: "id-1", name: "bantou-server", server_version: "0.3.0", protocol_version: "1.3.0", state: "updating", detail: "更新中", update: { to: "0.3.1", running: { caps: 1, workers: 0, reports: 0 } }, since: "2026-10-31T00:00:00.000Z" }],
-  };
-  const follow = { check: async () => void checks.push("check"), snapshot: () => snap } as unknown as Follow;
-  const { client, close } = await connect({}, { follow });
-  const a = await client.callTool({ name: "server_peers", arguments: {} });
-  assert.notEqual(a.isError, true);
-  assert.deepEqual(JSON.parse(text(a)), snap);
-  assert.deepEqual(checks, []);
-  await client.callTool({ name: "server_peers", arguments: { refresh: true } });
-  assert.deepEqual(checks, ["check"]);
-  await close();
-});
-
-test("server_peers: follow が無ければ isError", async () => {
-  const { client, close } = await connect();
-  const r = await client.callTool({ name: "server_peers", arguments: {} });
-  assert.equal(r.isError, true);
+test("task_status: session 向けは自分の owner の cap を cap ごとに 1 行で返し、server の版は link の控え（server-info の答え）から出す", async () => {
+  const views = [
+    { remote_id: "pm1-cap", session: "pm1", server: "srv-a", serverName: "srv-a", createdAt: "x", state: "running", owners: ["pm1"], server_label: "srv-a" },
+    { remote_id: "pm2-cap", session: "pm2", server: "srv-a", serverName: "srv-a", createdAt: "x", state: "running", owners: ["pm2"], server_label: "srv-a" },
+  ];
+  const { sessionWithLink, calls, close } = await connect({}, { remotes: { list: (f: unknown) => (calls.push({ remoteList: f }), views) as never } });
+  const c = await sessionWithLink("pm1", { serverVersionOf: (s: string) => (s === "srv-a" ? "1.2.3" : undefined) });
+  const r = JSON.parse(text(await c.callTool({ name: "task_status", arguments: {} }))) as { caps: { remote_id: string; line: string }[]; servers: string[] };
+  assert.deepEqual(r.caps.map((x) => x.line), ["pm1-cap | srv-a | 実行中"]);
+  assert.deepEqual(r.servers, ["srv-a | server 1.2.3"]);
+  assert.deepEqual(calls, [{ remoteList: { owner: "pm1", includeOutOfScope: true } }]);
+  const none = JSON.parse(text(await (await sessionWithLink("pm1")).callTool({ name: "task_status", arguments: {} }))) as { servers: string[] };
+  assert.deepEqual(none.servers, ["srv-a | server 不明"]);
+  await c.close();
   await close();
 });
 

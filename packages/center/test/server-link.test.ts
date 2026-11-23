@@ -1,51 +1,30 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { MESSENGER_PROTOCOL, type ServerNotice } from "@agent-hand/bantou-protocol";
-import { parseConfig } from "../src/config.js";
-import {
-  createClient,
-  createServerLink,
-  stripWarning,
-  type LinkClient,
-  type LinkInbound,
-  type LinkMeta,
-  type LinkPeer,
-} from "../src/server-link.js";
-
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+import { MESSENGER_PROTOCOL, isLaunchMessage, isServerMessage } from "@agent-hand/bantou-protocol";
+import { createServerLink, stripWarning, type LinkClient, type LinkInbound, type LinkMeta, type LinkPeer } from "../src/server-link.js";
 
 class FakeClient implements LinkClient {
-  sent: Record<string, unknown>[] = [];
-  sentTo: string[] = [];
-  sentMeta: Array<LinkMeta | undefined> = [];
-  /** JSON でない text（session への通知など）と delivery の記録。 */
-  sentRaw: Array<{ to: string; text: string; delivery?: string }> = [];
-  /** listPeers の返す peer。undefined なら 0.9 broker 相当（BROKER_UNSUPPORTED）。 */
-  peers: LinkPeer[] | undefined = undefined;
-  listCalls: Array<{ scope?: string; filter?: { protocol?: string; version?: string } }> = [];
+  sent: Array<{ to: string; text: string; delivery?: string; meta?: LinkMeta }> = [];
+  peers: LinkPeer[] | undefined = [];
+  listCalls: Array<{ scope?: string; filter?: unknown }> = [];
   handler: Parameters<LinkClient["onMessage"]>[0] = () => {};
-  connectCalls = 0;
   failConnect = false;
   failSend = false;
   closed = false;
-  peer = { id: "peer-1" };
+  name = "";
+  peer = { id: "center-1" };
   async connect(): Promise<void> {
-    this.connectCalls++;
-    if (this.failConnect) throw new Error("conn refused");
+    if (this.failConnect) throw new Error("name already taken");
   }
   async close(): Promise<void> {
     this.closed = true;
   }
   async send(to: string, text: string, delivery?: "pull" | "push", meta?: LinkMeta): Promise<unknown> {
     if (this.failSend) throw new Error("send failed");
-    this.sentRaw.push({ to, text, ...(delivery ? { delivery } : {}) });
-    if (!meta) return {};
-    this.sentTo.push(to);
-    this.sentMeta.push(meta);
-    this.sent.push(JSON.parse(text) as Record<string, unknown>);
+    this.sent.push({ to, text, ...(delivery ? { delivery } : {}), ...(meta ? { meta } : {}) });
     return {};
   }
-  async listPeers(scope?: "all" | "host" | "directory" | "repo", filter?: { protocol?: string; version?: string }): Promise<LinkPeer[]> {
+  async listPeers(scope?: "all" | "host" | "directory" | "repo", filter?: unknown): Promise<LinkPeer[]> {
     this.listCalls.push({ scope, filter });
     if (!this.peers) throw new Error("BROKER_UNSUPPORTED");
     return this.peers;
@@ -56,1177 +35,195 @@ class FakeClient implements LinkClient {
       this.handler = () => {};
     };
   }
-  reply(obj: object, from = "bantou-server", extra: Partial<LinkInbound> = {}): void {
-    void this.handler({ from_name: from, text: JSON.stringify(obj), ...extra });
-  }
-  replyText(text: string, extra: Partial<LinkInbound> = {}): void {
-    void this.handler({ from_name: "bantou-server", text, ...extra });
+  inbound(m: Partial<LinkInbound> & { text: string }): void {
+    void this.handler({ from_name: "bantou-server-aaaaaaaaaa", ...m });
   }
 }
 
-function setup(timeoutMs = 2000, peerWatchMs?: number, onNotice?: (n: ServerNotice) => void) {
-  const cfg = parseConfig({ servers: [{ name: "s1", timeoutMs }] }, "/x/c.json");
-  const clients: FakeClient[] = [];
+/** peers = null: broker が peer の列挙に対応していない（listPeers が投げる）。 */
+function setup(peers: LinkPeer[] | null = []) {
+  const client = new FakeClient();
+  client.peers = peers ?? undefined;
+  const names: string[] = [];
   const logs: string[] = [];
   const link = createServerLink({
-    config: cfg,
+    name: "bantou-center-0123456789",
     log: (m) => logs.push(m),
-    clientFactory: () => {
-      const c = new FakeClient();
-      clients.push(c);
-      return c;
+    clientFactory: (n) => {
+      names.push(n);
+      client.name = n;
+      return client;
     },
-    healthCheck: async () => true,
-    peerWatchMs,
-    onNotice,
   });
-  return { link, clients, logs };
+  return { link, client, names, logs };
 }
 
-const capResult = (id: string, text = "ok") => ({
-  bantou: 1, type: "cap_result", cap_id: id, session_id: "sid", ok: true, result_text: text,
-});
-const workerResult = (id: string) => ({
-  bantou: 1, type: "worker_result", worker_id: id, session_id: "sid", ok: true, result_text: "w",
-});
-const statusResult = (n: number) => ({
-  bantou: 1, type: "status_result", ok: true,
-  caps: [{ kind: "cap", id: `c${n}`, path: "/p", session_id: null, state: "idle", last_started_at: null, last_finished_at: null, retries: 0, queued: 0 }],
-  workers: [],
-});
+const META = { protocol: MESSENGER_PROTOCOL.protocol, version: MESSENGER_PROTOCOL.version };
 
-test("kickCap: 一致する cap_result で解決し、指示に bantou/type が付く", async () => {
-  const { link, clients } = setup();
-  const p = link.kickCap("s1", { cap_id: "c1", prompt: "hi", reason: "t" });
-  await sleep(20);
-  assert.deepEqual(clients[0].sent, [{ bantou: 1, type: "kick_cap", cap_id: "c1", prompt: "hi", reason: "t" }]);
-  clients[0].reply(capResult("c1", "done"));
-  const r = await p;
-  assert.equal(r.type, "cap_result");
-  assert.equal((r as { result_text: string }).result_text, "done");
-  await link.close();
-});
-
-test("別 cap_id の kick は順不同で独立に解決", async () => {
-  const { link, clients } = setup();
-  const a = link.kickCap("s1", { cap_id: "a", prompt: "x" });
-  const b = link.kickCap("s1", { cap_id: "b", prompt: "y" });
-  await sleep(30);
-  assert.equal(clients[0].sent.length, 2);
-  clients[0].reply(capResult("b", "B"));
-  clients[0].reply(capResult("a", "A"));
-  const [ra, rb] = await Promise.all([a, b]);
-  assert.equal((ra as { result_text: string }).result_text, "A");
-  assert.equal((rb as { result_text: string }).result_text, "B");
-  await link.close();
-});
-
-test("同じ cap_id の kick は直列（前の返信後に次を送る）", async () => {
-  const { link, clients } = setup();
-  const a1 = link.kickCap("s1", { cap_id: "a", prompt: "1" });
-  const a2 = link.kickCap("s1", { cap_id: "a", prompt: "2" });
-  await sleep(30);
-  assert.equal(clients[0].sent.length, 1);
-  clients[0].reply(capResult("a", "r1"));
-  assert.equal((await a1 as { result_text: string }).result_text, "r1");
-  await sleep(30);
-  assert.equal(clients[0].sent.length, 2);
-  assert.equal(clients[0].sent[1].prompt, "2");
-  clients[0].reply(capResult("a", "r2"));
-  assert.equal((await a2 as { result_text: string }).result_text, "r2");
-  await link.close();
-});
-
-test("worker_result は worker_id で照合", async () => {
-  const { link, clients } = setup();
-  const p = link.resumeWorker("s1", { worker_id: "w1", prompt: "go" });
-  await sleep(20);
-  assert.equal(clients[0].sent[0].type, "resume_worker");
-  clients[0].reply(workerResult("w1"));
-  assert.equal((await p).type, "worker_result");
-  await link.close();
-});
-
-test("対応しない返信は無視される", async () => {
-  const { link, clients, logs } = setup(150);
-  const p = link.kickCap("s1", { cap_id: "a", prompt: "x" });
-  await sleep(20);
-  clients[0].reply(capResult("zzz"));
-  clients[0].reply(capResult("a"), "someone-else");
-  clients[0].handler({ from_name: "bantou-server", text: "not json" });
-  const r = await p;
-  assert.equal(r.type, "error");
-  assert.match((r as { message: string }).message, /タイムアウト \(150ms\)/);
-  assert.ok(logs.some((l) => l.includes("対応する待ちなし")));
-  await link.close();
-});
-
-test("タイムアウトは error 返信（command 付き）", async () => {
-  const { link } = setup(60);
-  const r = await link.kickCap("s1", { cap_id: "a", prompt: "x" });
-  assert.deepEqual(r, { bantou: 1, type: "error", ok: false, message: "タイムアウト (60ms)", command: "kick_cap" });
-  await link.close();
-});
-
-test("status は FIFO で解決", async () => {
-  const { link, clients } = setup();
-  const s1 = link.status("s1");
-  const s2 = link.status("s1");
-  await sleep(30);
-  assert.equal(clients[0].sent.length, 2);
-  clients[0].reply(statusResult(1));
-  clients[0].reply(statusResult(2));
-  const [r1, r2] = await Promise.all([s1, s2]);
-  assert.equal((r1 as { caps: { id: string }[] }).caps[0].id, "c1");
-  assert.equal((r2 as { caps: { id: string }[] }).caps[0].id, "c2");
-  await link.close();
-});
-
-test("error 返信は command の種類で照合、command 無しは最古", async () => {
-  const { link, clients } = setup();
-  const k = link.kickCap("s1", { cap_id: "a", prompt: "x" });
-  const s = link.status("s1");
-  await sleep(30);
-  clients[0].reply({ bantou: 1, type: "error", ok: false, message: "status ng", command: "status" });
-  const rs = await s;
-  assert.equal((rs as { message: string }).message, "status ng");
-  clients[0].reply({ bantou: 1, type: "error", ok: false, message: "oldest" });
-  const rk = await k;
-  assert.equal((rk as { message: string }).message, "oldest");
-  await link.close();
-});
-
-test("未定義 server は例外", async () => {
-  const { link } = setup();
-  await assert.rejects(link.status("nope"), /未定義の server/);
-  await assert.rejects(link.kickCap("nope", { cap_id: "a", prompt: "x" }), /未定義の server/);
-});
-
-test("接続失敗はクラッシュせず、次回使用時に再接続", async () => {
-  const cfg = parseConfig({ servers: [{ name: "s1", timeoutMs: 500 }] }, "/x/c.json");
-  const clients: FakeClient[] = [];
-  const link = createServerLink({
-    config: cfg,
-    log: () => {},
-    healthCheck: async () => false,
-    clientFactory: () => {
-      const c = new FakeClient();
-      c.failConnect = clients.length === 0;
-      clients.push(c);
-      return c;
-    },
-  });
-  await link.connectAll();
-  let l = await link.list();
-  assert.deepEqual(l, [{ name: "s1", connected: false, reachable: false, peerId: null, serverPeer: null }]);
-
-  const p = link.status("s1");
-  await sleep(30);
-  assert.equal(clients.length, 2);
-  clients[1].reply(statusResult(1));
-  assert.equal((await p).type, "status_result");
-  l = await link.list();
-  assert.equal(l[0].connected, true);
-  assert.equal(l[0].peerId, "peer-1");
-  await link.close();
-});
-
-test("接続できない時は error 返信", async () => {
-  const cfg = parseConfig({ servers: [{ name: "s1" }] }, "/x/c.json");
-  const link = createServerLink({
-    config: cfg,
-    log: () => {},
-    clientFactory: () => {
-      const c = new FakeClient();
-      c.failConnect = true;
-      return c;
-    },
-  });
-  const r = await link.status("s1");
-  assert.equal(r.type, "error");
-  assert.match((r as { message: string }).message, /接続できない/);
-});
-
-test("送信失敗は error 返信で、次回は client を作り直す", async () => {
-  const { link, clients } = setup();
-  const p = link.status("s1");
-  await sleep(20);
-  clients[0].reply(statusResult(1));
-  await p;
-  clients[0].failSend = true;
-  const r = await link.status("s1");
-  assert.equal(r.type, "error");
-  assert.match((r as { message: string }).message, /送信失敗/);
-  const p2 = link.status("s1");
-  await sleep(30);
-  assert.equal(clients.length, 2);
-  clients[1].reply(statusResult(2));
-  assert.equal((await p2).type, "status_result");
-  await link.close();
-});
-
-test("close は待ちを error で解決する", async () => {
-  const { link } = setup();
-  const p = link.kickCap("s1", { cap_id: "a", prompt: "x" });
-  await sleep(20);
-  await link.close();
-  const r = await p;
-  assert.equal(r.type, "error");
-  assert.match((r as { message: string }).message, /center 終了/);
-});
-
-test("error 返信に cap_id / worker_id があれば id で照合する", async () => {
-  const { link, clients } = setup();
-  const a = link.kickCap("s1", { cap_id: "a", prompt: "x" });
-  const b = link.kickCap("s1", { cap_id: "b", prompt: "x" });
-  const w = link.resumeWorker("s1", { worker_id: "w", prompt: "x" });
-  await sleep(30);
-  clients[0].reply({ bantou: 1, type: "error", ok: false, message: "b ng", command: "kick_cap", cap_id: "b" });
-  assert.equal((await b as { message: string }).message, "b ng");
-  clients[0].reply({ bantou: 1, type: "error", ok: false, message: "w ng", command: "resume_worker", worker_id: "w" });
-  assert.equal((await w as { message: string }).message, "w ng");
-  clients[0].reply(capResult("a"));
-  assert.equal((await a).type, "cap_result");
-  await link.close();
-});
-
-test("接続を作り直すと、旧 client 宛ての待ちは即エラー", async () => {
-  const { link, clients } = setup();
-  const p = link.kickCap("s1", { cap_id: "a", prompt: "x" });
-  await sleep(20);
-  // 別の指示の送信失敗で接続を作り直させる
-  clients[0].failSend = true;
-  const f = await link.status("s1");
-  assert.match((f as { message: string }).message, /送信失敗/);
-  const p2 = link.status("s1");
-  const r = await p;
-  assert.equal(r.type, "error");
-  assert.match((r as { message: string }).message, /接続を作り直したため中断/);
-  await sleep(20);
-  clients[1].reply(statusResult(1));
-  assert.equal((await p2).type, "status_result");
-  await link.close();
-});
-
-test("peer id が変わると待ちを即エラーにして作り直す", async () => {
-  const { link, clients, logs } = setup(2000, 20);
-  const p = link.kickCap("s1", { cap_id: "a", prompt: "x" });
-  await sleep(10);
-  clients[0].peer = { id: "peer-2" };
-  const r = await p;
-  assert.match((r as { message: string }).message, /peer id が変わった/);
-  assert.ok(logs.some((l) => l.includes("peer id 変化")));
-  await link.close();
-});
-
-test("close 後の指示は接続せず即エラー", async () => {
-  const { link, clients } = setup();
-  await link.close();
-  const r = await link.kickCap("s1", { cap_id: "a", prompt: "x" });
-  assert.equal(r.type, "error");
-  assert.match((r as { message: string }).message, /center 終了/);
-  await link.connectAll();
-  assert.equal(clients.length, 0);
-});
-
-test("接続中に close されたら client を捨てて指示はエラー", async () => {
-  const { link, clients } = setup();
-  const p = link.kickCap("s1", { cap_id: "a", prompt: "x" });
-  const closing = link.close();
-  const r = await p;
-  await closing;
-  assert.equal(r.type, "error");
-  assert.match((r as { message: string }).message, /center 終了/);
-  assert.ok(clients.every((c) => c.closed));
-});
-
-test("実 client は通常の解決に従う（env の HOST/PORT が効く。URL を固定しない）", async () => {
-  const cfg = parseConfig({ servers: [{ name: "s1" }] }, "/x/c.json");
-  const keys = ["AGENT_MESSENGER_HOST", "AGENT_MESSENGER_PORT"] as const;
-  const saved = keys.map((k) => process.env[k]);
-  // テスト専用の env 上書き（通常解決の 1 段目）。到達不能な 127.0.0.1:1 を指して失敗メッセージで解決先を確かめる
-  process.env.AGENT_MESSENGER_HOST = "127.0.0.1";
-  process.env.AGENT_MESSENGER_PORT = "1";
-  const logs: string[] = [];
-  const client = createClient(cfg.servers[0], (m) => logs.push(m));
-  try {
-    await assert.rejects(client.connect(), /http:\/\/127\.0\.0\.1:1 is not reachable/);
-  } finally {
-    keys.forEach((k, i) => {
-      if (saved[i] === undefined) delete process.env[k];
-      else process.env[k] = saved[i];
-    });
-    await client.close();
-  }
-});
-
-const peerOf = (id: string, name: string, version: string = MESSENGER_PROTOCOL.version): LinkPeer => ({
-  id, name, protocols: [{ name: "bantou", version }],
-});
-
-function setupDiscovery(server: object = {}, peers?: LinkPeer[]) {
-  const cfg = parseConfig({ servers: [{ name: "s1", timeoutMs: 2000, ...server }] }, "/x/c.json");
-  const clients: FakeClient[] = [];
-  const logs: string[] = [];
-  const link = createServerLink({
-    config: cfg,
-    log: (m) => logs.push(m),
-    clientFactory: () => {
-      const c = new FakeClient();
-      c.peers = peers;
-      clients.push(c);
-      return c;
-    },
-    healthCheck: async () => true,
-  });
-  return { link, clients, logs };
-}
-
-test("meta: 名前宛て（発見できない時）でも meta {protocol: bantou, version} を付ける", async () => {
-  const { link, clients } = setup();
-  const p = link.status("s1");
-  await sleep(20);
-  assert.deepEqual(clients[0].sentTo, ["bantou-server"]);
-  assert.deepEqual(clients[0].sentMeta, [{ protocol: "bantou", version: MESSENGER_PROTOCOL.version }]);
-  clients[0].reply(statusResult(1));
-  await p;
-  await link.close();
-});
-
-test("発見: listPeers(all, {protocol: bantou}) の peer id へ送り、meta の version は peer の宣言を使う", async () => {
-  const { link, clients } = setupDiscovery({}, [peerOf("srv-id-1", "my-host", MESSENGER_PROTOCOL.version)]);
-  const p = link.kickCap("s1", { cap_id: "c1", prompt: "go" });
-  await sleep(20);
-  assert.deepEqual(clients[0].listCalls, [{ scope: "all", filter: { protocol: "bantou" } }]);
-  assert.deepEqual(clients[0].sentTo, ["srv-id-1"]);
-  assert.deepEqual(clients[0].sentMeta, [{ protocol: "bantou", version: MESSENGER_PROTOCOL.version }]);
-  // 発見した id からの返信（meta 無し）も受ける
-  clients[0].reply(capResult("c1", "found"), "my-host", { from_id: "srv-id-1" });
-  const r = await p;
-  assert.equal((r as { result_text: string }).result_text, "found");
-  const l = await link.list();
-  assert.equal(l[0].serverPeer, "srv-id-1");
-  await link.close();
-});
-
-test("発見: 複数なら name が bantou-server を優先、無ければ先頭", async () => {
-  const a = setupDiscovery({}, [peerOf("id-a", "other"), peerOf("id-b", "bantou-server"), peerOf("id-c", "zzz")]);
-  const p = a.link.status("s1");
-  await sleep(20);
-  assert.deepEqual(a.clients[0].sentTo, ["id-b"]);
-  a.clients[0].reply(statusResult(1));
-  await p;
+test("connect: center の名前で client を作る。登録に失敗（同名など）したら投げ、client を閉じる", async () => {
+  const a = setup();
+  await a.link.connect();
+  assert.deepEqual(a.names, ["bantou-center-0123456789"]);
+  assert.equal(a.link.name, "bantou-center-0123456789");
   await a.link.close();
 
-  const b = setupDiscovery({}, [peerOf("id-x", "first"), peerOf("id-y", "second")]);
-  const q = b.link.status("s1");
-  await sleep(20);
-  assert.deepEqual(b.clients[0].sentTo, ["id-x"]);
-  b.clients[0].reply(statusResult(1));
-  await q;
-  await b.link.close();
+  const b = setup();
+  b.client.failConnect = true;
+  await assert.rejects(() => b.link.connect(), /name already taken/);
+  assert.equal(b.client.closed, true);
+  // 接続できていないので送れない
+  await assert.rejects(() => b.link.stop("srv", "pm1-cap"), /接続していない/);
 });
 
-test("発見: 0 件・BROKER_UNSUPPORTED は bantou-server 宛てへフォールバック", async () => {
-  const zero = setupDiscovery({}, []);
-  const p = zero.link.status("s1");
-  await sleep(20);
-  assert.deepEqual(zero.clients[0].sentTo, ["bantou-server"]);
-  assert.ok(zero.logs.some((m) => m.includes("0 件")));
-  zero.clients[0].reply(statusResult(1));
-  await p;
-  await zero.link.close();
-
-  const old = setupDiscovery({}, undefined);
-  const q = old.link.status("s1");
-  await sleep(20);
-  assert.deepEqual(old.clients[0].sentTo, ["bantou-server"]);
-  assert.ok(old.logs.some((m) => m.includes("BROKER_UNSUPPORTED")));
-  old.clients[0].reply(statusResult(1));
-  await q;
-  await old.link.close();
-});
-
-test("servers[].peer 指定があれば発見せずその名前へ送る（従来の名前指定）", async () => {
-  const { link, clients } = setupDiscovery({ peer: "my-named-server" }, [peerOf("srv-id-1", "bantou-server")]);
-  const p = link.status("s1");
-  await sleep(20);
-  assert.deepEqual(clients[0].listCalls, []);
-  assert.deepEqual(clients[0].sentTo, ["my-named-server"]);
-  assert.deepEqual(clients[0].sentMeta, [{ protocol: "bantou", version: MESSENGER_PROTOCOL.version }]);
-  clients[0].reply(statusResult(1), "my-named-server");
-  assert.equal((await p).type, "status_result");
+test("launch: 宛先は server の名前そのまま。本文は 1 つの JSON（invoke / launch）で、meta = bantou protocol", async () => {
+  const { link, client } = setup();
+  await link.connect();
+  await link.launch("bantou-server-aaaaaaaaaa", { parentId: "pm1-cap", model: "sonnet", prompt: "do it", ws: "ws://h:7910/ws/worker?token=t" });
+  assert.equal(client.sent.length, 1);
+  const m = client.sent[0]!;
+  assert.equal(m.to, "bantou-server-aaaaaaaaaa");
+  assert.equal(m.delivery, "pull");
+  assert.deepEqual(m.meta, META);
+  const body: unknown = JSON.parse(m.text);
+  assert.deepEqual(body, { protocol: "bantou", callType: "invoke", order: "launch", "parent-id": "pm1-cap", model: "sonnet", prompt: "do it", ws: "ws://h:7910/ws/worker?token=t" });
+  assert.ok(isLaunchMessage(body));
+  assert.ok(isServerMessage(body));
   await link.close();
 });
 
-test("peer id は再登録で変わるので、リクエストごとに解決し直す", async () => {
-  const { link, clients } = setupDiscovery({}, [peerOf("id-1", "bantou-server")]);
-  const p1 = link.status("s1");
-  await sleep(20);
-  clients[0].reply(statusResult(1));
-  await p1;
-  clients[0].peers = [peerOf("id-2", "bantou-server")];
-  const p2 = link.status("s1");
-  await sleep(20);
-  assert.deepEqual(clients[0].sentTo, ["id-1", "id-2"]);
-  clients[0].reply(statusResult(2));
-  await p2;
+test("stop / reply（answer・approve・reject）/ server-info: protocol の guard を通る本文で送る", async () => {
+  const { link, client } = setup();
+  await link.connect();
+  await link.stop("srv", "pm1-cap");
+  await link.reply("srv", { sessionId: "s-1", order: "answer", content: "yes" });
+  await link.reply("srv", { sessionId: "s-2", order: "approve" });
+  await link.reply("srv", { sessionId: "s-3", order: "reject", content: "ignored" });
+  await link.requestServerInfo("srv");
+  const bodies = client.sent.map((s) => JSON.parse(s.text) as unknown);
+  assert.deepEqual(bodies, [
+    { protocol: "bantou", callType: "invoke", order: "stop", "parent-id": "pm1-cap" },
+    { protocol: "bantou", callType: "reply", order: "answer", "session-id": "s-1", content: "yes" },
+    { protocol: "bantou", callType: "reply", order: "approve", "session-id": "s-2" },
+    { protocol: "bantou", callType: "reply", order: "reject", "session-id": "s-3" },
+    { protocol: "bantou", callType: "status", order: "server-info" },
+  ]);
+  for (const b of bodies) assert.ok(isServerMessage(b));
+  for (const s of client.sent) assert.deepEqual(s.meta, META);
   await link.close();
 });
 
-test("受信: meta が bantou なら名前が違っても受け、他 protocol・他名前は無視", async () => {
-  const { link, clients, logs } = setup();
-  const p = link.kickCap("s1", { cap_id: "c1", prompt: "go" });
-  await sleep(20);
-  clients[0].reply(capResult("c1", "x"), "stranger");
-  clients[0].reply(capResult("c1", "x"), "stranger", { meta: { protocol: "other", version: "1" } });
-  await sleep(20);
-  assert.ok(logs.some((m) => m.startsWith("無視:")));
-  clients[0].reply(capResult("c1", "by-meta"), "renamed", { meta: { protocol: "bantou", version: "1.0.0" } });
-  assert.equal(((await p) as { result_text: string }).result_text, "by-meta");
+test("送信失敗は投げる（呼び出し側が isError にする）", async () => {
+  const { link, client } = setup();
+  await link.connect();
+  client.failSend = true;
+  await assert.rejects(() => link.launch("srv", { parentId: "pm1-cap", model: "sonnet", prompt: "x", ws: "ws://h/ws/worker" }), /send failed/);
   await link.close();
 });
 
-test("version 不一致の警告行が先頭に付いても本文を解釈する", async () => {
-  assert.equal(stripWarning("[agent-messenger warning] protocol version mismatch: a\n{\"x\":1}"), '{"x":1}');
+test("server-info の答え: 送ってきた名前ごとに版を控える。他の message・不正な答えは控えない。警告行が付いても読める", async () => {
+  const { link, client } = setup();
+  await link.connect();
+  assert.equal(link.serverVersionOf("bantou-server-aaaaaaaaaa"), undefined);
+  client.inbound({ text: JSON.stringify({ protocol: "bantou", callType: "status", order: "server-info", version: "1.2.3" }) });
+  assert.equal(link.serverVersionOf("bantou-server-aaaaaaaaaa"), "1.2.3");
+  client.inbound({ from_name: "bantou-server-bbbbbbbbbb", text: `[agent-messenger warning] version mismatch\n${JSON.stringify({ protocol: "bantou", callType: "status", order: "server-info", version: "2.0.0" })}` });
+  assert.equal(link.serverVersionOf("bantou-server-bbbbbbbbbb"), "2.0.0");
+  client.inbound({ from_name: "x", text: "hello" });
+  client.inbound({ from_name: "y", text: JSON.stringify({ protocol: "bantou", callType: "status", order: "server-info", version: "v1" }) });
+  client.inbound({ from_name: "z", mode: "ping", text: JSON.stringify({ protocol: "bantou", callType: "status", order: "server-info", version: "9.9.9" }) });
+  assert.equal(link.serverVersionOf("x"), undefined);
+  assert.equal(link.serverVersionOf("y"), undefined);
+  assert.equal(link.serverVersionOf("z"), undefined);
+  await link.close();
+});
+
+test("stripWarning: 先頭の警告行だけ除く", () => {
   assert.equal(stripWarning("[agent-messenger warning] a\n[agent-messenger warning] b\n{}"), "{}");
   assert.equal(stripWarning("{}"), "{}");
-  const { link, clients } = setup();
-  const p = link.status("s1");
-  await sleep(20);
-  clients[0].replyText(`[agent-messenger warning] protocol version mismatch: x\n${JSON.stringify(statusResult(1))}`);
-  assert.equal((await p).type, "status_result");
+});
+
+test("notifyPeer: 名前が一致する peer（自分以外）へ push で送る。絞り込みは無し", async () => {
+  const { link, client } = setup([{ id: "peer-1", name: "pm1-cap" }, { id: "center-1", name: "pm1-cap" }, { id: "sess-1", name: "pm1-cap" }]);
+  await link.connect();
+  const r = await link.notifyPeer("pm1-cap", "hello");
+  assert.deepEqual(r, { ok: true, to: "peer-1" });
+  assert.deepEqual(client.sent, [{ to: "peer-1", text: "hello", delivery: "push" }]);
+  assert.deepEqual(client.listCalls, [{ scope: "all", filter: undefined }]);
   await link.close();
 });
 
-test("reachable の既定は接続を確保できるか（listPeers 非対応の 0.9 broker でも true）", async () => {
-  const cfg = parseConfig({ servers: [{ name: "s1" }] }, "/x/c.json");
-  let fail = false;
-  const link = createServerLink({
-    config: cfg,
-    log: () => {},
-    clientFactory: () => {
-      const c = new FakeClient();
-      c.failConnect = fail;
-      return c;
-    },
-  });
-  assert.equal((await link.list())[0].reachable, true);
-  await link.close();
-  fail = true;
-  const link2 = createServerLink({ config: cfg, log: () => {}, clientFactory: () => Object.assign(new FakeClient(), { failConnect: true }) });
-  assert.equal((await link2.list())[0].reachable, false);
-  await link2.close();
-});
-
-// -- 発見ベース（config.servers に依存しない）: peers / selectPeer / kickCapOn / stopCapOn --
-
-function setupNoServers(peers?: LinkPeer[]) {
-  const cfg = parseConfig({}, "/x/c.json");
-  const clients: FakeClient[] = [];
-  const link = createServerLink({
-    config: cfg,
-    log: () => {},
-    clientFactory: () => {
-      const c = new FakeClient();
-      c.peers = peers;
-      clients.push(c);
-      return c;
-    },
-    identifyTimeoutMs: 30,
-  });
-  return { link, clients };
-}
-
-test("発見ベース: servers が空でも peers / selectPeer が protocol 絞り込みで動く。list / connectAll には出ない", async () => {
-  const { link, clients } = setupNoServers([peerOf("id-a", "bantou-server", "1.1.0"), peerOf("id-b", "other")]);
-  assert.deepEqual(await link.list(), []);
-  await link.connectAll();
-  assert.equal(clients.length, 0);
-  assert.deepEqual(await link.peers(), [
-    { id: "id-a", name: "bantou-server", version: "1.1.0" },
-    { id: "id-b", name: "other", version: MESSENGER_PROTOCOL.version },
+test("notifyPeer: 同名 peer が複数なら最後に登録したものへ送る", async () => {
+  const { link, client, logs } = setup([
+    { id: "new-1", name: "pm1-cap", registered_at: "2026-11-03T05:00:30.000Z" },
+    { id: "old-1", name: "pm1-cap", registered_at: "2026-11-03T05:00:00.000Z" },
+    { id: "none-1", name: "pm1-cap" },
   ]);
-  assert.deepEqual(clients[0].listCalls, [{ scope: "all", filter: { protocol: "bantou" } }]);
-  assert.equal((await link.selectPeer()).id, "id-a");
-  assert.equal((await link.selectPeer("id-b")).name, "other");
-  assert.equal((await link.selectPeer("other")).id, "id-b");
-  await assert.rejects(link.selectPeer("zzz"), /見つからない.*bantou-server\(id-a\)/);
-  assert.equal(clients.length, 1);
-  await link.close();
-});
-
-test("発見ベース: 0 件・発見不能（0.9 broker）・接続失敗は selectPeer が説明付きで投げる", async () => {
-  const empty = setupNoServers([]);
-  await assert.rejects(empty.link.selectPeer(), /見つからない/);
-  await empty.link.close();
-  const old = setupNoServers(undefined);
-  await assert.rejects(old.link.selectPeer(), /BROKER_UNSUPPORTED/);
-  await old.link.close();
-  const cfg = parseConfig({}, "/x/c.json");
-  const down = createServerLink({ config: cfg, log: () => {}, clientFactory: () => Object.assign(new FakeClient(), { failConnect: true }) });
-  await assert.rejects(down.selectPeer(), /messenger に接続できない/);
-  await down.close();
-});
-
-test("発見ベース: kickCapOn は選んだ peer id 宛てに declared version の meta 付きで送り、cap_result を返す", async () => {
-  const peer = { id: "id-a", name: "bantou-server", version: MESSENGER_PROTOCOL.version };
-  const { link, clients } = setupNoServers([peerOf("id-a", "bantou-server", MESSENGER_PROTOCOL.version)]);
-  const p = link.kickCapOn(peer, { cap_id: "r-1", prompt: "go" });
-  await sleep(20);
-  assert.deepEqual(clients[0].sentTo, ["id-a"]);
-  assert.deepEqual(clients[0].sentMeta, [{ protocol: "bantou", version: MESSENGER_PROTOCOL.version }]);
-  assert.deepEqual(clients[0].sent[0], { bantou: 1, type: "kick_cap", cap_id: "r-1", prompt: "go" });
-  clients[0].reply(capResult("r-1", "ok"), "bantou-server", { from_id: "id-a" });
-  assert.equal(((await p) as { result_text: string }).result_text, "ok");
-  await link.close();
-});
-
-test("stop_cap: stop_result は stop の待ちだけを解決し、同じ cap_id の kick_cap の待ちは続く", async () => {
-  const peer = { id: "id-a", name: "bantou-server" };
-  const { link, clients } = setupNoServers([peerOf("id-a", "bantou-server")]);
-  const kick = link.kickCapOn(peer, { cap_id: "r-1", prompt: "go" });
-  await sleep(20);
-  const stop = link.stopCapOn(peer, { cap_id: "r-1" }); // kick の実行中でも直列待ちにならない
-  await sleep(20);
-  assert.deepEqual(clients[0].sent.map((m) => m.type), ["kick_cap", "stop_cap"]);
-  clients[0].reply({ bantou: 1, type: "stop_result", ok: true, cap_id: "r-1", stopped: true });
-  assert.deepEqual(await stop, { bantou: 1, type: "stop_result", ok: true, cap_id: "r-1", stopped: true });
-  let kickDone = false;
-  void kick.then(() => (kickDone = true));
-  await sleep(20);
-  assert.equal(kickDone, false);
-  clients[0].reply({ ...capResult("r-1", ""), ok: false, error: "stop_cap により停止" });
-  assert.equal(((await kick) as { ok: boolean }).ok, false);
-  await link.close();
-});
-
-test("stop_cap の error（command=stop_cap, cap_id 付き）は kick_cap の待ちと取り違えず stop の待ちへ", async () => {
-  const peer = { id: "id-a", name: "bantou-server" };
-  const { link, clients } = setupNoServers([peerOf("id-a", "bantou-server")]);
-  const kick = link.kickCapOn(peer, { cap_id: "r-1", prompt: "go" });
-  await sleep(20);
-  const stop = link.stopCapOn(peer, { cap_id: "r-1" });
-  await sleep(20);
-  clients[0].reply({ bantou: 1, type: "error", ok: false, message: "ng", command: "stop_cap", cap_id: "r-1" });
-  assert.equal((await stop).type, "error");
-  let kickDone = false;
-  void kick.then(() => (kickDone = true));
-  await sleep(20);
-  assert.equal(kickDone, false);
-  await link.close();
-  assert.equal((await kick).type, "error"); // close で中断
-});
-
-test("config.servers があれば発見ベースは先頭 server の client を共有する（接続は 1 本）", async () => {
-  const cfg = parseConfig({ servers: [{ name: "s1" }] }, "/x/c.json");
-  const clients: FakeClient[] = [];
-  const link = createServerLink({
-    config: cfg, log: () => {},
-    clientFactory: () => { const c = new FakeClient(); c.peers = [peerOf("id-a", "bantou-server")]; clients.push(c); return c; },
-  });
-  await link.connectAll();
-  assert.equal((await link.selectPeer()).id, "id-a");
-  assert.equal(clients.length, 1);
-  assert.deepEqual((await link.list()).map((s) => s.name), ["s1"]);
-  await link.close();
-});
-
-const notice = (capId: string): ServerNotice => ({
-  bantou: 1,
-  type: "activity",
-  cap_id: capId,
-  at: "2026-10-29T00:00:00.000Z",
-  agents: [
-    { kind: "cap", id: capId, cap_id: capId, state: "running", task: "t", last_activity: null, last_output_at: null, silent_ms: 0, started_at: null, finished_at: null },
-  ],
-});
-
-test("通知: activity は onNotice に渡り、pending（kick の待ち）を消さない", async () => {
-  const got: ServerNotice[] = [];
-  const { link, clients, logs } = setup(2000, undefined, (n) => got.push(n));
-  const p = link.kickCap("s1", { cap_id: "c1", prompt: "go" });
-  await sleep(20);
-  clients[0].reply(notice("c1"));
-  clients[0].reply(notice("c1"), "bantou-server", { meta: { protocol: "bantou", version: "1.2.0" } });
-  await sleep(20);
-  assert.equal(got.length, 2);
-  assert.equal(got[0]!.cap_id, "c1");
-  assert.ok(!logs.some((m) => m.startsWith("対応する待ちなし") || m.startsWith("無視:")));
-  // 待ちは生きていて、cap_result で解決する
-  clients[0].reply(capResult("c1", "done"));
-  assert.equal(((await p) as { result_text: string }).result_text, "done");
-  await link.close();
-});
-
-test("通知: server 以外からの activity・onNotice 無しは無視。警告行付きでも受ける。onNotice の例外は握る", async () => {
-  const got: ServerNotice[] = [];
-  const { link, clients, logs } = setup(2000, undefined, (n) => {
-    got.push(n);
-    if (got.length === 2) throw new Error("handler ng");
-  });
-  const p = link.status("s1");
-  await sleep(20);
-  clients[0].reply(notice("c1"), "stranger");
-  assert.equal(got.length, 0);
-  assert.ok(logs.some((m) => m.startsWith("無視:")));
-  clients[0].replyText(`[agent-messenger warning] protocol version mismatch: x\n${JSON.stringify(notice("c1"))}`);
-  clients[0].reply(notice("c2"));
-  await sleep(20);
-  assert.deepEqual(got.map((n) => n.cap_id), ["c1", "c2"]);
-  assert.ok(logs.some((m) => m.includes("通知の処理に失敗") && m.includes("handler ng")));
-  clients[0].reply(statusResult(1));
-  assert.equal((await p).type, "status_result");
-  await link.close();
-
-  const plain = setup();
-  const q = plain.link.status("s1");
-  await sleep(20);
-  plain.clients[0].reply(notice("c1"));
-  plain.clients[0].reply(statusResult(1));
-  assert.equal((await q).type, "status_result");
-  await plain.link.close();
-});
-
-// -- 版合わせ（hello / update_server / 門） ------------------------------------------
-
-const helloReply = (over: object = {}) => ({
-  bantou: 1, type: "hello_result", ok: true, server_version: "0.3.0", protocol_version: MESSENGER_PROTOCOL.version,
-  update: null, last_update: null, ...over,
-});
-const updateReply = (over: object = {}) => ({
-  bantou: 1, type: "update_result", ok: true, state: "waiting", from: "0.3.0", to: "0.3.1",
-  running: { caps: 1, workers: 0, reports: 0 }, ...over,
-});
-
-test("hello: 送り先の peer id へ送り、from_id が一致する hello_result で解決。別 server の返信とは取り違えない", async () => {
-  const { link, clients } = setupNoServers([]);
-  const a = { id: "id-a", name: "bantou-server", version: MESSENGER_PROTOCOL.version };
-  const b = { id: "id-b", name: "other", version: MESSENGER_PROTOCOL.version };
-  const pa = link.hello(a);
-  const pb = link.hello(b);
-  await sleep(20);
-  assert.deepEqual(clients[0].sentTo.sort(), ["id-a", "id-b"]);
-  assert.deepEqual(clients[0].sent[0], { bantou: 1, type: "hello" });
-  // b の返信を先に、a の返信を後に
-  clients[0].reply(helloReply({ server_version: "B" }), "other", { from_id: "id-b" });
-  clients[0].reply(helloReply({ server_version: "A" }), "bantou-server", { from_id: "id-a" });
-  assert.equal(((await pa) as { server_version: string }).server_version, "A");
-  assert.equal(((await pb) as { server_version: string }).server_version, "B");
-  await link.close();
-});
-
-test("updateServer: version を載せて送り、update_result で解決。error（command=update_server）は送り先で照合", async () => {
-  const { link, clients } = setupNoServers([]);
-  const a = { id: "id-a", name: "s", version: MESSENGER_PROTOCOL.version };
-  const b = { id: "id-b", name: "t", version: MESSENGER_PROTOCOL.version };
-  const pa = link.updateServer(a, "0.3.1");
-  const pb = link.updateServer(b, "0.3.1");
-  await sleep(20);
-  assert.deepEqual(clients[0].sent[0], { bantou: 1, type: "update_server", version: "0.3.1" });
-  clients[0].reply({ bantou: 1, type: "error", ok: false, message: "ng", command: "update_server", code: "update_failed", retryable: false }, "t", { from_id: "id-b" });
-  clients[0].reply(updateReply(), "s", { from_id: "id-a" });
-  assert.equal(((await pa) as { state: string }).state, "waiting");
-  const eb = (await pb) as { type: string; code?: string };
-  assert.equal(eb.type, "error");
-  assert.equal(eb.code, "update_failed");
-  await link.close();
-});
-
-test("hello / update_server は protocol の版が違う server にも送る（meta は宣言の版）", async () => {
-  const { link, clients } = setupNoServers([]);
-  const old = { id: "id-old", name: "s", version: "1.3.0" };
-  const newer = { id: "id-new", name: "t", version: "9.0.0" };
-  const p1 = link.hello(old);
-  const p2 = link.updateServer(newer, "0.3.1");
-  await sleep(20);
-  assert.deepEqual(clients[0].sentTo, ["id-old", "id-new"]);
-  assert.deepEqual(clients[0].sentMeta, [
-    { protocol: "bantou", version: "1.3.0" },
-    { protocol: "bantou", version: "9.0.0" },
-  ]);
-  clients[0].reply(helloReply(), "s", { from_id: "id-old" });
-  clients[0].reply(updateReply(), "t", { from_id: "id-new" });
-  await Promise.all([p1, p2]);
-  await link.close();
-});
-
-test("hello はタイムアウトで error 返信（command 付き）", async () => {
-  const { link } = setupNoServers([]);
-  const r = (await Promise.race([
-    link.hello({ id: "id-a", name: "s", version: MESSENGER_PROTOCOL.version }),
-    sleep(12_000).then(() => "late"),
-  ])) as { type: string; command?: string };
-  assert.equal(r.type, "error");
-  assert.equal(r.command, "hello");
-  await link.close();
-});
-
-test("門: protocol の版が違う server へは kick_cap / stop_cap / status を送らず version_mismatch（再送可）を返す", async () => {
-  const peer = { id: "id-a", name: "s", version: "1.2.0" };
-  const { link, clients } = setupNoServers([peerOf("id-a", "s", "1.2.0")]);
-  const k = (await link.kickCapOn(peer, { cap_id: "r-1", prompt: "go" })) as { type: string; code?: string; retryable?: boolean; command?: string; message: string };
-  assert.equal(k.type, "error");
-  assert.equal(k.code, "version_mismatch");
-  assert.equal(k.retryable, true);
-  assert.equal(k.command, "kick_cap");
-  assert.match(k.message, /1\.2\.0/);
-  const s = (await link.stopCapOn(peer, { cap_id: "r-1" })) as { code?: string };
-  assert.equal(s.code, "version_mismatch");
-  assert.deepEqual(clients[0]?.sent ?? [], [], "何も送っていない");
-  assert.equal(link.gate(peer, "kick_cap")?.code, "version_mismatch");
-  assert.equal(link.gate(peer, "hello"), undefined);
-  assert.equal(link.gate(peer, "update_server"), undefined);
-  await link.close();
-});
-
-test("門: patch だけ違う版の server へは送れる（互換）。minor が違えば version_mismatch で断る", async () => {
-  const [maj, min] = MESSENGER_PROTOCOL.version.split(".");
-  const patchOnly = `${maj}.${min}.99`;
-  const otherMinor = `${maj}.${Number(min) + 1}.0`;
-  const ok = { id: "id-a", name: "s", version: patchOnly };
-  const { link, clients } = setupNoServers([peerOf("id-a", "s", patchOnly)]);
-  assert.equal(link.gate(ok, "kick_cap"), undefined);
-  assert.equal(link.gate(ok, "status"), undefined);
-  const p = link.kickCapOn(ok, { cap_id: "r-1", prompt: "go" });
-  await sleep(20);
-  assert.deepEqual(clients[0].sentTo, ["id-a"], "patch の差は送る");
-  assert.deepEqual(clients[0].sentMeta, [{ protocol: "bantou", version: patchOnly }]);
-  void p;
-  const ng = { id: "id-b", name: "t", version: otherMinor };
-  const r = link.gate(ng, "kick_cap");
-  assert.equal(r?.code, "version_mismatch");
-  assert.match(r?.message ?? "", new RegExp(otherMinor.replace(/\./g, "\\.")));
-  assert.equal(link.gate({ id: "id-c", name: "u", version: "garbage" }, "task")?.code, "version_mismatch");
-  await link.close();
-});
-
-test("門: 発見した peer の宣言が違えば、config の server 経由の指示（kickCap / status）も送らない", async () => {
-  const { link, clients } = setupDiscovery({}, [peerOf("id-a", "bantou-server", "1.2.0")]);
-  const r = (await link.status("s1")) as { code?: string };
-  assert.equal(r.code, "version_mismatch");
-  assert.deepEqual(clients[0].sent, []);
-  await link.close();
-});
-
-test("門: 版が分からない（名前宛てのフォールバック）時は送る", async () => {
-  const { link, clients } = setup();
-  const p = link.status("s1");
-  await sleep(20);
-  assert.deepEqual(clients[0].sentTo, ["bantou-server"]);
-  clients[0].reply(statusResult(1));
-  await p;
-  await link.close();
-});
-
-test("門: setGate の追加判定が protocol の版の門の後に効く。制御メッセージは通る", async () => {
-  const peer = { id: "id-a", name: "s", version: MESSENGER_PROTOCOL.version };
-  const { link, clients } = setupNoServers([peerOf("id-a", "s")]);
-  const seen: string[] = [];
-  link.setGate((p, c) => {
-    seen.push(`${p.id}:${c}`);
-    return c === "kick_cap"
-      ? { bantou: 1, type: "error", ok: false, message: "更新待ち", command: c, code: "updating", retryable: true }
-      : undefined;
-  });
-  const r = (await link.kickCapOn(peer, { cap_id: "r-1", prompt: "go" })) as { code?: string };
-  assert.equal(r.code, "updating");
-  assert.deepEqual(clients[0]?.sent ?? [], []);
-  const p = link.stopCapOn(peer, { cap_id: "r-1" });
-  await sleep(20);
-  assert.equal(clients[0].sent[0].type, "stop_cap");
-  clients[0].reply({ bantou: 1, type: "stop_result", ok: true, cap_id: "r-1", stopped: false }, "s", { from_id: "id-a" });
-  await p;
-  assert.deepEqual(seen, ["id-a:kick_cap", "id-a:stop_cap"]);
-  link.setGate(undefined);
-  assert.equal(link.gate(peer, "kick_cap"), undefined);
-  await link.close();
-});
-
-test("peers: summary / hostname も返す", async () => {
-  const { link } = setupNoServers([{ id: "id-a", name: "s", summary: "h /ws", hostname: "h", protocols: [{ name: "bantou", version: MESSENGER_PROTOCOL.version }] }]);
-  assert.deepEqual(await link.peers(), [{ id: "id-a", name: "s", summary: "h /ws", hostname: "h", version: MESSENGER_PROTOCOL.version }]);
-  await link.close();
-});
-
-test("kick_cap の updating error（cap_id 付き）は cap_id で照合され、kickCap の待ちが解決する", async () => {
-  const { link, clients } = setup();
-  const p = link.kickCap("s1", { cap_id: "c1", prompt: "go" });
-  await sleep(20);
-  clients[0].reply({ bantou: 1, type: "error", ok: false, message: "server 更新待ち", command: "kick_cap", cap_id: "c1", code: "updating", retryable: true });
-  const r = (await p) as { code?: string; retryable?: boolean };
-  assert.equal(r.code, "updating");
-  assert.equal(r.retryable, true);
-  await link.close();
-});
-
-test("待ちの無い cap_result / kick_cap の error は onLateCapReply に渡る。それ以外は渡らない", async () => {
-  const late: unknown[] = [];
-  const cfg = parseConfig({ servers: [{ name: "s1", timeoutMs: 2000 }] }, "/x/c.json");
-  const clients: FakeClient[] = [];
-  const link = createServerLink({
-    config: cfg,
-    log: () => {},
-    clientFactory: () => {
-      const c = new FakeClient();
-      clients.push(c);
-      return c;
-    },
-    healthCheck: async () => true,
-    onLateCapReply: (r) => late.push(r),
-  });
-  const p = link.kickCap("s1", { cap_id: "a", prompt: "x" });
-  await sleep(20);
-  clients[0].reply(capResult("a", "first"));
-  await p;
-  // 最初の返信で待ちは消えた。後続の cap_result は渡る
-  clients[0].reply(capResult("a", "second"));
-  clients[0].reply({ bantou: 1, type: "error", ok: false, message: "resume 失敗", command: "kick_cap", cap_id: "a" });
-  // 渡らない: worker_result、cap_id の無い error、別の送信元
-  clients[0].reply(workerResult("w1"));
-  clients[0].reply({ bantou: 1, type: "error", ok: false, message: "x", command: "kick_cap" });
-  clients[0].reply(capResult("a", "other"), "someone-else");
-  assert.deepEqual(late.map((r) => (r as { type: string }).type + ":" + ((r as { result_text?: string }).result_text ?? (r as { message?: string }).message)), ["cap_result:second", "error:resume 失敗"]);
-  await link.close();
-});
-
-test("notifyPeer: 名前が一致する peer（自分以外）へ push で送る", async () => {
-  const { link, clients } = setupDiscovery({}, [peerOf("srv", "bantou-server"), { id: "peer-1", name: "pm1" }, { id: "sess-1", name: "pm1" }]);
-  const r = await link.notifyPeer("pm1", "hello");
-  assert.deepEqual(r, { ok: true, to: "sess-1" });
-  assert.deepEqual(clients[0].sentRaw, [{ to: "sess-1", text: "hello", delivery: "push" }]);
-  // 絞り込み無し（session は bantou protocol を持たない）
-  assert.deepEqual(clients[0].listCalls, [{ scope: "all", filter: undefined }]);
-  await link.close();
-});
-
-test("notifyPeer: 同名 peer が複数（再起動直後の古い登録）なら最後に登録したものへ送る", async () => {
-  const { link, clients, logs } = setupDiscovery({}, [
-    peerOf("srv", "bantou-server"),
-    { id: "new-1", name: "pm1", registered_at: "2026-11-03T05:00:30.000Z" },
-    { id: "old-1", name: "pm1", registered_at: "2026-11-03T05:00:00.000Z" },
-    { id: "none-1", name: "pm1" },
-  ]);
-  const r = await link.notifyPeer("pm1", "hello");
-  assert.deepEqual(r, { ok: true, to: "new-1" });
-  assert.deepEqual(clients[0].sentRaw, [{ to: "new-1", text: "hello", delivery: "push" }]);
+  await link.connect();
+  assert.deepEqual(await link.notifyPeer("pm1-cap", "hello"), { ok: true, to: "new-1" });
+  assert.deepEqual(client.sent, [{ to: "new-1", text: "hello", delivery: "push" }]);
   assert.ok(logs.some((l) => l.includes("通知先の peer が複数")));
   await link.close();
 });
 
-test("notifyPeer: peer がいない・列挙非対応・送信失敗・接続失敗は ok:false で理由を返す（投げない）", async () => {
-  const a = setupDiscovery({}, [peerOf("srv", "bantou-server")]);
-  const r1 = await a.link.notifyPeer("pm1", "x");
+test("notifyPeer: peer がいない・列挙できない・送信失敗・未接続は ok:false で理由を返す（投げない）", async () => {
+  const a = setup([]);
+  await a.link.connect();
+  const r1 = await a.link.notifyPeer("pm1-cap", "x");
   assert.equal(r1.ok, false);
-  assert.match((r1 as { reason: string }).reason, /peer pm1 がいない/);
-  await a.link.close();
+  assert.match((r1 as { reason: string }).reason, /peer pm1-cap がいない/);
 
-  const b = setupDiscovery({}, undefined);
-  const r2 = await b.link.notifyPeer("pm1", "x");
+  const b = setup(null);
+  await b.link.connect();
+  const r2 = await b.link.notifyPeer("pm1-cap", "x");
   assert.equal(r2.ok, false);
   assert.match((r2 as { reason: string }).reason, /送信失敗|BROKER_UNSUPPORTED/);
-  await b.link.close();
 
-  const c = setupDiscovery({}, [{ id: "sess-1", name: "pm1" }]);
-  await c.link.notifyPeer("zz", "warm");
-  c.clients[0].failSend = true;
-  const r3 = await c.link.notifyPeer("pm1", "x");
+  const c = setup([{ id: "sess-1", name: "pm1-cap" }]);
+  await c.link.connect();
+  c.client.failSend = true;
+  const r3 = await c.link.notifyPeer("pm1-cap", "x");
   assert.equal(r3.ok, false);
   assert.match((r3 as { reason: string }).reason, /送信失敗: send failed/);
-  await c.link.close();
+
+  const d = setup();
+  const r4 = await d.link.notifyPeer("pm1-cap", "x");
+  assert.equal(r4.ok, false);
+  assert.match((r4 as { reason: string }).reason, /接続できない/);
 });
 
-test("statusOn: 選んだ peer へ status を送り status_result を返す（cap の有無の確認用）", async () => {
-  const peer = { id: "id-a", name: "bantou-server", version: MESSENGER_PROTOCOL.version };
-  const { link, clients } = setupNoServers([peerOf("id-a", "bantou-server", MESSENGER_PROTOCOL.version)]);
-  const p = link.statusOn(peer);
-  await sleep(20);
-  assert.deepEqual(clients[0].sentTo, ["id-a"]);
-  assert.deepEqual(clients[0].sent[0], { bantou: 1, type: "status" });
-  clients[0].reply(statusResult(1), "bantou-server", { from_id: "id-a" });
-  const r = (await p) as { type: string; caps: { id: string }[] };
-  assert.equal(r.type, "status_result");
-  assert.deepEqual(r.caps.map((c) => c.id), ["c1"]);
-  await link.close();
-});
-
-test("statusOn: cap_id を渡すと status に cap_id が付く（server が通知先にする。返信は同じ status_result）", async () => {
-  const peer = { id: "id-a", name: "bantou-server", version: MESSENGER_PROTOCOL.version };
-  const { link, clients } = setupNoServers([peerOf("id-a", "bantou-server", MESSENGER_PROTOCOL.version)]);
-  const p = link.statusOn(peer, { cap_id: "c-0123456789" });
-  await sleep(20);
-  assert.deepEqual(clients[0].sent[0], { bantou: 1, type: "status", cap_id: "c-0123456789" });
-  clients[0].reply(statusResult(1), "bantou-server", { from_id: "id-a" });
-  assert.equal(((await p) as { type: string }).type, "status_result");
-  await link.close();
-});
-
-test("通知・遅れた返信には送信元の peer id（from_id）が渡る", async () => {
-  const notices: { cap: string; from?: string }[] = [];
-  const late: { text?: string; from?: string }[] = [];
-  const cfg = parseConfig({ servers: [{ name: "s1", timeoutMs: 2000 }] }, "/x/c.json");
-  const clients: FakeClient[] = [];
-  const link = createServerLink({
-    config: cfg,
-    log: () => {},
-    clientFactory: () => {
-      const c = new FakeClient();
-      clients.push(c);
-      return c;
-    },
-    healthCheck: async () => true,
-    onNotice: (n, from) => notices.push({ cap: n.cap_id, ...(from ? { from } : {}) }),
-    onLateCapReply: (r, from) => late.push({ text: (r as { result_text?: string }).result_text, ...(from ? { from } : {}) }),
-  });
-  const p = link.kickCap("s1", { cap_id: "a", prompt: "x" });
-  await sleep(20);
-  clients[0].reply(notice("a"), "bantou-server", { from_id: "srv-1" });
-  clients[0].reply(capResult("a", "first"), "bantou-server", { from_id: "srv-1" });
-  await p;
-  clients[0].reply(capResult("a", "second"), "bantou-server", { from_id: "srv-1" });
-  assert.deepEqual(notices, [{ cap: "a", from: "srv-1" }]);
-  assert.deepEqual(late, [{ text: "second", from: "srv-1" }]);
-  await link.close();
-});
-
-// -- task / worker_reply（protocol 1.5.0） --
-
-const taskCmd = (taskId: string, capId = "r-1") => ({
-  cap_id: capId, task_id: taskId, goal: "g", deliverables: {}, verify: {}, constraints: [], workers: {},
-});
-const taskResult = (taskId: string, capId = "r-1", summary = "done") => ({
-  bantou: 1, type: "task_result", cap_id: capId, task_id: taskId, state: "done", summary,
-  workers: [], review: { verdict: "ok", items: [], rounds: 1 }, remaining: [],
-});
-
-test("taskOn: task を選んだ peer 宛てに送り、cap_id と task_id が一致する task_result で解決する。別 task_id の task_result は待ちを解決せず onLateCapReply へ渡る", async () => {
-  const late: unknown[] = [];
-  const cfg = parseConfig({}, "/x/c.json");
-  const clients: FakeClient[] = [];
-  const link = createServerLink({ config: cfg, log: () => {}, clientFactory: () => { const c = new FakeClient(); c.peers = [peerOf("id-a", "bantou-server", MESSENGER_PROTOCOL.version)]; clients.push(c); return c; }, onLateCapReply: (r) => late.push(r) });
-  const peer = { id: "id-a", name: "bantou-server", version: MESSENGER_PROTOCOL.version };
-  const p = link.taskOn(peer, taskCmd("t-2"));
-  await sleep(20);
-  assert.deepEqual(clients[0].sentTo, ["id-a"]);
-  assert.deepEqual(clients[0].sent[0], { bantou: 1, type: "task", ...taskCmd("t-2") });
-  clients[0].reply(taskResult("t-1", "r-1", "old"), "bantou-server", { from_id: "id-a" });
-  assert.equal(late.length, 1);
-  clients[0].reply(taskResult("t-2", "r-1", "new"), "bantou-server", { from_id: "id-a" });
-  assert.equal(((await p) as { summary: string }).summary, "new");
-  // 最初の返信の後に同じ task_id の task_result が重ねて届いても、渡る（待ちは無い）
-  clients[0].reply(taskResult("t-2", "r-1", "again"), "bantou-server", { from_id: "id-a" });
-  assert.deepEqual(late.map((r) => (r as { summary: string }).summary), ["old", "again"]);
-  await link.close();
-});
-
-test("taskOn: task の error（task_id 付き）は task の待ちを解決する。待ちが無ければ onLateCapReply へ渡る", async () => {
-  const late: unknown[] = [];
-  const cfg = parseConfig({}, "/x/c.json");
-  const clients: FakeClient[] = [];
-  const link = createServerLink({ config: cfg, log: () => {}, clientFactory: () => { const c = new FakeClient(); c.peers = [peerOf("id-a", "bantou-server", MESSENGER_PROTOCOL.version)]; clients.push(c); return c; }, onLateCapReply: (r) => late.push(r) });
-  const peer = { id: "id-a", name: "bantou-server", version: MESSENGER_PROTOCOL.version };
-  const p = link.taskOn(peer, taskCmd("t-1"));
-  await sleep(20);
-  clients[0].reply({ bantou: 1, type: "error", ok: false, message: "updating", command: "task", cap_id: "r-1", task_id: "t-1", code: "updating", retryable: true }, "bantou-server", { from_id: "id-a" });
-  assert.equal(((await p) as { code?: string }).code, "updating");
-  clients[0].reply({ bantou: 1, type: "error", ok: false, message: "resume 失敗", command: "task", cap_id: "r-1", task_id: "t-1" }, "bantou-server", { from_id: "id-a" });
-  assert.equal(late.length, 1);
-  await link.close();
-});
-
-test("workerReplyOn: cap_id と worker_id が一致する worker_reply_result で解決する。error（command=worker_reply）は worker_reply の待ちへ", async () => {
-  const cfg = parseConfig({}, "/x/c.json");
-  const clients: FakeClient[] = [];
-  const link = createServerLink({ config: cfg, log: () => {}, clientFactory: () => { const c = new FakeClient(); c.peers = [peerOf("id-a", "bantou-server", MESSENGER_PROTOCOL.version)]; clients.push(c); return c; } });
-  const peer = { id: "id-a", name: "bantou-server", version: MESSENGER_PROTOCOL.version };
-  const p = link.workerReplyOn(peer, { cap_id: "r-1", worker_id: "w-1", text: "OK" });
-  await sleep(20);
-  assert.deepEqual(clients[0].sent[0], { bantou: 1, type: "worker_reply", cap_id: "r-1", worker_id: "w-1", text: "OK" });
-  clients[0].reply({ bantou: 1, type: "worker_reply_result", ok: true, cap_id: "r-1", worker_id: "w-2", accepted: true }, "bantou-server", { from_id: "id-a" });
-  clients[0].reply({ bantou: 1, type: "worker_reply_result", ok: true, cap_id: "r-1", worker_id: "w-1", accepted: true }, "bantou-server", { from_id: "id-a" });
-  assert.deepEqual(await p, { bantou: 1, type: "worker_reply_result", ok: true, cap_id: "r-1", worker_id: "w-1", accepted: true });
-  const q = link.workerReplyOn(peer, { cap_id: "r-1", worker_id: "w-1", text: "NG" });
-  await sleep(20);
-  clients[0].reply({ bantou: 1, type: "error", ok: false, message: "worker が無い", command: "worker_reply", cap_id: "r-1", worker_id: "w-1" }, "bantou-server", { from_id: "id-a" });
-  assert.equal(((await q) as { type: string }).type, "error");
-  await link.close();
-});
-
-test("門: 版が違う server へは task / worker_reply を送らず version_mismatch を返す（1.4.0 の旧 server）", async () => {
-  const peer = { id: "id-a", name: "s", version: "1.4.0" };
-  const { link, clients } = setupNoServers([peerOf("id-a", "s", "1.4.0")]);
-  const t = (await link.taskOn(peer, taskCmd("t-1"))) as { code?: string; command?: string };
-  assert.deepEqual([t.code, t.command], ["version_mismatch", "task"]);
-  const w = (await link.workerReplyOn(peer, { cap_id: "r-1", worker_id: "w-1", text: "x" })) as { code?: string; command?: string };
-  assert.deepEqual([w.code, w.command], ["version_mismatch", "worker_reply"]);
-  assert.deepEqual(clients[0]?.sent ?? [], []);
-  assert.equal(link.gate(peer, "task")?.code, "version_mismatch");
-  assert.equal(link.gate(peer, "worker_reply")?.code, "version_mismatch");
-  await link.close();
-});
-
-test("通知: worker_report は onNotice に渡り、task の待ちを消さない", async () => {
-  const got: ServerNotice[] = [];
-  const { link, clients, logs } = setup(2000, undefined, (n) => got.push(n));
-  const p = link.kickCap("s1", { cap_id: "c1", prompt: "go" });
-  await sleep(20);
-  clients[0].reply({ bantou: 1, type: "worker_report", cap_id: "c1", task_id: "t-1", worker_id: "w-1", kind: "ask", text: "どっち？", at: "2026-11-04T00:00:00.000Z" });
-  await sleep(20);
-  assert.deepEqual(got.map((n) => [n.type, (n as { kind?: string }).kind]), [["worker_report", "ask"]]);
-  assert.ok(!logs.some((m) => m.startsWith("対応する待ちなし") || m.startsWith("無視:")));
-  clients[0].reply(capResult("c1", "done"));
-  assert.equal(((await p) as { result_text: string }).result_text, "done");
-  await link.close();
-});
-
-// -- server_list に載せる識別 ------------------------------------------------------
-
-test("list: 識別を学習した link の要素に server_id / host / user / workspace が載る", async () => {
-  const { link, clients } = setupDiscovery({}, [peerOf("id-1", "bantou-server")]);
-  const p = link.status("s1");
-  await sleep(20);
-  clients[0].reply({ ...statusResult(1), server_id: "srv-a", host: "lenovo", user: "bob", workspace: "/w/a" }, "bantou-server", { from_id: "id-1" });
-  await p;
-  assert.deepEqual(await link.list(), [
-    { name: "s1", connected: true, reachable: true, peerId: "peer-1", serverPeer: "id-1", server_id: "srv-a", host: "lenovo", user: "bob", workspace: "/w/a" },
+test("notifyPeer: 印（mark）の exclude の id と、印の since より古い登録は宛先から外す", async () => {
+  const { link } = setup([
+    { id: "old-1", name: "pm1-cap", registered_at: "2026-11-03T05:00:00.000Z" },
+    { id: "old-2", name: "pm1-cap", registered_at: "2026-11-03T05:00:10.000Z" },
   ]);
+  await link.connect();
+  const mark = { exclude: new Set(["old-1"]), since: "2026-11-03T05:00:10.000Z" };
+  assert.deepEqual(await link.notifyPeer("pm1-cap", "x", { mark }), { ok: true, to: "old-2" });
+  const stale = await link.notifyPeer("pm1-cap", "x", { mark: { exclude: new Set(["old-1"]), since: "2026-11-03T05:01:00.000Z" } });
+  assert.equal(stale.ok, false);
   await link.close();
 });
 
-test("list: 識別を学習していない link（旧 server の返信）には server_id / host が出ない", async () => {
-  const { link, clients } = setupDiscovery({}, [peerOf("id-1", "bantou-server")]);
-  const p = link.status("s1");
-  await sleep(20);
-  clients[0].reply(statusResult(1), "bantou-server", { from_id: "id-1" });
-  await p;
-  const [e] = await link.list();
-  assert.equal(e.serverPeer, "id-1");
-  assert.ok(!("server_id" in e) && !("host" in e) && !("user" in e) && !("workspace" in e));
-  await link.close();
-});
-
-test("list: 再登録で peer id が変わっても、新 peer id で学習した server_id が載る", async () => {
-  const { link, clients } = setupDiscovery({}, [peerOf("id-1", "bantou-server")]);
-  const p1 = link.status("s1");
-  await sleep(20);
-  clients[0].reply({ ...statusResult(1), server_id: "srv-a", host: "lenovo" }, "bantou-server", { from_id: "id-1" });
-  await p1;
-  clients[0].peers = [peerOf("id-2", "bantou-server")];
-  const p2 = link.status("s1");
-  await sleep(20);
-  clients[0].reply({ ...statusResult(2), server_id: "srv-a", host: "lenovo" }, "bantou-server", { from_id: "id-2" });
-  await p2;
-  const [e] = await link.list();
-  assert.equal(e.serverPeer, "id-2");
-  assert.equal(e.server_id, "srv-a");
-  assert.equal(e.host, "lenovo");
-  await link.close();
-});
-
-test("list: 学習後に旧 peer id が発見から消えても、serverPeer が更新されるまで server_id / host が残る", async () => {
-  const { link, clients } = setupDiscovery({}, [peerOf("id-1", "bantou-server")]);
-  const p = link.status("s1");
-  await sleep(20);
-  clients[0].reply({ ...statusResult(1), server_id: "srv-a", host: "lenovo" }, "bantou-server", { from_id: "id-1" });
-  await p;
-  clients[0].peers = [peerOf("id-2", "bantou-server")];
-  await link.peers(); // 発見で id-1 の識別（identities）は捨てられる
-  assert.equal(link.identityOf?.("id-1"), undefined);
-  const [e] = await link.list();
-  assert.equal(e.serverPeer, "id-1");
-  assert.equal(e.server_id, "srv-a");
-  assert.equal(e.host, "lenovo");
-  await link.close();
-});
-
-test("list: serverPeer が別 peer に変わって未学習なら、古い識別を付けない", async () => {
-  const { link, clients } = setupDiscovery({}, [peerOf("id-1", "bantou-server")]);
-  const p1 = link.status("s1");
-  await sleep(20);
-  clients[0].reply({ ...statusResult(1), server_id: "srv-a", host: "lenovo" }, "bantou-server", { from_id: "id-1" });
-  await p1;
-  clients[0].peers = [peerOf("id-2", "bantou-server")];
-  const p2 = link.status("s1");
-  await sleep(20);
-  // id-2 は識別を名乗らない（旧 server 相当）
-  clients[0].reply(statusResult(2), "bantou-server", { from_id: "id-2" });
-  await p2;
-  const [e] = await link.list();
-  assert.equal(e.serverPeer, "id-2");
-  assert.ok(!("server_id" in e) && !("host" in e));
-  await link.close();
-});
-
-test("list: serverPeer が別 peer に変わって学習済みなら、新しい識別が載る", async () => {
-  const { link, clients } = setupDiscovery({}, [peerOf("id-1", "bantou-server")]);
-  const p1 = link.status("s1");
-  await sleep(20);
-  clients[0].reply({ ...statusResult(1), server_id: "srv-a", host: "lenovo" }, "bantou-server", { from_id: "id-1" });
-  await p1;
-  clients[0].peers = [peerOf("id-2", "bantou-server")];
-  const p2 = link.status("s1");
-  await sleep(20);
-  clients[0].reply({ ...statusResult(2), server_id: "srv-b", host: "mac" }, "bantou-server", { from_id: "id-2" });
-  await p2;
-  const [e] = await link.list();
-  assert.equal(e.serverPeer, "id-2");
-  assert.equal(e.server_id, "srv-b");
-  assert.equal(e.host, "mac");
-  await link.close();
-});
-
-test("門: version_mismatch の error の文に、setVersionNote の更新の状態が入る。差し込まなければ今まで通り", async () => {
-  const peer = { id: "id-a", name: "s", version: "1.2.0" };
-  const { link } = setupNoServers([peerOf("id-a", "s", "1.2.0")]);
-  const before = (await link.kickCapOn(peer, { cap_id: "r-1", prompt: "go" })) as { message: string };
-  assert.ok(!before.message.includes("更新の状態"));
-  link.setVersionNote((p) => `更新の状態: テスト用 ${p.id}`);
-  const after = (await link.kickCapOn(peer, { cap_id: "r-1", prompt: "go" })) as { message: string; code?: string };
-  assert.equal(after.code, "version_mismatch");
-  assert.match(after.message, /更新の状態: テスト用 id-a/);
-  assert.match(after.message, /版が揃うまで指示を送らない/);
-  assert.equal(link.gate(peer, "hello"), undefined, "制御メッセージは断らない");
-  await link.close();
-});
-
-test("notifyPeer: 印（mark）の exclude に入れた id（起床前から居た古い同名 peer）は宛先から外す。新しい peer が現れるまでは ok:false（古い peer へ送って消えない）", async () => {
-  const { link, clients } = setupDiscovery({}, [peerOf("srv", "bantou-server"), { id: "old-1", name: "pm1", registered_at: "2026-11-03T05:00:00.000Z" }]);
-  const mark = await link.peerMarkOf("pm1");
-  assert.deepEqual([...(mark?.exclude ?? [])], ["old-1"]);
-  const r1 = await link.notifyPeer("pm1", "hello", { mark: mark ?? undefined });
-  assert.equal(r1.ok, false);
-  assert.deepEqual(clients[0].sentRaw, []);
-  await link.close();
-});
-
-test("notifyPeer: 印の後に登録された peer（登録時刻が印の since 以後）へだけ送る。古い登録は、id が印に無くても登録時刻が古ければ送らない", async () => {
-  const { link, clients } = setupDiscovery({}, [
-    { ...peerOf("srv", "bantou-server"), registered_at: "2026-11-03T05:00:00.000Z" },
-    { id: "old-1", name: "pm1", registered_at: "2026-11-03T05:00:10.000Z" },
+test("peerMarkOf: since は全 peer の最新の登録時刻、同名 peer の id が exclude に入る。列挙できなければ null", async () => {
+  const { link } = setup([
+    { id: "a", name: "pm1-cap", registered_at: "2026-11-03T05:00:00.000Z" },
+    { id: "b", name: "other", registered_at: "2026-11-03T05:00:40.000Z" },
+    { id: "center-1", name: "pm1-cap", registered_at: "2026-11-03T05:09:00.000Z" },
   ]);
-  const mark = { exclude: new Set<string>(), since: "2026-11-03T05:00:20.000Z" };
-  // 印より前の登録しか無い: 送らない
-  assert.equal((await link.notifyPeer("pm1", "hello", { mark })).ok, false);
-  assert.deepEqual(clients[0].sentRaw, []);
-  // 印より後の peer が現れたら、その peer にだけ送る
-  clients[0].peers!.push({ id: "new-1", name: "pm1", registered_at: "2026-11-03T05:00:25.000Z" });
-  const r = await link.notifyPeer("pm1", "hello", { mark });
-  assert.deepEqual(r, { ok: true, to: "new-1" });
-  assert.deepEqual(clients[0].sentRaw, [{ to: "new-1", text: "hello", delivery: "push" }]);
-  await link.close();
-});
-
-test("peerMarkOf: since は broker にいる全 peer の最新の登録時刻（broker の時計）。同名 peer の id が exclude に入る。列挙できなければ null", async () => {
-  const { link } = setupDiscovery({}, [
-    { ...peerOf("srv", "bantou-server"), registered_at: "2026-11-03T05:00:40.000Z" },
-    { id: "old-1", name: "pm1", registered_at: "2026-11-03T05:00:10.000Z" },
-    { id: "x-1", name: "other", registered_at: "2026-11-03T05:00:30.000Z" },
-  ]);
-  const m = await link.peerMarkOf("pm1");
+  await link.connect();
+  const m = await link.peerMarkOf("pm1-cap");
+  assert.deepEqual([...(m?.exclude ?? [])], ["a"]);
   assert.equal(m?.since, "2026-11-03T05:00:40.000Z");
-  assert.deepEqual([...(m?.exclude ?? [])], ["old-1"]);
   await link.close();
-  const b = setupDiscovery({}, undefined);
-  assert.equal(await b.link.peerMarkOf("pm1"), null);
-  await b.link.close();
+
+  const n = setup(null);
+  await n.link.connect();
+  assert.equal(await n.link.peerMarkOf("pm1-cap"), null);
+});
+
+test("close 後の送信は投げる", async () => {
+  const { link } = setup();
+  await link.connect();
+  await link.close();
+  await assert.rejects(() => link.stop("srv", "pm1-cap"), /center 終了/);
 });

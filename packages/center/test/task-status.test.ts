@@ -1,240 +1,59 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createSessionMcpServer } from "../src/server.js";
-import type { RemoteManager, RemoteView, StoredWorkerReport } from "../src/remotes.js";
-import { buildTaskStatus, limitRemoteList, REMOTE_LIST_TOTAL_MAX, TASK_STATUS_MAX_CHARS, TASK_STATUS_MAX_LINES } from "../src/task-status.js";
+import type { RemoteView } from "../src/remotes.js";
+import { buildTaskStatus, TASK_STATUS_MAX_LINES, TASK_STATUS_MAX_SERVERS } from "../src/task-status.js";
 
-const NOW = Date.parse("2026-01-01T01:00:00Z");
-const iso = (minAgo: number): string => new Date(NOW - minAgo * 60_000).toISOString();
+const NOW = Date.parse("2026-11-23T13:00:00.000Z");
 
-const report = (task_id: string, kind: StoredWorkerReport["kind"], minAgo: number, text = "x", extra: Partial<StoredWorkerReport> = {}): StoredWorkerReport =>
-  ({ bantou: 1, type: "worker_report", cap_id: "c", task_id, worker_id: "w", kind, text, at: iso(minAgo), ...extra }) as StoredWorkerReport;
+const view = (o: Partial<RemoteView> & { session: string; server: string }): RemoteView => ({
+  remote_id: `${o.session}-cap`,
+  serverName: o.server,
+  createdAt: "2026-11-23T12:00:00.000Z",
+  state: "running",
+  owners: [o.session],
+  server_label: o.server,
+  ...o,
+});
 
-const view = (session: string, tasks: { id: string; minAgo: number }[], reports: StoredWorkerReport[] = [], extra: Partial<RemoteView> = {}): RemoteView =>
-  ({
-    remote_id: `c-1-${session}`, session, server: "s", serverName: "n", state: "running", createdAt: iso(100), owners: [session],
-    pending: tasks.map((t) => ({ at: iso(t.minAgo), owner: session, prompt: "SECRET-PROMPT", task_id: t.id, delivery: "observed" as const })),
-    reachability: { reachable: true, last_ok_at: iso(0), failures: 0 }, cap_state: "running", worker_reports: reports, server_label: "host-a", ...extra,
-  }) as RemoteView;
-
-test("task_status: task ごとに 1 行。状態・経過・最後の報告・判断が要る件数。本文は入らない", () => {
-  const v = view("alpha", [{ id: "t-1", minAgo: 12 }, { id: "t-2", minAgo: 3 }], [
-    report("t-1", "progress", 8, "SECRET-BODY"),
-    report("t-1", "ask", 5, "q1"),
-    report("t-1", "approve", 4, "q2", { replied_at: iso(2) }),
+test("cap ごとに 1 行。running は「実行中」、止まっている（done）は「止まっている」と最後の書き込みからの分。他の session の cap は出ない", () => {
+  const views = [
+    view({ session: "pm1", server: "srv-a" }),
+    view({ session: "pm1", server: "srv-b", state: "done", finishedAt: new Date(NOW - 5 * 60_000).toISOString() }),
+    view({ session: "pm2", server: "srv-a" }),
+  ];
+  const r = buildTaskStatus(views, "pm1", NOW);
+  assert.equal(r.at, new Date(NOW).toISOString());
+  assert.deepEqual(r.caps, [
+    { remote_id: "pm1-cap", server: "srv-a", line: "pm1-cap | srv-a | 実行中" },
+    { remote_id: "pm1-cap", server: "srv-b", line: "pm1-cap | srv-b | 止まっている | 最後の書き込み 5 分前" },
   ]);
-  const r = buildTaskStatus([v], "alpha", NOW);
-  assert.equal(r.tasks.length, 2);
-  assert.equal(r.tasks[0]!.line, "t-1 | host-a | 返答待ち | 経過 12 分 | 最後の報告 approve 4 分前 | 判断が要る 1");
-  assert.equal(r.tasks[1]!.line, "t-2 | host-a | 実行中 | 経過 3 分 | 最後の報告 なし | 判断が要る 0");
-  assert.ok(!JSON.stringify(r).includes("SECRET"));
   assert.equal(r.truncated, false);
+  assert.equal(r.omitted, 0);
+  // 本文（prompt・result など）は入らない
+  assert.ok(!JSON.stringify(r).includes("pm2"));
 });
 
-test("task_status: 他の session の task は見えない（owner と pending の owner の両方で絞る）", () => {
-  const mine = view("alpha", [{ id: "t-mine", minAgo: 1 }]);
-  const other = view("beta", [{ id: "t-other", minAgo: 1 }]);
-  const mixed = view("alpha", [{ id: "t-x", minAgo: 1 }]);
-  mixed.pending.push({ at: iso(1), owner: "beta", prompt: "p", task_id: "t-beta-in-alpha-cap" });
-  const r = buildTaskStatus([mine, other, mixed], "alpha", NOW);
-  assert.deepEqual(r.tasks.map((t) => t.task_id).sort(), ["t-mine", "t-x"]);
+test("servers: server ごとの版（server-info の答えを控えた物）。未取得は不明。同じ server は 1 行。版を出すのはここだけ", () => {
+  const views = [view({ session: "pm1", server: "srv-a" }), view({ session: "pm1", server: "srv-b" }), view({ session: "pm1", server: "srv-a", remote_id: "x-cap" })];
+  const r = buildTaskStatus(views, "pm1", NOW, undefined, (s) => (s === "srv-a" ? "1.2.3" : undefined));
+  assert.deepEqual(r.servers, ["srv-a | server 1.2.3", "srv-b | server 不明"]);
+  assert.deepEqual(buildTaskStatus(views, "pm1", NOW).servers, ["srv-a | server 不明", "srv-b | server 不明"]);
+  // cap の行には版が入らない
+  assert.ok(r.caps.every((c) => !c.line.includes("1.2.3")));
 });
 
-test("task_status: 行数・文字数の上限で切れて truncated と omitted が付く", () => {
-  const many = view("alpha", Array.from({ length: TASK_STATUS_MAX_LINES + 15 }, (_, i) => ({ id: `t-${i}`, minAgo: 100 - i })));
-  const r = buildTaskStatus([many], "alpha", NOW);
-  assert.equal(r.tasks.length, TASK_STATUS_MAX_LINES);
+test("remote_id で 1 つの cap に絞れる。cap が無ければ空", () => {
+  const views = [view({ session: "pm1", server: "srv-a" }), view({ session: "pm1", server: "srv-b", remote_id: "other-cap" })];
+  assert.deepEqual(buildTaskStatus(views, "pm1", NOW, { remote_id: "other-cap" }).caps.map((c) => c.server), ["srv-b"]);
+  assert.deepEqual(buildTaskStatus(views, "pm1", NOW, { remote_id: "none" }).caps, []);
+  assert.deepEqual(buildTaskStatus([], "pm1", NOW), { at: new Date(NOW).toISOString(), caps: [], servers: [], truncated: false, omitted: 0 });
+});
+
+test("行数・servers の数の上限。越えたら truncated と omitted", () => {
+  const views = Array.from({ length: TASK_STATUS_MAX_LINES + 5 }, (_, i) => view({ session: "pm1", server: `srv-${i}` }));
+  const r = buildTaskStatus(views, "pm1", NOW);
+  assert.equal(r.caps.length, TASK_STATUS_MAX_LINES);
   assert.equal(r.truncated, true);
-  assert.equal(r.omitted, 15);
-  const longLabel = view("alpha", Array.from({ length: 40 }, (_, i) => ({ id: `t-${i}-${"y".repeat(100)}`, minAgo: 100 - i })), [], { server_label: "h".repeat(150) });
-  const r2 = buildTaskStatus([longLabel], "alpha", NOW);
-  assert.ok(r2.tasks.every((t) => t.line.length <= 200));
-  assert.ok(r2.tasks.reduce((n, t) => n + t.line.length, 0) <= TASK_STATUS_MAX_CHARS);
-  assert.ok(r2.truncated && r2.omitted > 0);
-});
-
-test("task_status: 不通・lost・失敗の状態", () => {
-  assert.match(buildTaskStatus([view("a", [{ id: "t", minAgo: 1 }], [], { reachability: { reachable: false, last_ok_at: null, failures: 3 } })], "a", NOW).tasks[0]!.line, /\| 不通 \|/);
-  assert.match(buildTaskStatus([view("a", [{ id: "t", minAgo: 1 }], [], { cap_state: "lost" })], "a", NOW).tasks[0]!.line, /\| lost \|/);
-  assert.match(buildTaskStatus([view("a", [{ id: "t", minAgo: 1 }], [], { state: "failed" })], "a", NOW).tasks[0]!.line, /\| 失敗 \|/);
-});
-
-test("limitRemoteList: report の本文 300 文字・result 2000 文字で切り、印が付く", () => {
-  const v = view("a", [], [report("t", "done", 1, "z".repeat(5000))], { result: "r".repeat(9000) });
-  const [o] = limitRemoteList([v]) as (RemoteView & { truncated?: { report_texts_cut: number; result_cut: boolean; note: string } })[];
-  assert.ok(o!.worker_reports[0]!.text.length < 400);
-  assert.ok(o!.result!.length < 2100);
-  assert.equal(o!.truncated?.report_texts_cut, 1);
-  assert.equal(o!.truncated?.result_cut, true);
-  assert.match(o!.truncated!.note, /上限/);
-});
-
-test("limitRemoteList: 大量の入力でも 1 回 20000 文字以内。古い report から落とし、件数が印に出る", () => {
-  const reports = Array.from({ length: 20 }, (_, i) => report("t", "progress", 30 - i, `${i}:` + "q".repeat(20000)));
-  const views = ["a", "b", "c", "d"].map((s) => view(s, [], reports, { result: "r".repeat(8000) }));
-  const out = limitRemoteList(views);
-  assert.ok(JSON.stringify(out, null, 2).length <= REMOTE_LIST_TOTAL_MAX, `size ${JSON.stringify(out, null, 2).length}`);
-  const dropped = out.reduce((n, v) => n + ((v as RemoteView & { truncated?: { reports_dropped: number } }).truncated?.reports_dropped ?? 0), 0);
-  assert.ok(dropped > 0);
-  for (const v of out as (RemoteView & { truncated?: { reports_dropped: number } })[]) if (v.truncated && v.worker_reports.length > 0) assert.ok(v.worker_reports[0]!.text.startsWith(`${20 - v.worker_reports.length}:`) || v.truncated.reports_dropped > 0);
-  // 残るのは新しい report
-  const kept = (out[0] as RemoteView).worker_reports;
-  if (kept.length > 0) assert.ok(kept[kept.length - 1]!.text.startsWith("19:"));
-});
-
-test("limitRemoteList: 小さい入力は変わらない（印なし）", () => {
-  const v = view("a", [], [report("t", "done", 1, "ok")], { result: "short" });
-  assert.deepEqual(limitRemoteList([v]), [v]);
-});
-
-async function sessionClient(remotes: Partial<RemoteManager>, owner: string) {
-  const s = createSessionMcpServer({ remotes: { scopeOf: () => ({ servers: undefined, out_of_scope: 0 }), ...remotes } as RemoteManager, owner });
-  const [c, st] = InMemoryTransport.createLinkedPair();
-  const cl = new Client({ name: "ts", version: "0" });
-  await Promise.all([s.connect(st), cl.connect(c)]);
-  return cl;
-}
-const body = (r: unknown): unknown => JSON.parse((r as { content: { text: string }[] }).content[0]!.text);
-
-test("session の MCP: task_status が owner の task だけ返し、remote_list は上限つき。tool の schema は pattern を持たない", async () => {
-  const calls: unknown[] = [];
-  const all = [view("alpha", [{ id: "t-mine", minAgo: 1 }], [report("t-mine", "done", 1, "z".repeat(5000))]), view("beta", [{ id: "t-other", minAgo: 1 }])];
-  const cl = await sessionClient({ list: (f: unknown) => (calls.push(f), all.filter((v) => v.session === (f as { owner: string }).owner)) } as Partial<RemoteManager>, "alpha");
-  const names = (await cl.listTools()).tools.map((t) => t.name);
-  assert.ok(names.includes("task_status"));
-  const ts = body(await cl.callTool({ name: "task_status", arguments: {} })) as { tasks: { task_id: string }[] };
-  assert.deepEqual(ts.tasks.map((t) => t.task_id), ["t-mine"]);
-  const rl = body(await cl.callTool({ name: "remote_list", arguments: {} })) as RemoteView[];
-  assert.ok(rl[0]!.worker_reports[0]!.text.length < 400);
-  assert.deepEqual(calls[0], { owner: "alpha", includeOutOfScope: true });
-  const t = (await cl.listTools()).tools.find((x) => x.name === "task_status")!;
-  assert.ok(!JSON.stringify(t.inputSchema).includes("pattern"));
-  assert.ok(t.description && t.description.length > 0);
-  await cl.close();
-});
-
-test("外向けの remote_list は切らない（返り値が変わらない）", async () => {
-  const { createCenterServer } = await import("../src/server.js");
-  const { parseConfig } = await import("../src/config.js");
-  const big = view("alpha", [], [report("t", "done", 1, "z".repeat(5000))], { result: "r".repeat(9000) });
-  const remotes = { list: () => [big] } as unknown as RemoteManager;
-  const server = createCenterServer({ config: parseConfig({}, "/x/c.json"), supervisor: {} as never, link: {} as never, sessions: {} as never, remotes, follow: undefined, login: undefined });
-  const [ct, st] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "t", version: "0" });
-  await Promise.all([server.connect(st), client.connect(ct)]);
-  const out = body(await client.callTool({ name: "remote_list", arguments: {} })) as RemoteView[];
-  assert.equal(out[0]!.worker_reports[0]!.text.length, 5000);
-  assert.equal(out[0]!.result!.length, 9000);
-  assert.equal((out[0] as { truncated?: unknown }).truncated, undefined);
-  await client.close();
-});
-
-const lenOf = (x: unknown): number => JSON.stringify(x, null, 2).length;
-const withPrompt = (session: string, n: number, extra: Partial<RemoteView> = {}, id = session): RemoteView => {
-  const v = view(session, [{ id: `t-${id}`, minAgo: 1 }], [], { remote_id: `c-1-${id}`, ...extra });
-  v.pending[0]!.prompt = "p".repeat(n);
-  return v;
-};
-
-test("limitRemoteList: pending の prompt が 50000 文字の cap 1 つでも 20000 文字以内。prompt を切った印", () => {
-  const out = limitRemoteList([withPrompt("a", 50000)]);
-  assert.ok(lenOf(out) <= REMOTE_LIST_TOTAL_MAX, `size ${lenOf(out)}`);
-  const o = out[0] as RemoteView & { truncated?: { pending_prompts_cut: boolean } };
-  assert.equal(o.truncated?.pending_prompts_cut, true);
-  assert.ok(o.pending[0]!.prompt.length < 400);
-});
-
-test("limitRemoteList: conversation の error 文が巨大でも切る", () => {
-  const conv = { started_at: iso(1), tasks: 1, last_error_text: "e".repeat(40000) } as unknown as RemoteView["conversation"];
-  const out = limitRemoteList([withPrompt("a", 10, { conversation: conv })]);
-  assert.ok(lenOf(out) <= REMOTE_LIST_TOTAL_MAX);
-  assert.equal((out[0] as RemoteView & { truncated?: { conversation_cut: boolean } }).truncated?.conversation_cut, true);
-});
-
-test("limitRemoteList: prompt 1000 文字の cap 30 個 → 20000 文字以内。cap の件数が落ち、omitted_remotes の印が付く。古い cap から落ちる", () => {
-  const views = Array.from({ length: 30 }, (_, i) => withPrompt(`s${i}`, 1000, { createdAt: iso(1000 - i) }, `${i}`));
-  const out = limitRemoteList(views, 3000);
-  assert.ok(lenOf(out) <= 3000, `size ${lenOf(out)}`);
-  const last = out[out.length - 1] as { omitted_remotes?: number };
-  assert.ok((last.omitted_remotes ?? 0) > 0);
-  const keptIds = out.slice(0, -1).map((v) => (v as RemoteView).remote_id);
-  assert.ok(!keptIds.includes("c-1-0"), "最も古い cap は落ちる");
-  assert.ok(keptIds.includes("c-1-29"), "最も新しい cap は残る");
-  assert.equal(keptIds.length + (last.omitted_remotes ?? 0), 30);
-  // 既定の上限でも 30 個は収まる
-  assert.ok(lenOf(limitRemoteList(views)) <= REMOTE_LIST_TOTAL_MAX);
-});
-
-test("limitRemoteList: 切る前が 20010 文字付近で、report 落としでは足りず fallback（result 縮め）の段を通る。note を付けても 20000 文字以内", () => {
-  // report 無し・prompt 短し・result だけが 2000 文字で並ぶ cap を、上限の直上になるまで増やす。
-  const mk = (i: number): RemoteView => withPrompt(`s${i}`, 10, { result: "r".repeat(1990), createdAt: iso(500 - i) }, `${i}`);
-  let n = 1;
-  while (lenOf(limitRemoteList(Array.from({ length: n }, (_, i) => mk(i)), 1e9)) <= REMOTE_LIST_TOTAL_MAX + 0) n++;
-  const views = Array.from({ length: n }, (_, i) => mk(i));
-  const base = lenOf(limitRemoteList(views, 1e9));
-  assert.ok(base > REMOTE_LIST_TOTAL_MAX && base < REMOTE_LIST_TOTAL_MAX + 3000, `base ${base}`);
-  const out = limitRemoteList(views);
-  assert.ok(lenOf(out) <= REMOTE_LIST_TOTAL_MAX, `size ${lenOf(out)}`);
-  const first = out[0] as RemoteView & { truncated?: { result_cut: boolean; note: string } };
-  assert.equal(first.truncated?.result_cut, true);
-  assert.ok(first.result!.length < 400, "fallback で result が縮む");
-  assert.ok(out.length === views.length, "cap は落とさず result の縮めで収まる");
-});
-
-import type { ServerVersionInfo } from "../src/follow.js";
-
-const vinfo = (over: Partial<ServerVersionInfo> = {}): ServerVersionInfo => ({
-  center_protocol: "1.8.0", server_protocol: "1.7.0", server_version: "0.3.0", state: "updating",
-  detail: "更新中（0.3.0→0.3.1）: cap 2 / worker 3 の終了待ち", update: { to: "0.3.1", running: { caps: 2, workers: 3, reports: 0 } }, since: iso(5), ...over,
-});
-
-test("task_status: servers に server ごとの版の状態（center の版・server の版・状態・件数）が出る。他の session の cap の server は出ない", () => {
-  const mine = view("alpha", [{ id: "t-1", minAgo: 1 }], [], { server_version_state: vinfo() });
-  const other = view("beta", [{ id: "t-2", minAgo: 1 }], [], { server_version_state: vinfo({ detail: "OTHER-SESSION-SERVER" }), server_label: "host-b" });
-  const r = buildTaskStatus([mine, other], "alpha", NOW);
-  assert.equal(r.servers.length, 1);
-  assert.match(r.servers[0]!, /host-a .*center protocol 1\.8\.0.*server 0\.3\.0.*updating.*cap 2 \/ worker 3/);
-  assert.ok(!JSON.stringify(r).includes("OTHER-SESSION"));
-  assert.ok(!JSON.stringify(r).includes("host-b"));
-});
-
-test("task_status: 版の状態があっても 40 行・6000 文字の上限を守る（server 10 件・task 100 件・長い detail）", () => {
-  const views = Array.from({ length: 30 }, (_, i) =>
-    view("alpha", Array.from({ length: 5 }, (_, j) => ({ id: `t-${i}-${j}`, minAgo: j })), [], { remote_id: `c-${i}`, server_label: `host-${i}`, server_version_state: vinfo({ detail: "d".repeat(200) }) }));
-  const r = buildTaskStatus(views, "alpha", NOW);
-  assert.ok(JSON.stringify(r, null, 2).length <= TASK_STATUS_MAX_CHARS);
-  assert.ok(r.tasks.length <= TASK_STATUS_MAX_LINES);
-  assert.ok(r.servers.length <= 10);
-  assert.equal(r.truncated, true);
-  assert.ok(r.servers.every((l) => l.length <= 200));
-});
-
-test("remote_list: 版の状態が付いた cap が大量でも 20000 文字以内", () => {
-  const views = Array.from({ length: 60 }, (_, i) => view(`s${i}`, [], [], { createdAt: iso(1000 - i), server_version_state: vinfo({ detail: "d".repeat(200) }) }));
-  const out = limitRemoteList(views);
-  assert.ok(JSON.stringify(out, null, 2).length <= REMOTE_LIST_TOTAL_MAX);
-});
-
-test("session の MCP: follow があると remote_list の各 cap と task_status に server の版の状態が付く。follow が無ければ付かない", async () => {
-  const all = [view("alpha", [{ id: "t-mine", minAgo: 1 }], [], { server_id: "sv-aaaa", peer: "id-1" } as Partial<RemoteView>), view("beta", [{ id: "t-o", minAgo: 1 }], [], { server_id: "sv-bbbb", peer: "id-2" } as Partial<RemoteView>)];
-  const remotes = { scopeOf: () => ({ servers: undefined, out_of_scope: 0 }), list: (f: { owner: string }) => all.filter((v) => v.session === f.owner) } as Partial<RemoteManager> as RemoteManager;
-  const follow = { versionOf: (ref: { server_id?: string; peer?: string }) => (ref.peer === "id-1" ? vinfo() : vinfo({ detail: "OTHER" })) } as never;
-  const s = createSessionMcpServer({ remotes, follow, owner: "alpha" });
-  const [c, st] = InMemoryTransport.createLinkedPair();
-  const cl = new Client({ name: "ts", version: "0" });
-  await Promise.all([s.connect(st), cl.connect(c)]);
-  const rl = body(await cl.callTool({ name: "remote_list", arguments: {} })) as RemoteView[];
-  assert.equal(rl.length, 1);
-  assert.equal(rl[0]!.server_version_state?.server_version, "0.3.0");
-  assert.equal(rl[0]!.server_version_state?.state, "updating");
-  const ts = body(await cl.callTool({ name: "task_status", arguments: {} })) as { servers: string[] };
-  assert.equal(ts.servers.length, 1);
-  assert.ok(!JSON.stringify(ts).includes("OTHER"));
-  await cl.close();
-  const plain = await sessionClient({ list: () => all.filter((v) => v.session === "alpha") } as Partial<RemoteManager>, "alpha");
-  const rl2 = body(await plain.callTool({ name: "remote_list", arguments: {} })) as RemoteView[];
-  assert.equal(rl2[0]!.server_version_state, undefined);
-  await plain.close();
+  assert.equal(r.omitted, 5);
+  assert.equal(r.servers.length, TASK_STATUS_MAX_SERVERS);
 });

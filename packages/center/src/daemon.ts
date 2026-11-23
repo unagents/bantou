@@ -1,10 +1,8 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import type { CapResultReply, ErrorReply, TaskResultReply, WorkerReportNotice } from "@agent-hand/bantou-protocol";
 import type { CliArgs } from "./args.js";
 import { resolveClaude } from "./claude-path.js";
 import { resolveSessionPath } from "./path-env.js";
-import { createActivityStore } from "./activity.js";
-import { loadCapId } from "./center-id.js";
+import { centerName } from "./center-name.js";
 import { loadConfig, MIN_TOKEN_LEN } from "./config.js";
 import { centerHostOf, coordinatorEntry, ensureCoordinatorState, startCoordinatorChild, type CoordinatorChild, type CoordinatorMcpState } from "./coordinator-mcp.js";
 import { SESSION_MCP_PATH, startHttpServer, type HttpHandle } from "./http.js";
@@ -18,9 +16,8 @@ import { mkdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { log, setLogFile } from "./log.js";
 import { watchParent } from "./parent-watch.js";
-import { createFollow } from "./follow.js";
-import { resolvePair } from "./pair.js";
 import { createRemoteManager } from "./remotes.js";
+import { createWorkerTracker, workerWsUrl } from "./worker-ws.js";
 import { createRemoteControlSupervisor } from "./remote-control.js";
 import { createContextUsageTracker } from "./context-usage.js";
 import { createLoginFlow } from "./login.js";
@@ -115,45 +112,13 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     onAuthChange: (name) => events.publish({ reason: "changed", name }),
   });
   const login = createLoginFlow({ supervisor, core, log });
-  const activity = createActivityStore();
-  // 通知は 5 秒ごとに来るので、状態の組が変わった時だけログに出す
-  const lastStates = new Map<string, string>();
-  // remotes は link の後に作るので、遅れて届く返信はここ経由で渡す
-  let applyLateReply: (r: CapResultReply | TaskResultReply | ErrorReply, fromId?: string) => void = () => {};
-  let onActivity: (capId: string, fromId?: string) => void = () => {};
-  let onWorkerReport: (n: WorkerReportNotice, fromId?: string) => void = () => {};
-  const link = createServerLink({
-    config,
-    log,
-    onLateCapReply: (r, fromId) => applyLateReply(r, fromId),
-    onNotice: (n, fromId) => {
-      if (n.type === "worker_report") {
-        onWorkerReport(n, fromId);
-        return;
-      }
-      activity.apply(n, fromId ?? "");
-      onActivity(n.cap_id, fromId);
-      const states = n.agents.map((a) => `${a.id}=${a.state}`).join(" ");
-      if (lastStates.get(n.cap_id) !== states) {
-        lastStates.set(n.cap_id, states);
-        log(`activity 受信: cap_id=${n.cap_id} ${states}`);
-      }
-    },
-  });
-  // desktop のビルドと組になる版。違う server には更新を指示し、版が揃うまで指示を送らない
-  const pair = resolvePair({ warn: log });
-  log(`組の版: server=${pair.server ?? "(不明、版合わせは無効)"} protocol=${pair.protocol}`);
-  // 更新待ちの run の cap_id から session 名を引く（この center の cap_id 接頭は後で読む）
-  let centerCapId: string | undefined;
-  const follow = createFollow({
-    link,
-    pair,
-    log,
-    onReach: (peer, ok, message) => remotes.noteReach(peer, ok, message),
-    sessionOfCap: (cid) => (centerCapId !== undefined && cid.startsWith(`${centerCapId}-`) ? cid.slice(centerCapId.length + 1) || undefined : undefined),
-  });
-  link.setGate((peer, command) => follow.gate(peer, command));
-  link.setVersionNote((peer) => follow.noteOf(peer));
+  // center の名前（bantou-center-<key>）。機械の ID を読めなければ起動しない。同じ名前が既に在って登録に失敗した時も起動しない（別の名前にしない）
+  const name = centerName();
+  log(`center の名前: ${name}`);
+  const link = createServerLink({ name, log });
+  await link.connect();
+  // worker の ws（最後の書き込みの時刻から running / 止まっている を出す）。口は http で待ち受ける時だけ
+  const tracker = createWorkerTracker();
   // session / remote の保存先は config と同じ dir（config の projects には書かない）
   const stateDir = dirname(resolve(configPath));
   const contextUsage = createContextUsageTracker({
@@ -238,32 +203,18 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     dir: join(stateDir, "handoffs"),
     log,
   });
-  const capId = await loadCapId(stateDir, log);
-  centerCapId = capId;
-  log(`remote-cap の cap_id 接頭: ${capId}（center ごとに固定。session の cap_id は ${capId}-<session 名>）`);
   const remotes = createRemoteManager({
     link,
-    capId,
-    servers: config.servers,
-    pushProgress: config.remotes.pushProgress,
-    configPath,
+    tracker,
+    // launch の ws（http で待ち受けていれば、実際の port を使う）。宛先の host が決まらなければ undefined（remote_send が error）
+    wsUrl: () => (httpPort === null || !config.token ? undefined : workerWsUrl({ bind: args.bind, port: httpPort, token: config.token, ...(config.publicHost ? { publicHost: config.publicHost } : {}) })),
     store: createJsonListStore(join(stateDir, "remotes.json"), log),
-    // 旧形式（server_id の無い記録）を読み替える前の退避。remotes.json.pre-server-id.bak（既にあれば上書きしない）
-    backup: async () => {
-      if (await backupFileOnce(join(stateDir, "remotes.json"), ".pre-server-id.bak")) log("remotes.json を退避: remotes.json.pre-server-id.bak");
-    },
     log,
-    activity,
     onSummaryChange: (name) => events.publish({ reason: "remote", name }),
     // session ごとの servers（無ければ center 共通）。sessions は先に作ってあるので直接引く
     serversOf: (owner) => sessions.serversOf(owner),
     memoryEvents,
-    // 通知先の messenger peer 名は session に付けた名前（capSessionName(owner)）。旧名への fallback は入れない（運用で補う。report 参照）
-    notify: (owner, text) => link.notifyPeer(capSessionName(owner), text),
   });
-  applyLateReply = (r, fromId) => void remotes.applyLateReply(r, fromId);
-  onActivity = (id, fromId) => remotes.onActivity(id, fromId);
-  onWorkerReport = (n, fromId) => remotes.onWorkerReport(n, fromId);
 
   let closing = false;
   let http: HttpHandle | null = null;
@@ -279,7 +230,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     hard.unref();
     try {
       // 子の停止を最優先にする（http.close が長引いても子に signal が届くように）
-      follow.stop();
+      remotes.close();
       coordChild?.stop();
       contextUsage.stop();
       memoryEvents.close();
@@ -311,7 +262,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   process.stderr.on("error", () => {});
   process.stdout.on("error", () => {});
 
-  const makeServer = (launcher: boolean) => createCenterServer({ config, supervisor, link, sessions, remotes, follow, login, log, launcher, resession });
+  const makeServer = (launcher: boolean) => createCenterServer({ config, supervisor, link, sessions, remotes, login, log, launcher, resession });
   if (args.transport === "http") {
     if (!config.token || config.token.length < MIN_TOKEN_LEN) {
       throw new Error(`http transport には config の token（${MIN_TOKEN_LEN} 文字以上）が必要: ${configPath}`);
@@ -320,8 +271,9 @@ export async function runDaemon(args: CliArgs): Promise<void> {
       createServer: (launcher) => makeServer(launcher === true),
       ...(launcherKey ? { launcherKey } : {}),
       schemas: schemaSourceFromFile(join(stateDir, "center-settings.json"), log),
-      createSessionServer: (owner) => createSessionMcpServer({ remotes, follow, owner, resession }),
+      createSessionServer: (owner) => createSessionMcpServer({ remotes, link, owner, resession }),
       sessionAuth: sessionTokens,
+      workerTracker: tracker,
       onStatusLine: (name, payload) => {
         const s = sessions.list().find((x) => x.name === name);
         if (s && (s.state === "starting" || s.state === "connected")) contextUsage.applyStatusLine(name, payload, s.startedAt);
@@ -367,11 +319,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     log("MCP stdio 接続");
   }
 
-  // transport を先に繋いでから、接続と autostart をバックグラウンドで進める
-  void link.connectAll().finally(() => follow.start());
-  // 古い記録の整理（同じ server_id の重複・長く確認できない到達先）。記録だけを消し、server には何も送らない
-  const pruneTimer = setInterval(() => void remotes.prune().catch((e: unknown) => log(`remote 記録の整理失敗: ${e instanceof Error ? e.message : String(e)}`)), 10 * 60_000);
-  pruneTimer.unref();
+  // transport を先に繋いでから、控えの復元と autostart をバックグラウンドで進める
   void remotes.restore().catch((e: unknown) => log(`remote 記録の復元失敗: ${e instanceof Error ? e.message : String(e)}`));
   contextUsage.start();
   void sessions.restore().catch((e: unknown) => log(`session の復帰失敗: ${e instanceof Error ? e.message : String(e)}`));
