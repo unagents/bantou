@@ -164,6 +164,46 @@ test("restore: 眠っていた session は起動せず眠ったまま復帰し�
   assert.equal(l.find((s) => s.name === "awake")?.sleeping, false);
 });
 
+const savedMk = (name: string, sleeping?: boolean): SavedSession => ({ name, path: join(dir, name), permissionMode: "auto", createdAt: "2026-11-21T00:00:00Z", ...(sleeping ? { sleeping } : {}) });
+
+test("restore: onRestoreStart は非スリープ・成功の session にだけ、supervisor.start(resume) の直前に呼ぶ（T15・T2）", async () => {
+  await writeFile(join(dir, "sessions.json"), JSON.stringify([savedMk("zzz", true), savedMk("awake")]));
+  const order: string[] = [];
+  const { mgr, sup } = setup({ onRestoreStart: (n) => order.push(`arm:${n}`), onRestoreFail: (n) => order.push(`fail:${n}`) });
+  const realStart = sup.start;
+  (sup as unknown as { start: unknown }).start = async (n: string, o?: { resume?: boolean }) => {
+    order.push(`start:${n}${o?.resume ? ":resume" : ""}`);
+    return realStart.call(sup, n, o);
+  };
+  await mgr.restore();
+  assert.deepEqual(order, ["arm:awake", "start:awake:resume"]);
+});
+
+test("restore: スリープ中の session は wake しても onRestoreStart を呼ばない。新規・sleep→wake でも呼ばない（T2）", async () => {
+  await writeFile(join(dir, "sessions.json"), JSON.stringify([savedMk("zzz", true)]));
+  const armed: string[] = [];
+  const { mgr } = setup({ onRestoreStart: (n) => armed.push(n) });
+  await mgr.restore();
+  await mgr.wake("zzz");
+  await mgr.create({ name: "fresh" });
+  await mgr.sleep("fresh");
+  await mgr.wake("fresh");
+  assert.deepEqual(armed, []);
+});
+
+test("restore: supervisor.start が投げたら onRestoreFail を呼び、次の session へ進む。成功した session には呼ばない（T9）", async () => {
+  await writeFile(join(dir, "sessions.json"), JSON.stringify([savedMk("bad"), savedMk("good")]));
+  const order: string[] = [];
+  const { mgr, sup } = setup({ onRestoreStart: (n) => order.push(`arm:${n}`), onRestoreFail: (n) => order.push(`fail:${n}`) });
+  const realStart = sup.start;
+  (sup as unknown as { start: unknown }).start = async (n: string, o?: { resume?: boolean }) => {
+    if (n === "bad") throw new Error("start 失敗");
+    return realStart.call(sup, n, o);
+  };
+  await mgr.restore();
+  assert.deepEqual(order, ["arm:bad", "fail:bad", "arm:good"]);
+});
+
 test("update（名前の変更）は止めて起動し直す操作なので、眠っていた session も起きる", async () => {
   const { mgr, calls, changes } = setup();
   await mgr.create({ name: "pm1" });

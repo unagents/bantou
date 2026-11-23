@@ -10,6 +10,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { submitFirstInput } from "./first-input.js";
 import { digest8 as digest8With, makeEventId as makeEventIdWith, MEMORY_BODY_MAX, redactReason } from "./memory.js";
 import type { SessionInfo } from "./sessions.js";
 import type { Logger } from "./log.js";
@@ -82,6 +83,8 @@ export interface ResessionDeps {
   dir: string;
   log: Logger;
   now?: () => number;
+  /** 再起動（restartFresh）の直前に、app 再起動後の状況確認の印を外す（確認と引継ぎを重ねない。2.3 の 2）。 */
+  cancelRestartCheck?: (session: string) => void;
   /** 最初の入力の本文を送ってから Enter を送るまでの間（ms）。既定 400。 */
   submitDelayMs?: number;
   /** 再起動を始めるまでの間。既定は setImmediate（Stop の応答を返した後）。 */
@@ -89,7 +92,6 @@ export interface ResessionDeps {
 }
 
 const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /** 最初の入力の本文。取り出せた時だけ引継ぎの本文（改行を含む）が入る。取り出せなかった時は 1 行（10.4）。 */
 export function firstInputText(r: { id: string; stored: "memory" | "file"; session: string; file: string; result: Fetched }): string {
@@ -182,6 +184,7 @@ export function createResessioner(deps: ResessionDeps): Resessioner {
     // 取り出しは再起動と並行して進める（再起動は待たない）。結果は deliver が待つ
     mark.fetched = fetchHandoff(session, mark);
     try {
+      deps.cancelRestartCheck?.(session);
       await deps.restartFresh(session);
       log(`リセッション再起動: session=${session} id=${mark.id} stored=${mark.stored}`);
     } catch (e) {
@@ -196,10 +199,7 @@ export function createResessioner(deps: ResessionDeps): Resessioner {
     if (!result.ok) log(`リセッションの引継ぎを取り出せない: session=${session} id=${mark.id} stored=${mark.stored} ${result.reason}`);
     const text = firstInputText({ id: mark.id, stored: mark.stored, session, file: fileOf(session), result });
     try {
-      // 本文は bracketed paste で 1 回の貼り付けとして入れ、Enter は少し置いて別に送る（改行で途中の確定をさせない）
-      if (!deps.core.input(session, Buffer.from(`\u001b[200~${text}\u001b[201~`))) throw new Error("session が実行中でない");
-      await sleep(submitDelayMs);
-      if (!deps.core.input(session, Buffer.from("\r"))) throw new Error("session が実行中でない");
+      await submitFirstInput(deps.core, session, text, submitDelayMs);
       const rec = records.get(session);
       if (result.ok && rec && rec.id === mark.id) {
         const done = { ...rec, deliveredAt: new Date(now()).toISOString() };
