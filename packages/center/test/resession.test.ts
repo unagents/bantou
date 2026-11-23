@@ -871,6 +871,23 @@ test("T4: 作業中（working・subagent・background）は Stop を待たず断
   await r.close();
 });
 
+test("T4b: background の task（shell など。subagent ではない）が動いていても Stop を待たず断る（SLEEP_REFUSED_PREFIX 付き）。印も残さず、task が終われば受ける", async () => {
+  const r = await rig();
+  const w1 = await boot(r);
+  r.hook(hookOf("Stop", { background_tasks: [{ id: "sh1", type: "shell", status: "running" }] }));
+  const v = r.sessions.list()[0]!;
+  assert.equal(v.background.tasks, 1);
+  assert.equal(v.background.subagents, 0);
+  assert.notEqual(v.activity, "working");
+  await assert.rejects(r.res.requestSleep("pm1"), (e: Error) => e.message.startsWith(SLEEP_REFUSED_PREFIX) && /作業中は眠らせられない/.test(e.message));
+  assert.equal(r.res.pending("pm1"), false);
+  assert.deepEqual(w1.inputs(), []);
+  r.hook(hookOf("Stop", { background_tasks: [] }));
+  assert.equal(r.sessions.list()[0]!.background.tasks, 0);
+  assert.equal((await r.res.requestSleep("pm1")).pending, true);
+  await r.close();
+});
+
 test("T2: 引継ぎは memory に保存する（stored=memory・file は書かない）。届かない時は file（stored=file・本文は file にある）。sleepHandoff の stored もそれに従う", async () => {
   const r = await rig();
   const w1 = await boot(r);

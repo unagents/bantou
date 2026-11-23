@@ -428,7 +428,7 @@ test("統括の道具 coordinator_session_sleep: 他の session をスリープ�
         if (name === "ghost") throw new Error("未定義の session: ghost");
         if (name === "boom") throw new Error("SECRET-DETAIL");
         if (name === "busy") throw new Error(`${SLEEP_REFUSED_PREFIX}利用者の入力待ち（needs-input）の間はリセッションしない`);
-        if (name === "working") throw new Error(`${SLEEP_REFUSED_PREFIX}作業中は眠らせられない（turn・subagent・background が動いている。終わってから）`);
+        if (name === "working" || name === "subagents" || name === "tasks") throw new Error(`${SLEEP_REFUSED_PREFIX}作業中は眠らせられない（turn・subagent・background が動いている。終わってから）`);
         slept.push(name);
         return { name, state: "connected", sleeping: false, accepted: true, pending: true };
       },
@@ -449,6 +449,11 @@ test("統括の道具 coordinator_session_sleep: 他の session をスリープ�
     const working = await c.callTool({ name: "coordinator_session_sleep", arguments: { name: "working" } });
     assert.equal(isError(working), true);
     assert.match(text(working), /作業中は眠らせられない/);
+    for (const n of ["subagents", "tasks"]) {
+      const r = await c.callTool({ name: "coordinator_session_sleep", arguments: { name: n } });
+      assert.equal(isError(r), true, n);
+      assert.match(text(r), /作業中は眠らせられない/, n);
+    }
     const ghost = await c.callTool({ name: "coordinator_session_sleep", arguments: { name: "ghost" } });
     assert.equal(isError(ghost), true);
     assert.match(text(ghost), /未定義の session: ghost/);

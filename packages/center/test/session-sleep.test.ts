@@ -706,3 +706,19 @@ test("T10: 眠っている session 宛の message（sleep-gate）で起きる時
   assert.equal(calls.filter((c) => c === "start:pm1").length, 2);
   await gate.close();
 });
+
+test("update（名前の変更）は眠りの引継ぎの参照を持ち越さない: 元の会話（resume）で起動し、onWake は呼ばない。保存にも sleepHandoff は残らない", async () => {
+  const { mgr, calls, wakes } = setupWake();
+  await mgr.create({ name: "pm1" });
+  await mgr.sleep("pm1", { handoff: REF });
+  assert.deepEqual((await savedOf())[0].sleepHandoff, REF);
+  const r = await mgr.update({ name: "pm1", newName: "pm2" });
+  assert.equal(r.sleeping, false);
+  assert.equal(calls.at(-1), "start:pm2:resume");
+  assert.deepEqual(wakes, []);
+  const rec = (await savedOf())[0];
+  assert.equal(rec.name, "pm2");
+  assert.equal(rec.sleepHandoff, undefined);
+  assert.equal(rec.sleeping, undefined);
+});
+
