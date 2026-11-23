@@ -216,8 +216,8 @@ export const COORDINATOR_USAGE: SystemInstructionPart = {
  */
 export const RESESSION_USAGE: SystemInstructionPart = {
   id: "resession",
-  version: 2,
-  title: "session_resession が使える session だけ: 区切りがついた時の引継ぎの渡し方と、再起動後の最初の入力の扱い",
+  version: 3,
+  title: "session_resession が使える session だけ: 区切りがついた時・眠らせる依頼が来た時の引継ぎの渡し方と、再起動・起こした後の最初の入力の扱い",
   when: (ctx) => ctx.resession === true,
   text: () =>
     [
@@ -226,7 +226,8 @@ export const RESESSION_USAGE: SystemInstructionPart = {
       "- 引数 handoff に引継ぎの本文を渡す。common の [記録] の 3 つ（引継ぎ = 仕掛かり・止まっている事・次の一手 / 決定と番号つきの未決 / 今の窓口）を、新しい会話が続きを読めるだけ書く。会話にしか無い事は、書かないと失われる。",
       "- 呼ぶと center が引継ぎを保存して受理を返す。そのあと turn を終えると、center が再起動する。受理の後は、短く「再起動する」とだけ言って turn を終える。新しい作業を始めない。",
       "- 利用者が返事を待っている時、remote の指示が動いている時、worker_reply が未返答の時は呼ばない（断られる）。",
-      "- 再起動した最初の入力に「リセッションで再起動した」と書いてあったら、その入力に center が渡した引継ぎの本文が入っている。common の [記録] の順に読んでから続ける。center が引継ぎを取り出せなかった時は、取り出せなかった事・理由・置き場が書いてある（本文は無い）。その時は、書いてある事と利用者の指示から続ける。",
+      "- center が入力に「スリープの依頼」と書いた 1 行を貼ってきたら、眠らせる依頼。同じ道具 session_resession で引継ぎを渡す（上の書き方）。受理の後は、短く「眠る」とだけ言って turn を終える。center がこの session を止める（新しい会話はすぐには起動しない）。",
+      "- 再起動した最初の入力に「リセッションで再起動した」または「スリープから起こした」と書いてあったら、その入力に center が渡した引継ぎの本文が入っている。common の [記録] の順に読んでから続ける。center が引継ぎを取り出せなかった時は、取り出せなかった事・理由・置き場が書いてある（本文は無い）。その時は、書いてある事と利用者の指示から続ける。",
     ].join("\n"),
 };
 

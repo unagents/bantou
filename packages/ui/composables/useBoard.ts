@@ -10,6 +10,7 @@ import {
   SESSIONS_CHANGED_EVENT,
   THREADS_CHANGED_EVENT,
 } from "../api";
+import { rowSleepBlock } from "./sleepButton";
 import type { ChipKey } from "./useSessionBoard";
 import { capActivity, sessionProgress, type SessionProgress } from "./sessionStatus";
 import type { CenterAuthState, ContextUsage, Ping, RemoteIssue, SessionActivity, SessionList, Task, Thread } from "../types";
@@ -44,6 +45,8 @@ export interface SessionGroup {
   remoteIssues: { unreachable: RemoteIssue[]; lost: RemoteIssue[]; stopped: RemoteIssue[] };
   /** The session is asleep (the center's `sleeping`): its claude is stopped; opening it wakes it. */
   sleeping: boolean;
+  /** Why the sleep button cannot be pressed (null: it can). Same conditions as the center's refusal (`sleepBlock`). */
+  sleepBlock: string | null;
   /** The claude's auth state as the center reports it (null: not reported). */
   auth: CenterAuthState | null;
   /** Why the last `/login` failed (center's `loginError`). */
@@ -143,6 +146,7 @@ export function useBoard(dir: Ref<string | null>) {
           remoteWaiting: remoteWaiting(name),
           remoteIssues: remoteIssues(name),
           sleeping: false,
+          sleepBlock: null,
           auth: null,
           loginError: null,
           working: [],
@@ -173,6 +177,8 @@ export function useBoard(dir: Ref<string | null>) {
         else g.working.push(t);
       }
     }
+    // After the thread ask above: a waiting thread makes the row needs-input, which the center also refuses.
+    for (const g of map.values()) g.sleepBlock = rowSleepBlock(find(g.name), centerList.value.reachable, g.activity);
     return [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
   });
 

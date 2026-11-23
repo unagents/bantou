@@ -59,7 +59,7 @@ export function useSessionBoard(board: Pick<Board, "sessions" | "centerList" | "
   async function sleep(name: string) {
     try {
       await sleepSession(name);
-      toast.add({ title: `${name} をスリープさせた`, color: "success" });
+      toast.add({ title: `${name} にスリープを依頼した`, color: "success" });
     } catch (e) {
       toast.add({ title: `${name} をスリープさせられない`, description: String(e), color: "error" });
     }

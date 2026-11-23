@@ -396,13 +396,13 @@ pub async fn session_update(
     Ok(s)
 }
 
-/// Put a session to sleep (`session_sleep`: its claude is stopped, the conversation and settings stay).
+/// Ask the center to put a session to sleep (`session_sleep`: the agent writes a handoff, then its claude is stopped). The center answers at once with `accepted`/`pending` plus `name`; only `name` is required here.
 #[tauri::command]
 pub async fn session_sleep(app: tauri::AppHandle, cache: tauri::State<'_, SessionCache>, name: String) -> CmdResult<Session> {
     session_sleep_wake(&app, &cache, "session_sleep", name.trim()).await
 }
 
-/// Wake a sleeping session (`session_wake`: its claude starts again with the same conversation). Called when the session is opened.
+/// Wake a sleeping session (`session_wake`: its claude starts as a new conversation and gets the sleep handoff). Called when the session is opened.
 #[tauri::command]
 pub async fn session_wake(app: tauri::AppHandle, cache: tauri::State<'_, SessionCache>, name: String) -> CmdResult<Session> {
     session_sleep_wake(&app, &cache, "session_wake", name.trim()).await

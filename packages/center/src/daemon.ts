@@ -37,6 +37,7 @@ import { createServerLink } from "./server-link.js";
 import { createProcessStandInClient } from "./stand-in.js";
 import { createSleepGate } from "./sleep-gate.js";
 import { createResessioner } from "./resession.js";
+import { cancelOnSessionEvents, createRestartChecker } from "./restart-check.js";
 import { createCenterMemoryEvents } from "./memory-events.js";
 import { expandEnvRefs } from "./mcp-server-def.js";
 import { capSessionName } from "./session-name.js";
@@ -162,9 +163,17 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     log,
   });
   const activityTracker = createSessionActivityTracker();
+  // resession は後で作る。確認の入力は、リセッション待ちの時は送らない（呼ばれるのは hook の時なので、その時には作られている）
+  const resessionPending = (name: string): boolean => resession.pending(name);
+  const restartCheck = createRestartChecker({ core, resessionPending, log });
+  // 印を付けたまま止まった・眠った・消えた・リセッションで起動し直した session の印を外す（U2 の A）
+  cancelOnSessionEvents(events, restartCheck);
   const sessions = createSessionManager({
     config,
     events,
+    // app 再起動後の状況確認: restore() が起こす直前に印を付け、起動に失敗したら外す（設計は docs/design/app-restart-check.md）
+    onRestoreStart: (name) => restartCheck.arm(name),
+    onRestoreFail: (name) => restartCheck.cancel(name),
     activity: (name, startedAt, running) => activityTracker.get(name, startedAt, running),
     remote: (name) => remotes.summary(name),
     contextUsage: (name) => contextUsage.get(name),
@@ -188,6 +197,9 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     notifyServersChanged: (name, text) => link.notifyPeer(capSessionName(name), text),
     // スリープの出入りで messenger の身代わり peer を置く・外す（gate は sessions の後に作るので、呼ばれる時に参照する）
     onSleepChange: (name, sleeping) => sleepGate.sync(name, sleeping),
+    // 引継ぎつきの眠りを新しい会話で起こす時: 起動の前に引継ぎを最初の入力で渡す印を付ける（失敗したら外す）。resession は後で作るので、呼ばれる時に参照する
+    onWake: (name, handoff) => resession.armWake(name, handoff),
+    onWakeAbort: (name) => resession.disarmWake(name),
     log,
   });
   // スリープ中の session 宛の message で、その session を起こす（身代わり peer。link は messenger の broker 1 つに繋がる）
@@ -204,8 +216,12 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   const memoryEvents = createCenterMemoryEvents({ memoryOf: (name) => sessions.memoryOf(name), log });
   // リセッション（引継ぎを残して新しい会話で起動し直す。設計は docs/design/resession.md）
   const resession = createResessioner({
+    cancelRestartCheck: (name) => restartCheck.cancel(name),
     info: (name) => sessions.list().find((x) => x.name === name),
     restartFresh: (name) => sessions.restartFresh(name),
+    // スリープ: 引継ぎを受けた後に会話を止める（新しい会話は起動しない）。ref 無しは引継ぎの無い眠り
+    sleepNow: (name, ref) => sessions.sleep(name, ref ? { handoff: ref } : undefined),
+    afterWakeDelivered: (name, id) => sessions.clearSleepHandoff(name, id),
     saveToMemory: (name, h) => memoryEvents.handoff(name, h),
     readFromMemory: (name, id) => memoryEvents.readHandoff(name, id),
     // 取り出せなかった理由の文から除く値: 外部記憶の url と、header の値（展開前・展開後。token は Authorization の中）
@@ -291,7 +307,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   process.stderr.on("error", () => {});
   process.stdout.on("error", () => {});
 
-  const makeServer = (launcher: boolean) => createCenterServer({ config, supervisor, link, sessions, remotes, follow, login, log, launcher });
+  const makeServer = (launcher: boolean) => createCenterServer({ config, supervisor, link, sessions, remotes, follow, login, log, launcher, resession });
   if (args.transport === "http") {
     if (!config.token || config.token.length < MIN_TOKEN_LEN) {
       throw new Error(`http transport には config の token（${MIN_TOKEN_LEN} 文字以上）が必要: ${configPath}`);
@@ -312,6 +328,8 @@ export async function runDaemon(args: CliArgs): Promise<void> {
         if (s && (s.state === "starting" || s.state === "connected")) publishLastMessage(events, name, payload);
         // 外部記憶へ（応答を待たない。キューに積むだけ）
         if (s && (s.state === "starting" || s.state === "connected")) memoryEvents.onHook(name, payload);
+        // app 再起動後の状況確認の最初の入力。リセッションの deliver は印を同期で消すので、必ず resession より先に呼ぶ
+        if (s && (s.state === "starting" || s.state === "connected")) restartCheck.onHook(name, payload);
         // リセッション待ちの session の Stop で再起動、起動し直した SessionStart で最初の入力（Stop の応答は先に返る。実行は次の tick）
         if (s && (s.state === "starting" || s.state === "connected")) resession.onHook(name, payload);
       },

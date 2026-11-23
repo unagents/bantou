@@ -1,5 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { SLEEP_REFUSED_PREFIX } from "./resession.js";
 import { SESSION_NAME, type SessionInfo } from "./sessions.js";
 import { MAX_SESSION_NAME } from "./center-id.js";
 import { SESSION_INSTRUCTIONS_MAX } from "./config.js";
@@ -75,6 +76,7 @@ export function buildSessionBrief(sessions: readonly SessionInfo[], coordinator:
   return { at, sessions: lines, truncated: omitted > 0, omitted };
 }
 
+
 /** 統括の道具が使う、center の情報の取得元。呼ばれるたびに今の値を取る（キャッシュしない）。 */
 export interface CoordinatorDeps {
   /** 今の全 session（center の session_list）。 */
@@ -82,7 +84,7 @@ export interface CoordinatorDeps {
   /** 新しい session を作る（center の session_create。path は渡さない = center の workspace の下だけ）。 */
   createSession: (input: { name: string; instructions?: string; start: boolean }) => Promise<{ name: string; state: string }>;
   /** 他の session をスリープさせる（center の session_sleep）。 */
-  sleepSession: (name: string) => Promise<{ name: string; state: string; sleeping: boolean }>;
+  sleepSession: (name: string) => Promise<{ name: string; state: string; sleeping: boolean; accepted: boolean; pending: boolean }>;
   now?: () => number;
   /** 失敗の詳細を残す先（log）。省略時は残さない。 */
   log?: (msg: string) => void;
@@ -146,17 +148,17 @@ export function registerCoordinatorTools(server: McpServer, deps: CoordinatorDep
     {
       title: "他の session をスリープさせる",
       description:
-        "name の session をスリープさせる（claude の process を止めてメモリなどを空ける。会話・設定・remote の記録は残る）。眠った session は、利用者が desktop で開いた時と、messenger でその session が宛先になった時に、元の会話のまま自動で起き直す。session_brief には「スリープ」と出る。すでに眠っている session には何もしない。name には他の session を指定する（自分自身を指定しない）。返り値 { name, state, sleeping }",
+        "name の session をスリープさせる（起動しないリセッション）。その session の agent に引継ぎを書かせてから、turn の終わりに claude の process を止める（メモリなどを空ける。設定・remote の記録は残る）。受理して即返す。眠るのは引継ぎが渡って turn が終わった後で、眠った事は session_brief の「スリープ」で分かる。作業中（turn・subagent・background が動いている）・利用者の入力待ち・未完了の remote の指示がある時などは、Stop を待たず、眠らせず理由つきで断られる。眠った session は、利用者が desktop で開いた時と、messenger でその session が宛先になった時に、新しい会話で自動で起き直し、最初の入力で引継ぎが渡る。すでに眠っている session には何もしない。name には他の session を指定する（自分自身を指定しない）。返り値 { name, state, sleeping, accepted, pending }（pending = true は引継ぎを頼んだ段階で、まだ眠っていない）",
       inputSchema: { name: z.string().max(MAX_SESSION_NAME, `${MAX_SESSION_NAME} 文字以内`).regex(SESSION_NAME, "英数字と _ - のみ") },
     },
     async ({ name }) => {
       try {
         const r = await deps.sleepSession(name);
-        return json({ name: r.name, state: r.state, sleeping: r.sleeping });
+        return json({ name: r.name, state: r.state, sleeping: r.sleeping, accepted: r.accepted, pending: r.pending });
       } catch (e) {
         const detail = e instanceof Error ? e.message : String(e);
-        // 利用者が直せる拒否（未定義・config 由来）だけ文を返す。それ以外は一般化し、詳細は log にだけ残す
-        if (detail.includes("未定義の session") || detail.includes("config 由来")) return json({ error: detail }, true);
+        // 断った理由（resession が SLEEP_REFUSED_PREFIX を付ける）と、未定義・config 由来の拒否だけ文を返す。それ以外は一般化し、詳細は log にだけ残す
+        if (detail.includes("未定義の session") || detail.includes("config 由来") || detail.includes(SLEEP_REFUSED_PREFIX)) return json({ error: detail }, true);
         deps.log?.(`coordinator_session_sleep 失敗: name=${name} ${detail}`);
         return json({ error: "session をスリープさせられなかった。詳細は log" }, true);
       }
