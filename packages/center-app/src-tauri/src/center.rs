@@ -5,9 +5,9 @@
 //! 2.4). The config is `center-server.json` in the state dir `~/.local/share/bantou/` (#9). It is a file of its
 //! own: `center.json` is the one the desktop rewrites at every start of its own center ((a)).
 //!
-//! Restarting is launchd's job (#16): when the center ends, the app ends with the center's status
-//! (0 when it ended normally, e.g. its port is in use; 1 otherwise), and launchd's KeepAlive
-//! (`SuccessfulExit: false`) restarts the app only after a non-zero end. The desktop's backoff is not copied.
+//! Restarting is launchd's job (#16): when the center ends, the app looks at whether another center uses the
+//! configured port now: yes = exit 0 (yield), no = exit 1. launchd's KeepAlive (`SuccessfulExit: false`)
+//! restarts the app only after a non-zero end. The center's own end status is not used. The desktop's backoff is not copied.
 
 use crate::log;
 use std::fs::{self, OpenOptions};
@@ -36,9 +36,28 @@ pub fn center_args(config: &str) -> Vec<String> {
     ["--transport", "http", "--bind", "0.0.0.0", "--config", config].iter().map(|s| s.to_string()).collect()
 }
 
-/// The end status of the app for the center's: 0 only for a normal end.
-pub fn exit_code_of(success: bool) -> i32 {
-    if success {
+/// The port of the center when its config has none.
+const DEFAULT_PORT: u16 = 7910;
+
+/// The `port` of the config text (default 7910 when absent, not a valid port, or the text is not JSON).
+pub fn port_of(config_text: &str) -> u16 {
+    serde_json::from_str::<serde_json::Value>(config_text)
+        .ok()
+        .and_then(|v| v.get("port").and_then(|p| p.as_u64()))
+        .and_then(|p| u16::try_from(p).ok())
+        .unwrap_or(DEFAULT_PORT)
+}
+
+/// Whether something accepts connections on the configured port now (another center).
+fn port_in_use(port: u16) -> bool {
+    use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+    port != 0 && TcpStream::connect_timeout(&SocketAddr::from((Ipv4Addr::LOCALHOST, port)), Duration::from_secs(1)).is_ok()
+}
+
+/// The end status of the app after the center ended on its own: 0 when another center uses the
+/// configured port now (yield, no restart), 1 otherwise (launchd restarts). The center's own end status is not used.
+pub fn exit_code_after_center(port_in_use: bool) -> i32 {
+    if port_in_use {
         0
     } else {
         1
@@ -97,6 +116,7 @@ pub fn start(app: AppHandle) {
     log::line(&format!("center を起動した: pid={} {}", child.id(), sidecar.display()));
 
     let waiter = app.clone();
+    let config_path = config.clone();
     std::thread::spawn(move || {
         let status = child.wait();
         PID.store(0, Ordering::SeqCst);
@@ -105,17 +125,14 @@ pub fn start(app: AppHandle) {
         if STOPPING.load(Ordering::SeqCst) {
             return;
         }
-        let code = match status {
-            Ok(s) => {
-                log::line(&format!("center が終わった: {s}"));
-                exit_code_of(s.success())
-            }
-            Err(e) => {
-                log::line(&format!("center を待てない: {e}"));
-                1
-            }
-        };
-        waiter.exit(code);
+        match status {
+            Ok(s) => log::line(&format!("center が終わった: {s}")),
+            Err(e) => log::line(&format!("center を待てない: {e}")),
+        }
+        let port = port_of(&fs::read_to_string(&config_path).unwrap_or_default());
+        let in_use = port_in_use(port);
+        log::line(&format!("port {port} は{}", if in_use { "別の center が使用中: 譲って終わる" } else { "空き: 終わって launchd の再起動を待つ" }));
+        waiter.exit(exit_code_after_center(in_use));
     });
 
     // launchd stops the app with SIGTERM: stop the center first (RunEvent::Exit calls `stop`), then end.
@@ -163,8 +180,18 @@ mod tests {
     }
 
     #[test]
-    fn exit_code_follows_the_centers_end() {
-        assert_eq!(exit_code_of(true), 0);
-        assert_eq!(exit_code_of(false), 1);
+    fn exit_code_follows_the_port_not_the_centers_end() {
+        // Another center holds the port: yield (0, no restart). Free: 1 (launchd restarts).
+        assert_eq!(exit_code_after_center(true), 0);
+        assert_eq!(exit_code_after_center(false), 1);
+    }
+
+    #[test]
+    fn port_comes_from_the_config() {
+        assert_eq!(port_of("{}"), 7910);
+        assert_eq!(port_of(""), 7910);
+        assert_eq!(port_of(r#"{"port": 8123}"#), 8123);
+        assert_eq!(port_of(r#"{"port": 70000}"#), 7910);
+        assert_eq!(port_of("not json"), 7910);
     }
 }

@@ -2,9 +2,10 @@
 //!
 //! Started, it keeps one center process running (`center.rs`) and registers itself as a launchd
 //! agent (`login_item.rs`, #14 = A). No window and no Dock icon (#15 = X): the app is only the
-//! parent of the center. launchd restarts the app after an abnormal exit (KeepAlive), and the
-//! app ends with the center's exit status, so a center that ended normally (e.g. its port is
-//! already in use) is not restarted in a loop (#16).
+//! parent of the center. launchd restarts the app after an abnormal exit (KeepAlive). When the
+//! center ends, the app ends with 0 if another center uses the configured port now (it yields,
+//! no restart loop, #16), and with 1 otherwise (launchd restarts it).
+//! An instance started from Finder, once registered, leaves the center to launchd's instance and exits 0.
 
 mod center;
 mod log;
@@ -22,7 +23,13 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             log::line("start");
-            login_item::ensure_registered();
+            let reg = login_item::ensure_registered();
+            let launchd_job = login_item::is_launchd_job(std::env::var("XPC_SERVICE_NAME").ok().as_deref());
+            if !login_item::should_start_center(launchd_job, reg) {
+                // Registered: launchd's instance keeps the center. Not started by this (Finder's) instance, so no double start.
+                log::line("launchd の instance に任せて終わる");
+                std::process::exit(0);
+            }
             tray::setup(app.handle());
             center::start(app.handle().clone());
             Ok(())

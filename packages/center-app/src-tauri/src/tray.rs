@@ -103,7 +103,7 @@ mod tests {
     fn stop_ends_normally_so_launchd_does_not_restart() {
         // KeepAlive is `SuccessfulExit: false`: only a non-zero end is restarted.
         assert_eq!(STOP_EXIT_CODE, 0);
-        assert_eq!(STOP_EXIT_CODE, center::exit_code_of(true));
+        assert_eq!(STOP_EXIT_CODE, center::exit_code_after_center(true));
     }
 
     #[test]

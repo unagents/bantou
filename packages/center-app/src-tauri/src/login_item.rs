@@ -31,8 +31,28 @@ pub fn action_for(status: isize) -> Action {
     }
 }
 
+/// Whether launchd runs (or now will run) the agent.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum Registration {
+    /// Registered and enabled (already, or just now): launchd's instance keeps the center.
+    Launchd,
+    /// Registration failed, or the agent is not approved: nothing from launchd will run the center.
+    NotLaunchd,
+}
+
+/// The environment value launchd sets (`XPC_SERVICE_NAME`) for a job: the label of the plist.
+pub fn is_launchd_job(xpc_service_name: Option<&str>) -> bool {
+    xpc_service_name == Some(PLIST_NAME.trim_end_matches(".plist"))
+}
+
+/// Whether this instance starts the center. A launchd's instance always does. Any other one (Finder) does only
+/// when launchd will not run the agent; otherwise it leaves the center to launchd's instance (no double start).
+pub fn should_start_center(launchd_job: bool, reg: Registration) -> bool {
+    launchd_job || reg == Registration::NotLaunchd
+}
+
 #[cfg(target_os = "macos")]
-pub fn ensure_registered() {
+pub fn ensure_registered() -> Registration {
     use objc2_foundation::NSString;
     use objc2_service_management::SMAppService;
 
@@ -42,18 +62,31 @@ pub fn ensure_registered() {
     let status = unsafe { service.status() };
     log::line(&format!("launchd の登録の状態: {status:?}"));
     match action_for(status.0) {
-        Action::Nothing => log::line("launchd に登録済み"),
-        Action::LogDisabled => log::line("launchd の登録は承認待ちか無効（System Settings > Login Items で許可する）。次の login から自動では起動しない"),
+        Action::Nothing => {
+            log::line("launchd に登録済み");
+            Registration::Launchd
+        }
+        Action::LogDisabled => {
+            log::line("launchd の登録は承認待ちか無効（System Settings > Login Items で許可する）。次の login から自動では起動しない");
+            Registration::NotLaunchd
+        }
         Action::Register => match unsafe { service.registerAndReturnError() } {
-            Ok(()) => log::line("launchd に登録した"),
-            Err(e) => log::line(&format!("launchd に登録できない: {}", e.localizedDescription())),
+            Ok(()) => {
+                log::line("launchd に登録した");
+                Registration::Launchd
+            }
+            Err(e) => {
+                log::line(&format!("launchd に登録できない: {}", e.localizedDescription()));
+                Registration::NotLaunchd
+            }
         },
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn ensure_registered() {
+pub fn ensure_registered() -> Registration {
     log::line("macOS 以外では launchd に登録しない");
+    Registration::NotLaunchd
 }
 
 #[cfg(test)]
@@ -66,5 +99,23 @@ mod tests {
         assert_eq!(action_for(3), Action::Register);
         assert_eq!(action_for(1), Action::Nothing);
         assert_eq!(action_for(2), Action::LogDisabled);
+    }
+
+    #[test]
+    fn launchd_job_is_known_by_its_label() {
+        assert!(is_launchd_job(Some("jp.grrow.bantou-center")));
+        assert!(!is_launchd_job(Some("application.jp.grrow.bantou-center.123.456")));
+        assert!(!is_launchd_job(Some("0")));
+        assert!(!is_launchd_job(None));
+    }
+
+    #[test]
+    fn finder_instance_starts_the_center_only_when_launchd_will_not() {
+        // launchd's own instance: always.
+        assert!(should_start_center(true, Registration::Launchd));
+        assert!(should_start_center(true, Registration::NotLaunchd));
+        // Finder's instance: leaves it to launchd once registered; starts it itself when registration failed.
+        assert!(!should_start_center(false, Registration::Launchd));
+        assert!(should_start_center(false, Registration::NotLaunchd));
     }
 }
