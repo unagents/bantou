@@ -7,9 +7,12 @@ import { MAX_BASH_PATHS, MAX_BASH_PATH_LENGTH, getBashWorkspace, runBash, type B
 import { MODEL_PATTERN } from "./model";
 import { MAX_REPORT_TEXT, REPORT_KINDS, getReportHandler } from "./reports";
 import { getWorkerHandler } from "./workers";
+import { getChangeReportHandler } from "./change-bridge";
 
 export const CAP_ID_HEADER = "x-bantou-cap-id";
 export const WORKER_ID_HEADER = "x-bantou-worker-id";
+/** 新しい経路（change）の step の worker に付く。cap-id の代わりに change-id と worker-id で report する。 */
+export const CHANGE_ID_HEADER = "x-bantou-change-id";
 /** cap の task の指揮（lane）の run に付く。worker_start で起動した worker はその task のものになる。 */
 export const TASK_ID_HEADER = "x-bantou-task-id";
 
@@ -34,6 +37,7 @@ export async function handleMcpRequest(req: Request): Promise<Response> {
   const capId = req.headers.get(CAP_ID_HEADER) ?? "";
   const workerId = req.headers.get(WORKER_ID_HEADER) ?? "";
   const taskId = req.headers.get(TASK_ID_HEADER) ?? "";
+  const changeId = req.headers.get(CHANGE_ID_HEADER) ?? "";
   const server = new McpServer({ name: "bantou", version: "0.1.1" });
   server.registerTool(
     "report",
@@ -48,6 +52,17 @@ export async function handleMcpRequest(req: Request): Promise<Response> {
     },
     async ({ kind, text: body }) => {
       const handler = getReportHandler();
+      // change の step の worker（x-bantou-change-id と x-bantou-worker-id。cap-id は無い）
+      if (changeId && workerId && !capId) {
+        const ch = getChangeReportHandler();
+        if (!ch) return text("server が起動中のため受け付けられない", true);
+        try {
+          await ch(changeId, workerId, kind, body);
+          return text("accepted");
+        } catch (e) {
+          return text(e instanceof Error ? e.message : String(e), true);
+        }
+      }
       if (!handler) return text("server が起動中のため受け付けられない", true);
       if (!capId || !workerId) return text(`${CAP_ID_HEADER} / ${WORKER_ID_HEADER} header が必要`, true);
       try {
@@ -59,6 +74,7 @@ export async function handleMcpRequest(req: Request): Promise<Response> {
     },
   );
   if (capId) registerBashTool(server, workerId ? { kind: "worker", capId, workerId } : { kind: "cap", capId });
+  else if (changeId && workerId) registerBashTool(server, { kind: "worker", workerId });
   if (capId && !workerId) registerWorkerTools(server, capId, taskId || undefined);
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined,

@@ -29,6 +29,8 @@ export interface InvokeInput {
   reason?: string;
   /** worker の持ち主 cap（mcp の header に入れる）。 */
   capId?: string;
+  /** 新しい経路（change）の worker の持ち主 change（mcp の header に入れる）。この時 capId は付かない。 */
+  changeId?: string;
   /** true なら activity の task を上書きしない（cap の report 起因の resume）。 */
   keepTask?: boolean;
   /** このエージェントの claude --model。省略時は前回記録した値、それも無ければ付けない。 */
