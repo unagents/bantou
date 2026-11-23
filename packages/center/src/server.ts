@@ -51,7 +51,7 @@ export function createCenterServer(deps: {
 /** session 向け窓口（/mcp/session）の MCP server。owner = 認証済みの呼び出し元 session 名。 */
 export function createSessionMcpServer(deps: { remotes: RemoteManager; changes?: ChangeManager; follow?: Follow; owner: string; resession?: Resessioner }): McpServer {
   const server = new McpServer({ name: "bantou-center-session", version: packageVersion() });
-  registerSessionTools(server, { remotes: deps.remotes, owner: deps.owner, ...(deps.follow ? { follow: deps.follow } : {}), ...(deps.resession ? { resession: deps.resession } : {}) });
+  registerSessionTools(server, { remotes: deps.remotes, owner: deps.owner, ...(deps.changes ? { changes: deps.changes } : {}), ...(deps.follow ? { follow: deps.follow } : {}), ...(deps.resession ? { resession: deps.resession } : {}) });
   if (deps.changes) registerChangeTools(server, { changes: deps.changes, owner: deps.owner });
   return server;
 }

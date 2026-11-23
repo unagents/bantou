@@ -117,7 +117,9 @@ export interface RemoteIssue {
  * 記録に保存する worker_report。replied_at = ask / approve に worker_reply を送った時刻（ISO。無ければ未返答）。
  * superseded_at = 返答なしで、同じ cap の同じ worker から progress 以外の後続の report が来て解消と見なした時刻（ISO）。
  */
-export type StoredWorkerReport = WorkerReportNotice & { replied_at?: string; superseded_at?: string };
+/** cap の worker の report（cap_id を持つ worker_report。change の worker の report は changes.ts が受ける）。 */
+export type CapWorkerReportNotice = WorkerReportNotice & { cap_id: string };
+export type StoredWorkerReport = CapWorkerReportNotice & { replied_at?: string; superseded_at?: string };
 
 /** 返答待ちの ask / approve（返答済みでも解消済みでもない）。 */
 const isOpenAsk = (w: StoredWorkerReport): boolean => (w.kind === "ask" || w.kind === "approve") && w.replied_at === undefined && w.superseded_at === undefined;
@@ -353,7 +355,7 @@ export function formatUnreachableNotice(remoteIds: string[], server: string, mes
 }
 
 /** worker_report の push 本文を作る。 */
-export function formatWorkerReportNotice(remoteId: string, n: WorkerReportNotice): string {
+export function formatWorkerReportNotice(remoteId: string, n: CapWorkerReportNotice): string {
   const head = n.text.length > NOTIFY_REPORT_MAX ? `${n.text.slice(0, NOTIFY_REPORT_MAX)}…(省略。全文は remote_list の worker_reports)` : n.text;
   return [
     `[bantou] worker_report remote_id=${remoteId} worker=${n.worker_id} kind=${n.kind}${n.task_id ? ` task_id=${n.task_id}` : ""}`,
@@ -412,6 +414,15 @@ export const workerReplySchema = {
   worker_id: z.string().regex(AGENT_ID_PATTERN, "英数字と _ - のみ").describe("返答する worker（worker_report の worker_id）"),
   text: z.string().min(1).refine(noNul, noNulMsg).describe("worker への返答（ask への回答、approve の承認・却下など）"),
   server: serverArg.describe("remote_id が複数の server にある時の絞り込み"),
+  change_id: z.string().regex(AGENT_ID_PATTERN, "英数字と _ - のみ").optional().describe("change の worker への返答の時、remote_id の代わりに change_id を渡す（change_register で登録した change の step の worker。change の worker は cap を持たない）。remote_id・server とは同時に指定できない"),
+};
+/** worker_stop の入力。止める worker は remote_id（cap）か change_id（change）のどちらかで指す。 */
+export const workerStopSchema = {
+  remote_id: z.string().regex(AGENT_ID_PATTERN, "英数字と _ - のみ").optional().describe("止める worker の持ち主の remote（cap）。省略時は呼び出し元 session の cap（server が複数なら server で絞る）。change の worker は change_id"),
+  worker_id: z.string().regex(AGENT_ID_PATTERN, "英数字と _ - のみ").describe("止める worker（worker_report の worker_id）"),
+  server: serverArg.describe("remote_id が複数の server にある時の絞り込み"),
+  change_id: z.string().regex(AGENT_ID_PATTERN, "英数字と _ - のみ").optional().describe("change の worker を止める時、remote_id の代わりに change_id を渡す。remote_id・server・task_id とは同時に指定できない"),
+  task_id: z.string().regex(AGENT_ID_PATTERN, "英数字と _ - のみ").optional().describe("cap の worker だけ。cap の別の task（動いている）の worker は止めない"),
 };
 
 /** 互換: remote_create の入力は remote_send と同じ。 */
@@ -485,8 +496,10 @@ export interface RemoteManager {
   noteReach(peer: ServerPeer, ok: boolean, message?: string): void;
   /** worker_reply を server へ送る（owner を渡すとその session の cap だけが対象。remote_id 省略時は owner の cap）。版が合わない server へは送らず投げる。 */
   workerReply(input: { remote_id?: string; server?: string; worker_id: string; text: string; owner?: string }): Promise<{ remote_id: string; server: string; worker_id: string; accepted: true }>;
+  /** worker_stop を server へ送る（cap の worker を 1 体止める。server の今の worker の停止の処理にそのまま渡す。owner・remote_id・server の決め方は workerReply と同じ）。 */
+  workerStop(input: { remote_id?: string; server?: string; worker_id: string; task_id?: string; owner?: string }): Promise<{ remote_id: string; server: string; worker_id: string; stopped: boolean }>;
   /** server から worker_report を受けた時に呼ぶ。記録に積み、未完了の指示の owner へ push する（progress は既定で push しない。config の remotes.pushProgress が true の時だけ、同じ worker から 60 秒に 1 回）。 */
-  onWorkerReport(report: WorkerReportNotice, fromId?: string): void;
+  onWorkerReport(report: CapWorkerReportNotice, fromId?: string): void;
   /** stop_cap を送って記録を外す。owner（session）を渡すと対象はその session の cap（と、remote_id で明示した旧共有 cap）だけ。remote_id 省略時は owner の cap（server が複数なら server で絞る）。 */
   delete(input: { remote_id?: string; server?: string; force?: boolean; owner?: string }): Promise<RemoteDeleteResult>;
   /**
@@ -2158,6 +2171,23 @@ export function createRemoteManager(opts: {
       wake();
       log(`remote worker_reply: ${rec.remote_id} worker=${worker_id} server=${rec.serverName}`);
       return { remote_id: rec.remote_id, server: peer.server_id ?? peer.id, worker_id: reply.worker_id, accepted: true as const };
+    },
+
+    async workerStop({ remote_id, server, worker_id, task_id, owner }) {
+      if (!AGENT_ID_PATTERN.test(worker_id)) throw new Error("worker_id は英数字と _ - のみ");
+      const rec = await pick(remote_id, server, owner, true);
+      const peer = await findPeer(rec);
+      const blocked = link.gate?.(peer, "worker_stop");
+      if (blocked) throw new Error(blocked.message);
+      const reply = await link.workerStopOn(peer, { cap_id: rec.remote_id, worker_id, ...(task_id !== undefined ? { task_id } : {}) });
+      if (reply.type === "error") throw new Error(reply.message);
+      // 止めた worker は返答できない: 返答待ちの ask / approve は先へ進んだ事にする
+      const at = new Date().toISOString();
+      for (const w of rec.worker_reports ?? []) if (w.worker_id === worker_id && isOpenAsk(w)) w.superseded_at = at;
+      void persist();
+      wake();
+      log(`remote worker_stop: ${rec.remote_id} worker=${worker_id} server=${rec.serverName} stopped=${reply.stopped}`);
+      return { remote_id: rec.remote_id, server: peer.server_id ?? peer.id, worker_id: reply.worker_id, stopped: reply.stopped };
     },
 
     onWorkerReport(report, fromId) {

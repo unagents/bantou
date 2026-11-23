@@ -74,52 +74,47 @@ test("registerChangeOn: change_id 付きの error は同じ change_id の待ち�
   await link.close();
 });
 
-test("changeReplyOn: change_id:worker_id で解決する。error（worker_id 付き）を cap の worker_result の待ちと取り違えない", async () => {
+test("workerReplyOn（change_id）/ workerStopOn: cap_id か change_id と worker_id で解決する。error（worker_id 付き）を cap の worker_result の待ちと取り違えない", async () => {
   const { link, clients, peer } = setup();
-  const p = link.changeReplyOn(peer, { change_id: "ch-1", worker_id: "w-1", text: "OK" });
+  const p = link.workerReplyOn(peer, { change_id: "ch-1", worker_id: "w-1", text: "OK" });
   await sleep(20);
-  clients[0].reply({ ...V, type: "change_reply_result", ok: true, change_id: "ch-1", worker_id: "w-2", accepted: true });
-  clients[0].reply({ ...V, type: "change_reply_result", ok: true, change_id: "ch-1", worker_id: "w-1", accepted: true });
+  assert.deepEqual(clients[0].sent[0], { ...V, type: "worker_reply", change_id: "ch-1", worker_id: "w-1", text: "OK" });
+  clients[0].reply({ ...V, type: "worker_reply_result", ok: true, change_id: "ch-1", worker_id: "w-2", accepted: true });
+  clients[0].reply({ ...V, type: "worker_reply_result", ok: true, change_id: "ch-1", worker_id: "w-1", accepted: true });
   assert.equal(((await p) as { worker_id: string }).worker_id, "w-1");
-  const q = link.changeReplyOn(peer, { change_id: "ch-1", worker_id: "w-1", text: "NG" });
+  const q = link.workerReplyOn(peer, { change_id: "ch-1", worker_id: "w-1", text: "NG" });
   await sleep(20);
-  clients[0].reply({ ...V, type: "error", ok: false, message: "返答待ちでない", command: "change_reply", change_id: "ch-1", worker_id: "w-1" });
+  clients[0].reply({ ...V, type: "error", ok: false, message: "返答待ちでない", command: "worker_reply", change_id: "ch-1", worker_id: "w-1" });
   const e = await q;
   assert.deepEqual([e.type, (e as { message: string }).message], ["error", "返答待ちでない"]);
-  await link.close();
-});
+  // cap の worker の返答は今のまま cap_id:worker_id
+  const c = link.workerReplyOn(peer, { cap_id: "c-1", worker_id: "w-1", text: "x" });
+  await sleep(20);
+  clients[0].reply({ ...V, type: "worker_reply_result", ok: true, change_id: "c-1", worker_id: "w-1", accepted: true });
+  clients[0].reply({ ...V, type: "worker_reply_result", ok: true, cap_id: "c-1", worker_id: "w-1", accepted: true });
+  assert.equal(((await c) as { cap_id?: string }).cap_id, "c-1");
 
-test("changeStatusOn / stopChangeOn: 結果と error（command 付き）で解決する", async () => {
-  const { link, clients, peer } = setup();
-  const s = link.changeStatusOn(peer, { change_id: "ch-1" });
+  const s = link.workerStopOn(peer, { change_id: "ch-1", worker_id: "w-1" });
   await sleep(20);
-  assert.deepEqual(clients[0].sent[0], { ...V, type: "change_status", change_id: "ch-1" });
-  clients[0].reply({ ...V, type: "change_status_result", ok: true, changes: [] });
-  assert.equal((await s).type, "change_status_result");
-  const s2 = link.changeStatusOn(peer);
+  assert.deepEqual(clients[0].sent.at(-1), { ...V, type: "worker_stop", change_id: "ch-1", worker_id: "w-1" });
+  clients[0].reply({ ...V, type: "worker_stop_result", ok: true, change_id: "ch-1", worker_id: "w-2", stopped: true });
+  clients[0].reply({ ...V, type: "worker_stop_result", ok: true, change_id: "ch-1", worker_id: "w-1", stopped: true });
+  assert.deepEqual([(await s).type, ((await s) as { stopped: boolean }).stopped], ["worker_stop_result", true]);
+  const u = link.workerStopOn(peer, { cap_id: "c-1", worker_id: "w-1", task_id: "t-1" });
   await sleep(20);
-  assert.deepEqual(clients[0].sent[1], { ...V, type: "change_status" });
-  clients[0].reply({ ...V, type: "error", ok: false, message: "change が無い", command: "change_status", change_id: "ch-9" });
-  assert.equal((await s2).type, "error");
-  const t = link.stopChangeOn(peer, { change_id: "ch-1" });
-  await sleep(20);
-  clients[0].reply({ ...V, type: "stop_change_result", ok: true, change_id: "ch-1", stopped: true });
-  assert.deepEqual([(await t).type, true], ["stop_change_result", true]);
-  const u = link.stopChangeOn(peer, { change_id: "ch-2" });
-  await sleep(20);
-  clients[0].reply({ ...V, type: "error", ok: false, message: "止められない", command: "stop_change", change_id: "ch-2" });
+  clients[0].reply({ ...V, type: "error", ok: false, message: "止められない", command: "worker_stop", cap_id: "c-1", worker_id: "w-1" });
   assert.equal(((await u) as { message: string }).message, "止められない");
   await link.close();
 });
 
-test("通知: change_report / change_progress は onNotice へ渡る（待ちは消えない）", async () => {
+test("通知: worker_report（change_id つき）/ change_progress は onNotice へ渡る（待ちは消えない）", async () => {
   const got: ServerNotice[] = [];
   const { link, clients, peer } = setup((n) => got.push(n));
   const p = link.registerChangeOn(peer, regCmd("ch-1"));
   await sleep(20);
-  clients[0].reply({ ...V, type: "change_report", notify_id: "c-0123456789-pm1", change_id: "ch-1", worker_id: "w-1", step: 0, kind: "ask", text: "?", at: "2026-11-23T00:00:00Z" });
+  clients[0].reply({ ...V, type: "worker_report", change_id: "ch-1", worker_id: "w-1", kind: "ask", text: "?", at: "2026-11-23T00:00:00Z" });
   clients[0].reply({ ...V, type: "change_progress", notify_id: "c-0123456789-pm1", change_id: "ch-1", step: 1, change_state: "completed", step_state: "passed", at: "2026-11-23T00:00:01Z" });
-  assert.deepEqual(got.map((n) => n.type), ["change_report", "change_progress"]);
+  assert.deepEqual(got.map((n) => n.type), ["worker_report", "change_progress"]);
   clients[0].reply({ ...V, type: "register_change_result", ok: true, change_id: "ch-1", accepted: true, state: "in_progress" });
   assert.equal((await p).type, "register_change_result");
   await link.close();

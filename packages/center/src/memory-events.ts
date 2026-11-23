@@ -24,7 +24,8 @@ import {
   type McpSdkLike,
   type MemoryTarget,
 } from "./memory.js";
-import type { CapResultReply, TaskResultReply, WorkerReportNotice } from "@agent-hand/bantou-protocol";
+import type { CapResultReply, TaskResultReply } from "@agent-hand/bantou-protocol";
+import type { CapWorkerReportNotice } from "./remotes.js";
 import { HOOK_TS_FIELD } from "./session-activity.js";
 import { expandEnvRefs, headerOf, memoryDefOf, type McpServerDef } from "./mcp-server-def.js";
 import type { Logger } from "./log.js";
@@ -49,7 +50,7 @@ export interface CenterMemoryEvents {
   /** cap_result / task_result の受信（kind: result）。error 返信は記録しない。 */
   result(session: string, reply: CapResultReply | TaskResultReply, at?: number): void;
   /** worker_report の受信（kind: report）。 */
-  report(session: string, n: WorkerReportNotice): void;
+  report(session: string, n: CapWorkerReportNotice): void;
   /** worker_reply の送信（kind: reply）。 */
   reply(session: string, r: { capId: string; workerId: string; text: string; taskId?: string; at?: number }): void;
   /**

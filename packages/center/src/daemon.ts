@@ -1,5 +1,5 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import type { CapResultReply, ChangeProgressNotice, ChangeReportNotice, ErrorReply, TaskResultReply, WorkerReportNotice } from "@agent-hand/bantou-protocol";
+import type { CapResultReply, ChangeProgressNotice, ErrorReply, TaskResultReply, WorkerReportNotice } from "@agent-hand/bantou-protocol";
 import type { CliArgs } from "./args.js";
 import { resolveClaude } from "./claude-path.js";
 import { resolveSessionPath } from "./path-env.js";
@@ -19,7 +19,7 @@ import { log, setLogFile } from "./log.js";
 import { watchParent } from "./parent-watch.js";
 import { createFollow } from "./follow.js";
 import { resolvePair } from "./pair.js";
-import { createRemoteManager } from "./remotes.js";
+import { createRemoteManager, type CapWorkerReportNotice } from "./remotes.js";
 import { createChangeManager } from "./changes.js";
 import { createRemoteControlSupervisor } from "./remote-control.js";
 import { createContextUsageTracker } from "./context-usage.js";
@@ -118,9 +118,9 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   // remotes は link の後に作るので、遅れて届く返信はここ経由で渡す
   let applyLateReply: (r: CapResultReply | TaskResultReply | ErrorReply, fromId?: string) => void = () => {};
   let onActivity: (capId: string, fromId?: string) => void = () => {};
-  let onWorkerReport: (n: WorkerReportNotice, fromId?: string) => void = () => {};
+  let onWorkerReport: (n: CapWorkerReportNotice, fromId?: string) => void = () => {};
   // changes は remotes の後に作るので、change の通知はここ経由で渡す
-  let onChangeReport: (n: ChangeReportNotice, fromId?: string) => void = () => {};
+  let onChangeWorkerReport: (n: WorkerReportNotice, fromId?: string) => void = () => {};
   let onChangeProgress: (n: ChangeProgressNotice, fromId?: string) => void = () => {};
   const link = createServerLink({
     config,
@@ -128,11 +128,9 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     onLateCapReply: (r, fromId) => applyLateReply(r, fromId),
     onNotice: (n, fromId) => {
       if (n.type === "worker_report") {
-        onWorkerReport(n, fromId);
-        return;
-      }
-      if (n.type === "change_report") {
-        onChangeReport(n, fromId);
+        // change の worker（change_id つき）と cap の worker（cap_id つき）
+        if (n.change_id !== undefined) onChangeWorkerReport(n, fromId);
+        else onWorkerReport({ ...n, cap_id: n.cap_id! }, fromId);
         return;
       }
       if (n.type === "change_progress") {
@@ -281,7 +279,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     serversOf: (owner) => sessions.serversOf(owner),
     notify: (owner, text) => link.notifyPeer(capSessionName(owner), text),
   });
-  onChangeReport = (n, fromId) => changes.onChangeReport(n, fromId);
+  onChangeWorkerReport = (n, fromId) => changes.onWorkerReport(n, fromId);
   onChangeProgress = (n, fromId) => changes.onChangeProgress(n, fromId);
 
   let closing = false;

@@ -1,12 +1,13 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { AGENT_ID_PATTERN } from "@agent-hand/bantou-protocol";
 import { z } from "zod";
-import { ACK_TIMEOUT_MS, OWNER_HEADER, OWNER_PATTERN, OWNER_QUERY, remoteSendSchema, remoteWaitSchema, workerReplySchema, WAIT_DEFAULT_SEC, peerOfRec, type RemoteManager, type RemoteSendInput, type RemoteView } from "./remotes.js";
+import { ACK_TIMEOUT_MS, OWNER_HEADER, OWNER_PATTERN, OWNER_QUERY, remoteSendSchema, remoteWaitSchema, workerReplySchema, workerStopSchema, WAIT_DEFAULT_SEC, peerOfRec, type RemoteManager, type RemoteSendInput, type RemoteView } from "./remotes.js";
 import type { RemoteControlSupervisor } from "./remote-control.js";
 import { assertCenterOnly, centerSettingsPatchSchema, projectSettingsPatchSchema, withoutLauncherKeys } from "./project-settings.js";
 import { LOGIN_CODE, type LoginFlow } from "./login.js";
 import { sessionCreateSchema, sessionUpdateSchema, SESSION_NAME, type SessionManager } from "./sessions.js";
 import type { Follow } from "./follow.js";
+import type { ChangeManager } from "./changes.js";
 import type { ServerLink } from "./server-link.js";
 import { retireServer } from "./retire.js";
 import type { Logger } from "./log.js";
@@ -31,10 +32,30 @@ async function guard(fn: () => Promise<ToolResult> | ToolResult): Promise<ToolRe
 
 /** worker_reply の handler（/mcp と /mcp/session で共通）。owner（/mcp/session の呼び出し元 session）を渡すと、その session の cap だけが対象。 */
 const workerReplyHandler =
-  (remotes: RemoteManager, owner?: string) =>
-  (args: { remote_id?: string; server?: string; worker_id: string; text: string }): Promise<ToolResult> =>
-    guard(async () =>
-      json(await remotes.workerReply({ worker_id: args.worker_id, text: args.text, ...(owner ? { owner } : {}), ...(args.remote_id ? { remote_id: args.remote_id } : {}), ...(args.server ? { server: args.server } : {}) })));
+  (remotes: RemoteManager, owner?: string, changes?: ChangeManager) =>
+  (args: { remote_id?: string; server?: string; worker_id: string; text: string; change_id?: string }): Promise<ToolResult> =>
+    guard(async () => {
+      // change の worker（cap を持たない）は change_id で指す
+      if (args.change_id) {
+        if (args.remote_id || args.server) throw new Error("change_id と remote_id / server は同時に指定できない");
+        if (!changes || !owner) throw new Error("change_id は session の tool（/mcp/session）でだけ使える");
+        return json(await changes.workerReply({ owner, change_id: args.change_id, worker_id: args.worker_id, text: args.text }));
+      }
+      return json(await remotes.workerReply({ worker_id: args.worker_id, text: args.text, ...(owner ? { owner } : {}), ...(args.remote_id ? { remote_id: args.remote_id } : {}), ...(args.server ? { server: args.server } : {}) }));
+    });
+
+/** worker_stop の handler（/mcp/session）。owner の cap の worker（remote_id / server）か、change の worker（change_id）を 1 体止める。 */
+const workerStopHandler =
+  (remotes: RemoteManager, owner: string, changes?: ChangeManager) =>
+  (args: { remote_id?: string; server?: string; worker_id: string; change_id?: string; task_id?: string }): Promise<ToolResult> =>
+    guard(async () => {
+      if (args.change_id) {
+        if (args.remote_id || args.server || args.task_id) throw new Error("change_id と remote_id / server / task_id は同時に指定できない");
+        if (!changes) throw new Error("change の管理が無い");
+        return json(await changes.workerStop({ owner, change_id: args.change_id, worker_id: args.worker_id }));
+      }
+      return json(await remotes.workerStop({ worker_id: args.worker_id, owner, ...(args.remote_id ? { remote_id: args.remote_id } : {}), ...(args.server ? { server: args.server } : {}), ...(args.task_id ? { task_id: args.task_id } : {}) }));
+    });
 
 /** server の返信が失敗（error 返信または ok:false）か。 */
 const isFailure = (r: { type: string; ok?: boolean }): boolean => r.type === "error" || r.ok === false;
@@ -409,8 +430,8 @@ export function registerTools(
  * session 向けの窓口（/mcp/session）の tool。owner は呼び出し元 session（認証済みの header X-Bantou-Session）で、
  * 引数では受けない（自己申告させない）。
  */
-export function registerSessionTools(server: McpServer, deps: { remotes: RemoteManager; owner: string; follow?: Follow; resession?: Pick<Resessioner, "request"> }): void {
-  const { remotes, owner, follow, resession } = deps;
+export function registerSessionTools(server: McpServer, deps: { remotes: RemoteManager; changes?: ChangeManager; owner: string; follow?: Follow; resession?: Pick<Resessioner, "request"> }): void {
+  const { remotes, changes, owner, follow, resession } = deps;
   if (resession) {
     server.registerTool(
       "session_resession",
@@ -460,10 +481,20 @@ export function registerSessionTools(server: McpServer, deps: { remotes: RemoteM
     {
       title: "worker へ返答",
       description:
-        "server の worker に返答を送る（worker_report の ask / approve への回答など）。server が同じ worker_id で worker を起動し直して text を渡す。remote_id 省略時はこの session の cap（server が複数あれば server で絞る）。他の session の cap には送れない。使う server の範囲（settings.servers）の外の server には送れない。{remote_id, server, worker_id, accepted:true} を返す。protocol の版が合わない server へは送らず error",
+        "server の worker に返答を送る（worker_report の ask / approve への回答など）。server が同じ worker_id で worker を起動し直して text を渡す。remote_id 省略時はこの session の cap（server が複数あれば server で絞る）。他の session の cap には送れない。使う server の範囲（settings.servers）の外の server には送れない。change の worker へは remote_id の代わりに change_id を渡す（cap を持たない change の step の worker。worker_report の change_id）。{remote_id | change_id, server, worker_id, accepted:true} を返す。protocol の版が合わない server へは送らず error",
       inputSchema: workerReplySchema,
     },
-    workerReplyHandler(remotes, owner),
+    workerReplyHandler(remotes, owner, changes),
+  );
+  server.registerTool(
+    "worker_stop",
+    {
+      title: "worker を止める",
+      description:
+        "server の worker を 1 体止める（server の今の worker の停止の処理: process group kill、予約中なら予約の取り消し）。cap の worker は remote_id（省略時はこの session の cap。server が複数なら server で絞る）と任意の task_id、change の worker は change_id で指す。change の worker を止めると、server はその step と change を「止められた」として記録し、change_progress を push で知らせる。{remote_id | change_id, server, worker_id, stopped} を返す。stopped=false は止める物が無かった（動いていない・もう終わっている）。protocol の版が合わない server へは送らず error",
+      inputSchema: workerStopSchema,
+    },
+    workerStopHandler(remotes, owner, changes),
   );
   server.registerTool(
     "remote_create",

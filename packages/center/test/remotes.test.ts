@@ -1747,6 +1747,52 @@ test("workerReply: error 返信・門（版違い）・未定義の remote・不
   assert.equal(calls, 1);
 });
 
+test("workerStop: center の cap の server へ {cap_id, worker_id, task_id?} を送り、stopped を返す。返答待ちだった ask は先へ進んだ事にする", async () => {
+  const sent: { peer: ServerPeer; cmd: unknown }[] = [];
+  const { mgr } = setup({
+    workerStopOn: async (peer: ServerPeer, cmd: unknown) => {
+      sent.push({ peer, cmd });
+      return { bantou: 1, type: "worker_stop_result", ok: true, cap_id: CAP, worker_id: "w-1", stopped: true };
+    },
+  } as never);
+  await mgr.send({ owner: "pm1", goal: "g" });
+  mgr.onWorkerReport(report("ask") as never);
+  assert.equal(mgr.list()[0].worker_reports[0].superseded_at, undefined);
+  const r = await mgr.workerStop({ worker_id: "w-1", task_id: "t-1" });
+  assert.deepEqual(r, { remote_id: CAP, server: "id-a", worker_id: "w-1", stopped: true });
+  assert.equal(sent[0].peer.id, "id-a");
+  assert.deepEqual(sent[0].cmd, { cap_id: CAP, worker_id: "w-1", task_id: "t-1" });
+  assert.notEqual(mgr.list()[0].worker_reports[0].superseded_at, undefined);
+  await mgr.workerStop({ remote_id: CAP, worker_id: "w-1" });
+  assert.deepEqual(sent[1].cmd, { cap_id: CAP, worker_id: "w-1" });
+});
+
+test("workerStop: error 返信・門（版違い）・未定義の remote・不正な worker_id は投げ、版違いの時は server へ送らない", async () => {
+  let calls = 0;
+  const { mgr } = setup({
+    workerStopOn: async () => {
+      calls++;
+      return { bantou: 1, type: "error", ok: false, message: "別の cap の worker", command: "worker_stop" };
+    },
+  } as never);
+  await mgr.send({ owner: "pm1", goal: "g" });
+  await assert.rejects(mgr.workerStop({ worker_id: "w-1" }), /別の cap の worker/);
+  assert.equal(calls, 1);
+  await assert.rejects(mgr.workerStop({ remote_id: "c-zzz", worker_id: "w-1" }), /未定義の remote/);
+  await assert.rejects(mgr.workerStop({ worker_id: "a b" }), /worker_id/);
+  assert.equal(calls, 1);
+  const gated = setup({
+    gate: (_p: ServerPeer, command: string) => (command === "worker_stop" ? { bantou: 1, type: "error", ok: false, message: "server の protocol の版が合わない", code: "version_mismatch", retryable: true } : undefined),
+    workerStopOn: async () => {
+      calls++;
+      return { bantou: 1, type: "worker_stop_result", ok: true, cap_id: CAP, worker_id: "w-1", stopped: true };
+    },
+  } as never);
+  await gated.mgr.send({ owner: "pm1", goal: "g" }).catch(() => undefined);
+  await assert.rejects(gated.mgr.workerStop({ worker_id: "w-1" }), /版が合わない/);
+  assert.equal(calls, 1);
+});
+
 test("旧 server（protocol_version 不一致）: task も worker_reply も送らず投げる。記録は作らない", async () => {
   const gate = (_p: ServerPeer, command: string) =>
     command === "task" || command === "worker_reply"
