@@ -9,8 +9,8 @@ import { readOwner } from "./workers";
  * 呼び出し元の自分の path の範囲に限って行う。今の action は rm のみ（足す時は HANDLERS に 1 つ足す）。
  */
 
-/** 呼び出し元（MCP の header から決まる）。worker は workerId の path、cap は capId の path と自分の worker の path が範囲。 */
-export type BashCaller = { kind: "cap"; capId: string } | { kind: "worker"; capId: string; workerId: string };
+/** 呼び出し元（MCP の header から決まる）。worker は workerId の path、cap は capId の path と自分の worker の path が範囲。change の worker は capId が無い。 */
+export type BashCaller = { kind: "cap"; capId: string } | { kind: "worker"; capId?: string; workerId: string };
 
 export interface BashArgs {
   action: string;

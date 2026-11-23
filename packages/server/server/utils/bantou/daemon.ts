@@ -23,7 +23,7 @@ import { DEFAULT_RESOURCE, loadConfig } from "./config";
 import { buildIdentity, loadOrCreateServerId } from "./identity";
 import { log } from "./log";
 import { buildExtraMcp, writeMcpConfigFile } from "./extra-mcp";
-import { CAP_ID_HEADER, TASK_ID_HEADER, WORKER_ID_HEADER, setPeerStatusHandler, type McpListener } from "./mcp";
+import { CAP_ID_HEADER, CHANGE_ID_HEADER, TASK_ID_HEADER, WORKER_ID_HEADER, setPeerStatusHandler, type McpListener } from "./mcp";
 import { buildBoard, buildPeerStatus } from "./board";
 import { createResourceMonitor } from "./resources";
 import { createReservationQueue } from "./reservations";
@@ -48,6 +48,13 @@ import { createWorkerHub, readOwner, readOwnerRecord, setWorkerHandler, writeOwn
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { prepareWorkspace } from "./workspace";
+import { setChangeReportHandler } from "./change-bridge";
+import { changeError, describeChangeCommand, executeChange, isChangeCommand } from "./change-commands";
+import { createOpenspecMcpGate, createUnconfiguredGate } from "./change-gate";
+import { createChangeNotifier } from "./change-notify";
+import { createAdmission } from "./change-resources";
+import { createChangeRunner } from "./change-runner";
+import { createChangeStore } from "./change-store";
 
 /** 返信に付ける messenger の meta（bantou protocol の登録と同じ値）。 */
 export const REPLY_META = { protocol: MESSENGER_PROTOCOL.protocol, version: MESSENGER_PROTOCOL.version };
@@ -324,7 +331,7 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
     log,
     tasksOf: (capId) => scheduler.snapshot(capId),
   });
-  const runExtras = async (kind: "cap" | "worker", id: string, input: { capId?: string; taskId?: string }): Promise<RunExtras> => {
+  const runExtras = async (kind: "cap" | "worker", id: string, input: { capId?: string; taskId?: string; changeId?: string }): Promise<RunExtras> => {
     if (!mcpUrl) throw new Error("mcp が未起動");
     // cap の task の lane は、mcp 設定・system prompt を lane の logs/ に書く（lane ごとに header の task_id が違う）
     const dir = kind === "cap" && input.taskId !== undefined ? laneDir(config.workspace, id, input.taskId) : agentDir(config.workspace, kind, id);
@@ -332,6 +339,10 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
     if (kind === "cap") {
       headers[CAP_ID_HEADER] = id;
       if (input.taskId !== undefined) headers[TASK_ID_HEADER] = input.taskId;
+    } else if (input.changeId !== undefined) {
+      // 新しい経路（change）の worker: 持ち主は change。cap-id は付けない（report は change-id と worker-id で受ける）
+      headers[CHANGE_ID_HEADER] = input.changeId;
+      headers[WORKER_ID_HEADER] = id;
     } else {
       const owner = await readOwnerRecord(config.workspace, id);
       const capId = input.capId ?? owner?.capId;
@@ -577,6 +588,51 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
     },
     log,
   });
+  /**
+   * change 単位の step 消化（新しい経路。remote-cap の経路とは別に並べる）。記録は <workspace>/changes/。
+   * 起こしてよいかは config.change の値（M3。省略は上限なし）と resources の測定値で server が判定する。
+   */
+  const changeGate = config.openspecMcp ? createOpenspecMcpGate(config.openspecMcp) : createUnconfiguredGate();
+  const changeRunner = createChangeRunner({
+    store: createChangeStore(config.workspace, log),
+    gate: changeGate,
+    admission: createAdmission(config.change ?? {}, () => resources.latest()),
+    launch: async (req) => {
+      const r = await manager.invoke("worker", req.worker_id, {
+        prompt: req.prompt,
+        repo: req.repo,
+        ...(req.branch !== undefined ? { branch: req.branch } : {}),
+        ...(req.model !== undefined ? { defaultModel: req.model } : {}),
+        reason: `change ${req.change_id} step ${req.step}`,
+        changeId: req.change_id,
+      });
+      return { ok: r.ok, session_id: r.session_id, ...(r.error !== undefined ? { error: r.error } : {}) };
+    },
+    stopWorker: (workerId) => manager.stop("worker", workerId),
+    notify: createChangeNotifier({
+      resolvePeers: async (name) => {
+        const own = client.peer.id;
+        return (await client.listPeers("all")).filter((p) => p.name === name && p.id !== own).map((p) => ({ id: p.id, registered_at: p.registered_at }));
+      },
+      send: async (to, notice) => {
+        await client.send(to, JSON.stringify(notice), "pull", REPLY_META);
+      },
+      log,
+    }),
+    log,
+  });
+  const changeBoard = async (): Promise<Record<string, unknown>> => {
+    await resources.sample().catch(() => undefined);
+    return {
+      ...changeRunner.counts(),
+      max_parallel_workers: config.change?.maxParallelWorkers ?? null,
+      min_free_memory_bytes: config.change?.minFreeMemoryBytes ?? null,
+      resources: resources.latest(),
+    };
+  };
+  // 資源が空くのを待っている queue を、測定の周期で見直す（周期は resource.sampleMs。新しい値は足さない）
+  const changePump = setInterval(() => changeRunner.pump(), config.resource?.sampleMs ?? DEFAULT_RESOURCE.sampleMs);
+  changePump.unref();
   // 退役（retire_server）。受付停止 → cap / worker 停止 → 返信 → messenger 解除 → exit 76
   const retire = createRetireController({
     workspace: config.workspace,
@@ -599,9 +655,13 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
       setReportHandler(async () => {
         throw new Error("server は退役中のため report を受け付けない");
       });
+      setChangeReportHandler(async () => {
+        throw new Error("server は退役中のため report を受け付けない");
+      });
     },
     stopAll: async () => {
       scheduler.close("server は退役中のため止めた");
+      changeRunner.close();
       await manager.shutdown();
     },
     finish: () => (deps.requestExit ?? (() => log("終了を頼む先が無いため終了できない")))("retire"),
@@ -641,7 +701,7 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
         log(`終了中のため無視: from=${from} type=${cmd.type}`);
         return;
       }
-      log(`指示受信: type=${cmd.type} from=${from} ${describeCommand(cmd)}`.trimEnd());
+      log(`指示受信: type=${cmd.type} from=${from} ${isChangeCommand(cmd) ? describeChangeCommand(cmd) : describeCommand(cmd)}`.trimEnd());
       let reply: ServerReply;
       if (cmd.type === "retire_server") {
         reply = await retire.request(cmd, from);
@@ -650,6 +710,14 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
         reply = retiringError(cmd);
       } else if (cmd.type === "hello" || cmd.type === "update_server") {
         reply = await executeUpdate(cmd, update);
+      } else if (isChangeCommand(cmd)) {
+        // 新しい経路（change）。更新待機中は登録だけ断る（再起動後に再送できる）。照会・停止・返答は通す
+        if (cmd.type === "register_change" && update.isUpdating()) {
+          const p = update.progress();
+          reply = changeError(cmd, `server 更新待ち（${p?.from ?? serverVersion}→${p?.to ?? "?"}）。再起動後に再送`, { code: "updating", retryable: true });
+        } else {
+          reply = await executeChange(cmd, { runner: changeRunner, from: { id: m.from_id, ...(m.from_name ? { name: m.from_name } : {}) }, board: changeBoard });
+        }
       } else if ((cmd.type === "kick_cap" || cmd.type === "task") && update.isUpdating()) {
         // 更新待機中は新しい指示を受け付けず、理由付きで断る（center は再起動後に再送できる）
         const p = update.progress();
@@ -751,6 +819,7 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
     exitWatcher.reported(workerId, kind, new Date().toISOString());
     return hub.report(capId, workerId, kind, text);
   });
+  setChangeReportHandler((changeId, workerId, kind, text) => changeRunner.reported(changeId, workerId, kind, text));
   setWorkerHandler(workerHub);
   setPeerStatusHandler(async (capId) => {
     // cap が見る時は今測る（掲示の周期を待たない）
@@ -760,6 +829,8 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
   setBashWorkspace(config.workspace);
   // 前回の予約を読み込む（動いている worker が 0 本なら先頭をすぐ起こす）
   await reservations.load();
+  // 前回の change の記録を読み、中断していた step を続ける
+  log(`change の記録: ${await changeRunner.load()} 件`);
   // 起動時に回収した running は lost として center へ知らせる
   for (const r of reaped.reaped) {
     const capId = r.kind === "cap" ? r.id : await readOwner(config.workspace, r.id);
@@ -774,6 +845,9 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
     try {
       // 実行中の claude を止め、中断の返信を出し切るのを少し待つ
       setReportHandler(undefined);
+      setChangeReportHandler(undefined);
+      clearInterval(changePump);
+      changeRunner.close();
       setWorkerHandler(undefined);
       setPeerStatusHandler(undefined);
       resources.close();

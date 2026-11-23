@@ -93,6 +93,22 @@ export interface ExtraMcpServer {
   targets: ExtraMcpTarget[];
 }
 
+/**
+ * 新しい経路（change）の worker の並行と資源の判定に使う値（M3）。利用者が置いた時だけ効く。既定は上限なし（値を足さない）。
+ * - maxParallelWorkers: 並行して動かす worker の数の上限（1 以上）。
+ * - minFreeMemoryBytes: メモリの空きの下限（bytes。1 以上）。測定値がこれを下回る間は起こさない。
+ */
+export interface ChangeConfig {
+  maxParallelWorkers?: number;
+  minFreeMemoryBytes?: number;
+}
+
+/** 全 server が共有する 1 つの openspec-mcp への接続（決定 13）。x-schema-discovery の中身は schemaDiscovery（mcpServers の 1 件分。type は http だけ。決定 20）。 */
+export interface OpenspecMcpConfig {
+  url: string;
+  schemaDiscovery: { type: "http"; url: string; headers?: Record<string, string> };
+}
+
 export interface Config {
   /** workspace フォルダの絶対パス。 */
   workspace: string;
@@ -108,6 +124,10 @@ export interface Config {
   resource?: { sampleMs: number };
   /** cap / worker に載せる追加の stdio MCP。name → 定義。 */
   extraMcp?: Record<string, ExtraMcpServer>;
+  /** change の worker の並行と資源の判定の値。省略は上限なし。 */
+  change?: ChangeConfig;
+  /** openspec-mcp への接続。省略なら change の登録を受けない。 */
+  openspecMcp?: OpenspecMcpConfig;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -172,6 +192,37 @@ function parseResource(v: unknown, path: string): { sampleMs: number } {
     throw new Error(`config の resource.sampleMs は 1000 以上の整数（ms）: ${path}`);
   }
   return { sampleMs };
+}
+
+function parseChange(v: unknown, path: string): ChangeConfig | undefined {
+  if (v === undefined) return undefined;
+  if (!isRecord(v)) throw new Error(`config の change はオブジェクト: ${path}`);
+  const out: ChangeConfig = {};
+  for (const key of ["maxParallelWorkers", "minFreeMemoryBytes"] as const) {
+    const x = v[key];
+    if (x === undefined) continue;
+    if (typeof x !== "number" || !Number.isInteger(x) || x < 1) throw new Error(`config の change.${key} は 1 以上の整数（省略 = 上限なし）: ${path}`);
+    out[key] = x;
+  }
+  return out;
+}
+
+function parseHttpSpec(v: unknown, where: string, path: string): { type: "http"; url: string; headers?: Record<string, string> } {
+  if (!isRecord(v)) throw new Error(`config の ${where} はオブジェクト: ${path}`);
+  if (v.type !== "http") throw new Error(`config の ${where}.type は "http" だけ: ${path}`);
+  if (typeof v.url !== "string" || v.url.length === 0) throw new Error(`config の ${where}.url は空でない文字列: ${path}`);
+  const headers = v.headers;
+  if (headers !== undefined && (!isRecord(headers) || Object.values(headers).some((x) => typeof x !== "string"))) {
+    throw new Error(`config の ${where}.headers は文字列値のオブジェクト: ${path}`);
+  }
+  return { type: "http", url: v.url, ...(headers !== undefined ? { headers: { ...(headers as Record<string, string>) } } : {}) };
+}
+
+function parseOpenspecMcp(v: unknown, path: string): OpenspecMcpConfig | undefined {
+  if (v === undefined) return undefined;
+  if (!isRecord(v)) throw new Error(`config の openspecMcp はオブジェクト: ${path}`);
+  if (typeof v.url !== "string" || v.url.length === 0) throw new Error(`config の openspecMcp.url は空でない文字列: ${path}`);
+  return { url: v.url, schemaDiscovery: parseHttpSpec(v.schemaDiscovery, "openspecMcp.schemaDiscovery", path) };
 }
 
 /** 名前の衝突判定用。- と _ を同一視し、大小を区別しない。 */
@@ -316,6 +367,11 @@ function parseSession(v: unknown, path: string): SessionConfig {
   };
 }
 
+/** 値のある項目だけを返す（省略された設定を、undefined のキーとして出さない）。 */
+function optionalEntries<T extends Record<string, unknown>>(o: T): Partial<T> {
+  return Object.fromEntries(Object.entries(o).filter(([, x]) => x !== undefined)) as Partial<T>;
+}
+
 /** config.json を読み込んで検証する。 */
 export async function loadConfig(path: string): Promise<Config> {
   let raw: string;
@@ -353,5 +409,6 @@ export async function loadConfig(path: string): Promise<Config> {
     update: parseUpdate(obj.update, path),
     resource: parseResource(obj.resource, path),
     extraMcp: parseExtraMcp(obj.extraMcp, path),
+    ...optionalEntries({ change: parseChange(obj.change, path), openspecMcp: parseOpenspecMcp(obj.openspecMcp, path) }),
   };
 }
