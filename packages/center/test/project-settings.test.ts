@@ -100,10 +100,10 @@ test("servers: schema は server の名前（agent-messenger の名前）の配�
   const { centerSettingsPatchSchema, readCenterSettings } = await import("../src/project-settings.js");
   assert.equal("servers" in centerSettingsPatchSchema.shape, false);
   assert.deepEqual(readCenterSettings({ instructions: "i", servers: ["a"] }), { instructions: "i" });
-  // 範囲の判定: server の名前（agent-messenger の名前。host に渡す）の完全一致（大文字小文字も区別する）。undefined は全部
+  // 範囲の判定: server の名前（agent-messenger の名前。host に渡す）で、大文字小文字を区別しない。undefined は全部
   assert.equal(serverAllowed(undefined, {}), true);
   assert.equal(serverAllowed([], { host: "h" }), false);
-  assert.equal(serverAllowed(["LENOVO"], { host: "lenovo" }), false);
+  assert.equal(serverAllowed(["LENOVO"], { host: "lenovo" }), true);
   assert.equal(serverAllowed(["srv-a"], { host: "srv-a" }), true);
   assert.equal(serverAllowed(["srv-a"], { host: "srv-b" }), false);
   assert.equal(serverAllowed(["lenovo"], {}), false, "名前が分からない server は指定では通らない");

@@ -186,10 +186,9 @@ test("reply: answer / approve / reject を送る。owner 無し（desktop の ce
   assert.equal(s.calls.filter((c) => c.op === "reply").length, 3);
 });
 
-test("servers の範囲: 範囲外の server への send は error で何も送らず控えも作らない。空配列は何も使わない。名前は完全一致（大文字小文字も区別する）", async () => {
-  const s = setup({ servers: { pm1: ["srv-a"], pm2: [] } });
+test("servers の範囲: 範囲外の server への send は error で何も送らず控えも作らない。空配列は何も使わない。大文字小文字は区別しない", async () => {
+  const s = setup({ servers: { pm1: ["Srv-A"], pm2: [] } });
   await s.manager.send({ owner: "pm1", server: "srv-a", prompt: "ok" });
-  await assert.rejects(() => s.manager.send({ owner: "pm1", server: "SRV-A", prompt: "x" }), /この session の servers に無い/);
   await assert.rejects(() => s.manager.send({ owner: "pm1", server: "srv-b", prompt: "x" }), /この session の servers に無い: srv-b/);
   await assert.rejects(() => s.manager.send({ owner: "pm2", server: "srv-a", prompt: "x" }), /空 = どの server も使わない/);
   assert.equal(s.calls.filter((c) => c.op === "launch").length, 1);
