@@ -31,12 +31,7 @@ export interface CapReport {
   content: string;
 }
 
-/** 失敗の content の長さの上限（process の detail が長い時に切る）。 */
-const MAX_FAILED_CONTENT = 4000;
-
-const clip = (s: string): string => (s.length > MAX_FAILED_CONTENT ? `${s.slice(0, MAX_FAILED_CONTENT)}…` : s);
-
-const failed = (content: string): CapReport => ({ status: "failed", content: clip(content) });
+const failed = (content: string): CapReport => ({ status: "failed", content });
 
 /**
  * worker の 1 回の実行の結果から、cap へ返す message を作る。
