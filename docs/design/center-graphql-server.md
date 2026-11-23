@@ -342,7 +342,7 @@ center（GraphQL を持つ backend の server。program は 1 つ、起動の形
 
 #### 2.7.7 同じ Mac で (a) と (b) が両方動く時
 
-(a) は desktop が決めた IP・port、(b) は設定した port（既定 7910）で起動する。同じ port の center は 1 つで、後から起動する方は port の使用中で起動に失敗して終わる（2.8.2）。別の port なら 2 つが同時に動きうる。その時は、状態 dir（`~/.local/share/bantou/`）・`center-id`・messenger の peer 名 `bantou-center`（`packages/center/src/server-link.ts:341`）の奪い合いが起きうる。どう扱うかは未決 #32。
+(a) は desktop が決めた IP・port、(b) は設定した port（既定 7910）で起動する。同じ port の center は 1 つで、後から起動する方は port の使用中で起動に失敗して終わる（2.8.2）。別の port なら 2 つが同時に動きうる。その時は、状態 dir（`~/.local/share/bantou/`）・`center-id`・messenger の peer 名 `bantou-center`（`packages/center/src/server-link.ts:341`）の奪い合いが起きうる。どう扱うかは #32 の決定（案 A、2.8.4）。
 
 #### 2.7.8 desktop の Rust に足す物・捨てる物
 
@@ -413,7 +413,7 @@ desktop は (a) を起動する前に、自分が決めた IP・port の状態�
 
 #### 2.8.5 同じ port の center は 1 つ
 
-- 同じ host・同じ port で動く center は 1 つ。後から起動する方は port で失敗して終わる。別の port なら、同じ Mac に (a) と (b) が両方動きうる。その時は状態 dir（`~/.local/share/bantou/`）・`center-id`・messenger の peer 名 `bantou-center`（`packages/center/src/server-link.ts:341`）の奪い合いが起きうる（未決 #32）。
+- 同じ host・同じ port で動く center は 1 つ。後から起動する方は port で失敗して終わる。別の port なら、同じ Mac に (a) と (b) が両方動きうる。その時は状態 dir（`~/.local/share/bantou/`）・`center-id`・messenger の peer 名 `bantou-center`（`packages/center/src/server-link.ts:341`）の奪い合いが起きうる（#32 の決定: 案 A で起こさない。2.8.4）。
 - port は host で 1 つなので、同じ Mac の別の user の login でも、同じ port なら center は 1 つ。別の user が自分の center を起こすには別の port が要る【決定 5 から導いた点。利用者に確かめる点】。
 
 #### 2.8.6 client の接続
