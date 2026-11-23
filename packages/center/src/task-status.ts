@@ -46,9 +46,9 @@ export function buildTaskStatus(
     if (filter?.remote_id !== undefined && v.remote_id !== filter.remote_id) continue;
     if (v.session !== owner) continue;
     const stoppedAt = v.finishedAt !== undefined ? Date.parse(v.finishedAt) : NaN;
+    // remote_id は `<parent-id>@<server>` なので server は別に出さない
     const parts = [
       v.remote_id,
-      v.server_label,
       v.state === "running" ? "実行中" : "止まっている",
       v.state === "done" && !Number.isNaN(stoppedAt) ? `最後の書き込み ${minutes(now - stoppedAt)} 分前` : "",
     ].filter((p) => p !== "");

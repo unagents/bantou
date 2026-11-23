@@ -238,7 +238,7 @@ export function registerTools(
     {
       title: "remote 一覧",
       description:
-        "center が保持する remote の控え（session × server の cap 単位）の一覧。各要素は remote_id（= launch の parent-id = cap の名前）, session, server（server の agent-messenger の名前）, serverName, server_label, state（running = worker の ws の最後の書き込みから 60 秒以内 / done = 止まっている = 60 秒無音）, finishedAt（止まっている時だけ。ws の最後の書き込みの時刻）, model, createdAt, owners。owner が分かれば（header / query / 引数）その session の cap だけ、分からなければ全件。結果・report・質問は server から cap の名前に直接届くので、center の一覧には載らない。",
+        "center が保持する remote の控え（session × server の cap 単位）の一覧。各要素は remote_id（`<parent-id>@<server>`。parent-id = launch の parent-id = cap の名前）, session, server（server の agent-messenger の名前）, serverName, server_label, state（running = worker の ws の最後の書き込みから 60 秒以内 / done = 止まっている = 60 秒無音）, finishedAt（止まっている時だけ。ws の最後の書き込みの時刻）, model, createdAt, owners。owner が分かれば（header / query / 引数）その session の cap だけ、分からなければ全件。結果・report・質問は server から cap の名前に直接届くので、center の一覧には載らない。",
       inputSchema: { owner: ownerArg },
     },
     ({ owner }, extra) =>
@@ -380,7 +380,7 @@ export function registerSessionTools(server: McpServer, deps: { remotes: RemoteM
     "remote_list",
     {
       title: "remote 一覧",
-      description: "この session の remote-cap の控え。使う server の範囲（session の設定 settings.servers）が決まっている時は、先頭の要素 { scope: { servers, out_of_scope_caps, note } } に範囲を出し、範囲外の server の cap は既定では出さない（include_out_of_scope: true で出す。範囲の指定が無ければ scope は付かない）。cap は server ごとに 1 つ: remote_id（= parent-id = cap の名前）, session, server（server の agent-messenger の名前）, serverName, server_label, state（running = worker の ws の最後の書き込みから 60 秒以内 / done = 止まっている = 60 秒無音）, finishedAt（止まっている時だけ。ws の最後の書き込みの時刻）, model, createdAt, owners。結果・report・質問は server から cap の名前（この session）に直接届くので、この一覧には載らない",
+      description: "この session の remote-cap の控え。使う server の範囲（session の設定 settings.servers）が決まっている時は、先頭の要素 { scope: { servers, out_of_scope_caps, note } } に範囲を出し、範囲外の server の cap は既定では出さない（include_out_of_scope: true で出す。範囲の指定が無ければ scope は付かない）。cap は server ごとに 1 つ: remote_id（`<parent-id>@<server>`。parent-id = cap の名前）, session, server（server の agent-messenger の名前）, serverName, server_label, state（running = worker の ws の最後の書き込みから 60 秒以内 / done = 止まっている = 60 秒無音）, finishedAt（止まっている時だけ。ws の最後の書き込みの時刻）, model, createdAt, owners。結果・report・質問は server から cap の名前（この session）に直接届くので、この一覧には載らない",
       inputSchema: {
         include_out_of_scope: z.boolean().optional().describe("true で、この session の使う server の範囲（settings.servers）の外の server の cap も出す（既定は出さない）"),
       },
@@ -401,7 +401,7 @@ export function registerSessionTools(server: McpServer, deps: { remotes: RemoteM
     {
       title: "cap の状態確認",
       description:
-        "この session の cap ごとに 1 行の状態確認（本文は入らない）。返り値 { at, caps: [{ remote_id, server, line }], servers（この session の cap のある server ごとの版。server-info の答えを控えた物。未取得は不明）, truncated, omitted }。line は `<remote_id> | <server> | <実行中 / 止まっている> [| 最後の書き込み <分> 分前]`（状態は ws の最後の書き込みから。60 秒無音で止まっている）。1 回 40 行まで。他の session の cap は見えない。remote_id で 1 つの cap に絞れる",
+        "この session の cap ごとに 1 行の状態確認（本文は入らない）。返り値 { at, caps: [{ remote_id, server, line }], servers（この session の cap のある server ごとの版。server-info の答えを控えた物。未取得は不明）, truncated, omitted }。line は `<remote_id> | <実行中 / 止まっている> [| 最後の書き込み <分> 分前]`（状態は ws の最後の書き込みから。60 秒無音で止まっている）。1 回 40 行まで。他の session の cap は見えない。remote_id で 1 つの cap に絞れる",
       inputSchema: { remote_id: z.string().min(1).optional() },
     },
     ({ remote_id }) => guard(() => json(buildTaskStatus(remotes.list({ owner, includeOutOfScope: true }), owner, Date.now(), remote_id ? { remote_id } : undefined, link ? (s) => link.serverVersionOf(s) : undefined))),
