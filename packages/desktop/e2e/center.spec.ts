@@ -137,7 +137,7 @@ const remotes = (workerState: string) => [
   },
   // an idle cap with no worker and no pending instruction (one row, no record of finished work)
   // the old shared cap kept from before (no session)
-  { remote_id: "c-0a1b2c3d4e", owners: [], server: "p-8e2f", serverName: "other-server", state: "done", createdAt: "2026-10-28T22:00:00.000Z", result: "PR を確認した。\n指摘は 3 件", result_at: "2026-10-28T23:00:00.000Z", pending: [] },
+  { remote_id: "c-0a1b2c3d4e", owners: [], server: "p-8e2f", serverName: "other-server", state: "stopped", createdAt: "2026-10-28T22:00:00.000Z", result: "PR を確認した。\n指摘は 3 件", result_at: "2026-10-28T23:00:00.000Z", pending: [] },
 ];
 
 const seedRemotes = (page: Page, list: unknown[]) =>
