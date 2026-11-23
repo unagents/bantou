@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { describeSystemInstructions } from "./system-instructions.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Config } from "./config.js";
@@ -9,17 +8,11 @@ import type { RemoteManager } from "./remotes.js";
 import type { RemoteControlSupervisor } from "./remote-control.js";
 import type { SessionManager } from "./sessions.js";
 import type { ServerLink } from "./server-link.js";
+import { packageVersion } from "./version.js";
 import { registerSessionTools, registerTools } from "./tools.js";
 
-/** package.json の version（src/ と dist/ のどちらからでも ../package.json）。 */
-export function packageVersion(): string {
-  try {
-    const p = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version?: string };
-    return p.version ?? "0.0.0";
-  } catch {
-    return "0.0.0";
-  }
-}
+/** 版は version.ts（compile した binary でも入る）。既存の import 先（server.js）のために再 export する。 */
+export { packageVersion };
 
 /** center の MCP server を組み立てる（transport は呼び出し側が繋ぐ）。 */
 export function createCenterServer(deps: {

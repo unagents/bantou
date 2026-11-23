@@ -330,6 +330,11 @@ test("terminalInput / terminalResize: 実行中の session の端末へ渡る（
     assert.equal(zero.errors![0].extensions.code, "BAD_USER_INPUT");
     const notB64 = await t.call(`mutation{ terminalInput(session:"a", dataB64:"!!") }`);
     assert.equal(notB64.errors![0].extensions.code, "BAD_USER_INPUT");
+    // 空・長さが 4 の倍数でない・padding が途中にある物は通さない
+    for (const bad of ["", "YQ", "YQ=", "YQ==YQ==", "YWJj="]) {
+      const r = await t.call(`mutation($d:String!){ terminalInput(session:"a", dataB64:$d) }`, { d: bad });
+      assert.equal(r.errors![0].extensions.code, "BAD_USER_INPUT", `dataB64=${JSON.stringify(bad)}`);
+    }
     assert.equal(got.input.length, 1);
     assert.equal(got.size.length, 1);
   } finally {

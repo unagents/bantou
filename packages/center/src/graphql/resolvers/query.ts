@@ -72,7 +72,7 @@ export const queryResolvers: Record<string, Resolver> = {
 
   // GET /sessions/<n>/output?after= の取り直し。購読は同期で続きを渡すので、集めてすぐ外す
   terminalOutputSince: (_p, args, { services }) => {
-    const name = String(args.session);
+    const name = checkSessionName(String(args.session));
     const after = typeof args.after === "number" ? args.after : undefined;
     const chunks: { id: number; data: string }[] = [];
     let reset = false;

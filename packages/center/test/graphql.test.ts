@@ -77,6 +77,25 @@ test("graphql: token 無し・違う token は 401、token 付きは応答する
   }
 });
 
+test("graphql: `//graphql`・`/graphql/` も受ける（req.url を正規化して yoga に渡す）", async () => {
+  const { h, url } = await boot();
+  try {
+    for (const path of ["//graphql", "/graphql/", "//graphql/"]) {
+      const r = await gql(url.replace("/graphql", path), "{__typename}");
+      assert.equal(r.status, 200, path);
+      assert.deepEqual(await r.json(), { data: { __typename: "Query" } }, path);
+    }
+    // query 付きの GET でも正規化の後に query が残る（`//graphql?query=…` は正規化が無いと yoga が 404 にする）
+    for (const path of ["/graphql/", "//graphql", "//graphql/"]) {
+      const g = await fetch(`${url.replace("/graphql", path)}?query=%7B__typename%7D`, { headers: AUTH });
+      assert.equal(g.status, 200, `GET ${path}`);
+      assert.deepEqual(await g.json(), { data: { __typename: "Query" } }, `GET ${path}`);
+    }
+  } finally {
+    await h.close();
+  }
+});
+
 test("graphql: 渡さなければ /graphql は無い（404）", async () => {
   const { h, url } = await boot({ withGraphql: false });
   try {
@@ -122,5 +141,9 @@ test("graphql schema: 3.1〜3.3 の表の項目が query / mutation / subscripti
   assert.deepEqual(fieldsOf(schema.getSubscriptionType()), [...SUBSCRIPTION_FIELDS].sort());
   for (const f of Object.values(schema.getQueryType()!.getFields())) assert.equal(typeof f.resolve, "function", `Query.${f.name} の resolver`);
   for (const f of Object.values(schema.getMutationType()!.getFields())) assert.equal(typeof f.resolve, "function", `Mutation.${f.name} の resolver`);
+  // sleepSession の説明は実装（sleep() の完了を待って返す）と合っている（「受理して即返す」ではない）
+  const sleepDesc = schema.getMutationType()!.getFields().sleepSession.description ?? "";
+  assert.match(sleepDesc, /待って/);
+  assert.doesNotMatch(sleepDesc, /受理して即返す/);
   for (const f of Object.values(schema.getSubscriptionType()!.getFields())) assert.equal(typeof f.subscribe, "function", `Subscription.${f.name} の subscribe`);
 });
