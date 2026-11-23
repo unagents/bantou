@@ -7,6 +7,7 @@ import { Readable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import { centerUrl } from "./events.ts";
 import { graphqlRefusal } from "./graphql-guard.ts";
+import { dropUnchangedSecrets, maskGraphqlAnswer, type SettingsRef } from "./graphql-secrets.ts";
 import { redactUrl } from "./normalize.ts";
 import type { Redactor } from "./redact.ts";
 import type { Target } from "./settings.ts";
@@ -75,12 +76,53 @@ function redactFrames(src: Readable, redactor: Redactor): Readable {
   );
 }
 
+/** A JSON answer to the web: read whole, the secret values of the settings masked (the items stay). */
+function maskWhole(src: Readable, request: string): Readable {
+  return Readable.from(
+    (async function* () {
+      const chunks: Buffer[] = [];
+      for await (const c of src) chunks.push(Buffer.from(c as Uint8Array));
+      yield maskGraphqlAnswer(request, Buffer.concat(chunks).toString("utf8"));
+    })(),
+  );
+}
+
+const CURRENT_SESSION = "query($n: String!) { sessionSettings(name: $n) { memory mcpServers mcpSecrets } }";
+const CURRENT_CENTER = "{ centerSettings { memory mcpServers mcpSecrets } }";
+
 export function createGraphqlRelay(opts: GraphqlRelayOptions): GraphqlRelay {
   const doFetch = opts.fetch ?? fetch;
+
+  /** The current secret items of a settings, read from the center (to see whether a write changes them). Undefined on any failure. */
+  async function fetchCurrent(ref: SettingsRef): Promise<Record<string, unknown> | undefined> {
+    try {
+      const target = await opts.getTarget();
+      if (!target) return undefined;
+      const headers: Record<string, string> = { "content-type": "application/json", accept: "application/json" };
+      if (target.token) headers.authorization = `Bearer ${target.token}`;
+      const payload = ref.kind === "session" ? { query: CURRENT_SESSION, variables: { n: ref.name } } : { query: CURRENT_CENTER };
+      const res = await doFetch(centerUrl(target.url, [GRAPHQL_SEGMENT]), {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+        redirect: "manual",
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) return undefined;
+      const data = ((await res.json()) as { data?: Record<string, unknown> }).data;
+      const s = ref.kind === "session" ? data?.sessionSettings : data?.centerSettings;
+      return typeof s === "object" && s !== null ? (s as Record<string, unknown>) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   return {
     async forward(body, accept) {
       if (Buffer.byteLength(body) > MAX_GRAPHQL_BYTES) return jsonReply(413, "body が大きすぎる");
       if (opts.guard !== false) {
+        // an item sent back as the web was shown it (`***`) is unchanged: drop it before the center-only check
+        body = await dropUnchangedSecrets(body, fetchCurrent);
         const refused = graphqlRefusal(body);
         if (refused) return jsonReply(refused.status, refused.message);
       }
@@ -107,14 +149,18 @@ export function createGraphqlRelay(opts: GraphqlRelayOptions): GraphqlRelay {
       if (ct) out["content-type"] = ct;
       if ((ct ?? "").startsWith("text/event-stream")) out["cache-control"] = "no-cache, no-transform";
       if (!res.body) return { status: res.status, headers: out, body: Readable.from([]), close: () => ac.abort() };
-      const raw = Readable.fromWeb(res.body as never);
+      const upstream = Readable.fromWeb(res.body as never);
       // destroy() cancels the center's stream; an abort after that is not an error worth a crash
-      raw.on("error", () => {});
+      upstream.on("error", () => {});
+      // the web's answers: secret values of the settings are masked (a JSON answer only; a stream carries no settings)
+      const masked = opts.guard !== false && (ct ?? "").includes("json");
+      const raw = masked ? maskWhole(upstream, body) : upstream;
+      if (masked) raw.on("error", () => {});
       const redact = opts.redactor;
-      if (!redact) return { status: res.status, headers: out, body: raw, close: () => raw.destroy() };
+      if (!redact) return { status: res.status, headers: out, body: raw, close: () => { raw.destroy(); upstream.destroy(); } };
       const cleaned = (ct ?? "").startsWith("text/event-stream") ? redactFrames(raw, redact) : redactWhole(raw, redact);
       cleaned.on("error", () => {});
-      return { status: res.status, headers: out, body: cleaned, close: () => { cleaned.destroy(); raw.destroy(); } };
+      return { status: res.status, headers: out, body: cleaned, close: () => { cleaned.destroy(); raw.destroy(); upstream.destroy(); } };
     },
   };
 }
