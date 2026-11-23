@@ -10,7 +10,7 @@ import { subscriptionTypeDefs } from "./schema-subscription.js";
 export function buildSchema(): GraphQLSchema {
   return createSchema({
     typeDefs: [typeDefs, queryTypeDefs, mutationTypeDefs, subscriptionTypeDefs],
-    // resolver が schema に無い field を指していたら起動時に落とす（stub の取りこぼしを test 以前に検出する）
+    // resolver が schema に無い field を指していたら起動時に落とす（resolver の取りこぼしを test 以前に検出する）
     resolverValidationOptions: { requireResolversToMatchSchema: "error" },
     resolvers: resolvers as never,
   });

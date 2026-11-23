@@ -4,6 +4,7 @@ import type { EventHub } from "../events.js";
 import type { Follow } from "../follow.js";
 import type { LoginFlow } from "../login.js";
 import type { Logger } from "../log.js";
+import type { Resessioner } from "../resession.js";
 import type { RemoteControlSupervisor } from "../remote-control.js";
 import type { RemoteManager } from "../remotes.js";
 import type { ServerLink } from "../server-link.js";
@@ -19,6 +20,8 @@ export interface GraphqlServices {
   supervisor: RemoteControlSupervisor;
   link: ServerLink;
   sessions: SessionManager;
+  /** session を眠らせる入口（引継ぎを書かせてから眠らせる。MCP の session_sleep と同じ resession.requestSleep。sessions.sleep は直接呼ばない）。 */
+  resession: Pick<Resessioner, "requestSleep">;
   remotes: RemoteManager;
   follow: Follow;
   login: LoginFlow;
