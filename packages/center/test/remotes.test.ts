@@ -84,8 +84,6 @@ test("send: parent-id = cap の名前（<session>-cap）、model 省略は既定
   assert.deepEqual(list[0]!.owners, ["pm1"]);
   assert.equal(s.mem.saved().length, 1);
   assert.ok(s.memoryCalls.some((c) => c === "task:pm1:pm1-cap:do it"));
-  // server-info は版の表示のために送る
-  assert.ok(s.calls.some((c) => c.op === "server-info" && c.server === "bantou-server-aaaaaaaaaa"));
   assert.deepEqual(s.manager.summary("pm1"), { running: 1, waitingReply: 0 });
 });
 

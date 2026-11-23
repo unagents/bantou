@@ -323,8 +323,6 @@ export function createRemoteManager(opts: {
       wake();
       opts.memoryEvents?.task(input.owner, { capId: parentId, taskId: newLaunchId(), goal: input.prompt });
       log(`remote launch: parent-id=${parentId} server=${input.server} model=${model ?? "(指定なし)"}`);
-      // 版の確認（答えは版の表示にだけ使う。届かなくても launch は成功）
-      void link.requestServerInfo(input.server).catch((e: unknown) => log(`server-info を送れない: ${input.server} ${e instanceof Error ? e.message : String(e)}`));
       return { remote_id: remoteIdOf(parentId, input.server), server: input.server, ...(model !== undefined ? { model } : {}), sent: true };
     },
 
