@@ -20,7 +20,9 @@ import { buildServerName, readMachineId } from "./name";
 import { isValidWorkerId, workerDir } from "./paths";
 import { listLiveProcesses, matchesSession } from "./processes";
 import { replyPrompt } from "./prompts";
+import { clearPending, takePending } from "./pending";
 import { createWorkQueue, type Job, type WorkQueue } from "./queue";
+import { createSelfUpdater, type SelfUpdater, type SelfUpdaterDeps } from "./update";
 import { removeReadyFile, writeReadyFile } from "./ready";
 import { cliRunner } from "./runner";
 import { findWorkerBySession, readState } from "./state";
@@ -184,6 +186,10 @@ export interface DaemonDeps {
   runner?: WorkerDeps["runner"];
   /** agent-messenger の client の作り方（テストで差し替える）。 */
   createClient?: typeof createMessengerClient;
+  /** 自己更新の入れ替えのための終了を頼む（plugin の shutdown）。未指定なら自己更新は動かさない。 */
+  requestExit?: (reason: string) => void;
+  /** 最新版の見方（テストで差し替える。既定は npx）。 */
+  fetchLatest?: SelfUpdaterDeps["fetchLatest"];
 }
 
 /** 設定を読み込んで起動し、常駐物を返す。シグナルと exit は呼び出し側（plugin）が担う。 */
@@ -244,11 +250,13 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
     },
     log,
   };
+  const makeJob = (input: WorkerRunInput, kind: "launch" | "reply", onSettled: () => void): Job => createWorkerJob(workerDeps, input, kind, onSettled);
+  let updater: SelfUpdater | undefined;
   const dispatcher = createDispatcher({
     workspace: config.workspace,
     serverVersion,
     queue,
-    makeJob: (input, kind, onSettled) => createWorkerJob(workerDeps, input, kind, onSettled),
+    makeJob,
     // center へは、送ってきた名前に返す（meta 付き）
     replyToSender: async (to, text) => {
       await client.send(to, text, "push", REPLY_META);
@@ -292,13 +300,43 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
   }
   setBashWorkspace(config.workspace);
 
+  // 自己更新の再起動の前に file に持った、queue の待ち（launch / reply）を続ける
+  const pending = await takePending(config.workspace).catch((e: unknown) => {
+    log(`queue の待ちの file を読めない: ${e instanceof Error ? e.message : String(e)}`);
+    return { jobs: [], skipped: 0 };
+  });
+  if (pending.jobs.length > 0 || pending.skipped > 0) {
+    log(`更新前の queue の待ちを続ける: ${pending.jobs.length} 件（読めずに外した ${pending.skipped} 件）`);
+  }
+  for (const j of pending.jobs) queue.submit(makeJob(j.input, j.kind, () => {}));
+  // 全部 submit し終えてから消す（途中で落ちても次の起動で続けられる）
+  await clearPending(config.workspace).catch((e: unknown) => log(`queue の待ちの file を消せない: ${e instanceof Error ? e.message : String(e)}`));
+  // 自己更新: 一定間隔で最新版を見る（版が x.y.z でない・終了を頼めない時は動かさない）
+  if (deps.requestExit !== undefined && SERVER_VERSION_PATTERN.test(serverVersion)) {
+    updater = createSelfUpdater({
+      workspace: config.workspace,
+      serverVersion,
+      update: config.update,
+      queue,
+      ...(deps.fetchLatest !== undefined ? { fetchLatest: deps.fetchLatest } : {}),
+      requestExit: deps.requestExit,
+      log,
+    });
+    updater.start();
+    log(`自己更新: ${config.update.checkIntervalMs}ms ごとに最新版を見る（待ちの上限 ${config.update.maxWaitMs}ms）`);
+  }
+
   const stop = async (): Promise<void> => {
     if (closing) return;
     closing = true;
     try {
       setBashWorkspace(undefined);
+      // 先頭で止める: drain 中に停止が来たら「入れ替える」に進ませない（queue を先に閉じるので、drain が抜ける時の resume で worker が起きない）
       queue.close();
+      updater?.close();
       await Promise.allSettled([...inflight]);
+      // 入れ替えの終了なら、待っている間に増えた分も含めて file に持ち直す
+      await updater?.flush();
       await removeReadyFile(config.workspace).catch(() => {});
       if (protocolSet) {
         await client.unsetProtocol().then(

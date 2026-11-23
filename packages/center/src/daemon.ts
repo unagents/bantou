@@ -32,6 +32,7 @@ import { createEventHub } from "./events.js";
 import { createSessionTokens } from "./session-auth.js";
 import { createGraphqlHandler } from "./graphql/server.js";
 import { createSessionActivityTracker, publishLastMessage } from "./session-activity.js";
+import { resolvePairServerVersion } from "./pair.js";
 import { createServerLink } from "./server-link.js";
 import { createProcessStandInClient } from "./stand-in.js";
 import { createSleepGate } from "./sleep-gate.js";
@@ -116,8 +117,11 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   // center の名前（bantou-center-<key>）。機械の ID を読めなければ起動しない。同じ名前が既に在って登録に失敗した時も起動しない（別の名前にしない）
   const name = centerName();
   log(`center の名前: ${name}`);
-  const link = createServerLink({ name, log });
+  const pairServer = resolvePairServerVersion({ warn: log });
+  const link = createServerLink({ name, log, ...(pairServer !== undefined ? { bridgeVersion: pairServer } : {}) });
   await link.connect();
+  // 移行の橋: protocol 1.x の server に update_server を 1 回だけ送る（返事は待たない。以後は server_list を見るたび）
+  void link.bridgeLegacy();
   // worker の ws（最後の書き込みの時刻から running / 止まっている を出す）。口は http で待ち受ける時だけ
   const tracker = createWorkerTracker();
   // session / remote の保存先は config と同じ dir（config の projects には書かない）

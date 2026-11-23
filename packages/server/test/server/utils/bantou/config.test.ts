@@ -35,6 +35,7 @@ test("config: 全項目指定はそのまま返る", async () => {
       maxParallel: 7,
       env: { CLAUDE_CONFIG_DIR: "/c" },
     },
+    update: { spec: "bantou@{version}", checkIntervalMs: 5000, maxWaitMs: 60_000 },
     namePrefix: "prod1",
     extraMcp: { fs: { command: "npx", args: ["-y", "p"], env: { A: "b" }, targets: ["worker"] } },
   };
@@ -132,15 +133,24 @@ test("config: maxParallel の既定は CPU 数 − 1（最低 1）。置けば�
   assert.equal((await load({ workspace: "/w", session: { maxParallel: 2 } }, 8)).session.maxParallel, 2);
 });
 
-test("config: v1 の項目（update / resource / maxRetries / workerKeepMs など）は読まない（置いても無視）", async () => {
+test("config: v1 の項目（resource / maxRetries / workerKeepMs など）は読まない（置いても無視）", async () => {
   const c = await load({
     workspace: "/w",
-    update: { spec: "x" },
     resource: { sampleMs: 1 },
     session: { maxRetries: -1, workerKeepMs: -1, exitResumeMax: -1, exitRecoverMs: -1, maxParallelTasks: 0 },
   });
   assert.deepEqual(c.session, { ...DEFAULT_SESSION, maxParallel: 3 });
-  assert.ok(!("update" in c) && !("resource" in c));
+  assert.ok(!("resource" in c));
+});
+
+test("config: update の既定は取得元 bantou@{version}・確認 10 分ごと・待ちの上限 30 分。置けば効き、不正は拒否", async () => {
+  assert.deepEqual((await load({ workspace: "/w" })).update, { spec: "bantou@{version}", checkIntervalMs: 600_000, maxWaitMs: 1_800_000 });
+  assert.deepEqual((await load({ workspace: "/w", update: { checkIntervalMs: 2000 } })).update, { spec: "bantou@{version}", checkIntervalMs: 2000, maxWaitMs: 1_800_000 });
+  await assert.rejects(load({ workspace: "/w", update: { spec: "x" } }), /update\.spec/);
+  await assert.rejects(load({ workspace: "/w", update: { spec: "-x@{version}" } }), /update\.spec/);
+  await assert.rejects(load({ workspace: "/w", update: { checkIntervalMs: 10 } }), /update\.checkIntervalMs/);
+  await assert.rejects(load({ workspace: "/w", update: { maxWaitMs: 0 } }), /update\.maxWaitMs/);
+  await assert.rejects(load({ workspace: "/w", update: [] }), /update はオブジェクト/);
 });
 
 test("config: workspace 省略は config.json のある dir が root。CLAUDE_CONFIG_DIR は <root>/.claude", async () => {

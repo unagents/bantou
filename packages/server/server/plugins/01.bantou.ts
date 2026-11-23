@@ -41,6 +41,8 @@ export default defineNitroPlugin((nitro) => {
   void startDaemon(configPath, {
     protocolDir,
     serverVersion: serverVersion || undefined,
+    // 自己更新の入れ替え: update.json に restart を書いた後、ここから終了する（exit 0。supervisor が update.json を見て新しい版で起こし直す）
+    requestExit: (reason) => shutdown(reason),
     // 起動 option --name-prefix（bin wrapper が launcher から子まで env で渡す）。config の namePrefix より優先
     ...(process.env.BANTOU_NAME_PREFIX ? { namePrefix: process.env.BANTOU_NAME_PREFIX } : {}),
     startMcp: (opts) => startMcpListener(toNodeListener(nitro.h3App), opts),

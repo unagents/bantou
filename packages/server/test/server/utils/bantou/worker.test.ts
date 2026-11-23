@@ -4,7 +4,7 @@ import { lstat, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ClaudeRunOptions, ClaudeRunResult } from "../../../../server/utils/bantou/claude";
-import { DEFAULT_SESSION, type Config } from "../../../../server/utils/bantou/config";
+import { DEFAULT_SESSION, DEFAULT_UPDATE, type Config } from "../../../../server/utils/bantou/config";
 import { WORKER_GUIDE } from "../../../../server/utils/bantou/prompts";
 import { WORKER_SCHEMA_JSON, type CapMessage, type CapReport } from "../../../../server/utils/bantou/result";
 import type { AgentRunner } from "../../../../server/utils/bantou/runner";
@@ -29,6 +29,7 @@ async function rig(run: (o: ClaudeRunOptions) => Promise<ClaudeRunResult>, over:
     broker: { port: 0, bind: "127.0.0.1", discovery: "off", token: "" },
     mcp: { port: 0, bind: "127.0.0.1" },
     session: { ...structuredClone(DEFAULT_SESSION), maxParallel: 2, ...over },
+    update: { ...DEFAULT_UPDATE },
     extraMcp: {},
   };
   const runs: ClaudeRunOptions[] = [];
