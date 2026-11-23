@@ -19,4 +19,4 @@
 ## build
 
 - 同梱する center と pty-wrapper は desktop の `bun run build:sidecar`（`packages/desktop/src-tauri/binaries/`）を使う。`tauri.conf.json` の `externalBin` がそこを指す。
-- `cd src-tauri && cargo tauri build`（未確認）。署名は desktop と同じ ad-hoc（`signingIdentity: "-"`）。
+- `cd src-tauri && cargo tauri build`（未確認）。署名は desktop と同じ自己署名の identity「bantou code signing」（`signingIdentity: "bantou code signing"`）。

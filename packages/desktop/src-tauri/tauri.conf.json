@@ -32,7 +32,7 @@
       "icons/icon.icns"
     ],
     "macOS": {
-      "signingIdentity": "-"
+      "signingIdentity": "bantou code signing"
     }
   },
   "plugins": {

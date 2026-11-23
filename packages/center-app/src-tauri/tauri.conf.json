@@ -25,7 +25,7 @@
       "icons/icon.icns"
     ],
     "macOS": {
-      "signingIdentity": "-",
+      "signingIdentity": "bantou code signing",
       "files": {
         "Library/LaunchAgents/jp.grrow.bantou-center.plist": "launchd/jp.grrow.bantou-center.plist"
       }
