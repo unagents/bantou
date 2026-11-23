@@ -497,3 +497,5 @@ center の process 内の印（`Mark`）が、保存先（`stored`）と id を�
 - system 指示: `resession` 部品が v2。`ctx.memory` の有無で文が変わらない。本文に `mcp__memory__handoff` を引く指示が無い（`system-instructions.test.ts`）。
 - memory 側: 変更なし。既存の test（`tool-schema.test.ts`・`helpers/suite.ts` の `handoff`）が通る事の確認だけ。
 - 実機（実測。この task では行っていない）: S3（最初の入力の確定）と、本文が大きい時の貼り付け。S5（新設）: 取り出せなかった時の最初の入力を session がどう扱うか。
+
+> スリープ（`session_sleep`）は、この仕組みの部品を使う「起動しないリセッション」にした。設計は `docs/design/sleep-resession.md`。

@@ -613,3 +613,136 @@ test("gate: 他の経路で起きる時、身代わりが外れる間（close �
   assert.match(delivered[1], /drained-2/);
   await gate.close();
 });
+
+// ---- 引継ぎつきの眠り（docs/design/sleep-resession.md の I1・T7〜T11） ----
+
+const REF = { id: "c1:handoff-1", stored: "memory" as const };
+
+/** onWake / onWakeAbort を記録する setup。onWake の時点までに supervisor に来ていた呼びも残す（起動の前に呼ぶ事の確認）。 */
+const setupWake = () => {
+  const wakes: { name: string; ref: unknown; callsBefore: string[] }[] = [];
+  const aborts: string[] = [];
+  let callsRef: string[] = [];
+  const s = setup({
+    onWake: (name, ref) => void wakes.push({ name, ref, callsBefore: [...callsRef] }),
+    onWakeAbort: (name) => void aborts.push(name),
+  });
+  callsRef = s.calls;
+  return { ...s, wakes, aborts };
+};
+
+test("T1: sleep(handoff) は sleeping と sleepHandoff を保存して止める", async () => {
+  const { mgr, calls } = setupWake();
+  await mgr.create({ name: "pm1" });
+  await mgr.sleep("pm1", { handoff: REF });
+  assert.deepEqual(calls, ["add:pm1", "start:pm1", "stop:pm1"]);
+  const rec = (await savedOf())[0];
+  assert.equal(rec.sleeping, true);
+  assert.deepEqual(rec.sleepHandoff, REF);
+
+});
+
+test("sleep(handoff): supervisor.stop が失敗したら、sleeping も sleepHandoff も戻して保存する", async () => {
+  const { mgr, sup } = setupWake();
+  await mgr.create({ name: "pm1" });
+  (sup as unknown as { stop: () => Promise<never> }).stop = async () => {
+    throw new Error("stop できない");
+  };
+  await assert.rejects(mgr.sleep("pm1", { handoff: REF }), /stop できない/);
+  const rec = (await savedOf())[0];
+  assert.notEqual(rec.sleeping, true);
+  assert.equal(rec.sleepHandoff, undefined);
+});
+
+test("sleep(handoff 無し) は前の（渡し終えていない）参照を引き継がない", async () => {
+  const { mgr } = setupWake();
+  await mgr.create({ name: "pm1" });
+  await mgr.sleep("pm1", { handoff: REF });
+  await mgr.wake("pm1");
+  // 渡す前（clear 前）にもう一度、引継ぎ無しで眠る
+  await mgr.sleep("pm1");
+  assert.equal((await savedOf())[0].sleepHandoff, undefined);
+});
+
+test("T5/T9: 引継ぎつきの眠りの wake は resume 無しで起動し、起動の前に onWake が参照つきで呼ばれる。clearSleepHandoff は id が一致する時だけ参照を外す", async () => {
+  const { mgr, calls, wakes } = setupWake();
+  await mgr.create({ name: "pm1" });
+  await mgr.sleep("pm1", { handoff: REF });
+  await mgr.wake("pm1");
+  assert.equal(calls.at(-1), "start:pm1", "--continue（resume）を付けない");
+  assert.deepEqual(wakes.map((w) => [w.name, w.ref]), [["pm1", REF]]);
+  assert.equal(wakes[0].callsBefore.filter((c) => c === "start:pm1").length, 1, "onWake の時点で起動はまだ 1 回（create のもの）= 起動の前");
+  assert.equal(wakes[0].callsBefore.at(-1), "stop:pm1");
+  assert.deepEqual((await savedOf())[0].sleepHandoff, REF, "渡し終えるまで参照は残る");
+  await mgr.clearSleepHandoff("pm1", "別の id");
+  assert.deepEqual((await savedOf())[0].sleepHandoff, REF);
+  await mgr.clearSleepHandoff("pm1", REF.id);
+  assert.equal((await savedOf())[0].sleepHandoff, undefined);
+});
+
+test("T7: 引継ぎつきの wake で起動が失敗したら眠ったままに戻る（sleepHandoff が残る）。onWakeAbort が呼ばれ、次の wake でまた起動できる", async () => {
+  const { mgr, sup, aborts, wakes, calls } = setupWake();
+  await mgr.create({ name: "pm1" });
+  await mgr.sleep("pm1", { handoff: REF });
+  let fail = true;
+  const realStart = sup.start;
+  (sup as unknown as { start: unknown }).start = async (n: string, o?: { resume?: boolean }) => {
+    if (fail) throw new Error("start 失敗");
+    return realStart.call(sup, n, o);
+  };
+  await assert.rejects(mgr.wake("pm1"), /start 失敗/);
+  assert.deepEqual(aborts, ["pm1"]);
+  const rec = (await savedOf())[0];
+  assert.equal(rec.sleeping, true);
+  assert.deepEqual(rec.sleepHandoff, REF);
+  fail = false;
+  await mgr.wake("pm1");
+  assert.equal(wakes.length, 2, "次の起こしでもう一度印を付ける");
+  assert.equal(calls.at(-1), "start:pm1");
+  // 引継ぎの無い眠りの wake の失敗では onWakeAbort は呼ばない
+  assert.deepEqual(aborts, ["pm1"]);
+});
+
+test("T8: center の再起動（新しい manager + restore）: 眠ったままで起こされず、sleepHandoff が残り、その後の wake で渡る（resume 無し）", async () => {
+  const first = setupWake();
+  await first.mgr.create({ name: "pm1" });
+  await first.mgr.sleep("pm1", { handoff: REF });
+  // 同じ状態 file から新しい manager（center の再起動）
+  const second = setupWake();
+  await second.mgr.restore();
+  assert.deepEqual(second.calls, ["add:pm1"], "起こさない（start も --continue も無い）");
+  assert.equal(second.mgr.list().find((s) => s.name === "pm1")?.sleeping, true);
+  assert.deepEqual(second.changes, ["pm1:true"]);
+  assert.deepEqual((await savedOf())[0].sleepHandoff, REF);
+  await second.mgr.wake("pm1");
+  assert.equal(second.calls.at(-1), "start:pm1");
+  assert.deepEqual(second.wakes.map((w) => w.ref), [REF]);
+});
+
+test("T10: 眠っている session 宛の message（sleep-gate）で起きる時も、新しい会話（resume 無し）で起動し、起動の前に onWake が呼ばれる", async () => {
+  const { mgr, calls, wakes } = setupWake();
+  await mgr.create({ name: "pm1" });
+  await mgr.sleep("pm1", { handoff: REF });
+  const made: ReturnType<typeof fakeClient>[] = [];
+  const gate = createSleepGate({
+    clientFactory: () => {
+      const fc = fakeClient();
+      made.push(fc);
+      return fc.client;
+    },
+    wake: (n) => mgr.wake(n),
+    deliver: async () => ({ ok: true }),
+    peerName: (n) => `${n}-cap`,
+    log: () => {},
+    deliverIntervalMs: 5,
+  });
+  gate.sync("pm1", true);
+  await tick();
+  made[0].emit({ from_name: "worker-x", text: "進捗です", mode: "push" });
+  await tick(50);
+  assert.equal(calls.at(-1), "start:pm1");
+  assert.deepEqual(wakes.map((w) => w.ref), [REF]);
+  assert.equal(wakes[0].callsBefore.includes("start:pm1"), true, "最初の start は create のもの。起こす start は onWake の後");
+  assert.equal(calls.filter((c) => c === "start:pm1").length, 2);
+  await gate.close();
+});

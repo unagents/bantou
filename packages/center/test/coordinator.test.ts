@@ -8,6 +8,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SLEEP_REFUSED_PREFIX } from "../src/resession.js";
 import { createServer as createNetServer } from "node:net";
 import { z } from "zod";
 import { buildSessionBrief, SESSION_BRIEF_LINE_MAX, SESSION_BRIEF_MAX_CHARS, SESSION_BRIEF_MAX_LINES, type CoordinatorDeps } from "../src/coordinator.js";
@@ -82,7 +83,7 @@ test("session_brief: 1 行は件数だけ。本文・path・URL・error の文�
 });
 
 test("道具の説明: session_brief の説明に、出ない自分の行の警告を書かない（owner は渡さない）", async () => {
-  const h = await startCoordinatorHttp({ port: 0, key: "k".repeat(40), backend: { sessions: async () => [], createSession: async () => ({ name: "x", state: "" }), sleepSession: async (n) => ({ name: n, state: "stopped", sleeping: true }) } });
+  const h = await startCoordinatorHttp({ port: 0, key: "k".repeat(40), backend: { sessions: async () => [], createSession: async () => ({ name: "x", state: "" }), sleepSession: async (n) => ({ name: n, state: "stopped", sleeping: true, accepted: true, pending: false }) } });
   try {
     const c = new Client({ name: "t", version: "0" });
     await c.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${h.port}/mcp`), { requestInit: { headers: { Authorization: `Bearer ${"k".repeat(40)}` } } }));
@@ -135,7 +136,7 @@ const fakeBackend = (over: Partial<Backend> = {}, created: string[] = []): Backe
     created.push(i.name);
     return { name: i.name, state: i.start ? "connected" : "stopped" };
   },
-  sleepSession: async (name) => ({ name, state: "stopped", sleeping: true }),
+  sleepSession: async (name) => ({ name, state: "stopped", sleeping: true, accepted: true, pending: false }),
   ...over,
 });
 
@@ -426,8 +427,10 @@ test("統括の道具 coordinator_session_sleep: 他の session をスリープ�
       sleepSession: async (name) => {
         if (name === "ghost") throw new Error("未定義の session: ghost");
         if (name === "boom") throw new Error("SECRET-DETAIL");
+        if (name === "busy") throw new Error(`${SLEEP_REFUSED_PREFIX}利用者の入力待ち（needs-input）の間はリセッションしない`);
+        if (name === "working") throw new Error(`${SLEEP_REFUSED_PREFIX}作業中は眠らせられない（turn・subagent・background が動いている。終わってから）`);
         slept.push(name);
-        return { name, state: "stopped", sleeping: true };
+        return { name, state: "connected", sleeping: false, accepted: true, pending: true };
       },
     }),
     logs,
@@ -436,8 +439,16 @@ test("統括の道具 coordinator_session_sleep: 他の session をスリープ�
     const c = await connect();
     const ok = await c.callTool({ name: "coordinator_session_sleep", arguments: { name: "other" } });
     assert.equal(isError(ok), false);
-    assert.deepEqual(JSON.parse(text(ok)), { name: "other", state: "stopped", sleeping: true });
+    assert.deepEqual(JSON.parse(text(ok)), { name: "other", state: "connected", sleeping: false, accepted: true, pending: true });
     assert.deepEqual(slept, ["other"]);
+    // 断った理由（眠らせられない）は利用者が直せる事なので文を返す
+    const busy = await c.callTool({ name: "coordinator_session_sleep", arguments: { name: "busy" } });
+    assert.equal(isError(busy), true);
+    assert.match(text(busy), /needs-input/);
+    // 作業中などの断りは、理由の文言に依らず（頭の印で）そのまま通る
+    const working = await c.callTool({ name: "coordinator_session_sleep", arguments: { name: "working" } });
+    assert.equal(isError(working), true);
+    assert.match(text(working), /作業中は眠らせられない/);
     const ghost = await c.callTool({ name: "coordinator_session_sleep", arguments: { name: "ghost" } });
     assert.equal(isError(ghost), true);
     assert.match(text(ghost), /未定義の session: ghost/);
@@ -453,7 +464,7 @@ test("統括の道具 coordinator_session_sleep: 他の session をスリープ�
 
 test("統括の道具: key の無い呼び手（統括の server を書いていない session）は 401 で、スリープさせられない", async () => {
   const slept: string[] = [];
-  const { h, connect } = await boot(fakeBackend({ sleepSession: async (n) => (slept.push(n), { name: n, state: "stopped", sleeping: true }) }));
+  const { h, connect } = await boot(fakeBackend({ sleepSession: async (n) => (slept.push(n), { name: n, state: "stopped", sleeping: true, accepted: true, pending: false }) }));
   try {
     await assert.rejects(() => connect({}));
     await assert.rejects(() => connect({ Authorization: `Bearer ${"x".repeat(40)}` }));
@@ -477,6 +488,11 @@ test("統括の道具 coordinator_session_sleep: 道具の説明に「他の ses
     assert.ok(t);
     assert.match(t!.description ?? "", /他の session を指定する/);
     assert.match(t!.description ?? "", /自分自身を指定しない/);
+    // 起動しないリセッション: 引継ぎを書かせてから止める。受理して即返す。元の会話のまま起きる、とは書かない
+    assert.doesNotMatch(t!.description ?? "", /元の会話のまま/);
+    assert.match(t!.description ?? "", /引継ぎ/);
+    assert.match(t!.description ?? "", /新しい会話/);
+    assert.match(t!.description ?? "", /pending/);
     await c.close();
   } finally {
     await h.close();
