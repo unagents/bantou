@@ -8,6 +8,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SLEEP_REFUSED_PREFIX } from "../src/resession.js";
 import { createServer as createNetServer } from "node:net";
 import { z } from "zod";
 import { buildSessionBrief, SESSION_BRIEF_LINE_MAX, SESSION_BRIEF_MAX_CHARS, SESSION_BRIEF_MAX_LINES, type CoordinatorDeps } from "../src/coordinator.js";
@@ -426,7 +427,8 @@ test("統括の道具 coordinator_session_sleep: 他の session をスリープ�
       sleepSession: async (name) => {
         if (name === "ghost") throw new Error("未定義の session: ghost");
         if (name === "boom") throw new Error("SECRET-DETAIL");
-        if (name === "busy") throw new Error("利用者の入力待ち（needs-input）の間はリセッションしない");
+        if (name === "busy") throw new Error(`${SLEEP_REFUSED_PREFIX}利用者の入力待ち（needs-input）の間はリセッションしない`);
+        if (name === "working") throw new Error(`${SLEEP_REFUSED_PREFIX}作業中は眠らせられない（turn・subagent・background が動いている。終わってから）`);
         slept.push(name);
         return { name, state: "connected", sleeping: false, accepted: true, pending: true };
       },
@@ -443,6 +445,10 @@ test("統括の道具 coordinator_session_sleep: 他の session をスリープ�
     const busy = await c.callTool({ name: "coordinator_session_sleep", arguments: { name: "busy" } });
     assert.equal(isError(busy), true);
     assert.match(text(busy), /needs-input/);
+    // 作業中などの断りは、理由の文言に依らず（頭の印で）そのまま通る
+    const working = await c.callTool({ name: "coordinator_session_sleep", arguments: { name: "working" } });
+    assert.equal(isError(working), true);
+    assert.match(text(working), /作業中は眠らせられない/);
     const ghost = await c.callTool({ name: "coordinator_session_sleep", arguments: { name: "ghost" } });
     assert.equal(isError(ghost), true);
     assert.match(text(ghost), /未定義の session: ghost/);

@@ -15,7 +15,7 @@ import { parseConfig, type Config } from "../src/config.js";
 import { createCore } from "../src/core.js";
 import { createCenterMemoryEvents } from "../src/memory-events.js";
 import { createRemoteControlSupervisor, type ChildLike, type SpawnImpl } from "../src/remote-control.js";
-import { AWAIT_START_STALE_MS, createResessioner, firstInputText, RESESSION_DIVIDER, WAKE_DIVIDER, type Resessioner, type ResessionDeps } from "../src/resession.js";
+import { AWAIT_START_STALE_MS, createResessioner, firstInputText, RESESSION_DIVIDER, SLEEP_REFUSED_PREFIX, WAKE_DIVIDER, type Resessioner, type ResessionDeps } from "../src/resession.js";
 import { MEMORY_BODY_MAX } from "../src/memory.js";
 import type { SessionInfo } from "../src/sessions.js";
 import { createSessionActivityTracker } from "../src/session-activity.js";
@@ -804,12 +804,10 @@ test("T1/T3: requestSleep は受理して即返す（まだ眠らない）。作
   assert.equal(w1.inputs()[1], "\r");
   // 頼んだ間（引継ぎを受ける前）は止めない
   r.hook(hookOf("UserPromptSubmit", { prompt: "ask" }));
-  r.hook(hookOf("Stop"));
   await sleep(60);
   assert.equal(w1.stopped(), false);
   assert.equal(r.sessions.list()[0]!.sleeping, false);
   assert.equal(r.res.pending("pm1"), true);
-  r.hook(hookOf("UserPromptSubmit", { prompt: "ask" }));
   const got = await r.res.request("pm1", HANDOFF);
   assert.ok(got.restart.includes("眠らせる"), "眠らせる為の返事");
   // tool の呼び出しの後、Stop の前: まだ止めない
@@ -830,10 +828,38 @@ test("T1/T3: requestSleep は受理して即返す（まだ眠らない）。作
   await r.close();
 });
 
-test("T4: 作業中（working・subagent・background）は Stop を待たず断る。待つ印も残さない", async () => {
+test("依頼が流れた: 引継ぎを渡さず turn が終わった（Stop）ら asking の印を外し、次の requestSleep を受ける。依頼の turn が始まる前の Stop では外さない。止めない", async () => {
   const r = await rig();
   const w1 = await boot(r);
-  await assert.rejects(r.res.requestSleep("pm1"), /作業中は眠らせられない/);
+  r.hook(hookOf("Stop"));
+  await r.res.requestSleep("pm1");
+  await until(() => w1.inputs().length === 2);
+  // 依頼の turn が始まる前の Stop（前の turn の遅れた物）では外さない
+  r.hook(hookOf("Stop"));
+  assert.equal(r.res.pending("pm1"), true);
+  await assert.rejects(r.res.requestSleep("pm1"), /すでに.*途中/);
+  // 依頼の turn が session_resession を呼ばずに終わった
+  r.hook(hookOf("UserPromptSubmit", { prompt: "ask" }));
+  assert.equal(r.res.pending("pm1"), true);
+  r.hook(hookOf("Stop"));
+  assert.equal(r.res.pending("pm1"), false, "印が外れた");
+  assert.equal(w1.stopped(), false);
+  assert.equal(r.sessions.list()[0]!.sleeping, false);
+  // 次の依頼を受けられ、最後まで眠れる
+  const again = await r.res.requestSleep("pm1");
+  assert.equal(again.pending, true);
+  await until(() => w1.inputs().length === 4);
+  r.hook(hookOf("UserPromptSubmit", { prompt: "ask" }));
+  await r.res.request("pm1", HANDOFF);
+  r.hook(hookOf("Stop", { last_assistant_message: "眠る" }));
+  await until(() => r.sessions.list()[0]!.sleeping);
+  await r.close();
+});
+
+test("T4: 作業中（working・subagent・background）は Stop を待たず断る。待つ印も残さない。断る理由は全て SLEEP_REFUSED_PREFIX 付き（統括の道具へ通る）", async () => {
+  const r = await rig();
+  const w1 = await boot(r);
+  await assert.rejects(r.res.requestSleep("pm1"), (e: Error) => e.message.startsWith(SLEEP_REFUSED_PREFIX) && /作業中は眠らせられない/.test(e.message));
   r.hook(hookOf("Stop"));
   r.hook(hookOf("SubagentStart", { agent_id: "a1" }));
   assert.ok(r.sessions.list()[0]!.background.subagents > 0, "subagent が動いている");
@@ -872,7 +898,7 @@ test("T4: 書けない時は眠らせず理由を返す: needs-input・remote �
   const r = await rig();
   const w1 = await boot(r);
   r.hook(hookOf("PermissionRequest"));
-  await assert.rejects(r.res.requestSleep("pm1"), /needs-input/);
+  await assert.rejects(r.res.requestSleep("pm1"), (e: Error) => e.message.startsWith(SLEEP_REFUSED_PREFIX) && /needs-input/.test(e.message));
   r.hook(hookOf("PostToolUse"));
   r.remote.running = 1;
   await assert.rejects(r.res.requestSleep("pm1"), /未完了の remote/);

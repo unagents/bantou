@@ -1,5 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { SLEEP_REFUSED_PREFIX } from "./resession.js";
 import { SESSION_NAME, type SessionInfo } from "./sessions.js";
 import { MAX_SESSION_NAME } from "./center-id.js";
 import { SESSION_INSTRUCTIONS_MAX } from "./config.js";
@@ -75,8 +76,6 @@ export function buildSessionBrief(sessions: readonly SessionInfo[], coordinator:
   return { at, sessions: lines, truncated: omitted > 0, omitted };
 }
 
-/** スリープの依頼を断った理由（resession の安全確認）のうち、利用者が直せる物。これは文を返す（それ以外は一般化して詳細は log だけ）。 */
-const SLEEP_REFUSAL = /needs-input|未完了の remote|未返答の|session が動いていない|すでに.*途中/;
 
 /** 統括の道具が使う、center の情報の取得元。呼ばれるたびに今の値を取る（キャッシュしない）。 */
 export interface CoordinatorDeps {
@@ -158,8 +157,8 @@ export function registerCoordinatorTools(server: McpServer, deps: CoordinatorDep
         return json({ name: r.name, state: r.state, sleeping: r.sleeping, accepted: r.accepted, pending: r.pending });
       } catch (e) {
         const detail = e instanceof Error ? e.message : String(e);
-        // 利用者が直せる拒否（未定義・config 由来）だけ文を返す。それ以外は一般化し、詳細は log にだけ残す
-        if (detail.includes("未定義の session") || detail.includes("config 由来") || SLEEP_REFUSAL.test(detail)) return json({ error: detail }, true);
+        // 断った理由（resession が SLEEP_REFUSED_PREFIX を付ける）と、未定義・config 由来の拒否だけ文を返す。それ以外は一般化し、詳細は log にだけ残す
+        if (detail.includes("未定義の session") || detail.includes("config 由来") || detail.includes(SLEEP_REFUSED_PREFIX)) return json({ error: detail }, true);
         deps.log?.(`coordinator_session_sleep 失敗: name=${name} ${detail}`);
         return json({ error: "session をスリープさせられなかった。詳細は log" }, true);
       }

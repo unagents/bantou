@@ -52,6 +52,9 @@ export interface ResessionResult {
   restart: string;
 }
 
+/** requestSleep が依頼を断った時の理由の頭。統括の道具（coordinator_session_sleep）は、この頭の付いた理由を（文の中身を見ずに）そのまま呼び手へ返す。 */
+export const SLEEP_REFUSED_PREFIX = "スリープを断った: ";
+
 /** asking = スリープの引継ぎを頼んだ（session_resession を待つ）。 */
 type Phase = "asking" | "waiting-stop" | "restarting" | "awaiting-start";
 /** restart = リセッション / sleep = スリープ（止めるだけ）/ wake = スリープから起こした後の最初の入力待ち。 */
@@ -65,6 +68,8 @@ interface Mark {
   stored: "memory" | "file";
   phase: Phase;
   since: number;
+  /** asking の間、依頼の 1 行が入って turn が始まった（UserPromptSubmit を見た）。 */
+  prompted?: boolean;
   /** 取り出し（`run` が再起動の直前に始め、`deliver` が待つ）。 */
   fetched?: Promise<Fetched>;
 }
@@ -302,11 +307,19 @@ export function createResessioner(deps: ResessionDeps): Resessioner {
         const after = deps.info(session);
         return { name: session, state: String(r?.state ?? after?.state ?? ""), accepted: true, sleeping: (r?.sleeping ?? after?.sleeping) === true, pending: false };
       }
+      // 断る理由は全部 SLEEP_REFUSED_PREFIX を付けて投げる（呼び手へ必ず通る）。ask の失敗など、断りでない物は付けない
+      const refuse = (reason: string): never => {
+        throw new Error(SLEEP_REFUSED_PREFIX + reason);
+      };
       const cur = marks.get(session);
-      if (cur && !isStale(cur)) throw new Error("すでにリセッション・スリープの途中（申告済み・依頼済み）");
+      if (cur && !isStale(cur)) refuse("すでにリセッション・スリープの途中（申告済み・依頼済み）");
       // 安全確認（作業中・needs-input・remote 未完了・未返答・動いていない session は断る。理由は呼び出し元へ返る。眠らせない。Stop は待たない）
-      check(session, false);
-      if (s.activity === "working" || s.background.subagents > 0 || s.background.tasks > 0) throw new Error("作業中は眠らせられない（turn・subagent・background が動いている。終わってから）");
+      try {
+        check(session, false);
+      } catch (e) {
+        refuse(e instanceof Error ? e.message : String(e));
+      }
+      if (s.activity === "working" || s.background.subagents > 0 || s.background.tasks > 0) refuse("作業中は眠らせられない（turn・subagent・background が動いている。終わってから）");
       const mark: Mark = { kind: "sleep", id: "", stored: "memory", phase: "asking", since: now() };
       marks.set(session, mark);
       await ask(session, mark);
@@ -382,6 +395,15 @@ export function createResessioner(deps: ResessionDeps): Resessioner {
         const name = str(p.hook_event_name);
         const mark = marks.get(session);
         if (!mark) return;
+        if (mark.kind === "sleep" && mark.phase === "asking") {
+          // 依頼の 1 行が入って turn が始まった（印）。その turn が session_resession を呼ばずに終わった（Stop）なら、依頼は流れた。印を外して次の session_sleep を受けられるようにする（期限は置かない）。入る前の Stop（前の turn の遅れた物）では外さない
+          if (name === "UserPromptSubmit") mark.prompted = true;
+          else if (name === "Stop" && mark.prompted) {
+            marks.delete(session);
+            log(`スリープの依頼が流れた（引継ぎを渡さず turn が終わった）: session=${session}`);
+          }
+          return;
+        }
         if (name === "UserPromptSubmit" && mark.phase === "waiting-stop") {
           // 申告の後に利用者の入力が来て会話が進んだ（Stop が来ないまま後の turn が走りうる）。古い引継ぎで再起動しないよう印を戻す（3.3 の 4 の「利用者の入力で working に戻ったら印を戻して見送る」と同じ扱い。必要なら session がもう一度申告する）
           marks.delete(session);
