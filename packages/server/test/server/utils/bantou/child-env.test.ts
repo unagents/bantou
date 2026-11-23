@@ -5,7 +5,6 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isNpxOwnEnv, stripNpxEnv } from "../../../../server/utils/bantou/child-env";
-import { verifyFetch } from "../../../../server/utils/bantou/update";
 
 /** npm 11 の `npx -y --package=<spec> -- <bin>` が子に渡す npm_* の形（値は架空）。 */
 const NPX_CHILD_ENV: NodeJS.ProcessEnv = {
@@ -131,7 +130,7 @@ async function makePackage(dir: string, name: string, version: string, bins: Rec
   return dir;
 }
 
-test("実 npx: npx で起動した server の env を外せば worker の npx が通り、自動更新の取得確認も通る", { skip: !hasNpx() && "npx が無い" }, async () => {
+test("実 npx: npx で起動した server の env を外せば worker の npx が通る", { skip: !hasNpx() && "npx が無い" }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "bantou-child-env-test-"));
   const savedEnv = process.env;
   try {
@@ -143,10 +142,6 @@ test("実 npx: npx で起動した server の env を外せば worker の npx �
     // worker が npx で起動する道具（superbash の代わり）
     const tool = await makePackage(join(dir, "tool"), "bantou-test-tool", "1.0.0", {
       "bantou-test-tool": `console.log("TOOL OK registry=" + (process.env.npm_config_registry ?? ""));`,
-    });
-    // 自動更新の更新先
-    const next = await makePackage(join(dir, "next"), "bantou-test-next", "0.3.1", {
-      bantou: `console.log("0.3.1");`,
     });
     await writeFile(join(dir, "npmrc"), "");
 
@@ -180,11 +175,6 @@ test("実 npx: npx で起動した server の env を外せば worker の npx �
     const ok = await runNpx(["-y", `file:${tool}`], childEnv, dir);
     assert.equal(ok.code, 0, ok.stderr);
     assert.match(ok.stdout, /TOOL OK registry=https:\/\/registry\.example\.test\//);
-
-    // 自動更新の取得確認は server 自身の env（npx から受け取ったまま）で動き、明示の --package が勝つ
-    process.env = { ...serverEnv };
-    await verifyFetch(`file:${next}`, "0.3.1");
-    assert.equal(process.env.npm_config_package, `file:${outer}`, "server 自身の env は変えていない");
   } finally {
     process.env = savedEnv;
     await rm(dir, { recursive: true, force: true });

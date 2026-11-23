@@ -75,6 +75,28 @@ test("claude: buildClaudeArgs resume + ツール + extraArgs", () => {
   );
 });
 
+test("claude: jsonSchema は --json-schema <値 1 つ> で、-- の前・session id の前に付く。無ければ付けない", () => {
+  const schema = '{"type":"object"}';
+  for (const mode of ["new", "resume"] as const) {
+    const args = buildClaudeArgs({ ...base, mode, jsonSchema: schema, extraArgs: ["--model", "m"] });
+    const i = args.indexOf("--json-schema");
+    assert.ok(i > 0);
+    assert.equal(args[i + 1], schema);
+    assert.equal(args[i + 2], "--model");
+    assert.ok(i < args.indexOf("--"));
+    assert.ok(i < args.indexOf(mode === "new" ? "--session-id" : "--resume"));
+    assert.equal(matchesSession(["claude", ...args].join(" "), "sid-1"), true);
+  }
+  assert.equal(buildClaudeArgs(base).includes("--json-schema"), false);
+});
+
+test("claude: readResultEnvelope は structured_output と session_id も返す", () => {
+  assert.deepEqual(
+    readResultEnvelope('{"type":"result","subtype":"success","is_error":false,"session_id":"s","result":"","structured_output":{"a":1}}'),
+    { ok: true, sessionId: "s", resultText: "", structuredOutput: { a: 1 } },
+  );
+});
+
 test("claude: readResultEnvelope", () => {
   assert.deepEqual(
     readResultEnvelope('{"type":"result","subtype":"success","is_error":false,"session_id":"s","result":"hi"}'),
@@ -102,6 +124,20 @@ async function withFake(script: string, fn: (exe: string, dir: string) => Promis
     await rm(dir, { recursive: true, force: true });
   }
 }
+
+test("runClaude: 最後の result の structured_output を返す", async () => {
+  const script = `
+process.stdout.write(JSON.stringify({type:"result",subtype:"success",is_error:false,session_id:"sid-9",result:"",structured_output:{lastType:"report",status:"success",content:"ok"}}) + "\\n");
+`;
+  await withFake(script, async (exe, dir) => {
+    const r = await runClaude({ ...base, claude: exe, cwd: dir });
+    assert.equal(r.ok, true);
+    if (r.ok) {
+      assert.equal(r.sessionId, "sid-9");
+      assert.deepEqual(r.structuredOutput, { lastType: "report", status: "success", content: "ok" });
+    }
+  });
+});
 
 test("runClaude: 成功（最終行に改行無し、ログ追記）", async () => {
   const script = `

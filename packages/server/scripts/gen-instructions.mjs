@@ -7,7 +7,6 @@ import { fileURLToPath } from "node:url";
 const dir = (p) => fileURLToPath(new URL(p, import.meta.url));
 const files = [
   ["COMMON_MD", "../../center/instructions/common.md"],
-  ["REMOTE_CAP_MD", "../instructions/remote-cap.md"],
   ["WORKER_MD", "../instructions/worker.md"],
 ];
 const out = ["// 自動生成: scripts/gen-instructions.mjs（instructions/*.md と packages/center/instructions/common.md から）。手で直さない。", ""];

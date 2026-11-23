@@ -17,10 +17,8 @@ const put = async (p: string, body = "x"): Promise<void> => {
   await writeFile(p, body);
 };
 
-const capA: BashCaller = { kind: "cap", capId: "capA" };
-const capB: BashCaller = { kind: "cap", capId: "capB" };
-const w1: BashCaller = { kind: "worker", capId: "capA", workerId: "w1" };
-const w2: BashCaller = { kind: "worker", capId: "capA", workerId: "w2" };
+const w1: BashCaller = { workerId: "w1" };
+const w2: BashCaller = { workerId: "w2" };
 
 const rmPaths = (c: BashCaller, paths: string[], recursive?: boolean): Promise<BashResult> =>
   runBash(ws, c, { action: "rm", paths, recursive });
@@ -36,17 +34,15 @@ after(async () => {
   await rm(base, { recursive: true, force: true });
 });
 
-/** 各 test で作り直す workspace: caps/capA capB, workers/w1 w2 (owner capA), w3 (owner capB) */
+/** 各 test で作り直す workspace: workers/w1 w2 w3 */
 async function fresh(): Promise<void> {
   ws = join(base, `ws-${Math.random().toString(36).slice(2)}`);
-  for (const [kind, id, owner] of [
-    ["caps", "capA"], ["caps", "capB"], ["workers", "w1", "capA"], ["workers", "w2", "capA"], ["workers", "w3", "capB"],
-  ] as const) {
-    const d = join(ws, kind, id);
+  for (const id of ["w1", "w2", "w3"]) {
+    const d = join(ws, "workers", id);
     await mkdir(join(d, "logs"), { recursive: true });
     await writeFile(join(d, "state.json"), "{}");
     await writeFile(join(d, "logs", "mcp.json"), "{}");
-    if (owner) await writeFile(join(d, "logs", "owner.json"), JSON.stringify({ cap_id: owner }));
+    await writeFile(join(d, "logs", "owner.json"), "{}");
   }
 }
 
@@ -173,46 +169,6 @@ test("rm: worker は他の worker の path を消せない（相対でも worker
   assert.ok(await exists(join(w1dir(), "g.txt")));
 });
 
-test("rm: cap は自分の dir と、自分が持ち主の worker の中を消せる", async () => {
-  await fresh();
-  await put(join(ws, "caps", "capA", "tmp", "x.txt"));
-  await put(join(w1dir(), "clone", "y.txt"));
-  const r = await rmPaths(capA, ["tmp", "worker:w1/clone", "worker:w1/./clone2"], true);
-  assert.deepEqual(r.removed, ["tmp", "worker:w1/clone"]);
-  assert.deepEqual(reasons(r), ["存在しない"]);
-  assert.ok(!(await exists(join(ws, "caps", "capA", "tmp"))));
-  assert.ok(!(await exists(join(w1dir(), "clone"))));
-  assert.ok(await exists(join(w1dir(), "state.json")));
-});
-
-test("rm: cap は他の cap の worker・他の cap の dir を消せない", async () => {
-  await fresh();
-  await put(join(ws, "workers", "w3", "z.txt"));
-  await put(join(ws, "caps", "capB", "z.txt"));
-  const r = await rmPaths(capA, ["worker:w3/z.txt", "../capB/z.txt", "worker:nope/x", "worker:../x", "worker:"]);
-  assert.deepEqual(r.removed, []);
-  assert.equal(r.skipped.length, 5);
-  assert.match(r.skipped[0]!.reason, /別の cap の worker/);
-  assert.ok(await exists(join(ws, "workers", "w3", "z.txt")));
-  assert.ok(await exists(join(ws, "caps", "capB", "z.txt")));
-  // capB 側から w1 も同じく不可
-  await put(join(w1dir(), "k.txt"));
-  const r2 = await rmPaths(capB, ["worker:w1/k.txt"]);
-  assert.deepEqual(r2.removed, []);
-});
-
-test("rm: cap は自分の dir そのもの・state.json・logs/ ・worker の dir そのもの / logs/ を消せない", async () => {
-  await fresh();
-  const r = await rmPaths(capA, [".", "", "state.json", "logs", "logs/x", "worker:w1", "worker:w1/", "worker:w1/.", "worker:w1/logs", "worker:w1/state.json", "worker:w1/LOGS/owner.json"], true);
-  assert.deepEqual(r.removed, []);
-  assert.equal(r.skipped.length, 11);
-  for (const d of [join(ws, "caps", "capA"), w1dir()]) {
-    assert.ok(await exists(join(d, "state.json")));
-    assert.ok(await exists(join(d, "logs")));
-  }
-  assert.ok(await exists(join(w1dir(), "logs", "owner.json")));
-});
-
 test("rm: 検査と削除の間に親が symlink に差し替わっても外は消えない（削除直前の再検査）", async () => {
   await fresh();
   await put(join(w1dir(), "p", "victim.txt"));
@@ -252,7 +208,7 @@ function rpc(url: string, body: object, headers: Record<string, string>): Promis
 const callBash = (args: unknown) => ({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "bash", arguments: args } });
 type ToolReply = { result?: { content: Array<{ text: string }>; isError?: boolean }; error?: unknown };
 
-test("mcp bash: cap / worker の両方に載り、返り値・isError の規則に従う", async () => {
+test("mcp bash: worker にだけ載り（道具は bash だけ）、返り値・isError の規則に従う", async () => {
   await fresh();
   setBashWorkspace(ws);
   await put(join(w1dir(), "a.txt"));
@@ -261,12 +217,12 @@ test("mcp bash: cap / worker の両方に載り、返り値・isError の規則�
   const l = await startMcpListener(toNodeListener(app), { port: 0, bind: "127.0.0.1" });
   try {
     const url = `http://127.0.0.1:${l.port}/mcp`;
-    const hw = { "x-bantou-cap-id": "capA", "x-bantou-worker-id": "w1" };
-    const hc = { "x-bantou-cap-id": "capA" };
+    const hw = { "x-bantou-worker-id": "w1" };
     const names = async (h: Record<string, string>): Promise<string[]> =>
       ((await (await rpc(url, { jsonrpc: "2.0", id: 1, method: "tools/list" }, h)).json()) as { result: { tools: Array<{ name: string }> } }).result.tools.map((t) => t.name);
-    assert.deepEqual(await names(hw), ["report", "bash"]);
-    assert.ok((await names(hc)).includes("bash"));
+    assert.deepEqual(await names(hw), ["bash"]);
+    // header 無しには道具が載らない（tools/list 自体が成り立たない）
+    await assert.rejects(names({}));
 
     // 一部成功・一部拒否は isError でない
     const ok = (await (await rpc(url, callBash({ action: "rm", paths: ["a.txt", "../x", "keep"] }), hw)).json()) as ToolReply;
@@ -280,10 +236,6 @@ test("mcp bash: cap / worker の両方に載り、返り値・isError の規則�
     const all = (await (await rpc(url, callBash({ action: "rm", paths: ["logs", "state.json"] }), hw)).json()) as ToolReply;
     assert.ok(!all.result!.isError);
     assert.equal((JSON.parse(all.result!.content[0]!.text) as BashResult).skipped.length, 2);
-
-    // cap は worker: 接頭辞で自分の worker を消せる
-    const cap = (await (await rpc(url, callBash({ action: "rm", paths: ["worker:w1/keep"], recursive: true }), hc)).json()) as ToolReply;
-    assert.deepEqual((JSON.parse(cap.result!.content[0]!.text) as BashResult).removed, ["worker:w1/keep"]);
 
     // 未知 action は isError
     const unk = (await (await rpc(url, callBash({ action: "mv", paths: ["a"] }), hw)).json()) as ToolReply;
@@ -325,25 +277,21 @@ test("mcp bash: cap / worker の両方に載り、返り値・isError の規則�
 
 // -- review 追補 -----------------------------------------------------------------
 
-test("rm: prefix 兄弟 dir（w-1 と w-10 / c-1 と c-10）を指す symlink 経由は範囲外で拒否", async () => {
+test("rm: prefix 兄弟 dir（w-1 と w-10）を指す symlink 経由は範囲外で拒否", async () => {
   await fresh();
-  for (const [kind, a, b, caller] of [
-    ["workers", "w-1", "w-10", { kind: "worker", capId: "capA", workerId: "w-1" }],
-    ["caps", "c-1", "c-10", { kind: "cap", capId: "c-1" }],
-  ] as const) {
-    for (const id of [a, b]) {
-      await mkdir(join(ws, kind, id, "logs"), { recursive: true });
-      await writeFile(join(ws, kind, id, "state.json"), "{}");
-    }
-    await put(join(ws, kind, b, "victim.txt"));
-    await symlink(join(ws, kind, b), join(ws, kind, a, "sib"));
-    const r = await rmPaths(caller, ["sib/victim.txt"], true);
-    assert.deepEqual(r.removed, []);
-    assert.match(r.skipped[0]!.reason, /範囲外/);
-    assert.ok(await exists(join(ws, kind, b, "victim.txt")));
-    // link 自体は消せる
-    assert.deepEqual((await rmPaths(caller, ["sib"])).removed, ["sib"]);
+  const [a, b, caller] = ["w-1", "w-10", { workerId: "w-1" }] as const;
+  for (const id of [a, b]) {
+    await mkdir(join(ws, "workers", id, "logs"), { recursive: true });
+    await writeFile(join(ws, "workers", id, "state.json"), "{}");
   }
+  await put(join(ws, "workers", b, "victim.txt"));
+  await symlink(join(ws, "workers", b), join(ws, "workers", a, "sib"));
+  const r = await rmPaths(caller, ["sib/victim.txt"], true);
+  assert.deepEqual(r.removed, []);
+  assert.match(r.skipped[0]!.reason, /範囲外/);
+  assert.ok(await exists(join(ws, "workers", b, "victim.txt")));
+  // link 自体は消せる
+  assert.deepEqual((await rmPaths(caller, ["sib"])).removed, ["sib"]);
 });
 
 test("rm: LOGS / Logs/x / STATE.JSON は大文字小文字違いでも保護の文言で拒否", async () => {

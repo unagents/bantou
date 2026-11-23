@@ -1,261 +1,470 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { createInterface } from "node:readline";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { prepareWorkspace } from "../../../../server/utils/bantou/workspace";
-import { REPLY_META, classifyMeta, commandCapId, describeCommand, describeUpdateWait, execute, executeUpdate, maskUserinfo, updatingError } from "../../../../server/utils/bantou/daemon";
-import { UpdateError, createUpdateController } from "../../../../server/utils/bantou/update";
-import type { AgentManager } from "../../../../server/utils/bantou/agents";
+import { fileURLToPath } from "node:url";
+import { toNodeListener, createApp, defineEventHandler, toWebRequest } from "h3";
+import type { InboundMessage } from "@unagents/messenger-client";
+import { MESSENGER_PROTOCOL } from "@agent-hand/bantou-protocol";
+import {
+  REPLY_META,
+  classifyMeta,
+  createDispatcher,
+  describeMessage,
+  startDaemon,
+  type DispatchDeps,
+} from "../../../../server/utils/bantou/daemon";
+import { handleMcpRequest, startMcpListener } from "../../../../server/utils/bantou/mcp";
+import { buildServerName } from "../../../../server/utils/bantou/name";
+import type { Job } from "../../../../server/utils/bantou/queue";
+import { APPROVE_PROMPT, REJECT_PROMPT } from "../../../../server/utils/bantou/prompts";
+import { writeState } from "../../../../server/utils/bantou/state";
+import type { WorkerRunInput } from "../../../../server/utils/bantou/worker";
 
-test("workspace 作成: caps と workers を作る", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "bantou-server-test-"));
-  try {
-    const ws = join(dir, "ws");
-    const r = await prepareWorkspace(ws);
-    assert.deepEqual(r, { caps: join(ws, "caps"), workers: join(ws, "workers") });
-    assert.ok((await stat(r.caps)).isDirectory());
-    assert.ok((await stat(r.workers)).isDirectory());
-    await assert.rejects(stat(join(ws, "repos")));
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
+const protocolDir = fileURLToPath(new URL("../../../../../protocol/messenger", import.meta.url));
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-test("指示ログ: prompt は先頭 80 文字、repo の userinfo は伏せる", () => {
-  const long = "x".repeat(200);
-  const line = describeCommand({
-    bantou: 1,
-    type: "kick_cap",
-    cap_id: "c1",
-    repo: "https://user:pw@example.com/o/r.git",
-    prompt: long,
-  });
-  assert.ok(line.includes("cap_id=c1"));
-  assert.ok(line.includes("repo=https://***@example.com/o/r.git"));
-  assert.ok(!line.includes("pw"));
-  assert.ok(line.includes(`prompt=${"x".repeat(80)}`));
-  assert.ok(!line.includes("x".repeat(81)));
-  assert.equal(describeCommand({ bantou: 1, type: "status" }), "");
-  assert.equal(maskUserinfo("git@h"), "git@h");
-});
-
-test("error 返信: 失敗した指示の cap_id を含める。resume_worker は未対応", async () => {
-  const manager = {
-    invoke: async () => {
-      throw new Error("boom");
-    },
-    status: async () => {
-      throw new Error("boom");
-    },
-  } as unknown as AgentManager;
-  const cap = await execute({ bantou: 1, type: "kick_cap", cap_id: "c1", prompt: "p" }, manager);
-  assert.deepEqual(cap, { bantou: 1, type: "error", ok: false, message: "boom", command: "kick_cap", cap_id: "c1" });
-  const w = await execute({ bantou: 1, type: "resume_worker", worker_id: "w1", prompt: "p" }, manager);
-  assert.deepEqual(w, { bantou: 1, type: "error", ok: false, message: "resume_worker は未対応", command: "resume_worker" });
-  const st = await execute({ bantou: 1, type: "status" }, manager);
-  assert.deepEqual(st, { bantou: 1, type: "error", ok: false, message: "boom", command: "status" });
-  const stop = await execute({ bantou: 1, type: "stop_cap", cap_id: "c1" }, { close: async () => { throw new Error("boom"); } } as unknown as AgentManager);
-  assert.deepEqual(stop, { bantou: 1, type: "error", ok: false, message: "boom", command: "stop_cap", cap_id: "c1" });
-});
+// -- 純粋関数 ---------------------------------------------------------------------
 
 test("meta の分類: 無し=旧形式、bantou=処理、他 protocol=無視", () => {
   assert.equal(classifyMeta(undefined), "legacy");
   assert.equal(classifyMeta(null), "legacy");
-  assert.equal(classifyMeta({ protocol: "bantou", version: "1.0.0" }), "bantou");
-  assert.equal(classifyMeta({ protocol: "bantou", version: "9.9.9" }), "bantou");
+  assert.equal(classifyMeta({ protocol: "bantou", version: "2.0.0" }), "bantou");
   assert.equal(classifyMeta({ protocol: "other", version: "1.0.0" }), "other");
 });
 
 test("返信 meta は protocol.json の name / version と一致する", async () => {
-  const dir = new URL("../../../../../protocol/messenger/", import.meta.url);
-  const m = JSON.parse(await readFile(new URL("protocol.json", dir), "utf8")) as { name: string; version: string };
+  const m = JSON.parse(await readFile(join(protocolDir, "protocol.json"), "utf8")) as { name: string; version: string };
   assert.deepEqual(REPLY_META, { protocol: m.name, version: m.version });
+  assert.equal(REPLY_META.version, MESSENGER_PROTOCOL.version);
 });
 
-test("stop_cap: manager.close の結果（stopped / session_cleared / previous_session_id）を stop_result で返し、ログ概要は cap_id", async () => {
-  const calls: unknown[] = [];
-  const manager = { close: async (k: string, id: string) => (calls.push([k, id]), { stopped: true, session_cleared: true, previous_session_id: "s-old", workers_stopped: 0 }) } as unknown as AgentManager;
-  const r = await execute({ bantou: 1, type: "stop_cap", cap_id: "c9" }, manager);
-  assert.deepEqual(r, { bantou: 1, type: "stop_result", ok: true, cap_id: "c9", stopped: true, session_cleared: true, previous_session_id: "s-old", workers_stopped: 0 });
-  // cap は動いていなくても、配下の worker を止めたら stopped=true と数
-  const m2 = { close: async () => ({ stopped: false, session_cleared: true, previous_session_id: "s-old", workers_stopped: 2 }) } as unknown as AgentManager;
-  const r2 = await execute({ bantou: 1, type: "stop_cap", cap_id: "c9" }, m2);
-  assert.equal(r2.type === "stop_result" && r2.stopped, true);
-  assert.equal(r2.type === "stop_result" && r2.workers_stopped, 2);
-  assert.deepEqual(calls, [["cap", "c9"]]);
-  assert.equal(describeCommand({ bantou: 1, type: "stop_cap", cap_id: "c9" }), "cap_id=c9");
+test("describeMessage: prompt・content は先頭 80 文字だけ", () => {
+  const long = "x".repeat(200);
+  const line = describeMessage({ protocol: "bantou", callType: "invoke", order: "launch", "parent-id": "cap", model: "sonnet", prompt: long, ws: "ws://h" });
+  assert.ok(line.includes("parent-id=cap") && line.includes("model=sonnet") && line.includes("ws=ws://h"));
+  assert.ok(line.includes(`prompt=${"x".repeat(80)}`) && !line.includes("x".repeat(81)));
+  const a = describeMessage({ protocol: "bantou", callType: "reply", order: "answer", "session-id": "s", content: long });
+  assert.ok(a.includes("session-id=s") && !a.includes("x".repeat(81)));
 });
 
-test("update_server: ログ概要は version。execute では処理しない（daemon が UpdateController で処理する）", async () => {
-  assert.equal(describeCommand({ bantou: 1, type: "update_server", version: "0.3.1" }), "version=0.3.1");
-  assert.equal(describeCommand({ bantou: 1, type: "hello" }), "");
-  const manager = {} as unknown as AgentManager;
-  const r = await execute({ bantou: 1, type: "hello" }, manager);
-  assert.equal(r.type, "error");
-});
+// -- dispatcher -------------------------------------------------------------------
 
-test("updatingError: 理由付き・retryable・cap_id 付きの kick_cap 向け error", () => {
-  const r = updatingError({ cap_id: "c1" }, { from: "0.3.0", to: "0.3.1" });
-  assert.equal(r.type, "error");
-  if (r.type !== "error") return;
-  assert.equal(r.ok, false);
-  assert.equal(r.code, "updating");
-  assert.equal(r.retryable, true);
-  assert.equal(r.command, "kick_cap");
-  assert.equal(r.cap_id, "c1");
-  assert.match(r.message, /0\.3\.0→0\.3\.1/);
-  assert.match(r.message, /再送/);
-});
+interface DRig {
+  jobs: Array<{ input: WorkerRunInput; kind: "launch" | "reply"; settle: () => void }>;
+  stops: string[];
+  replies: Array<{ to: string; text: string }>;
+  d: DispatchDeps;
+  ws: string;
+  cleanup(): Promise<void>;
+}
 
-test("executeUpdate: hello は hello_result、update_server の失敗は code 付き error", async () => {
-  const controller = createUpdateController({
-    workspace: "/nonexistent-ws",
-    serverVersion: "0.3.0",
-    specTemplate: "bantou@{version}",
-    running: () => ({ caps: 0, workers: 0, reports: 0 }),
-    fetch: async () => {
-      throw new UpdateError("update_failed", "取得できない", false);
+async function drig(serverVersion = "0.7.0"): Promise<DRig> {
+  const ws = await mkdtemp(join(tmpdir(), "bantou-dispatch-test-"));
+  const jobs: DRig["jobs"] = [];
+  const stops: string[] = [];
+  const replies: DRig["replies"] = [];
+  const d: DispatchDeps = {
+    workspace: ws,
+    serverVersion,
+    queue: {
+      submit: () => {},
+      stop: (p) => (stops.push(p), { running: 0, queued: 0 }),
     },
-    requestExit: () => {},
+    makeJob: (input, kind, onSettled) => {
+      jobs.push({ input, kind, settle: onSettled });
+      const job: Job = { kind, parentId: input.parentId, start: async () => {}, abort() {} };
+      return job;
+    },
+    replyToSender: async (to, text) => {
+      replies.push({ to, text });
+    },
     log: () => {},
-  });
-  const h = await executeUpdate({ bantou: 1, type: "hello" }, controller);
-  assert.equal(h.type, "hello_result");
-  const e = await executeUpdate({ bantou: 1, type: "update_server", version: "0.3.1" }, controller);
-  assert.deepEqual(e, {
-    bantou: 1, type: "error", ok: false, message: "取得できない", command: "update_server", code: "update_failed", retryable: false,
-  });
-  controller.close();
-});
-
-import type { TaskCommand } from "@agent-hand/bantou-protocol";
-
-const taskCmd: TaskCommand = {
-  bantou: 1, type: "task", cap_id: "c1", task_id: "t-1", goal: "やること",
-  repo: "https://u:pw@example.com/o/r.git", branch: "main",
-  deliverables: {}, verify: {}, constraints: [], workers: {}, worker_model: "sonnet",
-};
-
-test("task: cap の最初の指示を組み立てて invoke し、task_result で返す", async () => {
-  const calls: Array<[string, string, Record<string, unknown>]> = [];
-  const manager = {
-    invoke: async (k: string, id: string, input: Record<string, unknown>) => {
-      calls.push([k, id, input]);
-      return { session_id: "s", ok: true, result_text: '{"summary":"できた","review":{"verdict":"ok","items":[],"rounds":1}}' };
-    },
-  } as unknown as AgentManager;
-  const r = await execute(taskCmd, manager);
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0]![0], "cap");
-  assert.equal(calls[0]![1], "c1");
-  assert.ok(String(calls[0]![2].prompt).startsWith("[task t-1]\n"));
-  assert.ok(String(calls[0]![2].prompt).includes("やること"));
-  // repo / branch は cap の dir に clone されない（cap は git を触らない）。文面にだけ載る
-  assert.equal(calls[0]![2].repo, undefined);
-  assert.equal(calls[0]![2].branch, undefined);
-  assert.ok(String(calls[0]![2].prompt).includes("repo: https://u:pw@example.com/o/r.git"));
-  assert.ok(String(calls[0]![2].prompt).includes("branch: main"));
-  assert.equal(calls[0]![2].worker_model, "sonnet");
-  assert.equal(r.type, "task_result");
-  assert.equal((r as { summary: string }).summary, "できた");
-  assert.equal((r as { review: { verdict: string; rounds: number } }).review.verdict, "ok");
-  assert.equal((r as { review: { rounds: number } }).review.rounds, 1);
-});
-
-test("task: 生の返答は summary に入り verdict は unknown。失敗は error（cap_id と task_id 付き）", async () => {
-  const raw = await execute(taskCmd, { invoke: async () => ({ session_id: "s", ok: true, result_text: "起動した" }) } as unknown as AgentManager);
-  assert.deepEqual(raw, {
-    bantou: 1, type: "task_result", cap_id: "c1", task_id: "t-1", state: "done", summary: "起動した",
-    workers: [], review: { verdict: "unknown", items: [], rounds: 0 }, remaining: [],
-  });
-  const failed = await execute(taskCmd, { invoke: async () => ({ session_id: "s", ok: false, result_text: "", error: "exit 1" }) } as unknown as AgentManager);
-  assert.equal((failed as { state: string }).state, "failed");
-  assert.equal((failed as { error: string }).error, "exit 1");
-  const err = await execute(taskCmd, { invoke: async () => { throw new Error("boom"); } } as unknown as AgentManager);
-  assert.deepEqual(err, { bantou: 1, type: "error", ok: false, message: "boom", command: "task", cap_id: "c1", task_id: "t-1" });
-});
-
-test("task: ログ概要は task_id・goal 先頭・repo の userinfo を伏せる", () => {
-  const line = describeCommand({ ...taskCmd, goal: "g".repeat(200) });
-  assert.ok(line.includes("cap_id=c1 task_id=t-1"));
-  assert.ok(line.includes("repo=https://***@example.com/o/r.git"));
-  assert.ok(!line.includes("pw"));
-  assert.ok(line.includes("workers=0"));
-  assert.ok(line.includes(`goal=${"g".repeat(80)}`) && !line.includes("g".repeat(81)));
-});
-
-test("task: 更新待機中の断りは command=task、task_id 付き。kick_cap は従来どおり", () => {
-  const t = updatingError({ cap_id: "c1", task_id: "t-1" }, { from: "0.6.0", to: "0.6.1" });
-  assert.equal((t as { command?: string }).command, "task");
-  assert.equal((t as { task_id?: string }).task_id, "t-1");
-  assert.equal((t as { code?: string }).code, "updating");
-  const k = updatingError({ cap_id: "c1" }, { from: "0.6.0", to: "0.6.1" });
-  assert.equal((k as { command?: string }).command, "kick_cap");
-  assert.equal("task_id" in k, false);
-});
-
-test("worker_reply: 同じ worker_id で worker_start し、worker_reply_result を返す", async () => {
-  const calls: unknown[] = [];
-  const workers = { start: async (capId: string, input: unknown) => (calls.push([capId, input]), { worker_id: "w-1", accepted: true as const }) };
-  const cmd = { bantou: 1 as const, type: "worker_reply" as const, cap_id: "c1", worker_id: "w-1", text: "main に rebase して" };
-  const r = await execute(cmd, {} as unknown as AgentManager, workers);
-  assert.deepEqual(r, { bantou: 1, type: "worker_reply_result", ok: true, cap_id: "c1", worker_id: "w-1", accepted: true });
-  assert.deepEqual(calls, [["c1", { worker_id: "w-1", prompt: "main に rebase して" }]]);
-  assert.equal(describeCommand(cmd), "cap_id=c1 worker_id=w-1 text=main に rebase して");
-});
-
-test("worker_reply: 失敗は error（cap_id・worker_id 付き）。worker 機構が無い間も error", async () => {
-  const cmd = { bantou: 1 as const, type: "worker_reply" as const, cap_id: "c1", worker_id: "w-1", text: "x" };
-  const e1 = await execute(cmd, {} as unknown as AgentManager, { start: async () => { throw new Error("別の cap の worker: w-1"); } });
-  assert.deepEqual(e1, { bantou: 1, type: "error", ok: false, message: "別の cap の worker: w-1", command: "worker_reply", cap_id: "c1", worker_id: "w-1" });
-  const e2 = await execute(cmd, {} as unknown as AgentManager);
-  assert.equal(e2.type, "error");
-  assert.equal((e2 as { command?: string }).command, "worker_reply");
-});
-
-test("protocol 1.8.1: 返信 meta と hello の版は 1.8.1（1.8.0 の center / server とは版違いになる）", () => {
-  assert.equal(REPLY_META.version, "1.8.1");
-});
-
-test("commandCapId: cap を指す命令は cap_id、status は cap_id 付きの時だけ。hello / update_server は無し", () => {
-  assert.equal(commandCapId({ bantou: 1, type: "kick_cap", cap_id: "c1", prompt: "p" }), "c1");
-  assert.equal(commandCapId({ bantou: 1, type: "stop_cap", cap_id: "c2" }), "c2");
-  assert.equal(commandCapId({ bantou: 1, type: "worker_reply", cap_id: "c3", worker_id: "w", text: "x" }), "c3");
-  assert.equal(commandCapId({ bantou: 1, type: "status", cap_id: "c4" }), "c4");
-  assert.equal(commandCapId({ bantou: 1, type: "status" }), undefined);
-  assert.equal(commandCapId({ bantou: 1, type: "hello" }), undefined);
-  assert.equal(commandCapId({ bantou: 1, type: "update_server", version: "0.6.0" }), undefined);
-  assert.equal(describeCommand({ bantou: 1, type: "status", cap_id: "c4" }), "cap_id=c4");
-  assert.equal(describeCommand({ bantou: 1, type: "status" }), "");
-});
-
-test("updatingError: 更新の進行（UpdateProgress）を渡すと、待っている run・経過・上限を文と update 欄に載せる", () => {
-  const progress = {
-    state: "waiting" as const,
-    from: "0.6.8",
-    to: "0.6.9",
-    running: { caps: 1, workers: 1, reports: 0 },
-    since: new Date(Date.now() - 12 * 60_000).toISOString(),
-    deadline: "2026-11-21T05:40:00.000Z",
-    runs: [
-      { kind: "cap" as const, id: "c-other", started_at: new Date(Date.now() - 8 * 60_000).toISOString(), phase: "running" as const },
-      { kind: "worker" as const, id: "w-1", cap_id: "c-other", started_at: new Date(Date.now() - 3 * 60_000).toISOString(), phase: "running" as const },
-    ],
   };
-  const r = updatingError({ cap_id: "c1", task_id: "t-1" }, progress);
-  assert.equal(r.type, "error");
-  if (r.type !== "error") return;
-  assert.equal(r.code, "updating");
-  assert.equal(r.retryable, true);
-  assert.deepEqual(r.update, progress);
-  assert.match(r.message, /^server 更新待ち（0\.6\.8→0\.6\.9）。実行中の cap\/worker の終了後に再起動する。再起動後に再送。待機 12 分、2026-11-21T05:40:00\.000Z（上限）に残りを止めて再起動。待っている run: /);
-  assert.match(r.message, /cap 1 \/ worker 1/);
-  assert.match(r.message, /cap:c-other 実行 8 分/);
-  assert.match(r.message, /worker:w-1\[cap c-other\] 実行 3 分/);
-  assert.match(r.message, /待機 12 分/);
-  assert.match(r.message, /2026-11-21T05:40:00\.000Z（上限）に残りを止めて再起動/);
-  // 何も数えていない（restarting など）の時も件数は出る
-  assert.match(describeUpdateWait({ ...progress, running: { caps: 0, workers: 0, reports: 0 }, runs: [] }), /^待機 12 分、.*。待っている run: cap 0 \/ worker 0$/);
-  assert.match(describeUpdateWait({ ...progress, runs: [{ kind: "cap", id: "c-q", phase: "queued" }] }), /cap:c-q 待ち/);
+  // queue.submit が makeJob の結果を受けた形にして、submit の回数も見えるようにする
+  const submitted: Job[] = [];
+  d.queue = { submit: (j) => void submitted.push(j), stop: d.queue.stop };
+  return { jobs, stops, replies, d, ws, cleanup: () => rm(ws, { recursive: true, force: true }) };
+}
+
+const msg = (body: unknown, over: Partial<Pick<InboundMessage, "meta" | "from_id" | "from_name" | "mode">> = {}) => ({
+  text: typeof body === "string" ? body : JSON.stringify(body),
+  meta: { protocol: "bantou", version: "2.0.0" },
+  from_id: "id-center",
+  from_name: "center-name",
+  mode: "message" as InboundMessage["mode"],
+  ...over,
+});
+
+const launchBody = { protocol: "bantou", callType: "invoke", order: "launch", "parent-id": "cap-1", model: "opus[1m]", prompt: "やる", ws: "ws://c/ws" };
+
+test("dispatcher: launch は新しい worker（session-id を自前で作る）の job を作る。返事は無い", async () => {
+  const r = await drig();
+  try {
+    await createDispatcher(r.d).handle(msg(launchBody));
+    assert.equal(r.jobs.length, 1);
+    const j = r.jobs[0]!;
+    assert.equal(j.kind, "launch");
+    assert.equal(j.input.mode, "new");
+    assert.equal(j.input.parentId, "cap-1");
+    assert.equal(j.input.model, "opus[1m]");
+    assert.equal(j.input.prompt, "やる");
+    assert.equal(j.input.ws, "ws://c/ws");
+    assert.match(j.input.workerId, /^w-[0-9a-f]{10}$/);
+    assert.equal(j.input.dir, join(r.ws, "workers", j.input.workerId));
+    assert.match(j.input.sessionId, /^[0-9a-f-]{36}$/);
+    assert.deepEqual(r.replies, []);
+    // launch ごとに別の worker
+    await createDispatcher(r.d).handle(msg(launchBody));
+    assert.notEqual(r.jobs[1]!.input.workerId, j.input.workerId);
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("dispatcher: stop は parent-id で queue.stop。返事は無い", async () => {
+  const r = await drig();
+  try {
+    await createDispatcher(r.d).handle(msg({ protocol: "bantou", callType: "invoke", order: "stop", "parent-id": "cap-1" }));
+    assert.deepEqual(r.stops, ["cap-1"]);
+    assert.deepEqual(r.replies, []);
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("dispatcher: exec・guard に通らない物・他 protocol・ping・非 JSON は無視（何もしない）", async () => {
+  const r = await drig();
+  try {
+    const dsp = createDispatcher(r.d);
+    await dsp.handle(msg({ protocol: "bantou", callType: "exec", order: "run" }));
+    await dsp.handle(msg({ protocol: "bantou", callType: "exec", order: "launch", "parent-id": "c", model: "m", prompt: "p", ws: "w" }));
+    await dsp.handle(msg({ ...launchBody, model: "-bad" }));
+    await dsp.handle(msg({ ...launchBody, prompt: "" }));
+    await dsp.handle(msg({ ...launchBody, "parent-id": "" }));
+    await dsp.handle(msg({ bantou: 1, type: "kick_cap", cap_id: "c", prompt: "p" }));
+    await dsp.handle(msg({ bantou: 1, type: "status" }));
+    await dsp.handle(msg("hello"));
+    await dsp.handle(msg(launchBody, { meta: { protocol: "other", version: "1.0.0" } }));
+    await dsp.handle(msg(launchBody, { mode: "ping" }));
+    assert.deepEqual(r.jobs, []);
+    assert.deepEqual(r.stops, []);
+    assert.deepEqual(r.replies, []);
+  } finally {
+    await r.cleanup();
+  }
+});
+
+async function seedWorker(ws: string, id: string, session: string): Promise<void> {
+  await writeState(join(ws, "workers", id), {
+    worker_id: id,
+    session_id: session,
+    parent_id: "cap-1",
+    ws: "ws://c/ws",
+    model: "sonnet",
+    last_started_at: null,
+    last_finished_at: null,
+  });
+}
+
+test("dispatcher: reply（answer / approve / reject）は session-id の worker を --resume で起こし直す job。prompt は answer=content、approve / reject=固定", async () => {
+  const r = await drig();
+  try {
+    await seedWorker(r.ws, "w-a", "sess-a");
+    await seedWorker(r.ws, "w-b", "sess-b");
+    await seedWorker(r.ws, "w-c", "sess-c");
+    const dsp = createDispatcher(r.d);
+    const reply = (order: string, sid: string, content?: string) =>
+      msg({ protocol: "bantou", callType: "reply", order, "session-id": sid, ...(content !== undefined ? { content } : {}) });
+    await dsp.handle(reply("answer", "sess-a", "A案で行く"));
+    await dsp.handle(reply("approve", "sess-b"));
+    await dsp.handle(reply("reject", "sess-c"));
+    assert.deepEqual(
+      r.jobs.map((j) => [j.kind, j.input.mode, j.input.workerId, j.input.sessionId, j.input.prompt, j.input.parentId, j.input.ws, j.input.model]),
+      [
+        ["reply", "resume", "w-a", "sess-a", "A案で行く", "cap-1", "ws://c/ws", "sonnet"],
+        ["reply", "resume", "w-b", "sess-b", APPROVE_PROMPT, "cap-1", "ws://c/ws", "sonnet"],
+        ["reply", "resume", "w-c", "sess-c", REJECT_PROMPT, "cap-1", "ws://c/ws", "sonnet"],
+      ],
+    );
+    assert.equal(r.jobs[0]!.input.dir, join(r.ws, "workers", "w-a"));
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("dispatcher: reply の session-id が無ければログして無視。同じ session が動いている・待っている間の reply は無視、終われば受ける", async () => {
+  const r = await drig();
+  try {
+    await seedWorker(r.ws, "w-a", "sess-a");
+    const dsp = createDispatcher(r.d);
+    const ans = (sid: string) => msg({ protocol: "bantou", callType: "reply", order: "answer", "session-id": sid, content: "x" });
+    await dsp.handle(ans("nope"));
+    assert.equal(r.jobs.length, 0);
+    await dsp.handle(ans("sess-a"));
+    await dsp.handle(ans("sess-a"));
+    assert.equal(r.jobs.length, 1);
+    r.jobs[0]!.settle();
+    await dsp.handle(ans("sess-a"));
+    assert.equal(r.jobs.length, 2);
+  } finally {
+    await r.cleanup();
+  }
+});
+
+test("dispatcher: server-info は版だけを、送ってきた名前（from_name）に返す。版が x.y.z でなければ答えない", async () => {
+  const r = await drig("0.7.3");
+  try {
+    await createDispatcher(r.d).handle(msg({ protocol: "bantou", callType: "status", order: "server-info" }));
+    assert.equal(r.replies.length, 1);
+    assert.equal(r.replies[0]!.to, "center-name");
+    assert.deepEqual(JSON.parse(r.replies[0]!.text), { protocol: "bantou", callType: "status", order: "server-info", version: "0.7.3" });
+    // 名前が無い送り手には id
+    await createDispatcher(r.d).handle(msg({ protocol: "bantou", callType: "status", order: "server-info" }, { from_name: "" }));
+    assert.equal(r.replies[1]!.to, "id-center");
+    // server-info の答え（version 付き）は center → server の指示ではない
+    await createDispatcher(r.d).handle(msg({ protocol: "bantou", callType: "status", order: "server-info", version: "1.2.3" }));
+    assert.equal(r.replies.length, 2);
+  } finally {
+    await r.cleanup();
+  }
+  const u = await drig("unknown");
+  try {
+    await createDispatcher(u.d).handle(msg({ protocol: "bantou", callType: "status", order: "server-info" }));
+    assert.deepEqual(u.replies, []);
+  } finally {
+    await u.cleanup();
+  }
+});
+
+// -- 実 broker・実 client での通し -----------------------------------------------------
+
+async function freePort(): Promise<number> {
+  return await new Promise((resolve, reject) => {
+    const s = createServer();
+    s.once("error", reject);
+    s.listen(0, "127.0.0.1", () => {
+      const p = (s.address() as { port: number }).port;
+      s.close(() => resolve(p));
+    });
+  });
+}
+
+interface Got {
+  from_name: string;
+  text: string;
+  meta: { protocol: string; version: string } | null;
+}
+
+interface Peer {
+  got: Got[];
+  send(to: string, text: string, meta?: { protocol: string; version: string }): void;
+  stop(): Promise<void>;
+}
+
+/** 別 process の peer（test/fixtures/peer.mjs）。broker は 1 process につき 1 peer しか持てない。 */
+async function startPeer(brokerUrl: string, name: string): Promise<Peer> {
+  const script = fileURLToPath(new URL("../../../fixtures/peer.mjs", import.meta.url));
+  const child = spawn(process.execPath, [script, brokerUrl, name], { stdio: ["pipe", "pipe", "inherit"], cwd: fileURLToPath(new URL("../../../..", import.meta.url)) });
+  const got: Got[] = [];
+  let ready!: () => void;
+  const readyP = new Promise<void>((r) => (ready = r));
+  createInterface({ input: child.stdout }).on("line", (line) => {
+    const v = JSON.parse(line) as Got & { ready?: boolean };
+    if (v.ready) ready();
+    else got.push(v);
+  });
+  await Promise.race([readyP, new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`peer が起動しない: ${name}`)), 20_000))]);
+  return {
+    got,
+    send: (to, text, meta) => void child.stdin.write(JSON.stringify({ to, text, meta: meta ?? null }) + "\n"),
+    stop: () =>
+      new Promise<void>((r) => {
+        child.once("exit", () => r());
+        child.stdin.end();
+        setTimeout(() => child.kill("SIGKILL"), 3000).unref();
+      }),
+  };
+}
+
+const FAKE_CLAUDE = `#!/usr/bin/env node
+const fs = require("node:fs");
+const argv = process.argv.slice(2);
+const cut = argv.indexOf("--");
+const prompt = argv.slice(cut + 1).join(" ");
+const flag = (n) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : undefined; };
+const sessionId = flag("--session-id") ?? flag("--resume");
+fs.appendFileSync(process.env.FAKE_LOG, JSON.stringify({ argv: argv.slice(0, cut), prompt, sessionId, cwd: process.cwd(), pid: process.pid, tmpdir: process.env.TMPDIR }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "system" }) + "\\n");
+const result = (so) => process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "", session_id: sessionId, structured_output: so }) + "\\n");
+if (prompt.includes("SLEEP")) { setTimeout(() => {}, 60000); }
+else if (prompt.includes("ASK")) result({ lastType: "message", status: "ask", content: "どちら？" });
+else if (prompt.includes("BROKEN")) result({ lastType: "report", status: "ask", content: "x" });
+else result({ lastType: "report", status: "success", content: "done: " + prompt });
+`;
+
+test("daemon 通し: launch → ask（message）→ answer → success（report）、server-info、stop、名前", { timeout: 120_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "bantou-daemon-e2e-"));
+  const brokerPort = await freePort();
+  const saved = { ...process.env };
+  process.env.AGENT_MESSENGER_HOST = "127.0.0.1";
+  process.env.AGENT_MESSENGER_PORT = String(brokerPort);
+  process.env.AGENT_MESSENGER_DISCOVERY = "off";
+  const peers: Peer[] = [];
+  let daemon: Awaited<ReturnType<typeof startDaemon>> | undefined;
+  try {
+    const ws = join(dir, "ws");
+    await mkdir(ws, { recursive: true });
+    const fake = join(dir, "fake-claude");
+    await writeFile(fake, FAKE_CLAUDE);
+    await chmod(fake, 0o755);
+    const fakeLog = join(dir, "fake.log");
+    await writeFile(fakeLog, "");
+    const configPath = join(dir, "config.json");
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        workspace: ws,
+        broker: { port: brokerPort, bind: "127.0.0.1", discovery: "off" },
+        mcp: { port: 0, bind: "127.0.0.1" },
+        session: { claude: fake, maxParallel: 2, env: { FAKE_LOG: fakeLog } },
+      }),
+    );
+    const app = createApp().use("/mcp", defineEventHandler((e) => handleMcpRequest(toWebRequest(e))));
+    daemon = await startDaemon(configPath, {
+      protocolDir,
+      serverVersion: "0.7.1",
+      namePrefix: "e2e",
+      machineId: () => "machine-e2e",
+      cpus: () => 4,
+      loadavg1: () => 0,
+      startMcp: (o) => startMcpListener(toNodeListener(app), o),
+    });
+    const name = buildServerName("machine-e2e", "e2e");
+    assert.equal(daemon.name, name);
+    assert.match(name, /^e2e-bantou-server-[0-9a-f]{10}$/);
+    // supervisor への合図
+    assert.ok((await stat(join(ws, "server.ready"))).isFile());
+
+    const url = `http://127.0.0.1:${brokerPort}`;
+    const center = await startPeer(url, "bantou-center-e2e");
+    peers.push(center);
+    const cap = await startPeer(url, "cap-e2e");
+    peers.push(cap);
+    const capGot = cap.got;
+    const centerGot = center.got;
+    const waitFor = async <T>(f: () => T | undefined, what: string, ms = 20_000): Promise<T> => {
+      const end = Date.now() + ms;
+      for (;;) {
+        const v = f();
+        if (v !== undefined) return v;
+        if (Date.now() > end) throw new Error(`待ちが切れた: ${what}`);
+        await sleep(50);
+      }
+    };
+    const send = (body: unknown) => center.send(name, JSON.stringify(body), { protocol: "bantou", version: MESSENGER_PROTOCOL.version });
+    const base = { protocol: "bantou" };
+
+    // 1. launch（ASK）→ cap に message（ask、session-id 付き、meta 無し）
+    await send({ ...base, callType: "invoke", order: "launch", "parent-id": "cap-e2e", model: "sonnet", prompt: "ASK please", ws: "ws://127.0.0.1:9/none" });
+    const ask = await waitFor(() => capGot[0], "ask");
+    assert.ok(ask.meta === null || ask.meta === undefined, "cap への message に meta.protocol は付けない");
+    const askBody = JSON.parse(ask.text) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(askBody).sort(), ["content", "session-id", "status"]);
+    assert.equal(askBody.status, "ask");
+    assert.equal(askBody.content, "どちら？");
+    const sessionId = askBody["session-id"] as string;
+    assert.match(sessionId, /^[0-9a-f-]{36}$/);
+    // launch に返事は無い
+    assert.deepEqual(centerGot, []);
+
+    // 2. answer → 同じ session で --resume、cap に report（success、session-id 無し）
+    await send({ ...base, callType: "reply", order: "answer", "session-id": sessionId, content: "A案で" });
+    const done = await waitFor(() => capGot[1], "report");
+    assert.deepEqual(JSON.parse(done.text), { status: "success", content: "done: A案で" });
+    const calls = (await readFile(fakeLog, "utf8")).trim().split("\n").map((l) => JSON.parse(l) as { argv: string[]; prompt: string; sessionId: string; cwd: string; tmpdir: string });
+    assert.equal(calls.length, 2);
+    assert.ok(calls[0]!.argv.includes("--session-id") && calls[0]!.argv.includes("--json-schema") && calls[0]!.argv.includes("--model"));
+    assert.ok(calls[1]!.argv.includes("--resume") && calls[1]!.argv.includes("--json-schema"));
+    assert.equal(calls[1]!.sessionId, sessionId);
+    assert.equal(calls[1]!.cwd, calls[0]!.cwd, "同じ cwd で起こし直す");
+    assert.ok(calls[0]!.cwd.startsWith(join(ws, "workers")));
+    assert.equal(calls[0]!.tmpdir, join(calls[0]!.cwd, "tmp"));
+    // 道具の許可は bash だけ（report 道具は無い）
+    const from = calls[0]!.argv.indexOf("--allowedTools") + 1;
+    const allowed = calls[0]!.argv.slice(from, calls[0]!.argv.findIndex((a, i) => i >= from && a.startsWith("--")));
+    assert.ok(allowed.includes("mcp__bantou__bash"));
+    assert.ok(!allowed.some((t) => t.includes("report") || t.includes("worker_")));
+
+    // 3. server-info → 送ってきた名前に版だけ返る（meta 付き）
+    await send({ ...base, callType: "status", order: "server-info" });
+    const info = await waitFor(() => centerGot[0], "server-info");
+    assert.deepEqual(JSON.parse(info.text), { protocol: "bantou", callType: "status", order: "server-info", version: "0.7.1" });
+    assert.equal(info.meta?.protocol, "bantou");
+    assert.equal(info.from_name, name);
+
+    // 4. exec・知らない形・別 protocol は無視（何も起きない）
+    const before = capGot.length;
+    await send({ ...base, callType: "exec", order: "run" });
+    await send({ ...base, callType: "exec", order: "launch", "parent-id": "cap-e2e", model: "sonnet", prompt: "exec", ws: "ws://h" });
+    center.send(name, JSON.stringify({ protocol: "bantou", callType: "invoke", order: "launch", "parent-id": "cap-e2e", model: "sonnet", prompt: "other", ws: "ws://h" }), { protocol: "other", version: "1.0.0" });
+    await sleep(1500);
+    assert.equal(capGot.length, before);
+    assert.equal((await readFile(fakeLog, "utf8")).trim().split("\n").length, 2, "無視した指示では claude を起こさない");
+
+    // 5. 最後の出力の組が不正なら server が failed を付ける
+    await send({ ...base, callType: "invoke", order: "launch", "parent-id": "cap-e2e", model: "sonnet", prompt: "BROKEN", ws: "ws://127.0.0.1:9/none" });
+    const broken = await waitFor(() => capGot[2], "failed");
+    assert.equal((JSON.parse(broken.text) as { status: string }).status, "failed");
+
+    // 6. stop: 動いている worker を止め、結果は cap へ送らない
+    await send({ ...base, callType: "invoke", order: "launch", "parent-id": "cap-e2e", model: "sonnet", prompt: "SLEEP", ws: "ws://127.0.0.1:9/none" });
+    const sleeper = await waitFor(() => {
+      const ls = readFileSync(fakeLog, "utf8").trim().split("\n").map((l) => JSON.parse(l) as { prompt: string; pid: number });
+      return ls.find((l) => l.prompt === "SLEEP");
+    }, "SLEEP worker の起動");
+    await send({ ...base, callType: "invoke", order: "stop", "parent-id": "cap-e2e" });
+    await waitFor(() => {
+      try {
+        process.kill(sleeper.pid, 0);
+        return undefined;
+      } catch {
+        return true;
+      }
+    }, "SLEEP worker の停止", 15_000);
+    await sleep(800);
+    assert.equal(capGot.length, 3, "stop で止めた worker の結果は送らない");
+  } finally {
+    for (const p of peers) await p.stop();
+    await daemon?.stop();
+    process.env = saved;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("daemon: 機械の ID を読めなければ起動しない（broker も立てない）", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "bantou-daemon-noid-"));
+  try {
+    const configPath = join(dir, "config.json");
+    await writeFile(configPath, JSON.stringify({ workspace: join(dir, "ws"), broker: { port: 0, bind: "127.0.0.1", discovery: "off" }, mcp: { port: 0, bind: "127.0.0.1" } }));
+    await assert.rejects(
+      startDaemon(configPath, {
+        machineId: () => {
+          throw new Error("機械の ID を読めない（テスト）");
+        },
+        startMcp: async () => {
+          throw new Error("呼ばれない");
+        },
+      }),
+      /機械の ID を読めない/,
+    );
+    await assert.rejects(stat(join(dir, "ws", "broker.json")));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
