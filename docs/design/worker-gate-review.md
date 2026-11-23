@@ -221,7 +221,7 @@ session の起動の仕組みは変える予定で、毎回きれいな context 
 ### 3.2 master-cap
 
 - change を作り、消化する step の範囲（scope）を付けて server に登録する（0 節の 9・10。4.2 の `change_register`）。change の作り方の形（openspec の書式）は openspec 側の話で、この設計書は決めない。change の作成（proposal・design・tasks）を誰がどこでやるかは master-cap が決める（8 節）。
-- change の進み（どの step まで進んだか・返答待ちか・止まっているか）を見る（`change_status`）。止める・続きを頼む（`change_stop`）。worker の質問に返答する（`worker_reply`）。
+- change の進み（どの step まで進んだか・返答待ちか・止まっているか）を見る（`change_status`）。止める（`change_stop`）。worker の質問に返答する（`worker_reply`）。
 - worker を起こさない。分担を決めない。資源を見て起こすかを判断しない（server が持つ。3.6）。
 - code の実装などの実作業をしない（体制のルール）。proposal・design・tasks の作成は master-cap の作業範囲に入るが、並行の session に分けてよい（8 節）。
 - 【推測】master-cap の指示文（`packages/center/instructions/master-cap.md` の `[委譲]` `[待ち方]`）に、change の登録と見方、8 節の役割を移す改訂が要る。実装の task。session の起動の仕組みの変更（決定 15）はこの設計書の外。
@@ -242,7 +242,7 @@ session の起動の仕組みは変える予定で、毎回きれいな context 
 1. master-capが `change_register` で change と scope（消化する step の範囲）を server に登録する。server は登録を保存し、先頭の step を `queued` にして worker の起動の依頼を queue に積み（3.6）、残りの step は `pending` にする。change は `in_progress`。
 2. server が資源を見て起こせる時に、worker を起こす。worker は現在の step を実行する（1 step の範囲内。0 節の 8）。
 3. worker の run が終わったら、server が step の終わりを機械的に判定する（0 節の 10 の 2。利用者の見立ては「openspec は validate を使って、step の終了とかは判定できたはず」）。
-4. 判定が通れば、server は次の step を `pending` から `queued` にして worker の起動を queue に積む（step 2 → step 3 …）。scope の最後の step が通れば change は完了で、server が center に通知する。
+4. 判定が通れば、server は次の step を `pending` から `queued` にして worker の起動を queue に積む（step 2 → step 3 …）。scope の最後の step が通れば change は `completed`（登録した scope を消化し終えた。change 全体の完了ではない。3.5）になり、server が center に通知する。
 5. 判定が通らない時に何をするかは、未決 #4。
 
 **今の openspec / openspec-mcp で何が出来るか**: この設計を書いた環境には openspec の CLI も openspec-mcp も無く（`which openspec openspec-mcp` が何も返さない。global の npm package・`~/.npm/_npx` の cache にも無い）、repo の中にも、openspec の CLI・openspec-mcp の実体は無かった（`openspec` の語は、demo の fixture と e2e の seed の task 名に出るだけ）。**「validate で step の終了を判定できる」は利用者の見立てのままで、事実として確かめていない。** validate の引数・出力・何を見て終了とするかも、確かめていないので書かない。確かめられない所・足りない所は openspec-mcp の側の話で、openspec-mcp の project が決める（【openspec-mcp 待ち】）。この設計書が bantou 側で前提にするのは、「server が openspec / openspec-mcp を機械的に実行し、結果が通った / 通らないかを受け取れる」だけ。
@@ -273,7 +273,7 @@ session の起動の仕組みは変える予定で、毎回きれいな context 
    | 状態 | 意味 |
    |---|---|
    | `in_progress` | 登録済みで、下の 3 つのどれでもない（登録直後も含む。最初の step は `queued`） |
-   | `completed` | 今の scope の最後の step が通った（change 全体の完了ではない。次の scope を登録できる。決定 17） |
+   | `completed` | 今の scope の最後の step が通った（change 全体の完了ではない。決定 17 の例では、ここで一度戻り、次の scope を登録する） |
    | `stopped` | 止めた。`stop_change`（master-capの指示）で止めた |
    | `blocked` | 判定が通らず止まった。server が止めた（終わりの判定が通らない、worker が失敗して終わった、など。理由を持つ。未決 #4） |
 
@@ -289,6 +289,11 @@ session の起動の仕組みは変える予定で、毎回きれいな context 
    | `passed` | 判定が通った |
    | `blocked` | 判定が通らない・worker の失敗で止まった（change の `blocked` の原因になった step） |
    | `stopped` | `stop_change` で止めた（`pending` / `queued` の step も `stopped`） |
+
+   **change の状態の遷移（再登録）**: 決定 17 から言えるのは、「design と tasks までを 1 回登録し、戻ってから tasks の実行をもう 1 回 server に渡す」所まで。以下は、その細部の**案**（利用者の決定ではない）。
+   - 同じ `change_id` への再登録を許す。`completed` → `in_progress`（再登録の scope の先頭の step が `queued`、残りは `pending`）。step の記録は足し続け、前の scope の step は変えない。
+   - `blocked` / `stopped` の change も、再登録で `in_progress` に戻せる（行き止まりにしないため。未決 #4 案 A の「続ける」手段）。scope に含めた `blocked` / `stopped` の step は、やり直す。同じ session で続けるか新しく起こすかは実装の task。
+   - `repo` / `branch` を再登録で渡し直すか、change の記録の値を使うかは決めない（実装の task）。
 
    「止めた」（`stopped`。cap の指示）と「判定が通らず止まった」（`blocked`。server の判定）は別の状態として持つ。理由・次の動きが違う（`blocked` は未決 #4）。
 2. step の位置と session-id の結び付き: change の記録に「現在の step の番号」と、各 step の `worker_id` / `session_id` を持つ（0 節の 11「stepの位置はworkerのsession−idと紐付けて持ってる必要がある」）。server が再起動しても、この記録から続きを起こせる（今の `reservations.ts` と `owner.json` と同じく、ファイルに残す）。
@@ -323,13 +328,13 @@ master-capは center の tool（4.2）を使い、center が protocol（messenge
 
 | メッセージ（名前は仮） | 引数 | 返り値（成功） | 失敗（`ErrorReply.message` の内容） |
 |---|---|---|---|
-| `register_change`（change の登録） | `change_id`（AGENT_ID_PATTERN と同じ文字）、`scope`（消化する step の範囲。形は未決 #1）、`repo`、`branch?`、`worker_model?`（MODEL_PATTERN。step の worker の `--model` の既定）、通知先の鍵（今の `cap_id` と同じ形の id。center が付ける） | `{ type: "register_change_result", ok: true, change_id, accepted: true, state: "in_progress" }`（`state` は **change の状態**。登録直後は最初の step が `queued`）。受けて保存したら、worker の完了は待たずにすぐ返す（今の `worker_start` と同じ） | `change_id` が不正 / 登録済みで change の状態が `completed` でない（`completed` の change には次の scope を登録できる。決定 17） / `scope` が空 / `repo` が不正 / 更新中（`ErrorCode` の `updating`）・退役中（`ErrorReply.retiring`） |
+| `register_change`（change の登録） | `change_id`（AGENT_ID_PATTERN と同じ文字）、`scope`（消化する step の範囲。形は未決 #1）、`repo`、`branch?`、`worker_model?`（MODEL_PATTERN。step の worker の `--model` の既定）、通知先の鍵（今の `cap_id` と同じ形の id。center が付ける） | `{ type: "register_change_result", ok: true, change_id, accepted: true, state: "in_progress" }`（`state` は **change の状態**。登録直後は最初の step が `queued`）。受けて保存したら、worker の完了は待たずにすぐ返す（今の `worker_start` と同じ） | `change_id` が不正 / 登録済みで、change の状態が `in_progress` の間（再登録は `completed` / `blocked` / `stopped` の change に限る案。3.5） / `scope` が空 / `repo` が不正 / 更新中（`ErrorCode` の `updating`）・退役中（`ErrorReply.retiring`） |
 | `change_status`（進みの照会） | `change_id?`（省略で全ての change） | `{ type: "change_status_result", ok: true, changes: [{ change_id, state（**change の状態**）, step（現在の step の番号）, steps: [{ ref, worker_id, session_id, state（**step の状態**） }], reason?（`blocked` / `stopped` の理由）, updated_at }] }`。あわせて server の掲示（`board`。今の `status_result.board`）に queue の長さと資源を載せる | `change_id` が無い |
 | `stop_change`（止める） | `change_id` | `{ type: "stop_change_result", ok: true, change_id, stopped: boolean }`。動いている worker を止め（今の `stop` と同じく process group kill）、queue の依頼を取り下げ、change を `stopped`（**止めた**。server の判定で止まった `blocked` とは別）にし、動いていた step を `stopped` にする | `change_id` が無い / 動いている worker を止められなかった（`ErrorReply.message` に `worker_id` と理由。change の状態は変えない） |
 | `worker_reply`（質問への返答の受け口。今ある物の変更） | `worker_id`、`text`、`change_id`（今の `cap_id` の代わり） | `{ type: "worker_reply_result", ok: true, change_id, worker_id, accepted: true }`。同じ session で起こし直す依頼を queue に積んで、すぐ返す | `worker_id` が change の step の worker でない / step の状態が `waiting_reply` でない / `change_id` が違う |
 | `status` / `hello` / `update_server` / `retire_server`（今ある物） | 変えない。`status` の結果に change と queue・資源を足す（4.3） | — | — |
 
-- 続きの指示（change の scope に step を足す・step をやり直させる）は、利用者が話に出していないので、メッセージとして足さない。
+- 続きの指示（change の scope に step を足す・step をやり直させる）の専用のメッセージは、利用者が話に出していないので足さない。止まった・終わった change を続ける手段は、再登録（案。3.5 の遷移）で足りるか、未決 #4 で扱う。
 - step の worker の `worker_id` は server が採番する（change と step から決まる形。形式は実装の task）。cap は `change_id` で指す。
 
 ### 4.2 center の tool（`/mcp/session`。今の tool がどう変わるか）
@@ -424,8 +429,8 @@ tasks の instruction:
 | W2 | server の change の記録・登録の受け付け・queue（`register_change` / `change_status` / `stop_change`、`reservations.ts` の拡張、`workers.ts` の持ち主の鍵の付け替え） | 未決 #1・#2・#5 | W3 と別 file。center（W4）とは protocol の型が先に要る |
 | W3 | server の資源の管理と並行の判定（`resources.ts` / `activity.ts` を使う） | 未決 #3 | W2 と別 file |
 | W4 | center の tool の置き換え（`change_*`、`worker_reply`、master-cap の指示文（`master-cap.md`）の改訂）と protocol の型 | 4.1・4.3 の型 | server（W2・W3）と別 package |
+| W8（番号は W8 だが、W5 の前に要る） | 全 server が openspec-mcp につながる（client。schema-discovery の header で center を指す。決定 13） | **openspec-mcp のプロトコル**、各 server から openspec-mcp の host に届く事（【未確認】。7.5） | W5 の前に要る。server の版上げと配り直し（7.5）の一部 |
 | W5 | step の終わりの判定を server が実行する層と、次の step の起動 | **openspec-mcp のプロトコル**（実行の形・結果の読み方）、未決 #4 | W2 の後 |
-| W8 | 全 server が openspec-mcp につながる（client。schema-discovery の header で center を指す。決定 13） | **openspec-mcp のプロトコル**、各 server から openspec-mcp の host に届く事（【未確認】。7.5） | W5 の前に要る。server の版上げと配り直し（7.5）の一部 |
 | W6 | remote-cap の層を捨てる（3.1 の捨てる物）。旧メッセージの扱い（未決 #5） | W2〜W5 が動いた後 | 最後 |
 | W7 | docs の改訂（`docs/architecture.md` の server の実行モデル・`cap-orchestration.md` の廃止・`protocol.md`） | W1〜W6・W8 | 最後 |
 
@@ -481,7 +486,7 @@ tasks の instruction:
 
 **進め方の例（決定 17。決まった手順ではなく、選べる形の 1 つ）**:
 
-1. design と tasks までを step の範囲にして、server に 1 回登録する（`change_register`。proposal は master-cap が書く、または別の session に書かせる）。
+1. design と tasks までを step の範囲にして、server に 1 回登録する（`change_register`。proposal は master-cap が書く。proposal を remote の側に書かせてもよい（決定 18）が、change の登録の前に server の worker をどう起こすかは【未確定】で、この設計書は決めない）。
 2. 戻ってきたら（change の状態が `completed`）、中身を確かめる。確かめる人は master-cap が選ぶ（自分・サブエージェントなど）。
 3. 問題なければ、tasks の実行を step の範囲にして、同じ change にもう 1 回登録する（4.1。`completed` の change には次の scope を登録できる）。
 
@@ -497,7 +502,7 @@ tasks の instruction:
 cap が登録で渡す「消化する step の範囲」を、server がどう持つか。step の指し方（番号か見出しか）の形式は openspec / openspec-mcp が持つ形に合わせる（【openspec-mcp 待ち】）ので、ここで聞くのは、順序と範囲の持ち方だけ。
 - 案 A: 順序つきの step の参照の配列で渡す（`["<step>", "<step>", ...]`）。server は配列の順に消化する。参照の中身は bantou は解釈せず、そのまま openspec-mcp に渡す。
 - 案 B: 範囲（始点と終点）で渡し、中の列挙は openspec 側に聞く。
-- 同じ change への再登録（決定 17。design・tasks の後に tasks の実行を登録する）: 前の scope が `completed` の change に、新しい scope（案 A なら新しい配列）を足す。step の記録は足し続け、前の scope の step は変えない。
+- 同じ change への再登録（決定 17 の例。design・tasks の後に tasks の実行を登録する）: 再登録を許す事は決定 17 から出る。許す状態・step の記録の足し方・`repo` / `branch` の扱いは案（3.5）。案 A なら、新しい scope は新しい配列で渡す。
 - 推奨: A。理由: 順序が登録の時点で決まり、server が openspec に依らず「step 1 → step 2」を回せる（0 節の 10 の 2）。B は、列挙を openspec が返せるかに依る（【openspec-mcp 待ち】）。
 
 **未決 #2 queue の順序（0 節の 12）**
@@ -514,7 +519,7 @@ server が並行の数に責任を持つ（利用者の決定）。判定に使�
 
 **未決 #4 step の終わりの判定が通らなかった時（0 節の 10 の 2）**
 worker の run が終わったが、終わりの判定が通らなかった時に、server が何をするか。往復の上限は schema の責務（0 節の 7）なので、bantou は回数を数えない。
-- 案 A: change を `blocked`（理由つき）にして止め、center に通知する。次の step は起こさない。続けるかどうかは master-capが決める。
+- 案 A: change を `blocked`（理由つき）にして止め、center に通知する。次の step は起こさない。続けるかどうかは master-capが決め、続ける時は同じ `change_id` を再登録する（案。3.5。専用の「続き」のメッセージは足さない）。
 - 案 B: 同じ step の worker を、同じ session で続きとして起こし直す（queue を通る）。
 - 推奨: A。理由: bantou が往復を持たない（0 節の 7）形に合う。B は、回数の上限を bantou が持たないと止まらない。形 1（3.4）の schema では、条件を満たすまで worker が終わらないので、この場面は起きにくい【推測】。
 
