@@ -3,7 +3,7 @@
 - 作成: 2026-11-23
 - 基点: `develop` 4d98817（server 0.6.12）。code の記述は branch `docs/worker-gate-review`（ecd96f9）の tree を開いて確かめた。
 - 範囲: 設計だけ。code・test・設定は変えていない。
-- 書き方: 【事実】は repo の code / docs を開いて確かめた事（`file`。repo root からの path。行は変わりうるので関数名・定数名を主に書く）。【推測】は確かめていない解釈。【利用者の見立て】は利用者が言った事で、確かめていない物。【openspec-mcp 待ち】は openspec-mcp の project が決める事、または確かめられない事で、この設計書では決めない。決まっていない点は「未決 #N」（9 節）。
+- 書き方: 【事実】は repo の code / docs を開いて確かめた事（`file`。repo root からの path。行は変わりうるので関数名・定数名を主に書く）。【推測】は確かめていない解釈。【利用者の見立て】は利用者が言った事で、確かめていない物。【openspec-mcp 待ち】は openspec-mcp の project が決める事、または確かめられない事で、この設計書では決めない。決まっていない点は「未決 #N」（9 節）。【未確定】【未確認】は、決まっていない事・確かめていない事を本文中で示す印（【未確認】= 確かめていない事、【未確定】= 設計がまだ決まっていない事。未決の番号は付けない）。
 - 関係する設計: `docs/design/guardrail-schema-server.md`（`origin/docs/guardrail-schema-server`。guardrail の設定と schema の MCP server。進行中）、`docs/design/cap-orchestration.md`（今の remote-cap のルール）、`docs/design/center-tools.md`、`docs/architecture.md`。
 
 ## 0. 利用者と決まった事（原文つき）
@@ -293,6 +293,7 @@ session の起動の仕組みは変える予定で、毎回きれいな context 
    **change の状態の遷移（再登録）**: 決定 17 から言えるのは、「design と tasks までを 1 回登録し、戻ってから tasks の実行をもう 1 回 server に渡す」所まで。以下は、その細部の**案**（利用者の決定ではない）。
    - 同じ `change_id` への再登録を許す。`completed` → `in_progress`（再登録の scope の先頭の step が `queued`、残りは `pending`）。step の記録は足し続け、前の scope の step は変えない。
    - `blocked` / `stopped` の change も、再登録で `in_progress` に戻せる（行き止まりにしないため。未決 #4 案 A の「続ける」手段）。scope に含めた `blocked` / `stopped` の step は、やり直す。同じ session で続けるか新しく起こすかは実装の task。
+   - `blocked` の change を再登録した時、前の scope で `pending` のまま残っていた step は、再登録の scope に入っていれば今の scope の step として扱い、入っていなければ `pending` のまま残す。再登録の scope に入らない `blocked` の step は `blocked` のまま記録に残す（案。新しい機構は足さない）。
    - `repo` / `branch` を再登録で渡し直すか、change の記録の値を使うかは決めない（実装の task）。
 
    「止めた」（`stopped`。cap の指示）と「判定が通らず止まった」（`blocked`。server の判定）は別の状態として持つ。理由・次の動きが違う（`blocked` は未決 #4）。
@@ -334,7 +335,7 @@ master-capは center の tool（4.2）を使い、center が protocol（messenge
 | `worker_reply`（質問への返答の受け口。今ある物の変更） | `worker_id`、`text`、`change_id`（今の `cap_id` の代わり） | `{ type: "worker_reply_result", ok: true, change_id, worker_id, accepted: true }`。同じ session で起こし直す依頼を queue に積んで、すぐ返す | `worker_id` が change の step の worker でない / step の状態が `waiting_reply` でない / `change_id` が違う |
 | `status` / `hello` / `update_server` / `retire_server`（今ある物） | 変えない。`status` の結果に change と queue・資源を足す（4.3） | — | — |
 
-- 続きの指示（change の scope に step を足す・step をやり直させる）の専用のメッセージは、利用者が話に出していないので足さない。止まった・終わった change を続ける手段は、再登録（案。3.5 の遷移）で足りるか、未決 #4 で扱う。
+- 続きの指示（change の scope に step を足す・step をやり直させる）の専用のメッセージは、利用者が話に出していないので足さない。止まった・終わった change を続ける手段は、再登録（案。3.5 の遷移）とする。再登録の細部は案のまま、実装の task で決める。
 - step の worker の `worker_id` は server が採番する（change と step から決まる形。形式は実装の task）。cap は `change_id` で指す。
 
 ### 4.2 center の tool（`/mcp/session`。今の tool がどう変わるか）
@@ -454,7 +455,7 @@ tasks の instruction:
 
 ### 7.6 test の観点
 
-- 登録: `register_change` が保存して即返す／不正な `change_id`・重複・空の scope は `error`。
+- 登録: `register_change` が保存して即返す／不正な `change_id`・空の scope は `error`。`in_progress` の change への重複登録は `error`。`completed` / `blocked` / `stopped` の change への再登録は、案（3.5）の範囲で通り、`in_progress` に戻る（再登録の細部は案のまま、実装の task で決める）。
 - queue: 来た順に処理される。再起動後も残る。`stop_change` で取り下げられる。
 - 資源・並行: 判定が起こせない時は起きない／起こせる時に先頭だけ起きる。測定が取れない時の扱い（値が出た後に決める。未決 #3）。
 - step の進行: step 1 が通るまで step 2 が起きない／通ったら 1 回だけ起きる（二重に起きない）。scope の最後で change が `completed` になる。`stop_change` で止めた change は `stopped`、判定が通らず止まった change は `blocked` で、区別される。server が判定の中身を解釈せず、結果だけに従う。openspec-mcp が落ちている・遅い時に、次の step を起こさず止まる。
@@ -488,7 +489,7 @@ tasks の instruction:
 
 1. design と tasks までを step の範囲にして、server に 1 回登録する（`change_register`。proposal は master-cap が書く。proposal を remote の側に書かせてもよい（決定 18）が、change の登録の前に server の worker をどう起こすかは【未確定】で、この設計書は決めない）。
 2. 戻ってきたら（change の状態が `completed`）、中身を確かめる。確かめる人は master-cap が選ぶ（自分・サブエージェントなど）。
-3. 問題なければ、tasks の実行を step の範囲にして、同じ change にもう 1 回登録する（4.1。`completed` の change には次の scope を登録できる）。
+3. 問題なければ、tasks の実行を step の範囲にして、同じ change にもう 1 回登録する（決定 17 の範囲。再登録の細部は案で、3.5）。
 
 **知見の永続化**: 仕様・設計の知見は、openspec-mcp の change（proposal・design・tasks）に残り、会話に依らずに読める（決定 16。決定 15 の方向とも合う）。
 
