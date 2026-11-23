@@ -129,8 +129,8 @@ test("change の指示: 返信は protocol の型に合い、register → status
 
     const dup = await executeChange(parse({ type: "register_change", change_id: "ch1", scope: ["a"], repo: "r", notify_id: "n1" }), ctx);
     assert.ok(isServerReply(dup));
-    assert.deepEqual([dup.type, dup.ok], ["error", false]);
-    if (dup.type === "error") assert.deepEqual([dup.command, dup.change_id], ["register_change", "ch1"]);
+    assert.equal(dup.type, "error");
+    if (dup.type === "error") assert.deepEqual([dup.ok, dup.command, dup.change_id], [false, "register_change", "ch1"]);
 
     const bad = await executeChange(parse({ type: "change_reply", change_id: "ch1", worker_id: "ch1-s0", text: "x" }), ctx);
     assert.ok(isServerReply(bad));

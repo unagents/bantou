@@ -94,6 +94,9 @@ async function withRunner(fn: (f: Fx) => Promise<void>): Promise<void> {
   }
 }
 
+/** assert の型の絞り込みを受けずに通知を取り出す。 */
+const noticeAt = (f: Fx, i: number): ChangeNotice => f.notices[i]!;
+
 const reg = (id: string, scope: string[], extra: Record<string, unknown> = {}) => ({
   change_id: id,
   scope,
@@ -150,7 +153,7 @@ test("step は scope の順に 1 つずつ。通れば次、最後が通れば c
     assert.deepEqual(info!.steps.map((s) => s.state), ["passed", "passed"]);
     assert.deepEqual(info!.steps.map((s) => s.session_id), ["s0", "s1"]);
     assert.equal(f.notices.length, 1);
-    const n = f.notices[0]!;
+    const n = noticeAt(f, 0);
     assert.equal(n.type, "change_progress");
     if (n.type === "change_progress") {
       assert.equal(n.change_state, "completed");
@@ -384,6 +387,8 @@ test("再登録: stopped の change も動かし直せる", async () => {
     assert.equal(info!.state, "in_progress");
     assert.equal(info!.reason, undefined);
     assert.deepEqual(info!.steps.map((s) => s.state), ["stopped", "running"]);
+    // 現在の step は、止まった前の scope の step ではなく、新しい scope の先頭
+    assert.equal(info!.step, 1);
   });
 });
 
