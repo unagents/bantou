@@ -32,6 +32,7 @@ import { createCenterServer, createSessionMcpServer } from "./server.js";
 import { createCore } from "./core.js";
 import { createEventHub } from "./events.js";
 import { createSessionTokens } from "./session-auth.js";
+import { createGraphqlHandler } from "./graphql/server.js";
 import { createSessionActivityTracker, publishLastMessage } from "./session-activity.js";
 import { createServerLink } from "./server-link.js";
 import { createProcessStandInClient } from "./stand-in.js";
@@ -317,6 +318,10 @@ export async function runDaemon(args: CliArgs): Promise<void> {
       },
       core,
       events,
+      graphql: createGraphqlHandler(
+        { config, supervisor, link, sessions, remotes, follow, login, core, events, ...(config.workspace ? { workspace: config.workspace } : {}), log },
+        log,
+      ),
       ...(config.workspace ? { workspace: config.workspace } : {}),
       port: args.port,
       bind: args.bind,

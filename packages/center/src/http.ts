@@ -16,6 +16,8 @@ export const MCP_PATH = "/mcp";
 /** session（master-cap）向けの MCP 窓口。認証は session ごとの使い捨て token + header X-Bantou-Session。 */
 export const EVENTS_PATH = "/events";
 export const SESSION_MCP_PATH = "/mcp/session";
+/** GraphQL の endpoint（graphql/server.ts）。認証は今の Bearer（鍵の方式は段階 A3）。 */
+export const GRAPHQL_PATH = "/graphql";
 /** 統括の道具だけを出す口。割り当てた session にだけ（呼び出しの度に判定）。認証は /mcp/session と同じ session token。 */
 const OWNER_HEADER = "x-bantou-session";
 const SESSION_NAME = /^[A-Za-z0-9_-]+$/;
@@ -173,6 +175,8 @@ export async function startHttpServer(opts: {
   onHook?: (name: string, payload: unknown) => void;
   /** セッション増減の通知。渡すと GET /events（外向け token）を提供する。 */
   events?: EventHub;
+  /** GraphQL の handler（graphql/server.ts）。渡すと POST・GET /graphql を外向け token で提供する（subscription は SSE）。 */
+  graphql?: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
   /** SSE の keep-alive 間隔（テスト用）。 */
   keepAliveMs?: number;
   port: number;
@@ -446,6 +450,20 @@ export async function startHttpServer(opts: {
         unsubMessage();
         clearInterval(ka);
       });
+      return;
+    } else if (path === GRAPHQL_PATH && opts.graphql) {
+      if (!bearerMatches(req.headers.authorization, token)) {
+        sendJson(res, 401, { error: "unauthorized" }, { "www-authenticate": "Bearer" });
+        return;
+      }
+      // /events・core route と同じ（未決 #25 の推奨 A: loopback bind の時だけ Host を検査する）
+      if (allowed && !allowed.hosts.includes(req.headers.host ?? "")) {
+        sendJson(res, 403, { error: "forbidden host" });
+        return;
+      }
+      // `//graphql`・`/graphql/` も受けるので、正規化した path を yoga に見せる
+      req.url = query ? `${GRAPHQL_PATH}?${query}` : GRAPHQL_PATH;
+      await opts.graphql(req, res);
       return;
     } else if (statusLineMatch) {
       await handleSessionJson(req, res, statusLineMatch[1], "statusLine", opts.onStatusLine!);
