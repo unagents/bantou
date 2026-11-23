@@ -776,10 +776,10 @@ const savedFile = async (): Promise<{ name: string; sleeping?: boolean; sleepHan
 const wakeInputs = (w: FakeWrapper): string[] => w.inputs();
 const ASK = "スリープの依頼";
 
-/** 眠らせるところまで通す（working の turn の中で依頼 → Stop で頼む → 引継ぎ → Stop で停止）。 */
+/** 眠らせるところまで通す（turn の終わり → 依頼で引継ぎを頼む → 引継ぎ → Stop で停止）。 */
 async function sleepThrough(r: Rig, w: FakeWrapper): Promise<{ id: string; stored: string }> {
+  r.hook(hookOf("Stop")); // 作業中は断られるので、turn が終わってから依頼する
   await r.res.requestSleep("pm1");
-  r.hook(hookOf("Stop"));
   await until(() => w.inputs().length === 2);
   r.hook(hookOf("UserPromptSubmit", { prompt: "ask" }));
   const got = await r.res.request("pm1", HANDOFF);
@@ -788,17 +788,17 @@ async function sleepThrough(r: Rig, w: FakeWrapper): Promise<{ id: string; store
   return { id: got.handoff_id, stored: got.stored };
 }
 
-test("T1/T3: requestSleep は受理して即返す（まだ眠らない）。turn が動いていれば Stop で引継ぎを頼む 1 行を貼り、引継ぎを受けても Stop までは止めない。Stop で止める（新しい会話は起動しない）。sleeping と sleepHandoff が保存される", async () => {
+test("T1/T3: requestSleep は受理して即返す（まだ眠らない）。作業中は Stop を待たず断る。引継ぎを頼む 1 行を貼り、引継ぎを受けても Stop までは止めない。Stop で止める（新しい会話は起動しない）。sleeping と sleepHandoff が保存される", async () => {
   const r = await rig();
   const w1 = await boot(r);
+  // 作業中（working）は頼まず断る。印は残らない
+  await assert.rejects(r.res.requestSleep("pm1"), /作業中は眠らせられない/);
+  assert.deepEqual(w1.inputs(), []);
+  assert.equal(r.res.pending("pm1"), false);
+  r.hook(hookOf("Stop"));
   const q = await r.res.requestSleep("pm1");
   assert.deepEqual({ accepted: q.accepted, sleeping: q.sleeping, pending: q.pending }, { accepted: true, sleeping: false, pending: true });
-  // working の間は頼まない・止めない
-  await sleep(60);
-  assert.deepEqual(w1.inputs(), []);
-  assert.equal(r.sessions.list()[0]!.sleeping, false);
-  // turn の終わりで頼む 1 行（bracketed paste + Enter）
-  r.hook(hookOf("Stop"));
+  // 引継ぎを頼む 1 行（bracketed paste + Enter）
   await until(() => w1.inputs().length === 2);
   assert.ok(w1.inputs()[0]!.includes(ASK) && w1.inputs()[0]!.includes("session_resession"));
   assert.equal(w1.inputs()[1], "\r");
@@ -830,14 +830,18 @@ test("T1/T3: requestSleep は受理して即返す（まだ眠らない）。tur
   await r.close();
 });
 
-test("T1: idle の session は依頼の場で引継ぎを頼む 1 行を貼る", async () => {
+test("T4: 作業中（working・subagent・background）は Stop を待たず断る。待つ印も残さない", async () => {
   const r = await rig();
   const w1 = await boot(r);
+  await assert.rejects(r.res.requestSleep("pm1"), /作業中は眠らせられない/);
   r.hook(hookOf("Stop"));
-  assert.equal(r.sessions.list()[0]!.activity, "idle");
-  await r.res.requestSleep("pm1");
-  assert.ok(w1.inputs()[0]!.includes(ASK));
-  assert.equal(w1.inputs().length, 2);
+  r.hook(hookOf("SubagentStart", { agent_id: "a1" }));
+  assert.ok(r.sessions.list()[0]!.background.subagents > 0, "subagent が動いている");
+  await assert.rejects(r.res.requestSleep("pm1"), /作業中は眠らせられない/);
+  r.hook(hookOf("Stop"));
+  await sleep(40);
+  assert.equal(r.res.pending("pm1"), false);
+  assert.deepEqual(w1.inputs(), []);
   await r.close();
 });
 
@@ -891,8 +895,8 @@ test("T4: 書けない時は眠らせず理由を返す: needs-input・remote �
 test("T4: 引継ぎの申告の後に利用者の入力が来て会話が進んだ時は止めない（印を戻す）。頼んだ後に Stop で見直して working なら止めない", async () => {
   const r = await rig();
   const w1 = await boot(r);
-  await r.res.requestSleep("pm1");
   r.hook(hookOf("Stop"));
+  await r.res.requestSleep("pm1");
   await until(() => w1.inputs().length === 2);
   r.hook(hookOf("UserPromptSubmit", { prompt: "ask" }));
   await r.res.request("pm1", HANDOFF);
@@ -908,8 +912,8 @@ test("T4: 引継ぎの申告の後に利用者の入力が来て会話が進ん�
 test("T4: 見直し（Stop の後の check）が通らない時は止めない（Stop の後に remote の指示が走っていた）", async () => {
   const r = await rig();
   const w1 = await boot(r);
-  await r.res.requestSleep("pm1");
   r.hook(hookOf("Stop"));
+  await r.res.requestSleep("pm1");
   await until(() => w1.inputs().length === 2);
   r.hook(hookOf("UserPromptSubmit", { prompt: "ask" }));
   await r.res.request("pm1", HANDOFF);
@@ -1071,13 +1075,12 @@ test("T13: リセッション（restart の印）は今までどおり再起動�
   await r.close();
 });
 
-test("T14: pending は依頼（queued）・頼んだ間（asking）・起こした後の最初の入力待ち（wake）でも true。終われば false", async () => {
+test("T14: pending は引継ぎを頼んだ間（asking）・起こした後の最初の入力待ち（wake）でも true。終われば false", async () => {
   const r = await rig();
   const w1 = await boot(r);
   assert.equal(r.res.pending("pm1"), false);
-  await r.res.requestSleep("pm1");
-  assert.equal(r.res.pending("pm1"), true, "queued");
   r.hook(hookOf("Stop"));
+  await r.res.requestSleep("pm1");
   await until(() => w1.inputs().length === 2);
   assert.equal(r.res.pending("pm1"), true, "asking");
   r.hook(hookOf("UserPromptSubmit", { prompt: "ask" }));

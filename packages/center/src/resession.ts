@@ -52,15 +52,15 @@ export interface ResessionResult {
   restart: string;
 }
 
-/** queued = スリープの依頼を受けたが turn が動いている（Stop まで待って頼む）/ asking = 引継ぎを頼んだ（session_resession を待つ）。 */
-type Phase = "queued" | "asking" | "waiting-stop" | "restarting" | "awaiting-start";
+/** asking = スリープの引継ぎを頼んだ（session_resession を待つ）。 */
+type Phase = "asking" | "waiting-stop" | "restarting" | "awaiting-start";
 /** restart = リセッション / sleep = スリープ（止めるだけ）/ wake = スリープから起こした後の最初の入力待ち。 */
 type Kind = "restart" | "sleep" | "wake";
 /** 取り出しの結果。取り出しは投げず、失敗はこの形で `deliver` へ渡す。 */
 type Fetched = { ok: true; body: string } | { ok: false; reason: string };
 interface Mark {
   kind: Kind;
-  /** queued・asking の間は未定（""。引継ぎを受けてから入る）。 */
+  /** asking の間は未定（""。引継ぎを受けてから入る）。 */
   id: string;
   stored: "memory" | "file";
   phase: Phase;
@@ -81,7 +81,7 @@ export interface SleepRequestResult {
 export interface Resessioner {
   /**
    * session を眠らせる依頼（session_sleep の入口）。眠っている・未定義・config 由来の session は sleepNow（引継ぎ無し）へ任せる（今までの扱い）。
-   * 動いている session は安全確認を通し、引継ぎを頼む 1 行を入力に貼る（turn が動いていれば Stop まで待つ）。通らなければ理由つきで投げる（眠らせない）。
+   * 動いている session は安全確認を通し、引継ぎを頼む 1 行を入力に貼る。作業中（turn・subagent・background が動いている）を含め、通らなければ Stop を待たず理由つきで投げる（眠らせない。待ちの上限は置かない）。
    */
   requestSleep(session: string): Promise<SleepRequestResult>;
   /** 眠っている session を新しい会話で起こす起動の前に呼ぶ: 最初の入力で引継ぎを渡す印を付け、取り出しを始め、区切りの行を積む。 */
@@ -284,7 +284,6 @@ export function createResessioner(deps: ResessionDeps): Resessioner {
 
   /** 引継ぎを頼む 1 行を入力に貼る（asking にしてから）。入れられなければ印を外して投げる。 */
   const ask = async (session: string, mark: Mark): Promise<void> => {
-    mark.phase = "asking";
     try {
       await pasteInput(session, SLEEP_ASK_TEXT);
       log(`スリープの引継ぎを頼んだ: session=${session}`);
@@ -305,12 +304,13 @@ export function createResessioner(deps: ResessionDeps): Resessioner {
       }
       const cur = marks.get(session);
       if (cur && !isStale(cur)) throw new Error("すでにリセッション・スリープの途中（申告済み・依頼済み）");
-      // 安全確認（needs-input・remote 未完了・未返答・動いていない session は断る。理由は呼び出し元へ返る。眠らせない）。turn が動いている間は Stop まで待って頼む
+      // 安全確認（作業中・needs-input・remote 未完了・未返答・動いていない session は断る。理由は呼び出し元へ返る。眠らせない。Stop は待たない）
       check(session, false);
-      const mark: Mark = { kind: "sleep", id: "", stored: "memory", phase: s.activity === "working" ? "queued" : "asking", since: now() };
+      if (s.activity === "working" || s.background.subagents > 0 || s.background.tasks > 0) throw new Error("作業中は眠らせられない（turn・subagent・background が動いている。終わってから）");
+      const mark: Mark = { kind: "sleep", id: "", stored: "memory", phase: "asking", since: now() };
       marks.set(session, mark);
-      if (mark.phase === "asking") await ask(session, mark);
-      log(`スリープの依頼を受理: session=${session} phase=${mark.phase}`);
+      await ask(session, mark);
+      log(`スリープの依頼を受理: session=${session}`);
       return { name: session, state: s.state, accepted: true, sleeping: false, pending: true };
     },
 
@@ -382,22 +382,6 @@ export function createResessioner(deps: ResessionDeps): Resessioner {
         const name = str(p.hook_event_name);
         const mark = marks.get(session);
         if (!mark) return;
-        if (name === "Stop" && mark.phase === "queued") {
-          // turn が終わった。スリープの引継ぎを頼む（応答を返した後に貼る）
-          mark.phase = "asking";
-          defer(() =>
-            void (async () => {
-              try {
-                check(session, true);
-                await ask(session, mark);
-              } catch (e) {
-                if (marks.get(session) === mark) marks.delete(session);
-                log(`スリープの依頼を見送り: session=${session} ${e instanceof Error ? e.message : String(e)}`);
-              }
-            })(),
-          );
-          return;
-        }
         if (name === "UserPromptSubmit" && mark.phase === "waiting-stop") {
           // 申告の後に利用者の入力が来て会話が進んだ（Stop が来ないまま後の turn が走りうる）。古い引継ぎで再起動しないよう印を戻す（3.3 の 4 の「利用者の入力で working に戻ったら印を戻して見送る」と同じ扱い。必要なら session がもう一度申告する）
           marks.delete(session);

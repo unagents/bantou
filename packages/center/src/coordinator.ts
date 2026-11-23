@@ -149,7 +149,7 @@ export function registerCoordinatorTools(server: McpServer, deps: CoordinatorDep
     {
       title: "他の session をスリープさせる",
       description:
-        "name の session をスリープさせる（起動しないリセッション）。その session の agent に引継ぎを書かせてから、turn の終わりに claude の process を止める（メモリなどを空ける。設定・remote の記録は残る）。受理して即返す。眠るのは引継ぎが渡って turn が終わった後で、眠った事は session_brief の「スリープ」で分かる。利用者の入力待ち・未完了の remote の指示がある時などは、眠らせず理由つきで断られる。眠った session は、利用者が desktop で開いた時と、messenger でその session が宛先になった時に、新しい会話で自動で起き直し、最初の入力で引継ぎが渡る。すでに眠っている session には何もしない。name には他の session を指定する（自分自身を指定しない）。返り値 { name, state, sleeping, accepted, pending }（pending = true は引継ぎを頼んだ段階で、まだ眠っていない）",
+        "name の session をスリープさせる（起動しないリセッション）。その session の agent に引継ぎを書かせてから、turn の終わりに claude の process を止める（メモリなどを空ける。設定・remote の記録は残る）。受理して即返す。眠るのは引継ぎが渡って turn が終わった後で、眠った事は session_brief の「スリープ」で分かる。作業中（turn・subagent・background が動いている）・利用者の入力待ち・未完了の remote の指示がある時などは、Stop を待たず、眠らせず理由つきで断られる。眠った session は、利用者が desktop で開いた時と、messenger でその session が宛先になった時に、新しい会話で自動で起き直し、最初の入力で引継ぎが渡る。すでに眠っている session には何もしない。name には他の session を指定する（自分自身を指定しない）。返り値 { name, state, sleeping, accepted, pending }（pending = true は引継ぎを頼んだ段階で、まだ眠っていない）",
       inputSchema: { name: z.string().max(MAX_SESSION_NAME, `${MAX_SESSION_NAME} 文字以内`).regex(SESSION_NAME, "英数字と _ - のみ") },
     },
     async ({ name }) => {
