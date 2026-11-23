@@ -1,5 +1,7 @@
 import { getPlatform, getTransport } from "~/tauri";
-import type { CenterConnection, CenterConnectSnippets, CenterIpStatus, CenterLoginCode, CenterLoginStart, CenterParsedConnect, CenterCommonSettings, CenterSettings, CenterStatus, McpToolResult, ProjectSettings } from "../types";
+import { graphql } from "./graphql";
+import { M_RESTART_SESSION, M_START_SESSION_LOGIN, M_SUBMIT_SESSION_LOGIN_CODE, Q_RC_STATUS, Q_REMOTES_SERVERS, toRc, toServer } from "./graphql-docs";
+import type { CenterConnection, CenterConnectSnippets, CenterIpStatus, CenterLoginCode, CenterLoginStart, CenterParsedConnect, CenterRcStatus, CenterServer, CenterCommonSettings, CenterSettings, CenterStatus, McpToolResult, ProjectSettings } from "../types";
 
 export const centerGetSettings = () => getTransport().invoke<CenterSettings>("center_get_settings");
 
@@ -96,24 +98,29 @@ export const openExternalUrl = (url: string) => {
   return getPlatform().openExternal(href);
 };
 
-/** Start `/login` in the session's claude (`session_login`): resolves with the URL to open in a browser. */
-export const sessionLogin = (name: string) => centerToolStrict<CenterLoginStart>("session_login", { name });
+/** Start `/login` in the session's claude (`startSessionLogin`): resolves with the URL to open in a browser. */
+export const sessionLogin = async (name: string): Promise<CenterLoginStart> =>
+  (await graphql.request<{ startSessionLogin: CenterLoginStart }>(M_START_SESSION_LOGIN, { name })).startSessionLogin;
 
 /**
- * Feed the code from the browser to the session's claude (`session_login_code`). Resolves with the result also when
+ * Feed the code from the browser to the session's claude (`submitSessionLoginCode`). Resolves with the result also when
  * the login failed (`ok: false`, `error` says why); rejects only when the call itself failed (timeout, no pty).
  */
 export async function sessionLoginCode(name: string, code: string): Promise<CenterLoginCode> {
-  const r = await centerCall("session_login_code", { name, code });
-  const text = r.content.map((c) => c.text ?? "").join("");
-  // A failed login still has `ok: false`; a failed call (timeout, no pty) has only `error`.
-  const v = JSON.parse(text) as Partial<CenterLoginCode> & { error?: string | null };
-  if (typeof v.ok !== "boolean") throw new Error(v.error ?? `session_login_code: ${text}`);
-  return v as CenterLoginCode;
+  return (await graphql.request<{ submitSessionLoginCode: CenterLoginCode }>(M_SUBMIT_SESSION_LOGIN_CODE, { name, code })).submitSessionLoginCode;
 }
 
-/** Stop the session's claude and start it again with `--continue` (`rc_stop` + `rc_start resume`). */
+/** Stop the session's claude and start it again with `--continue` (`restartSession`). */
 export async function sessionRestart(name: string): Promise<void> {
-  await centerToolStrict("rc_stop", { project: name });
-  await centerToolStrict("rc_start", { project: name, resume: true });
+  await graphql.request(M_RESTART_SESSION, { name });
+}
+
+/** The peers (servers) registered on the broker (`servers`). */
+export async function serverList(): Promise<CenterServer[]> {
+  return (await graphql.request<{ servers: Parameters<typeof toServer>[0][] }>(Q_REMOTES_SERVERS)).servers.map(toServer);
+}
+
+/** The state of each session's claude process (`rcStatus`). */
+export async function rcList(): Promise<CenterRcStatus[]> {
+  return (await graphql.request<{ rcStatus: Parameters<typeof toRc>[0][] }>(Q_RC_STATUS)).rcStatus.map(toRc);
 }

@@ -129,6 +129,7 @@ pub fn run() {
             center_snippet::center_parse_connect,
             center_mcp::center_call,
             center_mcp::center_connection,
+            center_mcp::center_graphql_target,
             terminal::session_output_start,
             terminal::session_output_stop,
             terminal::session_input,

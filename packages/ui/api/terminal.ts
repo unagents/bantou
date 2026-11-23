@@ -1,11 +1,7 @@
-import { getTransport } from "~/tauri";
+import { graphql } from "./graphql";
+import { M_TERMINAL_INPUT, M_TERMINAL_RESIZE, S_TERMINAL_OUTPUT } from "./graphql-docs";
 
-/** One output chunk (or a reset) of a session's terminal, emitted by the Rust SSE client. */
-export const SESSION_OUTPUT_EVENT = "session-output";
-/** Connection state of the output stream of a session. */
-export const SESSION_OUTPUT_STATUS_EVENT = "session-output-status";
-
-/** Mirror of `src-tauri/src/terminal.rs::OutputPayload`. */
+/** One output chunk (or a reset) of a session's terminal (subscription `terminalOutput`). */
 export interface SessionOutput {
   session: string;
   /** Chunk id (0 on a reset). */
@@ -15,22 +11,71 @@ export interface SessionOutput {
   reset: boolean;
 }
 
-/** Mirror of `src-tauri/src/terminal.rs::StatusPayload`. */
+/** Connection state of the output stream of a session. */
 export interface SessionOutputStatus {
   session: string;
   state: "connected" | "retrying" | "rejected";
   message: string | null;
 }
 
-/** Open the output stream of a session; `after` = the last chunk id already held (null: from the start). */
-export const sessionOutputStart = (session: string, after: number | null) =>
-  getTransport().invoke<void>("session_output_start", { session, after });
+interface TerminalEvent {
+  type: "output" | "reset" | "status";
+  id: number | null;
+  data: string | null;
+  status: string | null;
+}
 
-export const sessionOutputStop = (session: string) => getTransport().invoke<void>("session_output_stop", { session });
+const outputHandlers = new Set<(p: SessionOutput) => void>();
+const statusHandlers = new Set<(p: SessionOutputStatus) => void>();
 
-/** Keystrokes (base64 of the bytes) to the session's pty. */
-export const sessionInput = (session: string, dataB64: string) =>
-  getTransport().invoke<void>("session_input", { session, dataB64 });
+/** Chunks and resets of every open output stream. Returns the function that stops listening. */
+export function onSessionOutput(handler: (p: SessionOutput) => void): () => void {
+  outputHandlers.add(handler);
+  return () => outputHandlers.delete(handler);
+}
 
-export const sessionResize = (session: string, cols: number, rows: number) =>
-  getTransport().invoke<void>("session_resize", { session, cols, rows });
+/** Connection states of every open output stream. Returns the function that stops listening. */
+export function onSessionOutputStatus(handler: (p: SessionOutputStatus) => void): () => void {
+  statusHandlers.add(handler);
+  return () => statusHandlers.delete(handler);
+}
+
+const emitOutput = (p: SessionOutput) => outputHandlers.forEach((h) => h(p));
+const emitStatus = (p: SessionOutputStatus) => statusHandlers.forEach((h) => h(p));
+
+const streams = new Map<string, () => void>();
+
+/** Open the output stream of a session; `after` = the last chunk id already held (null: from the start). A reopened one (a drop) continues from the last chunk it delivered. */
+export async function sessionOutputStart(session: string, after: number | null): Promise<void> {
+  streams.get(session)?.();
+  let last = after;
+  const stop = graphql.subscribe<{ terminalOutput: TerminalEvent }>(S_TERMINAL_OUTPUT, () => ({ session, after: last }), {
+    onNext: ({ terminalOutput: ev }) => {
+      if (ev.type === "output" && ev.id !== null && ev.data !== null) {
+        last = ev.id;
+        emitOutput({ session, id: ev.id, data: ev.data, reset: false });
+      } else if (ev.type === "reset") {
+        last = null;
+        emitOutput({ session, id: 0, data: "", reset: true });
+      }
+      // `status` (end): the stream closes after it; the drop is reported as `retrying` and the stream is opened again
+    },
+    onOpen: () => emitStatus({ session, state: "connected", message: null }),
+    onStatus: (state, message) => emitStatus({ session, state, message }),
+  });
+  streams.set(session, stop);
+}
+
+export async function sessionOutputStop(session: string): Promise<void> {
+  streams.get(session)?.();
+  streams.delete(session);
+}
+
+/** Keystrokes (base64 of the bytes) to the session's pty (`terminalInput`). */
+export const sessionInput = async (session: string, dataB64: string): Promise<void> => {
+  await graphql.request(M_TERMINAL_INPUT, { session, dataB64 });
+};
+
+export const sessionResize = async (session: string, cols: number, rows: number): Promise<void> => {
+  await graphql.request(M_TERMINAL_RESIZE, { session, cols, rows });
+};

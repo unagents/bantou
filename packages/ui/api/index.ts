@@ -1,11 +1,14 @@
-// Single entry point for every Tauri `invoke` — components import from
-// `~/api` and never call `invoke` directly.
+// Single entry point for every call to the center and the OS — components import from
+// `~/api` and never call `invoke` or `fetch` directly. The center is reached by GraphQL (`graphql.ts`);
+// `invoke` is left for the desktop's own OS-side commands and the calls GraphQL does not have yet (see `center.ts`).
 export {
   centerCall,
   centerCommonSettingsGet,
   centerCommonSettingsUpdate,
   centerToolStrict,
   openExternalUrl,
+  rcList,
+  serverList,
   sessionLogin,
   sessionLoginCode,
   sessionRestart,
@@ -20,23 +23,27 @@ export {
   centerStatus,
   centerTool,
 } from "./center";
+export { GraphqlError } from "./graphql";
 export {
-  CENTER_SESSIONS_CHANGED_EVENT,
   createSession,
   sessionPathHints,
   getSessionSettings,
   listSessions,
+  onSessionListChanged,
+  onSessionMessage,
+  onSessionsChanged,
   OS_NETWORK_EVENT,
   OS_WAKE_EVENT,
   CENTER_RUNNING_EVENT,
   refreshSessions,
-  SESSIONS_CHANGED_EVENT,
   updateSession,
   sleepSession,
   wakeSession,
   updateSessionSettings,
+  type SessionMessage,
+  type SessionsChange,
+  type SleepSessionResult,
 } from "./sessions";
-export { CENTER_SESSION_MESSAGE_EVENT } from "./sessions";
 export {
   CHECK_FOR_UPDATES_EVENT,
   checkForUpdate,
@@ -55,8 +62,8 @@ export {
 export { errorText, logWebview } from "./log";
 export { getStatuses, listTasks } from "./tasks";
 export {
-  SESSION_OUTPUT_EVENT,
-  SESSION_OUTPUT_STATUS_EVENT,
+  onSessionOutput,
+  onSessionOutputStatus,
   sessionInput,
   sessionOutputStart,
   sessionOutputStop,

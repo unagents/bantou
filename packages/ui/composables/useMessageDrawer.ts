@@ -1,5 +1,4 @@
-import { getTransport, type UnlistenFn } from "~/tauri";
-import { CENTER_SESSION_MESSAGE_EVENT } from "../api";
+import { onSessionMessage } from "../api";
 
 /** One entry of the drawer: a session's final message to the user (its last response of a turn). */
 export interface DrawerMessage {
@@ -15,14 +14,13 @@ export interface DrawerMessage {
 export const MAX_DRAWER_MESSAGES = 500;
 
 /**
- * The drawer's messages: every `center-session-message` is appended in the order it arrives (memory only, the newest
+ * The drawer's messages: every `sessionMessage` of the center is appended in the order it arrives (memory only, the newest
  * `MAX_DRAWER_MESSAGES`). Listening starts on mount and stops on unmount.
  */
 export function useMessageDrawer() {
   const messages = ref<DrawerMessage[]>([]);
   let seq = 0;
-  let unlisten: UnlistenFn | null = null;
-  let alive = true;
+  let unlisten: (() => void) | null = null;
 
   function push(m: { session?: unknown; text?: unknown; at?: unknown }) {
     if (typeof m.session !== "string" || typeof m.text !== "string") return;
@@ -31,13 +29,10 @@ export function useMessageDrawer() {
     messages.value = next.length > MAX_DRAWER_MESSAGES ? next.slice(next.length - MAX_DRAWER_MESSAGES) : next;
   }
 
-  onMounted(async () => {
-    const un = await getTransport().listen<{ session?: unknown; text?: unknown; at?: unknown }>(CENTER_SESSION_MESSAGE_EVENT, push);
-    if (alive) unlisten = un;
-    else un();
+  onMounted(() => {
+    unlisten = onSessionMessage(push);
   });
   onBeforeUnmount(() => {
-    alive = false;
     unlisten?.();
   });
 

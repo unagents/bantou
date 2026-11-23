@@ -1,7 +1,6 @@
-import { getTransport, type UnlistenFn } from "~/tauri";
 import {
-  SESSION_OUTPUT_EVENT,
-  SESSION_OUTPUT_STATUS_EVENT,
+  onSessionOutput,
+  onSessionOutputStatus,
   sessionOutputStart,
   sessionOutputStop,
   type SessionOutput,
@@ -18,7 +17,7 @@ const buffers = new Map<string, SessionBuffer>();
 const sinks = new Map<string, TerminalSink>();
 /** Latest connection state per session (reactive for the view). */
 const status = reactive<Record<string, SessionOutputStatus["state"]>>({});
-let unlisten: UnlistenFn[] | null = null;
+let unlisten: (() => void)[] | null = null;
 let listening: Promise<void> | null = null;
 
 function buffer(session: string): SessionBuffer {
@@ -41,8 +40,8 @@ function onOutput(p: SessionOutput) {
 function ensureListening(): Promise<void> {
   listening ??= (async () => {
     unlisten = [
-      await getTransport().listen<SessionOutput>(SESSION_OUTPUT_EVENT, (p) => onOutput(p)),
-      await getTransport().listen<SessionOutputStatus>(SESSION_OUTPUT_STATUS_EVENT, (p) => {
+      onSessionOutput((p: SessionOutput) => onOutput(p)),
+      onSessionOutputStatus((p: SessionOutputStatus) => {
         status[p.session] = p.state;
       }),
     ];
@@ -51,7 +50,7 @@ function ensureListening(): Promise<void> {
 }
 
 /**
- * Terminal output of center sessions: the Rust side streams it as `session-output` events; this keeps a
+ * Terminal output of center sessions: the `terminalOutput` subscription feeds it (`api/terminal.ts`); this keeps a
  * 2 MiB buffer and the last chunk id per session. The view attaches a sink to get live bytes.
  */
 export function useTerminalStore() {

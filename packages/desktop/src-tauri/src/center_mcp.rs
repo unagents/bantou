@@ -519,6 +519,27 @@ pub async fn center_call(
         .map_err(CommandError::Other)
 }
 
+/// Where the webview's GraphQL client sends its documents: `<origin of the MCP url>/graphql` and the Bearer header of the center in use.
+#[derive(Debug, PartialEq, Serialize)]
+pub struct GraphqlTarget {
+    pub url: String,
+    pub headers: std::collections::BTreeMap<String, String>,
+}
+
+pub(crate) fn graphql_target_of(t: &Target) -> Result<GraphqlTarget, String> {
+    let url = crate::terminal::center_url(&t.url, &["graphql"])?;
+    let mut headers = std::collections::BTreeMap::new();
+    if let Some(token) = t.token.as_deref() {
+        headers.insert("authorization".to_string(), format!("Bearer {token}"));
+    }
+    Ok(GraphqlTarget { url: url.to_string(), headers })
+}
+
+#[tauri::command]
+pub fn center_graphql_target(app: tauri::AppHandle) -> CmdResult<GraphqlTarget> {
+    graphql_target_of(&target(&app)?).map_err(CommandError::Other)
+}
+
 /// Which center the desktop talks to now (own sidecar / pasted remote). Err: no target.
 pub(crate) fn current_source(app: &tauri::AppHandle) -> CmdResult<TargetSource> {
     select_target(&load_settings(app)?).map(|t| t.source).ok_or_else(|| CommandError::other(NO_TARGET))
@@ -562,6 +583,16 @@ mod tests {
             token: "sidecar-token-123".into(),
             ..CenterSettings::default()
         }
+    }
+
+    #[test]
+    fn graphql_target_is_the_graphql_path_of_the_mcp_origin_with_the_bearer() {
+        let t = Target { url: "http://127.0.0.1:7920/mcp".into(), token: Some("tok".into()), source: TargetSource::Sidecar };
+        let g = graphql_target_of(&t).unwrap();
+        assert_eq!(g.url, "http://127.0.0.1:7920/graphql");
+        assert_eq!(g.headers.get("authorization").map(String::as_str), Some("Bearer tok"));
+        let none = Target { token: None, ..t };
+        assert!(graphql_target_of(&none).unwrap().headers.is_empty());
     }
 
     #[test]

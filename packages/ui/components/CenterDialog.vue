@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { centerConnection, centerTool } from "../api";
+import { centerConnection, rcList, serverList } from "../api";
 import type { CenterConnection, CenterRcStatus, CenterServer } from "../types";
 
 const open = defineModel<boolean>("open", { required: true });
@@ -16,7 +16,7 @@ const errorOf = (e: unknown) => String(e);
 /** The servers registered on the broker with protocol "bantou" (`server_list`). */
 async function loadServers() {
   try {
-    servers.value = await centerTool<CenterServer[]>("server_list");
+    servers.value = await serverList();
     serversError.value = null;
   } catch (e) {
     servers.value = [];
@@ -36,7 +36,7 @@ async function refresh() {
       return;
     }
     void loadServers();
-    rc.value = await centerTool<CenterRcStatus[]>("rc_list");
+    rc.value = await rcList();
   } catch (e) {
     error.value = errorOf(e);
   } finally {

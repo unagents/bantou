@@ -1,7 +1,7 @@
 import { getTransport, type UnlistenFn } from "~/tauri";
 import { useIntervalFn } from "@vueuse/core";
 import { createRefreshGate, KEY_REFRESH_MIN_MS } from "./refreshGate";
-import { CENTER_RUNNING_EVENT, CENTER_SESSIONS_CHANGED_EVENT, errorText, logWebview, OS_NETWORK_EVENT, OS_WAKE_EVENT, refreshSessions } from "../api";
+import { CENTER_RUNNING_EVENT, errorText, logWebview, onSessionsChanged, OS_NETWORK_EVENT, OS_WAKE_EVENT, refreshSessions } from "../api";
 
 /** Insurance against missed notifications: long on purpose. */
 export const SAFETY_REFRESH_MS = 5 * 60_000;
@@ -17,10 +17,10 @@ export const STARTUP_RETRY_CAP_MS = 60_000;
 /**
  * Keeps the side menu in step with the center's `session_list`.
  *
- * The list is read again (Rust keeps the last list; unreachable is reported with it):
+ * The list is read again (`api/sessions.ts` keeps the last list; unreachable is reported with it):
  * - before the user does anything in the window (pointer: capture phase, every time; key: capture phase, at most once per
  *   `KEY_REFRESH_MIN_MS`, so typing in a terminal does not read the list per key; the first key after a pause still does),
- * - when the center reports a session change (`center-sessions-changed`; reason created / deleted / restored / updated / context / activity, not filtered),
+ * - when the center reports a session change (subscription `sessionsChanged`; reason created / deleted / restored / updated / context / activity, not filtered),
  * - when the OS reports a wake from sleep (and once more shortly after) or a network change,
  * - when the own sidecar center is started (`bantou://center-running`),
  * - when `refreshNow()` is called by the owner (target changed: settings, pasted connection),
@@ -93,7 +93,7 @@ export function useSessionRefresh() {
     document.addEventListener("pointerdown", onUserAction, true);
     document.addEventListener("keydown", onKey, true);
     unlisten.push(
-      await getTransport().listen(CENTER_SESSIONS_CHANGED_EVENT, () => void refreshNow()),
+      onSessionsChanged(() => void refreshNow()),
       await getTransport().listen(OS_WAKE_EVENT, () => {
         void refreshNow();
         clearTimeout(retry);
