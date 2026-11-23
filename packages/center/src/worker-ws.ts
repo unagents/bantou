@@ -119,7 +119,7 @@ const reject = (socket: Duplex, status: string): void => {
  */
 export function attachWorkerWs(http: Server, opts: { token: string; tracker: WorkerTracker; log: Logger }): { close: () => void } {
   const { token, tracker, log } = opts;
-  const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
+  const wss = new WebSocketServer({ noServer: true });
   const onUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer): void => {
     let url: URL;
     try {
