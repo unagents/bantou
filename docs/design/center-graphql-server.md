@@ -221,8 +221,8 @@ center（GraphQL を持つ backend の server。program は 1 つ、起動の形
 | `sessionSettings(name)` | `ProjectSettings`（instructions / addDirs / outputStyle / servers）。launcher 鍵で守っていた 7 項目（memory / mcpServers / projectMemory / mcp / mcpConnections / mcpSecrets / coordinator）も、client の画面から変えられる（決定 6。field の形は #6） | `session_settings_get` |
 | `centerSettings` | center 共通の設定（`CenterCommonSettings`）（今の `center_settings_get` は `launcher`（呼び出し元が起動元か）も返す。型は `packages/ui/api/center.ts` の `{ settings, launcher? }`。起動元で client を分ける形は無くなるので、`launcher` は不要になる見込み。決定 6） | `center_settings_get` |
 | `centerInfo` | `{ workspace, systemInstructions[]（id / version / title） }`（`center_info` の形。`session_path_hints` の素は workspace。今の `launcher` は上と同じ理由で不要になる見込み） | `center_info` |
-| `remotes` | `CenterRemoteRecord[]`（remote_id・session・owners・server・serverName・server_label・state・model・createdAt・finishedAt） | `remote_list` |
-| `servers` | `ServerInfo[]`（broker に protocol「bantou」で登録されている peer の一覧。name・host・protocol の版・lastSeen・version（server-info の答え）） | `server_list` |
+| `remotes` | `CenterRemoteRecord[]`（remote_id・session・owners・server・serverName・server_label・state・model・createdAt・finishedAt。`state` は `RemoteState` = `running` / `stopped` の 2 値） | `remote_list` |
+| `servers` | `ServerInfo[]`（broker に protocol「bantou」で登録されている peer の一覧。name・host・protocol の版・lastSeen・version（server-info の答え）。元は MCP の `server_list` と同じ `ServerLink.listServers`（name・host・protocol・last_seen）で、`last_seen` を `lastSeen` に写す） | `server_list` |
 | `rcStatus` | `CenterRcStatus[]` | `rc_list` |
 | `terminalOutputSince(session, after)` | 端末の出力の取り直し（`after` 以降のチャンク）。通常は subscription `terminalOutput` を使う。root type が別なので同名の field も書けるが、混同を避けて Query 側の名前を分ける | `GET /sessions/<n>/output?after=` |
 

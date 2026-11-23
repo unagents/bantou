@@ -163,7 +163,7 @@ test("query centerInfo / centerVersion: workspace・システム埋め込み指�
 test("query remotes: remote_list（owner 無し）の全件。filter は空で呼ぶ", async () => {
   const calls: unknown[] = [];
   const running = { remote_id: "s-cap@srv", session: "s", owners: ["s"], server: "srv", serverName: "srv", server_label: "srv", state: "running", model: "sonnet", createdAt: "2026-11-23T00:00:00Z" };
-  const done = { remote_id: "t-cap@srv2", session: "t", owners: ["t"], server: "srv2", serverName: "srv2", server_label: "srv2", state: "done", finishedAt: "2026-11-23T00:01:00.000Z", createdAt: "2026-11-23T00:00:30Z" };
+  const done = { remote_id: "t-cap@srv2", session: "t", owners: ["t"], server: "srv2", serverName: "srv2", server_label: "srv2", state: "stopped", finishedAt: "2026-11-23T00:01:00.000Z", createdAt: "2026-11-23T00:00:30Z" };
   const { h, q } = await boot({ remotes: { list: (f: unknown) => (calls.push(f), [running, done]) } });
   try {
     const r = await q("{remotes{remote_id session owners server serverName server_label state model createdAt finishedAt}}");
@@ -183,8 +183,8 @@ test("query remotes: remote_list（owner 無し）の全件。filter は空で�
 test("query servers / rcStatus: servers は broker の protocol「bantou」の peer（listServers）と server-info の版。link が投げたら message つきの error。rc_list の写し", async () => {
   let fail = false;
   const peers = [
-    { name: "srv", host: "h1", protocol: "2.0.0", lastSeen: "2026-11-23T00:00:00Z" },
-    { name: "srv2", host: null, protocol: null, lastSeen: null },
+    { name: "srv", host: "h1", protocol: "2.0.0", last_seen: "2026-11-23T00:00:00Z" },
+    { name: "srv2", host: null, protocol: null, last_seen: null },
   ];
   const { h, q } = await boot({
     link: {

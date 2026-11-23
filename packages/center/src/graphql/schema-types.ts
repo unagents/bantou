@@ -13,8 +13,8 @@ export const typeDefs = /* GraphQL */ `
   """ needs-input は GraphQL の名前に使えないので needs_input（内部の値は resolvers/enums.ts で写す）。 """
   enum SessionActivityState { working needs_input idle unknown }
   enum AuthState { ok login_required keychain_locked }
-  """ running = worker の ws の最後の書き込みから 60 秒以内 / done = 止まっている（60 秒無音）。failed・unknown は v2 の center は出さない（画面の値の写し）。 """
-  enum RemoteState { running done failed unknown }
+  """ running = worker の ws の最後の書き込みから 60 秒以内 / stopped = 止まっている（60 秒無音）。remote_list の state と同じ 2 値。 """
+  enum RemoteState { running stopped }
   enum RemoteIssueKind { failed no_result }
   enum RcState { stopped starting connected error }
   enum CenterRunState { stopped running restarting error }
@@ -170,7 +170,7 @@ export const typeDefs = /* GraphQL */ `
 
   # ---- remote / server / rc ----
 
-  """ remote_list の 1 件（session × server の cap）。state は worker の ws の最後の書き込みから（running / done = 止まっている）。finishedAt は止まっている時の最後の書き込みの時刻。 """
+  """ remote_list の 1 件（session × server の cap）。state は worker の ws の最後の書き込みから（running / stopped = 止まっている）。finishedAt は止まっている時の最後の書き込みの時刻。 """
   type RemoteRecord {
     remote_id: String!
     session: String

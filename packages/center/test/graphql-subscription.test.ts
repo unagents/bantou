@@ -207,12 +207,16 @@ test("subscription remotesChanged: 実の RemoteManager・tracker につなぐ�
     await until(() => active.events === 1, "購読が張られる");
     const got = async () => (await s.next())?.data;
     await manager.send({ owner: "a", server: "srv", prompt: "p" });
+    // launch だけでは running にならない（worker の ws の書き込みが無い間は stopped）
+    assert.equal(manager.list({})[0].state, "stopped");
+    // /ws/worker の書き込み（tracker.note）: running
+    tracker.note(manager.list({})[0].remote_id.split("@")[0]);
     assert.deepEqual(await got(), { remotesChanged: { reason: "remote", name: "a" } });
     assert.equal(manager.list({})[0].state, "running");
     // 60 秒無音（周期の確認が見つける）: 止まっている
     t += 61_000;
     assert.deepEqual(await got(), { remotesChanged: { reason: "remote", name: "a" } });
-    assert.equal(manager.list({})[0].state, "done");
+    assert.equal(manager.list({})[0].state, "stopped");
     // /ws/worker の書き込み（tracker.note）: running に戻る
     tracker.note(manager.list({})[0].remote_id.split("@")[0]);
     assert.deepEqual(await got(), { remotesChanged: { reason: "remote", name: "a" } });
