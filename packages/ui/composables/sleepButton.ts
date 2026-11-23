@@ -1,3 +1,6 @@
+import type { Session, SessionActivity } from "../types";
+import { sleepBlock } from "./sessionStatus";
+
 /** What the sleep button needs of a session row (`SessionGroup`). */
 export interface SleepButtonSession {
   name: string;
@@ -17,11 +20,19 @@ export interface SleepButtonState {
  */
 export function sleepButtonState(g: SleepButtonSession): SleepButtonState {
   if (g.sleepBlock !== null) return { disabled: true, title: g.sleepBlock };
-  return { disabled: false, title: "スリープさせる（引継ぎを書かせてから止める。開くと新しい会話で引継ぎを渡す）" };
+  return { disabled: false, title: "スリープさせる" };
 }
 
 /** The button's click: a session that can not sleep now is left alone (the handler is not called). */
 export function clickSleep(g: SleepButtonSession, sleep: (name: string) => unknown): void {
   if (sleepButtonState(g).disabled) return;
   void sleep(g.name);
+}
+
+/**
+ * `sleepBlock` for a board row: the row's own `activity` decides needs-input (a waiting thread on one of the session's tasks
+ * makes the row needs-input even when the center says idle; `useBoard` sets that after building the row).
+ */
+export function rowSleepBlock(r: Session | undefined, reachable: boolean, rowActivity: SessionActivity | null): string | null {
+  return sleepBlock(r, reachable, rowActivity === "needs-input");
 }

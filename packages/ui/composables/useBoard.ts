@@ -10,8 +10,9 @@ import {
   SESSIONS_CHANGED_EVENT,
   THREADS_CHANGED_EVENT,
 } from "../api";
+import { rowSleepBlock } from "./sleepButton";
 import type { ChipKey } from "./useSessionBoard";
-import { capActivity, sessionProgress, sleepBlock, type SessionProgress } from "./sessionStatus";
+import { capActivity, sessionProgress, type SessionProgress } from "./sessionStatus";
 import type { CenterAuthState, ContextUsage, Ping, RemoteIssue, SessionActivity, SessionList, Task, Thread } from "../types";
 
 /** How often the remaining time of the ping timers is re-evaluated. */
@@ -177,7 +178,7 @@ export function useBoard(dir: Ref<string | null>) {
       }
     }
     // After the thread ask above: a waiting thread makes the row needs-input, which the center also refuses.
-    for (const g of map.values()) g.sleepBlock = sleepBlock(find(g.name), centerList.value.reachable, g.activity === "needs-input");
+    for (const g of map.values()) g.sleepBlock = rowSleepBlock(find(g.name), centerList.value.reachable, g.activity);
     return [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
   });
 

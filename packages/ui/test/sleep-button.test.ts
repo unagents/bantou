@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { clickSleep, sleepButtonState } from "../composables/sleepButton";
+import { clickSleep, rowSleepBlock, sleepButtonState } from "../composables/sleepButton";
 import { sleepBlock } from "../composables/sessionStatus";
 import type { Session } from "../types";
 
@@ -53,5 +53,23 @@ describe("sleep button: pressable only when the session is not at work", () => {
     assert.equal(calls.length, 0);
     clickSleep(row({ name: "b", activity: "idle" }), (n) => calls.push(n));
     assert.equal(calls.join(), "b");
+  });
+});
+
+describe("board row wiring: a waiting thread (row activity needs-input) blocks even when the center says idle", () => {
+  test("row activity needs-input blocks; other row activities follow the center", () => {
+    assert.match(rowSleepBlock(sess({ activity: "idle" }), true, "needs-input") ?? "", /入力待ち/);
+    assert.equal(rowSleepBlock(sess({ activity: "idle" }), true, "idle"), null);
+    assert.equal(rowSleepBlock(sess({ activity: "idle" }), true, null), null);
+    // the center's own needs-input still blocks whatever the row says
+    assert.notEqual(rowSleepBlock(sess({ activity: "needs-input" }), true, "idle"), null);
+  });
+});
+
+describe("unknown state leaves the decision to the center (documented in the design)", () => {
+  test("center unreachable / session not listed: not blocked, even for a state that would block", () => {
+    assert.equal(sleepBlock(sess({ sleeping: true }), false), null);
+    assert.equal(sleepBlock(sess({ state: "stopped" }), false), null);
+    assert.equal(sleepBlock(undefined, true), null);
   });
 });

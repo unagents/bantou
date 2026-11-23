@@ -2,7 +2,7 @@
 
 - 作成: 2026-11-23
 - 基点: `develop` 4d98817（0.1.62）
-- 範囲: 設計だけ。code・test・設定は変えていない。`packages/memory` は触れない。
+- 範囲: 設計。ui / desktop のスリープのボタン（作業中は押せない。`packages/ui/composables/sleepButton.ts` ほか）だけ code・test を変えた。center 側（`packages/center`）は設計のまま。`packages/memory` は触れない。
 - 書き方: 【事実】は repo の code / docs を開いて確かめた事（`file:行`、repo root からの path）。【推測】は確かめていない解釈。【未確認】は実測が要る事。
 - 並行 task: `origin/feat/app-restart-check`（`docs/design/app-restart-check.md`、399c5b0）と同じ file を触る。関係は 6 節。
 - 既存の流儀: `docs/design/resession.md`（リセッション）と同じ形。保存・取り出し・最初の入力はリセッションの部品をそのまま使う。
@@ -90,7 +90,8 @@
 | `packages/center/src/coordinator.ts` / `coordinator-mcp.ts` | `coordinator_session_sleep` の description と返り値を `session_sleep` の変更に合わせる |
 | `packages/center/src/system-instructions.ts` / `instructions/*.md` | 眠らせる依頼が来た時にエージェントが引継ぎを渡す tool を呼ぶ事（U1 の推奨なら `session_resession` の description に 1 文）を書く。system 指示の部品を足す場合は版（`instructions.generated.ts`）の更新が要る |
 | `packages/center/src/sleep-gate.ts` | 変更なし（`opts.wake` を呼ぶだけ）。起こした後の message の渡し順は U6 |
-| `packages/desktop` / `packages/ui` / `packages/memory` | 変更なし（【未確認】desktop が「眠らせる」の返り値の形に依存している場合は U3 で合わせる） |
+| `packages/ui` / `packages/desktop` | スリープのボタン（作業中は押せない。`sleepButton.ts`・`sessionStatus.ts` の `sleepBlock`・`useBoard.ts`・`index.vue`）。実施済み。それ以外は変更なし（【未確認】desktop が「眠らせる」の返り値の形に依存している場合は U3 で合わせる） |
+| `packages/memory` | 変更なし |
 | `docs/design/resession.md` | 1 行の追記（スリープとの関係。実装の時に） |
 
 ## 4. test 方針
@@ -102,7 +103,7 @@
 | T1 | `requestSleep` で session の入力に引継ぎを頼む 1 行が入り、tool（引継ぎ）の後、`Stop` で `supervisor.stop` が呼ばれる。`supervisor.start` は呼ばれない（新しい会話を立ち上げない）。`sleeping` と `sleepHandoff` が保存される | `Stop` で `restartFresh` を呼ぶ / `start` を呼ぶ / `sleepHandoff` を書かない |
 | T2 | 引継ぎは memory に保存（`stored=memory`）。届かない時は file（`stored=file`、本文は file にある） | `request` が `sleep` の時に保存を飛ばす |
 | T3 | 引継ぎを受けるまで `sleeping` は付かない・止めない（`asking` の間 / tool の呼び出しの後で `Stop` の前） | tool の時点で止める / `asking` で止める |
-| T4 | 書けない場合（U2 の推奨に合わせた各場合）: `needs-input`・remote 未完了・session が動いていない・申告の後に利用者の入力 → 止めない・理由が呼び出し元に返る・印が残らない | `check` を外す / `UserPromptSubmit` の見送りを外す |
+| T4 | 書けない場合（U2 の決定 A に合わせた各場合。`working` も `Stop` を待たずに断る）: `needs-input`・remote 未完了・session が動いていない・申告の後に利用者の入力 → 止めない・理由が呼び出し元に返る・印が残らない | `check` を外す / `UserPromptSubmit` の見送りを外す |
 | T5 | `wake` は `resume` 無しで `start` する（`--continue` が付かない）。`SessionStart`（`startup`）で最初の入力に引継ぎの本文が入る（paste → 待ち → `\r`）。「状況の確認」の別の入力は送られない（入力は合計 1 回） | `wake` が `resume: true` を渡す / 確認の入力を足す / `deliver` が本文を入れない |
 | T6 | 取り出せない時（memory に無い・file の id 違い）は、本文を渡さず、事・理由・置き場を書いた 1 行を送る | 失敗時に本文の代わりに空を送る / 理由を書かない |
 | T7 | 起動失敗で眠ったままに戻る（`sleeping`・`sleepHandoff` が残り、次の `wake` でまた渡せる） | 戻しで `sleepHandoff` を消す |
@@ -127,7 +128,7 @@
 下の U1〜U6 の決定。ここに無い未決は、各項の推奨のとおり。
 
 - U1: A。既存の `session_resession` を再利用し、center が印（`kind` / `asking`）で区別する。
-- U2: A。書けない時は、どの場合も眠らせず理由を返す。`working` も `Stop` まで待たずに断る。待ちの上限は置かない（上の「推奨」の C 案のうち `working` を待つ部分は採らない）。
+- U2: A。書けない時は、どの場合も眠らせず理由を返す。`working` も `Stop` まで待たずに断る。待ちの上限は置かない（U2 項の旧推奨 C のうち `working` を待つ部分は採らない）。
 - U3: A。受理して即返す。受理前の拒否は同期で返す。
 - U4: A。今スリープ中で `sleepHandoff` が無い session は、従来どおり `--continue` で起こす。
 - U5: B。取り出せなかった時は `sleepHandoff` を外す。
@@ -147,7 +148,8 @@
 
 - 決定: 画面のスリープのボタンは、その session が作業中の間は押せない（disabled。title に理由を出す）。作業が終われば押せる。眠らせる前に「作業が終わるのを待つ」「引継ぎ無しで眠らせる」事はしない。
 - 「作業中」の判定は、side menu の「作業進行中」の印と同じ（`sessionProgress`、`packages/ui/composables/sessionStatus.ts`）。cap 自身が busy、subagent・background の実行中、remote の task が走っている、のどれか。新しい状態・上限・値は足さない。
-- 押せない条件は `sleepBlock`（同 file）の 1 か所。作業中に加え、center が U2 で断る場合（動いていない・needs-input・remote 未完了・remote 未返答・スリープ中）と同じ条件にして、画面と center の判定が食い違わないようにした。
+- 押せない条件は `sleepBlock`（同 file）の 1 か所。作業中に加え、center が U2 で断る場合（動いていない・needs-input・remote 未完了・remote 未返答・スリープ中）と同じ条件にする。center 側の断りは sleep-impl の範囲で、center 実装後に両者の条件を揃える（今は画面が先に実装済みで、center の `check` は `working` と background を断らない）。
+- `sleepBlock` は center に繋がらない時・一覧に無い session では null（押せる）を返す。意図: 状態が分からない時にボタンを塞がず、判断は center の断りに任せる（`sleepBlock` の test が固定）。
 - 実装: `packages/ui/composables/sleepButton.ts`（`sleepButtonState` と `clickSleep`。条件は `sleepBlock`）。ボタンは `packages/desktop/src/pages/index.vue`。test は `packages/ui/test/sleep-button.test.ts`。
 - 旧 U2 の残り（応答しない・needs-input・remote 未完了・止まっている）の扱いは、下の U2 と U7 のまま。ここで決めたのは作業中の「画面のボタン」の入口だけ。
 
@@ -159,7 +161,8 @@
 - B: 引継ぎが書けなくても止める（`sleepHandoff` 無し。起こした時は U4 と同じ扱い）。利点: 必ず眠れる（メモリを空ける目的）。欠点: 引継ぎが無い。
 - C: 書けない場合ごとに分ける。作業中（`working`）は turn の終わり（`Stop`）まで待って頼み、`needs-input`・remote 未完了は A、動いていない（`stopped` 等）は B。利点: 場合に合う。欠点: 場合の数だけ分岐。
 - 待ちの上限（応答しない session をいつ諦めるか）は利用者の決める値で、この設計では置かない。A・C を採るなら、上限を置くか（置く時の値）、`asking` のまま待ち続けて呼び出し元が別に取り消すか、を利用者が決める。
-- 推奨: C のうち、`working` は `Stop` まで待つ・`needs-input`・remote 未完了・申告の後に利用者の入力は A（眠らせず理由を返す）。動いていない session（すでに止まっている・起動中）は B ではなく A（動いていない session に引継ぎは頼めず、すでに止まっているなら止める物が無い）。上限の有無は利用者の決定待ち。
+- （旧）推奨: C のうち、`working` は `Stop` まで待つ・`needs-input`・remote 未完了・申告の後に利用者の入力は A（眠らせず理由を返す）。動いていない session（すでに止まっている・起動中）は B ではなく A（動いていない session に引継ぎは頼めず、すでに止まっているなら止める物が無い）。上限の有無は利用者の決定待ち。
+- **決定済み（利用者、2026-11-23）: A。どの場合も眠らせず理由を返す。`working` も `Stop` を待たずに断る。待ちの上限は置かない。上の旧推奨 C の「`working` は `Stop` まで待つ」は採らない（決定の節の U2）。**
 
 ### U3 `session_sleep` が何を返すか（待つか、受理して返すか）
 
