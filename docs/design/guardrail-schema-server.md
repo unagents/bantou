@@ -19,10 +19,8 @@
 
 ### 背景（前提。この設計の対象ではない）
 
-- bantou の server は、worker を起こすだけの仕組みに寄せる方向。server は openspec-mcp を機械的に実行し、門（gate）が開いたら次の worker を起こす。remote-cap の判断の層は無くす方向。**この設計は remote-cap の廃止をしない**。関係だけ: この設計の schema の定義（3 節）は、openspec-mcp が機械的に進める流れの「何を終了条件にするか」を、bantou の利用者が足せるようにする物。
-- review は、openspec の schema の tasks の終了条件に「review の指摘 0 件」を置く。worker は openspec の instruction に従い、その条件を終了にする前に、サブエージェントの reviewer を起こす。0 件の数え方は、機械的に判定できる基準に当たる指摘が 0 件（仕様・決定と食い違う／test が落ちる・足した test が変異で落ちない／指示した範囲の外を変えている）。**この終了条件は schema の中身**で、guardrail の設定が運ぶ物の例。bantou 側の code は終了条件の中身を解釈しない（3.3 の「中身を解釈しない」）。
-- 利用者の追加の決定: openspec-mcp は、schema-discovery の header が無い接続では、標準の手順のまま動く（schema-discovery は足す物で、無くても今の動きは変わらない）。
-- 「review の指摘 0 件」の条件は schema の中身の話で、openspec-mcp の仕組みの話ではない。
+- 順番（利用者の決定）: review の仕組み（schema の tasks の終了条件に「指摘 0 件」を置く事、reviewer のサブエージェント、指摘の数え方）と、bantou の server を worker の起動だけにする変更（remote-cap の判断の層を無くす事を含む）は、guardrail の機能の実装が終わり、schema 定義を bantou の上で保守できるようになった後の話。この設計書の対象外で、今は作業にしない。
+- openspec-mcp は、schema-discovery の header が無い接続では、標準の手順のまま動く（schema-discovery は足す物で、無くても今の動きは変わらない）。
 - 用語の注意: 【事実】bantou には過去に「guardrail」があった（plugin の hooks `guard.mjs` と `docs/guardrail.md`）。2026-10-31 に廃止済み（`docs/history/20261031-1700-retire-guardrail/report.md`）。この設計の「guardrail 設定」は、それとは別の新しい機能（利用者の指示の「gardrail設定機能」）で、hook の仕組みは戻さない。
 
 ## 1. 今の形
@@ -94,7 +92,7 @@ openspec-mcp（別 project。http stream で単独起動。schema-discovery を 
 
 ### 3.3 「中身を解釈しない」の範囲
 
-- bantou は schema の中身（終了条件・「review の指摘 0 件」の定義を含む）を検証も解釈もしない。openspec が schema をどう読むかは openspec-mcp の側。bantou が検査する物は、実装の task で決める（利用者が決めていない上限・数値は足さない）。
+- bantou は schema の中身（終了条件を含む）を検証も解釈もしない。openspec が schema をどう読むかは openspec-mcp の側。bantou が検査する物は、実装の task で決める（利用者が決めていない上限・数値は足さない）。
 
 ## 4. center が openspec-mcp につなぐ流れ
 
@@ -160,7 +158,6 @@ code は書かないので、実装の task が足す test と、実測の一覧
 
 - openspec-mcp（http stream で単独起動した物）が、center の schema の MCP server から schema を得て、その schema で動く事【プロトコル待ち】。
 - guardrail の設定に足した schema が、次の問い合わせから返る事（再起動なし）。
-- 「review の指摘 0 件」を終了条件に書いた schema を足し、openspec-mcp の流れで実際に使える事【プロトコル待ち】。
 
 ## 8. 次にやる事
 
