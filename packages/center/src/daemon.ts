@@ -12,6 +12,7 @@ import { createConnectionsStore } from "./mcp-connections.js";
 import { createSecretsStore } from "./mcp-secrets.js";
 import { existsSync, renameSync } from "node:fs";
 import { createMcpSource } from "./mcp-source.js";
+import { applySchemaDiscoveryEnv, schemaSourceFromFile } from "./schema-server.js";
 import { buildSessionMcp } from "./mcp-session.js";
 import { mkdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -98,7 +99,10 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     mcpOf: (name, mcpUrl) => {
       const { data, problems } = sessions.mcpConnections();
       if (problems.length) log(`MCP の接続の設定に不正な項目がある（捨てた。名前だけ）: ${problems.join(", ")}`);
-      return buildSessionMcp(data, mcpSecrets, name, coordState);
+      const mcp = buildSessionMcp(data, mcpSecrets, name, coordState);
+      // schema の MCP server（schema-discovery）の指し先を env に置く。openspec-mcp の接続の headers に `"x-schema-discovery": "${BANTOU_SCHEMA_DISCOVERY}"` と書くと claude の起動時に展開される。http で待ち受けていなければ置かない
+      applySchemaDiscoveryEnv(mcp.env, { host: centerHostOf(args.bind), port: httpPort, token: config.token });
+      return mcp;
     },
     // sessions は supervisor の後に作るので、呼ばれる時に参照する
     serversOf: (name) => sessions.serversOf(name),
@@ -315,6 +319,7 @@ export async function runDaemon(args: CliArgs): Promise<void> {
     http = await startHttpServer({
       createServer: (launcher) => makeServer(launcher === true),
       ...(launcherKey ? { launcherKey } : {}),
+      schemas: schemaSourceFromFile(join(stateDir, "center-settings.json"), log),
       createSessionServer: (owner) => createSessionMcpServer({ remotes, follow, owner, resession }),
       sessionAuth: sessionTokens,
       onStatusLine: (name, payload) => {
