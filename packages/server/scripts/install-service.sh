@@ -74,14 +74,14 @@ NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
 command -v git >/dev/null || die "git が見つからない"
 
 if [ "$VERSION" != latest ]; then
-  say "警告: --version $VERSION で版を固定する。update_server で版を上げても、restart / host 再起動のたびにこの版に戻る（既定は latest。固定は非推奨）。"
+  say "警告: --version $VERSION で版を固定する。版を上げても、restart / host 再起動のたびにこの版に戻る（既定は latest。固定は非推奨）。"
 fi
 render() { # <template>
   sed -e "s|@USER@|$USER_NAME|g" -e "s|@HOME@|$HOME_DIR|g" -e "s|@VERSION@|$VERSION|g" \
       -e "s|@NPX@|$NPX|g" -e "s|@NODE_BIN@|$NODE_BIN|g" "$1"
 }
 
-# 実行前の警告: 既存 unit の内容が変わる（版固定の変更・解除など）と、server が restart され、update_server で上げた版は unit の版に戻る
+# 実行前の警告: 既存 unit の内容が変わる（版固定の変更・解除など）と、server が restart され、上げた版は unit の版に戻る
 if [ "$OS" = Linux ]; then EXISTING_UNIT="/etc/systemd/system/$UNIT_NAME.service"; UNIT_TPL=bantou-server.service.in
 else EXISTING_UNIT="/Library/LaunchDaemons/$PLIST_LABEL.plist"; UNIT_TPL=com.unagents.bantou.plist.in; fi
 if [ -f "$EXISTING_UNIT" ] && [ -f "$TPL_DIR/$UNIT_TPL" ] && [ "$(cat "$EXISTING_UNIT")" != "$(render "$TPL_DIR/$UNIT_TPL")" ]; then
@@ -89,7 +89,7 @@ if [ -f "$EXISTING_UNIT" ] && [ -f "$TPL_DIR/$UNIT_TPL" ] && [ "$(cat "$EXISTING
   [ "$VERSION" != latest ] || say "警告: --version を付けない再実行は版固定を解除して latest に戻す。"
   if [ "$NO_START" = 1 ]; then say "警告: --no-start なので今は再起動しない（動いている server には次の restart で反映される）。"
   else say "警告: 反映のため server を restart する。実行中の cap / worker は中断されるので cap が空の時に行う。"; fi
-  say "警告: update_server で上げた版は、unit の版（今回: $VERSION）に戻る。"
+  say "警告: 上げた版は、unit の版（今回: $VERSION）に戻る。"
 fi
 say "OS=$OS user=$USER_NAME home=$HOME_DIR version=$VERSION npx=$NPX dry-run=$DRY"
 

@@ -81,7 +81,7 @@ const configPath = resolve(args.config);
 if (!args.serve && !args.supervise) {
   // 既定: launcher。起動時に全コードを読み込み、supervisor（--supervise）を起動して見張る。以後 supervisor が入れ替わっても残る
   const launcher = await import("./launcher.mjs");
-  // 退役済み（retire_server が <workspace>/server.retired を書いた）なら起動しない。exit 75 は systemd unit の RestartPreventExitStatus（旧 unit も 75 は持つ）で再起動ループにならない
+  // 退役済み（<workspace>/server.retired がある）なら起動しない。exit 75 は systemd unit の RestartPreventExitStatus（旧 unit も 75 は持つ）で再起動ループにならない
   try {
     const ws = launcher.workspaceOf(configPath);
     if (existsSync(join(ws, RETIRED_FILE))) {

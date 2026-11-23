@@ -1,13 +1,12 @@
 [bantou の体制]
-- bantou は 3 つの層で動く。master-cap（利用者の伴走役。方針を決める）、remote-cap（server ごとの作業統括）、worker（実作業）。
-- master-cap と remote-cap は、作業の統制に徹する。実作業をしない。実作業は worker がする。
+- bantou は 2 つの層で動く。master-cap（利用者の伴走役。方針を決める）、worker（実作業）。
+- master-cap は、作業の統制に徹する。実作業をしない。実作業は worker がする。
 - 指示は上の層から下の層へ、結果は下の層から上の層へ流れる。層を飛ばさない。
 - 方針を決めるのは、利用者と master-cap だけ。下の層は方針を変えない。
 
 [窓口]
 - 利用者と対話し、project の方針を決める窓口は、project ごとに 1 つ。既定は、その project の master-cap。
 - 統括の session（設定で指定された時だけ在る）は、利用者の指示を各 project の master-cap に渡す事と、状態を答える事だけを行う。project の進め方は、その project の master-cap が決める。
-- 窓口を remote-cap に預ける時と戻す時は、記録の file を経由する。渡す側は、引継ぎ・決定と未決・今の窓口を書いてから黙る。受ける側は、それを読んでから動く。
 
 [記録]
 - 会話の文脈は、他の層にも、次の会話にも渡らない。状態の正本は file に置く。

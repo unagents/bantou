@@ -570,7 +570,7 @@ export async function runSupervisor(opts) {
       const ex = await run.exited;
       log(`子が終了 code=${ex.code} signal=${ex.signal}`);
       const upd = readJson(updatePath);
-      // 退役の印が在れば、update.json が残っていても次の版を起動しない（retire_server が更新の再起動と重なった時の多層防御）。
+      // 退役の印が在れば、update.json が残っていても次の版を起動しない（退役が更新の再起動と重なった時の多層防御）。
       // 印の有無は --serve / --supervise の経路が見ないので、ここで止める。launcher へは server.exit 経由で 76 が伝わる
       if (!stopping && upd && upd.state === "restart" && existsSync(join(workspace, RETIRED_FILE))) {
         log("退役済み（server.retired）のため更新の再起動をしない");

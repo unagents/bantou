@@ -7,12 +7,8 @@ claude を headless（`claude -p`）で起動する常駐プロセス。messenge
 - linux / mac で動く npm package（`bantou`）。`npx` で起動する。
 - headless 実行層。端末多重化ツールは使わない。
 - messenger broker を内蔵し、peer `bantou-server` として指示を待つ。起動時に agent-messenger の protocol `bantou` の待受としても登録する（下記「protocol 登録」）。
-- cap に worker の起動・状態・停止の道具を渡し、worker からの報告を受ける口として MCP（HTTP）の `/mcp` を持つ（下記「worker 報告（MCP）」「worker の起動（MCP）」）。
-- cap と worker の stream-json 出力を読み続け、生存と進捗を center へ `activity` 通知で送る（下記「活動情報（activity）」）。
 - bantou-desktop（`../desktop/`）など任意の messenger peer からの指示を受ける。
 - 実行モデルの全体は [`../../docs/architecture.md`](../../docs/architecture.md)。要約は次の通り。
-  - `kick_cap` で cap を起動する。初回は `claude -p --session-id <uuid>`、2 回目以降は `--resume <uuid>`。
-  - cap ごとに path（`<workspace>/caps/<cap_id>`）を持つ。worker も同様（`workers/<worker_id>`）。
   - 同一 cap（worker）への指示は直列。別の cap（worker）は並行して走る。
   - 状態は path 直下の `state.json` に残す。
   - 起動時に、前回の実行が残した孤児 claude プロセスを回収する。
@@ -36,23 +32,8 @@ npx bantou --config <path>
 - `npx bantou` で起動した bin は **launcher**（`bin/launcher.mjs`、凍結。node 組み込みのみ）。起動時に 1 回だけ同 package の `--supervise`（supervisor）を env `BANTOU_LAUNCHER_PID` 付きで起動し、以後は見張るだけ。SIGTERM / SIGINT は supervisor と、`server.lock` の `pid`（`launcher` が自分の時）へ 1 回ずつ中継する。supervisor の系列（更新で入れ替わる）が消えたら `<workspace>/server.exit`（`{launcher, code}`）の code で終わる（無ければ直下の supervisor の code、それも無ければ 1）。
 - supervisor（`--supervise`、Nitro は読まない）は常駐本体（`--serve`）を子に 1 本だけ持つ。SIGTERM / SIGINT は子の process group へ中継する。supervisor の PID は更新で**変わる**（新版の supervisor に引き継ぐ。下記）。launcher の PID は変わらない。子だけ入れ替える従来の更新（引き継ぎ非対応の版へ）では supervisor の PID は変わらない。
 - 二重起動の防止: `<workspace>/server.lock`（`{pid, version, started_at, launcher?, child?, next?}`）を supervisor が排他作成する。`pid` は supervisor 自身。生きている pid（または引き継ぎ中の `next.pid`）があれば `既に起動中 pid=...` / `引き継ぎ中 pid=...` で exit 1（launcher も exit 1）、死んだ pid なら取り直す。`--serve` は env `BANTOU_SUPERVISOR_PID` が lock の `pid`（引き継ぎの試行中は `next.pid`）と合わなければ exit 1（手起動を防ぐ）。最後の砦は broker / mcp の port bind 衝突。
-- 更新（protocol `bantou` の `update_server`、`docs/protocol.md`）: server は `npx -y --package=<spec> -- bantou --version` で取得を確かめ（失敗は `update_failed` で、動き続ける）、受理したら実行中の cap・worker・report が全部終わるのを待つ（待機中の `kick_cap` / `task` は `updating`（retryable）で断る）。終わったら `<workspace>/update.json`（`{"state":"restart","to","spec"}`）を書いて通常の終了処理で exit 0。
-- 引き継ぎ（supervisor も新版になる）: 子が終わると旧 supervisor（S2）は `npx -y --package=<spec> -- bantou --handoff-protocol` が `1` を出すか確かめる（0.3.0 など未対応の版は exit 2 → 従来どおり子だけ入れ替える）。対応版なら lock に `next:{token}` を付け、`npx -y --package=<spec> -- bantou --supervise --config ...` を別 group で起動する。新 supervisor（S3）は env `BANTOU_HANDOFF_TOKEN` が lock の token と合う時だけ試行モードに入り、`next.pid / version` を書き、自分の子を起動して ready を待つ（子が ready になるまで lock の持ち主は S2 のまま）。ready で `next.ready=true` を書くと、S2 が lock を `{pid:S3, ...}` に rename で書き換え、`update.json` の restart を消して exit 0 する（S3 の npx は残る）。S2 が昇格前に死んで ready 済みなら S3 が自分で昇格する。
-- 巻き戻し: S3 が ready 前に終了する、または 120 秒（+ 取得の猶予 60 秒）以内に ready にならないと、S2 が S3 の group と `next.child` / `next.pid` を止めて消えるまで待ち、lock を自分に戻し、`update.json` に `{"state":"failed","to","error","at"}` を書き、直前に ready だった版（最初は自分の `.output`）の子を同じ config で起動し直す。起動した server は `hello_result.last_update` で返す。引き継ぎ中に停止要求（SIGTERM）が来たら S2 が S3 の系列を片付け、巻き戻し扱いにせず停止する。子だけ入れ替える更新（引き継ぎ非対応の版）も、更新後の子が ready にならなければ従来どおり直前の版へ巻き戻す。
-- 取得元は config `update.spec`。`--version` を持たない版は更新先にできない（取得確認で失敗する）。
 - 版をまたぐ取り決めは変えない（変えるなら後方互換を保つ）: launcher と supervisor の間（config の workspace、lock の `pid` / `launcher`、`server.exit` の `{launcher, code}`、信号の中継、`BANTOU_LAUNCHER_PID`）、supervisor と子の間（`--serve`、`BANTOU_SUPERVISOR_PID`、`server.lock` / `server.ready` / `update.json`、更新時の exit 0）、supervisor 同士（`--handoff-protocol`、`--supervise`、`next` の形、`BANTOU_HANDOFF_TOKEN`）。
 - 0.3.0 以前の server（launcher を持たず supervisor が最初の版のまま残る）から、この仕組みへは一度だけ手で起動し直す。0.3.0 の supervisor の下でも新版の子は動く（子だけ入れ替わる）が、supervisor は 0.3.0 のまま。
-
-### 退役（retire_server）
-
-center から server を外す指示（protocol 1.8.0、`docs/protocol.md` の `retire_server`）。host に入って root で止めなくてよくする。
-
-- 順序: `server_id` の確認 → `<workspace>/server.retired` を書く（書けなければ何も止めず `error`）→ 更新予約の取消と新規 `kick_cap` / `task` / `worker_reply` / `update_server` / MCP `worker_start`・`report` の拒否（`error` `retiring:true`, `retryable:false`）→ 実行中の cap・worker を止める（`manager.shutdown`、shutdown と同じ経路）→ `retire_result` を返信 → 3 秒の猶予（center の poll が返信を取る時間）→ peer 登録解除・broker 停止 → **exit 76**。返信を送れなくても、受付から最長 10 秒で終了へ進み、その後の強制終了（plugin の hard timeout）が最長 5 秒なので、最悪でも約 15 秒で落ちる。更新の予約は取り消し、`update.json`（再起動の合図）も消す。重なって残った場合でも、supervisor は `server.retired` が在れば次の版を起動せず 76 で終わる（多層防御。supervisor は版をまたぐ取り決めを保つ範囲の追加で、凍結物は launcher のみ）。途中の失敗（停止・解除）は log に残して最後まで進むので、launcher だけ・supervisor だけ・登録だけが残る半端な状態にならない。
-- launcher と systemd / launchd に戻させない仕組み: 追加の通信は無い。`--serve` の子が exit 76 で終わると、既存の仕組み（supervisor が子の exit code を `server.exit` に書く → launcher がその code で終わる）でそのまま launcher の終了コードが 76 になる（launcher・supervisor は変更なし）。host lock `/tmp/bantou-server.lock` と `server.lock` は終了で解放される。systemd は unit の `RestartPreventExitStatus=75 76` で再起動しない。
-- 再起動の保険: `server.retired`（退役の印）がある間、`bin/bantou.mjs` は launcher を起動せず exit 75 で終わる（host lock の競合と同じ 75）。`RestartPreventExitStatus=75` だけの**旧 unit**でも、76 で一度（10 秒後）起動し直されるが、この拒否の 75 で止まる。印を消せば再び起動できる（再有効化）。
-- launchd: plist の `KeepAlive` を `PathState`（`<HOME>/server.retired` が**無い**間だけ起動し直す）にした。Apple の launchd.plist(5) の記述（「PathState: If the value of the key is true, then the job will be kept alive as long as the path exists」、false は逆の条件。複数キーは OR）に基づく。**macOS 実機では未検証**。制約: path は plist に固定で `workspace = HOME`（`install-service.sh` の標準形）が前提。旧 plist（`KeepAlive` が `true`）は印があっても 10 秒ごとに起動し直す（exit 75 の message が `server.log` に残るだけで害は無いが止まらない）。`install-service.sh` を再実行して plist を更新するか、`sudo launchctl bootout system/com.unagents.bantou`。
-- 自分の unit は無効化しない（専用ユーザーで動き、権限が無い）。代わりに返信 `retire_result.host_steps` に、root が host で行う 1〜3 行（unit 削除 → user 削除 → workspace 削除。値は quote 済み）を載せる。unit 名は systemd の cgroup / launchd の `XPC_SERVICE_NAME` から取り、取れなければ `install-service.sh` の既定名（`service.detected:false`）。
-- 旧 server（protocol 1.8.0 未満）は `retire_server` を無返信で無視する。center は `supportsRetire` を満たす server にだけ送る。
 
 ## config.json
 
@@ -92,12 +73,8 @@ center から server を外す指示（protocol 1.8.0、`docs/protocol.md` の `
 | `session.disallowedTools` | 任意 | `[]` | 空でなければ `--disallowedTools` に渡す。文字列の配列 |
 | `session.extraArgs` | 任意 | `[]` | `--` の前にそのまま付ける追加引数。文字列の配列。`--settings` の後ろに並ぶため、同じ指定が重なれば extraArgs が後勝ち |
 | `session.capBashSandbox` | 任意 | `false` | cap の `claude -p` の Bash sandbox。`false` は `--settings {"sandbox":{"enabled":false}}` を付けて切る（新規・resume とも）。`true` は付けず claude の設定のまま（sandbox が有効だと worker が cap の終了で消える）。真偽値 |
-| `session.workerKeepMs` | 任意 | `1800000`（30 分） | 終わった worker の dir を掃除するまでの待ち時間。0 以上の整数。0 は掃除しない（下記「終わった worker の掃除」） |
-| `session.maxParallelTasks` | 任意 | `2` | 1 つの cap で同時に動かす task の上限。1 以上の整数。1 は従来どおり 1 つずつ。超えた分と、先の task と同じ `deliverables.branch` の task は、前の task が終わるまで待つ（`docs/design/cap-orchestration.md`「task の並行」） |
 | `session.env` | 任意 | `{}` | spawn する claude に追加で渡す環境変数。文字列値のオブジェクト。bantou-server 自身の環境変数に上書きで合成する |
 | `extraMcp` | 任意 | `{}` | cap / worker に追加で載せる手元の stdio MCP の道具。`{ "<name>": { "command", "args", "env", "targets" } }`（下記「追加の MCP（extraMcp）」） |
-| `update.spec` | 任意 | `"bantou@{version}"` | 自己更新の取得元。`{version}` を更新先の版に置き換えて npx の `--package` に渡す。`{version}` 必須、`-` で始められない。テストでは `file:/path/bantou-{version}.tgz` で npm 未公開の tarball を指せる。本番は指定しない |
-| `update.maxWaitMs` | 任意 | `1800000`（30 分） | 更新の待機の上限。待つのは cap / worker の指示（claude の子が生きている run、準備中や結果を書いている途中の run、待ち行列）で、stop_cap で閉じた cap の worker は数えない（stop_cap がその cap の worker も止める）。上限を越えたら残りの run を「server 終了により中断」で止めて再起動する（center へは失敗の結果として返り、会話は残るので再送で続けられる） |
 
 - `broker` / `mcp` / `session` / `update` は省略可。書く場合はオブジェクト。
 - LAN に公開するには `broker.bind`（例 `0.0.0.0`）を明示する。その場合は `broker.token` の設定を推奨する。
@@ -124,29 +101,14 @@ center から server を外す指示（protocol 1.8.0、`docs/protocol.md` の `
 <workspace>/
   config.json                        root 構成の config（`workspace` 省略時。明示指定の構成では別の場所）
   server.log / server.lock / server.ready / server.exit / update.json  常駐の記録と更新の状態
-  server.json                        server の安定 id（`server_id`）。初回起動で 1 回生成
   broker.json                        broker の状態ファイル
-  caps/<cap-id>/                     cap の path（claude の cwd）
-    state.json                       状態
-    logs/<session_id>.jsonl          claude の生出力（stream-json）
-    logs/center.json                 この cap の通知先 center（peer 名と最後の peer id。送る時に名前から今の peer id へ引く）
-    logs/reports.jsonl               worker から受けた report の記録（1 行 1 件）
-    logs/model.json                  指定されたモデル（`{"model":"...","worker_model":"..."}`、指定が無ければ作らない）
-    logs/mcp.json                    cap の `--mcp-config`（実行ごとに上書き）
-    logs/system-prompt.md            cap の `--append-system-prompt-file`（実行ごとに上書き）
-    tmp/                             claude の `TMPDIR`（mode 700。起動のたびに無ければ作る。`.git/info/exclude` 対象。worker の掃除で消える）
   workers/<worker-id>/               worker の path。構成は cap と同じ
-    logs/owner.json                  この worker の持ち主 cap（`{"cap_id":"..."}`）
-    logs/repo.json                   clone 元（`{"repo":"...","branch":"..."}`。認証情報を含みうるので 0600）。掃除後の再開で clone し直すのに使う
-    logs/cleaned.json                掃除した時刻（`{"cleaned_at":"..."}`）。clone し直したら消える
 ```
 
 - 起動時に `<workspace>/caps` と `<workspace>/workers` が無ければ作る。
 - `cap_id` / `worker_id` は `[A-Za-z0-9_-]+`。
 - `repo` を指定した指示では、path を git repo として扱う。path が無ければ clone、`.git` があれば fetch、`.git` が無い既存 path はエラー。clone 後は `.git/info/exclude` に `state.json`・`logs/`・`tmp/` を追記する。
 - 既存の `.git` がある場合は `fetch` だけ行う。`repo` / `branch` の違いは検知しない。
-- `repo` 無しなら path を作るだけ（掃除済みの worker は `logs/repo.json` の clone 元で clone し直す。`repo.json` が無ければ空のまま）。
-- 掃除済み（`logs/cleaned.json` があり `.git` が無い）の worker に `repo` 付きの指示が来たら、tmp に clone して中身を移し、clone し直す。`logs/` と `state.json`（session_id）はそのまま。
 
 ## 内蔵 broker と peer
 
@@ -167,144 +129,18 @@ center から server を外す指示（protocol 1.8.0、`docs/protocol.md` の `
 ## worker 報告（MCP）
 
 - Nitro の `/mcp`（Streamable HTTP、stateless、JSON 応答）。listener は `mcp.bind` / `mcp.port` で server が自前で立てる（preset `node-listener` は listen しないため）。起動ログ `mcp 起動: url=http://<host>:<port>/mcp` に実 URL が出る。
-- tool は `report`（と `bash`、下記「worker の起動（MCP）」）。`report` の引数は `kind`（`progress` / `ask` / `approve` / `done`）と `text`（1..20000 文字）。
-- 送信元は header `x-bantou-cap-id` / `x-bantou-worker-id` で判定する（token は使わない。認証は全体で後回し）。
-- tool は記録して queue に積んだ時点で `accepted` を返す。worker はそこでターンを終える。不正な id・存在しない cap・終了中は `isError` で返す。
-- 受けた report は `logs/reports.jsonl` に追記し、該当 cap の queue に積んで `--resume` で起動する。prompt は `worker <id> から <kind>: <text>` と、worker へ返す時の MCP 情報（URL・header 名）。実行中の cap には、終わってから渡す。
-- cap の結果（stdout の result）は、`kick_cap` の送信元 center へ `cap_result` で返す。report 起因の resume の結果も同じ。center は peer の**名前**（`bantou-center`）で覚え（cap ごとに `logs/center.json` へ保存、再起動後も復元）、送る時に messenger の今の peer id へ引く（center の再起動で peer id が変わっても届く。protocol 1.6.0）。`task` / `kick_cap` / `worker_reply` / `stop_cap` / cap_id 付きの `status` を受けるたびに通知先を更新する（cap を作るのは `kick_cap` / `task` だけ）。resume が失敗した時は `error`（`command: "kick_cap"`、`cap_id`）を返す。
-- worker の MCP 設定は server が付ける。worker 起動のたびに `<path>/logs/mcp.json` を書き、`--mcp-config <file>` で渡す（resume でも毎回）。cap が渡す必要は無い:
+## bash（MCP）
 
-```json
-{"mcpServers":{"bantou":{"type":"http","url":"http://127.0.0.1:7902/mcp","headers":{"x-bantou-cap-id":"cap-a","x-bantou-worker-id":"w1"}}}}
-```
-
-- 併せて `--allowedTools mcp__bantou__report`（`session.allowedTools` に足す）と、system prompt（`logs/system-prompt.md`、`--append-system-prompt-file`）で worker に report の使い方を案内する。本文を argv に載せないのは、孤児回収が argv を最初の ` -- ` で切って `--session-id` を探すため（本文に ` -- ` があると照合できなくなる）。
-- `--strict-mcp-config` は server からは足さない。他の MCP を載せたくない環境は `session.extraArgs` に入れる。
-- cap の `claude -p` の Bash sandbox は既定で切る（`session.capBashSandbox: false`）。claude の sandbox が有効だと、cap の Bash が起動した子は setsid しても cap の終了で消える（204 の user settings は `sandbox.enabled: true`）。実測は `docs/history/20261028-1600-server-nuxt-flow/report.md`。`--settings` の値は user settings より優先される。sandbox を残したい環境は `capBashSandbox: true`。worker は server が起動する（下記）ので、cap の Bash の sandbox には依存しない。
-
-## worker の起動（MCP）
-
-- cap は server の `/mcp` から worker を起動する。cap の `claude -p` にも server が `--mcp-config`（header `x-bantou-cap-id` のみ）と `--allowedTools mcp__bantou__worker_start mcp__bantou__worker_status mcp__bantou__worker_stop`、system prompt（`CAP_GUIDE`）を付ける。worker は Bash で `claude` を直接起動せずこの tool を使うよう案内される。
-- tool は header `x-bantou-cap-id` があり `x-bantou-worker-id` が無い接続（= cap）にだけ載る。worker には `report` のみ載る（worker が worker を起動することはできない）。返り値は JSON テキスト。失敗は `isError` で `{"error":"..."}`。
 
 | tool | 入力 | 返り値 |
 |---|---|---|
-| `worker_start` | `prompt`、`worker_id?`、`repo?`、`branch?`、`model?` | `{"worker_id":"w-1f2e3d4c5b","accepted":true}` |
-| `worker_status` | `worker_id?` | `{"workers":[AgentActivity,...]}` |
-| `worker_stop` | `worker_id` | `{"worker_id":"w-...","stopped":true}` |
 | `bash` | `action`（今は `rm` のみ）、`paths`（1..100 件、各 1024 文字まで）、`recursive?` | `{"removed":["..."],"skipped":[{"path":"...","reason":"..."}]}` |
-
-- `worker_start`: `worker_id` を省くと `w-<hex10>` を採番して新規、既存の id なら同じ session を `--resume`（続きの指示）。完了を待たずに返る。実行中なら queue で直列。失敗は activity と `state.json` に出る。path は `<workspace>/workers/<worker_id>/`（`repo` 指定時は clone / fetch）。cap の存在を確かめる（無ければ `cap が存在しない`）。
-- cap の運用の決まり: `CAP_GUIDE`（system prompt の固定部分。正本は `docs/design/cap-orchestration.md`）に、cap は自分で実装せず worker にさせる、最小の分担は実装 worker と review worker の 2 体（review は別 clone で差分を読みテストを回して report、指摘は同じ `worker_id` の `worker_start` で実装 worker に戻し、最大 3 回）、独立な部分は別 worker で並列、worker への指示に成果物（branch・commit・report の置き場）と確認方法（回すテスト）を入れる、最終返答に各 worker の結果・review の結論・残った問題を書く、を入れてある。`kick_cap` の prompt には触らない。
-- `worker_start` の `model`: worker の `claude --model` にそのまま渡す（`sonnet` / `opus` / `haiku` / `claude-sonnet-5-5` などフル ID も可。`[A-Za-z0-9._[]-]` のみ、先頭 `-` 不可。不正は error）。優先順位は 指定 > その worker の前回のモデル > cap の `worker_model`（`kick_cap`） > 付けない。続きの指示（同じ `worker_id`）でも同じモデルを使い続ける。
-- 持ち主は `workers/<worker_id>/logs/owner.json` に記録する。別の cap の worker は `worker_start` / `worker_status` / `worker_stop` とも `別の cap の worker: <id>` で拒否する。
-- `worker_status`: 呼んだ cap の worker だけ。server 再起動後など活動情報が無い worker は `state.json` から補う（idle → idle、failed / error → failed、running → running。起動直後で `state.json` が無いものは running / `starting`）。
-- `worker_stop`: process group に SIGTERM、3 秒で SIGKILL（`stop_cap` と同じ）。
 - `bash`（cap と worker の両方に載る。cap / worker の起動時に `--allowedTools mcp__bantou__bash` も付く）: Bash の `rm -rf` が permission 分類器に止まる問題を、範囲を server が保証する tool で避ける。任意のシェル文字列は受けず、`action` は handler 表（今は `rm`）で引く。未知の `action` と引数の形の不正（件数・長さ・型）だけ `isError`。全部拒否でも `isError` にせず `skipped` に理由を返す。
   - 範囲: 呼び出し元の自分の path 配下だけ（worker は `workers/<worker_id>/`、cap は `caps/<cap_id>/` と、`logs/owner.json` の `cap_id` が自分の worker は `worker:<id>/<path>` で指す）。`paths` は自分の path からの相対。
   - 拒否: 絶対パス・`~`・`..`・バックスラッシュ・NUL、path そのもの（`.` や空）、`state.json` と `logs/`（`./`・末尾 `/`・大文字小文字違いも。symlink を解決した後も判定）、realpath が範囲外のもの、他の cap の worker、worker から `worker:` 接頭辞。
   - symlink は辿らず link 自体を消す。親が範囲外を指す symlink は拒否。dir は `recursive: true` の時だけ消し、再帰削除でも symlink は辿らない。削除の直前に lstat と親の realpath を取り直す（検査の後で変わっていたら消さない）。
   - 前提（認証）: 呼び出し元は header `x-bantou-cap-id` / `x-bantou-worker-id` だけで識別し、認証は無い（MCP の認証は全体で後回し。`worker_start` / `worker_stop` も同じ前提）。127.0.0.1 の `/mcp` に curl できる worker が `cap_id` を偽ると、その cap の path と配下 worker の path を `bash` の `rm` で消せる。偽装でも `logs/` と `state.json` は消せない（範囲の判定で常に拒否）。将来 MCP に起動ごとの token を入れる時は `bash` も対象にする。
   - `TMPDIR`: 起動のたび（resume でも）に `<path>/tmp` を無ければ mode 700 で作り（在れば何もしない。symlink・file なら消して作り直す）、claude の env `TMPDIR` に渡す（`session.env` では上書きできない）。`tmp` は `bash` の `rm` の範囲内。
-- worker の timeout・retry・sandbox 設定は cap と同じ `config.session`。
-- cap への案内（`CAP_GUIDE`）は claude の `--system-prompt-snapshot`（既定 on）により session の初回に固定される。変更前に作った cap session は resume しても新しい案内を受けない（新しい cap から効く）。
-
-## 終わった worker の掃除
-
-- 目的: 終わった worker の dir（clone・node_modules・ビルド生成物）が溜まり続けるのを防ぐ。
-- 対象: server が動いている間に、worker が `done`（`report` の `kind=done` を送って正常終了）になった、または `worker_stop` で止められたもの。`idle`（done 報告なしで終了）と、停止以外の `failed` は調査用に残す。
-- 時機: その cap が running / stalled でなくなり（turn が終わり）、worker の終了からも `session.workerKeepMs`（既定 30 分）経った時。cap の turn が続いている間や、worker に再開の指示（invoke 中）がある間は消さない。確認は 60 秒ごと。
-- 消すもの: `workers/<id>/` 直下の `logs/` と `state.json` 以外すべて（`logs/` の中は消さない）。消したら `logs/cleaned.json` を書く。持ち主 cap（`logs/owner.json`）が activity と合わない worker は消さない。
-- 通知: server.log に `worker 掃除: worker_id=<id> cap_id=<id> state=<state> 削除=<n>件 ...` を出し、その worker を activity の `agents[]` から外して center へ送る。`worker_status` は state.json から返すので掃除後も引ける。
-- 再開: 同じ `worker_id` の `worker_start`（`worker_reply` 含む）が来たら待ち時間を数え直す。掃除の途中ならその完了を待ってから進み、dir が消えた後なら clone し直して起動する（`repo` を省いても `logs/repo.json` の clone 元を使う。`repo.json` が無い worker は空の dir で起動する）。session_id は残るので `--resume` は続く。
-- 無効化: `session.workerKeepMs: 0`。
-- 制限: 対象の記録はメモリ。server を再起動する前に終わった worker は自動では消えない。掃除後の `worker_status` は state.json から返すため、done / 停止は `idle` などに見える。未 push の変更や未 commit の作業も消える（確認はしない）。`logs/repo.json` は掃除後も残る。
-- 途中で失敗した時: 印（`logs/cleaned.json`）を先に書き `.git` を先に消すので、残骸があっても再開は clone し直しで進む（残骸は clone し直しの前に消す）。`logs/repo.json` が無い掃除済みの worker（`repo` 引数なしで作り、worker が dir の中で自分で clone する運用のもの）は clone 元が無いのが正常なので、`repo` なしの `worker_start` は失敗にせず、空の dir（`logs/` と `state.json` は残る）で起動する。その時の prompt の末尾に「この dir は掃除されて空。必要なら自分で clone し直すこと」の 1 行を足す。空で起動した時点で `logs/cleaned.json` を外す（注記は掃除後の最初の再開 1 回だけ。以後 worker が自分で clone した dir は掃除済み扱いにならない。次の掃除で印を書き直す）。
-- 掃除の失敗は、同じ worker・同じ理由ならログに 1 回だけ出し、成功か再開まで出し直さない。`logs/owner.json` が無い worker は掃除せず（安全側）、`持ち主記録が無いので掃除しない: <id>` を worker ごとに 1 回だけ出す。`logs/` が通常の directory でない（symlink）worker は掃除しない（失敗としてログに出す）。
-
-## 活動情報（activity）
-
-- cap と worker の `claude -p` の stdout（stream-json）を 1 行ずつ読み、要約を保持する。保持はメモリのみ（`state.json` には書かない）。全文は流さない。
-- 要約: `state`、`task`（最後の `kick_cap` / `worker_start` の prompt の冒頭 200 文字。cap の report 起因の resume では上書きしない）、`last_activity`（tool 名と引数の要点、assistant テキストの冒頭、`Bash 実行中 60s` 等。120 文字）、`last_output_at`、`silent_ms`（最後の出力 = 無ければ起動時刻からの経過）、`started_at`、`finished_at`、`error`、`model`（指定されたもの。無ければ `null`。`status` の `caps[]` / `workers[]` も同じ）。
-- 状態: `running`（実行中）、`stalled`（実行中で 300 秒出力が無い。表示のみで kill しない。新しい出力で running に戻る）、`idle`（正常終了。cap は常にこれ）、`done`（worker が正常終了し、その実行中に `report` の `kind=done` を受けた）、`failed`（非 0 終了、応答が読めない、timeout、停止、server 終了、準備失敗）、`lost`（server 自身の kill でない signal で終了 = 外から kill された・落ちた。起動時の孤児回収が拾った running も lost）。`state.json` の `AgentState` とは別物。
-- lost と判定したら、その process group にも SIGKILL を送る。限界: claude の Bash tool が起動した子は別 group にいるため止まらない（204 実測）。
-- center への通知: protocol `bantou` の `activity`（cap を `kick_cap` した center 宛て）。cap ごとに 1 通で、cap 本人とその worker 全部のスナップショット。running / stalled が 1 つでもあれば 5 秒ごと、状態遷移（起動・stalled・終了・孤児回収）では即時（同じ同期区間はまとめる）。全員が終端になったらその 1 通を送って止める。送信失敗はログだけで再送しない。ログ: `activity 通知: to=<peer> cap_id=<id> <id>=<state> ...`。
-- center の peer id が再登録で変わると、記録済みの旧 id 宛ては届かない（report 起因の `cap_result` と同じ既知の制約）。
-- 閾値（`ACTIVITY_INTERVAL_MS` 5 秒、`STALLED_MS` 300 秒）は定数。stream-json の `tool_progress`（Bash 実行中は 30 秒ごとの heartbeat）を生存の目安にする。長い 1 ブロック生成と subagent 実行中の無音は未計測。
-
-## 指示
-
-任意の messenger peer が `bantou-server` 宛てに JSON 1 つをテキストで送る。
-
-| type | 内容 |
-|---|---|
-| `kick_cap` | cap を起動する（初回は新規 session、以降は resume） |
-| `stop_cap` | cap を閉じる: 実行中の `claude -p` を止め、cap の会話（`session_id`）を破棄する |
-| `status` | cap / worker の状態一覧 |
-
-`kick_cap`（`cap_id` と `prompt` 以外は任意）:
-
-```json
-{ "bantou": 1, "type": "kick_cap", "cap_id": "cap-a", "repo": "https://github.com/o/r.git", "branch": "main", "prompt": "Review the open issues.", "reason": "desktop から手動起動" }
-```
-
-- `cap_id`: cap の識別子。`caps/<cap_id>` が path になる。
-- `repo` / `branch`: path の git 取得に使う。`-` で始まる値は拒否。
-- `prompt`: claude に渡す指示。
-- `reason`: 起動理由。ログ用で、claude には渡さない。
-- `model`（任意）: cap 自身の `claude --model`。`sonnet` / `opus` / `haiku` / `claude-sonnet-5-5` などフル ID をそのまま渡す。形式は `[A-Za-z0-9._[]-]`（先頭 `-` 不可）で、不正なら `error`。省略時は前回の指定を使い続け、一度も無ければ `--model` を付けない。`session.extraArgs` に `--model` があっても、指定があれば `model` が後勝ち。
-- `worker_model`（任意）: この cap が `worker_start` で起動する worker の既定モデル。cap の `logs/model.json` に覚え、`worker_start` に `model` が無い時に使う。形式は `model` と同じ。
-- `model` / `worker_model` を知らない古い center は送らない（その場合は従来どおり）。知らない古い server は無視する。
-
-`stop_cap`（protocol `bantou` 1.1.0 で追加）:
-
-```json
-{ "bantou": 1, "type": "stop_cap", "cap_id": "cap-a" }
-```
-
-- **cap を閉じる**: idle / failed / `state=error` / 実行中のどれでも受け付ける。実行中なら下の手順で止め、実行が state.json を書き終えるのを待ってから、cap の会話を破棄する（`state.json` を `session_id: null`・`state: idle`・`retries: 0`・`last_error` 無しに書き直す。`last_started_at` / `last_finished_at` は残す）。次の `task` / `kick_cap` は `--session-id` の新しい会話で始まる（`state=error` で起動を断られていた cap も、閉じると起動できる）。破棄した session は `logs/closed.jsonl` に 1 行追記する（`closed_at` / `session_id` / `reason` / 破棄時点の `conversation`）。
-- **残すもの**: cap の `logs/`（セッションごとの生出力 `<session_id>.jsonl`、`reports.jsonl`、`closed.jsonl`、`model.json`）は消さず、その場に残す。cap dir 直下の他のファイルも触らない。**配下の worker の dir（`workers/<id>/`）は閉じても消さない**（溜まった dir は「終わった worker の掃除」の仕組みが掃除する）。配下の動いている worker（実行中・待ち。worker は cap の process group の外で動く）は止める（数は `stop_result` の `workers_stopped`）。閉じた cap には印（メモリと `logs/closed-mark.json`。server の再起動をまたぐ）を付け、worker の report・終了、起動時の worker 終了の回収では起こさない。center の次の `task` / `kick_cap` で印を外す。
-- 閉じている間（stop 要求から破棄まで）に同じ cap へ届いた指示は実行されず、`stop_cap により停止` で返る。
-- 走っている `claude -p` を process group ごと SIGTERM し、3 秒以内に終わらなければ SIGKILL する。子は `detached`（setsid）で起動しているので、cap の Bash が起動した孫もこの group にいる限り止まる。
-- 中断された `kick_cap` は `cap_result`（`ok: false`, `error: "stop_cap により停止"`、再試行しない）で返り、state は `failed`。
-- その cap に待っている指示（直列待ち）も、実行されずに同じ `cap_result` で返る。spawn 前（git 準備中）に届いた stop も、claude を起動せずに中断する。
-- 実行も待ちも無ければ `stopped: false` の `stop_result`。cap の dir と state.json は消さない（state の削除はしない）。
-- 限界: 孫が setsid などで別 group に出ていれば止まらない（`capBashSandbox` の注記と同じ事情。claude の Bash tool が起動した子は別 group）。stop 要求は inflight の間だけ有効で、全ての指示が片付くと消える（その間に届いた新しい指示も中断される）。
-
-`status`:
-
-```json
-{ "bantou": 1, "type": "status" }
-```
-
-## 返信
-
-指示の送信元 peer へ JSON で返す。
-
-```json
-{ "bantou": 1, "type": "cap_result", "cap_id": "cap-a", "session_id": "0b6f...-uuid", "ok": true, "result_text": "kicked" }
-{ "bantou": 1, "type": "status_result", "ok": true, "caps": [{ "kind": "cap", "id": "cap-a", "path": "/ws/caps/cap-a", "session_id": "0b6f...-uuid", "state": "idle", "last_started_at": "2026-10-28T05:00:00.000Z", "last_finished_at": "2026-10-28T05:01:10.000Z", "retries": 0, "queued": 0 }], "workers": [] }
-{ "bantou": 1, "type": "error", "ok": false, "message": "git clone 失敗: ...", "command": "kick_cap" }
-```
-
-- `stop_result`: `{ "bantou": 1, "type": "stop_result", "ok": true, "cap_id": "cap-a", "stopped": true, "session_cleared": true, "previous_session_id": "0b6f...-uuid" }`。`stopped` = cap の実行中（または待ち）の指示か、配下の worker を止めた。`workers_stopped` = 止めた配下の worker の数（任意項目。worker を止めない旧 server には無い）。`session_cleared` = 会話を破棄した（cap の dir が無い・session が無い時は false）。この 2 項目は後から足した任意項目（定義に入ったのは protocol 1.8.1。1.8.0 の定義には 2 つの hash があった）。stop_cap の失敗（`cap_id` が不正でない限り通常は無い）は `error`（`command: "stop_cap"`, `cap_id` 付き）。
-- `cap_result` は claude の実行が終わってから返る。数分かかることがある。
-- 実行が失敗しても `cap_result` で返る（`ok: false` と `error`）。
-- `error` は実行に入る前の失敗（git 失敗、state が `running` / `error` で起動できない、state 破損など）。
-- `cap_id` / `worker_id` が不正（`[A-Za-z0-9_-]+` でない）な指示は `error` を返さず、指示でないメッセージとして無視する（ログに `無視:`）。
-- `status_result` / `hello_result` には server の identity（protocol 1.7.0、すべて optional）が載る: `server_id`・`host`（`os.hostname()`）・`user`（server を動かす OS ユーザー）・`workspace`（絶対パス）。`status_result` には加えて `server_version`（npm `bantou` の版）と `protocol_version`。旧い server（1.7.0 未満）はこれらを返さないので、center は messenger の peer id で扱う。
-- `status_result` の `state` は `idle` / `running` / `failed` / `error`。`queued` は待ち行列の件数。state.json が壊れていれば `error`。
-
-## server_id（server の安定 id）
-
-- messenger の peer id は server の再起動・再登録のたびに変わる。代わりに server は workspace に 1 つの `server_id`（`srv-` + hex 10 桁、例 `srv-0a1b2c3d4e`）を持つ。
-- 保存先は `<workspace>/server.json`（`{"server_id","created_at"}`）。初回起動で 1 回だけ生成する。再起動・自己更新（`update_server`）・workspace の移動（dir ごと移した場合）でも、同じ workspace なら変わらない。別の workspace は別の id。
-- server.json が無い・`server_id` が無い旧形式・壊れている（JSON 不正、形が不正、`server_id` が `^[A-Za-z0-9_-]{1,64}$` でない）・読めない時は、起動を止めずに `server_id` を再生成して書く（旧形式なら他のキーを残す。`server.log` に `server_id 生成: ... (理由)` を出す）。壊れた場合は id が変わる。保存に失敗した時はその起動だけの id で動き、log に残す。
-- 同じ host に server が 2 つある時の見分け方: `hello_result` / `status_result` の `server_id` + `workspace` を見る（`host` と `user` は同じでも `workspace` と `server_id` が違う）。`server.log` の起動行（`server_id=... host=... user=...`）でも確かめられる。
-- 並行して初回起動した場合は先勝ち（先に `server.json` を置いた側の id を全員が使う）。
-- `server.json` に secret は無い。権限は umask 次第の既定（0644 など）で、読み取り可でよい。
-- 識別情報（`host` / `user` / `workspace` / `server_id`）は、`hello` / `status` を送れる messenger の peer 全員に見える（`user` と workspace の絶対パスを含む）。
-- server.json は `logs/` と `state.json` の掃除（cap / worker の dir）の対象外（workspace 直下なので触らない）。
 
 ## state.json
 
@@ -321,16 +157,8 @@ center から server を外す指示（protocol 1.8.0、`docs/protocol.md` の `
 - `state`: `idle`（待機）/ `running`（実行中）/ `failed`（直近の実行が失敗）/ `error`（孤児回収で判定できなかった時など）。
 - `last_error`: 失敗の理由。成功時は無い。
 - `retries`: 直近の実行で使った再試行回数。
-- `session_id` は `stop_cap`（cap を閉じる）で `null` に戻る。`null` の cap の次の実行は新しい会話。
 - `error` の agent は起動しない（`state=error のため起動しない`）。解除は手動で、state.json を削除するか内容を直す。
 - 書き込みは tmp ファイルへ書いて rename する。
-
-## 会話の記録（conversation）
-
-- `logs/conversation.json`（agent ごと。state.json の形は変えない）に、現在の会話の `started_at`（新しい会話を始めた run の開始時刻）、`tasks`（この会話での run 数。task・kick_cap・report 起因の resume を含む）、直近の使用量 `context_tokens` / `context_window` / `usage_at`、直近の run が失敗した時の `last_error_text` を持つ。`status_result` の各 agent の `conversation` に載る。
-- 使用量は claude の stream-json 最終行（`result`）から読む。`context_tokens` は `usage.iterations` の最後（最後の応答 1 回分）の `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`（`usage` 本体は run 全体の累計なので使わない）。`context_window` は `modelUsage` のうちトークン合計が最大のモデルの `contextWindow`。読めない run では直近の値を残す。
-- 失敗の理由: 失敗した run の `result` 行が `is_error`（または `errors` 配列）なら、その文を `last_error_text` と `last_error`（`終了コード 1: Prompt is too long` のように「終了コード N」の後ろに足す）に入れる。stderr があればそれが先頭。
-- `stop_cap` で会話ごと作り直す（`started_at` から数え直し）。会話の記録は補助情報で、書けなくても実行は止めない。
 
 ## retry と session 消失
 
@@ -349,20 +177,9 @@ center から server を外す指示（protocol 1.8.0、`docs/protocol.md` の `
 - 結果は `孤児回収: killed=<n> failed=<n> error=<n>` でログに出す。回収した running は activity で lost として登録し、center へ通知する（worker の持ち主は `owner.json`）。
 - 終了時（SIGTERM / SIGINT）は実行中の claude を process group ごと SIGKILL し、`failed`（`server 終了により中断`）にする。
 
-## 送り方
-
-- 任意の messenger peer から `send_message` で `bantou-server` 宛てに送る。
-- CLI の `send` は `from_id` が `cli` で peer ではないため、返信を受け取れない（サーバーは「返信失敗」をログに出して続行する）。
-- 指示でないメッセージ（非 JSON、他の JSON）は無視し、ログに `無視:` を出す。ping も無視する。
-- 指示は受信ごとに処理を始め、完了したら返信する。同一 id の指示は順番待ち、別 id は並行。`status` は実行中でも即答する。
-
 ## ログ
 
 標準出力に 1 行 1 件。
-
-```
-2026-10-28T05:00:00.000Z bantou: 指示受信: type=kick_cap from=... cap_id=cap-a prompt=Review the open issues.
-```
 
 起動 / 孤児回収 / worker 掃除 / broker 起動 / mcp 起動 / peer 登録 / worker_start / worker_stop / report 受信 / activity 通知 / 指示受信 / claude 起動 / claude 終了 / 再試行 / 返信 / エラー / 終了処理 が出る。
 
@@ -399,9 +216,7 @@ npm run e2e
 - 要: host に claude。claude を実際に複数回起動するため数分かかる。claude のログイン（claudeAgent）を使う。
 - `E2E_ROOT` で一時ディレクトリの親を変えられる（既定は OS の tmp）。`E2E_CLAUDE_CONFIG_DIR` で `CLAUDE_CONFIG_DIR` を渡す。`E2E_MODEL` で `--model` を指定する（worker の model は未指定なら `sonnet`）。cap の Bash sandbox は server の既定（`session.capBashSandbox: false`）で切れる。probe-survival は `E2E_CAP_BASH_SANDBOX=1` で sandbox 有効のまま計測する。
 - 内蔵 broker は 127.0.0.1 / discovery off の空き port（スクリプトが先に決める）、`/mcp` は port 0。server の messenger client はその broker へ向けるため、テスト専用に env（`AGENT_MESSENGER_HOST` / `PORT` / `DISCOVERY=off`）で上書きする。server・cap・worker に本番 broker を使わせない（`AGENT_MESSENGER_*` / `CLAUDE_CODE_MESSAGING_*` を除去、cap と worker は `--strict-mcp-config`）。
-- 検証内容: protocol 登録（`protocol 登録` ログ）→ center 相当の client が `listPeers("all", {protocol: "bantou"})` で発見 → meta 付きで送り、返信（`cap_result` / `status_result` / report 起因の `cap_result`）に meta が付くことを確認 → `kick_cap`（新規）→ `kick_cap`（resume、同じ session_id）→ worker 起動と報告（cap が `worker_start` tool で worker を起動 → worker が `report` done → server が受信 → cap が resume → 結果が送信元へ返る。`owner.json`、worker の state、worker と cap の `system/init` の `mcp_servers` が bantou のみであることも確認）→ `status` → meta 無しの旧形式 `status` も受ける → 他 protocol の meta は無視 → 非コマンドの無視 → 終了時の `protocol 解除`。
 - 失敗時は一時ディレクトリを残し、パスを `E2E_DIR=` に出す。
-- `npx tsx scripts/probe-survival.ts`（`E2E_*` は同じ）: cap が起動したプロセスが cap の終了後も残るかを `kick_cap` 経由で計測する。`PROBE_SIGTERM=1` で server の SIGTERM 経路も測る。
 - 後始末: messenger client、server プロセス（SIGTERM、exit 0 と port 解放も確認）、一時ディレクトリ。
 - 成功時は `E2E OK` と主要ログを出す。失敗時は理由を出して exit 1。
 
