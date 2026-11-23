@@ -22,7 +22,7 @@
    - 指示した範囲の外を変えている
 
    それ以外は報告に残すだけ（完了を止めない）。この基準は bantou の仕組みではなく、**schema 定義の中身**（5 節の例に入る物）。server は解釈しない。
-5. schema 定義の足し方。bantou の guardrail の設定で足し、bantou の schema の MCP server から openspec-mcp に渡る。設計は `docs/design/guardrail-schema-server.md`。プロトコルは openspec-mcp の project が決める。
+5. schema 定義の足し方。bantou の guardrail の設定で足し、bantou の schema の MCP server から openspec-mcp に渡る。設計は `docs/design/guardrail-schema-server.md`。openspec-mcp の側の設計の出典は、vault のノート（名前は利用者の言葉のとおり。本書では参照しない）。プロトコルは openspec-mcp の project が決める。
 6. 順番。
    > reviewの仕組みの話は、gardrail機能の実装が終わって、schema定義を、bantou上で保守管理出来るようにしてからの話
 
@@ -130,6 +130,7 @@
 
 - worker ごとに `<workspace>/workers/<worker_id>/state.json`（`state.ts`。`session_id`・`state`・`last_started_at` など）がある。`agents.ts` の run は `mode = st.session_id ? "resume" : "new"` で、session があれば `--resume` で続きを起こす。
 - worker は `report` を呼んだら turn を終える（`report` tool の説明）。つまり ask / approve を出した worker の process は、今すでに終わっていて、session_id だけが state.json に残る。返答（`worker_reply`）は、同じ `worker_id` で `workers.start` し、この session を起こし直す。
+- 【事実】ask の経路は tool としては在るが、`packages/server/instructions/worker.md` の `[進め方]` は worker に「質問しない。止まらず最後まで進む。」と指示している。決定 11 は worker が質問を出す事を前提にしている。この設計書では解決しない（利用者が話に出していない）。
 - server は「この worker は質問の返答待ちか」を状態として持っていない。持っているのは `activity.ts` の running / stalled / idle / done / failed / lost（process の生存と出力から）で、返答待ちは center の `waitingReply`（`worker_report` の ask / approve が未返答かどうか。`packages/center/src/coordinator.ts` など）が数える。step の位置を持つ物は無い。
 
 ### 1.7 今の形の特徴（変える動機に関わる所）
@@ -198,7 +199,7 @@
 - change の進み（どの step まで進んだか・返答待ちか・止まっているか）を見る（`change_status`）。止める・続きを頼む（`change_stop`）。worker の質問に返答する（`worker_reply`）。
 - worker を起こさない。分担を決めない。資源を見て起こすかを判断しない（server が持つ。3.6）。
 - 実作業をしない（体制のルール）。
-- cap（center 側）が master-cap を指すかは未決 #6。【推測】master-cap の指示文（`packages/center/instructions/master-cap.md` の `[委譲]` `[待ち方]`）に、change の登録と見方のルールを移す改訂が要る。実装の task。
+- cap（center 側）が master-cap を指すかは未決 #6。【推測】cap（center 側）の指示文（未決 #6 が master-cap なら `packages/center/instructions/master-cap.md` の `[委譲]` `[待ち方]`）に、change の登録と見方のルールを移す改訂が要る。実装の task。
 
 ### 3.3 worker
 
@@ -363,7 +364,7 @@ tasks の instruction:
 | 0 | 設計（この書面、guardrail-schema-server、openspec-mcp 側） | **今。並行で進める** |
 | 1 | guardrail 機能の実装（`docs/design/guardrail-schema-server.md` の S1〜S5） | 段階 2 の前提。S1・S3・S5 は openspec-mcp のプロトコルに依らない。**S2（schema の MCP server）・S4（openspec-mcp につなぐ）は openspec-mcp のプロトコル待ち** |
 | 2 | schema 定義を bantou 上で保守管理できる | 段階 1 の完了 |
-| 3 | change 単位の step 消化の実装（7.3 の W1〜W6） | 段階 2 の後（0 節の 6） |
+| 3 | change 単位の step 消化の実装（7.3 の W1〜W7） | 段階 2 の後（0 節の 6） |
 
 ### 7.3 実装の単位と並行
 
@@ -372,7 +373,7 @@ tasks の instruction:
 | W1 | schema 定義を guardrail の設定に足す（5 節の例を openspec-mcp の形に直して） | guardrail の実装完了、**openspec-mcp のプロトコル** | 他と別 file |
 | W2 | server の change の記録・登録の受け付け・queue（`register_change` / `change_status` / `stop_change`、`reservations.ts` の拡張、`workers.ts` の持ち主の鍵の付け替え） | 未決 #1・#2・#5 | W3 と別 file。center（W4）とは protocol の型が先に要る |
 | W3 | server の資源の管理と並行の判定（`resources.ts` / `activity.ts` を使う） | 未決 #3 | W2 と別 file |
-| W4 | center の tool の置き換え（`change_*`、`worker_reply`、`master-cap.md` の改訂）と protocol の型 | 4.1・4.3 の型 | server（W2・W3）と別 package |
+| W4 | center の tool の置き換え（`change_*`、`worker_reply`、cap（center 側）の指示文の改訂（未決 #6 が master-cap なら `master-cap.md`））と protocol の型 | 4.1・4.3 の型 | server（W2・W3）と別 package |
 | W5 | step の終わりの判定を server が実行する層と、次の step の起動 | **openspec-mcp のプロトコル**（実行の形・結果の読み方）、未決 #4 | W2 の後 |
 | W6 | remote-cap の層を捨てる（3.1 の捨てる物）。旧メッセージの扱い（未決 #5） | W2〜W5 が動いた後 | 最後 |
 | W7 | docs の改訂（`docs/architecture.md` の server の実行モデル・`cap-orchestration.md` の廃止・`protocol.md`） | W1〜W6 | 最後 |
