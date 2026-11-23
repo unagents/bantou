@@ -62,7 +62,7 @@ test.describe("server / cap tab", () => {
   test("the cap card shows the center's remote_list", async ({ page, stack }) => {
     stack.setSessions(["alpha"]);
     stack.center.tools.set("remote_list", [
-      { remote_id: "r-5b-cap", owners: [], server: "srv-1", server_label: "host-a.example.test", session: "alpha", state: "stopped", createdAt: "2026-11-20T00:00:00Z", model: "m-5b" },
+      { remote_id: "r-5b-cap", owners: [], server: "srv-1", server_label: "host-a.example.test", session: "alpha", state: "done", createdAt: "2026-11-20T00:00:00Z", model: "m-5b" },
     ]);
     await page.goto("/");
     await page.getByTestId("tab-server").click();

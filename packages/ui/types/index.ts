@@ -424,7 +424,7 @@ export interface CenterRemoteRecord {
   serverWorkspace?: string;
   /** Display label: host name first with the server_id (plus user and workspace when several servers share the host name). */
   server_label?: string;
-  state: "running" | "stopped";
+  state: "running" | "done" | "failed" | "unknown";
   /** Model given when the cap was created (absent = none). */
   model?: string;
   worker_model?: string;
