@@ -21,7 +21,7 @@ bantou の work session ↔ bantou メッセージの共通 TypeScript 型。
 - `messenger/protocol.json`（parse 後の値で比較。空白・改行は無関係）か `messenger/PROTOCOL.md`（1 byte でも）を変えたら hash が変わる。**必ず版を上げる**: `protocol.json` の `version` と `src/server.ts` の `MESSENGER_PROTOCOL.version` を上げ、`messenger/versions.json` に `"<版>": "<hash>"` を 1 行足す。optional 項目の追加・文言の直しも同じ。
 - hash は agent-messenger の `sha256(canonicalJSON({manifest, doc}))`。`test/versions.test.mjs` が「今の定義の hash = 今の版に記録した hash」を確かめる。版を上げずに定義を変えると落ちる。
 - 複数 hash を持てるのは過去の例外（1.6.0 / 1.8.0）だけ。test が固定している。同じ版の別定義は broker が `PROTOCOL_CONFLICT` で断り、後から更新された server が center の発見から消える（2026-11-11 の事故）。
-- patch だけの上げ（通信の形を変えない版の付け直し）は center が通す（下の「版の互換」）。
+- 版を上げると center（major / minor が違う版）が旧版の server へ `launch` / `server-info` を送らなくなる。server を先に publish する。patch だけの上げ（通信の形を変えない版の付け直し）は center が通す（下の「版の互換」）。
 - 型・ガード・`docs/protocol.md` だけの変更は定義ではないので版は要らない。
 
 ## 版の互換
