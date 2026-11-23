@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DEFAULT_BIND, DEFAULT_PORT, parseArgs } from "../src/args.js";
 
-test("既定は stdio / 7910 / 127.0.0.1", () => {
+test("既定は stdio / 127.0.0.1。port は引数に無い（config の port・既定 7910 で待ち受ける）", () => {
   const a = parseArgs([]);
   assert.equal(a.transport, "stdio");
-  assert.equal(a.port, DEFAULT_PORT);
+  assert.equal(a.port, undefined);
+  assert.equal(DEFAULT_PORT, 7910);
   assert.equal(a.bind, DEFAULT_BIND);
 });
 

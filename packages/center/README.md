@@ -26,7 +26,7 @@ bantou-center [--config <path>] [--transport stdio|http] [--port <n>] [--bind <a
 | フラグ | 既定 | 説明 |
 |---|---|---|
 | `--transport` | `stdio` | `stdio` / `http` |
-| `--port` | `7910` | http の待受ポート。`0` は OS 任せ（実ポートは stderr のログに出る）。stdio では無視 |
+| `--port` | なし | http の待受ポート（test・開発・今の desktop の起動用）。`0` は OS 任せ（実ポートは stderr のログに出る）。無ければ config の `port`（既定 `7910`）で待ち受け、別の port には逃げない。使用中なら理由を出して終わる（`--port` 無しの起動は exit 0）。stdio では無視 |
 | `--bind` | `127.0.0.1` | http の bind アドレス。stdio では無視 |
 
 不明な引数・不正な値は usage を stderr に出して exit 2。
@@ -91,7 +91,11 @@ stdout は MCP の通信路。ログは全て stderr に出る。
 | `servers[].timeoutMs` | 正の整数 | `2100000`（35 分） | 返信待ちの打ち切り |
 | `logDir` | 絶対パス | config と同じ場所の `center-logs/` | remote-control の出力ログ置き場 |
 | `workspace` | 絶対パス | なし | `session_create` で `path` 省略時の置き場所 `<workspace>/<name>` の親。session は起動時に立てない |
-| `token` | 12 文字以上の文字列 | なし | http transport の `/mcp` が要求する Bearer token。http では必須（無い・12 文字未満だと起動せずエラー終了。Cork の MCP Server が 12 文字未満の token を拒否し、保存値が不正なら作り直すのに合わせた）。stdio では使わない。desktop は sidecar 起動時に `center.json` へ書く |
+| `token` | 12 文字以上の文字列 | なし | http transport の `/mcp` が要求する Bearer token。書いた場合は 12 文字以上が必要（12 文字未満だと起動せずエラー終了。無い時は下記の `internal-token`。Cork の MCP Server が 12 文字未満の token を拒否し、保存値が不正なら作り直すのに合わせた）。stdio では使わない。desktop は sidecar 起動時に `center.json` へ書く |
+| `port` | 0〜65535 の整数 | `7910` | http の待受ポート（起動時に読む。`--port` があればそちらが優先）。窓の無い起動（bantou-center）はこの値でだけ待ち受ける |
+| `keyRanges` | IP / CIDR の配列（`192.168.1.0/24`・`10.0.0.5`・`fd00::/8`） | なし（誰にも鍵を渡さない） | 鍵を渡してよい接続元の IP の範囲（起動時に読む）。範囲内の接続元が `POST /auth/key`（認証なし）で client の鍵（`{ "key": "…" }`）を受け取り、以後 `Authorization: Bearer <鍵>` で `/mcp`・`/events`・`/graphql`・`/sessions/*` を使う。鍵は state dir の `client-keys.json`（hash のみ・0600）に覚える。失効は扱わない |
+
+`token` を書かない http 起動（bantou-center）は、center 自身が使う token を state dir の `internal-token`（0600）に 1 度作って使う（統括の MCP・worker の ws 用。client には渡さない）。
 
 ### config の読み直し
 

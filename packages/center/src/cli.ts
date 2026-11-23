@@ -79,7 +79,13 @@ try {
   process.exit(2);
 }
 
-runDaemon(args).catch((e: unknown) => {
+runDaemon(args).catch(async (e: unknown) => {
+  const { PortInUseError } = await import("./port-check.js");
+  // port が設定から決まる起動（`--port` 無し。bantou-center の本番）が使用中で終わる時は、正常終了にする（launchd が再起動し続けない。設計書 #16・#32）
+  if (e instanceof PortInUseError && args.port === undefined) {
+    console.error(fatalLine(e.message));
+    process.exit(0);
+  }
   console.error(fatalLine(e instanceof Error ? e.message : String(e)));
   process.exit(1);
 });

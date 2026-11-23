@@ -1,5 +1,7 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import type { CliArgs } from "./args.js";
+import { DEFAULT_PORT, type CliArgs } from "./args.js";
+import { createClientKeys, createRangeCheck, ensureInternalToken } from "./client-keys.js";
+import { assertPortFree, PortInUseError, portInUseMessage } from "./port-check.js";
 import { resolveClaude } from "./claude-path.js";
 import { resolveSessionPath } from "./path-env.js";
 import { centerName } from "./center-name.js";
@@ -64,6 +66,10 @@ export async function runDaemon(args: CliArgs): Promise<void> {
   } else if (!config.projects.some((p) => p.autostart)) {
     log(`remote-control は自動起動しない: autostart の project が 0 件 (projects=${config.projects.length}, ${configPath})`);
   }
+  // 待受 port: `--port`（test・開発・今の desktop の起動）が無ければ config の port（既定 7910）。別の port には逃げない。
+  // 使用中なら、log dir・state・session・孤児 process・messenger に触れる前に、理由つきで終わる（2 つ目の center が何にも触らない）
+  const listenPort = args.port ?? config.port ?? DEFAULT_PORT;
+  if (args.transport === "http") await assertPortFree(listenPort, args.bind);
   try {
     await mkdir(config.logDir, { recursive: true });
     setLogFile(join(config.logDir, "center.log"));
@@ -277,10 +283,17 @@ export async function runDaemon(args: CliArgs): Promise<void> {
 
   const makeServer = (launcher: boolean) => createCenterServer({ config, supervisor, link, sessions, remotes, login, log, launcher, resession });
   if (args.transport === "http") {
-    if (!config.token || config.token.length < MIN_TOKEN_LEN) {
+    // config に token が無い起動（bantou-center の本番。client は鍵で繋ぐ）は、center 自身が使う token を state dir に 1 度作って使う。client には渡さない
+    if (!config.token) config.token = await ensureInternalToken(join(stateDir, "internal-token"));
+    if (config.token.length < MIN_TOKEN_LEN) {
       throw new Error(`http transport には config の token（${MIN_TOKEN_LEN} 文字以上）が必要: ${configPath}`);
     }
+    // client の鍵（鍵を取る接続は keyRanges の範囲の接続元だけ。範囲が無ければ誰にも渡さない）
+    const clientKeys = await createClientKeys(join(stateDir, "client-keys.json"), log);
+    const keyRange = createRangeCheck(config.keyRanges ?? []);
     http = await startHttpServer({
+      clientKeys,
+      keyRange,
       createServer: (launcher) => makeServer(launcher === true),
       ...(launcherKey ? { launcherKey } : {}),
       schemas: schemaSourceFromFile(join(stateDir, "center-settings.json"), log),
@@ -310,10 +323,14 @@ export async function runDaemon(args: CliArgs): Promise<void> {
         log,
       ),
       ...(config.workspace ? { workspace: config.workspace } : {}),
-      port: args.port,
+      port: listenPort,
       bind: args.bind,
       token: config.token,
       log,
+    }).catch((e: unknown) => {
+      // 事前の確認（assertPortFree）と listen の間に別の process が port を取った時の最後の守り
+      if ((e as NodeJS.ErrnoException).code === "EADDRINUSE") throw new PortInUseError(portInUseMessage(listenPort, "other"));
+      throw e;
     });
     httpPort = http.port;
     // 統括の MCP の server（独立した process）。port・key は state dir の coordinator-mcp.json（初回に作る。以後は変わらない）

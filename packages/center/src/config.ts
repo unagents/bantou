@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { MODEL_PATTERN } from "@agent-hand/bantou-protocol";
 import { z } from "zod";
+import { parseRange } from "./client-keys.js";
 
 /** `claude --permission-mode` の選択肢。 */
 export const PERMISSION_MODES = [
@@ -102,6 +103,10 @@ export const configSchema = z
      * どちらも無い時は launch を送らず error（remote_send）。
      */
     publicHost: z.string().min(1).optional(),
+    /** http の待受 port。起動時に読む。CLI の `--port` が無い起動（bantou-center の本番）はこの値で待ち受け、別の port には逃げない。無ければ DEFAULT_CENTER_PORT。 */
+    port: z.number().int().min(0).max(65535).optional(),
+    /** 鍵を渡してよい接続元の IP の範囲（`192.168.1.0/24`・`10.0.0.5`・`fd00::/8`）。空・無しなら鍵を渡さない。起動時に読む。 */
+    keyRanges: z.array(z.string().refine((s) => parseRange(s) !== undefined, { message: "IP か CIDR（例: 192.168.1.0/24）で指定する" })).optional(),
   })
   .superRefine((cfg, ctx) => {
     for (const key of ["projects", "servers"] as const) {
@@ -134,6 +139,10 @@ export interface Config {
   token?: string;
   /** server から届く center の宛先 host（未設定なら undefined）。 */
   publicHost?: string;
+  /** http の待受 port（未設定なら undefined。既定は DEFAULT_CENTER_PORT）。 */
+  port?: number;
+  /** 鍵を渡してよい接続元の IP の範囲（未設定なら鍵を渡さない）。 */
+  keyRanges?: string[];
 }
 
 /** zod の検証結果から Config を作る（logDir の既定は config と同じ場所の center-logs）。 */
@@ -151,13 +160,15 @@ export function parseConfig(data: unknown, configPath: string, warn?: (msg: stri
       .join("; ");
     throw new Error(`config が不正: ${issues}`);
   }
-  const { logDir, token, workspace, publicHost, ...rest } = r.data;
+  const { logDir, token, workspace, publicHost, port, keyRanges, ...rest } = r.data;
   return {
     ...rest,
     logDir: logDir ?? join(dirname(resolve(configPath)), "center-logs"),
     ...(workspace ? { workspace } : {}),
     ...(token ? { token } : {}),
     ...(publicHost ? { publicHost } : {}),
+    ...(port !== undefined ? { port } : {}),
+    ...(keyRanges ? { keyRanges } : {}),
   };
 }
 
