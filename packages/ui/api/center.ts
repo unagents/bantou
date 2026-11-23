@@ -1,5 +1,5 @@
 import { getPlatform, getTransport } from "~/tauri";
-import type { CenterRetireResult, CenterConnection, CenterConnectSnippets, CenterIpStatus, CenterLoginCode, CenterLoginStart, CenterParsedConnect, CenterCommonSettings, CenterSettings, CenterStatus, McpToolResult, ProjectSettings } from "../types";
+import type { CenterConnection, CenterConnectSnippets, CenterIpStatus, CenterLoginCode, CenterLoginStart, CenterParsedConnect, CenterCommonSettings, CenterSettings, CenterStatus, McpToolResult, ProjectSettings } from "../types";
 
 export const centerGetSettings = () => getTransport().invoke<CenterSettings>("center_get_settings");
 
@@ -95,9 +95,6 @@ export const openExternalUrl = (url: string) => {
   }
   return getPlatform().openExternal(href);
 };
-
-/** Retire a server (`server_retire`, irreversible). `serverId` is the server_id (never a host name: two servers can share a host). Rejects with the center's reason (not supported, no reply, ...). */
-export const serverRetire = (serverId: string) => centerToolStrict<CenterRetireResult>("server_retire", { server: serverId });
 
 /** Start `/login` in the session's claude (`session_login`): resolves with the URL to open in a browser. */
 export const sessionLogin = (name: string) => centerToolStrict<CenterLoginStart>("session_login", { name });

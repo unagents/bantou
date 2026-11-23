@@ -19,6 +19,17 @@ export interface LinkPeer {
   /** broker が付ける登録時刻（ISO 8601）。同名 peer の新旧判定に使う。 */
   registered_at?: string;
   last_seen?: string;
+  /** peer が declare している protocol（name + version）。 */
+  protocols?: { name: string; version: string }[];
+}
+
+/** server_list の 1 行: protocol「bantou」で broker に登録されている peer。 */
+export interface ServerListEntry {
+  name: string;
+  host: string | null;
+  /** peer が declare している protocol「bantou」の版。 */
+  protocol: string | null;
+  last_seen: string | null;
 }
 
 /** 受信 message のうち link が使う部分。 */
@@ -87,6 +98,8 @@ export interface ServerLink {
    * peer が見つからない・送れない時は ok:false と理由を返す（投げない）。bantou protocol の message ではない。
    */
   notifyPeer(name: string, text: string, opts?: { mark?: PeerMark }): Promise<{ ok: true; to: string } | { ok: false; reason: string }>;
+  /** broker に protocol「bantou」で登録されている peer（server）の一覧。自分は除く。投げる事がある（未接続・列挙に非対応）。 */
+  listServers(): Promise<ServerListEntry[]>;
   /** 起床の直前に控える印（失敗は null）。 */
   peerMarkOf(name: string): Promise<PeerMark | null>;
   close(): Promise<void>;
@@ -177,6 +190,18 @@ export function createServerLink(opts: {
         : sendTo(server, { protocol: "bantou", callType: "reply", order: i.order, "session-id": i.sessionId }),
     requestServerInfo: (server) => sendTo(server, { protocol: "bantou", callType: "status", order: "server-info" }),
     serverVersionOf: (server) => versions.get(server),
+    async listServers() {
+      const c = clientOrThrow();
+      if (!c.listPeers) throw new Error("broker が peer の列挙に対応していない");
+      const own = c.peer?.id ?? null;
+      const peers = (await c.listPeers("all", { protocol: MESSENGER_PROTOCOL.protocol })).filter((p) => p.id !== own);
+      return peers.map((p) => ({
+        name: p.name,
+        host: p.hostname ?? null,
+        protocol: p.protocols?.find((d) => d.name === MESSENGER_PROTOCOL.protocol)?.version ?? null,
+        last_seen: p.last_seen ?? null,
+      }));
+    },
     async peerMarkOf(peerName) {
       try {
         const c = clientOrThrow();

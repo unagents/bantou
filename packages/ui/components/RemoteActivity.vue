@@ -124,7 +124,7 @@ function clock(iso: string): string {
 
 /** The cap is idle, has no worker and no pending instruction: one line "待機中". */
 function waiting(r: CenterRemoteRecord): boolean {
-  if (r.state !== "done" || (r.pending?.length ?? 0) > 0) return false;
+  if (r.state !== "stopped" || (r.pending?.length ?? 0) > 0) return false;
   const agents = r.activity?.agents ?? [];
   return !agents.some((a) => a.kind === "worker") && !agents.some((a) => a.kind === "cap" && a.state !== "idle" && a.state !== "done");
 }

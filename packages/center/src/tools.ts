@@ -232,6 +232,20 @@ export function registerTools(
     () => guard(() => json({ workspace: workspace ?? null, systemInstructions, launcher })),
   );
 
+  server.registerTool(
+    "server_list",
+    {
+      title: "server 一覧",
+      description:
+        "broker に protocol「bantou」で登録されている peer（server）の一覧。各要素は { name, host, protocol, last_seen }（name = remote_send の server にそのまま渡す値 / host = peer の host 名 / protocol = peer が declare している protocol の版 / last_seen = broker が見た最後の時刻）。",
+    },
+    () =>
+      guard(async () => {
+        if (!deps.link) throw new Error("messenger に接続していない");
+        return json(await deps.link.listServers());
+      }),
+  );
+
   // -- B. remote の読み取り（外向けは一覧だけ。作成・削除は session 向けの窓口 /mcp/session） --
   server.registerTool(
     "remote_list",

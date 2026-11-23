@@ -289,7 +289,6 @@ test("5.3 the web list is exactly the designed one", () => {
       "rc_stop",
       "remote_list",
       "server_list",
-      "server_peers",
       "session_create",
       "session_list",
       "session_login",
@@ -302,7 +301,7 @@ test("5.3 the web list is exactly the designed one", () => {
       "worker_reply",
     ].sort(),
   );
-  for (const t of ["session_delete", "server_retire", "rc_status", "cap_kick", ""]) assert.equal(allowWebTool(t), false, t);
+  for (const t of ["session_delete", "rc_status", ""]) assert.equal(allowWebTool(t), false, t);
 });
 
 test("memory / mcpServers: the web policy refuses settings with a memory or mcpServers key for the 3 settings tools before anything is sent (only the place that started the center writes them); other items go through", async () => {
@@ -339,14 +338,14 @@ test("memory / mcpServers: the web policy refuses settings with a memory or mcpS
 test("5.3 a tool outside allowTool is refused before anything is sent; no policy allows every tool", async () => {
   const mock = await start();
   const web = new McpClient({ policy: { allowTool: allowWebTool } });
-  await assert.rejects(web.callTool(mock.url, undefined, "server_retire", {}), ToolNotAllowedError);
+  await assert.rejects(web.callTool(mock.url, undefined, "rc_status", {}), ToolNotAllowedError);
   await assert.rejects(web.callTool(mock.url, undefined, "session_delete", {}), /許可されていない/);
   assert.equal(mock.log.length, 0);
   assert.equal(web.lastError(), undefined);
   await web.callTool(mock.url, undefined, "rc_list");
   assert.equal(mock.count("tools/call"), 1);
   const desktop = new McpClient();
-  await desktop.callTool(mock.url, undefined, "server_retire");
+  await desktop.callTool(mock.url, undefined, "rc_status");
   assert.equal(mock.count("tools/call"), 2);
 });
 

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { centerTool, pickDirectory } from "../api";
 import { INSTRUCTIONS_NOTE, type SettingsDraft } from "../composables/sessionInstructions";
-import type { CenterServerPeers } from "../types";
+import type { CenterServer } from "../types";
 
 // One section per project-settings item. A future item (skills, output style) is another section here.
 const draft = defineModel<SettingsDraft>({ required: true });
@@ -37,11 +37,10 @@ function removeDir(i: number) {
 }
 // canPick: "追加" opens the folder dialog and adds the chosen folder as one row (a cancel adds nothing, no blank row).
 // When the dialog itself fails (no dialog on this OS) the add button falls back to typed rows (a blank row).
-// servers: the choices are the servers the center has discovered (`server_peers`), picked as checkboxes.
-// An entry is the server_id (host name when the server reports none); a typed host name works too (it covers every server on that host).
+// servers: the choices are the servers registered on the broker (`server_list`), picked as checkboxes.
+// An entry is the server's name (the value `remote_send` takes as `server`); a typed name works too.
 interface ServerChoice {
   value: string;
-  host: string;
   label: string;
 }
 const choices = ref<ServerChoice[]>([]);
@@ -49,12 +48,8 @@ const choicesError = ref<string | null>(null);
 const serverInput = ref("");
 async function loadChoices() {
   try {
-    const r = await centerTool<CenterServerPeers>("server_peers");
-    choices.value = r.peers.map((p) => {
-      const host = p.host ?? p.hostname ?? p.name;
-      const who = [p.user, p.workspace].filter(Boolean).join(" ");
-      return { value: p.server_id ?? host, host, label: [host, p.server_id, who].filter(Boolean).join("  ") };
-    });
+    const r = await centerTool<CenterServer[]>("server_list");
+    choices.value = r.map((s) => ({ value: s.name, label: [s.name, s.host].filter(Boolean).join("  ") }));
     choicesError.value = null;
   } catch (e) {
     choices.value = [];
@@ -68,13 +63,13 @@ const limited = computed(() => draft.value.servers !== null);
 function setLimited(on: boolean) {
   draft.value = { ...draft.value, servers: on ? [] : null };
 }
-const matches = (entry: string, c: ServerChoice) => entry === c.value || entry.toLowerCase() === c.host.toLowerCase();
+const matches = (entry: string, c: ServerChoice) => entry === c.value;
 const isChosen = (c: ServerChoice) => (draft.value.servers ?? []).some((e) => matches(e, c));
 function toggleChoice(c: ServerChoice, on: boolean) {
   const rest = (draft.value.servers ?? []).filter((e) => !matches(e, c));
   draft.value = { ...draft.value, servers: on ? [...rest, c.value] : rest };
 }
-/** Entries that match no discovered server (typed host names, servers that are not running now). */
+/** Entries that match no listed server (typed names, servers that are not registered now). */
 const otherServers = computed(() => (draft.value.servers ?? []).filter((e) => !choices.value.some((c) => matches(e, c))));
 function addServer() {
   const v = serverInput.value.trim();
@@ -203,7 +198,7 @@ async function pickAdd() {
     <section v-if="!noServers" class="flex flex-col gap-1" :data-testid="`${idPrefix}-section-servers`">
       <h3 class="text-sm font-semibold">使う server</h3>
       <p class="text-cork-muted text-xs">
-        master-cap が remote-cap を送る server の範囲。オフなら全部の server。この設定は session ごとにここだけで持つ（全 session 共通の設定には無い）。オンで 1 つも選ばないと、どの server も使わない
+        master-cap が worker を送る server の範囲。オフなら全部の server。この設定は session ごとにここだけで持つ（全 session 共通の設定には無い）。オンで 1 つも選ばないと、どの server も使わない
       </p>
       <UCheckbox
         :model-value="limited"
@@ -220,14 +215,14 @@ async function pickAdd() {
           <span class="text-cork-muted">（今は見つかっていない）</span>
           <UButton icon="i-lucide-x" color="neutral" variant="ghost" size="xs" :aria-label="`${e} を外す`" :data-testid="`${idPrefix}-server-remove`" @click="removeServer(e)" />
         </div>
-        <p v-if="choicesError" class="text-cork-muted pl-6 text-xs" :data-testid="`${idPrefix}-servers-error`">server の一覧を取れない（host 名か server_id を入力して追加できる）: {{ choicesError }}</p>
+        <p v-if="choicesError" class="text-cork-muted pl-6 text-xs" :data-testid="`${idPrefix}-servers-error`">server の一覧を取れない（server の名前を入力して追加できる）:{{ choicesError }}</p>
         <div class="flex gap-2 pl-6">
-          <UInput v-model="serverInput" class="flex-1" size="xs" placeholder="host 名か server_id" :data-testid="`${idPrefix}-server-input`" @keydown.enter.prevent="addServer" />
+          <UInput v-model="serverInput" class="flex-1" size="xs" placeholder="server の名前" :data-testid="`${idPrefix}-server-input`" @keydown.enter.prevent="addServer" />
           <UButton size="xs" label="追加" color="neutral" variant="outline" :data-testid="`${idPrefix}-server-add`" @click="addServer" />
         </div>
         <p v-if="(draft.servers ?? []).length === 0" class="text-cork-danger-text pl-6 text-xs" :data-testid="`${idPrefix}-servers-none`">1 つも選んでいない: この範囲ではどの server も使わない</p>
       </template>
-      <p class="text-cork-muted text-xs" :data-testid="`${idPrefix}-servers-note`">保存すると次の呼び出しからすぐ効く（起動し直し不要）。host 名は同じ host の server すべてに効く</p>
+      <p class="text-cork-muted text-xs" :data-testid="`${idPrefix}-servers-note`">保存すると次の呼び出しからすぐ効く（起動し直し不要）</p>
     </section>
   </div>
 </template>

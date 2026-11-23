@@ -66,11 +66,11 @@ test("three columns: side menu | remote tasks of the session + task list | termi
           agents: [{ kind: "cap", id: "c-0123456789-careery", state: "running", task: "xlsx 取込の調査", silent_ms: 2000, last_activity: "Bash 実行中" }],
         },
       },
-      { remote_id: "c-0123456789-stroke-board", session: "stroke-board", owners: [], server: "p2", serverName: "other-server", state: "done", createdAt: "2026-10-29T00:00:00.000Z" },
+      { remote_id: "c-0123456789-stroke-board", session: "stroke-board", owners: [], server: "p2", serverName: "other-server", state: "stopped", createdAt: "2026-10-29T00:00:00.000Z" },
       // a second server of careery: its cap is its own row (one row per server)
-      { remote_id: "c-0123456789-careery", session: "careery", owners: [], server: "p3", serverName: "third-server", state: "done", createdAt: "2026-10-29T00:00:00.000Z" },
+      { remote_id: "c-0123456789-careery", session: "careery", owners: [], server: "p3", serverName: "third-server", state: "stopped", createdAt: "2026-10-29T00:00:00.000Z" },
       // the old shared cap (no session) is never shown in a session's column
-      { remote_id: "c-0123456789", owners: [], server: "p", serverName: "shared-old-server", state: "done", createdAt: "2026-10-28T00:00:00.000Z" },
+      { remote_id: "c-0123456789", owners: [], server: "p", serverName: "shared-old-server", state: "stopped", createdAt: "2026-10-28T00:00:00.000Z" },
     ];
   });
   await pickSession(page, "careery");

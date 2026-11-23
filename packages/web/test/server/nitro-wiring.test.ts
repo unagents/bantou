@@ -288,7 +288,7 @@ describe("Nitro build の配線", { timeout: 300_000 }, () => {
       assert.equal((await rpc(cmd)).status, 404, cmd);
     }
     const before = center.count("tools/call");
-    for (const name of ["server_retire", "session_delete"]) {
+    for (const name of ["rc_status", "session_delete"]) {
       assert.equal((await rpc("center_call", { name, arguments: {} })).status, 404, name);
     }
     assert.equal(center.count("tools/call"), before);

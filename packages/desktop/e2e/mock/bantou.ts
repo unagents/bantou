@@ -56,34 +56,10 @@ export class MockBantou {
     { project: "alpha", path: "/ws/alpha", state: "connected", pid: 4301, sessionUrl: "https://claude.ai/code/session_mock", restarts: 0 },
     { project: "beta", path: "/ws/beta", state: "stopped", pid: null, sessionUrl: null, restarts: 2 },
   ];
-  /** `server_list` result (center `ServerInfo[]`): the configured links. `serverPeer` is the peer id the center last sent to (or a plain name), matched with `server_peers[].server_id` first when the entry has `server_id` (optional, with `host` / `user` / `workspace`), else with `server_peers[].id`. */
-  centerServers: Record<string, unknown>[] = [{ name: "srv1", connected: true, reachable: true, peerId: "p1", serverPeer: "p2" }];
-  /** `server_peers` result (center `Follow.snapshot()`). */
-  centerVersions: unknown = {
-    pair: { server: "0.3.0", protocol: "1.3.0" },
-    peers: [
-      { key: "mac200 /ws", id: "p2", name: "bantou-server", hostname: "mac200", server_version: "0.3.0", protocol_version: "1.3.0", state: "ok", detail: "版が一致", since: "2026-10-31T00:00:00.000Z" },
-    ],
-  };
-  /** When set, `server_peers` fails with this message. */
-  centerVersionsError: string | null = null;
-  /** `server_retire` calls received (arguments as sent). */
-  centerRetireCalls: unknown[] = [];
-  /** When set, `server_retire` fails with this message (isError result: not supported, no reply, ...). */
-  centerRetireError: string | null = null;
-  /** The `server_retire` answer (center `RetireOutcome`) for the server_id asked; the peer then leaves `server_peers`, like the center drops a retired peer. */
-  centerRetireResult: Record<string, unknown> = {
-    ok: true,
-    state: "retiring",
-    stopped: { caps: 2, workers: 3 },
-    exit_at: "2026-11-10T09:00:03.000Z",
-    exit_code: 76,
-    host_steps: ["systemctl disable --now bantou-server.service", "userdel bantou-srv", "rm -rf /home/bantou-srv/ws"],
-    service: { manager: "systemd", name: "bantou-server.service", detected: true },
-    records_removed: 2,
-    sessions: ["alpha"],
-    message: "mock",
-  };
+  /** `server_list` result (center `ServerListEntry[]`): the peers registered on the broker with protocol "bantou". */
+  centerServers: Record<string, unknown>[] = [{ name: "srv1", host: "mac200", protocol: "2.0.0", last_seen: "2026-10-31T00:00:00.000Z" }];
+  /** When set, `server_list` fails with this message. */
+  centerServersError: string | null = null;
   /** `remote_list` result (center `RemoteView[]`): one remote-cap per server (`remote_id` = cap_id, `owners`, `pending`, latest `result`; no history). */
   centerRemotes: unknown[] = [];
   /** `worker_reply` calls received (arguments as sent). */
@@ -676,20 +652,9 @@ export class MockBantou {
             }
             return text({ project, path: s.path, state: args.name === "rc_stop" ? "stopped" : "starting", pid: null, sessionUrl: null, restarts: 0 });
           }
-          case "server_retire": {
-            this.centerRetireCalls.push(args.arguments);
-            if (this.centerRetireError) return { ...text({ error: this.centerRetireError }), isError: true };
-            const id = (args.arguments as { server: string }).server;
-            const v = this.centerVersions as { peers: Record<string, unknown>[] };
-            const peer = v.peers.find((p) => p.server_id === id);
-            v.peers = v.peers.filter((p) => p.server_id !== id);
-            return text({ ...this.centerRetireResult, server_id: id, host: peer?.host, user: peer?.user, workspace: peer?.workspace, peer: peer?.id });
-          }
           case "server_list":
+            if (this.centerServersError) throw new Error(this.centerServersError);
             return text(this.centerServers);
-          case "server_peers":
-            if (this.centerVersionsError) throw new Error(this.centerVersionsError);
-            return text(this.centerVersions);
           default:
             throw new Error(`unknown tool: ${String(args.name)}`);
         }

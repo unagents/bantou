@@ -7,7 +7,6 @@ export const WEB_ALLOWED_TOOLS: readonly string[] = [
   "rc_start",
   "rc_stop",
   "server_list",
-  "server_peers",
   "remote_list",
   "worker_reply",
   "session_login",
@@ -24,8 +23,7 @@ export const WEB_ALLOWED_TOOLS: readonly string[] = [
   "session_settings_update",
   "center_info",
 ];
-// Not allowed on purpose: `session_delete` (the desktop UI does not use it) and
-// `server_retire` (irreversible; desktop only, design 5.3 / decision 10).
+// Not allowed on purpose: `session_delete` (the desktop UI does not use it).
 
 const allowed = new Set(WEB_ALLOWED_TOOLS);
 

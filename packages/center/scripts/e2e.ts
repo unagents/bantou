@@ -1,7 +1,7 @@
 /**
  * e2e: 本物の bantou-server と、claude の代わりの stub remote-control を使って center を検証する。
  * - rc_start / 切断復帰(--continue) / rc_stop / rc_list
- * - cap_kick（claude を 1 回起動する。claude のログインを使う）/ server_status
+ * - server_list
  * - stdin EOF で center が自分で終了する
  * `E2E_ROOT` で一時ディレクトリの親を変更できる。
  */
@@ -19,7 +19,7 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 const centerDir = fileURLToPath(new URL("..", import.meta.url));
 const serverDir = "/home/vagrant/work/bantou/develop/packages/server";
 const RUN_TIMEOUT = 300_000;
-const TOOLS = ["cap_kick", "rc_list", "rc_start", "rc_status", "rc_stop", "server_list", "server_status", "worker_resume"];
+const TOOLS = ["rc_list", "rc_start", "rc_status", "rc_stop", "server_list"];
 
 const serverLog: string[] = [];
 const centerLog: string[] = [];
@@ -81,7 +81,6 @@ async function main(): Promise<void> {
   const stub = join(dir, "rc-stub.mjs");
   const serverCfg = join(dir, "server.json");
   const centerCfg = join(dir, "center.json");
-  const capId = `e2e-cap-${process.pid}`;
 
   let server: ChildProcess | undefined;
   let serverExit: number | null | undefined;
@@ -213,24 +212,9 @@ async function main(): Promise<void> {
     }
 
     // 6. server 経由
-    const servers = (await call("server_list")).json as { name: string; connected: boolean; reachable: boolean }[];
+    const servers = (await call("server_list")).json as { name: string; host: string | null; protocol: string | null; last_seen: string | null }[];
     const local = servers.find((s) => s.name === "local");
-    if (!local || !local.reachable || !local.connected) fail(`server_list: ${JSON.stringify(servers)}`);
-    const kick = await call("cap_kick", {
-      server: "local",
-      cap_id: capId,
-      prompt: "Run `echo kicked` in Bash and reply with only the command output on one line.",
-      reason: "e2e",
-    });
-    if (kick.isError || kick.json.type !== "cap_result" || kick.json.ok !== true) {
-      fail(`cap_kick が cap_result(ok) でない: ${JSON.stringify(kick.json)}`);
-    }
-    if (!String(kick.json.result_text).includes("kicked")) fail(`result_text に kicked が無い: ${kick.json.result_text}`);
-    const status = await call("server_status", { server: "local" });
-    const cap = (status.json.caps ?? []).find((c: { id: string }) => c.id === capId);
-    if (status.json.type !== "status_result" || !cap || cap.state !== "idle") {
-      fail(`server_status に idle の ${capId} が無い: ${JSON.stringify(status.json)}`);
-    }
+    if (!local || !local.protocol) fail(`server_list: ${JSON.stringify(servers)}`);
 
     // 7. stdin EOF で center が自分で終了する
     await client.close();

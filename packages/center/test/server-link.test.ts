@@ -142,6 +142,24 @@ test("stripWarning: 先頭の警告行だけ除く", () => {
   assert.equal(stripWarning("{}"), "{}");
 });
 
+test("listServers: protocol「bantou」で絞って列挙し、自分を除いて { name, host, protocol, last_seen } だけ返す。未接続・列挙に非対応は投げる", async () => {
+  const { link, client } = setup([
+    { id: "s-1", name: "srv-a", hostname: "host-a", last_seen: "2026-11-23T00:00:00.000Z", summary: "x", protocols: [{ name: "other", version: "9.9.9" }, { name: "bantou", version: "2.0.0" }] },
+    { id: "s-2", name: "srv-b", protocols: [] },
+    { id: "center-1", name: "bantou-center-0123456789", protocols: [{ name: "bantou", version: "2.0.0" }] },
+  ]);
+  await assert.rejects(link.listServers(), /接続していない/);
+  await link.connect();
+  assert.deepEqual(await link.listServers(), [
+    { name: "srv-a", host: "host-a", protocol: "2.0.0", last_seen: "2026-11-23T00:00:00.000Z" },
+    { name: "srv-b", host: null, protocol: null, last_seen: null },
+  ]);
+  assert.deepEqual(client.listCalls, [{ scope: "all", filter: { protocol: "bantou" } }]);
+  client.peers = undefined;
+  await assert.rejects(link.listServers(), /BROKER_UNSUPPORTED/);
+  await link.close();
+});
+
 test("notifyPeer: 名前が一致する peer（自分以外）へ push で送る。絞り込みは無し", async () => {
   const { link, client } = setup([{ id: "peer-1", name: "pm1-cap" }, { id: "center-1", name: "pm1-cap" }, { id: "sess-1", name: "pm1-cap" }]);
   await link.connect();

@@ -16,7 +16,7 @@ const mock = (page: Page, change: Change) =>
     if (c.reachable !== undefined) m.centerReachable = c.reachable;
   }, change);
 
-test("the center dialog shows the connection, the remote sessions and one server list", async ({ page }) => {
+test("the center dialog shows the connection, the remote sessions and the server list", async ({ page }) => {
   await page.goto("/");
   await mock(page, { enabled: true });
   await page.getByTestId("open-center").click();
@@ -39,9 +39,9 @@ test("the center dialog shows the connection, the remote sessions and one server
   const srv = page.getByTestId("center-server-row");
   await expect(srv).toHaveCount(1);
   await expect(srv).toHaveAttribute("data-host", "mac200");
-  await expect(srv).toHaveAttribute("data-state", "ok");
-  await expect(srv).toHaveAttribute("data-link", "reachable");
-  await expect(srv.getByTestId("center-server-link-badge")).toHaveText("到達可");
+  await expect(srv.getByTestId("center-server-name")).toHaveText("srv1");
+  await expect(srv.getByTestId("center-server-host")).toHaveText("mac200");
+  await expect(srv.getByTestId("center-server-version")).toHaveText("2.0.0");
   await expect(srv).not.toContainText("cap-a");
 });
 
@@ -137,7 +137,7 @@ const remotes = (workerState: string) => [
   },
   // an idle cap with no worker and no pending instruction (one row, no record of finished work)
   // the old shared cap kept from before (no session)
-  { remote_id: "c-0a1b2c3d4e", owners: [], server: "p-8e2f", serverName: "other-server", state: "done", createdAt: "2026-10-28T22:00:00.000Z", result: "PR を確認した。\n指摘は 3 件", result_at: "2026-10-28T23:00:00.000Z", pending: [] },
+  { remote_id: "c-0a1b2c3d4e", owners: [], server: "p-8e2f", serverName: "other-server", state: "stopped", createdAt: "2026-10-28T22:00:00.000Z", result: "PR を確認した。\n指摘は 3 件", result_at: "2026-10-28T23:00:00.000Z", pending: [] },
 ];
 
 const seedRemotes = (page: Page, list: unknown[]) =>
@@ -320,228 +320,73 @@ test.describe("remotes of a session (the center dialog no longer lists them)", (
   });
 });
 
-const seedVersions = (page: Page, v: unknown) =>
-  page.evaluate((x) => {
-    (window as unknown as { __BANTOU_MOCK__: { centerVersions: unknown } }).__BANTOU_MOCK__.centerVersions = x;
-  }, v);
-
-const versionPeer = (over: Record<string, unknown>) => ({
-  key: "mac200 /ws",
-  id: "p2",
-  name: "bantou-server",
-  hostname: "mac200",
-  server_version: "0.3.0",
-  protocol_version: "1.3.0",
-  state: "ok",
-  detail: "版が一致",
-  since: "2026-10-31T00:00:00.000Z",
-  ...over,
-});
-
-/** Seed server_list (the configured links). */
-const seedLinks = (page: Page, v: unknown) =>
+/** Seed server_list (the peers registered with protocol "bantou"). */
+const seedServers = (page: Page, v: unknown) =>
   page.evaluate((x) => {
     (window as unknown as { __BANTOU_MOCK__: { centerServers: unknown } }).__BANTOU_MOCK__.centerServers = x;
   }, v);
 
-const link = (over: Record<string, unknown>) => ({ name: "srv1", connected: true, reachable: true, peerId: "c1", serverPeer: "p2", ...over });
+const server = (over: Record<string, unknown>) => ({ name: "srv1", host: "mac200", protocol: "2.0.0", last_seen: "2026-11-23T00:00:00.000Z", ...over });
 
-const rowOf = (page: Page, host: string) => page.locator(`[data-testid=center-server-row][data-host="${host}"]`);
-
-test("the server list shows the paired versions and, per server, the host first, the version state and the connection", async ({ page }) => {
+test("a server row shows the name, the host and the protocol version, and nothing else", async ({ page }) => {
   await page.goto("/");
   await mock(page, { enabled: true });
-  await page.getByTestId("open-center").click();
-  await expect(page.getByTestId("center-pair")).toContainText("server 0.3.0");
-  await expect(page.getByTestId("center-pair")).toContainText("protocol 1.3.0");
-  const row = page.getByTestId("center-server-row");
-  await expect(row).toHaveCount(1);
-  await expect(row).toHaveAttribute("data-state", "ok");
-  await expect(row.getByTestId("center-server-version-badge")).toHaveText("一致");
-  await expect(row.getByTestId("center-server-version")).toHaveText("server 0.3.0");
-  await expect(row.getByTestId("center-server-link-badge")).toHaveText("到達可");
-  // the host name is the first thing of the row; a healthy server has no detail line
-  await expect(row.locator("span").first()).toHaveText("mac200");
-  await expect(row.getByTestId("center-server-detail")).toHaveCount(0);
-  // the old per-section ids are gone
-  await expect(page.getByTestId("center-version-row")).toHaveCount(0);
-  await expect(page.getByTestId("center-versions")).toHaveCount(0);
-});
-
-test("the server list shows 更新中 with the waiting caps and workers, 版違い and 更新失敗 with the reason", async ({ page }) => {
-  await page.goto("/");
-  await mock(page, { enabled: true });
-  await seedVersions(page, {
-    pair: { server: "0.3.1", protocol: "1.3.0" },
-    peers: [
-      versionPeer({ key: "a", id: "a", hostname: "host-a", state: "updating", detail: "更新中（0.3.0→0.3.1）: cap 1 / worker 2 の終了待ち", update: { to: "0.3.1", running: { caps: 1, workers: 2, reports: 0 } } }),
-      versionPeer({ key: "b", id: "b", hostname: "host-b", server_version: "0.2.3", protocol_version: "1.2.0", state: "unsupported", detail: "自動更新できない版（protocol 1.2.0）。server を手動で起動し直す" }),
-      versionPeer({ key: "c", id: "c", hostname: "host-c", state: "failed", detail: "更新に失敗（→0.3.1）: 版 0.3.1 を取得できない" }),
-      versionPeer({ key: "d", id: "d", hostname: "host-d", state: "mismatch", detail: "protocol の版が違う" }),
-    ],
-  });
-  await seedLinks(page, []);
+  await seedServers(page, [server({ name: "srv-a", host: "host-a" }), server({ name: "srv-b", host: "host-b", protocol: "2.1.0" })]);
   await page.getByTestId("open-center").click();
   const rows = page.getByTestId("center-server-row");
-  await expect(rows).toHaveCount(4);
-  await expect(rows.nth(0).getByTestId("center-server-version-badge")).toHaveText("更新中");
-  await expect(rows.nth(0).getByTestId("center-server-running")).toContainText("cap 1 / worker 2");
-  await expect(rows.nth(1).getByTestId("center-server-version-badge")).toHaveText("版違い");
-  await expect(rows.nth(1).getByTestId("center-server-detail")).toContainText("手動で起動し直す");
-  await expect(rows.nth(2).getByTestId("center-server-version-badge")).toHaveText("更新失敗");
-  await expect(rows.nth(2).getByTestId("center-server-detail")).toContainText("取得できない");
-  await expect(rows.nth(3).getByTestId("center-server-version-badge")).toHaveText("版違い");
-  await expect(rows.nth(3)).toHaveAttribute("data-state", "mismatch");
-  // no cap / worker rows
-  await expect(page.getByTestId("center-agent")).toHaveCount(0);
+  await expect(rows).toHaveCount(2);
+  await expect(rows.nth(0).locator("span").first()).toHaveText("srv-a");
+  await expect(rows.nth(0).getByTestId("center-server-host")).toHaveText("host-a");
+  await expect(rows.nth(0).getByTestId("center-server-version")).toHaveText("2.0.0");
+  await expect(rows.nth(1).getByTestId("center-server-version")).toHaveText("2.1.0");
+  await expect(page.getByTestId("center-pair")).toHaveCount(0);
+  await expect(page.getByTestId("center-server-retire")).toHaveCount(0);
+  await expect(page.getByTestId("center-server-link-badge")).toHaveCount(0);
+  await expect(page.getByTestId("center-server-version-badge")).toHaveCount(0);
 });
 
 test("pressing update re-reads the server list", async ({ page }) => {
   await page.goto("/");
   await mock(page, { enabled: true });
   await page.getByTestId("open-center").click();
-  await expect(page.getByTestId("center-server-row").getByTestId("center-server-version-badge")).toHaveText("一致");
-  await expect(page.getByTestId("center-server-row").getByTestId("center-server-link-badge")).toHaveText("到達可");
-  await seedVersions(page, { pair: { server: "0.3.0", protocol: "1.3.0" }, peers: [versionPeer({ state: "updating", detail: "更新中", update: { to: "0.3.0", running: { caps: 0, workers: 1, reports: 0 } } })] });
-  await seedLinks(page, [link({ connected: false })]);
+  await expect(page.getByTestId("center-server-row")).toHaveCount(1);
+  await seedServers(page, [server({ name: "srv-a" }), server({ name: "srv-b" })]);
   await page.getByTestId("center-refresh").click();
-  await expect(page.getByTestId("center-server-row").getByTestId("center-server-version-badge")).toHaveText("更新中");
-  await expect(page.getByTestId("center-server-row").getByTestId("center-server-link-badge")).toHaveText("未接続");
+  await expect(page.getByTestId("center-server-row")).toHaveCount(2);
 });
 
 test("the server list says so when there is no server", async ({ page }) => {
   await page.goto("/");
   await mock(page, { enabled: true });
-  await seedVersions(page, { pair: { server: null, protocol: "1.3.0" }, peers: [] });
-  await seedLinks(page, []);
+  await seedServers(page, []);
   await page.getByTestId("open-center").click();
   await expect(page.getByTestId("center-versions-none")).toHaveText("server なし");
   await expect(page.getByTestId("center-server-row")).toHaveCount(0);
-  await expect(page.getByTestId("center-pair")).toContainText("server 不明");
 });
 
-test("the host name comes first with the server_id, and user / workspace show only when servers share a host name", async ({ page }) => {
-  await page.goto("/");
-  await mock(page, { enabled: true });
-  await seedVersions(page, {
-    pair: { server: "0.3.0", protocol: "1.3.0" },
-    peers: [
-      versionPeer({ key: "a", id: "mx1ekubv", host: "lenovo", hostname: "lenovo", server_id: "srv-1111111111", user: "alice", workspace: "/home/alice/ws" }),
-      versionPeer({ key: "b", id: "83caasod", host: "lenovo", hostname: "lenovo", server_id: "srv-2222222222", user: "bob", workspace: "/home/bob/ws" }),
-      versionPeer({ key: "c", id: "zz", host: "mac200", hostname: "mac200", server_id: "srv-3333333333", user: "carol", workspace: "/m" }),
-    ],
-  });
-  await seedLinks(page, []);
-  await page.getByTestId("open-center").click();
-  const rows = page.getByTestId("center-server-row");
-  await expect(rows).toHaveCount(3);
-  await expect(rows.nth(0).locator("span").first()).toHaveText("lenovo");
-  await expect(rows.nth(0)).toHaveAttribute("data-server-id", "srv-1111111111");
-  await expect(rows.nth(0).getByTestId("center-server-id")).toHaveText("srv-1111111111");
-  await expect(rows.nth(0).getByTestId("center-server-who")).toHaveText("alice /home/alice/ws");
-  await expect(rows.nth(1).getByTestId("center-server-who")).toHaveText("bob /home/bob/ws");
-  await expect(rows.nth(2).getByTestId("center-server-id")).toHaveText("srv-3333333333");
-  await expect(rows.nth(2).getByTestId("center-server-who")).toHaveCount(0);
-});
-
-test("the connection badge is one of 到達可 / 未接続 / 到達不可 per server", async ({ page }) => {
-  await page.goto("/");
-  await mock(page, { enabled: true });
-  await seedVersions(page, {
-    pair: { server: "0.3.0", protocol: "1.3.0" },
-    peers: [
-      versionPeer({ key: "a", id: "pa", host: "host-a" }),
-      versionPeer({ key: "b", id: "pb", host: "host-b" }),
-      versionPeer({ key: "c", id: "pc", host: "host-c" }),
-    ],
-  });
-  await seedLinks(page, [
-    link({ name: "a", serverPeer: "pa" }),
-    link({ name: "b", serverPeer: "pb", connected: false }),
-    link({ name: "c", serverPeer: "pc", reachable: false, connected: false }),
-  ]);
-  await page.getByTestId("open-center").click();
-  await expect(rowOf(page, "host-a").getByTestId("center-server-link-badge")).toHaveText("到達可");
-  await expect(rowOf(page, "host-b").getByTestId("center-server-link-badge")).toHaveText("未接続");
-  await expect(rowOf(page, "host-c").getByTestId("center-server-link-badge")).toHaveText("到達不可");
-  // one badge for the connection, not the old connected / reachable pair
-  await expect(page.getByText("not connected")).toHaveCount(0);
-  await expect(page.getByText("unreachable")).toHaveCount(0);
-});
-
-test("a server only in server_list, and one only in server_peers, both get a row; a link joins by peer id, else by a unique name", async ({ page }) => {
-  await page.goto("/");
-  await mock(page, { enabled: true });
-  await seedVersions(page, {
-    pair: { server: "0.3.0", protocol: "1.3.0" },
-    peers: [
-      versionPeer({ key: "a", id: "pa", host: "host-a", server_id: "srv-a" }),
-      versionPeer({ key: "n", id: "pn", name: "only-one-name", host: "host-name" }),
-      versionPeer({ key: "p", id: "pp", host: "host-peer-only" }),
-    ],
-  });
-  await seedLinks(page, [
-    link({ name: "a", serverPeer: "pa" }),
-    link({ name: "by-name", serverPeer: "only-one-name", connected: false }),
-    link({ name: "link-only", serverPeer: null, connected: false, reachable: false }),
-  ]);
-  await page.getByTestId("open-center").click();
-  const rows = page.getByTestId("center-server-row");
-  await expect(rows).toHaveCount(4);
-  // joined by peer id: one row with the version and the connection
-  await expect(rowOf(page, "host-a")).toHaveCount(1);
-  await expect(rowOf(page, "host-a").getByTestId("center-server-version-badge")).toHaveText("一致");
-  await expect(rowOf(page, "host-a")).toHaveAttribute("data-link", "reachable");
-  // joined by name (only one peer has it)
-  await expect(rowOf(page, "host-name")).toHaveAttribute("data-link", "disconnected");
-  // only in server_peers: version, connection unknown
-  await expect(rowOf(page, "host-peer-only")).toHaveAttribute("data-state", "ok");
-  await expect(rowOf(page, "host-peer-only")).toHaveAttribute("data-link", "unknown");
-  await expect(rowOf(page, "host-peer-only").getByTestId("center-server-link-badge")).toHaveText("不明");
-  // only in server_list: its name as the host, no version badge
-  const only = rowOf(page, "link-only");
-  await expect(only).toHaveCount(1);
-  await expect(only).toHaveAttribute("data-link", "unreachable");
-  await expect(only.getByTestId("center-server-version-badge")).toHaveCount(0);
-  await expect(only.getByTestId("center-server-link-badge")).toHaveText("到達不可");
-});
-
-test("a link joins its peer by server_id even when the peer id changed; without server_id it falls back to the peer id", async ({ page }) => {
-  await page.goto("/");
-  await mock(page, { enabled: true });
-  await seedVersions(page, {
-    pair: { server: "0.3.0", protocol: "1.3.0" },
-    peers: [
-      // re-registered: the link still points at the old id "old-id"
-      // (the real center returns this right after a re-registration: serverPeer is still the old id, which has left discovery, and server_id is kept from the last reply)
-      versionPeer({ key: "r", id: "new-id", host: "host-rereg", server_id: "srv-r" }),
-      versionPeer({ key: "o", id: "pold", host: "host-legacy" }),
-    ],
-  });
-  await seedLinks(page, [
-    link({ name: "r", serverPeer: "old-id", server_id: "srv-r", host: "host-rereg" }),
-    link({ name: "legacy", serverPeer: "pold" }),
-  ]);
-  await page.getByTestId("open-center").click();
-  await expect(page.getByTestId("center-server-row")).toHaveCount(2);
-  await expect(rowOf(page, "host-rereg")).toHaveCount(1);
-  await expect(rowOf(page, "host-rereg").getByTestId("center-server-version-badge")).toHaveText("一致");
-  await expect(rowOf(page, "host-rereg")).toHaveAttribute("data-link", "reachable");
-  // an old-format entry (no server_id) still joins by peer id
-  await expect(rowOf(page, "host-legacy")).toHaveAttribute("data-link", "reachable");
-});
-
-test("a failed server_peers still lists the servers of server_list, with the error", async ({ page }) => {
+test("a failed server_list shows the error and the remote session list stays", async ({ page }) => {
   await page.goto("/");
   await mock(page, { enabled: true });
   await page.evaluate(() => {
-    (window as unknown as { __BANTOU_MOCK__: { centerVersionsError: string } }).__BANTOU_MOCK__.centerVersionsError = "peers unavailable";
+    (window as unknown as { __BANTOU_MOCK__: { centerServersError: string } }).__BANTOU_MOCK__.centerServersError = "peers unavailable";
   });
-  await seedLinks(page, [link({ name: "srv-x", serverPeer: "p9" })]);
   await page.getByTestId("open-center").click();
-  await expect(rowOf(page, "srv-x")).toHaveCount(1);
-  await expect(rowOf(page, "srv-x").getByTestId("center-server-link-badge")).toHaveText("到達可");
   await expect(page.getByTestId("center-versions-error")).toContainText("peers unavailable");
+  await expect(page.getByTestId("center-rc")).toHaveCount(2);
+});
+
+test("the server_list error is cleared when the center goes away", async ({ page }) => {
+  await page.goto("/");
+  await mock(page, { enabled: true });
+  await page.evaluate(() => {
+    (window as unknown as { __BANTOU_MOCK__: { centerServersError: string } }).__BANTOU_MOCK__.centerServersError = "peers unavailable";
+  });
+  await page.getByTestId("open-center").click();
+  await expect(page.getByTestId("center-versions-error")).toContainText("peers unavailable");
+  await mock(page, { reachable: false });
+  await page.getByTestId("center-refresh").click();
+  await expect(page.getByTestId("center-conn-state")).toHaveText("disconnected");
+  await expect(page.getByTestId("center-versions-error")).toHaveCount(0);
 });
 
 test("the remote session list stays and keeps its place above the servers", async ({ page }) => {
@@ -553,62 +398,4 @@ test("the remote session list stays and keeps its place above the servers", asyn
   const srvBox = await page.getByTestId("center-server-row").first().boundingBox();
   expect(rcBox!.y).toBeLessThan(srvBox!.y);
   await expect(page.getByText("remote session", { exact: true })).toBeVisible();
-});
-
-test("in a narrow window a long row wraps and the host name keeps its width, first on the row", async ({ page }) => {
-  await page.setViewportSize({ width: 520, height: 800 });
-  await page.goto("/");
-  await mock(page, { enabled: true });
-  const host = "a-very-long-host-name-of-a-build-machine.example.internal";
-  const longRow = (key: string, id: string, user: string) =>
-    versionPeer({
-      key,
-      id,
-      host,
-      server_id: `srv-${key}111111111`,
-      user,
-      workspace: `/home/${user}/workspaces/a-deeply/nested/workspace-directory`,
-      server_version: "0.3.0",
-      state: "updating",
-      detail: "更新中",
-      update: { to: "0.3.1", running: { caps: 1, workers: 2, reports: 0 } },
-    });
-  await seedVersions(page, { pair: { server: "0.3.1", protocol: "1.3.0" }, peers: [longRow("a", "pa", "alice"), longRow("b", "pb", "bob")] });
-  await seedLinks(page, []);
-  await page.getByTestId("open-center").click();
-  const row = page.getByTestId("center-server-row").first();
-  const h = row.getByTestId("center-server-host");
-  await expect(h).toBeVisible();
-  await expect(h).toHaveAttribute("title", host);
-  await expect(row.getByTestId("center-server-who")).toBeVisible();
-  // the dialog is still opening (it moves a little): poll until the layout settles
-  await expect
-    .poll(async () => {
-      const hb = (await h.boundingBox())!;
-      const rb = (await row.boundingBox())!;
-      const last = (await row.getByTestId("center-server-running").boundingBox())!;
-      return {
-        // the host name keeps a readable width, stays inside the row and is at its start
-        wide: hb.width >= 100,
-        inside: hb.x + hb.width <= rb.x + rb.width + 1,
-        first: hb.x <= rb.x + 1,
-        // the row is too long for one line: the last item wraps to a line below the host name
-        wrapped: last.y > hb.y + hb.height - 1,
-      };
-    })
-    .toEqual({ wide: true, inside: true, first: true, wrapped: true });
-});
-
-test("the server_peers error is cleared when the center goes away", async ({ page }) => {
-  await page.goto("/");
-  await mock(page, { enabled: true });
-  await page.evaluate(() => {
-    (window as unknown as { __BANTOU_MOCK__: { centerVersionsError: string } }).__BANTOU_MOCK__.centerVersionsError = "peers unavailable";
-  });
-  await page.getByTestId("open-center").click();
-  await expect(page.getByTestId("center-versions-error")).toContainText("peers unavailable");
-  await mock(page, { reachable: false });
-  await page.getByTestId("center-refresh").click();
-  await expect(page.getByTestId("center-conn-state")).toHaveText("disconnected");
-  await expect(page.getByTestId("center-versions-error")).toHaveCount(0);
 });

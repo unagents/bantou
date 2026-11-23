@@ -185,16 +185,15 @@ test("createCenterMcp without a policy applies the web list; an explicit allowTo
   const mock = await start();
   const target = async (): Promise<Target> => ({ url: mock.url, source: "remote" });
   const web = createCenterMcp({ settings: { selectTarget: target } });
-  await assert.rejects(web.call("server_retire"), ToolNotAllowedError);
   await assert.rejects(web.call("session_delete"), ToolNotAllowedError);
   await assert.rejects(web.json("session_delete"), ToolNotAllowedError);
   assert.equal(mock.log.length, 0);
   await web.call("rc_list");
   // a policy object without allowTool is also fail-closed
   const noFn = createCenterMcp({ settings: { selectTarget: target }, policy: {} });
-  await assert.rejects(noFn.call("server_retire"), ToolNotAllowedError);
+  await assert.rejects(noFn.call("rc_status"), ToolNotAllowedError);
   const all = createCenterMcp({ settings: { selectTarget: target }, policy: { allowTool: () => true } });
-  await all.call("server_retire");
+  await all.call("rc_status");
   const only = createCenterMcp({ settings: { selectTarget: target }, policy: { allowTool: (n) => n === "rc_stop" } });
   await assert.rejects(only.call("rc_list"), ToolNotAllowedError);
   await only.call("rc_stop");

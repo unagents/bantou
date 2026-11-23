@@ -14,7 +14,7 @@ export const PROTOCOL_VERSION = "2025-06-18";
 export const SESSION_HEADER = "mcp-session-id";
 /** `initialize` / `ping` / the initialized notification. */
 export const SHORT_TIMEOUT_MS = 10_000;
-/** `tools/call`: `cap_kick` / `worker_resume` wait for the agent's result, which can take minutes. */
+/** `tools/call`: a call can wait for the center for minutes. */
 export const CALL_TIMEOUT_MS = 600_000;
 export const NO_TARGET = "接続先が無い（center を有効にするか、別ホストの接続設定を貼る）";
 const LOG_BODY_CHARS = 2000;
