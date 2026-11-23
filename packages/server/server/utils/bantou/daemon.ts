@@ -276,7 +276,8 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
       log: (m) => log(`messenger: ${m}`),
     });
     client.onMessage((m) => {
-      if (closing) return;
+      // 入れ替えのための終了中（updater が restarting）は、届いた指示を捨てずに queue へ入れる（stop が file に持ち直す）。それ以外の停止中は受けない
+      if (closing && !updater?.restarting()) return;
       const p: Promise<void> = dispatcher
         .handle(m)
         .catch((e: unknown) => log(`エラー: ${e instanceof Error ? e.message : String(e)}`))
@@ -344,6 +345,9 @@ export async function startDaemon(configPath: string, deps: DaemonDeps): Promise
           (e: unknown) => log(`protocol 解除失敗: ${e instanceof Error ? e.message : String(e)}`),
         );
       }
+      // 上の待ちの間に届いた指示も file に持ち直す（client を閉じる前の最後）
+      await Promise.allSettled([...inflight]);
+      await updater?.flush();
       await client.close();
       await mcp.close();
       log("mcp 停止");
