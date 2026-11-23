@@ -1,6 +1,6 @@
 [package]
 name = "bantou-center-app"
-version = "0.1.66"
+version = "0.1.67"
 description = "bantou-center: windowless app that keeps the bantou center running (launchd agent)"
 authors = ["grrow"]
 edition = "2021"
