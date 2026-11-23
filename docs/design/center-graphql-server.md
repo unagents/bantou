@@ -1,6 +1,6 @@
-# center を GraphQL の backend server にする設計（desktop の sidecar をやめる）
+# center を launchd の常駐 server にして GraphQL を持たせる設計（center は app に同梱、起動は sidecar でなく launchd）
 
-- 作成: 2026-11-23
+- 作成: 2026-11-23（同日、利用者の訂正「app 同梱はする」を反映して改訂）
 - 基点: `develop` 4d98817（0.1.62）
 - 範囲: 設計だけ。code・test・設定は変えていない。
 - 書き方: 【事実】は repo の code / docs を開いて確かめた事（`file:行`。repo root からの path）。【推測】は確かめていない解釈。【未確認】は実測が要る事。決まっていない点は「未決 #N」（7 節）。
@@ -12,13 +12,19 @@
 >
 > centerはデスクトップアプリにしないで、普通にlaunchでサーバーを起動させる。graphqlのエンドポイントを持ったバックエンドサーバー。クライアントアプリはフロントエンドアプリと同じようにgraphqlのエンドポイントを叩いて画面を操作するイメージ
 
-決めてある事（変えない）:
+> いや、app同梱はする。（上の指示への、利用者の訂正）
 
-1. center は desktop の app に同梱しない。OS の常駐の仕組み（mac は launchd）で、普通の server として起動する。
-2. center は GraphQL の endpoint を持つ backend の server になる。
-3. client の app（desktop・web）は、frontend の app と同じく、center の GraphQL endpoint を叩いて画面を動かす。
+決めてある事（変えない。訂正を反映した形）:
 
-この設計は、上の 3 点に上限・期限・数値・独自の仕様を足さない。決められない点は 7 節の未決にした。
+1. center は今どおり app に同梱して配る（app を入れれば center も入る。版も app と一緒）。
+2. 起動は app の子の process（sidecar）ではなく、OS の常駐の仕組み（mac は launchd）で、普通の server として起動する。
+3. center は GraphQL の endpoint を持つ backend の server になる。
+4. client の app（desktop・web）は、frontend の app と同じく、center の GraphQL endpoint を叩いて画面を動かす。
+5. app は、center の launchd の登録・更新・止め方を扱い、app を click した時の入口を持つ（2.7）。
+
+初版（4edee56）は「app に同梱しない」を前提に書いたので、この版で、同梱・配り方・更新・app の入口の部分を書き直した（2.2・2.5・2.7・3・4・5.1・6・7 節）。GraphQL の schema（2.3）、認証の基本（2.4）、session の claude と MCP が center に残る事（2.6）は変わらない。
+
+この設計は、上の 5 点に上限・期限・数値・独自の仕様を足さない。決められない点は 7 節の未決にした。
 
 ## 1. 今の形
 
@@ -91,15 +97,15 @@ desktop (Tauri 2 + Nuxt 4)                          web (Nuxt SPA + Nitro BFF)
 client（desktop / web / 将来のスマホ）  = 同じ Nuxt 画面（packages/ui）
    │   GraphQL over HTTP（query・mutation）+ subscription
    ▼
-bantou-center（launchd が起動する普通の server）
+bantou-center（app に同梱した binary。app が launchd に登録し、launchd が起動する普通の server）
    ├ GraphQL endpoint（今の /mcp の tool 群と /events と /sessions/<n>/* が担う物を型つきで公開）
    ├ /mcp/session（master-cap 向け MCP。残る）  /mcp（外向け MCP。残るかは未決 #5）
    ├ session の claude（pty-wrapper）と core（出力の queue）  … center の中に残る
    └ server-link → remote の bantou-server  … 変わらない
 ```
 
-- client は center の GraphQL だけを見る。desktop は center を起動も監視も同梱もしない。web は今の BFF の位置づけを未決 #4 で決める。
-- `docs/concept.md` の原則 3（desktop にとって center や server がどこにあるかは関心事ではない）・原則 6（共有できる物は center が持つ）に沿う。center は「desktop と基本は一体」（`docs/concept.md` の登場者）から「独立した server」に変わるので、`docs/concept.md` / `docs/architecture.md` の該当文の改訂が要る（5・4 節の段階 G）。
+- client は center の GraphQL だけを見る。desktop は center を子 process として起動も監視もしない（launchd が起動する）。center の binary は app に同梱のまま、app が launchd に登録する（2.7）。web は今の BFF の位置づけを未決 #4 で決める。
+- `docs/concept.md` の原則 3（desktop にとって center や server がどこにあるかは関心事ではない）・原則 6（共有できる物は center が持つ）に沿う。center は「desktop と基本は一体」（`docs/concept.md` の登場者）から「app に同梱して配るが、process としては独立した server」に変わるので、`docs/concept.md` / `docs/architecture.md` / `CLAUDE.md` の「sidecar 同梱」の文の改訂が要る（4 節の段階 G）。
 
 ### 2.2 center の常駐（入れ方・起動・止め方・更新・消し方）
 
@@ -107,12 +113,12 @@ bantou-center（launchd が起動する普通の server）
 
 | 操作 | 形（案。細部は未決） |
 |---|---|
-| 入れ方 | center の binary（`bantou-center` と `bantou-pty-wrapper`）を desktop の bundle から出して単独の配布物にする。入れる場所・配り方は未決 #3。service の定義（plist）を置いて登録する。冪等にする（`install-service.sh` と同じ流儀）。 |
+| 入れ方 | center の binary（`bantou-center` と `bantou-pty-wrapper`）は今どおり app の bundle に同梱する（`externalBin`）。**app から**launchd に登録する（2.7）。service の定義（plist）を置いて登録する。冪等にする（`install-service.sh` と同じ流儀）。登録の仕組みは未決 #14、binary の置き場は #15。 |
 | 起動 | launchd が起動する。`--transport http --port --bind --config` は今の引数のまま（`packages/center/src/args.ts`）。token は config（`token`、12 文字以上、無いと起動しない `daemon.ts:212-214`）。置き場は未決 #2（LaunchAgent か LaunchDaemon）、状態 dir は未決 #9。 |
 | 親の監視 | launchd が親になるので `ppid` は変わらず、`parent-watch.ts` は何もしない【推測。実測で確かめる、6 節】。service 起動の時は無効でよい。 |
 | 止め方 | launchd が SIGTERM を送る。center は子の claude を止めてから終わる（待ちは `stopGraceMs` + hard exit、`daemon.ts:171-175`）。service の停止待ちはそれより長く取る（web 設計 9.1）。 |
-| 更新 | 配り方は未決 #3。center を入れ替えて再起動する。再起動で session は `--continue` で戻る（`restore()`）。app（client）の更新とは切り離す（5 節の「app の再起動」の意味が変わる）。 |
-| 消し方 | service の登録を外し、binary を消す。状態 dir（`sessions.json` など）は消さない既定にし、消すのは別の明示の操作にする（`docs/ops/server-install.md` の退役と同じ向き）【案。細部は未決 #3】。 |
+| 更新 | center は app に同梱で、版も app と一緒（決めてある）。app の更新（updater）が新しい binary を bundle に置く。動いている center は更新されず、再起動して初めて新しい版になる。再起動の入口は 2.7.4・未決 #18。再起動で session は `--continue` で戻る（`restore()`）。 |
+| 消し方 | 常駐をやめる（`bootout` + plist の削除）。状態 dir（`sessions.json` など）は消さない既定にし、消すのは別の明示の操作にする（`docs/ops/server-install.md` の退役と同じ向き）。app の削除（cask の uninstall）で plist が残る問題は 2.7.6。 |
 | ログ | 今は desktop が `center_status` に末尾を出す（`center.rs`）。service 化後は center のログ file（`logDir`、`packages/center/src/log.ts`）と launchd の stdout / stderr 設定。画面の「center の状態」は GraphQL で返す（3 節）。 |
 | Linux | systemd user unit（web 設計 9.1 の例）。Windows の center は対象にするか未決 #10。 |
 
@@ -171,32 +177,108 @@ bantou-center（launchd が起動する普通の server）
 ### 2.4 認証
 
 - 今: center の `/mcp` は `Authorization: Bearer <token>`（定時間比較、欠落・不一致は 401）。token は desktop が生成して center の config に書く。web は BFF が token を持ち、前段の Cloudflare Access が守る。待ち受けは `0.0.0.0` で TLS 無し（`docs/architecture.md`）。
-- 変更後の最小形: GraphQL の endpoint も同じ Bearer token（今の仕組みを移す）。token の生成・保存は center の側（desktop が生成して渡す形をやめる。center の config / 初回の生成）。token の配り方（client が知る方法）は未決 #4。
-- 「launcher 鍵」の置き換え: 今は desktop が sidecar を起動した事を鍵で証明し、`memory`・`mcpServers` の書き込みを許す。center が独立すると「起動した所」が無いので、書き込みの権限の持ち方が要る。未決 #6。
+- 変更後の最小形: GraphQL の endpoint も同じ Bearer token（今の仕組みを移す）。token の生成・保存は今のまま app が持つ（登録の時に center の config に書く。再生成は config を書き直して service を再起動）。別 host の client への配り方は今の接続設定の共有（未決 #4）。
+- 「launcher 鍵」: 今は desktop が sidecar を起動した事を、起動ごとの鍵で証明し、`memory`・`mcpServers` の書き込みを許す。launchd の常駐になると、鍵は center が起動する前に決まっている必要がある（center が app より先に、または app と無関係に起動し直されるため）。未決 #6（登録の時に作って保存する鍵、が推奨）。
 - 取り返しのつかない操作（`retireServer`、`deleteSession`）を誰に許すか: 今は desktop だけ（web は許可 list から外す）。権限の単位は未決 #4。
 
 ### 2.5 client 側（desktop は何を持ち何を捨てるか。web との共有）
 
 | 部品 | 扱い |
 |---|---|
-| center の sidecar 起動・監視（`center.rs`）、同梱 binary（`externalBin`、`build-sidecar.ts`）、`center_status` / `center_set_settings` の起動項目（enabled・port・bind・workspace・claudePath）、token の生成・regenerate、launcher 鍵 | **捨てる**（center が自分で持つ。接続先の設定だけが client に残る） |
+| center の sidecar の spawn・監視・自動再起動・終了時の停止（`center.rs` の spawn / backoff / `Center::stop`、`lib.rs` の `RunEvent::Exit` の停止）、`bantou://center-running`、launcher 鍵を起動ごとに作る所 | **捨てる**（launchd に移る。#16・#19） |
+| 同梱 binary（`externalBin`、`build-sidecar.ts`）、`center_set_settings` の起動項目（enabled・port・bind・workspace・claudePath）、token の生成・regenerate | **残す**（center は app に同梱のまま。設定は app が持ち、launchd への登録の時に center の config へ書く。2.7） |
+| launchd の登録・起動・止め方・消し方（新規） | **足す**（`launchctl` を呼ぶ Rust の command。2.7.8） |
 | MCP client（`center_mcp.rs`）、SSE 購読（`center_events.rs`）、`SessionCache`（`session.rs`）、端末の中継（`terminal.rs`）、添付の中継（`attachment.rs`） | **捨てる**（webview が GraphQL を直接叩く。Rust の中継層が無くなる） |
-| 接続設定の共有（`center_snippet.rs`: `center_connect_snippets` / `center_parse_connect` / `center_local_ips` / `center_ip_status`） | 接続先 URL + token を貼る入力だけ残す案。snippet を「出す」側は center に移す（center の host で出す）かは未決 #4 |
-| updater・relaunch（app 自身の更新） | **残す**（client の更新は center と切り離す） |
+| 接続設定の共有（`center_snippet.rs`: `center_connect_snippets` / `center_parse_connect` / `center_local_ips` / `center_ip_status`） | **残す**（今の接続設定の配り方のまま。別 host の desktop が貼る。web は持たない） |
+| updater・relaunch（app 自身の更新） | **残す**。center は同梱なので、app の更新が新しい center の binary を運ぶ（運ぶだけで、動いている center は更新しない。再起動の入口は 2.7.4・#18） |
 | 画面の native 機能: folder 選択（`pick_directory`）・file drop（`onFilesDropped`）・fs watch（`watchDir`）・window / `bantou <path>` の CLI・menu・OS の sleep 復帰 / network 変化 event・log file | **残す**（desktop 固有。`~/tauri` の `Platform` に残る。web は browser の API で代える） |
 | Cork の task md（`task.rs`・`frontmatter.rs`）、旧 broker（`broker.rs`・`thread.rs`・`agent.rs`） | center と別の desktop ローカル機能。この設計では触らない（残す。廃止するかは未決 #8） |
 | `~/tauri` の層（`getTransport()` / `getPlatform()`） | 段階的に `~/api` を GraphQL client に差し替え、`getTransport()` は desktop 固有の native 機能と、移行中の互換だけに縮める。最終形では ui は「GraphQL client + Platform」を見る（4 節） |
 | web の BFF（`center-client` + Nitro） | 未決 #4。BFF を残す（token をブラウザに出さない・Cloudflare Access 前提を維持）案と、薄い proxy にする案、ブラウザが直接叩く案 |
 
 - 共有: desktop と web は同じ `packages/ui` を使い、GraphQL client も 1 つにする（`packages/ui/api/*.ts` の中身が GraphQL の document になる）。desktop と web の差は `Platform` だけ（`centerSidecar` の項目は不要になる）。
-- 設定画面（`SettingsDialog.vue`）: 「center を起動する」の switch・port・IP・状態・token の再生成が消え、「接続先（URL・token）」と「center の状態の表示」になる（`webMode` の分岐が全 client の形になる）。
+- 設定画面（`SettingsDialog.vue`）: 「center を起動する」の switch が「この Mac に center を常駐させる」（launchd への登録。2.7）になり、状態の表示は launchd の状態 + center の状態になる。接続先（URL・token）の入力は残り、別 host の center を指す時は常駐の操作を出さない（web と同じ `webMode` の形）。
 
 ### 2.6 session の claude と MCP は center に残るか
 
 - 残る。session の claude（pty-wrapper 経由）、core、`/mcp/session`、hook / status-line、coordinator-mcp（子 process）、server-link は center の process の中・子として今のまま動く（`docs/concept.md` の原則 6）。
-- 変わるのは center を起動する者（desktop → launchd）と、画面への出し方（MCP + SSE + 個別 HTTP → GraphQL）だけ。
+- 変わるのは center を起動する者（desktop の子 process → launchd。binary は app に同梱のまま）と、画面への出し方（MCP + SSE + 個別 HTTP → GraphQL）だけ。
 - 影響する点: session の claude の cwd・PATH・認証（keychain）が launchd の環境で成り立つか（2.2、6 節）。center と session が desktop と別の host になっても、`/mcp/session` は loopback の center URL（`daemon.ts:329` の `centerUrl`）で動く。
+### 2.7 app から center の常駐を扱う（登録・起動・更新・止め方・消し方と、app の入口）
 
+利用者の訂正: center は app に同梱し、版も app と一緒。起動は launchd。app の役割は「center の launchd の管理者」と「client」の 2 つになる。
+
+【事実】今の関係部品:
+- 同梱: `packages/desktop/src-tauri/tauri.conf.json` の `bundle.externalBin`（`binaries/bantou-center`・`binaries/bantou-pty-wrapper`）。build は `packages/desktop/scripts/build-sidecar.ts`（target triple の suffix 付きで置き、bundle 時に外れる、同 file の冒頭の注記）。
+- 配り: Homebrew cask `packages/desktop/Casks/bantou.rb`（arm64 の macOS、`auto_updates true`、`app "bantou.app"`、`zap trash` は `~/Library/Application Support/jp.grrow.bantou` と `~/Library/Caches/jp.grrow.bantou`。**launchd の登録を外す stanza は無い**）。app 自身の更新は `tauri_plugin_updater`（1.6）。
+- 起動の設定: `center.rs` の `CenterSettings`（enabled・port・bind・workspace・claudePath・token・remote）と `write_config` / `sidecar_args`（1.2）。
+
+#### 2.7.1 登録（常駐させる）
+
+- 入口: 設定画面の「この Mac に center を常駐させる」（今の「center を起動する」の switch の置き換え）、または初回の案内（#17）。
+- 手順: (1) 設定から config（`center.json`）を書く（今の `write_config` の流用。`workspace`・`remoteControl.claude`・`token`）。(2) plist を書く（label・実行 file・引数 `--transport http --port --bind --config`・log の出力先・launcher 鍵（#6）・環境）。(3) launchd に登録する（`launchctl bootstrap gui/<uid>`。LaunchAgent の場合。#2）。(4) 起動して GraphQL の疎通（query）を待ち、画面に状態を出す。冪等（登録済みなら plist が同じか確かめて差があれば入れ替える）。
+- 登録の仕組み（plist + `launchctl` か `SMAppService` か center の subcommand か）は未決 #14。実行 file の path は未決 #15。
+
+#### 2.7.2 起動・再起動
+
+- 起動は launchd（ログイン時、または登録の直後。`RunAtLoad` 相当）。app の起動・終了とは無関係。
+- 異常終了からの再起動は launchd に任せる案（#16）。今 `center.rs` が持つ backoff・断念・ログ末尾の保持は app から外れる。画面の「center の状態」は `launchctl print` の結果 + GraphQL の疎通 + center のログ file の末尾にする。
+- center の `parent-watch.ts`（親が変わったら終わる）は launchd の下では起動しても何もしない【推測。6 節で実測】。
+
+#### 2.7.3 app を click した時の入口
+
+app を開いた（click した）時、app は「この Mac の center」の状態を確かめ、状態に応じて動く。表の状態は、`launchctl print` の結果と、GraphQL の疎通・center の版の query で見分ける。
+
+| 状態 | app の動き（案。細部は未決） |
+|---|---|
+| 接続先が別 host の center（`remote` に URL がある） | 常駐の操作を出さない（今の `remote` と同じ。web と同じ形）。URL に GraphQL で繋ぐだけ |
+| この Mac の center が未登録 | 初回の登録の案内（#17）。承諾されるまで画面は「center が無い」を出す |
+| 登録済み・稼働・版が app と同じ | そのまま GraphQL で繋ぎ、session の一覧を出す（app を開き直しても session は止まらない） |
+| 登録済み・稼働・版が app と違う（app を更新した後） | 繋いで使える（#13 の互換の範囲）。画面に「center の更新（再起動）」の入口を出す（#18） |
+| 登録済み・停止（落ちた・止めた） | 画面に「停止中」と「起動する」を出す（`kickstart`）。自動で起動するかは #16・#17 |
+| 登録済みだが実行 file が無い・起動に失敗し続ける | 画面にその理由（`launchctl print` の状態と center のログの末尾）を出し、「再登録」を出す（app の移動・削除後に起きうる。#15） |
+
+- 画面に出す操作（設定画面・状態の表示）: 「常駐させる / やめる」「起動 / 止める」「center を再起動して更新する」「状態とログ」。
+- app を終了しても center は止まらない（#19）。
+
+#### 2.7.4 更新（版は app と一緒）
+
+- app の更新（`tauri_plugin_updater` → `relaunch`）は、bundle の中の center の binary も新しくする。動いている center（launchd が起動済み）は旧 binary のまま動き続ける【推測。bundle の置き換え中・後に実行 file がどうなるかは【未確認】、#15・6 節】。
+- 新しい版にするには center を再起動する（`launchctl kickstart -k` か `bootout` → `bootstrap`）。入口は 2.7.3 の表の「版が違う」行（#18）。再起動で session の claude は止まり、`restore()` が `--continue` で戻す（1.6。session の中断は今と同じ）。
+- 版の違いの検出: client が GraphQL で center の版を取り、app の版と比べる（#13）。server の版合わせは今の `follow.ts`（`BANTOU_PAIR_SERVER_VERSION`、app の build が埋める）のまま。
+
+#### 2.7.5 止め方
+
+- 画面の「止める」: `launchctl bootout`（SIGTERM。center は子の claude を止めてから終わる。待ちは `stopGraceMs` + hard exit、`daemon.ts:171-175`）。次に app の入口の「起動する」で戻す。再登録は要らない（登録は残す）案と、止めると登録も外れる案があるが、前者を案にする（#17 の一部）。
+- app の終了では止めない（#19）。
+
+#### 2.7.6 消し方
+
+- 画面の「常駐をやめる」: `bootout` + plist の削除。状態 dir は消さない（#9）。
+- app を削除した時（cask の uninstall）: 今の cask に launchd の登録を外す stanza は無い。plist だけが残って、実行 file が無い center の起動を launchd が試み続ける事になりうる。cask に `uninstall launchctl:`（label を指定）の stanza を足す案がある（cask の変更は別 task）。【未確認】の部分は 6 節で実測。
+
+#### 2.7.7 権限
+
+- LaunchAgent（`~/Library/LaunchAgents`）は user の domain なので管理者権限が要らない【推測】。LaunchDaemon（`/Library/LaunchDaemons`、`packages/server/scripts/install-service.sh` の mac の形）は管理者権限が要り、app からの登録に権限の確認が入る。#2 の推奨の理由の 1 つ。
+- 認証・権限で止まった時は、操作と理由を画面に出す（権限を自分で広げない）。
+
+#### 2.7.8 desktop の Rust に足す command と、捨てる command
+
+足す（`center.rs` の spawn の置き換え。名前は仮）:
+
+| command | 内容 |
+|---|---|
+| `center_service_status` | 未登録 / 稼働 / 停止 / 異常 と、plist・実行 file の有無、`launchctl print` の要約 |
+| `center_service_install` | 2.7.1 の手順（冪等） |
+| `center_service_start` / `center_service_stop` / `center_service_restart` | `kickstart` / `bootout` / `kickstart -k` |
+| `center_service_uninstall` | 2.7.6 |
+| event `bantou://center-service`（仮） | 状態が変わった時（3.3） |
+
+捨てる: `center.rs` の spawn・backoff・断念・終了時の停止、`bantou://center-running`（3.3）。残す: `center_get_settings` / `center_set_settings`（登録に使う項目）、`center_regenerate_token`、`center_snippet.rs` 一式（3.1）。
+
+#### 2.7.9 app の無い host（web 用の Linux の host など）
+
+app が無いので、この 2.7 の入口は使えない。center の `service` subcommand（#14 の案 C）で登録する形は共有できる。配り方は未決 #20。
 ## 3. 今の機能との対応表
 
 ### 3.1 Tauri command（`packages/desktop/src-tauri/src/lib.rs` の `generate_handler!` 43 個。ui が呼ぶのは 41 個）
@@ -209,10 +291,10 @@ bantou-center（launchd が起動する普通の server）
 | `session_sleep` / `session_wake` | `sleepSession` / `wakeSession` | mutation `sleepSession` / `wakeSession` |
 | `session_path_hints` | `sessionPathHints`（`canPick` は client の `Platform` が決める） | query `centerInfo`（workspace）+ client 側の `canPick` |
 | `session_get_settings` / `session_update_settings` | `getSessionSettings` / `updateSessionSettings` | query `sessionSettings` / mutation `updateSessionSettings` |
-| `center_get_settings` / `center_set_settings`（center.rs） | `centerGetSettings` / `centerSetSettings`（`packages/ui/api/center.ts`） | 接続先の設定は client のローカル（URL・token）。起動の項目（enabled・port・bind・workspace・claudePath）は center の設定（`centerSettings` / `updateCenterSettings` か config）。分け方は未決 #9 |
-| `center_status`（center.rs） | `centerStatus` | subscription / query `centerStatus`（center の状態）。子 process の restart 回数・bindFailed は意味が変わる（launchd の状態になる） |
-| `center_regenerate_token` | `centerRegenerateToken` | center 側の操作（mutation か CLI。未決 #4） |
-| `center_local_ips` / `center_ip_status` / `center_connect_snippets` / `center_parse_connect`（center_snippet.rs） | 同名 | 接続設定の入出力。`center_parse_connect` は client のローカル処理。他は center の host の情報なので query（未決 #4） |
+| `center_get_settings` / `center_set_settings`（center.rs） | `centerGetSettings` / `centerSetSettings`（`packages/ui/api/center.ts`） | 接続先（URL・token）は client のローカル。「この Mac の center の常駐」の項目（enabled・port・bind・workspace・claudePath）は app が持ち、登録の時に center の config へ書く（`write_config` の流用）。分け方は未決 #9 |
+| `center_status`（center.rs） | `centerStatus` | app の Rust の `center_service_status`（launchd の状態: 未登録 / 稼働 / 停止 / 異常、2.7.8）+ GraphQL の query `centerStatus`（center 自身の状態）。子 process の restart 回数・bindFailed は意味が変わる（launchd の状態になる。#16） |
+| `center_regenerate_token` | `centerRegenerateToken` | 残す（app が config の token を書き直し、service を再起動する。#4） |
+| `center_local_ips` / `center_ip_status` / `center_connect_snippets` / `center_parse_connect`（center_snippet.rs） | 同名 | 残す（接続設定を別 host の desktop に配る機能は今のまま。`center_parse_connect` は client のローカル処理） |
 | `center_call`（center_mcp.rs） | `centerCall` / `centerTool` / `centerToolStrict`（12 個の tool、3.2） | 3.2 の各 query / mutation に分ける。汎用の `center_call` は無くす |
 | `center_connection`（center_mcp.rs） | `centerConnection` | client のローカルの接続状態（GraphQL の疎通。`CenterConnection`） |
 | `session_output_start` / `session_output_stop`（terminal.rs） | `sessionOutputStart` / `sessionOutputStop`（`packages/ui/api/terminal.ts`） | subscription `terminalOutput` の開始・解除 |
@@ -246,7 +328,7 @@ bantou-center（launchd が起動する普通の server）
 | `center-sessions-changed`（`center_events.rs`） | center `/events` | subscription `sessionsChanged` |
 | `center-session-message`（同上） | center `/events` | subscription `sessionMessage` |
 | `session-output` / `session-output-status`（`terminal.rs`） | center `/sessions/<n>/output` | subscription `terminalOutput` |
-| `bantou://center-running`（`center.rs`、sidecar を spawn した時） | desktop の Rust | 無くす（center は常駐。client は疎通が戻るまで再試行する、`useSessionRefresh.ts` の `refreshUntilReachable` を接続の再確立の契機に置き換える） |
+| `bantou://center-running`（`center.rs`、sidecar を spawn した時） | desktop の Rust | `bantou://center-service`（仮。service の登録・起動・停止の操作の後、または状態が変わった時に Rust が出す。画面は疎通が戻るまで再試行する、`useSessionRefresh.ts` の `refreshUntilReachable` を契機に使う） |
 | `bantou://os-wake` / `bantou://os-network-changed`（`os_events.rs`、web は browser が作る） | OS | client のローカルのまま（GraphQL の subscription の再接続の契機に使う） |
 | `bantou://sessions-changed`（`useBoard.ts`） | Rust / client のローカル | client のローカルのまま（Cork task 側。未決 #8） |
 | `bantou://threads-changed` / `bantou://pings-changed` / `bantou://agent` | `thread.rs` / `broker.rs` / `agent.rs` | 変わらない（未決 #8） |
@@ -254,7 +336,7 @@ bantou-center（launchd が起動する普通の server）
 
 ### 3.4 `Platform`（`packages/desktop/src/tauri/platform.ts`、8 個）
 
-`checkForUpdate` / `downloadAndInstall` / `relaunch`（app の更新。残す）、`openExternal`（残す）、`onFilesDropped`（残す）、`log`（残す）、`watchDir`（Cork の md 用。残す）、`currentWindow`（残す）。center に関わる物は無い。`centerSidecar` の項目は不要になる。
+`checkForUpdate` / `downloadAndInstall` / `relaunch`（app の更新。残す）、`openExternal`（残す）、`onFilesDropped`（残す）、`log`（残す）、`watchDir`（Cork の md 用。残す）、`currentWindow`（残す）。center に関わる物は無い。`centerSidecar` の項目は「この shell が center の常駐を管理できる」の意味に変わって残る（desktop は true、web は false。設定画面の `webMode` の分岐の根拠）。
 
 ### 3.5 center が HTTP で直接公開している物（GraphQL への置き換え）
 
@@ -278,18 +360,20 @@ ui・desktop・web の画面側の呼び出しを grep で数え、3.1〜3.4 の
 |---|---|---|---|
 | A | center に GraphQL の endpoint を足す（`/graphql`）。resolver は `packages/center-client/src/commands.ts` の表と center の中の関数を使う（query / mutation / subscription は 2.3）。認証は `/mcp` と同じ Bearer。GraphQL server の部品は未決 #1 | 今の desktop・web は無変更で動く（`/mcp` を使い続ける）。GraphQL は curl / test で確かめる | endpoint を足しただけ。外せば元に戻る |
 | B | `packages/ui/api/*.ts` を GraphQL client に差し替える。web の `~/tauri` の transport を GraphQL にする（BFF の形は未決 #4）。desktop の `src/tauri/transport.ts` は、center 系の command を GraphQL へ、native 系（workspace・updater・Cork）だけ Tauri に残す。subscription は `terminalOutput`・`sessionsChanged`・`sessionMessage` | web が GraphQL で動く。desktop は「center 系は GraphQL / native 系は Tauri」の混在で動く（sidecar の center にも別 host の center にも GraphQL で繋がる） | 差し替えを feature flag か branch 単位にすれば戻せる。center 側は無変更 |
-| C | center の service 化: 配布物（binary + wrapper）の切り出しと、launchd の plist・install / uninstall・状態 dir の引き継ぎ（未決 #2・#3・#9）。desktop の sidecar は残したまま、別に service として center を動かせる状態にする | desktop は「sidecar の center」にも「service の center」にも繋げる。service の center が実機で session を回せる（6 節の実測） | service を外せば sidecar に戻る |
-| D | desktop から sidecar を外す: `center.rs`・`center_mcp.rs`・`center_events.rs`・`session.rs` の cache・`terminal.rs`・`attachment.rs` の中継・`center_snippet.rs` の起動側・launcher 鍵・`externalBin`・`build-sidecar.ts` を消す。設定画面を「接続先 + center の状態」にする。dmg から center が消える | desktop は service の center に繋ぐ client だけになる。app の更新が center に触らない | D の前の release に戻せる |
-| E | 権限（未決 #6）の置き換え（launcher 鍵 → 新しい権限の持ち方）と、`/mcp` の残し方（未決 #5）の整理 | `memory` / `mcpServers` の読み書きが新しい権限で動く | 権限の方式を旧に戻す |
-| F | 更新の配り（未決 #3）の自動化。center の更新と server の版合わせ（`follow.ts` の `BANTOU_PAIR_SERVER_VERSION`）を、desktop の build に依らない形にする | center が独立して更新・再起動する | 手動の更新に戻す |
-| G | docs の改訂: `docs/concept.md`・`docs/architecture.md`・`CLAUDE.md` の Map・`docs/protocol.md` の desktop ↔ center の節・`packages/center/README.md` の起動・`packages/desktop/README.md`・`docs/ops/` に center の設置の手順書を足す。ほかの設計書の「desktop の sidecar」の記述（`docs/design/master-cap-session.md` など）の読み替え | docs が実装と合う | — |
+| C | center の常駐化: center の `service` subcommand（plist の生成・登録・解除。#14）と、desktop の Rust の service 管理の command（2.7.8）、設定画面・app の入口（2.7.3）、状態 dir の引き継ぎ（#9）。同梱 binary はそのまま bundle に入れ、launchd がそれを起動する（#15）。desktop の sidecar（`center.rs` の spawn）は残したまま、「sidecar で起動」と「launchd で常駐」を設定で切り替えられる状態にする（同じ port を同時に使わない） | desktop は sidecar の center にも launchd の center にも繋げる。launchd の center が実機で session を回せる（6 節の実測） | 設定を sidecar に戻す |
+| D | desktop から sidecar の spawn を外す: `center.rs` の spawn・監視・backoff・終了時の停止、`center_events.rs` / `center_mcp.rs` / `session.rs` の cache / `terminal.rs` / `attachment.rs` の中継、`center_snippet.rs` の起動側を消す。**binary の同梱（`externalBin`・`build-sidecar.ts`）は残す**（launchd が bundle の center を起動する）。設定画面を「接続先 + この Mac の center の常駐の操作」にする | desktop は launchd の center に繋ぐ client + service の管理者になる。app の終了・更新が center を止めない | D の前の release に戻せる |
+| E | launcher 鍵の保存方式の変更（#6 の A: 起動ごとの鍵 → 登録の時に作る鍵）と、`/mcp` の残し方（#5）の整理 | `memory` / `mcpServers` の読み書きが新しい鍵で動く | 鍵の方式を旧に戻す |
+| F | 更新の入口（#18）: app の更新後に center の版の違いを検出して、再起動の入口を出す。`follow.ts` の server の版合わせ（`BANTOU_PAIR_SERVER_VERSION`）は app の build が埋める今のまま | app を更新すれば center も同じ版に揃う（再起動は #18 の入口） | 手動の再起動に戻す |
+| G | docs の改訂: `docs/concept.md`・`docs/architecture.md`・`CLAUDE.md` の Map（「center は desktop に sidecar 同梱」→「center は app に同梱し、launchd の常駐として起動」）・`docs/protocol.md` の desktop ↔ center の節・`packages/center/README.md` の起動・`packages/desktop/README.md`・`docs/ops/` に center の常駐の手順書を足す。ほかの設計書の「sidecar」の記述の読み替え | docs が実装と合う | — |
 
 並行できる単位（依存の少ない順）:
 
-- A（GraphQL server 本体: schema・resolver・認証・subscription）は、段階 C の service 化（plist・install・配布物）と並行できる。互いに触る file が別（A は `packages/center/src` と新しい resolver、C は `packages/server/scripts` に似た設置の script と配布の build）。
+- A（GraphQL server 本体: schema・resolver・認証・subscription）は、段階 C の service 化と並行できる。互いに触る file が別（A は `packages/center/src` と新しい resolver、C は desktop の Rust と center の `service` subcommand）。
 - A の中でも、query 群（session・remote・server・rc の読み取り）、mutation 群（session の操作・設定・login・retire）、subscription（`sessionsChanged`・`sessionMessage`・`terminalOutput`・`centerStatus`）は、schema の合意（2.3）ができた後は別 worker に分けられる。端末の subscription は `core.ts` の購読（`after` / `reset` / `end`）に依存するので 1 つにまとめる。
+- C は 3 つに分けられる: C1 = center の `service` subcommand（plist の生成・登録・解除。#14）、C2 = desktop の Rust の service 管理の command（2.7.8。`center.rs` の spawn と併存する間は同じ port を使えないので、切替の設定を持つ）、C3 = 画面（設定画面・app の入口・版の違いの表示）。C2 は C1 の入口が固まってから。C3 は C2 の command の形が決まれば並行できる。
 - B は A の schema に依存する（schema の合意後、client の差し替えは `packages/ui/api/` のファイルごとに分けられる: sessions / center / terminal / attachment。web の transport と desktop の transport は別 worker）。
 - D は B と C の完了後。E・F は D と並行できるが、E は未決 #6 の決定後。
+- G（docs）は各段の完了ごとに、その段の分だけ。
 - G（docs）は各段の完了ごとに、その段の分だけ。
 
 ## 5. 進行中の別変更との関係
@@ -300,7 +384,7 @@ ui・desktop・web の画面側の呼び出しを grep で数え、3.1〜3.4 の
 
 - 内容: `origin/feat/app-restart-check`（`docs/design/app-restart-check.md`、`packages/center/src/restart-check.ts`、`packages/center/test/restart-check.test.ts`）と `origin/feat/app-restart-check-sessions`（`packages/center/src/sessions.ts` の `restore()` に `onRestoreStart` / `onRestoreFail`）。center が起動し直した session の最初の入力（`SessionStart` の後）で「app が再起動した」事を知らせ、状況の確認を促す。検出は `restore()` の中（`supervisor.start(name, { resume: true })` の直前に印を付ける）。
 - この設計との関係: 実装は center の中の物で、GraphQL 化・service 化とは別の file（`restart-check.ts`・`sessions.ts` の restore・`daemon.ts` の配線）。**衝突は少ない**。
-- 意味が変わる点: その設計は「center は desktop の sidecar なので、app の再起動 = center の process の起動」（1.1 の【推測】）に立つ。center が app から離れると、**app（client）を再起動しても center は再起動しない**ので `restore()` は走らず、session も起動し直されない。`restore()` が走るのは center の起動（host の起動、launchd の再起動、center の更新、center の異常終了からの復帰）の時だけになる。つまり「app の再起動の最初の 1 回」は「center の起動の最初の 1 回」に読み替わる。
+- 意味が変わる点: その設計は「center は desktop の sidecar なので、app の再起動 = center の process の起動」（1.1 の【推測】）に立つ。center が launchd の常駐になると、**app（client）を終了・再起動しても center は再起動しない**ので `restore()` は走らず、session も起動し直されない。`restore()` が走るのは center の起動の時だけ（host の起動、launchd の再起動、異常終了からの復帰、app の更新後に center を再起動した時（#18））。center は app に同梱されるので、利用者から見た「app を更新した」は、center の再起動（#18 の入口で行う）と結びつく。つまり「app の再起動の最初の 1 回」は「center の起動の最初の 1 回」に読み替わる。
 - 整合の案（利用者の判断。未決 #11）: (A) 実装は変えず、意味を「center が起動し直した時」に読み替える（文面の「app が再起動した」を「center が再起動した」に直す）。(B) さらに「client が繋ぎ直した時」にも確認を送る（これは別の仕様になり、現在の指示「app が再起動された時の最初の 1 回」から外れる。足すなら利用者が決める）。推奨は A。
 
 ### 5.2 `feat/sleep-resession`（スリープを起動しないリセッションに）
@@ -341,7 +425,12 @@ code は書かないので、ここは実装の task が足す test と、実機
 - 端末の subscription の実測: 出力が多い時の遅延・切断・再接続の後の続き。web の Cloudflare 経由（SSE / WebSocket が通る条件。web 設計 8.5）。
 - 認証: 別 host の client（LAN・Tailscale）から繋げる事。平文の token（`0.0.0.0` の待ち受け）が今と同じ範囲に収まる事。
 - 更新: center を入れ替えて再起動した時の session の中断の長さと、`follow.ts` の server の版合わせ。
-- desktop: sidecar を外した版が、center の service が止まっている時に「繋がらない」を画面に出して、戻れば自動で再接続する。
+- desktop: center の service が止まっている時に「繋がらない」を画面に出して、戻れば自動で再接続する。
+- app の入口（2.7.3）: 登録なし・登録済みで稼働・登録済みで停止・稼働中で版が違う・binary が無い、の各状態で app を開き、各々の振る舞いが表のとおりになる。
+- app から: 登録（`bootstrap`）→ 疎通 → 止める（`bootout`）→ 起動（`kickstart`）→ 常駐をやめる（plist 削除）の一巡が、管理者権限なしで通る。冪等（2 回登録しても壊れない）。
+- app の更新（updater が bundle を置き換える）の最中・直後に、動いている center が落ちない・launchd の plist の path が有効なまま（#15）。更新後の最初の起動で center の版の違いが検出される。
+- app を終了（Cmd+Q）しても center と session が動き続ける。app を開き直すと繋がる。
+- cask の uninstall（`zap trash` だけで、launchd の登録を外す stanza は今無い）の後に、plist だけが残って center が起動し続けない（または起動に失敗し続けない）事。
 
 ## 7. 未決（番号つき。各案と推奨）
 
@@ -355,31 +444,32 @@ code は書かないので、ここは実装の task が足す test と、実機
 - 案 A: center 1 つを 1 つの service にする。mac は LaunchAgent（user の login の domain。`~/Library/LaunchAgents`）。
 - 案 B: center 1 つを LaunchDaemon（`/Library/LaunchDaemons`、`UserName` 付き）にする（`packages/server/scripts/install-service.sh` の mac と同じ形）。
 - 案 C: 複数（center と web backend を同じ service にまとめる、または session ごと）。
-- 推奨: 単位は A（center 1 つ = 1 service。`docs/concept.md` の原則 6「session ごとに重い仕組みを抱えさせない」と、web 設計 6.4 の「1 host に center を複数立てない」に沿う）。種別は A（LaunchAgent）を第一候補にして実測で決める。理由: `claude` の認証が login keychain にあり（`docs/handoff.md` の Lessons）、user の login の domain の方が keychain に届く【推測。未確認】。LaunchAgent は user が login していないと起動しない（host の再起動後に自動ログインが要る）という制約があり、これが許されない運用なら B。web backend は別の service（web 設計 9.1）のまま。
+- 推奨: 単位は A（center 1 つ = 1 service。`docs/concept.md` の原則 6「session ごとに重い仕組みを抱えさせない」と、web 設計 6.4 の「1 host に center を複数立てない」に沿う）。種別は A（LaunchAgent）。理由: (1) app の click だけで登録できる（user の domain なので管理者権限が要らない【推測】。LaunchDaemon は `/Library` に置くので管理者権限が要り、app からの登録に権限の確認が入る）。(2) `claude` の認証が login keychain にあり（`docs/handoff.md` の Lessons）、user の login の domain の方が keychain に届く【推測。未確認】。LaunchAgent は user が login していないと起動しない（host の再起動後に自動ログインが要る）という制約があり、これが許されない運用なら B（その場合 app からの登録の形が変わる）。web backend は別の service（web 設計 9.1）のまま。
 
-**#3 center の配り方と更新の配り方（入れ方・更新・消し方）**
-- 案 A: Homebrew で配る（別の formula か、今の cask と別の物。`unagents/homebrew-tap`）。更新は `brew upgrade`。service の登録は center の subcommand（`bantou-center service install` のような物）か `brew services`。
-- 案 B: GitHub Releases に center の binary を置き、center 自身が更新する（新しい binary を取って入れ替え、自分で終わって launchd に起動し直させる）。
-- 案 C: desktop の app が center の更新を GraphQL の mutation で指示する（app と center の版を組にする。今の `BANTOU_PAIR_SERVER_VERSION` の考えの延長）。
-- 推奨: 最初は A（配布が既存の流儀、`CLAUDE.md` の publish 方針の延長。更新は人が `brew upgrade` する）。B は段階 F で足す。C は center が自分を更新する権限の問題があるので推奨しない。更新で session が中断される事（1.6）は変わらないので、更新を「cap が空の時に行う」運用（web 設計 9.3）は手順書に書く（自動で待つ仕組みを足すかは別の決定）。消し方は「service の登録を外す・binary を消す・状態 dir は残す」を既定にする案。
+**#3 center 単独の更新の経路（app の更新とは別に center だけ更新するか）**
+- 決めてある事: center は app に同梱し、版も app と一緒（app を更新すれば center も新しくなる）。更新後の center の再起動の入口は #18。
+- 案 A: app の更新だけが center の配り方（center 単独の更新の経路を作らない）。
+- 案 B: A に加えて、center 単独の更新（GitHub Releases の binary を center が自分で取り替える）を足す。
+- 推奨: A（利用者の指示は「app 同梱」。版が app と一緒でなくなる経路を足さない）。`follow.ts` の server の版合わせ（`BANTOU_PAIR_SERVER_VERSION`、app の build が埋める）は今のまま使える。
 
 **#4 認証の形と、web の BFF**
 - 案 A: 今と同じ 1 本の Bearer token。token は center が持つ。client は URL + token を貼る。web は BFF が token を持つ（今のまま）。
 - 案 B: A に、client ごとの token（発行・失効）を足す。取り返しのつかない操作（`retireServer`・`deleteSession`）は権限を分ける。
 - 案 C: A に TLS（center が終端、または前段の reverse proxy）を足す。
 - web の形: (a) BFF を残す（token をブラウザに出さない。GraphQL を中継する）、(b) 薄い proxy にする、(c) ブラウザが center を直接叩く（token がブラウザに出る）。
-- 推奨: 認証は A（利用者の決めてある事に新しい仕組みを足さない。今の desktop・web と同じ強さ）。web は (a)（Cloudflare Access の守りと token を隠す設計が既にある。`packages/web/server/`）。B・C は実運用で必要になった時に別の決定にする。token の生成と配り方（client に渡す方法）は center の host で行い（center が生成し、画面に出す物は center の host の CLI / 設定にする案）、desktop の「token を生成して渡す」仕組みは無くなる。
+- 推奨: 認証は A（利用者の決めてある事に新しい仕組みを足さない。今の desktop・web と同じ強さ）。web は (a)（Cloudflare Access の守りと token を隠す設計が既にある。`packages/web/server/`）。B・C は実運用で必要になった時に別の決定にする。token の生成と配り方は今のまま app が持つ（app が登録の時に token を作って center の config に書き、設定画面の接続設定で配る。「再生成」は config を書き直して service を再起動する）。別 host の desktop・web は貼り付けた URL と token で繋ぐ。
 
 **#5 `/mcp`（外向け MCP）を残すか、`session_delete` などを GraphQL に出すか**
 - 案 A: `/mcp` はそのまま残す（素のエージェントが `claude mcp add` で cap 運用する入口。`docs/concept.md` の「center は MCP サーバー」）。GraphQL は画面用。
 - 案 B: `/mcp` を GraphQL に統合して廃止。
 - 推奨: A。理由: `/mcp` は master-cap・外部のエージェントが使う入口で、`docs/design/center-tools.md` の設計がある。画面（GraphQL）と エージェント（MCP）は別の利用者。`session_delete` は desktop の UI が使っていない（web も許可していない）ので、GraphQL には出さず MCP だけにする案を推奨。
 
-**#6 launcher 鍵（`memory`・`mcpServers` の書き込み権）の置き換え**
-- 案 A: center の host で動かす CLI（`bantou-center memory` / `bantou-center mcp`、`packages/center/src/cli.ts`・`memory-settings.ts`・`mcp-cli.ts` に既にある）だけで書く。GraphQL からは読み取りだけ（値の秘密は伏せる、今の `mcp-secrets.ts` の扱い）。
-- 案 B: admin 権限の token を別に持ち、それで繋いだ client だけが GraphQL で書ける。
-- 案 C: desktop の画面で書ける今の体験を保つため、client の token に書き込みの scope を持たせる。
-- 推奨: A を最初の形にする（権限の仕組みを新しく足さない。CLI は既にある）。画面から書きたい要望があれば、B を別の決定にする。desktop の設定画面の「外部記憶」「追加の MCP」の編集は、A の間は「center の host で設定する」案内になる（利用者の画面の体験が変わる点なので、決定を要する）。
+**#6 launcher 鍵（`memory`・`mcpServers` の書き込み権）の扱い**
+- 前提の変化: center は app に同梱され、app が launchd に登録する。つまり app は今も「center を起動した所」であり続けられる（登録した app が、center に渡す鍵の持ち主）。
+- 案 A: 今の launcher 鍵の仕組みを残す。ただし鍵は起動のたびに変わる乱数（今は sidecar の起動ごと、`packages/center/src/launcher.ts`）でなく、**登録の時に app が作って保存する鍵**（0600 の file か plist の環境変数）にする。center は鍵を env から取り出して消す（`takeLauncherKey`）。app は自分の center に繋ぐ時だけ header を付ける。別 host の center に繋ぐ desktop・web は今どおり書けない。
+- 案 B: center の host の CLI（`bantou-center memory` / `bantou-center mcp`、`packages/center/src/cli.ts`・`memory-settings.ts`・`mcp-cli.ts`）だけで書く。GraphQL は読み取りだけ。
+- 案 C: admin 権限の token を別に持ち、繋いだ client だけが GraphQL で書ける。
+- 推奨: A（権限の仕組みを新しく足さない。今の画面の体験が変わらない）。鍵の保存先の守り（同じ user の他の process から読めるか）は【未確認】で、実装の task が確かめる。A が守れなければ B。
 
 **#7 端末の入出力と添付を GraphQL に載せる範囲**
 - 案 A: 出力は subscription、入力・サイズは mutation、添付の画像（bytes）は既存の HTTP route `POST /sessions/<n>/attachments` を残す。
@@ -398,9 +488,9 @@ code は書かないので、ここは実装の task が足す test と、実機
 - 案 B: service 用の新しい場所（`~/.config/bantou/` など。`packages/center/README.md` の既定）に作り直す。
 - 推奨: A。理由: 移行で session と cap の記録が消えない。`center-id`（cap_id の素、`docs/architecture.md`）が変わると cap の記録の対応が崩れる。設定の分け方は、`CenterSettings` の起動項目（enabled・port・bind・workspace・claudePath・token）は center の config へ、`remote`（接続先 URL・token）は client のローカルの設定へ、とする案を推奨する。
 
-**#10 Windows（desktop の client は動くが center は mac / Linux の host）**
-- 案 A: center は mac（launchd）と Linux（systemd）だけを対象にし、Windows は client としてだけ使う。
-- 案 B: Windows の center の常駐も扱う。
+**#10 Windows**
+- 案 A: center の同梱と常駐は mac の app だけを対象にする（今の cask は arm64 の macOS だけ、`packages/desktop/Casks/bantou.rb` の `depends_on`）。Windows の app は client としてだけ使い、center には GraphQL で繋ぐ。
+- 案 B: Windows の center の常駐（Windows service）も扱う。
 - 推奨: A（利用者の指示は launchd。`pty-wrapper` と `claude` の Windows 対応は今の repo に根拠が無い【未確認】）。
 
 **#11 「app の再起動の後の状況の確認」の意味（5.1）**
@@ -418,9 +508,47 @@ code は書かないので、ここは実装の task が足す test と、実機
 - 案 A: GraphQL の field の追加だけを許し（古い client は新しい field を無視）、削除・型の変更は client と center を同じ release で出す。client は center の版を query で取り、組が合わない時は画面に出す。
 - 案 B: schema に版を持たせ、複数の版を同時に提供する。
 - 推奨: A（今の `Session` の `null` = 古い center の扱いと同じ考え）。
+**#14 app から center の launchd の登録をする仕組み**
+- 案 A: Rust（desktop の `src-tauri`）が plist を書き、`launchctl`（`bootstrap` / `bootout` / `kickstart` / `print`）を呼ぶ。今の `center.rs` が `kill(1)` を `std::process::Command` で呼ぶのと同じ流儀。
+- 案 B: macOS の `SMAppService`（Login Items の登録。app の bundle 内の plist を OS が管理）。
+- 案 C: center の subcommand（`bantou-center service install` など）が登録し、app はそれを呼ぶだけにする（Linux の host でも同じ入口を使える）。
+- 推奨: C を土台に、app は A の形で呼ぶ（app が `bantou-center service …` を子 process として 1 回実行する）。理由: 登録の知識が center の binary 側に 1 つにまとまり、app の無い host（未決 #20）でも同じ手順を使える。`SMAppService` の要否（署名・OS の版の条件、`depends_on macos: :sequoia` の cask の範囲）は【未確認】で、plist + `launchctl` で足りなければ B。
 
+**#15 center の binary の置き場（launchd が起動する path）**
+- 案 A: app の bundle の中の binary を直接指す（`bantou.app/Contents/MacOS/bantou-center` 【推測。Tauri の `externalBin` は target triple を外して bundle の実行 file の隣に置く（`build-sidecar.ts:7-9` の注記）。実際の場所は【未確認】】）。
+- 案 B: 登録の時に固定の場所（例: `~/Library/Application Support/jp.grrow.bantou/` の下）へ binary を写し、plist はそこを指す。app の更新と center の更新を別の操作にできる。
+- 案 C: 固定の場所に symlink を置き、symlink が bundle 内を指す。
+- 推奨: A。理由: 「app を更新すれば center の版も揃う」（決めてある）が最も単純に成り立つ。ただし app の更新（updater が bundle を置き換える）の最中・直後に、動いている center の実行 file がどうなるか、plist の path が有効なままかは【未確認】で、6 節で実測する。問題があれば B（写す場所の更新は app が行う）。
+
+**#16 center が落ちた時の再起動の持ち主（launchd の `KeepAlive` など）**
+- 案 A: launchd に任せる（異常終了だけ再起動する設定。値は実測して決める）。今 `center.rs` が持つ backoff・断念・ログ末尾の保持（`center.rs:44-55,233-290,451`）は app から外す。
+- 案 B: launchd は起動だけ。再起動は app が見て行う（今と同じ。app が閉じていると再起動されない）。
+- 推奨: A（center の寿命を app から切り離す、が趣旨）。断念の仕組みを launchd 側にどう持たせるか（再起動が連続した時の振る舞い）は【未確認】。app は launchd の状態（`launchctl print`）と GraphQL の疎通を画面に出す。
+
+**#17 初回の登録（app を初めて開いた時）**
+- 案 A: 自動で登録する（app を入れて開けば center が常駐する。今の `enabled` の既定と同じ体験）。
+- 案 B: 確認の画面（「この Mac に center を常駐させる」）を出し、承諾で登録する。
+- 案 C: 設定画面の switch だけ（利用者が入れる）。
+- 推奨: B（launchd への登録は OS の設定に残る変更で、利用者に見える形にする。登録は 1 回の click）。今 `enabled` が `false` の既定かは【未確認】（`center.rs` の `CenterSettings` の既定値を実装の task が確かめる）。
+
+**#18 app の更新後の center の更新（再起動）の入口**
+- 案 A: app が更新後の最初の起動で、center の版（GraphQL の query）と app の版を比べ、違えば「center を再起動して更新する」を画面に出す（利用者が click。session は `--continue` で戻る、1.6）。
+- 案 B: 自動で再起動する。
+- 案 C: 次に center が起動し直される時（host の再起動など）まで待つ。
+- 推奨: A（session の中断を利用者が選べる。利用者が決めていない待ちの仕組みを足さない）。版が違う間は画面に出し、動作は止めない（#13 の互換の範囲で動く）。
+
+**#19 app を終了した時の center**
+- 案 A: 止めない（常駐が趣旨）。
+- 案 B: 止める（今の `RunEvent::Exit` と同じ）。
+- 案 C: 設定で選ぶ。
+- 推奨: A。止めたい時は画面の「center を止める」（`bootout`）か、「常駐をやめる」を使う。今の `lib.rs` の終了処理の `Center::stop()` は外す。
+
+**#20 app の無い host の center の入れ方（web 用の Linux の host など）**
+- 案 A: center の単独の配布物と `bantou-center service install`（#14 の案 C）で入れる。配り方は別の決定。
+- 案 B: app 同梱の center だけを対象にし、app の無い host は今の手順（ソースから起動する。web 設計 6.1）のまま。
+- 推奨: B（この設計の範囲は「app 同梱の center」。app の無い host の配布は利用者がまだ決めていない）。ただし center の `service install` を #14 の C で作れば、A に進める余地が残る。
 ## 8. 次にやる事（推奨の順）
 
-1. 未決 #1・#2・#3・#4・#6・#7 の決定（schema と配布の形に効く）。#11 は進行中の 2 branch の merge の前に決める。
+1. 未決 #2・#4・#6・#7 と、新しい #14〜#20（app からの登録の仕組み・binary の置き場・初回の登録・更新後の center の再起動）の決定（schema と常駐の形に効く）。#11 は進行中の 2 branch の merge の前に決める。
 2. 段階 A の worker を、query / mutation / subscription に分けて並行で出す（schema の合意、2.3 を先に固める）。
-3. 並行して段階 C の実測（launchd で center が `claude` の認証を通すか）を行う。結果で #2 の種別が決まる。
+3. 並行して段階 C の実測（launchd で center が `claude` の認証を通すか。app の bundle 内の binary を launchd が起動できるか）を行う。結果で #2・#14・#15 が決まる。
