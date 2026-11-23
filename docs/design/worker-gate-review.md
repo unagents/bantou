@@ -74,6 +74,12 @@
     - `/schemas/[schema-name]` は、schema の MCP server の **MCP の口**で問い合わせる（HTTP の path にはしない）。
     - header は `x-schema-discovery` に JSON 1 本。形は mcpServers の 1 件分と同じ（`{"type":"http","url":"…","headers":{…}}`。type は http だけ）。
     - resource か tool か・URI の形・応答の中身は、openspec-mcp の project が確定版の文書（Gitea `agent-hand/openspec-mcp` の branch `design/schema-discovery` の `docs/schema-discovery-protocol.md`）にしている所。中身はまだ決まっていない（【openspec-mcp 待ち】。プロトコル待ち）。この設計書では決めない。
+21. step の単位への指摘。master-cap が step を「tasks の中の作業 1 つずつ」と読み、また「tasks という文書が必ず在る」前提で整理していた事への指摘。
+    > なんで、tasksの中の作業をstepで切るの？
+    >
+    > tasksがstepとして絶対にあるっていう構造になっちゃってない？
+
+    step が何で・いくつ在り・どう終わるかは schema が決める（決定 10 の「schemaの組み方で、ゲートクリアの仕様はどのようにも組める」）。server は、step の名前や種類（tasks など）を決め打ちで持たない。
 
 ### 前提（決定 15）
 
@@ -81,15 +87,15 @@ session の起動の仕組みは変える予定で、毎回きれいな context 
 
 ### 利用者の決定と、この設計書の案の区別
 
-- **利用者の決定は、上の 1〜19 の原文と、20（openspec-mcp の project 経由で届いた、利用者が決めた事）だけ**。それ以外は、この設計書の案・読みで、利用者の決定ではない。利用者の決定から導いた実装の細部で master-cap が決めた物は 9.1 に分けて書く（利用者が別に決めたら従う）。
+- **利用者の決定は、上の 1〜19 と 21 の原文と、20（openspec-mcp の project 経由で届いた、利用者が決めた事）だけ**。それ以外は、この設計書の案・読みで、利用者の決定ではない。利用者の決定から導いた実装の細部で master-cap が決めた物は 9.1 に分けて書く（利用者が別に決めたら従う）。
 - 決定から出る形（本文に書く）: master-cap（14）は worker を起こさず、change に消化する step の範囲（scope）を付けて server に登録する（9・10）。server は登録を queue に溜め、資源を見て並行の数に責任を持って worker を起こし、worker は 1 step を実行し（8）、step の終わりは server が機械的に判定し、通れば次の step の worker を起こし、通らなければ同じ worker を同じ session で起こし直して続きをやらせる（10・12・19）。門の中身（review・往復の上限・指摘の数え方）は schema の組み方で、bantou の仕組みは持たない（2・3・4・7・10）。worker の質問は今の messenger の仕組みで、server が worker の状態と、session-id に結び付けた step の位置を持つ（11）。全 server が 1 つの openspec-mcp につなぐ（13。header は `x-schema-discovery`。20）。master-cap の仕事に proposal・design・tasks の作成が入り、並行の session に分けて進める（16〜18。8 節）。
 - 10 の 1 と 2 は「schema の組み方で作れるゲートの形」として並べられている。**どちらかを選ぶ事も、どちらかに決める事もしない**。併存できる物として書く（3.4）。
-- 「step の終わりを validate で判定できたはず」は利用者の見立て。今の openspec と openspec-mcp で何が出来るかは 3.4 に書く（この設計を書いた環境では確かめられなかった）。
+- 「step の終わりを validate で判定できたはず」は利用者の見立てで、実測ではできなかった（validate は、済んでいない task があっても valid になる）。同じ事は status と list でできる。確かめた事実は 3.4 に書く。
 - server が openspec-mcp を実行する契機・形式・門が開かなかった時の openspec-mcp 側の扱いは、openspec-mcp のプロトコルが決める（【openspec-mcp 待ち】）。
 
 ### この設計書の範囲
 
-- 1〜20 を、今の code の上でどう置き換えるかを書く。5 の guardrail 側の設計は上記の別設計書に任せ、ここでは「そこに足す定義の例」だけを書く。
+- 1〜21 を、今の code の上でどう置き換えるかを書く。5 の guardrail 側の設計は上記の別設計書に任せ、ここでは「そこに足す定義の例」だけを書く。
 - **openspec-mcp のプロトコルの中身（呼び出しの形式・返り値の形・resource か tool か・URI の形・step の指し方の形式など）は決めない。openspec-mcp が決める**（header の名前と形は決定 20 で決まっている）。本書で「openspec-mcp を実行する」「終わりを判定する」と書く所は、その形が出てから具体にする（【openspec-mcp 待ち】）。
 - 利用者が話に出していない事は、仕様にも未決にも足さない。
 
@@ -181,11 +187,11 @@ session の起動の仕組みは変える予定で、毎回きれいな context 
             ▲                      │  ① 登録を queue に溜める
             │ 質問・停止・完了      │  ② 資源（メモリ・process）を見て、並行の数に責任を持って worker を起こす（12）
             │                      │  ③ worker は 1 step を実行する（8）
-            │                      │  ④ 終わったら step の終わりを機械的に判定する（openspec の validate など。【openspec-mcp 待ち】）
+            │                      │  ④ 終わったら step の終わりを機械的に判定する（openspec-mcp に聞いた artifact の状態と apply の進み。3.4）
             │                      │  ⑤ 通れば次の step の worker を起こす。通らなければ同じ worker（同じ session）を起こし直し、通らなかった中身を渡す（19）
             │                      ▼
             │                  worker（claude -p）… openspec のインストラクションに従い、1 step を行う
-            │                      └ review は tasks の中の作業。instruction に従い reviewer のサブエージェントを起動（5 節）
+            │                      └ review は、schema が決めた作業の 1 つ（例: apply の作業）。instruction に従い reviewer のサブエージェントを起動（5 節）
             ▼
    guardrail の設定 ─ schema の MCP server ─► openspec-mcp（schema を読む）
 ```
@@ -240,9 +246,9 @@ session の起動の仕組みは変える予定で、毎回きれいな context 
 
 ### 3.3 worker
 
-- 普段の役割は、tasks（`tasks.md` など）で規定されている作業の実行（0 節の 8）。server の worker は、tasks の step を実行すると仮定する（0 節の 8。「極論だけど、一旦」と利用者が言っている）。
+- 普段の役割は、schema が規定した step の作業の実行（0 節の 8。利用者の言葉は「tasks.md とかで規定されてる作業」。tasks はその例で、仕組みの前提ではない。決定 21）。server の worker は、step を実行すると仮定する（0 節の 8。「極論だけど、一旦」と利用者が言っている）。
 - 作業範囲は 1 step の中が基本（0 節の 8）。次の step には進まない。次を起こすのは server。
-- openspec のインストラクションに従って作業する（0 節の 3）。review を tasks の作業として含む場合は、そのインストラクションに従って reviewer のサブエージェントを起動する（5・6 節）。
+- openspec のインストラクションに従って作業する（0 節の 3）。review を step の作業として含む場合は、そのインストラクションに従って reviewer のサブエージェントを起動する（5・6 節）。
 - 質問・承認依頼は `report`（ask / approve）で出す（今の仕組みのまま。0 節の 11）。出したら turn を終える（今の `report` tool のとおり）。
 - `worker.md` の `[進め方]`（「質問しない。止まらず最後まで進む。」）との関係は未確認で、実装 task で扱う（決定 11 は worker が `report(ask)` で質問を出す前提。未決には足さない。利用者が話に出していないため。1.6）。
 - `packages/server/instructions/worker.md` は今の worker 共通のルール（`[範囲]` `[進め方]` `[終わる時]`）。review の手順は入れない。【推測】「1 step の範囲」を worker に伝える所は、server が起動時に渡す prompt（どの change のどの step か）に書く。実装の task。
@@ -253,7 +259,7 @@ session の起動の仕組みは変える予定で、毎回きれいな context 
 
 1. master-capが `change_register` で change と scope（消化する step の範囲）を server に登録する。server は登録を保存し、先頭の step を `queued` にして worker の起動の依頼を queue に積み（3.6）、残りの step は `pending` にする。change は `in_progress`。
 2. server が資源を見て起こせる時に、worker を起こす。worker は現在の step を実行する（1 step の範囲内。0 節の 8）。
-3. worker の run が終わったら（step の状態は `checking`）、server が step の終わりを機械的に判定する（0 節の 10 の 2。利用者の見立ては「openspec は validate を使って、step の終了とかは判定できたはず」）。
+3. worker の run が終わったら（step の状態は `checking`）、server が step の終わりを機械的に判定する（0 節の 10 の 2）。server は openspec-mcp に聞いて、(1) artifact の状態（done / ready / blocked）と、(2) apply の進み（tracks の file の済んだ checkbox の数と全体の数、complete か）を読み、step の終わりと次に進められる step を判定する。step の名前・数・並びは schema から来る物で、server は決め打ちしない（決定 21）。openspec-mcp への問い合わせの形は【openspec-mcp 待ち】。
 4. 判定が通れば、server は次の step の worker を起こす: `pending` から `queued` にして worker の起動を queue に積む（step 2 → step 3 …）。scope の最後の step が通れば change は `completed`（登録した scope を消化し終えた。change 全体の完了ではない。3.5）になり、server が center に通知する（下の (c)）。
 5. 判定が通らなければ、server は **同じ worker（同じ session）を起こし直し**、通らなかった中身を渡して続きをやらせる（決定 19）。起こし直しも queue と資源の判定を通る（3.6）。worker の run が終わるたびに 3 に戻る。change は止めない。通らないたびに master-cap には知らせない。何度やっても通らない時の扱い（回数の上限など）は、決定 7 と同じく schema の責務で、bantou の仕組みは持たず、この設計書では決めない。
 
@@ -265,11 +271,24 @@ session の起動の仕組みは変える予定で、毎回きれいな context 
 
 step の終わりの確かめに通らない事は、知らせる場面に入れない（続きをやらせる。決定 19）。worker の失敗・異常終了の扱いは、本設計では決めない（決定 19 の範囲外）。進みの掲示（`change_status`、`activity`）は、master-cap が照会して見る物で、止まって知らせる場面ではない。
 
-**今の openspec / openspec-mcp で何が出来るか**: この設計を書いた環境には openspec の CLI も openspec-mcp も無く（`which openspec openspec-mcp` が何も返さない。global の npm package・`~/.npm/_npx` の cache にも無い）、repo の中にも、openspec の CLI・openspec-mcp の実体は無かった（`openspec` の語は、demo の fixture と e2e の seed の task 名に出るだけ）。**「validate で step の終了を判定できる」は利用者の見立てのままで、事実として確かめていない。** validate の引数・出力・何を見て終了とするかも、確かめていないので書かない。確かめられない所・足りない所は openspec-mcp の側の話で、openspec-mcp の project が決める（【openspec-mcp 待ち】）。この設計書が bantou 側で前提にするのは、「server が openspec / openspec-mcp を機械的に実行し、結果が通った / 通らないかを受け取れる」だけ。
+**今の openspec / openspec-mcp で何が出来るか**【事実】（openspec-mcp の project の実測。OpenSpec 2.1.1。調べる worker と review の worker が再現し、食い違い 0 件。出典は openspec-mcp の project の報告。この設計書の環境では再現していない）:
+
+- validate では step の終わりを判定できない（済んでいない task があっても valid）。決定 10 の「validate を使って…判定できたはず」は利用者の見立てで、実測ではできなかった。同じ事は、下の status と list でできる。
+- schema.yaml の artifact に書けるのは id・generates・description・template・instruction・requires だけ。artifact の done は、generates の file が在るかだけで決まる（中身は見ない）。`status --json` の artifacts[] に done / ready / blocked が出る。
+- apply に書けるのは requires・tracks（相対 path か null）・instruction。checkbox を数える file は、apply.tracks で 1 つ選べる（名前は自由。null なら数えない）。tracks の file の checkbox が全部 [x] になると、`list --json` は status: complete、`instructions apply --json` は state: all_done。
+- `status --json` の isComplete は、artifact の file が全部在れば true（checkbox は見ない）。
+- schema の側で step の終わりとして機械的に表せる物は 2 つだけ: (1) artifact の file が在るか（requires で順序）。(2) apply.tracks で選んだ 1 つの file の checkbox の数。それ以外の条件（中身の検査、review の 0 件、検証の command）を書く項目は無い。
+- openspec-mcp が今出している道具は list・new・status の 3 つ。instructions は出していない。worker が instruction を受け取る口は、openspec-mcp の project が利用者に諮る所で、この設計書では決めない（【openspec-mcp 待ち】）。
+
+この事実から、bantou 側が前提にするのは、「server が openspec-mcp に聞き、(1) artifact の状態と (2) apply の進みを読んで、通った / 通らないかを判定できる」だけ。openspec-mcp の持ち分（道具の足し方など）はこの設計書で設計しない。
+
+**review の条件（決定 3・10 の 1）との関係**: schema に review の 0 件を書く項目は無い（上の事実）。だから今の openspec で review の条件が成り立つのは、「条件を満たすまで、その作業の checkbox に印を付けない」と instruction に書く形である。worker は instruction に従い、条件を満たすまで印を付けず、印が全部付けば apply の進みが complete になり、server の判定が通る。review の中身を server が見るのではない。
+
+**step の指す物**: scope（M1。順序つきの step の並び）の step は、artifact の id と apply の段を指す。どの artifact・どの段が step になるか、いくつ在るかは schema が決める（決定 21）。
 
 **門の形（併存する。選ばない）**: 0 節の 10 の 2 つは、schema の組み方で作れるゲートの形として並んでいる。
 
-- **形 1（worker の中で完了が条件づけられる）**: tasks の中に「reviewer のサブエージェントを実行する」作業を instruction として置く。その作業に完了の印を付けるには、instruction の条件のクリアが要る。**クリアできるまで worker は継続して作業する**（0 節の 10 の 1）。
+- **形 1（worker の中で完了が条件づけられる）**: step の中（例: apply が数える file の中）に「reviewer のサブエージェントを実行する」作業を instruction として置く。その作業に完了の印（checkbox）を付けるには、instruction の条件のクリアが要る。**クリアできるまで worker は継続して作業する**（0 節の 10 の 1）。
 - **形 2（server が step を順に回し、終わりを判定する）**: step を scope で渡すと、server が step 1 を worker にさせ、終わったら step 2 をさせる。終わりの判定を server が機械的に行う（0 節の 10 の 2）。
 
 【推測】2 つは同じ仕組みの上で併存できる。server の動きは 1 つで、「step の worker を起こす → worker の run が終わる → 終わりの判定を実行する → 通れば次の step、通らなければ同じ worker を続きで起こし直す（決定 19）」。形 1 の schema では、条件を満たすまで worker の run が終わらないので、worker の run が終わった時には判定が通る。形 2 の schema では、判定が門になる。どちらの形を使うか・組み合わせるかは schema の組み方で、bantou は選ばない・解釈しない。
@@ -308,7 +327,7 @@ step の終わりの確かめに通らない事は、知らせる場面に入れ
    | `passed` | 判定が通った |
    | `stopped` | `stop_change` で止めた（`pending` / `queued` の step も `stopped`） |
 
-   **change の状態の遷移（再登録）**: 決定 17 から言えるのは、「design と tasks までを 1 回登録し、戻ってから tasks の実行をもう 1 回 server に渡す」所まで。以下は、その細部の**案**（利用者の決定ではない）。
+   **change の状態の遷移（再登録）**: 決定 17 から言えるのは、「design と tasks までを 1 回登録し、戻ってから tasks の実行をもう 1 回 server に渡す」所まで（design・tasks は利用者の例で、step の中身は schema が決める。決定 21）。以下は、その細部の**案**（利用者の決定ではない）。
    - 同じ `change_id` への再登録を許す。`completed` → `in_progress`（再登録の scope の先頭の step が `queued`、残りは `pending`）。step の記録は足し続け、前の scope の step は変えない。
    - `stopped` の change も、再登録で `in_progress` に戻せる（止めた change を動かし直せるように）。scope に含めた `stopped` の step は、やり直す。同じ session で続けるか新しく起こすかは実装の task。
    - `repo` / `branch` を再登録で渡し直すか、change の記録の値を使うかは決めない（実装の task）。
@@ -379,15 +398,15 @@ master-capは center の tool（4.2）を使い、center が protocol（messenge
 
 ## 5. review を入れた schema 定義の例
 
-> **注記**: 以下は、bantou 側が guardrail の設定（`docs/design/guardrail-schema-server.md`）で足す schema 定義の**例**で、0 節の 3・4・10 の 1 を tasks の中の作業として書いたもの。openspec の schema の書式・項目名・完了の印の語・インストラクションの渡し方は、openspec-mcp の側のプロトコルが決める。**形は openspec-mcp 側で変わりうる**。bantou は中身を解釈せず、そのまま保存して返すだけ（guardrail-schema-server の 3.3）。以下の項目名は説明のための仮の物。
+> **注記**: 以下は、bantou 側が guardrail の設定（`docs/design/guardrail-schema-server.md`）で足す schema 定義の**例**で、0 節の 3・4・10 の 1 を、apply が数える file（tasks.md は一例。名前は schema が決める）の中の作業として書いたもの。tasks という文書・step が必ず在るという前提ではない（決定 21）。openspec の schema の書式・項目名・完了の印の語・インストラクションの渡し方は、openspec-mcp の側のプロトコルが決める。**形は openspec-mcp 側で変わりうる**。bantou は中身を解釈せず、そのまま保存して返すだけ（guardrail-schema-server の 3.3）。以下の項目名は説明のための仮の物。
 
 ```text
 # guardrail の設定に足す schema 定義の例（名前: bantou-review）。書き方は仮。
 schema: bantou-review
-tasks の instruction:
-  作業は tasks に分けて行う。
-  review の作業（reviewer のサブエージェントの実行）を、tasks の 1 作業として行う。
-  この作業に完了の印を付けるには、次の条件を満たす事:
+apply の instruction（数える file は apply.tracks で選ぶ。例では tasks.md）:
+  作業は、数える file の項目に分けて行う。
+  review の作業（reviewer のサブエージェントの実行）を、その file の 1 項目として行う。
+  この項目の checkbox に印を付けるには、次の条件を満たす事（満たすまで印を付けない）:
     reviewer が次の 3 つの基準に当たる指摘を数え、0 件である。
       (a) 仕様・決定と食い違う
       (b) test が落ちる、または足した test が変異で落ちない
@@ -402,11 +421,11 @@ tasks の instruction:
 
 ## 6. worker が reviewer のサブエージェントを起こす手順の置き場
 
-0 節の 3 は「worker セッションは openspec のインストラクションに従って作業する」ので、手順は**インストラクション（= schema 定義の tasks の instruction）に置く**。0 節の 10 の 1 も「reviewのサブエージェントの実行をタスクとしてインストラクション指示にする」。
+0 節の 3 は「worker セッションは openspec のインストラクションに従って作業する」ので、手順は**インストラクション（= schema 定義の tasks の instruction）に置く**。0 節の 10 の 1 も「reviewのサブエージェントの実行をタスクとしてインストラクション指示にする」。review の条件が成り立つのは、「条件を満たすまで、その作業の checkbox に印を付けない」と instruction に書く形（3.4）。
 
 | 置き場 | 内容 | メモ |
 |---|---|---|
-| schema 定義の tasks の instruction（guardrail の設定で保守。5 節の例） | review の作業の実行、数える 3 つの基準、満たすまで続ける事、reviewer の判定手順（例: (a) は仕様・決定の file との突き合わせ、(b) は test の実行と足した test の変異の確かめ、(c) は指示された範囲と差分の突き合わせ） | bantou 上で保守管理できる（0 節の 5・6）。schema ごとに変えられる。openspec が worker に渡す物。変異の実行手段は決めない（利用者が決めていない） |
+| schema 定義の instruction（apply の instruction など。guardrail の設定で保守。5 節の例） | review の作業の実行、数える 3 つの基準、満たすまで続ける事、reviewer の判定手順（例: (a) は仕様・決定の file との突き合わせ、(b) は test の実行と足した test の変異の確かめ、(c) は指示された範囲と差分の突き合わせ） | bantou 上で保守管理できる（0 節の 5・6）。schema ごとに変えられる。openspec が worker に渡す物。変異の実行手段は決めない（利用者が決めていない） |
 | `packages/server/instructions/worker.md` | 変えない（worker 共通のルール。review の手順は入れない） | 【事実】今の `worker.md` は範囲・進め方・終わる時のルールだけで、review の語は無い |
 
 - worker の「終わる時」の報告（`worker.md` の `[終わる時]`）には、reviewer が数えた指摘の件数と、数えなかった指摘を書く。`worker.md` の既存の項目（途中で分かった問題・判断が要る残件）の範囲で足りる【推測】。変えるかは実装の task。
@@ -507,6 +526,8 @@ tasks の instruction:
 
 **進め方の例（決定 17。決まった手順ではなく、選べる形の 1 つ）**:
 
+（design・tasks は決定 17 の利用者の言葉の例。どんな step が在り、いくつに切るかは schema が決める。server は tasks などを決め打ちで持たない。決定 21）
+
 1. design と tasks までを step の範囲にして、server に 1 回登録する（`change_register`。proposal は master-cap が書く。proposal を remote の側に書かせてもよい（決定 18）が、change の登録の前に server の worker をどう起こすかは【未確定】で、この設計書は決めない）。
 2. 戻ってきたら（change の状態が `completed`）、中身を確かめる。確かめる人は master-cap が選ぶ（自分・サブエージェントなど）。
 3. 問題なければ、tasks の実行を step の範囲にして、同じ change にもう 1 回登録する（決定 17 の範囲。再登録の細部は案で、3.5）。
@@ -563,7 +584,8 @@ tasks の instruction:
 
 **確かめられなかった事**
 
-- 【openspec-mcp 待ち】openspec の CLI・openspec-mcp は、この環境に無かった。「validate で step の終了を判定できる」は利用者の見立てのまま。validate の引数・出力・何を見て終了とするか・scope の step の指し方の形式・openspec-mcp の呼び出しの形は、確かめていない。決定 20 の確定版の文書（`docs/schema-discovery-protocol.md`）も開いていない（届いた内容だけを書いた。resource か tool か・URI の形・応答の中身は未確定）。
+- 【事実の出典】3.4 の openspec の実測は、openspec-mcp の project の報告による（この環境には openspec の CLI も openspec-mcp も無く、再現していない）。「validate で step の終了を判定できる」は利用者の見立てで、実測ではできなかった。
+- 【openspec-mcp 待ち】scope の step の指し方の形式・openspec-mcp の呼び出しの形（instructions を worker が受け取る口を含む）は、確かめていない。決定 20 の確定版の文書（`docs/schema-discovery-protocol.md`）も開いていない（届いた内容だけを書いた。resource か tool か・URI の形・応答の中身は未確定）。
 - 【推測】3.4 の「形 1 と形 2 が同じ仕組みの上で併存できる」は、設計上の読み。openspec-mcp の側で、step ごとの終了条件と instruction を schema に持てるかは、openspec-mcp のプロトコルが出るまで分からない。
 - 【未確認】各 server から openspec-mcp の host に届くか（決定 13。7.5）。
 - 【推測】4 節のメッセージ名・引数は仮。実装の task で protocol の型に落とす時に決める。
