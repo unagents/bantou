@@ -76,6 +76,8 @@ export function registerTools(
     supervisor: RemoteControlSupervisor;
     link: ServerLink;
     sessions: SessionManager;
+    /** session_sleep の入口（引継ぎを書かせてから眠らせる。resession.requestSleep）。省略時は sessions.sleep を直接呼ぶ。 */
+    requestSleep?: (name: string) => Promise<unknown>;
     remotes: RemoteManager;
     follow?: Follow;
     workspace?: string;
@@ -128,16 +130,16 @@ export function registerTools(
     {
       title: "session をスリープさせる",
       description:
-        "session_create で作った session をスリープさせる（claude の process を止めてメモリなどを空ける。会話（resume できる状態）・設定・remote の記録は残す）。眠っている間は session_list の sleeping が true（state は stopped）。desktop でその session を開いた時と、messenger でその session が宛先になった時に、元の会話のまま自動で起き直す（session_wake でも起こせる）。眠っている session には何もしない。{ SessionInfo } を返す",
+        "session_create で作った session をスリープさせる（起動しないリセッション）。その session の agent に引継ぎを書かせ（center が頼む 1 行を入力に貼り、agent が session_resession で渡す。保存は外部記憶・届かなければ center の file）、turn が終わった後に claude の process を止めてメモリなどを空ける。新しい会話はすぐには起動しない。設定・remote の記録は残る。受理して即返す: { name, state, accepted: true, sleeping: false, pending: true }（眠るのは引継ぎが渡って turn が終わった後。眠った事は session_list の sleeping（true・state は stopped）と events の sleep で分かる）。作業中（turn・subagent・background が動いている）・利用者の入力待ち（needs-input）・未完了の remote の指示・未返答の worker_reply がある時・動いていない session は、Stop を待たず、眠らせず理由つきで断る。desktop でその session を開いた時と、messenger でその session が宛先になった時に、新しい会話で自動で起き直し、最初の入力で引継ぎが渡る（session_wake でも起こせる。起こした時の状況確認の入力は無い）。眠っている session には何もしない（{ name, state, accepted, sleeping: true, pending: false }）",
       inputSchema: { name: z.string().regex(SESSION_NAME, "英数字と _ - のみ") },
     },
-    ({ name }) => guard(async () => json(await sessions.sleep(name))),
+    ({ name }) => guard(async () => json(await (deps.requestSleep ? deps.requestSleep(name) : sessions.sleep(name)))),
   );
   server.registerTool(
     "session_wake",
     {
       title: "スリープ中の session を起こす",
-      description: "スリープ中の session を元の会話のまま起こす（claude を --continue で起動し直す）。眠っていない session には何もしない。{ SessionInfo } を返す",
+      description: "スリープ中の session を起こす。新しい会話（--continue 無し）で claude を起動し、最初の入力で center が眠る前に渡された引継ぎ（取り出せなかった時はその事と置き場）を渡す。状況確認の別の入力は送らない。この仕組みの前に眠った session（引継ぎが無い）は今までどおり --continue で元の会話を起こす。眠っていない session には何もしない。{ SessionInfo } を返す",
       inputSchema: { name: z.string().regex(SESSION_NAME, "英数字と _ - のみ") },
     },
     ({ name }) => guard(async () => json(await sessions.wake(name))),
@@ -181,7 +183,7 @@ export function registerTools(
     {
       title: "center 共通の設定を取得",
       description:
-        "center 共通の設定 { settings } を返す。settings は { instructions?: string（全 session の --append-system-prompt の先頭に付く共通の追加指示。session の追加指示は空行を挟んでその後ろ）, addDirs?: string[]（全 session に --add-dir で付く参照フォルダ。絶対パス。session の addDirs はその後ろ）, outputStyle?: string（全 session の claude の output style の markdown 本文。session に outputStyle があればそちらを使う）, …将来の項目 }。servers（使う server）は共通の設定には無い。session の設定（session_settings_get / session_settings_update）で指定する。未設定は {}。保存済みの共通設定に servers が残っていても読み捨てる。mcpServers・memory は center を起動した所（応答の launcher が true）にだけ返す",
+        "center 共通の設定 { settings } を返す。settings は { instructions?: string（全 session の --append-system-prompt の先頭に付く共通の追加指示。session の追加指示は空行を挟んでその後ろ）, addDirs?: string[]（全 session に --add-dir で付く参照フォルダ。絶対パス。session の addDirs はその後ろ）, outputStyle?: string（全 session の claude の output style の markdown 本文。session に outputStyle があればそちらを使う）, guardrailSchemas?: Record<名前, { schema: string（schema.yaml の文字列）, templates: Record<templates/ からの相対 path, 中身の文字列> }>（guardrail の設定: openspec 向けの schema 定義）, …将来の項目 }。servers（使う server）は共通の設定には無い。session の設定（session_settings_get / session_settings_update）で指定する。未設定は {}。保存済みの共通設定に servers が残っていても読み捨てる。mcpServers・memory は center を起動した所（応答の launcher が true）にだけ返す",
     },
     () => guard(async () => json({ ...shown(sessions.getCenterSettings()), launcher })),
   );
@@ -190,7 +192,7 @@ export function registerTools(
     {
       title: "center 共通の設定を更新",
       description:
-        "center 共通の設定を項目ごとにマージ更新し、更新後の { settings } を返す。settings に書いた項目だけ変わる。null はその項目を削除。instructions は 16000 文字以内で、空文字は削除と同じ。addDirs は絶対パスの配列（20 個以内。空配列は削除と同じ）。outputStyle は 32000 文字以内で、空文字は削除と同じ。servers は共通の設定では持てない（null 以外を渡すと error。session の設定 session_settings_update の settings.servers で指定する）。mcpServers（全 session に載る追加の MCP の server。Claude Code の mcp.json の mcpServers と同じ形）と memory（外部記憶の MCP の server）は center を起動した所（launcher）からだけ書ける（他からは error）。応答の launcher は呼び出し元が起動元か。全 session の次の起動（再起動・--continue 含む）から効く。動いている session には効かない",
+        "center 共通の設定を項目ごとにマージ更新し、更新後の { settings } を返す。settings に書いた項目だけ変わる。null はその項目を削除。instructions は 16000 文字以内で、空文字は削除と同じ。addDirs は絶対パスの配列（20 個以内。空配列は削除と同じ）。outputStyle は 32000 文字以内で、空文字は削除と同じ。guardrailSchemas（guardrail の設定: openspec 向けの schema 定義。名前 → { schema（schema.yaml の文字列）, templates?（templates/ からの相対 path → 中身の文字列。省略は空）}。名前は英数字で始まり英数字と . _ - のみ（大文字小文字を区別）。bantou は YAML も中身も解釈せずそのまま保存して返し、schema の MCP server（/mcp/schemas）が返す。名前ごとにマージし（定義は丸ごと置き換え）、名前の値が null でその schema を削除、guardrailSchemas 自体が null で全部削除。起動元以外からも書ける。session の設定には置けない）。servers は共通の設定では持てない（null 以外を渡すと error。session の設定 session_settings_update の settings.servers で指定する）。mcpServers（全 session に載る追加の MCP の server。Claude Code の mcp.json の mcpServers と同じ形）と memory（外部記憶の MCP の server）は center を起動した所（launcher）からだけ書ける（他からは error）。応答の launcher は呼び出し元が起動元か。全 session の次の起動（再起動・--continue 含む）から効く。動いている session には効かない",
       inputSchema: { settings: centerSettingsPatchSchema },
     },
     ({ settings }) =>
@@ -415,7 +417,7 @@ export function registerSessionTools(server: McpServer, deps: { remotes: RemoteM
       {
         title: "リセッション（引継ぎを残して新しい会話で起動し直す）",
         description:
-          "自分（呼び出し元 session）のリセッションを申告する。引継ぎ（handoff）を center が保存して受理を返し、この turn が終わったあと center が claude を新しい会話（--continue 無し）で起動し直す。起動し直した最初の入力で、center が引継ぎの本文（取り出せなかった時はその事と置き場）を渡す。新しい会話が自分で引きに行く必要は無い。他の session は指せない。利用者の入力待ち・未完了の remote の指示・未返答の worker_reply がある間は断られる。返り値 { accepted, handoff_id, stored（memory = 外部記憶に保存 / file = 外部記憶に届かず center の file に保存。どちらも center が保存先から取り出して渡す）, restart }。受理されたら短く再起動すると言って turn を終える",
+          "自分（呼び出し元 session）のリセッションを申告する（center がスリープの引継ぎを頼んできた時は、この道具で引継ぎを渡す。受理の後に turn を終えると center が session を止めて眠らせる）。引継ぎ（handoff）を center が保存して受理を返し、この turn が終わったあと center が claude を新しい会話（--continue 無し）で起動し直す。起動し直した最初の入力で、center が引継ぎの本文（取り出せなかった時はその事と置き場）を渡す。新しい会話が自分で引きに行く必要は無い。他の session は指せない。利用者の入力待ち・未完了の remote の指示・未返答の worker_reply がある間は断られる。返り値 { accepted, handoff_id, stored（memory = 外部記憶に保存 / file = 外部記憶に届かず center の file に保存。どちらも center が保存先から取り出して渡す）, restart }。受理されたら短く再起動すると言って turn を終える",
         inputSchema: { handoff: z.string().min(1).max(65536).describe("引継ぎの本文。仕掛かり・止まっている事・次の一手 / 決定と番号つきの未決 / 今の窓口") },
       },
       ({ handoff }) => guard(async () => json(await resession.request(owner, handoff))),

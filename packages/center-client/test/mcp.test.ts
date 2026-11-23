@@ -324,6 +324,8 @@ test("memory / mcpServers: the web policy refuses settings with a memory or mcpS
   await mcp.call("center_settings_update", { settings: { instructions: "i" } });
   assert.equal(mock.count("tools/call"), 2);
   assert.equal(webToolArgsRefusal("rc_list", { settings: { memory: 1 } }), undefined);
+  // guardrail's schema definitions are center-wide settings anyone may write (not center-only keys): not refused, null (delete) too
+  for (const v of [{ spec: { a: 1 } }, { spec: null }, null]) assert.equal(webToolArgsRefusal("center_settings_update", { settings: { guardrailSchemas: v } }), undefined);
   for (const k of ["mcp", "mcpServers", "projectMemory", "coordinator", "mcpConnections", "mcpSecrets"]) {
     for (const v of [{ url: "http://x/?q=SECRETVAL" }, null]) {
       for (const tool of ["session_create", "session_settings_update", "center_settings_update"]) {

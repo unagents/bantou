@@ -31,9 +31,11 @@ export function createCenterServer(deps: {
   log?: Logger;
   /** 呼び出し元が center を起動した所か（外部記憶・追加の MCP の server を読み書きできる。launcher.ts）。 */
   launcher?: boolean;
+  /** session_sleep の入口（引継ぎを書かせてから眠らせる）。省略時は sessions.sleep をそのまま呼ぶ。 */
+  resession?: Pick<Resessioner, "requestSleep">;
 }): McpServer {
   const server = new McpServer({ name: "bantou-center", version: packageVersion() });
-  registerTools(server, { systemInstructions: deps.systemInstructions ?? describeSystemInstructions(), supervisor: deps.supervisor, link: deps.link, sessions: deps.sessions, remotes: deps.remotes, follow: deps.follow, login: deps.login, workspace: deps.config.workspace, launcher: deps.launcher === true, ...(deps.log ? { log: deps.log } : {}) });
+  registerTools(server, { ...(deps.resession ? { requestSleep: (name: string) => deps.resession!.requestSleep(name) } : {}), systemInstructions: deps.systemInstructions ?? describeSystemInstructions(), supervisor: deps.supervisor, link: deps.link, sessions: deps.sessions, remotes: deps.remotes, follow: deps.follow, login: deps.login, workspace: deps.config.workspace, launcher: deps.launcher === true, ...(deps.log ? { log: deps.log } : {}) });
   return server;
 }
 

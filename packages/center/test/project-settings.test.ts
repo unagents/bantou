@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { assertCenterOnly, CENTER_ONLY_MCP_ERROR, LEGACY_KEYS_ERROR, memorySchema, composeAddDirs, composeInstructions, composeOutputStyle, mergeSettings, projectSettingsPatchSchema, readSettings, settingsIssues, withoutLauncherKeys } from "../src/project-settings.js";
+import { centerSettingsPatchSchema, guardrailSchemaNames, guardrailSchemaOf, guardrailSchemasOf, assertCenterOnly, CENTER_ONLY_MCP_ERROR, LEGACY_KEYS_ERROR, memorySchema, composeAddDirs, composeInstructions, composeOutputStyle, mergeSettings, projectSettingsPatchSchema, readSettings, settingsIssues, withoutLauncherKeys } from "../src/project-settings.js";
 import { serverEntryIssues } from "../src/mcp-connections.js";
 
 test("mergeSettings: 省略は変えない・値は上書き・null は削除・instructions の空文字は削除・未知項目は保持。元は変えない", () => {
@@ -232,4 +232,81 @@ test("settingsIssues: mcpServers は普通の MCP の設定・組み込み・旧
     assert.ok(out.some((i) => re.test(i)), `${JSON.stringify(patch)}: ${out.join(" / ")}`);
     assert.ok(!out.join(" ").includes("SECRETV"), JSON.stringify(patch));
   }
+});
+
+const G = (schema: string, templates?: Record<string, string>) => ({ schema, ...(templates ? { templates } : {}) });
+const N = (schema: string, templates: Record<string, string> = {}) => ({ schema, templates });
+
+test("guardrailSchemas: patch の schema は名前が [A-Za-z0-9][A-Za-z0-9._-]*（大文字小文字は別）・中身は { schema: 文字列, templates?: 相対 path → 文字列 }。項目全体の null・名前の null は可", () => {
+  assert.equal(centerSettingsPatchSchema.safeParse({ guardrailSchemas: { "spec-driven_1.v2": G("name: x\n"), Abc: G("", { "a/b.md": "T" }) } }).success, true);
+  assert.equal(centerSettingsPatchSchema.safeParse({ guardrailSchemas: { old: null } }).success, true);
+  assert.equal(centerSettingsPatchSchema.safeParse({ guardrailSchemas: null }).success, true);
+  for (const bad of ["a b", "a/b", "", "日本語", "-a", ".a", "_a", "a%2Fb"]) assert.equal(centerSettingsPatchSchema.safeParse({ guardrailSchemas: { [bad]: G("x") } }).success, false, bad);
+  assert.equal(centerSettingsPatchSchema.safeParse({ guardrailSchemas: ["x"] }).success, false);
+  assert.equal(centerSettingsPatchSchema.safeParse({ guardrailSchemas: "x" }).success, false);
+});
+
+test("guardrailSchemas: patch の定義の形が違えば断る（任意の JSON・schema が文字列でない・templates の中身が文字列でない・相対でない path）", () => {
+  const bad = (v: unknown) => centerSettingsPatchSchema.safeParse({ guardrailSchemas: { a: v } }).success;
+  assert.equal(bad("A"), false, "文字列だけ");
+  assert.equal(bad({ k: [1] }), false, "schema が無い");
+  assert.equal(bad({ schema: 1 }), false);
+  assert.equal(bad({ schema: "s", templates: { "a.md": 1 } }), false);
+  assert.equal(bad({ schema: "s", templates: ["x"] }), false);
+  for (const p of ["", "/abs.md", "../x.md", "a/../x.md", "a//b.md", "./a.md", "a\\b.md"]) assert.equal(bad({ schema: "s", templates: { [p]: "T" } }), false, `path ${JSON.stringify(p)}`);
+  assert.equal(bad({ schema: "s", templates: { "sub/dir/a.md": "T", "b.yaml": "" } }), true);
+});
+
+test("mergeSettings guardrailSchemas: 名前ごとに足す・変える（定義は丸ごと置き換え）・消す。他の名前・他の項目は変えない。空になれば項目ごと消す。元は変えない", () => {
+  const cur = { instructions: "i", guardrailSchemas: { a: N("A"), b: N("B", { "t.md": "T" }) } };
+  const added = mergeSettings(cur, { guardrailSchemas: { c: G("C") } });
+  assert.deepEqual(added, { instructions: "i", guardrailSchemas: { a: N("A"), b: N("B", { "t.md": "T" }), c: N("C") } }, "templates 省略は空で保存");
+  assert.deepEqual(mergeSettings(cur, { guardrailSchemas: { b: G("B2") } }).guardrailSchemas, { a: N("A"), b: N("B2") }, "templates も丸ごと置き換わる");
+  assert.deepEqual(mergeSettings(cur, { guardrailSchemas: { a: null } }).guardrailSchemas, { b: N("B", { "t.md": "T" }) });
+  assert.deepEqual(mergeSettings(cur, { guardrailSchemas: { a: null, b: null } }), { instructions: "i" });
+  assert.deepEqual(mergeSettings(cur, { guardrailSchemas: null }), { instructions: "i" });
+  assert.deepEqual(mergeSettings(cur, { guardrailSchemas: {} }), cur);
+  assert.deepEqual(mergeSettings(cur, { instructions: "j" }).guardrailSchemas, cur.guardrailSchemas);
+  assert.deepEqual(mergeSettings(undefined, { guardrailSchemas: { z: G("") } }), { guardrailSchemas: { z: N("") } }, "空文字の schema も値として保存");
+  assert.deepEqual(cur, { instructions: "i", guardrailSchemas: { a: N("A"), b: N("B", { "t.md": "T" }) } });
+});
+
+test("mergeSettings guardrailSchemas: YAML・templates の中身は解釈せずそのまま保存。__proto__ という名前・path でも prototype を汚さない。読めない形の値は入れない", () => {
+  const yaml = "name: x\nartifacts:\n  - id: a\n    generates: \"${x}\"\n\t# tab と日本語\n";
+  assert.equal(mergeSettings({}, { guardrailSchemas: { s: G(yaml, { "w.md": "# {{x}}\n" }) } }).guardrailSchemas?.s?.schema, yaml);
+  const patch = JSON.parse('{"guardrailSchemas":{"p":{"schema":"S","templates":{"__proto__":"P"}}}}');
+  const out = mergeSettings({}, patch);
+  assert.equal(Object.hasOwn(out.guardrailSchemas?.p?.templates ?? {}, "__proto__"), true);
+  assert.equal(Object.getPrototypeOf(out.guardrailSchemas?.p?.templates), Object.prototype);
+  assert.equal(({} as Record<string, unknown>).P, undefined);
+  assert.deepEqual(mergeSettings({}, JSON.parse('{"guardrailSchemas":{"x":"S","y":{"schema":3}}}')), {}, "zod を通らない経路でも読めない形は入れない");
+});
+
+test("readSettings / guardrailSchemasOf: 壊れた値・規則外の名前・旧形（任意の JSON）・null は落とす。空は未設定。名前の昇順の一覧と 1 件の取得", () => {
+  assert.deepEqual(readSettings({ guardrailSchemas: ["x"] }), {});
+  assert.deepEqual(readSettings({ guardrailSchemas: "x" }), {});
+  assert.deepEqual(readSettings({ guardrailSchemas: {} }), {});
+  assert.deepEqual(readSettings({ guardrailSchemas: { "bad name": G("x"), ok: G("O"), nul: null, old: "A", old2: { k: 1 } } }), { guardrailSchemas: { ok: N("O") } });
+  assert.deepEqual(readSettings({ guardrailSchemas: { b: G("1"), a: G("2") }, future: 1 }), { guardrailSchemas: { b: N("1"), a: N("2") }, future: 1 });
+  const s = { guardrailSchemas: { b: G("B"), a: G("A", { "t.md": "T" }), C: G("c") } };
+  assert.deepEqual(guardrailSchemaNames(s), ["C", "a", "b"]);
+  assert.deepEqual(guardrailSchemaOf(s, "a"), N("A", { "t.md": "T" }));
+  assert.equal(guardrailSchemaOf(s, "c"), undefined, "大文字小文字は別の名前");
+  assert.equal(guardrailSchemaOf(s, "none"), undefined);
+  assert.equal(guardrailSchemaOf(s, "toString"), undefined);
+  assert.deepEqual(guardrailSchemasOf(undefined), {});
+  assert.deepEqual(guardrailSchemaNames({}), []);
+});
+
+test("guardrailSchemas は launcher 専用ではない: 起動元以外も書ける。読みの応答からも除かれない", () => {
+  assert.doesNotThrow(() => assertCenterOnly({ guardrailSchemas: { a: G("A") } }, { launcher: false }));
+  assert.doesNotThrow(() => assertCenterOnly({ guardrailSchemas: null }, { launcher: false }));
+  assert.deepEqual(withoutLauncherKeys({ guardrailSchemas: { a: N("A") }, memory: {} }), { guardrailSchemas: { a: N("A") } });
+});
+
+test("guardrailSchemas は session の設定には置けない（null＝削除は可）。center 共通の設定では可", () => {
+  const check = () => [];
+  assert.match(settingsIssues({ guardrailSchemas: { a: G("A") } }, "session", check).join(" "), /guardrailSchemas/);
+  assert.deepEqual(settingsIssues({ guardrailSchemas: null }, "session", check), []);
+  assert.deepEqual(settingsIssues({ guardrailSchemas: { a: G("A") } }, "common", check), []);
 });

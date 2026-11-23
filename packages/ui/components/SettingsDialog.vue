@@ -15,6 +15,7 @@ import {
 } from "../api";
 import { isRemoteOnly } from "../composables/centerRole";
 import { draftError, draftOf, emptyDraft, toCenterUpdate, type SettingsDraft } from "../composables/sessionInstructions";
+import { cloneGuardrailDraft, guardrailDraftError, guardrailDraftOf, guardrailUpdate, type GuardrailRow } from "../composables/guardrailSchemas";
 import type { CenterConnectSnippets, CenterConnection, CenterIpStatus, CenterParsedConnect, CenterSettings, CenterStatus } from "../types";
 
 const open = defineModel<boolean>("open", { required: true });
@@ -86,9 +87,13 @@ async function load() {
 const common = ref<SettingsDraft>(emptyDraft());
 const commonBaseline = ref<SettingsDraft | null>(null);
 const commonError = ref<string | null>(null);
-const commonDirty = computed(() => commonBaseline.value !== null && JSON.stringify(common.value) !== JSON.stringify(commonBaseline.value));
+// guardrail's schema definitions (center-wide; every place that can edit the center-wide settings shows them).
+const guardrail = ref<GuardrailRow[]>([]);
+const guardrailBaseline = ref<GuardrailRow[]>([]);
+const guardrailDirty = computed(() => JSON.stringify(guardrail.value) !== JSON.stringify(guardrailBaseline.value));
+const commonDirty = computed(() => commonBaseline.value !== null && (guardrailDirty.value || JSON.stringify(common.value) !== JSON.stringify(commonBaseline.value)));
 // The reference folders are left out of the form (and the update) while remoteOnly: a value in the draft is neither checked nor sent.
-const commonProblem = computed(() => draftError(remoteOnly.value ? { ...common.value, addDirs: [] } : common.value));
+const commonProblem = computed(() => draftError(remoteOnly.value ? { ...common.value, addDirs: [] } : common.value) ?? guardrailDraftError(guardrail.value));
 // The folder dialog picks on this PC: right for the own sidecar, not for a pasted remote center.
 const commonCanPick = computed(() => !!settings.value?.enabled);
 // The extra MCP servers and the external memory: only the place that started the center (the center says so) shows and
@@ -101,6 +106,8 @@ async function loadCommon() {
     const r = await centerCommonSettingsGet();
     commonLauncher.value = r.launcher === true;
     common.value = draftOf(r.settings);
+    guardrail.value = guardrailDraftOf(r.settings.guardrailSchemas);
+    guardrailBaseline.value = cloneGuardrailDraft(guardrail.value);
     commonBaseline.value = { ...common.value, addDirs: [...common.value.addDirs], servers: common.value.servers && [...common.value.servers] };
   } catch (e) {
     commonLauncher.value = false;
@@ -113,8 +120,13 @@ async function saveCommon() {
   const body = toCenterUpdate(common.value, commonBaseline.value ? { base: commonBaseline.value } : {});
   // Not sent while hidden: an item left out is unchanged on the center (null would remove it).
   if (remoteOnly.value) delete body.addDirs;
+  // Only the changed schemas go (merged by name on the center); none changed → the item is left out (unchanged).
+  const schemas = guardrailUpdate(guardrail.value, guardrailBaseline.value);
+  if (schemas) body.guardrailSchemas = schemas;
   const r = await centerCommonSettingsUpdate(body);
   common.value = draftOf(r.settings);
+  guardrail.value = guardrailDraftOf(r.settings.guardrailSchemas);
+  guardrailBaseline.value = cloneGuardrailDraft(guardrail.value);
   commonBaseline.value = { ...common.value, addDirs: [...common.value.addDirs], servers: common.value.servers && [...common.value.servers] };
 }
 
@@ -614,6 +626,9 @@ const stateColor = { stopped: "neutral", running: "success", restarting: "warnin
           </p>
           <fieldset :disabled="commonBaseline === null" class="min-w-0">
             <ProjectSettingsFields v-model="common" id-prefix="center-common" :rows="4" no-servers :can-pick="commonCanPick" :hide-add-dirs="remoteOnly" :center-internal="commonLauncher" @error="commonError = $event" />
+          </fieldset>
+          <fieldset :disabled="commonBaseline === null" class="min-w-0">
+            <GuardrailSchemasField v-model="guardrail" id-prefix="center-guardrail" />
           </fieldset>
           <p v-if="commonProblem" class="text-cork-danger-text text-xs" data-testid="center-common-problem">{{ commonProblem }}</p>
           <p v-if="commonError" class="text-cork-danger-text text-xs whitespace-pre-wrap" data-testid="center-common-error">

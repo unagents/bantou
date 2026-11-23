@@ -44,3 +44,22 @@ export function sessionProgress(r: Session | undefined, reachable: boolean): Ses
   const remote = Math.max(0, (r.remote?.running ?? 0) - (r.remote?.unreachable?.length ?? 0) - (r.remote?.lost?.length ?? 0));
   return cap || subagents > 0 || tasks > 0 || remote > 0 ? { cap, subagents, tasks, remote } : null;
 }
+
+/**
+ * Why the sleep button cannot be pressed (null: it can). Sleep writes a handoff first, so it is refused (never "wait for Stop")
+ * whenever the session cannot write one: design `sleep-resession.md` U2 A. The same conditions as the center's safety check
+ * (`resession.ts` `check`: not running / needs-input / remote running / remote unanswered) plus "work is going on"
+ * (`sessionProgress`: the cap busy, subagents, background runs). `needsInput` is the row's own needs-input
+ * (a waiting thread counts there too, `SessionGroup.activity`).
+ */
+export function sleepBlock(r: Session | undefined, reachable: boolean, needsInput = false): string | null {
+  if (!reachable || !r) return null;
+  if (r.sleeping) return "スリープ中（開くと起きる）";
+  if (r.state !== "connected" && r.state !== "starting") return `動いていない（${r.state}）`;
+  if (needsInput || r.activity === "needs-input") return "利用者の入力待ちの間は眠らせられない";
+  const p = sessionProgress(r, reachable);
+  if (p) return "作業中は眠らせられない（終わってから）";
+  if ((r.remote?.waitingReply ?? 0) > 0) return "worker への返答待ちがある間は眠らせられない";
+  if ((r.remote?.running ?? 0) > 0) return "remote の作業中は眠らせられない（終わってから）";
+  return null;
+}

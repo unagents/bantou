@@ -26,7 +26,7 @@ type Read<T> = { ok: true; value: T } | { ok: false };
 
 const isRec = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
-function readCached<T>(path: string, parse: (raw: unknown) => T, empty: T, log: (m: string) => void): () => Read<T> {
+export function readCached<T>(path: string, parse: (raw: unknown) => T, empty: T, log: (m: string) => void): () => Read<T> {
   let cache: { key: string; value: Read<T> } | undefined;
   return () => {
     let key: string;

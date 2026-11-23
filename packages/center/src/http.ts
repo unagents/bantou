@@ -6,6 +6,7 @@ import { LAUNCHER_HEADER, launcherMatches } from "./launcher.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { MIN_TOKEN_LEN } from "./config.js";
+import { createSchemaServer, SCHEMA_MCP_PATH, schemaTokenOf, type SchemaSource } from "./schema-server.js";
 import type { Core } from "./core.js";
 import type { EventHub } from "./events.js";
 import type { SessionTokens } from "./session-auth.js";
@@ -173,6 +174,8 @@ export async function startHttpServer(opts: {
   onStatusLine?: (name: string, payload: unknown) => void;
   /** session の claude の hook が渡した JSON（POST /sessions/<name>/hook、session token 認証）。渡すと提供する。sessionAuth と一緒に渡す。 */
   onHook?: (name: string, payload: unknown) => void;
+  /** guardrail の schema 定義の元。渡すと SCHEMA_MCP_PATH（schema の MCP server。stateless・JSON 応答の POST だけ。認証は schemaTokenOf の Bearer）を提供する。 */
+  schemas?: SchemaSource;
   /** セッション増減の通知。渡すと GET /events（外向け token）を提供する。 */
   events?: EventHub;
   /** GraphQL の handler（graphql/server.ts）。渡すと POST・GET /graphql を外向け token で提供する（subscription は SSE）。 */
@@ -419,6 +422,31 @@ export async function startHttpServer(opts: {
         return;
       }
       owner = name;
+    } else if (path === SCHEMA_MCP_PATH && opts.schemas) {
+      // schema の MCP server（schema-discovery）。session 無し・JSON 応答の POST だけ。center の token とは別の読み取り専用の token で守る
+      if (!bearerMatches(req.headers.authorization, schemaTokenOf(token))) {
+        sendJson(res, 401, { error: "unauthorized" }, { "www-authenticate": "Bearer" });
+        return;
+      }
+      if (allowed && !allowed.hosts.includes(req.headers.host ?? "")) {
+        sendJson(res, 403, { error: "forbidden host" });
+        return;
+      }
+      if (req.method !== "POST") {
+        sendJson(res, 405, { error: "method not allowed" }, { allow: "POST" });
+        return;
+      }
+      const r = await readBody(req, res);
+      if (!r) return;
+      const server = createSchemaServer(opts.schemas);
+      const transport = new StreamableHTTPServerTransport({ enableJsonResponse: true });
+      res.once("close", () => {
+        void transport.close().catch(() => {});
+        void server.close().catch(() => {});
+      });
+      await server.connect(transport);
+      await transport.handleRequest(req, res, r.body);
+      return;
     } else if (path === EVENTS_PATH && opts.events) {
       if (!bearerMatches(req.headers.authorization, token)) {
         sendJson(res, 401, { error: "unauthorized" }, { "www-authenticate": "Bearer" });
