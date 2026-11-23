@@ -21,6 +21,7 @@
 ## server の実行モデル（stroke 方式の発展）
 
 1. 人の操作は不要（tmux に attach する運用は想定しない）。全エージェントは headless（`claude -p`）
+2. server の責務は 5 つ: (1) center との窓口、(2) cap の起動と resume、(3) cap の依頼による worker の起動・状態・停止、(4) worker からの報告の受け口、(5) cap と worker の出力から生存・進捗を center へ通知。worker を起動すると決めるのは cap、プロセスを起動するのは server（cap の依頼で起動する）
 3. center ↔ server は agent-messenger 0.10.0 の protocol 方式でつなぐ。server は起動時に `setProtocol` で bantou protocol（定義は `packages/protocol/messenger/protocol.json` と `PROTOCOL.md`、npm package に同梱）の待受として登録し、終了時に `unsetProtocol` する。center は `listPeers("all", {protocol: "bantou"})` で server を発見し（center も server も普通の agent-messenger client として通常の解決 env → config → UDP 発見 → ローカル fallback で broker につなぐ。broker の URL は指名しない。config の `servers` は name のみ、peer 名は自動発見。`servers[].peer` で名前指定も可）、`meta: {protocol: "bantou", version}` 付きで送る。server の返信にも meta が付く。meta 無しの旧形式も当面受ける。登録に失敗しても名前待受で継続する。仕様の正本は `unagents/agent-messenger` の `docs/design/protocol.md`。center から「起動する cap の情報」を含む protocol メッセージが届く。server は「どの cap が、どの center（送信元 peer）の依頼で動いているか」を state で管理する
 4. cap の起動と resume は stroke 方式。cap 用の path（`<workspace>/caps/<cap-id>/`）を作り、そこで `claude -p --session-id|--resume <id> -- <prompt>` を実行し、stream-json の stdout で結果を受ける
 5. cap の `claude -p` は Bash の sandbox を既定で切って起動する（新規・resume とも `--settings {"sandbox":{"enabled":false}}`。config `session.capBashSandbox`、既定 false、true で従来どおり claude の設定のまま）。理由: 204 の既定は `sandbox.enabled: true` で、sandbox 下の cap の Bash が起動した子は setsid しても cap の終了で消える。worker は server が起動するので、この影響は受けない。cap の Bash が起動する子の生存のために切る
