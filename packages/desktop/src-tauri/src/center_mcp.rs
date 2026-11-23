@@ -599,6 +599,9 @@ mod tests {
 
     #[test]
     fn graphql_target_is_the_graphql_path_of_the_mcp_origin_with_the_bearer() {
+        // LAUNCHER_URL is process-wide: a parallel test that records this very URL as the own sidecar would add the
+        // launcher header here, so hold the lock those tests take (none of them leaves the URL set).
+        let _g = LAUNCHER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let t = Target { url: "http://127.0.0.1:7920/mcp".into(), token: Some("tok".into()), source: TargetSource::Sidecar };
         let g = graphql_target_of(&t).unwrap();
         assert_eq!(g.url, "http://127.0.0.1:7920/graphql");
