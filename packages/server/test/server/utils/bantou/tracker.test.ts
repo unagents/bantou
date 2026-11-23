@@ -109,7 +109,7 @@ test("tracker: 実 WebSocket（global）で ws の受け側に 1 行届く", asy
   const server = createServer();
   const sockets = new Set<import("node:net").Socket>();
   server.on("upgrade", (req, socket) => {
-    sockets.add(socket);
+    sockets.add(socket as import("node:net").Socket);
     const key = req.headers["sec-websocket-key"] as string;
     const accept = createHash("sha1").update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest("base64");
     socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);

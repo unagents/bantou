@@ -403,7 +403,7 @@ test("daemon 通し: launch → ask（message）→ answer → success（report�
 
     // 3. server-info → 送ってきた名前に版だけ返る（meta 付き）
     await send({ ...base, callType: "status", order: "server-info" });
-    const info = await waitFor(() => centerGot[0], "server-info");
+    const info = await waitFor(() => center.got[0], "server-info");
     assert.deepEqual(JSON.parse(info.text), { protocol: "bantou", callType: "status", order: "server-info", version: "0.7.1" });
     assert.equal(info.meta?.protocol, "bantou");
     assert.equal(info.from_name, name);
