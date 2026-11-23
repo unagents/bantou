@@ -104,7 +104,7 @@ export function createCenterClient(opts: CenterClientOptions = {}): CenterClient
   const events = createCenterEvents({ settings, fetch: opts.fetch, logger });
   const terminal = createTerminals({ getTarget: () => settings.selectTarget(), fetch: opts.fetch, log: logger });
   const attachments = createAttachments(terminal, { fetch: opts.fetch, log: logger });
-  const graphql = createGraphqlRelay({ getTarget: () => settings.selectTarget(), fetch: opts.fetch, log: logger });
+  const graphql = createGraphqlRelay({ getTarget: () => settings.selectTarget(), fetch: opts.fetch, log: logger, redactor });
 
   const raw = createCommands({
     settings,

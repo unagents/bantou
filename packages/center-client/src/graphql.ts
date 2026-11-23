@@ -4,8 +4,11 @@
 // The token never reaches the browser. Framework independent: fetch only; the route layer sends the stream.
 
 import { Readable } from "node:stream";
+import { StringDecoder } from "node:string_decoder";
 import { centerUrl } from "./events.ts";
+import { graphqlRefusal } from "./graphql-guard.ts";
 import { redactUrl } from "./normalize.ts";
+import type { Redactor } from "./redact.ts";
 import type { Target } from "./settings.ts";
 
 export const GRAPHQL_SEGMENT = "graphql";
@@ -26,6 +29,10 @@ export interface GraphqlRelayOptions {
   getTarget: () => Promise<Target | undefined>;
   fetch?: typeof fetch;
   log?: { warn(msg: string): void };
+  /** Cleans every answer of the secrets known to it (the center's token and the like) before the browser sees it. */
+  redactor?: Redactor;
+  /** The web's mutation allow-list and center-only settings refusal. On unless `false` (the desktop does not use this relay). */
+  guard?: boolean;
 }
 
 export interface GraphqlRelay {
@@ -38,11 +45,45 @@ const jsonReply = (status: number, message: string): GraphqlReply => {
   return { status, headers: { "content-type": "application/json; charset=utf-8" }, body, close: () => body.destroy() };
 };
 
+/** A JSON answer: read whole, cleaned, sent as one piece (a secret cannot hide between chunks). */
+function redactWhole(src: Readable, redactor: Redactor): Readable {
+  return Readable.from(
+    (async function* () {
+      const chunks: Buffer[] = [];
+      for await (const c of src) chunks.push(Buffer.from(c as Uint8Array));
+      yield await redactor.text(Buffer.concat(chunks).toString("utf8"));
+    })(),
+  );
+}
+
+/** An SSE stream: cleaned frame by frame (a frame ends with a blank line), in order; the tail is flushed at the end. */
+function redactFrames(src: Readable, redactor: Redactor): Readable {
+  return Readable.from(
+    (async function* () {
+      const dec = new StringDecoder("utf8");
+      let buf = "";
+      for await (const c of src) {
+        buf += dec.write(Buffer.from(c as Uint8Array));
+        const parts = buf.split(/\r?\n\r?\n/);
+        const ends = [...buf.matchAll(/\r?\n\r?\n/g)].map((m) => m[0]);
+        buf = parts.pop() ?? "";
+        for (let i = 0; i < parts.length; i++) yield await redactor.text(parts[i]! + ends[i]!);
+      }
+      buf += dec.end();
+      if (buf !== "") yield await redactor.text(buf);
+    })(),
+  );
+}
+
 export function createGraphqlRelay(opts: GraphqlRelayOptions): GraphqlRelay {
   const doFetch = opts.fetch ?? fetch;
   return {
     async forward(body, accept) {
       if (Buffer.byteLength(body) > MAX_GRAPHQL_BYTES) return jsonReply(413, "body が大きすぎる");
+      if (opts.guard !== false) {
+        const refused = graphqlRefusal(body);
+        if (refused) return jsonReply(refused.status, refused.message);
+      }
       const target = await opts.getTarget();
       if (!target) return jsonReply(503, "center の接続先が無い");
       let url: URL;
@@ -66,10 +107,14 @@ export function createGraphqlRelay(opts: GraphqlRelayOptions): GraphqlRelay {
       if (ct) out["content-type"] = ct;
       if ((ct ?? "").startsWith("text/event-stream")) out["cache-control"] = "no-cache, no-transform";
       if (!res.body) return { status: res.status, headers: out, body: Readable.from([]), close: () => ac.abort() };
-      const body2 = Readable.fromWeb(res.body as never);
+      const raw = Readable.fromWeb(res.body as never);
       // destroy() cancels the center's stream; an abort after that is not an error worth a crash
-      body2.on("error", () => {});
-      return { status: res.status, headers: out, body: body2, close: () => body2.destroy() };
+      raw.on("error", () => {});
+      const redact = opts.redactor;
+      if (!redact) return { status: res.status, headers: out, body: raw, close: () => raw.destroy() };
+      const cleaned = (ct ?? "").startsWith("text/event-stream") ? redactFrames(raw, redact) : redactWhole(raw, redact);
+      cleaned.on("error", () => {});
+      return { status: res.status, headers: out, body: cleaned, close: () => { cleaned.destroy(); raw.destroy(); } };
     },
   };
 }

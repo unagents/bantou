@@ -151,4 +151,5 @@ export {
 } from "./client.ts";
 export { maskSecrets, formsOf, MIN_FORM_LEN } from "./secrets.ts";
 export { GRAPHQL_SEGMENT, MAX_GRAPHQL_BYTES, createGraphqlRelay, type GraphqlRelay, type GraphqlRelayOptions, type GraphqlReply } from "./graphql.ts";
+export { WEB_ALLOWED_MUTATIONS, graphqlRefusal, type GuardRefusal } from "./graphql-guard.ts";
 export { MAX_BODY_BYTES, readBodyLimited, readBytesLimited, type BodyRead, type BytesRead } from "./body.ts";

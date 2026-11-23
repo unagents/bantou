@@ -7,6 +7,7 @@ import { afterEach, test } from "node:test";
 import { createGraphqlRelay, MAX_GRAPHQL_BYTES, type GraphqlReply } from "../src/index.ts";
 
 const TOKEN = "tok-ABCDEF123456-secret";
+const Q = '{"query":"{ centerVersion { version } }"}';
 
 interface Seen {
   method: string;
@@ -67,7 +68,7 @@ test("a subscription (Accept: text/event-stream) comes back as a stream, and clo
     res.on("close", () => (closed = true));
   });
   const relay = createGraphqlRelay({ getTarget: async () => ({ url: c.url, token: TOKEN, source: "remote" }) });
-  const r = await relay.forward("{}", "text/event-stream");
+  const r = await relay.forward('{"query":"subscription { sessionsChanged { name } }"}', "text/event-stream");
   assert.equal(r.headers["cache-control"], "no-cache, no-transform");
   assert.equal(c.seen[0]!.accept, "text/event-stream");
   const first = await new Promise<string>((resolve) => r.body.once("data", (d: Buffer) => resolve(d.toString())));
@@ -79,12 +80,12 @@ test("a subscription (Accept: text/event-stream) comes back as a stream, and clo
 
 test("no target, an unreachable center and a too large body are JSON errors, never a throw", async () => {
   const none = createGraphqlRelay({ getTarget: async () => undefined });
-  const a = await none.forward("{}", undefined);
+  const a = await none.forward(Q, undefined);
   assert.equal(a.status, 503);
   assert.match(await text(a), /errors/);
 
   const dead = createGraphqlRelay({ getTarget: async () => ({ url: "http://127.0.0.1:1/mcp", token: TOKEN, source: "remote" }) });
-  const b = await dead.forward("{}", undefined);
+  const b = await dead.forward(Q, undefined);
   assert.equal(b.status, 502);
   assert.ok(!(await text(b)).includes(TOKEN));
 
