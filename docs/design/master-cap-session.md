@@ -1,6 +1,6 @@
 # master-cap セッションの起動と出力配信（設計、2026-11-01）
 
-前提は `docs/concept.md`。center の tool 仕様は `docs/design/center-tools.md`。本書はユーザーと合意した方針と、その根拠になった実測をまとめる。未実装。
+前提は `docs/concept.md`。本書はユーザーと合意した方針と、その根拠になった実測をまとめる。未実装。
 
 ## 背景（経路テストの結果）
 
@@ -13,17 +13,14 @@
 | 番頭 → master-cap の指示 | 失敗（経路テスト時点） | desktop の「タスク追加を指示」は agent-messenger で session 名宛てに送るが、master-cap は messenger の peer でなかった。→ 下の「6.1」で peer にした |
 | master-cap → center の `remote_create` | 失敗 | master-cap の MCP 設定に center が無い（`claude mcp list` で確認）。起動引数にも無い |
 | center → server（agent-messenger） | 通過 | アプリ再起動後。更新直後の起動では center だけ broker に届かなかった（下の「別件」） |
-| server → remote-cap → worker | 通過 | 起点は Mac main cap の curl（master-cap ではない） |
-
-あわせて、center の MCP が token 1 本で全 tool を公開しており、token を持つ誰でも remote-cap を作れることが分かった（owner は自己申告）。
 
 ## 合意した方針
 
 ### 1. tool の窓口を分ける
 
 - 外向け（desktop など token を持つ相手）: `session_create` / `session_update` / `session_delete` / `session_list`。
-- center が起動したセッション（master-cap）向け: `remote_send`（別名 `remote_create`） / `remote_delete` / `remote_list` / `remote_wait`（2026-11-04 以降。経路テスト当時は `remote_create` / `remote_delete` / `remote_list`）。
-- `remote_*` と `cap_kick` は外向けから外す（`cap_kick` も remote-cap を直接起動できるため）。
+- center が起動したセッション（master-cap）向け: `remote_send`（別名 `remote_create`） / `remote_list` / `remote_wait`（2026-11-04 以降。経路テスト当時は `remote_create` / `remote_list`）。
+- `remote_*` は外向けから外す。
 
 ### 2. master-cap に道具を渡す手段
 
@@ -114,7 +111,6 @@ center の通知（remote の完了通知など）は owner の session 名の m
 
 8. セッション向けの窓口（`/mcp/session`）の認証は、center がセッション起動ごとに作る使い捨ての token にする。外向けの token では呼べない（外向けの token を持つ相手が session を名乗れないようにするため）。master-cap には環境変数で渡し、`--mcp-config` の header で `${VAR}` 展開させる。
 9. 外向けには読み取り専用の `remote_list` を残す（desktop の「リモート指示タスクの一覧」の表示用）。作成・削除はセッション向けだけ。
-10. 中央の列は、そのセッションが指示を送った remote-cap の記録（`remote_list` の `owners` 一致分。server の cap 単位。履歴は無く、最新の結果と未完了の指示だけ）を出す。今の Cork 形式のタスク一覧は消さず、同じ列の下に残す。
 11. pty の大きさは、最後にサイズを送ってきた desktop に合わせる。
 12. wrapper は `packages/pty-wrapper`（Rust crate）に置き、center と同じく desktop の sidecar として同梱する。center は自分の実行ファイルと同じ場所から wrapper を探す。
 
@@ -154,25 +150,3 @@ master-cap への追加指示を、center が起動する master-cap に渡す�
 - server 0.3.1: `remote_create` に repo を渡すと、clone 前に `logs/center.json` が cap の dir を作るため `cap の path は git repo でない` で必ず失敗する。
 - center の remote 記録は最初の `cap_result` だけが残り、worker 完了後の `cap_result`（report 起因）で更新されない。→ 修正済み（`docs/history/20261103-1210-remote-result-followup/report.md`）。
 - 0.1.23 へアプリ内更新した直後の起動で、center（sidecar）だけ broker に届かなかった。同じ binary を ssh から単独起動すると届く。アプリを再起動すると直った。原因は未確定。
-
-## 追記（2026-11-04）: remote-cap は 1 つの server につき 1 つ
-
-- （2026-11-04 のうちに session ごとへ改訂。下の追記）center は server ごとに remote-cap を 1 つだけ持つ（cap_id は center ごとに固定の `c-<10 桁 hex>`。2026-11-04 以降は記録が持つ cap_id が優先で、旧形式から引き継いだ server は元の cap_id のまま。下の「追記（2026-11-04 夜）」）。session からの指示は `remote_send`（別名 `remote_create`）でその cap への「次の指示」になり、cap が無い時だけ最初の `kick_cap` で作る。
-- 記録は server の cap 単位（履歴は持たない。最新の結果と未完了の指示だけ）。完了通知は、cap が idle で worker 無しになった時に、未完了の指示を全て完了にして指示を送った session ごとに送る。
-- 経路テスト時点の `remote_create`（作業ごとに cap を作る）の記述は、この変更前のもの。詳細は `docs/design/center-tools.md` と `packages/center/README.md`、`docs/history/20261104-0200-one-cap-per-server/report.md`。
-
-## 追記（2026-11-04 夜）: center の記録は center が持ち、消すのは remote_delete だけ
-
-- remote-cap は center の指示で作られ、その記録は center が保存して再起動で復元する。以後の指示はその記録の cap に送る。記録を消すのは `remote_delete` だけ。
-- 旧形式（作業ごとの cap）の記録は、起動時に掃除（`stop_cap` で消す）するのをやめ、その server の cap として引き継ぐ（cap_id はそのまま）。同じ server に複数あれば動いている（`running` / `unknown` / 未完了の指示あり）記録を最優先し、同順位なら最新（`createdAt` / `finishedAt` / `result_at` / `error_at` のうち最も新しい時刻）を残す。理由: 最新だけで選ぶと、動いている旧 cap より新しい完了済みの記録が残り、動いている cap へ `stop_cap` が飛ぶため（利用者の決定「最新の 1 件を残す」からの意図した調整）。動いている記録が複数なら最新の動いている記録を残し、他（動いている記録を含む）へ `stop_cap` を送る。他は `stop_cap` で消す（1 回限り）。cap_id は server ごとに記録から決める。
-- server は center を peer の名前（`bantou-center`）で覚え、送る時に今の peer id へ引く（protocol 1.6.0）。center を再起動しても activity / 結果 / worker_report が届く。center は起動時に各 cap の `status`（cap_id 付き）を server へ送って通知先を取り戻す。
-- 「他 session から見えない」を保証するのは `/mcp/session`（session ごとの使い捨て token + `X-Bantou-Session`）だけ。外向け `/mcp`（center token、desktop 用）は owner を自己申告でき、省略で全件。desktop は全件を取って client 側で絞る。
-- session を消しても cap は残る。同名の session を作り直すと同じ cap_id で引き継ぐ。不要なら `remote_delete`。大文字小文字を区別しない FS の server では `Main` と `main` の cap が同じ dir になりうる（既知の制約）。
-- 詳細は `docs/design/center-tools.md`、`packages/center/README.md`、`docs/protocol.md`。
-
-## 追記（2026-11-04）: session と remote-cap を 1 対 1 にする
-
-- 利用者の決定。これまでは 1 server に cap 1 つを全 session で共有していたため、他の session が作った cap とその指示・結果が見え、指示も混ざった。session（master-cap）と remote-cap を 1 対 1 で管理する。「作業ごとに cap を作らない」は維持する。
-- cap は session × server に 1 つ。cap_id = `c-<center-id>-<session 名>`（center-id は固定長 10 桁 hex なので一意。session 名は 64 文字まで）（session 名は `[A-Za-z0-9_-]` で、変換は恒等）。`remote_send` は呼び出し元 session（`X-Bantou-Session`）の cap へ送り、無ければ作る。`remote_list` / `remote_wait` / `remote_delete` / `worker_reply` と通知は呼び出し元 session の cap だけが対象で、他の session の cap は見えない・触れない。
-- 既存の共有 cap（`c-<center-id>`）は center の起動時に session 無しの記録として残す。新しい指示は送らず、`remote_delete` に `remote_id` を明示して消す。
-- 詳細は `docs/design/center-tools.md`、`packages/center/README.md`、`docs/protocol.md`、`docs/history/20261104-0600-cap-per-session/report.md`。

@@ -33,7 +33,7 @@
 - 【事実】スリープは `sessions.sleep(name)` = 停止 + `sleeping` の記録。起床は `sessions.wake(name)` = `start(name, { resume: true })`（`packages/center/src/sessions.ts:851-905`）。公開の tool は `session_sleep` / `session_wake`（`packages/center/src/tools.ts:125-143`）。統括の道具は自分自身を眠らせない（`packages/center/src/coordinator.ts:149`）。
 - 【事実】スリープ中、同名の messenger の身代わりが message を預かり、起床後に渡す。止めた直後の送りは古い登録に届いて消える事があるため、起床後の渡しは「新しい peer」だけに送る（`packages/center/src/sleep-gate.ts:1-8`、`:40-42`）。
 - 【事実】`--continue` で戻るのは「その作業 dir の最新の会話」。center の session は session ごとの dir を持つ（`packages/center/src/sessions.ts:24`（保存する session の `path`）と `:35`（`SessionInfo` の `path`））。
-- 【事実】session 名は再起動でも変わらない。memory の Agent ID = session 名（`docs/design/external-memory.md:17`）、messenger の peer 名 = `capSessionName(session)`（`packages/center/src/wrapper.ts:80`）。remote（cap）の記録も session 名で持つ（`docs/design/master-cap-session.md` の「session と remote-cap を 1 対 1 にする」）。
+- 【事実】session 名は再起動でも変わらない。memory の Agent ID = session 名（`docs/design/external-memory.md:17`）、messenger の peer 名 = `capSessionName(session)`（`packages/center/src/wrapper.ts:80`）。remote（cap）の記録も session 名で持つ（`docs/design/master-cap-session.md` の「session と cap を 1 対 1 にする」）。
 - 【事実】休止の設計（他 branch）は 2.4 で「会話 id を覚えて `--resume <id>` で起こす」案を持ち、2.2 で「止める条件」を表にしている。リセッションは「続きを戻さない」ので `--resume` / `--continue` を付けない点で逆の操作。止める条件の表は 3.1 で参考にする。
 
 ### 2.2 hook（作業状態と、発言・応答の本文）
