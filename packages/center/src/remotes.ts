@@ -21,8 +21,8 @@ export const WAIT_MAX_SEC = 1800;
 /** 集計の変化（running の件数）を見直す間隔（ms）。60 秒の無音で「止まっている」へ変わる時は、書き込みの event が無い。 */
 export const SUMMARY_CHECK_MS = 5_000;
 
-/** running = ws の最後の書き込みから 60 秒以内 / done = 止まっている（60 秒無音）。desktop の画面の値（running / done / failed / unknown）に合わせる。 */
-export type RemoteState = "running" | "done";
+/** running = ws の最後の書き込みから 60 秒以内 / stopped = 止まっている（60 秒無音）。 */
+export type RemoteState = "running" | "stopped";
 
 /** session の集計に載せる 1 件（v2 では center が作らない。desktop の型を保つために残す）。 */
 export interface RemoteIssue {
@@ -73,7 +73,7 @@ export interface RemoteRecord {
 /** remote_list が返す 1 件。desktop の画面に出す項目名は旧 1.x のまま。 */
 export type RemoteView = RemoteRecord & {
   state: RemoteState;
-  /** 止まっている（state=done）時だけ。ws の最後の書き込みの時刻（ISO）。 */
+  /** 止まっている（state=stopped）時だけ。ws の最後の書き込みの時刻（ISO）。 */
   finishedAt?: string;
   owners: string[];
   server_label: string;
@@ -209,7 +209,7 @@ export function createRemoteManager(opts: {
 
   /** 控えの parent-id（cap の名前）。ws の書き込みはこの名前で届く。 */
   const parentOf = (r: RemoteRecord): string => capSessionName(r.session);
-  const stateOf = (r: RemoteRecord): RemoteState => (tracker.stateOf(parentOf(r)) === "running" ? "running" : "done");
+  const stateOf = (r: RemoteRecord): RemoteState => tracker.stateOf(parentOf(r));
 
   const viewOf = (r: RemoteRecord): RemoteView => {
     const state = stateOf(r);
@@ -217,7 +217,7 @@ export function createRemoteManager(opts: {
     return {
       ...r,
       state,
-      ...(state === "done" && last !== undefined ? { finishedAt: new Date(last).toISOString() } : {}),
+      ...(state === "stopped" && last !== undefined ? { finishedAt: new Date(last).toISOString() } : {}),
       owners: [r.session],
       server_label: r.server,
     };
@@ -408,7 +408,7 @@ export function createRemoteManager(opts: {
       targets = [...targets];
       const has = (t: RemoteRecord): boolean => records.includes(t);
       const check = (): RemoteView | undefined => {
-        for (const t of targets) if (has(t) && stateOf(t) === "done") return viewOf(t);
+        for (const t of targets) if (has(t) && stateOf(t) === "stopped") return viewOf(t);
         return undefined;
       };
       const deadline = nowMs() + sec * 1000;

@@ -125,7 +125,7 @@ test("state: ws の最後の書き込みから 60 秒以内は running、無音�
   assert.equal(s.manager.list()[0]!.state, "running");
   s.clock.advance(1_000);
   const stopped = s.manager.list()[0]!;
-  assert.equal(stopped.state, "done");
+  assert.equal(stopped.state, "stopped");
   assert.equal(stopped.finishedAt, new Date(1_000_000).toISOString());
   assert.deepEqual(s.manager.summary("pm1"), { running: 0, waitingReply: 0 });
   s.tracker.note("pm1-cap");
@@ -231,12 +231,12 @@ test("wait: 止まっている cap があれば即返す。動いている間は
   s.clock.advance(60_000);
   s.tracker.note("other-cap"); // 起こす
   const v = await waiting;
-  assert.equal(v.state, "done");
+  assert.equal(v.state, "stopped");
   assert.equal(v.remote_id, "pm1-cap@srv");
 
   // すでに止まっていれば即返す
   const again = await s.manager.wait({ remote_id: "pm1-cap@srv" });
-  assert.equal(again.state, "done");
+  assert.equal(again.state, "stopped");
 
   // 動いている cap は timeout で running のまま返す
   const t = setup();
@@ -304,7 +304,7 @@ test("restore: 今の規約の控えは復元し、旧 1.x の形式（cap_id �
     serverName: "srv-x",
     model: "opus",
     createdAt: "2026-11-02T00:00:00.000Z",
-    state: "done",
+    state: "stopped",
     owners: ["pm2"],
     server_label: "srv-x",
   } as unknown as (typeof list)[number]);
