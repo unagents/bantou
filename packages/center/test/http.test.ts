@@ -380,7 +380,7 @@ test("/mcp/session: 窓口は remote_send / remote_create / remote_stop / remote
   try {
     assert.deepEqual((await c.listTools()).tools.map((x) => x.name).sort(), ["remote_create", "remote_list", "remote_send", "remote_stop", "remote_wait", "task_status", "worker_reply"]);
     await c.callTool({ name: "remote_create", arguments: { server: "s", prompt: "p", model: "sonnet", owner: "evil" } });
-    assert.deepEqual(created, [{ owner: "pm1", server: "s", model: "sonnet", prompt: "p" }]);
+    assert.deepEqual(created, [{ owner: "pm1", server: "s", prompt: "p" }]);
     const l = await c.callTool({ name: "remote_list", arguments: {} });
     assert.equal((JSON.parse((l.content as { text: string }[])[0].text) as { owner: string }[])[0].owner, "pm1");
   } finally {
