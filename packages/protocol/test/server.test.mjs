@@ -9,6 +9,7 @@ import {
   isHelloCommand, isUpdateServerCommand, isValidServerVersion, isErrorCode, ERROR_CODES,
   FOLLOW_MIN_PROTOCOL, SERVER_VERSION_PATTERN, SERVER_ID_PATTERN, MODEL_PATTERN, isValidModel,
   isTaskCommand, isWorkerReplyCommand, isWorkerRole, isWorkerReportKind,
+  isRegisterChangeCommand, isChangeStatusCommand, isStopChangeCommand, isChangeReplyCommand,
   isRetireServerCommand, supportsRetire, isProtocolCompatible, RETIRE_MIN_PROTOCOL, RETIRE_EXIT_CODE,
 } from "../dist/index.js";
 
@@ -576,4 +577,93 @@ test("parallel tasks (additive): cap tasks on status_result / activity, task_id 
   const workerAgent = { ...activityAgent, task_id: "t-1" };
   assert.equal(isServerNotice({ ...activityNotice, agents: [capAgent, workerAgent] }), true);
   assert.equal(isServerNotice({ ...activityNotice, agents: [{ ...activityAgent, task_id: "bad id" }] }), false);
+});
+
+// -- change messages ------------------------------------------------------------
+const registerChange = {
+  bantou: 1, type: "register_change", change_id: "ch-1", scope: ["design", "tasks:1", "x"],
+  repo: "https://example.com/r.git", notify_id: "n1",
+};
+const stepInfo = { ref: "design", worker_id: "w-ch-1-0", session_id: "s1", state: "running" };
+const changeInfo = {
+  change_id: "ch-1", state: "in_progress", step: 0, steps: [stepInfo, { ref: "tasks", state: "pending" }],
+  updated_at: "2026-11-23T00:00:00.000Z",
+};
+
+test("register_change: scope は順序つきの参照の並びで、中身は解釈しない", () => {
+  assert.equal(isServerCommand(registerChange), true);
+  assert.equal(isRegisterChangeCommand(registerChange), true);
+  assert.equal(isServerCommand({ ...registerChange, branch: "b", worker_model: "sonnet" }), true);
+  assert.deepEqual(parseServerCommand(JSON.stringify(registerChange)).scope, ["design", "tasks:1", "x"]);
+  assert.equal(isServerCommand({ ...registerChange, scope: [] }), false);
+  assert.equal(isServerCommand({ ...registerChange, scope: ["a", ""] }), false);
+  assert.equal(isServerCommand({ ...registerChange, scope: ["a", 1] }), false);
+  assert.equal(isServerCommand({ ...registerChange, scope: "a" }), false);
+  assert.equal(isServerCommand({ ...registerChange, change_id: "a b" }), false);
+  assert.equal(isServerCommand({ ...registerChange, repo: "" }), false);
+  assert.equal(isServerCommand({ ...registerChange, notify_id: undefined }), false);
+  assert.equal(isServerCommand({ ...registerChange, worker_model: "bad model" }), false);
+});
+
+test("change_status / stop_change / change_reply の command", () => {
+  assert.equal(isChangeStatusCommand({ bantou: 1, type: "change_status" }), true);
+  assert.equal(isChangeStatusCommand({ bantou: 1, type: "change_status", change_id: "ch-1" }), true);
+  assert.equal(isServerCommand({ bantou: 1, type: "change_status", change_id: "a b" }), false);
+  assert.equal(isStopChangeCommand({ bantou: 1, type: "stop_change", change_id: "ch-1" }), true);
+  assert.equal(isServerCommand({ bantou: 1, type: "stop_change" }), false);
+  const reply = { bantou: 1, type: "change_reply", change_id: "ch-1", worker_id: "w1", text: "yes" };
+  assert.equal(isChangeReplyCommand(reply), true);
+  assert.equal(isServerCommand({ ...reply, text: "" }), false);
+  assert.equal(isServerCommand({ ...reply, worker_id: "a b" }), false);
+  assert.equal(isServerCommand({ ...reply, change_id: undefined }), false);
+});
+
+test("今の cap 向けの command は変わらない", () => {
+  assert.equal(isServerCommand({ bantou: 1, type: "worker_reply", cap_id: "c1", worker_id: "w1", text: "x" }), true);
+  assert.equal(isServerCommand({ bantou: 1, type: "worker_reply", change_id: "c1", worker_id: "w1", text: "x" }), false);
+  assert.equal(isServerCommand(stopCap), true);
+});
+
+test("change の reply", () => {
+  assert.equal(isServerReply({ bantou: 1, type: "register_change_result", ok: true, change_id: "ch-1", accepted: true, state: "in_progress" }), true);
+  assert.equal(isServerReply({ bantou: 1, type: "register_change_result", ok: true, change_id: "ch-1", accepted: true, state: "blocked" }), false);
+  assert.equal(isServerReply({ bantou: 1, type: "change_status_result", ok: true, changes: [changeInfo] }), true);
+  assert.equal(isServerReply({ bantou: 1, type: "change_status_result", ok: true, changes: [], board: { queued: 0 } }), true);
+  assert.equal(isServerReply({ bantou: 1, type: "change_status_result", ok: true, changes: [{ ...changeInfo, step: -1 }] }), false);
+  assert.equal(isServerReply({ bantou: 1, type: "change_status_result", ok: true, changes: [{ ...changeInfo, steps: [{ ref: "a", state: "weird" }] }] }), false);
+  assert.equal(isServerReply({ bantou: 1, type: "stop_change_result", ok: true, change_id: "ch-1", stopped: true }), true);
+  assert.equal(isServerReply({ bantou: 1, type: "stop_change_result", ok: true, change_id: "ch-1", stopped: "yes" }), false);
+  assert.equal(isServerReply({ bantou: 1, type: "change_reply_result", ok: true, change_id: "ch-1", worker_id: "w1", accepted: true }), true);
+  assert.equal(isServerReply({ bantou: 1, type: "change_reply_result", ok: true, change_id: "ch-1", worker_id: "w1", accepted: false }), false);
+});
+
+test("error は change_id と change の command 名を持てる", () => {
+  const err = { bantou: 1, type: "error", ok: false, message: "no", command: "register_change", change_id: "ch-1" };
+  assert.equal(isServerReply(err), true);
+  assert.equal(isServerReply({ ...err, change_id: "a b" }), false);
+  assert.equal(isServerReply({ ...err, command: "nope" }), false);
+});
+
+test("change の通知: 質問 / 止められた・範囲を終えた", () => {
+  const report = {
+    bantou: 1, type: "change_report", notify_id: "n1", change_id: "ch-1", worker_id: "w1", step: 1,
+    kind: "ask", text: "which?", at: "2026-11-23T00:00:00.000Z",
+  };
+  assert.equal(isServerNotice(report), true);
+  assert.equal(isServerNotice({ ...report, kind: "approve" }), true);
+  assert.equal(isServerNotice({ ...report, kind: "done" }), false);
+  assert.equal(isServerNotice({ ...report, kind: "progress" }), false);
+  assert.equal(isServerNotice({ ...report, step: 1.5 }), false);
+  assert.equal(isServerNotice({ ...report, notify_id: undefined }), false);
+  const prog = {
+    bantou: 1, type: "change_progress", notify_id: "n1", change_id: "ch-1", step: 2,
+    change_state: "completed", step_state: "passed", at: "2026-11-23T00:00:00.000Z",
+  };
+  assert.equal(isServerNotice(prog), true);
+  assert.equal(isServerNotice({ ...prog, change_state: "stopped", step_state: "stopped", reason: "user" }), true);
+  assert.equal(isServerNotice({ ...prog, change_state: "blocked" }), false);
+  assert.equal(isServerNotice({ ...prog, step_state: "x" }), false);
+  assert.equal(parseServerNotice(JSON.stringify(prog)).change_state, "completed");
+  // 今の通知は変わらない
+  assert.equal(isServerNotice(activityNotice), true);
 });
