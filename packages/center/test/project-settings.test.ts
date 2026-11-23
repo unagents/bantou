@@ -310,3 +310,19 @@ test("guardrailSchemas は session の設定には置けない（null＝削除�
   assert.deepEqual(settingsIssues({ guardrailSchemas: null }, "session", check), []);
   assert.deepEqual(settingsIssues({ guardrailSchemas: { a: G("A") } }, "common", check), []);
 });
+
+test("openspecUrl: center 共通の設定の読み書き。http / https の URL だけ。空文字・null で削除。他の項目は変えない。読みで壊れた値は落とす", () => {
+  assert.equal(centerSettingsPatchSchema.safeParse({ openspecUrl: "http://10.0.0.7:8080/mcp" }).success, true);
+  assert.equal(centerSettingsPatchSchema.safeParse({ openspecUrl: "" }).success, true);
+  assert.equal(centerSettingsPatchSchema.safeParse({ openspecUrl: null }).success, true);
+  for (const bad of ["not a url", "ftp://x/y", "http://u:p@h/x", 3]) assert.equal(centerSettingsPatchSchema.safeParse({ openspecUrl: bad }).success, false, String(bad));
+  const set = mergeSettings({ instructions: "i" }, { openspecUrl: "https://o.example/mcp" });
+  assert.deepEqual(set, { instructions: "i", openspecUrl: "https://o.example/mcp" });
+  assert.deepEqual(mergeSettings(set, { instructions: "j" }).openspecUrl, "https://o.example/mcp");
+  assert.deepEqual(mergeSettings(set, { openspecUrl: "" }), { instructions: "i" });
+  assert.deepEqual(mergeSettings(set, { openspecUrl: null }), { instructions: "i" });
+  assert.deepEqual(readSettings({ openspecUrl: "https://o.example/mcp" }), { openspecUrl: "https://o.example/mcp" });
+  assert.deepEqual(readSettings({ openspecUrl: 3 }), {});
+  assert.deepEqual(readSettings({ openspecUrl: "" }), {});
+  assert.doesNotThrow(() => assertCenterOnly({ openspecUrl: "https://o.example/mcp" }, { launcher: false }));
+});

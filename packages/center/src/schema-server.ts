@@ -91,6 +91,30 @@ export function applySchemaDiscoveryEnv(env: Record<string, string>, o: { host: 
   env[SCHEMA_DISCOVERY_ENV] = schemaDiscoveryValue(`http://${o.host}:${o.port}${SCHEMA_MCP_PATH}`, o.token);
 }
 
+/** session に自動で足す openspec-mcp の entry 名（tool は mcp__openspec__*）。 */
+export const OPENSPEC_SERVER_KEY = "openspec";
+
+/**
+ * center 共通の設定 `openspecUrl` があれば、session の MCP 設定に `openspec`（type: http）を足し、allow に `mcp__openspec__*` を足す。
+ * header `x-schema-discovery` の中身は launch の `schema`（launchSchemaOf）と同じ JSON。値は argv に出さないよう env（SCHEMA_DISCOVERY_ENV）に置き、
+ * header には `${BANTOU_SCHEMA_DISCOVERY}` の参照だけを書く（claude が起動時に展開する）。schema が決まらない（host 未決定・token 無し）時は header を付けず url だけ。
+ * 設定に同じ名前の接続があれば center のこの entry が勝つ。
+ */
+export function applyOpenspec(
+  mcp: { servers: Record<string, unknown>; env: Record<string, string>; allow: string[] },
+  o: { openspecUrl: string | undefined; schema: SchemaDiscovery | undefined },
+): void {
+  if (!o.openspecUrl) return;
+  const entry: Record<string, unknown> = { type: "http", url: o.openspecUrl };
+  if (o.schema) {
+    mcp.env[SCHEMA_DISCOVERY_ENV] = JSON.stringify(o.schema);
+    entry.headers = { "x-schema-discovery": `\${${SCHEMA_DISCOVERY_ENV}}` };
+  }
+  mcp.servers[OPENSPEC_SERVER_KEY] = entry;
+  const rule = `mcp__${OPENSPEC_SERVER_KEY}__*`;
+  if (!mcp.allow.includes(rule)) mcp.allow.push(rule);
+}
+
 /** URI から名前を取り出す。template に合い、名前が規則に合う時だけ。無ければ undefined（正規化・decode はしない）。 */
 export function schemaNameOfUri(uri: string): string | undefined {
   if (!uri.startsWith(SCHEMA_URI_PREFIX)) return undefined;
