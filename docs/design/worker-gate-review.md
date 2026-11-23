@@ -3,7 +3,7 @@
 - 作成: 2026-11-23
 - 基点: `develop` 4d98817（server 0.6.12）。code の記述は branch `docs/worker-gate-review`（ecd96f9）の tree を開いて確かめた。
 - 範囲: 設計だけ。code・test・設定は変えていない。
-- 書き方: 【事実】は repo の code / docs を開いて確かめた事（`file`。repo root からの path。行は変わりうるので関数名・定数名を主に書く）。【推測】は確かめていない解釈。【利用者の見立て】は利用者が言った事で、確かめていない物。【openspec-mcp 待ち】は openspec-mcp の project が決める事、または確かめられない事で、この設計書では決めない。決まっていない点は「未決 #N」（8 節）。
+- 書き方: 【事実】は repo の code / docs を開いて確かめた事（`file`。repo root からの path。行は変わりうるので関数名・定数名を主に書く）。【推測】は確かめていない解釈。【利用者の見立て】は利用者が言った事で、確かめていない物。【openspec-mcp 待ち】は openspec-mcp の project が決める事、または確かめられない事で、この設計書では決めない。決まっていない点は「未決 #N」（9 節）。
 - 関係する設計: `docs/design/guardrail-schema-server.md`（`origin/docs/guardrail-schema-server`。guardrail の設定と schema の MCP server。進行中）、`docs/design/cap-orchestration.md`（今の remote-cap のルール）、`docs/design/center-tools.md`、`docs/architecture.md`。
 
 ## 0. 利用者と決まった事（原文つき）
@@ -11,7 +11,7 @@
 1. server の仕組みの方向。
    > serverをworkerを起動するだけの仕組みに集約し、workerコントロールはcenter側のcapが受け持つ
 
-   remote-cap（server 側の判断の層）は無くす。以下、「center 側の cap」を **cap（center 側）** と書く。これが master-cap を指すかは、master-cap が利用者に確かめている所（未決 #6）。
+   remote-cap（server 側の判断の層）は無くす。以下、「center 側の cap」は **master-cap**（決定 14）。
 2. 門（ゲート）の持ち方。
    > 直しと再review部分をopnespec−mcpのschemaで担保するような構造にし、serverはopenspec-mcpを機械的に実行させる事で、server側のworker起動をゲートクリアで賄わせる
 3. review の置き方。
@@ -47,17 +47,38 @@
 12. 資源の管理。
     > serverが管理するもう一つ重要な責務として、リソース管理がさらに必須になる。serverはメモリやプロセス状況を保持して、workerの並行実行に対して責任を保つ必要がある。capからのworker依頼はキューに溜めて処理する必要も出てくる
 
+13. server の変更。
+    > さらにserverへの変更点。serverもopenspec-mcpを追加として入れ、schema-serverのheader指定で、centerを指定するように全serverで変更が必要になる
+
+    master-cap の問い（各 server の上でそれぞれ openspec-mcp を動かすか、1 つを全 server が共有するか）への返事は「B」。openspec-mcp は **1 つ**で、全 server がその 1 つにつなぐ。
+14. 「center 側の cap」は何か、への返事。
+    > 1はAの想定。但しセッション起動の仕組みとかを変更する予定
+
+    A = 各 project の master-cap が、change の登録と worker の質問への返答を直接受け持つ。
+15. session の起動の仕組み（設計はまだ落としきれていない、と利用者が断った上での話）。
+    > remote-controlとの兼ね合いがあるからまだ設計落としきれてないが、セッションを起動し続けるという仕様は変更するつもり。projectを管理するcapが対応するという基本形は維持しつつ、セッション作業を毎回クリーンコンテキストをスタートで開始する方向に変える予定
+16. openspec-mcp を使った作業の流れ。
+    > 仕組みの仕様変更は後でいいとしても、openspec-mcpを使っての作業フローの確立は必要になると踏んでる。master-capがやらなければ行けない作業範囲に、proposal, design, tasksの作成等が入ってくる。対応としては、並行セッションに分解して進めるという方針で良いのだが、openspec-mcp基盤での仕様・設計の知見の永続化が今の基盤に乗ってくる形になるはず。
+17. 進め方の例（master-cap の問い「master-cap は proposal まで書き、design と tasks は code を読める並行の session に書かせるか（A）、master-cap が design と tasks まで書くか（B）」への返事）。
+    > Aかな。さっきのserverにstepを渡す形で、designとtasksまで1回踏む。帰ってきたらcapが中身をreview。内容が問題なければ、もう一度serverに、tasksの実行をstepで渡すとかか？
+18. 17 への補足。
+    > 弱冠の補足が居る。まず、proposal自体もremote-capに対応させるっていうのはNGではない。artifactの中身のreviewやチェックタスクをMaster−capが絶対にやらなければいけない事にもしない。サブエージェントを使う等は選択肢にある。master-capの決めで重要な事はどの作業を誰がどこでやるのが適切か？どこまでをどう進めるのが効率的化？の作業全体の設計への注力が重要。また小さな直しへの答えとして、schemaに何を選ぶかをchangeの作成段階でmaster-capが判断する事も作業全体の設計によりうまく進むかを決める重要なファクターになる
+
+### 前提（決定 15）
+
+session の起動の仕組みは変える予定で、毎回きれいな context から始める方向にある。設計は未確定で、この設計書では扱わない。状態を会話の外（server の change の記録・openspec-mcp の change）に持つ今の設計は、その方向と合う。
+
 ### 利用者の決定と、この設計書の案の区別
 
-- **利用者の決定は、上の 1〜12 の原文だけ**。それ以外は、この設計書の案・推奨・読みで、利用者の決定ではない。
-- 決定から出る形（本文に書く）: cap（center 側）は worker を起こさず、change に消化する step の範囲（scope）を付けて server に登録する（9・10）。server は登録を queue に溜め、資源を見て並行の数に責任を持って worker を起こし、worker は 1 step を実行し（8）、step の終わりは server が機械的に判定して次の step の worker を起こす（10・12）。門の中身（review・往復の上限・指摘の数え方）は schema の組み方で、bantou の仕組みは持たない（2・3・4・7・10）。worker の質問は今の messenger の仕組みで、server が worker の状態と、session-id に結び付けた step の位置を持つ（11）。
+- **利用者の決定は、上の 1〜18 の原文だけ**。それ以外は、この設計書の案・推奨・読みで、利用者の決定ではない。
+- 決定から出る形（本文に書く）: master-cap（14）は worker を起こさず、change に消化する step の範囲（scope）を付けて server に登録する（9・10）。server は登録を queue に溜め、資源を見て並行の数に責任を持って worker を起こし、worker は 1 step を実行し（8）、step の終わりは server が機械的に判定して次の step の worker を起こす（10・12）。門の中身（review・往復の上限・指摘の数え方）は schema の組み方で、bantou の仕組みは持たない（2・3・4・7・10）。worker の質問は今の messenger の仕組みで、server が worker の状態と、session-id に結び付けた step の位置を持つ（11）。全 server が 1 つの openspec-mcp につなぐ（13）。master-cap の仕事に proposal・design・tasks の作成が入り、並行の session に分けて進める（16〜18。8 節）。
 - 10 の 1 と 2 は「schema の組み方で作れるゲートの形」として並べられている。**どちらかを選ぶ事も、どちらかに決める事もしない**。併存できる物として書く（3.4）。
 - 「step の終わりを validate で判定できたはず」は利用者の見立て。今の openspec と openspec-mcp で何が出来るかは 3.4 に書く（この設計を書いた環境では確かめられなかった）。
 - server が openspec-mcp を実行する契機・形式・門が開かなかった時の openspec-mcp 側の扱いは、openspec-mcp のプロトコルが決める（【openspec-mcp 待ち】）。
 
 ### この設計書の範囲
 
-- 1〜12 を、今の code の上でどう置き換えるかを書く。5 の guardrail 側の設計は上記の別設計書に任せ、ここでは「そこに足す定義の例」だけを書く。
+- 1〜18 を、今の code の上でどう置き換えるかを書く。5 の guardrail 側の設計は上記の別設計書に任せ、ここでは「そこに足す定義の例」だけを書く。
 - **openspec-mcp のプロトコルの中身（呼び出しの形式・返り値の形・header・step の指し方の形式など）は決めない。openspec-mcp が決める**。本書で「openspec-mcp を実行する」「終わりを判定する」と書く所は、その形が出てから具体にする（【openspec-mcp 待ち】）。
 - 利用者が話に出していない事は、仕様にも未決にも足さない。
 
@@ -143,7 +164,7 @@
 
 ```
 利用者 ↔ master-cap（center）
-            │  cap（center 側）が change を作り、消化する step の範囲（scope）を付けて登録する（9・10）
+            │  master-capが change を作り、消化する step の範囲（scope）を付けて登録する（9・10）
             ▼
         center ──────────────► server
             ▲                      │  ① 登録を queue に溜める
@@ -158,9 +179,12 @@
    guardrail の設定 ─ schema の MCP server ─► openspec-mcp（schema を読む）
 ```
 
-- cap（center 側）は worker を起こさない。cap が見る単位は worker ではなく **change**（どの step まで進んだか）。
+- master-capは worker を起こさない。cap が見る単位は worker ではなく **change**（どの step まで進んだか）。
+- 全 server は、1 つの openspec-mcp に client としてつなぐ（決定 13。7.5）。
 - server は、change の step を 1 つずつ worker に実行させる。次の step を起こすのは server（0 節の 2・10 の 2）。
 - 門の中身は schema の組み方で決まる（0 節の 10）。review・往復の上限・指摘の数え方は schema 定義の中身で、bantou の仕組み（server・guardrail）は持たない（0 節の 4・7）。
+
+- session の起動の仕組みは変える予定で、毎回きれいな context から始める方向（決定 15。この設計書では扱わない）。この設計は状態を会話の外（change の記録・openspec-mcp）に持つので、その方向と合う。
 
 ## 3. 責務
 
@@ -179,6 +203,7 @@
 | worker の report の受け口 | `report` tool（worker 向け）。受けて center に通知する。cap を起こす所は無くなる | `mcp.ts` / `reports.ts` |
 | worker の停止・孤児回収・process group kill | 変わらない | `workers.ts`、`processes.ts`、`daemon.ts` |
 | path 分離・clone・掃除・更新・退役・identity | 変わらない | `paths.ts`、`workspace.ts`、`cleanup.ts`、`update.ts`、`retire.ts`、`identity.ts` |
+| openspec-mcp への接続 | 全 server が、1 つの openspec-mcp に client としてつなぐ。つなぐ時、schema-discovery の header で、schema の取り先として center（center が内蔵する schema の MCP server）を指す（決定 13）。header の名前・中身の形は openspec-mcp のプロトコルの話で、決めない | 新規。【openspec-mcp 待ち】 |
 | 生存・進捗・掲示の通知 | change の進みを足して center に送る（4.3） | `activity.ts`、`board.ts` |
 
 **捨てる（remote-cap の判断の層）**
@@ -189,17 +214,17 @@
 | cap の指示文 | `prompts.ts` の `CAP_GUIDE`・`buildTaskPrompt`・`extractTaskResult`・`buildTaskResult`、`instructions/remote-cap.md`、`docs/design/cap-orchestration.md` | 分担・往復・最終返答は、step の登録（scope）と schema に移る |
 | task の指揮（task ごとの cap の run） | `tasks.ts` | 単位は change になる（0 節の 9）。cap ごとの `session.maxParallelTasks` も、資源の管理（3.6）に置き換わる |
 | report 起因の cap の再開・worker 終了時の cap の再開 | `reports.ts` の cap を起こす部分、`worker-exit.ts` の cap を起こす部分 | 起こす相手の cap が無い。worker が report せずに終わった・失敗した事は、change の状態として center に通知する（4.3） |
-| cap 向けの `worker_start` / `worker_status` / `worker_stop` / `peer_status`（`/mcp`、header `x-bantou-cap-id`） | `mcp.ts` の `registerWorkerTools`、`server/routes/mcp.ts` | cap（center 側）は worker を起こさない（0 節の 9）。worker 向けの `report`・`bash` は残る |
+| cap 向けの `worker_start` / `worker_status` / `worker_stop` / `peer_status`（`/mcp`、header `x-bantou-cap-id`） | `mcp.ts` の `registerWorkerTools`、`server/routes/mcp.ts` | master-capは worker を起こさない（0 節の 9）。worker 向けの `report`・`bash` は残る |
 
 【推測】捨てる範囲の細部（`agents.ts` の worker 部分との切り分け）は実装の task で決める。
 
-### 3.2 cap（center 側）
+### 3.2 master-cap
 
-- change を作り、消化する step の範囲（scope）を付けて server に登録する（0 節の 9・10。4.2 の `change_register`）。change を誰がどこでどう作るか（openspec の change の作り方）の形は openspec 側の話で、この設計書は決めない。
+- change を作り、消化する step の範囲（scope）を付けて server に登録する（0 節の 9・10。4.2 の `change_register`）。change の作り方の形（openspec の書式）は openspec 側の話で、この設計書は決めない。change の作成（proposal・design・tasks）を誰がどこでやるかは master-cap が決める（8 節）。
 - change の進み（どの step まで進んだか・返答待ちか・止まっているか）を見る（`change_status`）。止める・続きを頼む（`change_stop`）。worker の質問に返答する（`worker_reply`）。
 - worker を起こさない。分担を決めない。資源を見て起こすかを判断しない（server が持つ。3.6）。
-- 実作業をしない（体制のルール）。
-- cap（center 側）が master-cap を指すかは未決 #6。【推測】cap（center 側）の指示文（未決 #6 が master-cap なら `packages/center/instructions/master-cap.md` の `[委譲]` `[待ち方]`）に、change の登録と見方のルールを移す改訂が要る。実装の task。
+- code の実装などの実作業をしない（体制のルール）。proposal・design・tasks の作成は master-cap の作業範囲に入るが、並行の session に分けてよい（8 節）。
+- 【推測】master-cap の指示文（`packages/center/instructions/master-cap.md` の `[委譲]` `[待ち方]`）に、change の登録と見方、8 節の役割を移す改訂が要る。実装の task。session の起動の仕組みの変更（決定 15）はこの設計書の外。
 
 ### 3.3 worker
 
@@ -214,10 +239,10 @@
 
 0 節の 9・10 を、流れとして書く。**openspec / openspec-mcp とのやり取りの形は【openspec-mcp 待ち】**。以下は「何が何を判断するか」だけを置く。
 
-1. cap（center 側）が `change_register` で change と scope（消化する step の範囲）を server に登録する。server は登録を保存し、現在の step を先頭にして、worker の起動の依頼を queue に積む（3.6）。
+1. master-capが `change_register` で change と scope（消化する step の範囲）を server に登録する。server は登録を保存し、先頭の step を `queued` にして worker の起動の依頼を queue に積み（3.6）、残りの step は `pending` にする。change は `in_progress`。
 2. server が資源を見て起こせる時に、worker を起こす。worker は現在の step を実行する（1 step の範囲内。0 節の 8）。
 3. worker の run が終わったら、server が step の終わりを機械的に判定する（0 節の 10 の 2。利用者の見立ては「openspec は validate を使って、step の終了とかは判定できたはず」）。
-4. 判定が通れば、server は次の step の worker の起動を queue に積む（step 2 → step 3 …）。scope の最後の step が通れば change は完了で、server が center に通知する。
+4. 判定が通れば、server は次の step を `pending` から `queued` にして worker の起動を queue に積む（step 2 → step 3 …）。scope の最後の step が通れば change は完了で、server が center に通知する。
 5. 判定が通らない時に何をするかは、未決 #4。
 
 **今の openspec / openspec-mcp で何が出来るか**: この設計を書いた環境には openspec の CLI も openspec-mcp も無く（`which openspec openspec-mcp` が何も返さない。global の npm package・`~/.npm/_npx` の cache にも無い）、repo の中にも、openspec の CLI・openspec-mcp の実体は無かった（`openspec` の語は、demo の fixture と e2e の seed の task 名に出るだけ）。**「validate で step の終了を判定できる」は利用者の見立てのままで、事実として確かめていない。** validate の引数・出力・何を見て終了とするかも、確かめていないので書かない。確かめられない所・足りない所は openspec-mcp の側の話で、openspec-mcp の project が決める（【openspec-mcp 待ち】）。この設計書が bantou 側で前提にするのは、「server が openspec / openspec-mcp を機械的に実行し、結果が通った / 通らないかを受け取れる」だけ。
@@ -247,29 +272,29 @@
 
    | 状態 | 意味 |
    |---|---|
-   | `registered` | 登録直後。まだ最初の step の worker が動いていない |
-   | `in_progress` | 進行中（どれかの step が `queued` / `running` / `waiting_reply` / `checking`） |
-   | `completed` | scope の最後の step が通った |
-   | `stopped` | 止めた。`stop_change`（cap（center 側）の指示）で止めた |
+   | `in_progress` | 登録済みで、下の 3 つのどれでもない（登録直後も含む。最初の step は `queued`） |
+   | `completed` | 今の scope の最後の step が通った（change 全体の完了ではない。次の scope を登録できる。決定 17） |
+   | `stopped` | 止めた。`stop_change`（master-capの指示）で止めた |
    | `blocked` | 判定が通らず止まった。server が止めた（終わりの判定が通らない、worker が失敗して終わった、など。理由を持つ。未決 #4） |
 
    step の状態:
 
    | 状態 | 意味 |
    |---|---|
+   | `pending` | scope に入っているが、まだ queue に積まれていない（前の step が通るのを待つ） |
    | `queued` | queue に積まれ、まだ起きていない（資源待ちを含む） |
    | `running` | worker が動いている |
    | `waiting_reply` | worker が ask / approve を出し、session を閉じて、cap の返答を待っている |
    | `checking` | worker の run が終わり、server が終わりの判定を実行している |
    | `passed` | 判定が通った |
    | `blocked` | 判定が通らない・worker の失敗で止まった（change の `blocked` の原因になった step） |
-   | `stopped` | `stop_change` で止めた |
+   | `stopped` | `stop_change` で止めた（`pending` / `queued` の step も `stopped`） |
 
    「止めた」（`stopped`。cap の指示）と「判定が通らず止まった」（`blocked`。server の判定）は別の状態として持つ。理由・次の動きが違う（`blocked` は未決 #4）。
 2. step の位置と session-id の結び付き: change の記録に「現在の step の番号」と、各 step の `worker_id` / `session_id` を持つ（0 節の 11「stepの位置はworkerのsession−idと紐付けて持ってる必要がある」）。server が再起動しても、この記録から続きを起こせる（今の `reservations.ts` と `owner.json` と同じく、ファイルに残す）。
 3. 流れ:
    - worker が `report`（ask / approve）→ server は step の状態を `waiting_reply` にして、center へ通知（`worker_report` の形を change つきにしたもの。4.3）。worker の process は終わっている（session は閉じている）。この間、process が無いので資源を使わない。
-   - cap（center 側）が `worker_reply` → server が受け取り、`waiting_reply` の step の worker を、記録している session_id で起こし直す（`--resume`）。step の状態は `queued` → `running`（起こすのも queue と資源の判定を通る。順序は未決 #2）。
+   - master-capが `worker_reply` → server が受け取り、`waiting_reply` の step の worker を、記録している session_id で起こし直す（`--resume`）。step の状態は `queued` → `running`（起こすのも queue と資源の判定を通る。順序は未決 #2）。
    - `worker_reply` は、返答先の worker の step が `waiting_reply` でない時は error を返す（4.1）。
 
 ### 3.6 資源の管理と queue
@@ -284,13 +309,13 @@
 2. server が、worker の並行実行に責任を持つ: queue の先頭の worker を起こしてよいかを、資源の状況から server が判定し、よい時だけ起こす。今のように「cap が足りないと判断して予約を付ける」のではない。
 3. queue: 全ての worker 起動の依頼（change の step の worker の起動、返答での起こし直し）が queue を通る。来た順に処理する（順序は未決 #2）。queue は再起動後も残す（今の `reservations.ts` と同じ）。
 4. 判定に使う値（並行の上限、メモリの下限など）は未決 #3。
-5. cap（center 側）は、起こすかどうかを判断しない。見るだけ: step の状態に `queued`（資源待ちを含む）が出る（3.5・4.1・4.3）。今の `peer_status` / `server_board` は、掲示として残せる（center から見る材料）。
+5. master-capは、起こすかどうかを判断しない。見るだけ: step の状態に `queued`（資源待ちを含む）が出る（3.5・4.1・4.3）。今の `peer_status` / `server_board` は、掲示として残せる（center から見る材料）。
 
 ## 4. server が出す道具と、center と server の間のやり取り
 
 > **この節は設計書の案であり、利用者の決定ではない。メッセージ名・tool 名・引数・状態名・置き場は仮。** 決定に出ているのは、cap が change を scope つきで server に登録する事、進みを見る事、質問に返答する事、server が資源と queue と状態を持つ事まで（0 節の 9〜12）。以下は、それを今の protocol と center の tool の上に置いた時の一案。状態名は 3.5 の 2 つの表（change の状態と step の状態）に従う。
 
-cap（center 側）は center の tool（4.2）を使い、center が protocol（messenger の `bantou`。今の `task` / `status` / `worker_reply` と同じ経路）で server に送る。server は cap 向けの MCP を持たない（3.1）ので、server の「出す道具」は protocol のメッセージ（4.1）。
+master-capは center の tool（4.2）を使い、center が protocol（messenger の `bantou`。今の `task` / `status` / `worker_reply` と同じ経路）で server に送る。server は cap 向けの MCP を持たない（3.1）ので、server の「出す道具」は protocol のメッセージ（4.1）。
 
 ### 4.1 server が受けるメッセージ（center → server）
 
@@ -298,7 +323,7 @@ cap（center 側）は center の tool（4.2）を使い、center が protocol�
 
 | メッセージ（名前は仮） | 引数 | 返り値（成功） | 失敗（`ErrorReply.message` の内容） |
 |---|---|---|---|
-| `register_change`（change の登録） | `change_id`（AGENT_ID_PATTERN と同じ文字）、`scope`（消化する step の範囲。形は未決 #1）、`repo`、`branch?`、`worker_model?`（MODEL_PATTERN。step の worker の `--model` の既定）、通知先の鍵（今の `cap_id` と同じ形の id。center が付ける） | `{ type: "register_change_result", ok: true, change_id, accepted: true, state: "registered" \| "in_progress" }`（`state` は **change の状態**）。受けて保存したら、worker の完了は待たずにすぐ返す（今の `worker_start` と同じ） | `change_id` が不正 / 登録済み / `scope` が空 / `repo` が不正 / 更新中（`ErrorCode` の `updating`）・退役中（`ErrorReply.retiring`） |
+| `register_change`（change の登録） | `change_id`（AGENT_ID_PATTERN と同じ文字）、`scope`（消化する step の範囲。形は未決 #1）、`repo`、`branch?`、`worker_model?`（MODEL_PATTERN。step の worker の `--model` の既定）、通知先の鍵（今の `cap_id` と同じ形の id。center が付ける） | `{ type: "register_change_result", ok: true, change_id, accepted: true, state: "in_progress" }`（`state` は **change の状態**。登録直後は最初の step が `queued`）。受けて保存したら、worker の完了は待たずにすぐ返す（今の `worker_start` と同じ） | `change_id` が不正 / 登録済みで change の状態が `completed` でない（`completed` の change には次の scope を登録できる。決定 17） / `scope` が空 / `repo` が不正 / 更新中（`ErrorCode` の `updating`）・退役中（`ErrorReply.retiring`） |
 | `change_status`（進みの照会） | `change_id?`（省略で全ての change） | `{ type: "change_status_result", ok: true, changes: [{ change_id, state（**change の状態**）, step（現在の step の番号）, steps: [{ ref, worker_id, session_id, state（**step の状態**） }], reason?（`blocked` / `stopped` の理由）, updated_at }] }`。あわせて server の掲示（`board`。今の `status_result.board`）に queue の長さと資源を載せる | `change_id` が無い |
 | `stop_change`（止める） | `change_id` | `{ type: "stop_change_result", ok: true, change_id, stopped: boolean }`。動いている worker を止め（今の `stop` と同じく process group kill）、queue の依頼を取り下げ、change を `stopped`（**止めた**。server の判定で止まった `blocked` とは別）にし、動いていた step を `stopped` にする | `change_id` が無い / 動いている worker を止められなかった（`ErrorReply.message` に `worker_id` と理由。change の状態は変えない） |
 | `worker_reply`（質問への返答の受け口。今ある物の変更） | `worker_id`、`text`、`change_id`（今の `cap_id` の代わり） | `{ type: "worker_reply_result", ok: true, change_id, worker_id, accepted: true }`。同じ session で起こし直す依頼を queue に積んで、すぐ返す | `worker_id` が change の step の worker でない / step の状態が `waiting_reply` でない / `change_id` が違う |
@@ -364,13 +389,13 @@ tasks の instruction:
 
 ## 7. 今の機能との対応・移行の段取り・並行できる単位・test の観点
 
-> この節に出る `register_change` / `change_*` / `stop_change` などの名前と、`registered` / `in_progress` / `waiting_reply` などの状態名は、3.5・4 節の**案の名前**。名前が変われば、この節の記述もその名前に読み替える（利用者の決定ではない）。
+> この節に出る `register_change` / `change_*` / `stop_change` などの名前と、`in_progress` / `pending` / `waiting_reply` などの状態名は、3.5・4 節の**案の名前**。名前が変われば、この節の記述もその名前に読み替える（利用者の決定ではない）。
 
 ### 7.1 今の機能との対応表
 
 | 今の機能（実在） | 置き場 | 変えた後 |
 |---|---|---|
-| `remote_send`（別名 `remote_create`） | center `tools.ts`、`remotes.ts` の `send` | `change_register`（4.2）。`goal` / `deliverables` / `verify` / `constraints` / `workers.items` は、change の中身（openspec の change・tasks）と scope に移る（change を誰がどこでどう作るかの形は openspec 側の話で、この設計書は決めない）。`depends_on` は、step の順（scope の順）に置き換わる |
+| `remote_send`（別名 `remote_create`） | center `tools.ts`、`remotes.ts` の `send` | `change_register`（4.2）。`goal` / `deliverables` / `verify` / `constraints` / `workers.items` は、change の中身（openspec の change・tasks）と scope に移る（change を誰がどこで作るかは 8 節。書式は openspec 側の話で、この設計書は決めない）。`depends_on` は、step の順（scope の順）に置き換わる |
 | `remote_list` / `task_status` / `remote_wait` | center `tools.ts` | `change_list` / `change_status` / `change_wait`（4.2） |
 | `remote_delete`（protocol `stop_cap`） | center `tools.ts` | `change_stop`（protocol `stop_change`） |
 | `worker_reply` | center `tools.ts`、server `daemon.ts` | 残る。宛先は今も worker。持ち主の鍵が cap から change になる（4.1） |
@@ -389,7 +414,7 @@ tasks の instruction:
 | 0 | 設計（この書面、guardrail-schema-server、openspec-mcp 側） | **今。並行で進める** |
 | 1 | guardrail 機能の実装（`docs/design/guardrail-schema-server.md` の S1〜S5） | 段階 2 の前提。S1・S3・S5 は openspec-mcp のプロトコルに依らない。**S2（schema の MCP server）・S4（openspec-mcp につなぐ）は openspec-mcp のプロトコル待ち** |
 | 2 | schema 定義を bantou 上で保守管理できる | 段階 1 の完了 |
-| 3 | change 単位の step 消化の実装（7.3 の W1〜W7） | 段階 2 の後（0 節の 6） |
+| 3 | change 単位の step 消化の実装（7.3 の W1〜W8） | 段階 2 の後（0 節の 6） |
 
 ### 7.3 実装の単位と並行
 
@@ -398,10 +423,11 @@ tasks の instruction:
 | W1 | schema 定義を guardrail の設定に足す（5 節の例を openspec-mcp の形に直して） | guardrail の実装完了、**openspec-mcp のプロトコル** | 他と別 file |
 | W2 | server の change の記録・登録の受け付け・queue（`register_change` / `change_status` / `stop_change`、`reservations.ts` の拡張、`workers.ts` の持ち主の鍵の付け替え） | 未決 #1・#2・#5 | W3 と別 file。center（W4）とは protocol の型が先に要る |
 | W3 | server の資源の管理と並行の判定（`resources.ts` / `activity.ts` を使う） | 未決 #3 | W2 と別 file |
-| W4 | center の tool の置き換え（`change_*`、`worker_reply`、cap（center 側）の指示文の改訂（未決 #6 が master-cap なら `master-cap.md`））と protocol の型 | 4.1・4.3 の型 | server（W2・W3）と別 package |
+| W4 | center の tool の置き換え（`change_*`、`worker_reply`、master-cap の指示文（`master-cap.md`）の改訂）と protocol の型 | 4.1・4.3 の型 | server（W2・W3）と別 package |
 | W5 | step の終わりの判定を server が実行する層と、次の step の起動 | **openspec-mcp のプロトコル**（実行の形・結果の読み方）、未決 #4 | W2 の後 |
+| W8 | 全 server が openspec-mcp につながる（client。schema-discovery の header で center を指す。決定 13） | **openspec-mcp のプロトコル**、各 server から openspec-mcp の host に届く事（【未確認】。7.5） | W5 の前に要る。server の版上げと配り直し（7.5）の一部 |
 | W6 | remote-cap の層を捨てる（3.1 の捨てる物）。旧メッセージの扱い（未決 #5） | W2〜W5 が動いた後 | 最後 |
-| W7 | docs の改訂（`docs/architecture.md` の server の実行モデル・`cap-orchestration.md` の廃止・`protocol.md`） | W1〜W6 | 最後 |
+| W7 | docs の改訂（`docs/architecture.md` の server の実行モデル・`cap-orchestration.md` の廃止・`protocol.md`） | W1〜W6・W8 | 最後 |
 
 - W2 と W3 は server の中の別 file、W4 は center で、型を決めた後は並行できる。W6 は新旧の経路を並走で確かめた後に行う（旧経路を先に捨てない）。
 
@@ -414,7 +440,14 @@ tasks の instruction:
 | `<workspace>/caps/<cap-id>/` の既存 dir | cap の会話・`state.json`・`logs/` が残る。`requireCap` が cap の dir を要求する（1.4）ので、dir を消す前に worker の持ち主の鍵を付け替える（未決 #5 に含める） |
 | `logs/owner.json`（`{ cap_id, task_id? }`） | 旧 worker の持ち主の記録。新しい持ち主（change）に変える時、旧形式を読み続けるか移すか（未決 #5 に含める） |
 
-### 7.5 test の観点
+### 7.5 全 server の変更（決定 13）
+
+- 全 server（remote の `bantou-server`）が、1 つの openspec-mcp に client としてつなぐ。つなぐ時、schema-discovery の header で center の schema の MCP server を指す。全 server で同じ変更が要る。
+- 段取り: server の版を上げ（protocol の版の確認は 未決 #5）、全 server に配り直す（今の `update_server` の仕組み。`docs/architecture.md` の更新の節）。配った後に、各 server が openspec-mcp につながる事を確かめる。
+- header の名前・中身の形、つなぎ方は openspec-mcp のプロトコルの話で、先取りしない。
+- 【未確認】各 server から openspec-mcp の host に届くか（network の経路・認証）。この環境では確かめていない。届かない server が出た時の扱いは、openspec-mcp の置き場が決まってから。
+
+### 7.6 test の観点
 
 - 登録: `register_change` が保存して即返す／不正な `change_id`・重複・空の scope は `error`。
 - queue: 来た順に処理される。再起動後も残る。`stop_change` で取り下げられる。
@@ -427,14 +460,44 @@ tasks の instruction:
 - center: `change_list` / `change_status` / `change_wait` の置き換えで、未返答の ask / approve（`waitingReply`）・到達性・版の状態が失われない。`resession.ts` の未返答の確認が cap 無しでも効く。
 - 回帰: guardrail の schema の MCP server（別設計）と、この設計の schema 定義が同じ設定の項目を使って保守できる。
 
-## 8. 未決（番号つき。各案と推奨）
+## 8. master-cap の役割と進め方（決定 14・16〜18）
 
-決まった事 1〜12 から出てくる物だけを載せる。**全て未決**。推奨は推奨であり、利用者の決定ではない。
+> この節の「判断する事」の並べ方・進め方の例は、利用者の話（16〜18 の原文）を整理した物で、決まった手順ではない。
+
+**中心の仕事**: 作業全体の設計。どの作業を、誰が、どこでやるのが適切か。どこまでを、どう進めるのが効率的か（決定 18）。
+
+**master-cap が判断する事**:
+
+- change を作る段で、どの schema を選ぶか（例: 小さな直しには軽い手順の schema。決定 18）。作業全体がうまく進むかを決める重要な要素。
+- step の範囲を、どこで切って登録するか（`change_register` の scope。3.4）。
+- 各 step を、誰に・どこでやらせるか。
+- 確かめ（artifact の中身の review・チェック）を、誰にやらせるか。
+
+**proposal・design・tasks の作成**:
+
+- master-cap の作業範囲に入る（決定 16）。ただし並行の session（server の worker など）に分けて進めてよい。proposal を remote の側に書かせてもよい（決定 18）。
+- artifact の中身の review や確かめを、master-cap が必ず自分でやる事にはしない。サブエージェントを使う、などを選べる（決定 18）。
+- 範囲の注記: master-cap が自分でやらない事を選べる、という意味。体制のルール（master-cap は code の実装などの実作業をしない）は変わらない。
+
+**進め方の例（決定 17。決まった手順ではなく、選べる形の 1 つ）**:
+
+1. design と tasks までを step の範囲にして、server に 1 回登録する（`change_register`。proposal は master-cap が書く、または別の session に書かせる）。
+2. 戻ってきたら（change の状態が `completed`）、中身を確かめる。確かめる人は master-cap が選ぶ（自分・サブエージェントなど）。
+3. 問題なければ、tasks の実行を step の範囲にして、同じ change にもう 1 回登録する（4.1。`completed` の change には次の scope を登録できる）。
+
+**知見の永続化**: 仕様・設計の知見は、openspec-mcp の change（proposal・design・tasks）に残り、会話に依らずに読める（決定 16。決定 15 の方向とも合う）。
+
+**この設計書で決めない事**: どんな schema を用意するか（重さの違う手順の中身）は、利用者と schema 定義を書く側が決める。master-cap が選ぶ物はそこにある schema（5 節の例はその 1 つ）。
+
+## 9. 未決（番号つき。各案と推奨）
+
+決まった事 1〜18 から出てくる物だけを載せる。**全て未決**。推奨は推奨であり、利用者の決定ではない。
 
 **未決 #1 scope の形（0 節の 9・10。bantou 側）**
 cap が登録で渡す「消化する step の範囲」を、server がどう持つか。step の指し方（番号か見出しか）の形式は openspec / openspec-mcp が持つ形に合わせる（【openspec-mcp 待ち】）ので、ここで聞くのは、順序と範囲の持ち方だけ。
 - 案 A: 順序つきの step の参照の配列で渡す（`["<step>", "<step>", ...]`）。server は配列の順に消化する。参照の中身は bantou は解釈せず、そのまま openspec-mcp に渡す。
 - 案 B: 範囲（始点と終点）で渡し、中の列挙は openspec 側に聞く。
+- 同じ change への再登録（決定 17。design・tasks の後に tasks の実行を登録する）: 前の scope が `completed` の change に、新しい scope（案 A なら新しい配列）を足す。step の記録は足し続け、前の scope の step は変えない。
 - 推奨: A。理由: 順序が登録の時点で決まり、server が openspec に依らず「step 1 → step 2」を回せる（0 節の 10 の 2）。B は、列挙を openspec が返せるかに依る（【openspec-mcp 待ち】）。
 
 **未決 #2 queue の順序（0 節の 12）**
@@ -451,7 +514,7 @@ server が並行の数に責任を持つ（利用者の決定）。判定に使�
 
 **未決 #4 step の終わりの判定が通らなかった時（0 節の 10 の 2）**
 worker の run が終わったが、終わりの判定が通らなかった時に、server が何をするか。往復の上限は schema の責務（0 節の 7）なので、bantou は回数を数えない。
-- 案 A: change を `blocked`（理由つき）にして止め、center に通知する。次の step は起こさない。続けるかどうかは cap（center 側）が決める。
+- 案 A: change を `blocked`（理由つき）にして止め、center に通知する。次の step は起こさない。続けるかどうかは master-capが決める。
 - 案 B: 同じ step の worker を、同じ session で続きとして起こし直す（queue を通る）。
 - 推奨: A。理由: bantou が往復を持たない（0 節の 7）形に合う。B は、回数の上限を bantou が持たないと止まらない。形 1（3.4）の schema では、条件を満たすまで worker が終わらないので、この場面は起きにくい【推測】。
 
@@ -461,10 +524,7 @@ protocol の `kick_cap` / `stop_cap` / `task` / `task_result` / `cap_result`、`
 - 案 B: 旧メッセージの型を当面残す。既に動いている旧経路の task は、終わるまで動かし続ける。新しく来る旧メッセージ（新しい `task` / `kick_cap` など）は cap を起こさず `error` で断る。型は後の版で消す。
 - 推奨: B。理由: server は更新の時、動いている cap・worker が終わるまで入れ替えを待つので、旧経路の task が残る間は壊さない方が安全。消すのは W6（7.3）。
 
-**未決 #6 「center 側の cap」は何を指すか（0 節の 1）**
-cap（center 側）が master-cap を指すか。master-cap が利用者に確認している所で、確認が済むまで本書は「cap（center 側）」と書く。
-
-## 9. この設計書を書く時に確かめた事・確かめられなかった事
+## 10. この設計書を書く時に確かめた事・確かめられなかった事
 
 **code と突き合わせて確かめた事**
 
@@ -481,4 +541,5 @@ cap（center 側）が master-cap を指すか。master-cap が利用者に確�
 
 - 【openspec-mcp 待ち】openspec の CLI・openspec-mcp は、この環境に無かった。「validate で step の終了を判定できる」は利用者の見立てのまま。validate の引数・出力・何を見て終了とするか・scope の step の指し方の形式・openspec-mcp の呼び出しの形は、確かめていない。
 - 【推測】3.4 の「形 1 と形 2 が同じ仕組みの上で併存できる」は、設計上の読み。openspec-mcp の側で、step ごとの終了条件と instruction を schema に持てるかは、openspec-mcp のプロトコルが出るまで分からない。
+- 【未確認】各 server から openspec-mcp の host に届くか（決定 13。7.5）。
 - 【推測】4 節のメッセージ名・引数は仮。実装の task で protocol の型に落とす時に決める。
