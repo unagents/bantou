@@ -17,10 +17,16 @@
 - **openspec-mcp の側**（http stream での単独起動、schema-discovery を header で受ける事、schema-discovery のプロトコルの設計）は、openspec-mcp の project が設計する。**この設計書では設計しない**。プロトコルは未確定。header 名・header の値の形・応答の形・`/schemas/[schema-name]` の応答の中身は、この設計書で決めない。それに依る所は「openspec-mcp のプロトコルが出てから決める」と書く（以下 `【プロトコル待ち】`）。
 - **bantou の側**（この設計書で書く）: (1) center が内蔵する schema の MCP server、(2) center が openspec-mcp の schema-discovery に自分の schema の MCP server の情報を入れてつなぐ流れ、(3) guardrail の設定（openspec 向けの schema 定義を任意に足す機能）。
 
+### 利用者の追加の決定（2026-11-23）
+
+> reviewの仕組みの話は、gardrail機能の実装が終わって、schema定義を、bantou上で保守管理出来るようにしてからの話と考えてる
+
+> ヘッダーがない時は標準手順がそのまま採用される前提でよい（今がそうなってるはず）
+
 ### 背景（前提。この設計の対象ではない）
 
-- 順番（利用者の決定）: review の仕組み（schema の tasks の終了条件に「指摘 0 件」を置く事、reviewer のサブエージェント、指摘の数え方）と、bantou の server を worker の起動だけにする変更（remote-cap の判断の層を無くす事を含む）は、guardrail の機能の実装が終わり、schema 定義を bantou の上で保守できるようになった後の話。この設計書の対象外で、今は作業にしない。
-- openspec-mcp は、schema-discovery の header が無い接続では、標準の手順のまま動く（schema-discovery は足す物で、無くても今の動きは変わらない）。
+- 順番: review の仕組み（schema の tasks の終了条件に「指摘 0 件」を置く事、reviewer のサブエージェント、指摘の数え方）と、bantou の server を worker の起動だけにする変更（remote-cap の判断の層を無くす事を含む）は、guardrail の機能の実装が終わり、schema 定義を bantou の上で保守できるようになった後の話（上の 1 つ目の決定）。この設計書の対象外で、今は作業にしない。
+- 前提: schema-discovery の header が無い接続では、標準の手順がそのまま採用される（上の 2 つ目の決定。openspec-mcp の振る舞いで、bantou の設計では決めない）。
 - 用語の注意: 【事実】bantou には過去に「guardrail」があった（plugin の hooks `guard.mjs` と `docs/guardrail.md`）。2026-10-31 に廃止済み（`docs/history/20261031-1700-retire-guardrail/report.md`）。この設計の「guardrail 設定」は、それとは別の新しい機能（利用者の指示の「gardrail設定機能」）で、hook の仕組みは戻さない。
 
 ## 1. 今の形
@@ -101,9 +107,8 @@ openspec-mcp（別 project。http stream で単独起動。schema-discovery を 
 1. center は、openspec-mcp の schema-discovery（header で受ける設定）に、自分の schema の MCP server の情報を入れてつなぐ。いつ入れるか（接続のたびか、他か）と、何を入れるか（アドレスだけか、他も要るか）は【プロトコル待ち】。
 2. openspec-mcp は、その情報を使って schema の MCP server に `/schemas/[schema-name]` を問い合わせる【プロトコル待ち】。
 3. 利用者が guardrail の設定に schema 定義を足すと、次の問い合わせから返る（3.2。center の再起動は要らない見込み）。
-4. schema-discovery の header が無い接続では、openspec-mcp は標準の手順のまま動く（利用者の決定。0 節）。
 
-- **【プロトコル待ち】で決めない物**: header の名前、header に入れる「mcp-server の設定」の形、`/schemas/[schema-name]` の応答の形、openspec-mcp が schema の MCP server に何を問い合わせるか。プロトコルが出てから、この設計書の 3.1・4 節を更新する。
+- **【プロトコル待ち】で決めない物**: header の名前、header に入れる「mcp-server の設定」の形、`/schemas/[schema-name]` の応答の形、openspec-mcp が schema の MCP server に何を問い合わせるか。プロトコルが出てから、この設計書の 3.1・3.2・4 節と #1・#3 を更新する。
 - **center が openspec-mcp のアドレスをどこに持つか**・**誰が openspec-mcp につなぐか**は、利用者の指示にあるのは「bantou-center がつなげる」まで。細部は未決 #3。
 - 【事実】center の設定の `mcpServers` は、http の MCP server の `url` と `headers` を持てる（1.2）。openspec-mcp の接続先を `mcpServers` の 1 件で持てるかは、schema-discovery が header の形に依るので【プロトコル待ち】。#3 の案 A の前提。
 
@@ -151,7 +156,7 @@ code は書かないので、実装の task が足す test と、実測の一覧
 - guardrail の設定: 足す・読む・マージ更新・`null` で消す（`packages/center/test/project-settings.test.ts` と同じ流儀）。未知の項目が消えない（既存の性質を壊さない）。壊れた `center-settings.json` で fail closed（`mcp-source.ts` と同じ扱い。`packages/center/test/mcp-assign.test.ts` の流儀）。
 - schema の MCP server: 足した定義が `/schemas/[schema-name]` で返る。無い名前は「無い」と返る。定義を足した直後・消した直後が、center の再起動なしで反映される。他の設定が応答に出ない。応答の形の test は【プロトコル待ち】。
 - 画面: guardrail の欄の追加・編集・削除。desktop・web とも同じ画面で動く。【事実】`packages/ui/test/` には今 `session-status.test.ts` の 1 file だけで、画面（`.vue`）の component test の流儀は無い。画面の test をどの形で足すかは実装の task で決める（今の画面の確認は `packages/desktop/e2e/` と `packages/web/e2e/` の e2e）。
-- つなぎ: center が openspec-mcp につなぐ時に、schema の MCP server の情報が入る【プロトコル待ち】。schema-discovery の header が無い接続で、openspec-mcp が標準の手順のまま動く事（openspec-mcp 側の確認）。
+- つなぎ: center が openspec-mcp につなぐ時に、schema の MCP server の情報が入る【プロトコル待ち】。schema-discovery の header を付けない接続（guardrail の設定が空の時など）が、bantou 側の変更で壊れない事（header が無い時の openspec-mcp の振る舞いは前提。0 節）。
 - 既存の center の test（`packages/center/test/*.test.ts`）が全部通ったまま（足すだけの変更）。
 
 **実測（実機。値は測って書く）**
