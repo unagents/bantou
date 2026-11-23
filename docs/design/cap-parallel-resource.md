@@ -8,7 +8,6 @@
 - **U2 = B**: 並行の上限 `session.maxParallelTasks` は既定「上限なし」。利用者が設定に置いた時だけ効く。
 - **U3**: server は負荷・メモリ・worker の数・ディスクを測って掲示するだけ。閾値を持たず、資源が足りるかを判定しない。判断は cap。
 - **U4 = B**: 資源の単位は worker。task は受けたらすぐ指揮を始める。
-- **予約**: 資源が足りないと判断した cap が、`worker_start` に予約のフラグ（`reserve: true`）を付けて出す。server が足りないと決めて予約にはしない。server は来た順に queue に貯め、同じ server の worker が 1 本終わるたびに先頭から 1 本ずつ起こす。動いている worker が 0 本の時に予約が来たら、すぐ起こす。予約中の worker はその task の「動いている」に数える（3.5）。
 - **U5**: 推奨どおり（B: 予約・通知の依頼をファイルに残す）。**U6 = A**。**U7 = A**。**U8 = A**。**U9**: 推奨どおり（A）。**U11 = A**。
 - **U10**: 周期の再測定は掲示のためだけ。予約の起動の契機は、worker の終了と、動いている worker が 0 本の時の予約の到着。周期の値は設定 `resource.sampleMs`。既定の 30 秒は**実装が置いた値で、利用者の承認待ち**（設計書に値の推奨は無かった）。
 - center の `remote_list` と `task_status` の「待ち（同時実行の上限）」の表示を新しい形に合わせ、desktop にも server の掲示板（cap・worker の数・資源・予約の件数）を出す。
@@ -16,11 +15,11 @@
 ## 1. 利用者の方針（原文の要点）
 
 - 勝手に cap の作業の並行の上限を入れない。設計を見直す。
-- remote-cap は、基本、可能な限り task を並行させる。**これは鉄の掟**。
-- ただし remote-cap が動く host のリソースは常に気にする。
-- 同じ host の複数の remote-cap は、host のリソースの状況と、他の cap が動かす worker の実行数を見て、何本並行させるかを判断する。
+- cap は、基本、可能な限り task を並行させる。**これは鉄の掟**。
+- ただし cap が動く host のリソースは常に気にする。
+- 同じ host の複数の cap は、host のリソースの状況と、他の cap が動かす worker の実行数を見て、何本並行させるかを判断する。
 - 同じ host の cap 同士は、後続の待ち task の有無を問い合わせ、worker の完了の通知を依頼できる。
-- bantou-server が、管理する cap と稼働中の全 worker を見える化する掲示板を持つかもしれない。リソースの解放待ちは、フラグだけの簡易な次の予約として bantou-server が queue に貯めるかもしれない。
+- server が、管理する cap と稼働中の全 worker を見える化する掲示板を持つかもしれない。リソースの解放待ちは、フラグだけの簡易な次の予約として server が queue に貯めるかもしれない。
 
 ## 2. 今の作り（server 0.6.11 = `packages/server/package.json:3` / 調査した repo の develop `4bf3751`）
 
@@ -42,14 +41,12 @@
 
 ### 2.3 worker の起動
 
-- cap（lane）が `worker_start`（MCP）で worker を起こす。`workers.ts:145-165` で `deps.manager.invoke("worker", workerId, …)` を呼び、完了を待たず `accepted: true` を返す。
 - **worker の本数に上限・host 資源の確認は無い**。`workers.ts:130-170` と `agents.ts` を `concurr` / `maxConcurrent` / `semaphore` / `同時` で grep して該当なし（調べた範囲の事実。他の所に無いことの保証ではない）。
 - 数の制約は、同じ worker_id は 1 つずつ（agent ごとの queue。`status` の `queued`: `protocol/src/server.ts:561`）だけ。
 - host のリソース（CPU・メモリ・負荷）を読む処理は server に無い（`loadavg` / `freemem` / `os.cpus` を `server/utils/bantou/*.ts` で grep して該当なし）。
 
 ### 2.4 status
 
-- `status_result` = `caps`（各 `AgentStatus`）+ `workers`、identity（`server_id` / `host` / `user` / `workspace`）付き: `daemon.ts:186`、`identity.ts:99-101`。
 - cap の `tasks`（`CapTaskInfo[]`: `state` waiting/running/done/failed、`waiting_for` = `limit` | `branch`、`queued_at` ほか）: `protocol/src/server.ts:567-596`、組み立ては `daemon.ts:182-185`。
 - 終わった task は 1 時間・cap あたり最大 20 件を保持（`tasks.ts:120-121`）。メモリのみで、server の再起動で消える（`docs/protocol.md:437`）。
 - 見えるのは **その server の cap と worker だけ**。host 全体のリソース値と、他の server の cap・worker は出ない。
@@ -71,14 +68,11 @@
 
 ## 3. 設計
 
-前提（U4 の推奨 B を、この設計の前提に置く）: **資源の単位は worker**。task（lane = 指揮の会話 1 つ）は受けたらすぐ指揮を始め、資源の判断で待たせない。資源の判断は worker の開始（`worker_start`）で行い、待ちの予約の対象も worker の開始の依頼 1 種類だけにする。U4 が A / C に決まった場合は、3.1・3.2・3.5 を直す。
-
 ### 3.1 固定の上限をやめる（要件 1）
 
 - `session.maxParallelTasks` の固定の上限（既定 2）による `limit` 待ちをやめる。task は受けたらすぐ指揮を始める（上の前提）。
 - 待たせる理由は、**U1 の結果で決まる**。整理すると次のとおり（数値の上限は置かない）:
   1. task を待たせる理由: 同じ branch の前の task（U1 が A の時だけ残る。B なら無くなる）。
-  2. task を待たせる理由: `closing`（`stop_cap` の close の最中。`tasks.ts:163`）。資源・並行の判断ではなく停止の手順なので、今のまま残す。今は `waiting_for` に `limit` と読み替えて載せている（`tasks.ts:217`）。`limit` の廃止後はこの読み替えを直す（直し方は実装時に決める）。
   3. worker の開始を待たせる理由: host のリソース待ち（3.2）。task の待ちではなく worker の予約の待ち（3.5）として現れる。
 - `waiting_for` の値 `limit` は、task の待ちとしては出なくなる。protocol は additive に保ち、旧 `limit` を読む側は未知の文字列を許す（`CapTaskState` と同じ「reader must accept other strings」の流儀。`protocol/src/server.ts:576`）。worker の予約の状態は 3.5 に書く。
 - `maxParallelTasks` の設定項目の扱い（廃止 / 上限なしの既定 / 利用者が任意で置く上限として残す）は **U2**。
@@ -112,15 +106,9 @@
 
 方式（設計）:
 
-- cap 同士は直接やり取りしない。**bantou-server を仲介**にする（指示は層を飛ばさない決まり）。
-- cap が server に頼む手段は、**cap 専用の MCP tool**（今の `worker_start` / `worker_status` / `worker_stop` と同じ経路。cap だけに登録する。`mcp.ts:31,103`）。protocol の command（center → server）にはしない。理由: 頼むのは center でなく cap の claude で、今の worker の操作と同じ経路に載せれば、cap の id・task の id（`x-bantou-cap-id`、lane の `taskId`）が server に届く。center を経由すると 1 層増える（推測: center に中継を足す変更が要る。実装時に確認）。tool の名前は仮で、決めるのは実装時。
-- 問い合わせ tool（仮名 `peer_status`）:
-  - 入力: なし（同じ server の他の cap 全部）。
-  - 出力: 他の cap ごとに `{cap_ref, running_workers, waiting_tasks, reserved_workers, no_followers}`。`cap_ref` は不透明な参照で、cap_id（session 名を含む）をそのまま返すかは **U6**。goal などの指示・結果の中身は返さない（`architecture.md:44` の session の分離を守る）。
-  - `no_followers`（後続なし）: server が持つ事実だけで計算する。**待ち task が 0 件、かつ worker の予約が 0 件、かつその cap の task の指揮の run が動いていない**（run が動いていれば新しい worker を起こしうる）。この基準でよいか、他の cap の claude に実際に尋ねるかは **U9**。
+- cap 同士は直接やり取りしない。**server を仲介**にする（指示は層を飛ばさない決まり）。
 - 完了通知の依頼 tool（仮名 `notify_when_done`）:
   - 入力: 対象（`cap_ref` と、worker_id か「その cap の全 worker」）。
-  - 出力: `{request_id, accepted: true}`（今の `worker_start` と同じく、すぐ返す）。
   - 動き: server が依頼を覚え、対象が完了（worker の done・停止・失敗）した時に、依頼した cap の task の指揮を再開して知らせる。
 - 通知の届け方: cap は report でしか再開しないので、server が依頼した cap の lane を再開する。今の `[worker 終了通知]`（`worker-exit.ts:35-38`）と同じ形の prompt（仮: 先頭行 `[他 cap の完了通知]`）で resume する（推測: 既存の再開の入口を流用できるはず。実装時に要確認）。
 - 通知の依頼の寿命・件数・server 再起動をまたぐか（今の `tasks` はメモリのみ）は **U5**。
@@ -128,7 +116,7 @@
 - 他の cap の worker を止める・順序を変える権限は与えない（問い合わせと通知の依頼だけ）。
 - 同じ server の中の cap だけが対象。同じ host の別 server の cap へは届かない（U7 の案 A の場合。限定は U7 に明記）。
 
-### 3.4 bantou-server の掲示板（要件 4）
+### 3.4 server の掲示板（要件 4）
 
 server が、**自分が管理する cap と稼働中の全 worker の数**を 1 か所で見えるようにする。
 
@@ -144,28 +132,23 @@ server が、**自分が管理する cap と稼働中の全 worker の数**を 1
 - protocol: `status_result` に additive の欄として足す（`caps` / `workers` は今のまま。追加の欄は旧 peer が無視する。`docs/protocol.md:188` の `tasks` と同じ流儀）。版を上げるかは protocol 定義の決まりに従う（`cap-orchestration.md:135`）。
 - center: `remote_list` に host 全体の掲示板の値を足して返す。待ち表示の文言（`task-status.ts:51`）を「host のリソース待ち」に更新する。`tools.ts:436` と `README.md:231` の「`maxParallelTasks` 既定 2」の説明を改める。
 - desktop: 今は選択中 session の cap だけ（`architecture.md:44`）。host 全体の掲示板は、他の session の cap の中身を出さず、**数と資源だけ**を出す欄（例 host ごと 1 行: cap 数・worker 数・資源の状況・待ち数）にする。session の分離は崩さない。
-- 範囲: 1 つの server の掲示板は、その server の cap と worker だけ。**同じ host に複数の server がある場合**（`server_id` が別、workspace が別。`identity.ts:99-101`）は、server どうしの掲示板の共有が要る。やり方は **U7**。
+- 範囲: 1 つの server の掲示板は、その server の cap と worker だけ。**同じ host に複数の server がある場合**（workspace が別。`identity.ts:99-101`）は、server どうしの掲示板の共有が要る。やり方は **U7**。
 
 ### 3.5 リソース待ちの次の予約（要件 5）
 
-利用者の案: リソース解放待ちの worker の依頼は、フラグだけの簡易な「次の予約」にして、bantou-server が queue に貯める。
+利用者の案: リソース解放待ちの worker の依頼は、フラグだけの簡易な「次の予約」にして、server が queue に貯める。
 
-- **予約の対象は、worker の開始の依頼（`worker_start`）の 1 種類だけ**。task は予約しない（3 章の前提。task は受けたらすぐ指揮を始める）。
-- `worker_start` が資源不足の時の返り: 今と同じく**待たずにすぐ返す**（`workers.ts:145-165` は完了を待たず `accepted: true` を返す）。返り値に additive の `reserved: true` を足し、`{worker_id, accepted: true, reserved: true}` とする。cap は「予約された」と分かり、ターンを終えてよい（今の `worker_start` の使い方と同じ）。worker は、空きが出たら server が自動で起動する。
-- cap から見える形: `worker_status` で、その worker は新しい state `reserved`（additive の文字列。読む側は未知の state を許す）。始まれば今と同じ経路で進む（worker の report で cap の lane が再開する）。予約中の worker を止めたい時は `worker_stop` が予約を取り消す（設計。実装時に要確認）。
-- **予約中の worker は、task が「動いている」ことに数える**（task の終わりの判定に足す）。理由: 3 章の前提では、cap は `reserved` を見てターンを終える。その時点で指揮の run も worker の run も無い。今の終わりの判定は、指揮の run・worker の run（`manager.laneBusy`。`agents.ts:1073-1076`）と report 起因の処理（`hub.pendingFor`。`reports.ts:372`）だけを数える（`daemon.ts:389` の `busy`）。予約を数えないと、task が done / failed に見え、lane の `mcp.json` の削除（`cap-orchestration.md:108`）と lane の片付け（`workerKeepMs` 後）が、予約が始まる前に走りうる。設計: `busy` に「その task の worker の予約が 1 件以上ある」を足す（`busy: laneBusy || pendingFor > 0 || reservedFor(capId, taskId) > 0`。名前は仮）。予約が始まれば worker の run（`laneBusy`）が引き継ぐ。予約を取り消した（`worker_stop`・`stop_cap`）場合は数えなくなり、他に動く物が無ければ task は終わる。予約の件数は、再起動をまたいで残すか（U5）に従う。再起動後に予約を残さない案 A の場合は、予約と一緒に task の「動いている」も消える。
 - 予約に載せるもの: フラグ（cap_id・task_id・worker_id・受けた時刻）だけを queue の見え方とする。起動に要る入力（prompt・repo・branch・model。`workers.ts:147-157`）は、今の agent の queue が持つ入力と同じ扱いで server が持つ（メモリか永続かは **U5**）。
-- 貯める場所: bantou-server の queue（`tasks.ts` の waiting と同じ層）。今の「cap ごとの待ち」を「host 全体の待ち」に広げる形。
+- 貯める場所: server の queue（`tasks.ts` の waiting と同じ層）。今の「cap ごとの待ち」を「host 全体の待ち」に広げる形。
 - 解放の契機（U10 の決定）: worker の完了・停止と、動いている worker が 0 本の時の予約の到着。周期の再測定は契機にしない（掲示のためだけ）。契機で、予約の先頭を 1 本起こす（server は「始めてよいか」を判定しない。足りないと判断するのは cap）。
 - 順序: 来た順（今の `pump` と同じ。`tasks.ts:208`）。他の順（cap 間の公平など）は **U8**。
-- `stop_cap` は、その cap の予約も破棄する（今の `stop_cap` が待っている task を止めるのと同じ扱い。`tasks.ts:418-441`）。
 - server の再起動時の予約の扱いは **U5**。
 - 3.3 の完了通知の依頼は、この queue と同じ仕組み（契機で通知）に載せられる（推測。実装時に確認）。
 
 ## 4. 影響を受ける所（実装時の洗い出し。今回は変えない）
 
-- server: `config.ts`（maxParallelTasks）、`tasks.ts`（`blockedBy` の `limit`）、`daemon.ts:383-415`、`workers.ts`（worker 起動前の確認・予約）、`mcp.ts`（cap 専用 tool の追加）、`daemon.ts:182-186`（status）、`daemon.ts:389`（task の終わりの判定 `busy` に予約を足す）、`worker-exit.ts`（通知の再開と `exitResumeMax`。U11）。
-- protocol: `CapTaskInfo.waiting_for`、`status_result` の追加欄、`worker_start` の返り値・worker の state、docs/protocol.md、版。
+- server: `config.ts`（maxParallelTasks）、`tasks.ts`（`blockedBy` の `limit`）、`daemon.ts:383-415`、`workers.ts`（worker 起動前の確認・予約）、`mcp.ts`（cap 専用 tool の追加）、`daemon.ts:182-186`（status）、`worker-exit.ts`（通知の再開と `exitResumeMax`。U11）。
+- protocol: `CapTaskInfo.waiting_for`、`status_result` の追加欄、worker の state、docs/protocol.md、版。
 - center: `task-status.ts:51`、`tools.ts:436`、`remotes.ts`、`README.md:231`。
 - desktop / ui: `RemoteActivity.vue`、host の掲示板の欄。
 - 文書: `cap-orchestration.md`「task の並行」（105 行の「既定 2」の記述）、`docs/protocol.md:188,437`、`docs/architecture.md:46`（「同時に動く数は server の `session.maxParallelTasks`」と書いてある）、`packages/server/README.md:96`。
@@ -217,14 +200,14 @@ server が、**自分が管理する cap と稼働中の全 worker の数**を 1
 
 ### U6. 掲示板に載せる項目と、他の session への見せ方
 
-- 案 A: 数・状態・資源だけ（中身は載せない。`peer_status` の `cap_ref` は不透明な参照）。利点: session の分離（`architecture.md:44`）を保つ。欠点: 他の cap が「何を待っているか」は分からない。
+- 案 A: 数・状態・資源だけ（中身は載せない）。利点: session の分離（`architecture.md:44`）を保つ。欠点: 他の cap が「何を待っているか」は分からない。
 - 案 B: task の branch 名や cap_id も載せる。利点: 同じ branch の衝突を事前に避けやすい。欠点: 他の session の作業が見える。
 - 推奨: A。理由: 指示・結果が混ざらないよう session を分けた決定（2026-11-04）を崩さない。
 
 ### U7. 同じ host に複数の server がある場合の掲示板
 
 - 前提（推測）: server ごとに workspace が別なので、同じ host に複数の server が動きうる。実際にそう運用しているかは未確認。
-- **限定（案 A の場合）**: 3.3 の問い合わせ・完了通知の依頼と、予約の公平（U8）は、**同じ server の cap の間だけ**で働く。同じ host の別 server の cap とは、問い合わせも通知の依頼もできない。利用者の原文（「ホストに同居する、remote-cap 同士」）が別 server の cap を含むなら、案 A では満たせない。
+- **限定（案 A の場合）**: 3.3 の問い合わせ・完了通知の依頼と、予約の公平（U8）は、**同じ server の cap の間だけ**で働く。同じ host の別 server の cap とは、問い合わせも通知の依頼もできない。利用者の原文（「ホストに同居する、cap 同士」）が別 server の cap を含むなら、案 A では満たせない。
 - 案 A: server ごとの掲示板のみ（server 間は見ない）。利点: 実装が最小。欠点: 上の限定。同じ host の別 server の worker が資源を食っても、判断に入るのは資源の実測だけ。
 - 案 B: host 共有の置き場（host 上の共有ファイル等）を 1 つ決め、server 間で数・予約・通知の依頼を共有する。利点: 同じ host の全 cap が見える（利用者の原文どおり）。欠点: 共有の置き場の決め（host の共有一時領域を使わない決まりがある）と排他制御が要る。
 - 案 C: 複数 server を同じ host に置くことを非対応とする。利点: 単純。原文どおりになる。欠点: 既存の運用を狭める。
