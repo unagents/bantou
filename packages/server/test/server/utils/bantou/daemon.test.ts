@@ -619,6 +619,7 @@ test("daemon 自己更新: 新しい版を見て新しい launch を取り出さ
       createClient: clientFor,
       serverVersion: "0.7.0",
       runner: runner1 as unknown as DaemonDeps["runner"],
+      loadavg1: () => 0,
       fetchLatest: async () => "0.8.0",
       requestExit: (r) => exits.push(r),
     });
@@ -630,7 +631,7 @@ test("daemon 自己更新: 新しい版を見て新しい launch を取り出さ
         from_name: "center",
       });
     send(handlers[0]!, "A");
-    await sleep(100);
+    for (let i = 0; i < 200 && prompts1.length === 0; i++) await sleep(50);
     assert.deepEqual(prompts1, ["A"]);
     // 更新の確認は 1 間隔（1 秒）の後。待ちに入った後に来た launch は取り出されない
     while (!logs.some((l) => l.includes("待っている（worker 1）"))) await sleep(50);
@@ -660,7 +661,7 @@ test("daemon 自己更新: 新しい版を見て新しい launch を取り出さ
         return fail;
       },
     };
-    const d2 = await startDaemon(configPath, { machineId: () => "m", startMcp: stubMcp, createClient: clientFor, serverVersion: "0.8.0", runner: runner2 as unknown as DaemonDeps["runner"] });
+    const d2 = await startDaemon(configPath, { machineId: () => "m", startMcp: stubMcp, createClient: clientFor, serverVersion: "0.8.0", runner: runner2 as unknown as DaemonDeps["runner"], loadavg1: () => 0 });
     while (prompts2.length < 2) await sleep(50);
     assert.deepEqual(prompts2, ["B", "C"]);
     await assert.rejects(stat(join(dir, "ws", "pending-jobs.json")));
@@ -702,6 +703,7 @@ test("daemon 自己更新: 待ちの途中で更新以外の停止が来たら�
       createClient: create,
       serverVersion: "0.7.0",
       runner: runner as unknown as DaemonDeps["runner"],
+      loadavg1: () => 0,
       fetchLatest: async () => "0.8.0",
       requestExit: (r) => exits.push(r),
     });
