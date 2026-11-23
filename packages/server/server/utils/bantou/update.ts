@@ -108,6 +108,8 @@ export interface SelfUpdater {
   flush(): Promise<void>;
   /** 入れ替えに入っているか（待ち・再起動）。 */
   updating(): boolean;
+  /** 入れ替えのための終了に入っているか（update.json を書いた後）。この間に届いた指示は stop が file に持つ。 */
+  restarting(): boolean;
   close(): void;
 }
 
@@ -219,6 +221,7 @@ export function createSelfUpdater(deps: SelfUpdaterDeps): SelfUpdater {
       }
     },
     updating: () => phase === "waiting" || phase === "restarting",
+    restarting: () => phase === "restarting",
     close() {
       closed = true;
       if (timer !== undefined) clearInterval(timer);

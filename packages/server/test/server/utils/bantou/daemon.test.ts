@@ -640,7 +640,10 @@ test("daemon 自己更新: 新しい版を見て新しい launch を取り出さ
     assert.deepEqual(exits, []);
     release();
     while (exits.length === 0) await sleep(50);
-    await d1.stop();
+    // 入れ替えのための終了中に届いた launch も捨てず、file に持つ
+    const stopping = d1.stop();
+    send(handlers[0]!, "C");
+    await stopping;
     console.log = origLog;
 
     assert.deepEqual(prompts1, ["A"]);
@@ -658,10 +661,65 @@ test("daemon 自己更新: 新しい版を見て新しい launch を取り出さ
       },
     };
     const d2 = await startDaemon(configPath, { machineId: () => "m", startMcp: stubMcp, createClient: clientFor, serverVersion: "0.8.0", runner: runner2 as unknown as DaemonDeps["runner"] });
-    while (prompts2.length === 0) await sleep(50);
-    assert.deepEqual(prompts2, ["B"]);
+    while (prompts2.length < 2) await sleep(50);
+    assert.deepEqual(prompts2, ["B", "C"]);
     await assert.rejects(stat(join(dir, "ws", "pending-jobs.json")));
     await d2.stop();
+  } finally {
+    console.log = origLog;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("daemon 自己更新: 待ちの途中で更新以外の停止が来たら、worker が終わっても入れ替えに進まない（update.json を書かず、終了も頼まない）", { timeout: 60_000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "bantou-daemon-selfupdate-stop-"));
+  const origLog = console.log;
+  try {
+    const logs: string[] = [];
+    console.log = (m?: unknown) => {
+      logs.push(String(m));
+    };
+    const handlers: Array<(m: unknown) => void> = [];
+    const create = (() => ({
+      peer: { id: "fake-id" },
+      onMessage: (h: (m: unknown) => void) => {
+        handlers.push(h);
+      },
+      connect: async () => {},
+      setProtocol: async () => ({ name: "bantou", version: "2.0.0", hash: "h" }),
+      unsetProtocol: async () => {},
+      send: async () => {},
+      close: async () => {},
+    })) as unknown as NonNullable<DaemonDeps["createClient"]>;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const runner = { run: async () => (await gate, { ok: false as const, sessionMissing: false, timedOut: false, detail: "x", durationMs: 1 }) };
+    const exits: string[] = [];
+    const configPath = await daemonConfig(dir, { update: { checkIntervalMs: 1000, maxWaitMs: 60_000 } });
+    const d = await startDaemon(configPath, {
+      machineId: () => "m",
+      startMcp: stubMcp,
+      createClient: create,
+      serverVersion: "0.7.0",
+      runner: runner as unknown as DaemonDeps["runner"],
+      fetchLatest: async () => "0.8.0",
+      requestExit: (r) => exits.push(r),
+    });
+    handlers[0]!({
+      text: JSON.stringify({ protocol: "bantou", callType: "invoke", order: "launch", "parent-id": "cap-1", prompt: "A", ws: "ws://h:7910/ws/worker" }),
+      meta: { protocol: "bantou", version: "2.0.0" },
+      from_id: "c1",
+      from_name: "center",
+    });
+    while (!logs.some((l) => l.includes("待っている（worker 1）"))) await sleep(50);
+    const stopping = d.stop();
+    release();
+    await stopping;
+    await sleep(300);
+    console.log = origLog;
+    assert.deepEqual(exits, []);
+    assert.equal(logs.some((l) => l.includes("入れ替える:")), false);
+    await assert.rejects(stat(join(dir, "ws", "update.json")));
   } finally {
     console.log = origLog;
     await rm(dir, { recursive: true, force: true });
