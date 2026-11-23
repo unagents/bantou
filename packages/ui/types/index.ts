@@ -173,10 +173,11 @@ export interface ProjectSettings {
 /** The center-wide settings (`center_settings_get`): a session's project settings without `servers` (the servers a session uses are set per session only). */
 export type CenterCommonSettings = Omit<ProjectSettings, "servers"> & {
   /**
-   * guardrail's openspec schema definitions (name → definition: any JSON, not read by bantou). Center-wide only (not in a session's
-   * settings). An update merges by name: a name with `null` deletes that schema, `guardrailSchemas: null` deletes all.
+   * guardrail's openspec schema definitions (name → { schema: schema.yaml text, templates: path under templates/ → content }; not read by
+   * bantou). Center-wide only (not in a session's settings). An update merges by name (a definition is replaced as a whole; `templates` may be
+   * left out): a name with `null` deletes that schema, `guardrailSchemas: null` deletes all.
    */
-  guardrailSchemas?: Record<string, unknown> | null;
+  guardrailSchemas?: Record<string, { schema: string; templates?: Record<string, string> } | null> | null;
 };
 
 /** The center's list as last fetched (mirror of `src-tauri/src/session.rs::SessionList`). Memory only. */

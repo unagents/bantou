@@ -1,71 +1,98 @@
 /**
- * The guardrail settings form: openspec's schema definitions (name → definition), kept in the center-wide settings
- * (`guardrailSchemas`). bantou does not read a definition: the form edits it as text and saves it as the JSON value it is.
+ * The guardrail settings form: openspec's schema definitions (name → { schema, templates }), kept in the center-wide settings
+ * (`guardrailSchemas`). bantou does not read a definition: the schema (YAML) and each template are edited as text and saved as the strings they are.
  */
 
-/** A schema's name: part of the `/schemas/[schema-name]` path, so letters, digits, `_` and `-` only (same rule as the center). */
-export const GUARDRAIL_SCHEMA_NAME = /^[A-Za-z0-9_-]+$/;
+/** A schema's name: part of the `/schemas/[schema-name]` path (same rule as the center; case-sensitive). */
+export const GUARDRAIL_SCHEMA_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/** One template file of a schema: its path relative to `templates/` and its content. */
+export interface GuardrailTemplate {
+  path: string;
+  body: string;
+}
 
 /** One row of the form. `saved` rows exist on the center: their name is fixed (to rename, delete and add). */
 export interface GuardrailRow {
   name: string;
-  /** The definition as JSON text. */
-  text: string;
+  /** schema.yaml as text (not read). */
+  schema: string;
+  templates: GuardrailTemplate[];
   saved: boolean;
 }
 
 const isRec = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
-/** The rows for the `guardrailSchemas` the center returned (by name; a value that is null is not a definition). */
-export const guardrailDraftOf = (schemas: unknown): GuardrailRow[] =>
-  isRec(schemas)
-    ? Object.keys(schemas)
-        .filter((name) => schemas[name] !== null && schemas[name] !== undefined)
-        .sort()
-        .map((name) => ({ name, text: JSON.stringify(schemas[name], null, 2), saved: true }))
-    : [];
+/** A template's path: relative to `templates/` (same rule as the center): not empty, no empty / `.` / `..` part between `/`, no `\` or NUL. */
+export function isTemplatePath(p: string): boolean {
+  if (p === "" || p.includes("\\") || p.includes("\0")) return false;
+  return p.split("/").every((seg) => seg !== "" && seg !== ".." && seg !== ".");
+}
+
+/** The templates of one definition as the center returned them (a record of path → string), or null if it is not that. */
+function templatesOf(v: unknown): GuardrailTemplate[] | null {
+  if (!isRec(v)) return null;
+  const out: GuardrailTemplate[] = [];
+  for (const path of Object.keys(v).sort()) {
+    const body = v[path];
+    if (typeof body !== "string") return null;
+    out.push({ path, body });
+  }
+  return out;
+}
+
+/** The rows for the `guardrailSchemas` the center returned (by name; a value that is not `{ schema, templates }` is dropped). */
+export const guardrailDraftOf = (schemas: unknown): GuardrailRow[] => {
+  if (!isRec(schemas)) return [];
+  const rows: GuardrailRow[] = [];
+  for (const name of Object.keys(schemas).sort()) {
+    const v = schemas[name];
+    if (!isRec(v) || typeof v.schema !== "string") continue;
+    const templates = templatesOf(v.templates === undefined ? {} : v.templates);
+    if (templates) rows.push({ name, schema: v.schema, templates, saved: true });
+  }
+  return rows;
+};
 
 /** A copy of the rows (the baseline must not follow edits of the draft). */
-export const cloneGuardrailDraft = (rows: GuardrailRow[]): GuardrailRow[] => rows.map((r) => ({ ...r }));
-
-/** The definition typed in a row: JSON text. Null is refused (on the center `null` means delete; there is a delete button). */
-function parseText(text: string): { value: unknown } | { error: string } {
-  if (!text.trim()) return { error: "中身が空" };
-  let v: unknown;
-  try {
-    v = JSON.parse(text);
-  } catch (e) {
-    return { error: `JSON として読めない: ${String(e)}` };
-  }
-  if (v === null) return { error: "null は定義にできない（消すには削除する）" };
-  return { value: v };
-}
+export const cloneGuardrailDraft = (rows: GuardrailRow[]): GuardrailRow[] => rows.map((r) => ({ ...r, templates: r.templates.map((t) => ({ ...t })) }));
 
 /** Problem with the rows, or null. */
 export function guardrailDraftError(rows: GuardrailRow[]): string | null {
   const seen = new Set<string>();
   for (const r of rows) {
     const label = r.name || "（名前なし）";
-    if (!GUARDRAIL_SCHEMA_NAME.test(r.name)) return `schema の名前は英数字と _ - のみ: ${label}`;
+    if (!GUARDRAIL_SCHEMA_NAME.test(r.name)) return `schema の名前は英数字で始まり、英数字と . _ - のみ: ${label}`;
     if (seen.has(r.name)) return `schema の名前が重なっている: ${r.name}`;
     seen.add(r.name);
-    const p = parseText(r.text);
-    if ("error" in p) return `schema ${r.name}: ${p.error}`;
+    const paths = new Set<string>();
+    for (const t of r.templates) {
+      if (!isTemplatePath(t.path)) return `schema ${r.name}: template の path は templates/ からの相対 path（空・先頭の /・. や .. や空の区間・\\ を含まない）: ${t.path || "（空）"}`;
+      if (paths.has(t.path)) return `schema ${r.name}: template の path が重なっている: ${t.path}`;
+      paths.add(t.path);
+    }
   }
   return null;
 }
 
+/** The definition of a row as the center takes it (`templates` always sent: a definition is replaced as a whole). */
+const definitionOf = (r: GuardrailRow): { schema: string; templates: Record<string, string> } => ({
+  schema: r.schema,
+  // fromEntries makes own properties (a path `__proto__` stays a key)
+  templates: Object.fromEntries(r.templates.map((t) => [t.path, t.body])),
+});
+
 /**
- * The update body for `guardrailSchemas` (merged by name on the center): a row that is new or whose text changed → its value,
+ * The update body for `guardrailSchemas` (merged by name on the center): a row that is new or whose definition changed → `{ schema, templates }`,
  * a saved row that is gone → null. `null` when nothing changed. Call it only when `guardrailDraftError` is null.
  */
-export function guardrailUpdate(rows: GuardrailRow[], base: GuardrailRow[]): Record<string, unknown> | null {
-  const out: Record<string, unknown> = {};
-  const was = new Map(base.map((r) => [r.name, r.text]));
+export function guardrailUpdate(rows: GuardrailRow[], base: GuardrailRow[]): Record<string, { schema: string; templates: Record<string, string> } | null> | null {
+  const out: Record<string, { schema: string; templates: Record<string, string> } | null> = {};
+  const was = new Map(base.map((r) => [r.name, JSON.stringify(definitionOf(r))]));
   for (const r of rows) {
-    if (was.get(r.name) === r.text) continue;
-    const p = parseText(r.text);
-    if ("value" in p) out[r.name] = p.value;
+    const d = definitionOf(r);
+    if (was.get(r.name) === JSON.stringify(d)) continue;
+    out[r.name] = d;
   }
   const names = new Set(rows.map((r) => r.name));
   for (const r of base) if (!names.has(r.name)) out[r.name] = null;
