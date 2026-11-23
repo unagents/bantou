@@ -175,6 +175,10 @@ export function createSessionManager(opts: {
   notifyServersChanged?: (name: string, text: string) => Promise<{ ok: boolean; reason?: string }>;
   /** スリープ状態が変わった時（sleeping = 今眠っているか。restore で眠ったままの session にも呼ぶ）。messenger の身代わり peer の登録・解除に使う。失敗しても本体は成功にする。 */
   onSleepChange?: (name: string, sleeping: boolean) => void;
+  /** restore() が非スリープの session を supervisor.start(resume:true) で起こす直前に呼ぶ（app 再起動後の最初の入力の印付け）。スリープ中・wake・自動再起動・restartFresh・新規では呼ばない。失敗しても起動は続ける。 */
+  onRestoreStart?: (name: string) => void;
+  /** restore() の supervisor.start が失敗した時に呼ぶ（onRestoreStart の印を外す）。 */
+  onRestoreFail?: (name: string) => void;
 }): SessionManager {
   const { config, supervisor, store, log } = opts;
   const waitMs = opts.waitMs ?? 15_000;
@@ -547,6 +551,15 @@ export function createSessionManager(opts: {
     }
   };
 
+  const notifyRestore = (kind: "start" | "fail", name: string): void => {
+    try {
+      if (kind === "start") opts.onRestoreStart?.(name);
+      else opts.onRestoreFail?.(name);
+    } catch (e) {
+      log(`復帰の通知に失敗: ${name} ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
   const savedOrThrow = (name: string): SavedSession => {
     const rec = saved.get(name);
     if (rec) return rec;
@@ -579,7 +592,13 @@ export function createSessionManager(opts: {
             log(`session スリープのまま復帰: ${s.name} (${s.path})`);
             continue;
           }
-          await supervisor.start(s.name, { resume: true });
+          notifyRestore("start", s.name);
+          try {
+            await supervisor.start(s.name, { resume: true });
+          } catch (e) {
+            notifyRestore("fail", s.name);
+            throw e;
+          }
           log(`session 復帰: ${s.name} (${s.path})`);
         } catch (e) {
           log(`session 復帰失敗: ${s.name} ${e instanceof Error ? e.message : String(e)}`);
