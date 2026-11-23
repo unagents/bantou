@@ -27,7 +27,7 @@ bantou の work session ↔ bantou メッセージの共通 TypeScript 型。
 ## 版の互換
 
 - `isProtocolCompatible(a, b)`（`src/server.ts`）: major と minor が同じなら互換、patch の差は通す。形が崩れた版（空・非数・桁欠け・先頭 `v`・pre-release 付き・`undefined`）は互換でない（false）。
-- 通信の形を変える定義の変更は minor 以上を上げる。patch は形を変えない付け直し専用（1.8.0 → 1.8.1 のような版の付け直し）。patch を上げても center は止まらない。
+- 通信の形を変える定義の変更は minor 以上を上げる。patch は形を変えない付け直し専用（1.8.0 → 1.8.1 のような版の付け直し）。
 - 定義の版（`protocol.json` / `versions.json`）の扱いは上の「定義を変える時」のまま。互換の判定は版の上げ方を緩めない。
 
 ## 未定義
