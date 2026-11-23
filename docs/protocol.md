@@ -133,12 +133,12 @@ Tool outputs are JSON text. A failure sets `isError`.
 | `rc_stop` | `project` | remote-control record |
 | `rc_status` | `project` | remote-control record |
 | `server_list` | none | `[{ name, connected, reachable, peerId, serverPeer }]` |
-| `remote_send` | `goal`, `repo?`, `branch?`, `deliverables?`, `verify?`, `constraints?`, `workers?`, `server?`, `worker_model?` | `{ remote_id, server, serverName, state: "running", created, worker_model? }` |
+| `remote_send` | `server`, `model?`, `prompt` | `{ remote_id, server, model, sent: true }` |
 | `remote_create` | same | alias of `remote_send` (same handling) |
-| `worker_reply` | `remote_id?`, `worker_id`, `text`, `server?` | `{ remote_id, server, worker_id, accepted: true }` (also on `/mcp` for the desktop). Only the caller's cap (no `remote_id` = the caller's cap) |
-| `remote_stop` | `remote_id?`, `server?`, `force?` | `{ remote_id, deleted, stopped, session_cleared, previous_session_id?, workers_stopped?, warning? }` Only the caller's cap, or the old shared cap named by `remote_id` |
-| `remote_list` | `include_shared?` | `RemoteView[]` of the caller's caps; `include_shared: true` adds the old shared cap (no session) |
-| `remote_wait` | `remote_id?`, `server?`, `timeout_sec?` | the finished `RemoteView`. Only the caller's caps (or the old shared cap named by `remote_id`) |
+| `worker_reply` | `server`, `session_id`, `order`, `content?` | `{ server, session_id, order, sent: true }` (also on `/mcp` for the desktop) |
+| `remote_stop` | `server` | `{ remote_id, server, sent: true, forgotten }` |
+| `remote_list` | `include_out_of_scope?` (`owner?` on `/mcp`) | `RemoteView[]`: `remote_id`, `session`, `server`, `serverName`, `server_label`, `state`, `finishedAt?`, `model`, `createdAt`, `owners` |
+| `remote_wait` | `remote_id?` (`<parent-id>@<server>`), `server?`, `timeout_sec?` | the `RemoteView` |
 
 Remote-control record:
 

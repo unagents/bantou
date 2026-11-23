@@ -129,12 +129,12 @@ center は wrapper 経由の session（master-cap）を起動するたび（新�
 | `session_login` | `name` | `{ name, loginUrl }`。session の claude に `/login` を打ち、認証 URL が出るまで待つ（上限 15 秒）。下記「再ログイン」 |
 | `session_login_code` | `name`, `code` | `{ name, ok, auth, error }`。認証コードを投入して結果を待つ（上限 30 秒）。`ok: false` は `isError` |
 | `center_info` | なし | `{ workspace: string \| null, systemInstructions: [{ id, version, title }] }`（`workspace` は config の `workspace`。未設定は `null`。desktop の追加ダイアログがフォルダ欄の既定 `<workspace>/<name>` を出すのに使う。`systemInstructions` は master-cap の起動時に付けるシステム埋め込み指示の部品（条件付きの `memory@1` も含む）。項目は今後増える） |
-| `remote_send`（session 向けのみ） | `goal`, `deliverables?`, `verify?`, `constraints?`, `workers?`, `worker_model?`, `repo?`, `branch?`, `server?` | `{ remote_id, server, peer, host?, serverName, state, created, worker_model?, delivered, delivery, delivered_at?, delivery_basis?, error? }`（server が受け付けたことは最大 15 秒（`ACK_TIMEOUT_MS`、環境変数 `BANTOU_REMOTE_ACK_TIMEOUT_MS`）確かめてから返す。確認できなければ isError で `delivered: false`。`peer` は今の到達先、`host` は host 名）。呼び出し元 session の cap（server ごとに 1 つ。cap_id = `c-<center-id>-<session 名>`）へ送る。owner は header の session 名。他の session の cap には届かない。`goal` だけなら `deliverables: {}` / `verify: {}` / `constraints: []` / `workers: {}`（items 無し = implement + review の最低 2 体）。`worker_model` は新規の cap なら「引数 ?? config `servers[].workerModel`」、既存の cap は引数があった時だけ載せる。protocol の版が合わない server へは送らず isError。受け付けを観測できた時は `delivered: true`・`delivery: "observed"`・`delivered_at`・`delivery_basis`、確認できない時は isError で `delivered: false`・`delivery: "sent"`（または `"unsent"`）・`error`（再送する前に `remote_list` で `delivery` を確認する） |
+| `remote_send`（session 向けのみ） | `server`, `model?`, `prompt` | `{ remote_id, server, model, sent: true }` |
 | `remote_create`（session 向けのみ） | 同上 | `remote_send` の互換の別名（同じ処理） |
-| `worker_reply` | `remote_id?`, `worker_id`, `text`, `server?` | `{ remote_id, server, worker_id, accepted: true }`。server の worker へ返答を送る。`remote_id` 省略時は呼び出し元 session の cap（server が複数あれば `server` で絞る）。他の session の cap には送れない（旧共有 cap は `remote_id` で明示）。外向け（desktop）は owner を持たないので全件が対象。protocol の版が合わない server へは送らず isError。session 向け・外向けの両方 |
-| `remote_stop`（session 向けのみ） | `remote_id?`, `server?`, `force?` | `{ remote_id, deleted, stopped, session_cleared, previous_session_id?, warning? }`。cap を閉じる（実行中なら止め、server 側の cap の会話も破棄）と記録の削除。対象は呼び出し元 session の cap と、`remote_id` で明示した旧共有 cap だけ（他の session の cap は見えない・触れない）。`remote_id` 省略時は自分の cap（server が複数あれば `server` で絞る） |
-| `remote_list` | `owner?`（外向け。無ければ全件）。session 向けは `include_shared?`（旧共有 cap も含める）で、自分の session の cap だけ | `RemoteView[]`（server の cap 単位。`RemoteRecord` + `owners` + `worker_reports` + `reachability` + `cap_state`、下記） |
-| `remote_wait` | `remote_id?`, `server?`, `timeout_sec?`（既定 600、上限 1800）, `owner?`（外向けのみ） | 終わった `RemoteView`。timeout なら `state: "running"` のまま |
+| `worker_reply` | `server`, `session_id`, `order`, `content?` | `{ server, session_id, order, sent: true }`。session 向け・外向けの両方 |
+| `remote_stop`（session 向けのみ） | `server` | `{ remote_id, server, sent: true, forgotten }` |
+| `remote_list` | `owner?`（外向け。無ければ全件）。session 向けは `include_out_of_scope?` | `RemoteView[]`: `remote_id`, `session`, `server`, `serverName`, `server_label`, `state`, `finishedAt?`, `model`, `createdAt`, `owners` |
+| `remote_wait` | `remote_id?`（`<parent-id>@<server>`）, `server?`, `timeout_sec?`（既定 600、上限 1800）, `owner?`（外向けのみ） | `RemoteView`。timeout なら `state: "running"` のまま |
 | `rc_list` | なし | `RcStatus[]` |
 | `rc_start` | `project`, `resume?` | `RcStatus`（起動済みなら現状を返す。`resume: true` で `--continue`、復帰できなければ素の起動） |
 | `rc_stop` | `project` | `RcStatus` |
@@ -436,7 +436,7 @@ session（`session_create` で作った wrapper 経由の claude。config 由来
 
 ## 窓口の分離
 
-- 外向け `/mcp`: 認証は config の `token`（Bearer）。`session_*`、読み取り専用の `remote_list`、`remote_wait`、`worker_reply`（desktop の `center_call` 用。引数は `{ remote_id?, worker_id, text, server? }`）、`rc_*`、`server_*`。`remote_send` / `remote_create` は無い。
+- 外向け `/mcp`: 認証は config の `token`（Bearer）。`session_*`、読み取り専用の `remote_list`、`remote_wait`、`worker_reply`（desktop の `center_call` 用。引数は `{ server, session_id, order, content? }`）、`rc_*`、`server_*`。`remote_send` / `remote_create` は無い。
 - session 向け `/mcp/session`: `remote_send` / `remote_create`（別名）/ `remote_stop` / `remote_list` / `remote_wait` / `worker_reply` だけ。認証は session の起動ごとに center が作る使い捨て token（`Authorization: Bearer <token>`）と header `X-Bantou-Session: <session 名>` の組で、token はその名前に発行されたものだけ通る。不一致・外向け token・欠落は 401。owner は header の名前で、引数では受けない。MCP session id は窓口をまたいで使えない。
 - token は session の起動（再起動を含む）ごとに作り直し、停止で無効になる。master-cap には環境変数 `BANTOU_SESSION_TOKEN` で渡し、`--mcp-config` の JSON には `${BANTOU_SESSION_TOKEN}` と書く（引数に平文で残さない、ファイルも書かない）。
 
