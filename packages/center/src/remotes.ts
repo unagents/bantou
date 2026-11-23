@@ -18,6 +18,8 @@ export const OWNER_PATTERN = /^[A-Za-z0-9_-]+$/;
 /** remote_wait の既定・上限（秒）。 */
 export const WAIT_DEFAULT_SEC = 600;
 export const WAIT_MAX_SEC = 1800;
+/** remote_send で model を省いた時に launch へ載せるモデル（launch は model が必須）。 */
+export const DEFAULT_WORKER_MODEL = "sonnet";
 /** 集計の変化（running の件数）を見直す間隔（ms）。60 秒の無音で「止まっている」へ変わる時は、書き込みの event が無い。 */
 export const SUMMARY_CHECK_MS = 5_000;
 
@@ -87,7 +89,7 @@ const noNulMsg = { message: "NUL 文字を含められない" };
 /** remote_send の入力（remote_create も同じ）。 */
 export const remoteSendSchema = {
   server: serverArg,
-  model: z.string().regex(MODEL_PATTERN, "英数字と . _ [ ] - のみ（先頭は - 不可）").describe("worker のモデル（launch の model。既定は無い）"),
+  model: z.string().regex(MODEL_PATTERN, "英数字と . _ [ ] - のみ（先頭は - 不可）").optional().describe(`worker のモデル。省略時は ${DEFAULT_WORKER_MODEL}`),
   prompt: z.string().min(1).refine(noNul, noNulMsg).describe("worker にさせる作業"),
 };
 
@@ -114,7 +116,7 @@ export const remoteCreateSchema = remoteSendSchema;
 export interface RemoteSendInput {
   owner: string;
   server: string;
-  model: string;
+  model?: string;
   prompt: string;
 }
 
@@ -303,8 +305,8 @@ export function createRemoteManager(opts: {
       checkOwner(input.owner);
       checkServer(input.server);
       if (input.prompt.length === 0 || input.prompt.includes("\0")) throw new Error("prompt が不正（空・NUL 文字は不可）");
-      const model = input.model;
-      if (typeof model !== "string" || !MODEL_PATTERN.test(model)) throw new Error("model が不正: 英数字と . _ [ ] - のみ（先頭は - 不可）");
+      const model = input.model ?? DEFAULT_WORKER_MODEL;
+      if (!MODEL_PATTERN.test(model)) throw new Error("model が不正: 英数字と . _ [ ] - のみ（先頭は - 不可）");
       checkScope(input.owner, input.server);
       const ws = opts.wsUrl();
       if (ws === undefined) throw new Error("launch を送れない: center の ws の宛先が決まらない（bind が loopback で、config の publicHost が無い。server から届く宛先を publicHost に書く）");

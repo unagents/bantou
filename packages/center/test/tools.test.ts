@@ -276,27 +276,26 @@ test("session_update は SessionManager に引数をそのまま委譲し、例�
   await close();
 });
 
-test("remote_send / remote_create（別名）: owner は session の認証済み名で固定。同じ処理・同じ入力 { server, model, prompt }。引数 owner は受けない。返り値は送った事だけ", async () => {
+test("remote_send / remote_create（別名）: owner は session の認証済み名で固定。同じ処理・同じ入力 { server, model?, prompt }。引数 owner は受けない。返り値は送った事だけ", async () => {
   const { session, calls, close } = await connect();
   const c = await session("pm1");
-  const ok = await c.callTool({ name: "remote_send", arguments: { server: "srv-a", prompt: "go", model: "sonnet" } });
+  const ok = await c.callTool({ name: "remote_send", arguments: { server: "srv-a", prompt: "go" } });
   assert.deepEqual(JSON.parse(text(ok)), { remote_id: "pm1-cap", server: "srv-a", model: "sonnet", sent: true });
   const alias = await c.callTool({ name: "remote_create", arguments: { server: "srv-a", prompt: "go2", model: "opus" } });
   assert.equal(alias.isError, undefined);
   // 自己申告の owner は schema に無いので、渡しても無視される
   await c.callTool({ name: "remote_send", arguments: { server: "srv-b", prompt: "go3", model: "claude-sonnet-5-5", owner: "evil" } });
   assert.deepEqual(calls, [
-    { remoteSend: { owner: "pm1", server: "srv-a", model: "sonnet", prompt: "go" } },
-    { remoteSend: { owner: "pm1", server: "srv-a", model: "opus", prompt: "go2" } },
-    { remoteSend: { owner: "pm1", server: "srv-b", model: "claude-sonnet-5-5", prompt: "go3" } },
+    { remoteSend: { owner: "pm1", server: "srv-a", prompt: "go" } },
+    { remoteSend: { owner: "pm1", server: "srv-a", prompt: "go2", model: "opus" } },
+    { remoteSend: { owner: "pm1", server: "srv-b", prompt: "go3", model: "claude-sonnet-5-5" } },
   ]);
   // 旧形式（goal だけ）・server 無し・prompt 無し・形式が不正な model は schema で拒否され、remotes.send は呼ばれない
   assert.equal((await c.callTool({ name: "remote_send", arguments: { goal: "x" } })).isError, true);
   assert.equal((await c.callTool({ name: "remote_send", arguments: { prompt: "x" } })).isError, true, "server は必須");
   assert.equal((await c.callTool({ name: "remote_send", arguments: { server: "srv-a" } })).isError, true, "prompt は必須");
   assert.equal((await c.callTool({ name: "remote_send", arguments: { server: "srv-a", prompt: "x", model: "a b" } })).isError, true);
-  assert.equal((await c.callTool({ name: "remote_send", arguments: { server: "srv-a", prompt: "a\0b", model: "sonnet" } })).isError, true);
-  assert.equal((await c.callTool({ name: "remote_send", arguments: { server: "srv-a", prompt: "x" } })).isError, true, "model は必須（既定は無い）");
+  assert.equal((await c.callTool({ name: "remote_send", arguments: { server: "srv-a", prompt: "a\0b" } })).isError, true);
   assert.equal(calls.length, 3);
   await c.close();
   await close();
@@ -305,7 +304,7 @@ test("remote_send / remote_create（別名）: owner は session の認証済み
 test("remote_send の失敗（送れない・範囲外など）は isError + {error}", async () => {
   const { session, close } = await connect({}, { remotes: { send: async () => { throw new Error("launch を送れない"); } } });
   const c = await session("pm1");
-  const r = await c.callTool({ name: "remote_send", arguments: { server: "srv-a", prompt: "x", model: "sonnet" } });
+  const r = await c.callTool({ name: "remote_send", arguments: { server: "srv-a", prompt: "x" } });
   assert.equal(r.isError, true);
   assert.deepEqual(JSON.parse(text(r)), { error: "launch を送れない" });
   await c.close();

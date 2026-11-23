@@ -141,7 +141,7 @@ export function registerTools(
     {
       title: "session の設定を取得",
       description:
-        "session のプロジェクト設定 { name, settings } を返す。settings は { instructions?: string（--append-system-prompt に渡す追加指示）, addDirs?: string[]（--add-dir で渡す参照フォルダ。絶対パス）, outputStyle?: string（claude の output style の markdown 本文。session のフォルダの .claude/output-styles/bantou.md に書いて --settings {\"outputStyle\":\"bantou\"} で選ぶ）, servers?: string[]（この session が remote_send / worker_reply で使える server＝host 名。置き場は center の状態 dir の sessions.json の settings.servers（session ごと）。center 共通の設定 center-settings.json には無く、config の servers[]（server の接続・model の設定）とは別物。未設定は全部、空配列は使わない。master-cap には起動時の指示文・remote_list の先頭・変更時の push で知らされる）, …将来の項目 }。未設定は {}。config 由来の project も {}",
+        "session のプロジェクト設定 { name, settings } を返す。settings は { instructions?: string（--append-system-prompt に渡す追加指示）, addDirs?: string[]（--add-dir で渡す参照フォルダ。絶対パス）, outputStyle?: string（claude の output style の markdown 本文。session のフォルダの .claude/output-styles/bantou.md に書いて --settings {\"outputStyle\":\"bantou\"} で選ぶ）, servers?: string[]（この session が remote_send / remote_delete / worker_reply で使える server＝host 名か server_id。置き場は center の状態 dir の sessions.json の settings.servers（session ごと）。center 共通の設定 center-settings.json には無く、config の servers[]（server の接続・model の設定）とは別物。未設定は全部、空配列は使わない。master-cap には起動時の指示文・remote_list の先頭・変更時の push で知らされる）, …将来の項目 }。未設定は {}。config 由来の project も {}",
       inputSchema: { name: z.string().regex(SESSION_NAME, "英数字と _ - のみ") },
     },
     ({ name }) => guard(async () => json(shown(sessions.getSettings(name)))),
@@ -334,7 +334,7 @@ export function registerSessionTools(server: McpServer, deps: { remotes: RemoteM
   }
   const sendHandler = (args: Omit<RemoteSendInput, "owner">): Promise<ToolResult> =>
     guard(async () => {
-      const r = await remotes.send({ owner, server: args.server, model: args.model, prompt: args.prompt });
+      const r = await remotes.send({ owner, server: args.server, prompt: args.prompt, ...(args.model ? { model: args.model } : {}) });
       return json(r);
     });
   server.registerTool(
@@ -342,7 +342,7 @@ export function registerSessionTools(server: McpServer, deps: { remotes: RemoteM
     {
       title: "remote-cap へ指示",
       description:
-        "server に worker の起動（launch）を送る。server は agent-messenger の名前（そのまま宛先）。parent-id にはこの session の cap の名前（<session 名>-cap）が入り、本文に server・worker の指定は入らない。model は必須（既定は無い）。center の ws の宛先も一緒に送り、worker の tracker がそこへ書く。返り値は送った事だけ { remote_id, server, model, sent: true }。worker の結果・report・質問は server から cap の名前（この session）に直接届く（center は転送しない）。worker の動きは remote_list / remote_wait（ws の最後の書き込みから running / 止まっている = 60 秒無音）。この session に使う server の範囲（settings.servers）の外の server には送れない。center の ws の宛先が決まらない（bind が loopback で config の publicHost が無い）時は送らず error",
+        "server に worker の起動（launch）を送る。server は agent-messenger の名前（そのまま宛先）。parent-id にはこの session の cap の名前（<session 名>-cap）が入り、本文に server・worker の指定は入らない。model を省くと sonnet。center の ws の宛先も一緒に送り、worker の tracker がそこへ書く。返り値は送った事だけ { remote_id, server, model, sent: true }。worker の結果・report・質問は server から cap の名前（この session）に直接届く（center は転送しない）。worker の動きは remote_list / remote_wait（ws の最後の書き込みから running / 止まっている = 60 秒無音）。この session に使う server の範囲（settings.servers）の外の server には送れない。center の ws の宛先が決まらない（bind が loopback で config の publicHost が無い）時は送らず error",
       inputSchema: remoteSendSchema,
     },
     sendHandler,
