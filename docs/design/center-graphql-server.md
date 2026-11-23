@@ -141,7 +141,7 @@ desktop (Tauri 2 + Nuxt 4)                          web (Nuxt SPA + Nitro BFF)
 - 【事実】`packages/ui` は Nuxt 4 の layer（`packages/desktop/nuxt.config.ts` の `extends: ["../ui"]`）。Tauri の package に依存せず、`~/tauri`（利用側 project の `src/tauri/` または `app/tauri/` に解決される）の `getTransport()`（`invoke` / `listen`）と `getPlatform()` だけを見る（`CLAUDE.md`「役割分離ルール」、`packages/ui/api/*.ts`）。
 - 【事実】desktop の `~/tauri` は `packages/desktop/src/tauri/{transport,platform,index}.ts`（Tauri の `invoke` / `listen`、updater・relaunch・shell open・file drop・log・fs watch・window）。
 - 【事実】web の `~/tauri` は `packages/web/app/tauri/{transport,platform,session-watch,index}.ts`。command は `POST /api/rpc/<cmd>`、event は `GET /api/events`（SSE）、端末は `GET /api/sessions/<n>/output`（EventSource）と `POST …/input|resize|attachments`（`packages/web/app/tauri/transport.ts`）。command 名・event 名・payload の型は desktop と同じ。
-- 【事実】web の backend（Nitro、`packages/web/server/`）は `packages/center-client` を持つ BFF。`packages/center-client/src/commands.ts` が「desktop の Rust command と同じ名前・同じ args・同じ結果」の表（`createCommands`）を持ち、center の MCP tool に翻訳する。center の token は backend が持ちブラウザに出さない。許可する center tool は絞る（`packages/center-client/src/tool-policy.ts` の `WEB_ALLOWED_TOOLS`。`session_delete`・`server_retire` は web に出さない）。守りは Cloudflare Access（`packages/web/server/plugins/00.guard.ts`、`packages/web/server/utils/guard/`）。
+- 【事実】web の backend（Nitro、`packages/web/server/`）は `packages/center-client` を持つ BFF。`packages/center-client/src/commands.ts` が「desktop の Rust command と同じ名前・同じ args・同じ結果」の表（`createCommands`）を持ち、center の MCP tool に翻訳する。center の token は backend が持ちブラウザに出さない。許可する center tool は絞る（`packages/center-client/src/tool-policy.ts` の `WEB_ALLOWED_TOOLS`。`session_delete` は web に出さない）。守りは Cloudflare Access（`packages/web/server/plugins/00.guard.ts`、`packages/web/server/utils/guard/`）。
 - 【事実】web の `Platform.centerSidecar` は false（`packages/web/app/tauri/platform.ts`）。設定画面は「自分で center を起動する」項目を出さず、接続先 center の url と token だけを持つ（`packages/ui/components/SettingsDialog.vue` の `webMode`）。
 - 【推測】`center-client` の command 表は、そのまま GraphQL の resolver の素材になる（同じ許可・同じ検査・同じ変換）。移行の入口はここ（4 節）。
 
@@ -149,13 +149,12 @@ desktop (Tauri 2 + Nuxt 4)                          web (Nuxt SPA + Nitro BFF)
 
 - 【事実】session の実体は、center が `pty-wrapper`（`packages/pty-wrapper`、Rust）経由で動かす対話型 `claude --remote-control <名前>`（`packages/center/src/wrapper.ts`、`remote-control.ts`、`docs/design/master-cap-session.md`）。出力は center の `core`（`packages/center/src/core.ts`）が session ごとに queue（上限は `CORE_QUEUE_MAX_BYTES`）で持ち、購読者へ配る。入力・サイズ変更は wrapper へ渡る（最後にサイズを送った側が勝つ）。
 - 【事実】session の claude には MCP が 2 系統付く: `/mcp/session`（master-cap 向け。`session_resession` など。session token で認証、`packages/center/src/session-auth.ts`、`mcp-session.ts`）と、`/mcp`（外向け。token）。加えて center の設定の `memory`・`mcpServers` が全 session の `--mcp-config` に足される（`docs/design/external-memory.md`、`packages/center/src/mcp-source.ts`）。hook / statusLine は `POST /sessions/<n>/hook|status-line`（session token）で center に届く（`http.ts:30-31`）。
-- 【事実】center の MCP tool は `packages/center/src/tools.ts` の `registerTool(` の呼び出しは 33 箇所（`registerTools(` の定義は数えない）で、異なる名前は 30 個（`worker_reply`・`remote_list`・`remote_wait` が 2 回ずつ登録される）。名前は下記。session 系（`session_create` `session_delete` `session_sleep` `session_wake` `session_update` `session_settings_get/update` `session_list` `session_login` `session_login_code` `session_resession`）、center 系（`center_settings_get/update` `center_info`）、remote 系（`remote_list` `remote_send` `remote_create` `remote_delete` `remote_wait` `task_status` `worker_reply` `worker_resume`）、rc 系（`rc_list` `rc_start` `rc_stop` `rc_status`）、server 系（`server_list` `server_peers` `server_status` `server_retire`）。
+- 【事実】center の MCP tool は `packages/center/src/tools.ts` の `registerTool(` で登録している。名前は下記。session 系（`session_create` `session_delete` `session_sleep` `session_wake` `session_update` `session_settings_get/update` `session_list` `session_login` `session_login_code` `session_resession`）、center 系（`center_settings_get/update` `center_info`）、remote 系（`remote_list` `remote_send` `remote_create` `remote_wait` `task_status` `worker_reply`）、rc 系（`rc_list` `rc_start` `rc_stop` `rc_status`）、server 系（`server_list`）。
 - 【事実】center → remote の経路は agent-messenger の protocol `bantou`（`packages/center/src/server-link.ts`、`docs/protocol.md`）。desktop・web はこれに関わらない。
 
 ### 1.6 app の更新で center が上がる流れ
 
 - 【事実】app の更新は `tauri_plugin_updater`（`packages/desktop/src-tauri/tauri.conf.json` の `plugins.updater`、endpoint は GitHub Releases の `latest.json`）。`packages/ui/composables/useUpdater.ts` が `checkForUpdate` → `downloadAndInstall` → `relaunch` を呼ぶ（desktop の `platform.ts`）。center は同じ bundle の中の binary なので、app を更新して relaunch すると新しい center が sidecar として起動する（`RunEvent::Exit` で古い center は止まる）。
-- 【事実】center が組にする server の版は、build 時に center へ埋め込む（`build-sidecar.ts` の `--env=BANTOU_PAIR_SERVER_VERSION`）。center は発見した server に `hello` を送って版を確かめ、違えば `update_server` で組の版を指示する（`packages/center/src/follow.ts`、`docs/architecture.md` の server の項 13）。
 - 【事実】center が止まると session の claude も止まる（SIGTERM で子を止める。次の起動で `restore()` が `--continue` で戻す、`packages/center/src/sessions.ts` の `restore`、`daemon.ts:354`）。今は「app の再起動 = center の再起動 = 全 session の再起動」になっている（`origin/feat/app-restart-check` の設計 1.1 も同じ読み）。
 
 ### 1.7 今の形の問題（この設計が解く事）
@@ -326,7 +325,7 @@ center（GraphQL を持つ backend の server。program は 1 つ、起動の形
 
 - bantou-center.app の更新で新しい binary が入っても、launchd が起動済みの center は旧 binary で動き続ける【推測。bundle の置き換え中・後に実行 file と launchd の登録がどうなるかは【未確認】、6 節】。
 - 新しい版にするには center の再起動が要る。入口は未決 #18（desktop の画面から GraphQL で / CLI で / OS の操作で）。再起動で session の claude は止まり、`restore()` が `--continue` で戻す（1.6。session の中断は今と同じ）。
-- 版の違いの検出: client が GraphQL で center の版を取り、自分の版と比べる（#13）。server の版合わせは今の `follow.ts`（`BANTOU_PAIR_SERVER_VERSION`、build が埋める）のまま。
+- 版の違いの検出: client が GraphQL で center の版を取り、自分の版と比べる（#13）。
 - bantou-center.app 自体の更新の配り方（cask / updater）は未決 #3。
 
 #### 2.7.5 止め方・常駐をやめる
@@ -514,7 +513,7 @@ ui・desktop・web の画面側の呼び出しを grep で数え、3.1〜3.4 の
 並行できる単位（依存の少ない順）:
 
 - A（GraphQL server 本体: schema・resolver・認証・subscription）は、C（bantou-center.app）と並行できる。互いに触る file が別（A は `packages/center/src` と新しい resolver、C は新しい app の package・build・cask・center の `service` subcommand）。
-- A の中でも、query 群（session・remote・server・rc の読み取り）、mutation 群（session の操作・設定・login・retire）、subscription（`sessionsChanged`・`sessionMessage`・`terminalOutput`・`centerStatus`）は、schema の合意（2.3）ができた後は別 worker に分けられる。端末の subscription は `core.ts` の購読（`after` / `reset` / `end`）に依存するので 1 つにまとめる。
+- A の中でも、query 群（session・remote・server・rc の読み取り）、mutation 群（session の操作・設定・login）、subscription（`sessionsChanged`・`sessionMessage`・`terminalOutput`・`centerStatus`）は、schema の合意（2.3）ができた後は別 worker に分けられる。端末の subscription は `core.ts` の購読（`after` / `reset` / `end`）に依存するので 1 つにまとめる。
 - C は C1・C2・C3・C4 に分けられる。C1 が app の土台で、C2・C3 はその上。C4 は desktop 側（`center.rs` の起動前の確認）と center 側（二重起動の検出）で別 worker にできる。#14・#15 の決定が先。
 - B は A の schema に依存する（schema の合意後、client の差し替えは `packages/ui/api/` のファイルごとに分けられる: sessions / center / terminal / attachment。web の transport と desktop の transport は別 worker）。
 - D は B の完了後。C とは独立。E・F は C の後、E は #6 の決定後。
@@ -568,7 +567,7 @@ code は書かないので、ここは実装の task が足す test と、実機
 - GraphQL server の部品（未決 #1）が `bun build --compile` の単体 binary で動く事。今は `@modelcontextprotocol/sdk` と zod が compile で遅延初期化に包まれて落ちた事がある（`packages/center/src/cli.ts` の冒頭の注記）。同種の問題が GraphQL の部品で出ないか。
 - 端末の subscription の実測: 出力が多い時の遅延・切断・再接続の後の続き。web の Cloudflare 経由（SSE / WebSocket が通る条件。web 設計 8.5）。
 - 認証: 別 host の client（LAN・Tailscale）が、IP の範囲に入っていれば鍵を取って繋げる事。範囲外は鍵を取れない事。
-- 更新: center を入れ替えて再起動した時の session の中断の長さと、`follow.ts` の server の版合わせ。
+- 更新: center を入れ替えて再起動した時の session の中断の長さ。
 - desktop: center の service が止まっている時に「繋がらない」を画面に出して、戻れば自動で再接続する。
 - 窓の無い app（2.7.2）: 初回の起動（未登録）・launchd 起動・手で起動（既に動いている / 止まっている）・OS で無効化された後、の各状態で、振る舞いが表のとおりになる。登録の結果が log に残る。
 - 登録: 管理者権限なしで登録でき（LaunchAgent の場合。#2）、冪等（2 回起動しても二重に登録しない）。登録の解除（入口は #18）が通る。
