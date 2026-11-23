@@ -171,6 +171,8 @@ pub fn resolve_workspace(workspace: &str, home: &Path) -> PathBuf {
 
 /// Config file for the center: no projects (no session is started at launch). The workspace is passed
 /// as `workspace`, which the center uses only as the default place for `session_create` without a path.
+/// The picked IP (`bind`) goes in as `publicHost`: the center listens on `LISTEN_BIND` (wildcard), so
+/// without it the center cannot name its own ws URL for `launch` (`remote_send` fails). Empty: omitted.
 pub fn build_config(s: &CenterSettings, home: &Path) -> serde_json::Value {
     let mut remote_control = serde_json::json!({});
     if let Some(v) = &s.claude_path {
@@ -182,6 +184,9 @@ pub fn build_config(s: &CenterSettings, home: &Path) -> serde_json::Value {
     });
     if !s.token.is_empty() {
         cfg["token"] = s.token.clone().into();
+    }
+    if !s.bind.is_empty() {
+        cfg["publicHost"] = s.bind.clone().into();
     }
     cfg
 }
@@ -206,12 +211,13 @@ fn config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 
 /// Whether applying `new` needs a stop/start. `running_with` is the settings the live
 /// center was started with (None when not running). `remote` is not passed to the
-/// center, so it never forces a restart; neither does `bind` (the center always listens on every address). `claude_path` and `token` change what the child
-/// gets, so they do.
+/// center, so it never forces a restart. `bind` (written as `publicHost`, read by the center only
+/// at startup), `claude_path` and `token` change what the child gets, so they do.
 pub fn needs_restart(running_with: Option<&CenterSettings>, new: &CenterSettings) -> bool {
     match running_with {
         Some(old) => {
             !new.enabled || old.port != new.port
+                || old.bind != new.bind
                 || old.workspace != new.workspace
                 || old.claude_path != new.claude_path
                 || old.token != new.token
@@ -960,6 +966,15 @@ mod tests {
         assert_eq!(v["workspace"], "/w/x");
     }
 
+    #[test]
+    fn config_json_names_the_picked_ip_as_public_host() {
+        // the center listens on the wildcard, so the picked IP is what it names in the ws URL for launch
+        let s = CenterSettings { bind: "192.168.1.50".into(), ..Default::default() };
+        assert_eq!(build_config(&s, Path::new("/h"))["publicHost"], "192.168.1.50");
+        // nothing picked: the key is absent (the center's schema rejects an empty string)
+        assert!(build_config(&CenterSettings::default(), Path::new("/h")).get("publicHost").is_none());
+    }
+
     fn tmp_dir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("bantou-ws-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
@@ -1021,8 +1036,8 @@ mod tests {
         assert!(needs_restart(Some(&on), &CenterSettings { token: "another-token-1".into(), ..on.clone() }));
         // running, effective change: restart
         assert!(needs_restart(Some(&on), &CenterSettings { port: 7911, ..on.clone() }));
-        // the picked IP only names the connection settings' host: no restart
-        assert!(!needs_restart(Some(&on), &CenterSettings { bind: "192.168.1.50".into(), ..on.clone() }));
+        // the picked IP is the center's publicHost, read only at startup: restart
+        assert!(needs_restart(Some(&on), &CenterSettings { bind: "192.168.1.50".into(), ..on.clone() }));
         assert!(needs_restart(Some(&on), &CenterSettings { workspace: "/y".into(), ..on.clone() }));
         assert!(needs_restart(Some(&on), &CenterSettings { claude_path: Some("/x/claude".into()), ..on.clone() }));
         // running, disabled: stop
