@@ -222,9 +222,8 @@ center（GraphQL を持つ backend の server。program は 1 つ、起動の形
 | `sessionSettings(name)` | `ProjectSettings`（instructions / addDirs / outputStyle / servers）。launcher 鍵で守っていた 7 項目（memory / mcpServers / projectMemory / mcp / mcpConnections / mcpSecrets / coordinator）も、client の画面から変えられる（決定 6。field の形は #6） | `session_settings_get` |
 | `centerSettings` | center 共通の設定（`CenterCommonSettings`）（今の `center_settings_get` は `launcher`（呼び出し元が起動元か）も返す。型は `packages/ui/api/center.ts` の `{ settings, launcher? }`。起動元で client を分ける形は無くなるので、`launcher` は不要になる見込み。決定 6） | `center_settings_get` |
 | `centerInfo` | `{ workspace, systemInstructions[]（id / version / title） }`（`center_info` の形。`session_path_hints` の素は workspace。今の `launcher` は上と同じ理由で不要になる見込み） | `center_info` |
-| `remotes` | `CenterRemoteRecord[]`（state・未完了の指示・最新の result / error・`task_result`・`worker_reports`・activity） | `remote_list` |
-| `servers` | `CenterServerInfo[]`（server の一覧と版・follow 状態） | `server_list` |
-| `serverPeers(refresh)` | `CenterServerPeers`（版の突き合わせ） | `server_peers` |
+| `remotes` | `CenterRemoteRecord[]`（remote_id・session・owners・server・serverName・server_label・state・model・createdAt・finishedAt） | `remote_list` |
+| `servers` | `ServerInfo[]`（broker に protocol「bantou」で登録されている peer の一覧。name・host・protocol の版・lastSeen・version（server-info の答え）） | `server_list` |
 | `rcStatus` | `CenterRcStatus[]` | `rc_list` |
 | `terminalOutputSince(session, after)` | 端末の出力の取り直し（`after` 以降のチャンク）。通常は subscription `terminalOutput` を使う。root type が別なので同名の field も書けるが、混同を避けて Query 側の名前を分ける | `GET /sessions/<n>/output?after=` |
 
@@ -240,8 +239,7 @@ center（GraphQL を持つ backend の server。program は 1 つ、起動の形
 | `deleteSession(name)` | 今の desktop の UI は使っていない（web も許可していない）。出すかは未決 #5 | `session_delete` |
 | `startSessionLogin(name)` / `submitSessionLoginCode(name, code)` | session の claude の再ログイン | `session_login` / `session_login_code` |
 | `restartSession(name)` | 再起動（今は `rc_stop` → `rc_start(resume)` の 2 手、`packages/ui/api/center.ts:118-121`）。1 つの操作にする案 | `rc_stop` + `rc_start` |
-| `replyWorker(remoteId, server, workerId, text)` | worker への返答 | `worker_reply` |
-| `retireServer(serverId)` | server の退役（取り返しがつかない。web には出さない扱いを引き継ぐ。鍵を持つ client の中で区別するかは未決 #4 / 2.4 の最後の点） | `server_retire` |
+| `replyWorker(server, sessionId, order, content?)` | worker への返答（order は answer / approve / reject） | `worker_reply` |
 | `terminalInput(session, dataB64)` / `terminalResize(session, cols, rows)` | 端末の入力・サイズ | `POST /sessions/<n>/input|resize` |
 | `attachToSession(session, …)` | 画像の添付。bytes を GraphQL に載せるか、既存の HTTP route を残すかは未決 #7 | `POST /sessions/<n>/attachments` |
 
@@ -252,7 +250,7 @@ center（GraphQL を持つ backend の server。program は 1 つ、起動の形
 | `sessionsChanged` | `SessionsEvent`（reason + name）。client は取り直す（今の使い方）か、差分を直接受ける【案】 | center `/events`、`center-sessions-changed` |
 | `sessionMessage` | turn の終わりの最後の応答（session / text / at） | `/events` の `session-message`、`center-session-message` |
 | `terminalOutput(session, after)` | `{ id, data(base64) }` / `reset` / `status`（`end` を含む）。切れたら `after` で続きから | `GET /sessions/<n>/output`、`session-output` / `session-output-status` |
-| `remotesChanged` | 画面が `remote_list` を取り直す契機（今は `SessionsEvent.reason = remote` と activity で足りているか確かめる【未確認】） | 同上 |
+| `remotesChanged` | 画面が `remote_list` を取り直す契機（`SessionsEvent.reason = remote`（remote の running 件数が変わった時）） | 同上 |
 | `centerStatus` | center 自身の状態（版・稼働・認証の要否など。今 desktop が子 process の状態を `center_status` で出している所の置き換え） | `center_status`（Rust） |
 
 - 型の規則: 今の `Session` の `null` は「古い center が送らない」の意味を含む（`packages/ui/types/index.ts` の注記）。center と client が同じ release で動く前提になるので、その互換の扱い（client が新しく center が古い時の振る舞い）を決める必要がある（段階 B の完了条件、4 節）。
@@ -270,7 +268,7 @@ center（GraphQL を持つ backend の server。program は 1 つ、起動の形
 - 「launcher 鍵」の置き換え（決定 6）: 今は desktop が sidecar を起動した事を、起動ごとの鍵で証明する。起動元だけが `memory`・`mcpServers` を読み書きでき、`projectMemory` を読める（書きは `bantou-center memory set --session`・移行・設定 file の直接編集だけ）。旧設定の `mcp`・`mcpConnections`・`mcpSecrets`・`coordinator` は誰からも MCP では書けない。守る項目は合わせて 7 つ（`CENTER_ONLY_KEYS`: `packages/center-client/src/tool-policy.ts:45`、`packages/center/src/project-settings.ts` の `LAUNCHER_KEYS` + `LEGACY_INTERNAL_KEYS` + `FILE_ONLY_KEYS`）。書きは `assertCenterOnly`、読みは `withoutLauncherKeys` が絞る（定義は `project-settings.ts`、`tools.ts`・`sessions.ts` が呼ぶ）。決定 6 で、client の app の上で、この 7 項目を含む設定の変更を全部できる形になる。起動元の証明（launcher 鍵）で client を分ける形は無くなり、見え方は (a) でも (b) でも web でも同じになる。7 項目の GraphQL 上の形は #6。
 - 設定の保存先は center の host（今は mac200）。client が保存する接続の設定は center の IP だけ（port は変えた時だけ。決定 5・6）。client が center を MCP の server として指定する形は無くなる。「client で入れる唯一の設定は IP」は、「(b) につなぐ時に入れる接続の設定が IP だけ」の意味で、(a)/(b) の選択（#34）とは別。desktop は今どおり「center を起動」を選ぶと (a) になり、その時は IP を入れない。(b) の server につなぐ時だけ IP を入れる。
 - 設定の見え方（決定 6。#33）: (a) でも (b) でも、client の画面で見せるのは同じ。見せないのは (a) の起動と接続の設定（IP・port・bind・鍵・鍵を渡す IP の範囲）だけ。workspace・claudePath は session の作業に関わる設定なので、(a)・(b) とも client の画面で変えられ、保存先は center の host。
-- 取り返しのつかない操作（`retireServer`、`deleteSession`）を鍵の持ち主の中で区別する決定は無い。今は desktop だけ（web は許可 list から外す）。区別を足すかは利用者が決める（web の形は #4）。
+- 取り返しのつかない操作（`deleteSession`）を鍵の持ち主の中で区別する決定は無い。今は desktop だけ（web は許可 list から外す）。区別を足すかは利用者が決める（web の形は #4）。
 
 ### 2.5 client 側（desktop は何を持ち何を捨てるか。web との共有）
 
@@ -440,7 +438,7 @@ desktop は (a) を起動する前に、自分が決めた IP・port の状態�
 | `center_regenerate_token` | `centerRegenerateToken` | 鍵の方式に置き換わる（2.4） |
 | `center_ip_status`（center.rs:744） | 同名 | 無くなる（下の center_snippet.rs の 3 つと同じ用途。token 入りの URL を貼る形が鍵の方式に置き換わる。2.4） |
 | `center_local_ips` / `center_connect_snippets` / `center_parse_connect`（center_snippet.rs） | 同名 | 無くなる（token 入りの URL を貼る形は、鍵の方式に置き換わる。2.4。`center_local_ips` などの OS 側の補助を残すかは実装の task） |
-| `center_call`（center_mcp.rs） | `centerCall` / `centerTool` / `centerToolStrict`（12 個の tool、3.2） | 3.2 の各 query / mutation に分ける。汎用の `center_call` は無くす |
+| `center_call`（center_mcp.rs） | `centerCall` / `centerTool` / `centerToolStrict`（10 個の tool、3.2） | 3.2 の各 query / mutation に分ける。汎用の `center_call` は無くす |
 | `center_connection`（center_mcp.rs） | `centerConnection` | client のローカルの接続状態（GraphQL の疎通。`CenterConnection`） |
 | `session_output_start` / `session_output_stop`（terminal.rs） | `sessionOutputStart` / `sessionOutputStop`（`packages/ui/api/terminal.ts`） | subscription `terminalOutput` の開始・解除 |
 | `session_input` / `session_resize` | `sessionInput` / `sessionResize` | mutation `terminalInput` / `terminalResize` |
@@ -452,18 +450,16 @@ desktop は (a) を起動する前に、自分が決めた IP・port の状態�
 | `agent_open` / `agent_close` / `agent_say` / `agent_answer`（agent.rs） | `agentOpen` ほか（`ThreadModal.vue`） | **変わらない**（未決 #8） |
 | `create_task` / `update_task_status`（task.rs） | ui は呼んでいない（`docs/handoff.md` の Open） | 触らない |
 
-### 3.2 center の MCP tool を `centerTool` / `centerCall` で直接呼んでいる物（12 個）
+### 3.2 center の MCP tool を `centerTool` / `centerCall` で直接呼んでいる物（10 個）
 
 | tool | 呼ぶ所 | 変更後 |
 |---|---|---|
 | `remote_list` | `RemoteActivity.vue:23` | query `remotes` |
 | `worker_reply` | `RemoteActivity.vue:98` | mutation `replyWorker` |
-| `server_peers`（`refresh` あり） | `CenterDialog.vue:41`、`ProjectSettingsFields.vue:52` | query `serverPeers` |
 | `server_list` | `CenterDialog.vue:62` | query `servers` |
 | `rc_list` | `CenterDialog.vue:61` | query `rcStatus` |
 | `rc_start` / `rc_stop`（`sessionRestart`） | `packages/ui/api/center.ts:118-121` | mutation `restartSession`（または 2 つの mutation） |
 | `center_settings_get` / `center_settings_update` | `packages/ui/api/center.ts:33-37` | query `centerSettings` / mutation `updateCenterSettings` |
-| `server_retire` | `packages/ui/api/center.ts:100` | mutation `retireServer` |
 | `session_login` / `session_login_code` | `packages/ui/api/center.ts:103-110` | mutation `startSessionLogin` / `submitSessionLoginCode` |
 
 ### 3.3 event（ui の `listen` 12 個）
@@ -494,10 +490,10 @@ Host の検査: `/events` と `/sessions/<n>/output|input|resize|attachments` �
 ui・desktop・web の画面側の呼び出しを grep で数え、3.1〜3.4 の行と突き合わせた。
 
 - Tauri command: `generate_handler!` に 43 個（workspace 4 / task 4 / thread 2 / broker 3 / agent 4 / session 9 / center 5 / center_snippet 3 / center_mcp 2 / terminal 4 / attachment 3）。ui の `invoke("…")` が名指しする物は 41 個（`create_task`・`update_task_status` の 2 個は呼ばれていない）。3.1 の表は 43 個全部を含む。
-- `centerTool` / `centerToolStrict` / `centerCall` の tool 名: `remote_list` `worker_reply` `server_peers` `server_list` `rc_list` `rc_start` `rc_stop` `center_settings_get` `center_settings_update` `server_retire` `session_login` `session_login_code` の 12 個。3.2 の表に全部ある。
+- `centerTool` / `centerToolStrict` / `centerCall` の tool 名: `remote_list` `worker_reply` `server_list` `rc_list` `rc_start` `rc_stop` `center_settings_get` `center_settings_update` `session_login` `session_login_code` の 10 個。3.2 の表に全部ある。
 - `listen` する event 名: 12 個（`center-sessions-changed` `center-session-message` `session-output` `session-output-status` `bantou://center-running` `bantou://os-wake` `bantou://os-network-changed` `bantou://sessions-changed` `bantou://threads-changed` `bantou://pings-changed` `bantou://agent` `menu:check-for-updates`）。3.3 の表に全部ある。
 - web の `~/tauri`（`packages/web/app/tauri/transport.ts`）が受ける command は desktop と同じ名前（`POST /api/rpc/<cmd>`）。`packages/center-client/src/commands.ts` の表がその実装で、3.1 の center 系・session 系と一致する。
-- center の MCP tool（`tools.ts`）のうち、画面が使うのは 3.2 の 12 個と、web の backend が内部で使う `session_list` `session_create` `session_update` `session_sleep` `session_wake` `session_settings_get/update` `center_info`（`tool-policy.ts` の `WEB_ALLOWED_TOOLS`）。残り（`session_delete` `session_resession` `remote_send` `remote_create` `remote_delete` `remote_wait` `task_status` `worker_resume` `rc_status` `server_status`）は画面から呼ばれていない。master-cap（`/mcp` を使う素のエージェント）の道具として残す（未決 #5）。
+- center の MCP tool（`tools.ts`）のうち、画面が使うのは 3.2 の 10 個と、web の backend が内部で使う `session_list` `session_create` `session_update` `session_sleep` `session_wake` `session_settings_get/update` `center_info`（`tool-policy.ts` の `WEB_ALLOWED_TOOLS`）。残り（`session_delete` `session_resession` `remote_send` `remote_create` `remote_stop` `remote_wait` `task_status` `rc_status`）は画面から呼ばれていない。master-cap（`/mcp` を使う素のエージェント）の道具として残す（未決 #5）。
 
 ## 4. 移行の段取り（段階に分ける。各段で動く物が残る）
 
