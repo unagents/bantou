@@ -13,7 +13,7 @@
 - center が終わると、app は設定の port を別の center が今使っているかを見て終わる。使用中 = 0（譲る。launchd は再起動しない）、空き = 1（launchd が再起動する）。center の終了状態は見ない。
 - menu bar に項目が出る（#18 = A）。「止める」は center を止めて app を正常終了（0）する。KeepAlive は `SuccessfulExit: false` なので launchd は再起動しない。
 - 「設定の file を開く」は `~/.local/share/bantou/center-server.json` を既定の app で開く（`open`）。設定画面・状態の表示は無い。
-- Finder から起動した instance は、launchd に登録できた（登録済みを含む）なら center を起こさず exit 0 し、launchd の instance に任せる。launchd の起動かは環境変数 `XPC_SERVICE_NAME` が plist の Label かで見る。登録に失敗した（承認待ち・無効を含む）時だけ、自分で center を起こす。
+- Finder から起動した instance は、launchd に登録できた（登録済みを含む）なら center を起こさず exit 0 し、launchd の instance に任せる。登録済み（enabled）でも launchd に job が実際に在るかを `launchctl print gui/<uid>/<Label>` の成否で確かめ、無ければ `SMAppService.unregister()` → `register()` で載せ直す。launchd の起動かは環境変数 `XPC_SERVICE_NAME` が plist の Label かで見る。登録に失敗した（承認待ち・無効を含む）時と、載せ直しても job が無い時だけ、自分で center を起こす。
 - 二重に起動しても何もしない（single-instance）。SIGTERM（launchd の停止）では center を止めてから終わる（最大 15 秒）。
 
 ## build

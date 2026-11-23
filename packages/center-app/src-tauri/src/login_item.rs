@@ -31,6 +31,33 @@ pub fn action_for(status: isize) -> Action {
     }
 }
 
+/// What to do for an agent whose status is enabled: SMAppService can say enabled while launchd has no job
+/// (after `launchctl bootout`), and then nothing would run the center.
+#[derive(Debug, PartialEq, Eq)]
+pub enum EnabledAction {
+    /// The job is in launchd: leave it to launchd's instance.
+    Keep,
+    /// No job in launchd: unregister, then register again to put it back.
+    Reload,
+}
+
+pub fn action_for_enabled(job_in_launchd: bool) -> EnabledAction {
+    if job_in_launchd {
+        EnabledAction::Keep
+    } else {
+        EnabledAction::Reload
+    }
+}
+
+/// After the re-register: launchd only runs the center when the job is in it now.
+pub fn registration_after_reload(reregistered: bool, job_in_launchd: bool) -> Registration {
+    if reregistered && job_in_launchd {
+        Registration::Launchd
+    } else {
+        Registration::NotLaunchd
+    }
+}
+
 /// Whether launchd runs (or now will run) the agent.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Registration {
@@ -51,6 +78,22 @@ pub fn should_start_center(launchd_job: bool, reg: Registration) -> bool {
     launchd_job || reg == Registration::NotLaunchd
 }
 
+/// Whether launchd has the job: only the exit status of `launchctl print gui/<uid>/<label>` (output unused).
+#[cfg(target_os = "macos")]
+fn job_in_launchd() -> bool {
+    use std::process::{Command, Stdio};
+    // SAFETY: getuid has no preconditions.
+    let uid = unsafe { libc::getuid() };
+    let target = format!("gui/{uid}/{}", PLIST_NAME.trim_end_matches(".plist"));
+    Command::new("launchctl")
+        .args(["print", &target])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 #[cfg(target_os = "macos")]
 pub fn ensure_registered() -> Registration {
     use objc2_foundation::NSString;
@@ -63,8 +106,28 @@ pub fn ensure_registered() -> Registration {
     log::line(&format!("launchd の登録の状態: {status:?}"));
     match action_for(status.0) {
         Action::Nothing => {
-            log::line("launchd に登録済み");
-            Registration::Launchd
+            if action_for_enabled(job_in_launchd()) == EnabledAction::Keep {
+                log::line("launchd に登録済み");
+                return Registration::Launchd;
+            }
+            log::line("launchd に job が無い。登録を外して載せ直す");
+            if let Err(e) = unsafe { service.unregisterAndReturnError() } {
+                log::line(&format!("launchd の登録を外せない: {}", e.localizedDescription()));
+            }
+            let reregistered = match unsafe { service.registerAndReturnError() } {
+                Ok(()) => true,
+                Err(e) => {
+                    log::line(&format!("launchd に載せ直せない: {}", e.localizedDescription()));
+                    false
+                }
+            };
+            let reg = registration_after_reload(reregistered, job_in_launchd());
+            if reg == Registration::Launchd {
+                log::line("launchd に載せ直した");
+            } else {
+                log::line("launchd に job が無いまま。自分で center を起こす");
+            }
+            reg
         }
         Action::LogDisabled => {
             log::line("launchd の登録は承認待ちか無効（System Settings > Login Items で許可する）。次の login から自動では起動しない");
@@ -99,6 +162,20 @@ mod tests {
         assert_eq!(action_for(3), Action::Register);
         assert_eq!(action_for(1), Action::Nothing);
         assert_eq!(action_for(2), Action::LogDisabled);
+    }
+
+    #[test]
+    fn enabled_agent_without_a_launchd_job_is_reloaded() {
+        assert_eq!(action_for_enabled(true), EnabledAction::Keep);
+        assert_eq!(action_for_enabled(false), EnabledAction::Reload);
+    }
+
+    #[test]
+    fn reload_counts_as_launchd_only_when_the_job_is_back() {
+        assert_eq!(registration_after_reload(true, true), Registration::Launchd);
+        assert_eq!(registration_after_reload(true, false), Registration::NotLaunchd);
+        assert_eq!(registration_after_reload(false, true), Registration::NotLaunchd);
+        assert_eq!(registration_after_reload(false, false), Registration::NotLaunchd);
     }
 
     #[test]
