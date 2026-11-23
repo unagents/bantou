@@ -1,48 +1,96 @@
-# center の起動を「desktop の裏の起動（S）」と「bantou-center の常駐（D）」の 2 形にし、GraphQL を持たせる設計
+# center を GraphQL の endpoint を持つ backend の server にし、起動を「desktop の裏の起動（S）」と「bantou-center の常駐（D）」の 2 形にする設計
 
-- 作成: 2026-11-23（同日、利用者の訂正と追加の決定を 2 回反映して改訂）
+- 作成: 2026-11-23（同日、利用者の決定を反映して複数回改訂。この版は 0 節の決定 1〜9 を正とする）
 - 基点: `develop` 4d98817（0.1.62）
 - 範囲: 設計だけ。code・test・設定は変えていない。
 - 書き方: 【事実】は repo の code / docs を開いて確かめた事（`file:行`。repo root からの path）。【推測】は確かめていない解釈。【未確認】は実測が要る事。決まっていない点は「未決 #N」（7 節）。
 - 関係する既存の設計: `docs/concept.md`、`docs/architecture.md`、`docs/protocol.md`、`docs/design/resession.md`、`docs/design/master-cap-session.md`、`docs/design/center-tools.md`、web 版の設計（`origin/docs/web-app-design` の `docs/history/20261111-2342-web-app-design/design.md`）、進行中の `origin/feat/app-restart-check` と `origin/feat/sleep-resession`（5 節）。
 
-## 0. 利用者の指示（原文）と、決めてある事
+## 0. 利用者の決定（出た順。原文つき）と、この設計の言葉
+
+この節の 1〜9 を正とする。本文（1 節以降）がこの節と食い違う所は、この節に合わせて直してある。以前の版が書いていた「port を入力しない（規定 port のみ）」「Bearer token 1 本」「launcher 鍵で起動元だけが設定を変えられる」「接続設定（token 入りの URL）の貼り付け」は、決定 5〜8 で置き換わった。
+
+版の履歴: 初版（4edee56）は「app に同梱しない・sidecar をやめる」、第 2 版（8ac588a）は「app が launchd に登録する」、第 3 版（4ee5501）は S と D の 2 形、第 4 版（dc8da51）は「規定 port のみ」を書いた。01cd7d1 と ae4d942 は、これらを「出所が確認できない」として取り下げたが、利用者の決定（下の 2〜5）が出所だと分かったので、`git revert`（9bbbaae・90e4b50。通常の commit）で打ち消した。review の指摘を反映した d241443（launcher 鍵の 7 項目・添付の分け方・行番号など）は残している。この版は、決定 6〜9 を足して書き直した。
+
+### 決定（出た順）
+
+**決定 1: center は GraphQL の endpoint を持つ backend の server**
 
 > center起動のbantouとclient起動のbantouの起動の仕組みを根本で変更する
 >
 > centerはデスクトップアプリにしないで、普通にlaunchでサーバーを起動させる。graphqlのエンドポイントを持ったバックエンドサーバー。クライアントアプリはフロントエンドアプリと同じようにgraphqlのエンドポイントを叩いて画面を操作するイメージ
 
-利用者の訂正:
+center は GraphQL の endpoint を持つ backend の server。client の app（desktop・web）は、frontend の app と同じく、その endpoint を叩いて画面を動かす。
+
+**決定 2: center は app に同梱して配る**
 
 > いや、app同梱はする。
 
-利用者の追加の決定:
+center は app に同梱して配る。版も app と一緒。
+
+**決定 3: 起動の形は S と D の 2 つ**
 
 > まず普通にdesktopアプリを起動。この時、centerを起動っていうのを選ぶと、裏でcenter起動。これは今と同じ。で、desktopアプリとしてbantou-centerっていうのを別で用意する。そいつを起動すると、画面がないプロセスが起動する
->
+
+- **S（sidecar 起動）**: desktop の app を普通に起動し、「center を起動」を選ぶと裏で center が起動する。今と同じ（`center.rs`、1.2）。
+- **D（常駐起動）**: desktop の app として `bantou-center` を別に用意する。窓の無い app で、起動すると center の process だけが動く。初回の起動で、自分を launchd に常駐として登録する（mac。登録の手段は未決 #14）。
+
+**決定 4: desktop から center を見つける方法は IP の指定だけ**
+
 > desktop側からのサーバーのdiscoveryはipのみで固定。
 
-利用者の追加の決定（port）:
+自動の発見（mDNS など）はしない。
+
+**決定 5: center の port は設定で変えられる。既定は 7910。基本は固定**
 
 > centerのportを規定しておいて、規定portのみで起動する形は？
 
-（master-cap が説明した後、利用者は「ok」と答えた）
+（master-cap が説明した後、利用者は「ok」と答えた。その後、次の訂正が出た）
 
-決めてある事（変えない。最新の形）:
+> portだけど、設定はできるようにする。でも固定が基本にする
 
-1. center は GraphQL の endpoint を持つ backend の server。client の app（desktop・web）は、frontend の app と同じく、その endpoint を叩いて画面を動かす。
-2. center の起動の形は 2 つ。この設計では次の名前で呼ぶ。
-   - **S（sidecar 起動）**: desktop の app を普通に起動し、起動の時に「center を起動」を選ぶと、裏で center を起動する。**今と同じ**（`center.rs`、1.2）。
-   - **D（常駐起動）**: desktop の app とは別に、desktop の app として `bantou-center` を用意する。窓の無い app で、起動すると center の process だけが動く。初回の起動で、自分を launchd に常駐として登録する（mac。登録の手段は未決 #14）。
-3. center は app に同梱して配る（S の desktop も D の bantou-center も、center の binary を持つ。版は app と一緒）。
-4. desktop から center を見つける方法は IP の指定だけ（固定）。自動の発見（mDNS など）は使わない。desktop は「IP と規定 port」でつなぐ。
-5. center の port は 1 つに決めておき（規定 port）、center はその port でしか起動しない。別の port に逃げない。同じ mac に center は 1 つだけになる。2 つ目の center は port が使用中で起動に失敗する。desktop は「center を起動」を選んでも、規定 port で center が動いていれば起こさず、それにつなぐ（2.8）。
-6. port が他の program に使われていて起動できない時は、理由が分かる error を出す（2.8.3）。
-7. 規定 port の番号は利用者が決める（未決 #22）。LAN から届く時の認証は未決 #23。
+center の port は設定で変えられる。既定は 7910（決定 9）で、基本は固定。center は設定した port でしか起動しない（別の port に逃げない）。client は IP を入れ、center の port を変えた時だけ port も入れる。
 
-版の履歴: 初版（4edee56）は「app に同梱しない・sidecar をやめる」、第 2 版（8ac588a）は「app が launchd に登録する・sidecar を外す」を前提に書いた。この版でどちらも取り下げ、上の 5 点に書き直した（desktop は launchd に触らない。sidecar 起動は残る。D は別の app が自分を登録する）。GraphQL の schema（2.3）、session の claude と MCP が center に残る事（2.6）は変わらない。第 3 版（4ee5501）は S と D の 2 形で、同じ Mac に両方動く時を未決 #19 にしていた。この版は、規定 port の決定で #19 を片付ける形に書き直した（2.8 を新設）。
+**決定 6: 見え方の統一と設定（保存先は server 側）**
 
-この設計は、上の 7 点に上限・期限・数値・独自の仕様を足さない。決められない点は 7 節の未決にした。
+> 今まではserver側とクライアントで見え方が違ったわけだけど、それが無くなる。クライアントアプリ上で設定変更を全部出来るようにする。でも保存する先は、server側（mac200）。クライアントアプリが今はmcpサーバーとしてサーバーを指定してるがこれがなくなり、serverのipを指定するのみになる（クライアント側で入れる唯一の設定）
+
+server 側と client で見え方が違う形を無くす。client の app の上で設定の変更を全部できる（launcher 鍵で守っていた 7 項目も含む）。保存する先は server 側（center の host。今は mac200）。client が center を MCP の server として指定する形は無くなる。
+
+**決定 7: 認証は、初回の接続で center が鍵を渡し、client が覚える（案 A）**
+
+利用者の原文は「Aで」（master-cap が出した認証の案 A への選択）。案 A の内容: client が初めて center につないだ時に、center が鍵を渡し、client が覚える。鍵の無い通信は断る。
+
+**決定 8: binone と方式を揃える**
+
+利用者が承諾した（master-cap の提案に対する承諾。承諾の原文はこの task の記録に無い）。内容:
+
+- bantou-center（D）は窓の無い常駐で、設定はメニューバーのメニューから開く。
+- server 側の設定として「鍵を渡してよい接続元の IP の範囲」を持つ。この設定だけは、server 側のメニューバーで指定する。
+- client の通信を「鍵を取る接続」と「それ以外の通信」に分ける。鍵を取る接続は、設定した IP の範囲からかどうかだけを見て鍵を渡す。それ以外の通信は、鍵を一緒に送らないと受け付けない。
+
+**決定 9: master-cap が決めた未決**（利用者の原文ではなく、master-cap の決定）
+
+- 決定 5 の center の port の既定の番号は 7910（旧 #22 の案 A）。
+- 旧 #24（test・開発用の port）は案 B。
+- 旧 #19 の残り 3 点は、設計書の推奨どおり（7 節 #19）。
+
+### この設計の言葉
+
+- **center の port**: 設定した port（既定 7910）。以前の版の「規定 port」はこれに読み替える。
+- **鍵**: 決定 7 の、center が渡し client が覚える物。以前の Bearer token と launcher 鍵の置き換え。
+- **鍵を取る接続 / それ以外の通信**: 決定 8。
+- **IP の範囲**: 決定 8 の「鍵を渡してよい接続元の IP の範囲」。
+
+### 未決（7 節に各案と推奨）
+
+- #26 鍵の失効と再発行
+- #27 メニューバーの無い環境での IP の範囲の指定
+- #28 中継越しの接続元 IP
+- #29 S での IP の範囲と port の設定の置き場
+- #30 S と D で同じ設定を使うか
+
+この設計は、利用者が決めていない上限・期限・数値・独自の仕様を足さない。決められない点は 7 節の未決にした。
 
 ## 1. 今の形
 
@@ -114,7 +162,7 @@ desktop (Tauri 2 + Nuxt 4)                          web (Nuxt SPA + Nitro BFF)
 ```
 client（desktop / web）  = 同じ Nuxt 画面（packages/ui）
    │   GraphQL over HTTP（query・mutation）+ subscription
-   │   見つけ方は IP の指定だけ（固定。自動の発見は無い）。port は規定 port（2.8）
+   │   見つけ方は IP の指定だけ（固定。自動の発見は無い）。port はcenter の port（2.8）
    ▼
 bantou-center（GraphQL を持つ backend の server。起動の形が 2 つ）
    ├ S: desktop.app が子 process として起動（「center を起動」を選んだ時。今と同じ）
@@ -128,7 +176,7 @@ bantou-center（GraphQL を持つ backend の server。起動の形が 2 つ）
 ```
 
 - client は center の GraphQL だけを見る。desktop は S の時だけ center を子 process として起動する。D の center は desktop と無関係に動く（desktop を閉じても、起動していなくても動く）。desktop は launchd に触らない。
-- desktop から center を見つける方法は IP の指定だけ（S の時の自分の center は `127.0.0.1`）。port は規定 port で、入力しない（2.8）。mDNS・broadcast などの自動の発見は使わない。なお center が remote の server を見つける仕組み（agent-messenger の broker 経由。`docs/architecture.md` の server の項 3、`packages/center/src/server-link.ts`）は desktop ↔ center の話ではなく、変えない。
+- desktop から center を見つける方法は IP の指定だけ（S の時の自分の center は `127.0.0.1`）。port は既定 7910 で、center の port を変えた時だけ入れる（2.8）。mDNS・broadcast などの自動の発見は使わない。なお center が remote の server を見つける仕組み（agent-messenger の broker 経由。`docs/architecture.md` の server の項 3、`packages/center/src/server-link.ts`）は desktop ↔ center の話ではなく、変えない。
 - web は今の BFF の位置づけを未決 #4 で決める。
 - `docs/concept.md` の原則 3（desktop にとって center や server がどこにあるかは関心事ではない）・原則 6（共有できる物は center が持つ）に沿う。D の center は desktop から独立して常駐するので、`docs/concept.md` の「desktop と基本は一体」・`docs/architecture.md`・`CLAUDE.md` の「sidecar 同梱」の文の改訂が要る（4 節の段階 G）。
 
@@ -139,7 +187,7 @@ S は今と同じ（desktop が子 process として起動・監視・停止す�
 | 操作 | 形（案。細部は未決） |
 |---|---|
 | 入れ方 | `bantou-center.app` を入れる（配り方は未決 #3）。**初回の起動で app が自分を launchd に登録する**（手段は未決 #14）。利用者の操作は app を起動する 1 回だけ。冪等（登録済みで起動しても二重に登録しない）。 |
-| 起動 | 初回は利用者が app を起動した時。以後は launchd が起動する（login 時など）。中身は center の process（`--transport http --bind --config`。**port は規定 port で、引数で変えられない**、2.8・#24）。token は config（`token`、12 文字以上、無いと起動しない `daemon.ts:296-297`）。D の token の作り方・渡し方は未決 #20。種別（LaunchAgent / LaunchDaemon）は未決 #2。 |
+| 起動 | 初回は利用者が app を起動した時。以後は launchd が起動する（login 時など）。中身は center の process（`--transport http --bind --config`。**port は設定で決まり（既定 7910）、CLI の引数と環境変数では変えられない**、2.8・#24）。認証は鍵の方式（2.4）で、今の config の `token` に代わる。種別（LaunchAgent / LaunchDaemon）は未決 #2。 |
 | 親の監視 | center は 2 秒ごとに `ppid` を見て、起動時から変わったら終わる（`parent-watch.ts`）。bantou-center の作り方（未決 #15）で親が変わる: shell が center を子として起動する形なら、shell が死ねば center も終わる（今の S と同じ）。center が launchd の直下なら `ppid` は変わらず何もしない【推測。6 節で実測】。 |
 | 止め方 | 窓が無い app の止め方は未決 #18。launchd が止める時は SIGTERM。center は子の claude を止めてから終わる（待ちは `stopGraceMs` + hard exit、`daemon.ts:258 付近（`stopGraceMs + HARD_EXIT_MARGIN_MS`）`）。service の停止待ちはそれより長く取る（web 設計 9.1）。 |
 | 更新 | center は app に同梱で、版も app と一緒。bantou-center.app を更新しても、動いている center は旧 binary のまま。再起動して初めて新しい版になる。更新の配り方は #3、再起動の入口は #18。再起動で session は `--continue` で戻る（`restore()`）。 |
@@ -152,7 +200,7 @@ S は今と同じ（desktop が子 process として起動・監視・停止す�
 
 ### 2.3 GraphQL schema の輪郭
 
-置き場は center の http server（今の `/mcp` と同じ port・同じ認証。path は `/graphql`【案】）。型は `packages/ui/types/index.ts`（今の画面が使う型）を土台にする。以下は輪郭で、field の細部は実装の task で決める。
+置き場は center の http server（今の `/mcp` と同じ port。認証は鍵（2.4）。path は `/graphql`【案】）。型は `packages/ui/types/index.ts`（今の画面が使う型）を土台にする。以下は輪郭で、field の細部は実装の task で決める。
 
 **Query**
 
@@ -160,9 +208,9 @@ S は今と同じ（desktop が子 process として起動・監視・停止す�
 |---|---|---|
 | `sessions` | `SessionList`（`sessions[]`、`reachable`、`reason`）。`Session` = name / state / sessionUrl / source / lastError / path / contextUsage / instructions / activity / activityAt / background / remote / auth / loginUrl / loginError / sleeping | MCP `session_list`、`list_sessions`・`refresh_sessions` |
 | `session(name)` | 1 session | 同上 |
-| `sessionSettings(name)` | `ProjectSettings`（instructions / addDirs / outputStyle / servers）。launcher 鍵が守る 7 項目（memory / mcpServers / projectMemory / mcp / mcpConnections / mcpSecrets / coordinator）は公開しない、または権限が要る（未決 #6） | `session_settings_get` |
-| `centerSettings` | center 共通の設定（`CenterCommonSettings`）+ `launcher`（呼び出し元が起動元か。`center_settings_get` が返す。型は `packages/ui/api/center.ts` の `{ settings, launcher? }`） | `center_settings_get` |
-| `centerInfo` | `{ workspace, systemInstructions[]（id / version / title）, launcher }`（`center_info` が返す形。`session_path_hints` の素は workspace。`launcher` は呼び出し元が起動元か、#6） | `center_info` |
+| `sessionSettings(name)` | `ProjectSettings`（instructions / addDirs / outputStyle / servers）。launcher 鍵で守っていた 7 項目（memory / mcpServers / projectMemory / mcp / mcpConnections / mcpSecrets / coordinator）も、client の画面から変えられる（決定 6。field の形は #6） | `session_settings_get` |
+| `centerSettings` | center 共通の設定（`CenterCommonSettings`）（今の `center_settings_get` は `launcher`（呼び出し元が起動元か）も返す。型は `packages/ui/api/center.ts` の `{ settings, launcher? }`。起動元で client を分ける形は無くなるので、`launcher` は不要になる見込み。決定 6） | `center_settings_get` |
+| `centerInfo` | `{ workspace, systemInstructions[]（id / version / title） }`（`center_info` の形。`session_path_hints` の素は workspace。今の `launcher` は上と同じ理由で不要になる見込み） | `center_info` |
 | `remotes` | `CenterRemoteRecord[]`（state・未完了の指示・最新の result / error・`task_result`・`worker_reports`・activity） | `remote_list` |
 | `servers` | `CenterServerInfo[]`（server の一覧と版・follow 状態） | `server_list` |
 | `serverPeers(refresh)` | `CenterServerPeers`（版の突き合わせ） | `server_peers` |
@@ -182,8 +230,8 @@ S は今と同じ（desktop が子 process として起動・監視・停止す�
 | `startSessionLogin(name)` / `submitSessionLoginCode(name, code)` | session の claude の再ログイン | `session_login` / `session_login_code` |
 | `restartSession(name)` | 再起動（今は `rc_stop` → `rc_start(resume)` の 2 手、`packages/ui/api/center.ts:118-121`）。1 つの操作にする案 | `rc_stop` + `rc_start` |
 | `replyWorker(remoteId, server, workerId, text)` | worker への返答 | `worker_reply` |
-| `retireServer(serverId)` | server の退役（取り返しがつかない。web には出さない扱いを引き継ぐ。権限は未決 #4・#6） | `server_retire` |
-| `regenerateCenterToken` | center の token を作り直し、center を再起動する（D の center 用）。今の `center_regenerate_token` は Rust の command で、center の MCP tool には無い。S は今の Rust の command が残る。mutation にするか CLI（`bantou-center` の subcommand）にするかは未決 #20・#18。token が変わるので、client の接続は切れ、新しい token を入れ直す | `center_regenerate_token`（Rust、`center.rs`） |
+| `retireServer(serverId)` | server の退役（取り返しがつかない。web には出さない扱いを引き継ぐ。鍵を持つ client の中で区別するかは未決 #4 / 2.4 の最後の点） | `server_retire` |
+| `revokeKeys`（仮の名前） | 鍵の失効と再発行。入口と範囲（全部 / client ごと）は未決 #26。今の `center_regenerate_token`（Rust の command）の置き換え | `center_regenerate_token`（Rust、`center.rs`） |
 | `terminalInput(session, dataB64)` / `terminalResize(session, cols, rows)` | 端末の入力・サイズ | `POST /sessions/<n>/input|resize` |
 | `attachToSession(session, …)` | 画像の添付。bytes を GraphQL に載せるか、既存の HTTP route を残すかは未決 #7 | `POST /sessions/<n>/attachments` |
 
@@ -200,30 +248,35 @@ S は今と同じ（desktop が子 process として起動・監視・停止す�
 - 型の規則: 今の `Session` の `null` は「古い center が送らない」の意味を含む（`packages/ui/types/index.ts` の注記）。center と client が同じ release で動く前提になるので、その互換の扱い（client が新しく center が古い時の振る舞い）を決める必要がある（段階 B の完了条件、4 節）。
 - GraphQL が公開しない物: master-cap 向けの `/mcp/session`（`session_resession` など）、hook / status-line の受け口（session token）、server-link。session の claude が使う物は GraphQL に出さない。
 
-### 2.4 認証
+### 2.4 認証と設定の見え方（決定 6〜8）
 
-- 今: center の `/mcp` は `Authorization: Bearer <token>`（定時間比較、欠落・不一致は 401）。token は desktop が生成して center の config に書く。web は BFF が token を持ち、前段の Cloudflare Access が守る。待ち受けは `0.0.0.0` で TLS 無し（`docs/architecture.md`）。
-- 変更後の最小形: GraphQL の endpoint も同じ Bearer token（今の仕組みを移す）。S の token は今のまま desktop が生成して center の config に書く。D は desktop が起動しない（desktop 無しで center が起動する）ので、token は bantou-center 側で作る必要があり、desktop への渡し方が要る。未決 #20。別 host の client への配り方は今の接続設定の共有（未決 #4）。
-- 「launcher 鍵」: 今は desktop が sidecar を起動した事を、起動ごとの鍵で証明する。起動元だけが `memory`・`mcpServers` を読み書きでき、`projectMemory` を読める（書きは `bantou-center memory set --session`・移行・設定 file の直接編集だけ）。旧設定の `mcp`・`mcpConnections`・`mcpSecrets`・`coordinator` は誰からも MCP では書けない。守る項目は合わせて 7 つ（`CENTER_ONLY_KEYS`: `packages/center-client/src/tool-policy.ts:45`、`packages/center/src/project-settings.ts` の `LAUNCHER_KEYS` + `LEGACY_INTERNAL_KEYS` + `FILE_ONLY_KEYS`）。書きは `assertCenterOnly`、読みは `withoutLauncherKeys` が絞る（定義は `project-settings.ts`、`tools.ts`・`sessions.ts` が呼ぶ）。**S は今のまま**。D の center は desktop が起動しないので、desktop は「起動した所」ではない。7 項目それぞれの扱いは未決 #6。
-- 取り返しのつかない操作（`retireServer`、`deleteSession`）を誰に許すか: 今は desktop だけ（web は許可 list から外す）。権限の単位は未決 #4。
+- 今（【事実】）: center の `/mcp` は `Authorization: Bearer <token>`（定時間比較、欠落・不一致は 401）。token は desktop が生成して center の config に書く。web は BFF が token を持ち、前段の Cloudflare Access が守る。待ち受けは `0.0.0.0` で TLS 無し（`docs/architecture.md`）。
+- 変更後（決定 7・8）:
+  1. client が初めて center につないだ時に、center が鍵を渡し、client が覚える。鍵の無い通信は断る。
+  2. client の通信は 2 つに分ける。**鍵を取る接続**: 設定した IP の範囲からかどうかだけを見て鍵を渡す。**それ以外の通信**: 鍵を一緒に送らないと受け付けない。
+  3. 「鍵を渡してよい接続元の IP の範囲」は server 側の設定で、この設定だけは server 側のメニューバーで指定する。bantou-center（D）は窓の無い常駐で、設定はメニューバーのメニューから開く（binone と方式を揃える）。S の時の置き場は未決 #29、メニューバーの無い環境は未決 #27、中継越しの接続元 IP は未決 #28。
+  4. 今の Bearer token（desktop が生成して config に書く。接続設定で貼る）は、この方式に置き換わる。鍵の失効と再発行は未決 #26。
+- 「launcher 鍵」の置き換え（決定 6）: 今は desktop が sidecar を起動した事を、起動ごとの鍵で証明する。起動元だけが `memory`・`mcpServers` を読み書きでき、`projectMemory` を読める（書きは `bantou-center memory set --session`・移行・設定 file の直接編集だけ）。旧設定の `mcp`・`mcpConnections`・`mcpSecrets`・`coordinator` は誰からも MCP では書けない。守る項目は合わせて 7 つ（`CENTER_ONLY_KEYS`: `packages/center-client/src/tool-policy.ts:45`、`packages/center/src/project-settings.ts` の `LAUNCHER_KEYS` + `LEGACY_INTERNAL_KEYS` + `FILE_ONLY_KEYS`）。書きは `assertCenterOnly`、読みは `withoutLauncherKeys` が絞る（定義は `project-settings.ts`、`tools.ts`・`sessions.ts` が呼ぶ）。決定 6 で、client の app の上で、この 7 項目を含む設定の変更を全部できる形になる。起動元の証明（launcher 鍵）で client を分ける形は無くなり、見え方は S でも D でも web でも同じになる。7 項目の GraphQL 上の形は #6。
+- 設定の保存先は server 側（center の host。今は mac200）。client が保存する設定は center の IP だけ（port は変えた時だけ。決定 5・6）。client が center を MCP の server として指定する形は無くなる。
+- 取り返しのつかない操作（`retireServer`、`deleteSession`）を鍵の持ち主の中で区別する決定は無い。今は desktop だけ（web は許可 list から外す）。区別を足すかは利用者が決める（web の形は #4）。
 
 ### 2.5 client 側（desktop は何を持ち何を捨てるか。web との共有）
 
 | 部品 | 扱い |
 |---|---|
-| S の center の起動・監視・自動再起動・終了時の停止（`center.rs` の spawn / backoff / `Center::stop`、`lib.rs` の `RunEvent::Exit`）、同梱 binary（`externalBin`、`build-sidecar.ts`）、`center_status` / `center_set_settings` の起動項目（enabled・bind・workspace・claudePath）、S の token の生成・regenerate（desktop が config を書き直して center を再起動する、今のまま。D の token は desktop からは作らず、center 側へ移す形。#4・#20）、launcher 鍵、`bantou://center-running` | **残す**（S は今と同じ。「center を起動」を選んだ時の裏の起動） |
+| S の center の起動・監視・自動再起動・終了時の停止（`center.rs` の spawn / backoff / `Center::stop`、`lib.rs` の `RunEvent::Exit`）、同梱 binary（`externalBin`、`build-sidecar.ts`）、`center_status` / `center_set_settings` の起動項目（enabled・bind・workspace・claudePath）、`bantou://center-running` | **残す**（S は今と同じ。「center を起動」を選んだ時の裏の起動） |
 | MCP client（`center_mcp.rs`）、SSE 購読（`center_events.rs`）、`SessionCache`（`session.rs`）、端末の中継（`terminal.rs`） | **捨てる**（webview が GraphQL を直接叩く。S の center にも D の center にも同じ形で繋がる。Rust の中継層が無くなる） |
 | 添付（`attachment.rs`: `session_attach_bytes` / `session_attach_paths` / `session_attach_pick`） | **分ける**。消す: center への中継（`upload` = reqwest で `POST /sessions/<n>/attachments`、`run` の接続先の選択 `select_target`・`load_settings`、保存した path を pty に打つ `post(.. "input" ..)`・`input_text`・`b64`）。webview が GraphQL（`attachToSession`・`terminalInput`）か、残す HTTP route（#7）で行う。残す: desktop の OS 側の入口 = `session_attach_pick`（file dialog、`rfd`）、`session_attach_paths`（drop された path の受け取り）、`load`（path から bytes を読む）、画像の型の見分け `sniff_type`・大きさの検査 `check_size`（`MAX_BYTES` = 20 MB。center も同じ検査をする）。この 2 つの command は「保存まで行う」から「読んだ bytes と名前を webview に返す」形に変わる（形は未決 #7）。`session_attach_bytes` は clipboard の bytes を webview が既に持つので、command ごと不要 |
-| 接続先の指定 | **IP の指定だけ**（固定。自動の発見は使わない）。port は規定 port で入力しない（2.8）。S で「center を起動」を選んだ時の接続先は自分（`127.0.0.1`）。別 host の center・D の center は IP と token を入れる。今の `remote`（URL + token）の入力の置き換え。token は今の接続設定のまま【未決 #20】 |
-| 接続設定の共有（`center_snippet.rs`: `center_connect_snippets` / `center_parse_connect` / `center_local_ips` / `center_ip_status`） | **残す**（S の center が自分の接続設定を出す、今のまま。D の center が出す側の入口は未決 #20） |
+| 接続先の指定 | **center の IP の指定だけ**（固定。自動の発見は使わない。決定 4）。port は既定 7910 で、center の port を変えた時だけ入れる（決定 5）。初めてつないだ時に center が渡す鍵を覚える（決定 7）。S で「center を起動」を選んだ時の接続先は自分（`127.0.0.1`）。今の `remote`（URL + token）の入力と、client が center を MCP の server として指定する形は無くなる（決定 6） |
+| 接続設定の共有（`center_snippet.rs`: `center_connect_snippets` / `center_parse_connect` / `center_local_ips` / `center_ip_status`） | **無くなる**（token 入りの URL を別 host の desktop に貼る形は、鍵の方式に置き換わる。2.4。`center_local_ips` などの OS 側の補助を残すかは実装の task） |
 | updater・relaunch（app 自身の更新） | **残す**。bantou-center.app の更新は別の問題（未決 #3） |
 | 画面の native 機能: folder 選択（`pick_directory`）・file drop（`onFilesDropped`）・fs watch（`watchDir`）・window / `bantou <path>` の CLI・menu・OS の sleep 復帰 / network 変化 event・log file | **残す**（desktop 固有。`~/tauri` の `Platform` に残る。web は browser の API で代える） |
 | Cork の task md（`task.rs`・`frontmatter.rs`）、旧 broker（`broker.rs`・`thread.rs`・`agent.rs`） | center と別の desktop ローカル機能。この設計では触らない（残す。廃止するかは未決 #8） |
 | `~/tauri` の層（`getTransport()` / `getPlatform()`） | 段階的に `~/api` を GraphQL client に差し替え、`getTransport()` は desktop 固有の native 機能と S の起動の操作だけに縮める。最終形では ui は「GraphQL client + Platform」を見る（4 節） |
-| web の BFF（`center-client` + Nitro） | 未決 #4。BFF を残す（token をブラウザに出さない・Cloudflare Access 前提を維持）案と、薄い proxy にする案、ブラウザが直接叩く案 |
+| web の BFF（`center-client` + Nitro） | 未決 #4。BFF を残す（鍵をブラウザに出さない・Cloudflare Access 前提を維持）案と、薄い proxy にする案、ブラウザが直接叩く案 |
 
 - 共有: desktop と web は同じ `packages/ui` を使い、GraphQL client も 1 つにする（`packages/ui/api/*.ts` の中身が GraphQL の document になる）。desktop と web の差は `Platform` だけ（`centerSidecar` は今のまま: desktop は S の center を起動できる = true、web は false）。
-- 設定画面（`SettingsDialog.vue`）: 「center を起動する」の switch（S）は今のまま。「接続先」は IP の指定になる。desktop は launchd に触らないので、D の登録・解除の操作は設定画面に持たない（入口は #18）。S と D が同じ Mac で動く時の画面の出し方は #19。
+- 設定画面（`SettingsDialog.vue`）: 「center を起動する」の switch（S）は今のまま。「接続先」は IP の指定だけになる（port は変えた時だけ）。server 側に保存する設定（7 項目を含む）は、この画面から全部変えられる（決定 6）。IP の範囲（決定 8）は server 側のメニューバーで指定する（#29）。desktop は launchd に触らないので、D の登録・解除の操作は設定画面に持たない（入口は #18）。S と D が同じ Mac で動く時の画面の出し方は #19。
 
 ### 2.6 session の claude と MCP は center に残るか
 
@@ -232,7 +285,7 @@ S は今と同じ（desktop が子 process として起動・監視・停止す�
 - 影響する点: D で session の claude の cwd・PATH・認証（keychain）が launchd の環境で成り立つか（2.2、6 節）。center と session が desktop と別の host になっても、`/mcp/session` は loopback の center URL（`daemon.ts:330` の `centerUrl`）で動く。
 ### 2.7 bantou-center（窓の無い app。D の形）
 
-利用者の決定: desktop の app とは別に、desktop の app として `bantou-center` を用意する。窓が無く、起動すると center の process だけが動く。初回の起動で自分を launchd に常駐として登録する。
+利用者の決定: desktop の app とは別に、desktop の app として `bantou-center` を用意する。窓が無く、起動すると center の process だけが動く。初回の起動で自分を launchd に常駐として登録する。設定はメニューバーのメニューから開く（決定 3・8）。
 
 【事実】今の関係部品:
 - 同梱の仕組み: `packages/desktop/src-tauri/tauri.conf.json` の `bundle.externalBin`（`binaries/bantou-center`・`binaries/bantou-pty-wrapper`）。build は `packages/desktop/scripts/build-sidecar.ts`（target triple の suffix 付きで置き、bundle 時に外れる）。desktop が S の時に起動する物と同じ binary を、bantou-center.app も持つことになる。
@@ -251,13 +304,13 @@ S は今と同じ（desktop が子 process として起動・監視・停止す�
 | launchd が起動した（登録済み） | center を起動するだけ |
 | 登録済みで、利用者が app を手で起動した（Finder など） | 既に center が動いていれば何もしない（二重に起動しない。#16）。止まっていれば起動する |
 | 登録済みだが OS 側で無効にされた（System Settings の Login Items） | 起動した間は動く。次の login から自動では起動しない。知らせ方は #17 |
-| 同じ Mac で S の center が既に規定 port を持っている | port の使用中で起動に失敗し、理由を出して終わる（2.8。launchd の再起動の loop にしない。#16・#19） |
+| 同じ Mac で S の center が既にcenter の port を持っている | port の使用中で起動に失敗し、理由を出して終わる（2.8。launchd の再起動の loop にしない。#16・#19） |
 
 #### 2.7.3 desktop から見つける（IP のみ）
 
-- desktop の設定で接続先を IP（と token）で指定する。port は規定 port（2.8）。自動の発見（mDNS・broadcast・同じ Mac の process 探索）は使わない。
-- 同じ Mac の D の center に繋ぐ時も、IP（`127.0.0.1` など）を指定する。desktop が config file を読んで token を拾う、といった発見の代わりになる自動化は、利用者が決めていないので入れない。token の渡し方は未決 #20。
-- center は全アドレスで待ち受ける（`docs/architecture.md`）ので、同じ LAN の別 host の desktop も、同じ指定で繋げる。
+- desktop の設定で、center の IP を指定する（client で入れる設定はこれだけ。決定 6）。port は既定 7910 で、center の port を変えた時だけ入れる（決定 5）。初回の接続で center が鍵を渡し、desktop が覚える（2.4）。自動の発見（mDNS・broadcast・同じ Mac の process 探索）は使わない。
+- 同じ Mac の D の center に繋ぐ時も、IP（`127.0.0.1` など）を指定する。desktop が config file を読んで認証情報を拾う、といった発見の代わりになる自動化は、利用者が決めていないので入れない。
+- center は全アドレスで待ち受ける（`docs/architecture.md`）ので、同じ LAN の別 host の desktop も、同じ指定で繋げる。鍵を取れるのは、設定した IP の範囲に入る接続元だけ（決定 8、2.4）。
 
 #### 2.7.4 更新（版は app と一緒）
 
@@ -277,11 +330,11 @@ S は今と同じ（desktop が子 process として起動・監視・停止す�
 
 #### 2.7.7 同じ Mac で S と D が両方動く時
 
-規定 port の決定（2.8）で片付いた。center は規定 port でだけ起動するので、同じ Mac に center は 1 つ。後から起動する方は port の使用中で起動に失敗して終わる。状態 dir（`~/.local/share/bantou/`）・`center-id`・messenger の peer 名 `bantou-center`（`packages/center/src/server-link.ts:341`）の奪い合いは、center が 1 つなので起きない。残る小さな点は未決 #19。
+center の port の決定（2.8）で、S と D が同じ設定を使う限り片付く。同じ port の center は 1 つで、後から起動する方は port の使用中で起動に失敗して終わる。状態 dir（`~/.local/share/bantou/`）・`center-id`・messenger の peer 名 `bantou-center`（`packages/center/src/server-link.ts:341`）の奪い合いは、center が 1 つなら起きない。S と D が別の設定を持つかは未決 #30、残る小さな点は未決 #19。
 
 #### 2.7.8 desktop の Rust に足す物・捨てる物
 
-- 足す: 接続先を IP で指定する入力と、その疎通の確認（GraphQL の query）。S を起動する前の「規定 port に center が居るか」の確認（2.8.4）。port の設定項目と入力欄は外す。
+- 足す: 接続先を IP で指定する入力（port は変えた時だけ入れる）と、その疎通の確認（GraphQL の query）。初回の接続で center が渡す鍵を覚える所。S を起動する前の「center の port に center が居るか」の確認（2.8.4）。
 - 捨てる: `center_mcp.rs` ほか中継層（2.5）。
 - 変えない: S の起動・監視・停止（`center.rs`）。launchd の登録は desktop に持たせない。
 
@@ -289,21 +342,21 @@ S は今と同じ（desktop が子 process として起動・監視・停止す�
 
 app が無いので bantou-center.app は使えない。配り方は未決 #21。
 
-### 2.8 規定 port（center は規定 port でだけ起動する）
+### 2.8 center の port（設定で変えられる。既定 7910。基本は固定）
 
-利用者の決定（原文）: 「centerのportを規定しておいて、規定portのみで起動する形は？」（master-cap の説明の後、「ok」）。
+利用者の決定（原文。決定 5）: 「centerのportを規定しておいて、規定portのみで起動する形は？」（master-cap の説明の後、「ok」）。その後の訂正: 「portだけど、設定はできるようにする。でも固定が基本にする」。
 
 決める事:
 
-1. center の port は 1 つに決めておく（規定 port）。番号は未決 #22（利用者が決める）。
-2. center は規定 port でしか起動しない。別の port に逃げない（S も D も同じ）。
-3. 同じ mac に center は 1 つだけになる。2 つ目の center は port が使用中で起動に失敗する。
-4. desktop は「IP と規定 port」でつなぐ。port の入力は無い。
-5. desktop は「center を起動」を選んでも、規定 port で center が動いていれば起こさず、それにつなぐ。
-6. 規定 port が他の program に使われていて起動できない時は、理由が分かる error を出す。
-7. LAN から届く時の認証は未決 #23。
+1. center の port は設定で変えられる。既定は 7910（決定 9）。基本は固定で、変える時だけ設定する。
+2. center は設定した port でしか起動しない。別の port に逃げない（S も D も同じ）。
+3. 同じ port の center は 1 つだけ。2 つ目の center は port が使用中で起動に失敗する。S と D が別の設定を持つなら、別の port で同じ Mac に 2 つ動きうる。S と D が同じ設定を使うかは未決 #30、設定の置き場は未決 #29。
+4. client は IP を入れる。center の port を変えた時だけ port も入れる（既定のままなら入れない）。
+5. client（desktop）は「center を起動」を選んでも、設定した port で center が動いていれば起こさず、それにつなぐ。
+6. port が他の program に使われていて起動できない時は、理由が分かる error を出す。
+7. 認証は鍵の方式（2.4）。
 
-この決定で、S と D が同じ Mac で両方動く問題（前の版の未決 #19）は片付く。残る小さな点は #19 に書いた。
+この決定で、S と D が同じ Mac で両方動く問題（前の版の未決 #19）は、S と D が同じ設定を使う限り片付く（#30 の推奨）。残る小さな点は #19。
 
 #### 2.8.1 今の port の扱い（変わる所）
 
@@ -311,34 +364,34 @@ app が無いので bantou-center.app は使えない。配り方は未決 #21�
 - 【事実】desktop の `CenterSettings.port` も既定 7910（`center.rs` の `DEFAULT_PORT`）で、設定画面から変えられる（`packages/ui/components/SettingsDialog.vue` の `centerSetSettings`）。port の変更は center の再起動を要する（`center.rs` の `needs_restart`）。
 - 【事実】bind の失敗は、center の log から見分けて `CenterStatus.bindFailed` に出している（`center.rs:331` の `looks_like_bind_failure`、`packages/ui/types/index.ts` の `CenterStatus`）。
 - 【事実】test は `--port 0` を使う（`packages/center/test/args.test.ts`・`http.test.ts`）。`packages/center/scripts/e2e.ts` は `node:net` を使う（空き port を取る用途と読める【推測】）。
-- 変わる事: desktop の port の設定項目と入力欄を外す（`enabled`・`bind`・`workspace`・`claudePath`・`token` は残る）。center の `--port` 引数を本番の起動で使えなくする（test・開発の扱いは未決 #24）。
+- 変わる事: port の設定項目は残る（決定 5）。保存先は server 側の設定（決定 6。置き場は #29）。center は本番の起動で、CLI の引数と環境変数では port を受けず、設定から読む（#24 B）。client の入力欄は、port を変えた時だけ使う。test・開発は #24 B の扱い。
 
 #### 2.8.2 center の起動の順（2 つ目の center が何にも触らない事）
 
 - 【事実】今の `daemon.ts` は、store の生成（`:172`・`:230`）と `loadCapId`（`:221`）の後に listen（`startHttpServer`、`:299`）し、その後に `sessions.restore()`（`:354`）を呼ぶ。孤児 process の回収（`reapOrphans`）は session を start する時に走る（`packages/center/src/remote-control.ts:400`）ので、port で失敗すれば、session の起動・孤児の回収には届かない。
 - 要件: 2 つ目の center は、listen に失敗したら、状態 dir の file を書き換えず、session・孤児 process・remote の記録に触れずに終わる。store の生成と `center-id` の作成（`loadCapId`）が listen より前に file を書くかは【未確認】。書くなら、listen を先に移す。実装の task が確かめる。
-- listen を先にするのは、規定 port の決定が「別の center を動かさない」ための最後の守りだから（desktop の起動前の確認（2.8.4）は先に確かめるだけで、確認と起動の間に別の center が port を取りうる）。
+- listen を先にするのは、center の port の決定が「別の center を動かさない」ための最後の守りだから（desktop の起動前の確認（2.8.4）は先に確かめるだけで、確認と起動の間に別の center が port を取りうる）。
 
 #### 2.8.3 起動に失敗した時の error（理由が分かる）
 
 出す内容:
 
-- どの port か（規定 port の番号）。
-- 使用中の相手が何か: (a) 規定 port で GraphQL の疎通を試し、center なら「既に center が動いている（版・起動の形）」。(b) 応答が GraphQL でない・接続だけできる・応答が無い、なら「他の program が使用中」。使用中の process 名・PID を OS に問い合わせて足せるか（`lsof` 相当）は【未確認】。
-- 次にする事: 既に center なら「それにつなぐ」、他の program なら「その program を止める」。規定 port を変える手段は無い（番号は #22 で決まる 1 つ）。
+- どの port か（center の port の番号）。
+- 使用中の相手が何か: (a) center の port で GraphQL の疎通を試し、center なら「既に center が動いている（版・起動の形）」。(b) 応答が GraphQL でない・接続だけできる・応答が無い、なら「他の program が使用中」。使用中の process 名・PID を OS に問い合わせて足せるか（`lsof` 相当）は【未確認】。
+- 次にする事: 既に center なら「それにつなぐ」、他の program なら「その program を止める」。port を変えたい時は設定で変える（既定 7910。2.8）。
 
 出す先:
 
 | 起動の形 | error の出し先 |
 |---|---|
 | S | center の log（stderr）と、desktop の画面（今の `center_status` の `bindFailed` と `error` に、上の理由の文言を足す） |
-| D | center の log。bantou-center は窓が無いので、desktop が接続した時に「規定 port の相手が何か」を調べて画面に出す（#17 の知らせ方と同じ入口） |
+| D | center の log。bantou-center は窓が無いので、desktop が接続した時に「center の port の相手が何か」を調べて画面に出す（#17 の知らせ方と同じ入口） |
 
 #### 2.8.4 desktop が「center を起動」を選んだ時（S の起動前の確認）
 
-desktop は S を起動する前に、`127.0.0.1` と規定 port の状態を確かめる。
+desktop は S を起動する前に、`127.0.0.1` とcenter の port の状態を確かめる。
 
-| 規定 port の状態 | desktop の動き |
+| center の port の状態 | desktop の動き |
 |---|---|
 | center が動いている（GraphQL の疎通で center と分かる） | center を起こさず、それにつなぐ。画面に「動いている center につないだ」と出す |
 | 空き | S を起動する（今と同じ） |
@@ -346,17 +399,18 @@ desktop は S を起動する前に、`127.0.0.1` と規定 port の状態を確
 
 確認と起動の間に別の center が port を取った場合は、center の listen の失敗（2.8.2）が最後の守りになる。
 
-#### 2.8.5 同じ Mac に center が 1 つになる意味
+#### 2.8.5 同じ port の center は 1 つ
 
-- S と D が両方動く事は無い。後から起動する方は port で失敗して終わる。同じ状態 dir（`~/.local/share/bantou/`）・`center-id`・messenger の peer 名 `bantou-center`（`packages/center/src/server-link.ts:341`）の奪い合いも、center が 1 つなら起きない。
-- D の center が動いている間は、desktop の「center を起動」を選んでも S は起きず、その center につながる。S が規定 port を持っている間は、bantou-center は起動に失敗して終わる。その終わり方（launchd の再起動の loop にしない）は #16・#19。
-- port は host で 1 つなので、同じ Mac の別の user の login でも center は 1 つ。別の user が自分の center を起こすことはできない【規定 port の決定から導いた制約。利用者に確かめる点】。
+- 同じ port で動く center は 1 つ。後から起動する方は port で失敗して終わる。S と D が同じ設定（同じ port・同じ状態 dir）を使えば、同じ Mac に center は 1 つになり、状態 dir（`~/.local/share/bantou/`）・`center-id`・messenger の peer 名 `bantou-center`（`packages/center/src/server-link.ts:341`）の奪い合いも起きない。S と D が別の設定（別の port）を持つと、この前提は崩れる（未決 #30）。
+- D の center が動いている間は、desktop の「center を起動」を選んでも S は起きず、その center につながる。S が port を持っている間は、bantou-center は起動に失敗して終わる。その終わり方（launchd の再起動の loop にしない）は #16・#19。
+- port は host で 1 つなので、同じ Mac の別の user の login でも、同じ port なら center は 1 つ。別の user が自分の center を起こすには別の port の設定が要る【決定 5 から導いた点。利用者に確かめる点】。
 
-#### 2.8.6 desktop の接続
+#### 2.8.6 client の接続
 
-- 接続先は IP の指定だけ（規定 port は入力しない）。S の時の自分は `127.0.0.1`。別の host の center も、同じ規定 port。
-- 規定 port が別の host で他の program に使われている時、その host には center を置けない（置くなら他の program を止める）。
-- web の BFF の接続先（`center-client` の設定の URL）の形は #4 で決める（この決定は desktop の指定の形を決める）。
+- 接続先は center の IP。port は既定 7910 で、center の port を変えた時だけ入れる。S の時の自分は `127.0.0.1`。
+- center の port が別の host で他の program に使われている時、その host の center は起動しない（error は 2.8.3）。
+- web の BFF の接続先（`center-client` の設定）の形は #4 で決める。
+
 
 ## 3. 今の機能との対応表
 
@@ -370,10 +424,10 @@ desktop は S を起動する前に、`127.0.0.1` と規定 port の状態を確
 | `session_sleep` / `session_wake` | `sleepSession` / `wakeSession` | mutation `sleepSession` / `wakeSession` |
 | `session_path_hints` | `sessionPathHints`（`canPick` は client の `Platform` が決める） | query `centerInfo`（workspace）+ client 側の `canPick` |
 | `session_get_settings` / `session_update_settings` | `getSessionSettings` / `updateSessionSettings` | query `sessionSettings` / mutation `updateSessionSettings` |
-| `center_get_settings` / `center_set_settings`（center.rs） | `centerGetSettings` / `centerSetSettings`（`packages/ui/api/center.ts`） | 残す。S の起動の項目（enabled・bind・workspace・claudePath）は今のまま。**port の項目は外す**（規定 port、2.8）。接続先は IP の指定になる（`remote` の url の置き換え。2.5）。分け方は未決 #9 |
+| `center_get_settings` / `center_set_settings`（center.rs） | `centerGetSettings` / `centerSetSettings`（`packages/ui/api/center.ts`） | 残す。S の起動の項目（enabled・bind・workspace・claudePath）は今のまま。**port の項目は残す**（既定 7910。設定で変えられる。2.8）。接続先は IP の指定になる（`remote` の url の置き換え。2.5）。設定は server 側に保存し、client の画面から全部変えられる（決定 6、#9） |
 | `center_status`（center.rs） | `centerStatus` | S の子 process の状態として残す。D の center の状態は GraphQL の `centerStatus`（2.3）で見る |
-| `center_regenerate_token` | `centerRegenerateToken` | 残す（S の token。D の token は未決 #20） |
-| `center_local_ips` / `center_ip_status` / `center_connect_snippets` / `center_parse_connect`（center_snippet.rs） | 同名 | 残す（S の center の接続設定を別 host の desktop に配る今のまま。`center_parse_connect` は client のローカル処理。D の center が出す側の入口は #20） |
+| `center_regenerate_token` | `centerRegenerateToken` | 鍵の方式に置き換わる（2.4）。鍵の失効と再発行は未決 #26 |
+| `center_local_ips` / `center_ip_status` / `center_connect_snippets` / `center_parse_connect`（center_snippet.rs） | 同名 | 無くなる（token 入りの URL を貼る形は、鍵の方式に置き換わる。2.4。`center_local_ips` などの OS 側の補助を残すかは実装の task） |
 | `center_call`（center_mcp.rs） | `centerCall` / `centerTool` / `centerToolStrict`（12 個の tool、3.2） | 3.2 の各 query / mutation に分ける。汎用の `center_call` は無くす |
 | `center_connection`（center_mcp.rs） | `centerConnection` | client のローカルの接続状態（GraphQL の疎通。`CenterConnection`） |
 | `session_output_start` / `session_output_stop`（terminal.rs） | `sessionOutputStart` / `sessionOutputStop`（`packages/ui/api/terminal.ts`） | subscription `terminalOutput` の開始・解除 |
@@ -439,12 +493,13 @@ ui・desktop・web の画面側の呼び出しを grep で数え、3.1〜3.4 の
 
 | 段 | 内容 | この段の終わりに動く物 | 戻し方 |
 |---|---|---|---|
-| A | center に GraphQL の endpoint を足す（`/graphql`）。resolver は `packages/center-client/src/commands.ts` の表と center の中の関数を使う（query / mutation / subscription は 2.3）。認証は `/mcp` と同じ Bearer。GraphQL server の部品は未決 #1 | 今の desktop・web は無変更で動く（`/mcp` を使い続ける）。GraphQL は test と HTTP の呼び出しで確かめる | endpoint を足しただけ。外せば元に戻る |
-| A2 | center の起動を規定 port だけにする（規定 port の番号は #22。`--port` の扱いは #24）。listen を状態への書き込みより先にし、失敗した時の error（使用中が center か他の program か）を出す（2.8.2・2.8.3）。S の desktop は port の設定項目を外し、起動前に規定 port を確かめる（2.8.4） | S は規定 port で今のまま動く。規定 port が使用中なら、理由の分かる error が出る | `--port` を戻す |
-| B | `packages/ui/api/*.ts` を GraphQL client に差し替える。web の `~/tauri` の transport を GraphQL にする（BFF の形は未決 #4）。desktop の `src/tauri/transport.ts` は、center 系の command を GraphQL へ、native 系（workspace・updater・Cork）と S の起動の操作だけ Tauri に残す。接続先を IP の指定（port は規定 port）にする（2.5・2.8）。subscription は `terminalOutput`・`sessionsChanged`・`sessionMessage` | web が GraphQL で動く。desktop は S の center にも別 host の center にも GraphQL で繋がる | 差し替えを feature flag か branch 単位にすれば戻せる。center 側は無変更 |
-| C | bantou-center.app を作る: C1 = app の実体（#15）と同梱・build・配り方（#3、cask の構成）、C2 = 初回の自己登録（#14）と登録の状態の扱い（#17）、C3 = 窓の無い app の操作の入口（止める・更新・登録解除・接続情報の表示。#18・#20。center の subcommand と GraphQL の mutation）、C4 = 規定 port の使用中の判定と error（2.8・#19。desktop 側と bantou-center 側の両方） | bantou-center.app を起動すると center が動き、登録され、desktop が IP で繋がる。S は今のまま動く | app を使わなければ S だけの今の形 |
+| A | center に GraphQL の endpoint を足す（`/graphql`）。resolver は `packages/center-client/src/commands.ts` の表と center の中の関数を使う（query / mutation / subscription は 2.3）。認証は段階 A3 で鍵の方式にする（それまでは `/mcp` と同じ Bearer）。GraphQL server の部品は未決 #1 | 今の desktop・web は無変更で動く（`/mcp` を使い続ける）。GraphQL は test と HTTP の呼び出しで確かめる | endpoint を足しただけ。外せば元に戻る |
+| A2 | center の起動を、設定した port だけにする（既定 7910。CLI の引数・環境変数では変えない。#24）。listen を状態への書き込みより先にし、失敗した時の error（使用中が center か他の program か）を出す（2.8.2・2.8.3）。S の desktop は、起動前に center の port を確かめる（2.8.4） | S はcenter の port で今のまま動く。center の port が使用中なら、理由の分かる error が出る | `--port` を戻す |
+| A3 | 鍵の方式（2.4）: 鍵を取る接続とそれ以外の通信の分け、IP の範囲の検査、鍵の発行と検査。IP の範囲の設定の置き場（#27・#29）、鍵の失効と再発行（#26）、中継越しの接続元 IP（#28）は決定の後 | 鍵の無い通信が断られる。S も D も同じ形で繋がる | Bearer に戻す |
+| B | `packages/ui/api/*.ts` を GraphQL client に差し替える。web の `~/tauri` の transport を GraphQL にする（BFF の形は未決 #4）。desktop の `src/tauri/transport.ts` は、center 系の command を GraphQL へ、native 系（workspace・updater・Cork）と S の起動の操作だけ Tauri に残す。接続先を IP の指定（port はcenter の port）にする（2.5・2.8）。subscription は `terminalOutput`・`sessionsChanged`・`sessionMessage` | web が GraphQL で動く。desktop は S の center にも別 host の center にも GraphQL で繋がる | 差し替えを feature flag か branch 単位にすれば戻せる。center 側は無変更 |
+| C | bantou-center.app を作る: C1 = app の実体（#15）と同梱・build・配り方（#3、cask の構成）、C2 = 初回の自己登録（#14）と登録の状態の扱い（#17）、C3 = 窓の無い app の操作の入口（止める・更新・登録解除・接続情報の表示。#18・#20。center の subcommand と GraphQL の mutation）、C4 = center の port の使用中の判定と error（2.8・#19。desktop 側と bantou-center 側の両方） | bantou-center.app を起動すると center が動き、登録され、desktop が IP で繋がる。S は今のまま動く | app を使わなければ S だけの今の形 |
 | D | desktop の Rust の中継層（`center_mcp.rs`・`center_events.rs`・`session.rs` の cache・`terminal.rs`・`attachment.rs` の upload・接続先の選択・pty への input の中継。OS 側の入口 `pick` / `paths` と `load`・型・大きさの検査は残す、2.5）を外す（webview が GraphQL を直接叩く）。**S の起動・監視（`center.rs`）・同梱 binary・launcher 鍵は残す** | desktop の Rust は center の中継をしない。S は今どおり起動できる | D の前の release に戻せる |
-| E | D の center への書き込みの権限（#6）と、`/mcp` の残し方（#5）の整理 | `memory` / `mcpServers` の読み書きが、S と D の両方で動く | 権限の方式を旧に戻す |
+| E | client の画面から 7 項目を含む設定を全部変えられる形（#6）と、`/mcp` の残し方（#5）の整理 | 7 項目を含む設定の読み書きが、S・D・web の画面で同じに動く | 旧の launcher 鍵の方式に戻す |
 | F | 更新の入口（#18・#12）: 版の違いの検出と、D の center の再起動の入口。bantou-center.app の更新の配り（#3） | app を更新すれば center も同じ版に揃う（D の再起動は #18 の入口） | 手動の再起動に戻す |
 | G | docs の改訂: `docs/concept.md`・`docs/architecture.md`・`CLAUDE.md` の Map（「center は desktop に sidecar 同梱」→「center は app に同梱。desktop が裏で起こす形（S）と、bantou-center.app が launchd に常駐する形（D）」）・`docs/protocol.md` の desktop ↔ center の節・`packages/center/README.md` の起動・`packages/desktop/README.md`・`docs/ops/` に D の手順書を足す | docs が実装と合う | — |
 
@@ -491,7 +546,7 @@ code は書かないので、ここは実装の task が足す test と、実機
 **test（実装が足す）**
 
 - schema: query / mutation / subscription が 3.1〜3.3 の表の全項目を持つ（表を test の入力にして、漏れを機械的に検出する）。
-- 認証: Bearer の欠落・不一致は 401、定時間比較（`packages/center/test/` の既存の `/mcp` の認証 test と同じ形）。launcher 鍵の置き換え後（未決 #6）、`memory` / `mcpServers` は権限が無い接続で書けない（今の `CENTER_ONLY_KEYS` の test の移植）。
+- 認証: 鍵の無い通信は断る。「鍵を取る接続」は、設定した IP の範囲からかどうかだけで鍵を渡す（範囲外には渡さない）。鍵を持つ client は、7 項目を含む設定を変えられる（#6）。
 - 互換: GraphQL の `Session` が `packages/ui/types/index.ts` の `Session` と同じ形で返る（`center-client` の `parseSession` と同じ検査）。
 - subscription: 端末の `after` での続き・`reset`・`end`、接続が切れた後の再接続、`sessionsChanged` の reason が既存の 10 種を全部運ぶ（`packages/center/src/events.ts`）。
 - client: `packages/ui` の既存の test（`packages/ui/test/`）と e2e（`packages/desktop/e2e/*.spec.ts` は Tauri の IPC を mock して画面を動かす。`packages/web/e2e/`）が、transport の差し替え後も通る。mock の層を GraphQL に置き換える（`packages/desktop/e2e/mock/`）。
@@ -504,16 +559,16 @@ code は書かないので、ここは実装の task が足す test と、実機
 - host の再起動・login の前後・center の kill・launchd による再起動で、session が `--continue` で戻る事（`restore()`）と、停止にかかる時間（`stopGraceMs` と service の停止待ちの関係）。
 - GraphQL server の部品（未決 #1）が `bun build --compile` の単体 binary で動く事。今は `@modelcontextprotocol/sdk` と zod が compile で遅延初期化に包まれて落ちた事がある（`packages/center/src/cli.ts` の冒頭の注記）。同種の問題が GraphQL の部品で出ないか。
 - 端末の subscription の実測: 出力が多い時の遅延・切断・再接続の後の続き。web の Cloudflare 経由（SSE / WebSocket が通る条件。web 設計 8.5）。
-- 認証: 別 host の client（LAN・Tailscale）から繋げる事。平文の token（`0.0.0.0` の待ち受け）が今と同じ範囲に収まる事。
+- 認証: 別 host の client（LAN・Tailscale）が、IP の範囲に入っていれば鍵を取って繋げる事。範囲外は鍵を取れない事。中継を挟んだ時の接続元 IP の見え方（#28）。
 - 更新: center を入れ替えて再起動した時の session の中断の長さと、`follow.ts` の server の版合わせ。
 - desktop: center の service が止まっている時に「繋がらない」を画面に出して、戻れば自動で再接続する。
 - 窓の無い app（2.7.2）: 初回の起動（未登録）・launchd 起動・手で起動（既に動いている / 止まっている）・OS で無効化された後、の各状態で、振る舞いが表のとおりになる。登録の結果が log に残る。
 - 登録: 管理者権限なしで登録でき（LaunchAgent の場合。#2）、冪等（2 回起動しても二重に登録しない）。登録の解除（入口は #18）が通る。
-- 規定 port（2.8、#19・#22）: (a) 規定 port が空いている時、S も D も起動する。(b) center が動いている時に S を選んでも起こさず、それにつなぐ。(c) 2 つ目の center（S・D のどちらでも）は、listen に失敗したら、状態 dir の file・session・孤児 process に触れずに終わる（2.8.2）。(d) 規定 port を他の program が使っている時、起動に失敗し、使用中が center か他の program かが分かる error が log と画面に出る（2.8.3）。(e) launchd が、port 使用中で終わった bantou-center を再起動し続けない（#16・#19）。(f) 別の port では起動できない（本番の経路。#24）。
+- center の port（2.8、#19・#22）: (a) center の port が空いている時、S も D も起動する。(b) center が動いている時に S を選んでも起こさず、それにつなぐ。(c) 2 つ目の center（S・D のどちらでも）は、listen に失敗したら、状態 dir の file・session・孤児 process に触れずに終わる（2.8.2）。(d) center の port を他の program が使っている時、起動に失敗し、使用中が center か他の program かが分かる error が log と画面に出る（2.8.3）。(e) launchd が、port 使用中で終わった bantou-center を再起動し続けない（#16・#19）。(f) 別の port では起動できない（本番の経路。#24）。
 - bantou-center.app の更新（#3）の最中・直後に、動いている center が落ちない。更新後に center の版の違いが検出され、再起動の入口（#18）が動く。
 - Local Network の許可: bantou-center.app（別の code identity）から、LAN の別 host の remote の server・broker へ繋がるか。許可の確認の画面を出せない窓無しの app で許可が通るか（`docs/ops/desktop-signing.md` の件）【未確認】。
 - cask の uninstall（`zap trash` だけで、launchd の登録を外す stanza は今無い）の後に、登録だけが残って起動に失敗し続けない事。
-- 接続先の IP の指定だけで desktop が D の center に繋がる事（自動の発見が無くても）。
+- 接続先の IP の指定だけで desktop が D の center に繋がる事（自動の発見が無くても。初回の接続で鍵を取る）。
 
 ## 7. 未決（番号つき。各案と推奨）
 
@@ -536,35 +591,28 @@ code は書かないので、ここは実装の task が足す test と、実機
 - 更新の案: (A) bantou-center.app にも Tauri の updater を持たせる（窓が無いので通知・再起動の入口は #18）。(B) cask の upgrade だけにする（`auto_updates true` との関係を見直す）。(C) (c) の入れ子にして desktop の updater に任せる。
 - 推奨: 配りは (a)（利用者の「別で用意」に沿い、版が揃い、入れるのは 1 回）。更新は (A)（今の updater・Releases・`latest.json` の流儀を使う。center の binary を 2 つ持つ（desktop 用と bantou-center 用）事の容量は【未確認】だが、S を「今と同じ」に保つ事を優先する）。(C) は「別の app を起動する」入口と合わないので推奨しない。
 
-**#4 認証の形と、web の BFF**
-- 案 A: 今と同じ 1 本の Bearer token（LAN から届く時の認証は #23）。token は center が持つ。client は URL + token を貼る。web は BFF が token を持つ（今のまま）。
-- 案 B: A に、client ごとの token（発行・失効）を足す。取り返しのつかない操作（`retireServer`・`deleteSession`）は権限を分ける。
-- 案 C: A に TLS（center が終端、または前段の reverse proxy）を足す。
-- web の形: (a) BFF を残す（token をブラウザに出さない。GraphQL を中継する）、(b) 薄い proxy にする、(c) ブラウザが center を直接叩く（token がブラウザに出る）。
-- 推奨: 認証は A（利用者の決めてある事に新しい仕組みを足さない。今の desktop・web と同じ強さ）。web は (a)（Cloudflare Access の守りと token を隠す設計が既にある。`packages/web/server/`）。B・C は実運用で必要になった時に別の決定にする。S の token の生成と配り方は今のまま（desktop が生成して config に書き、接続設定で配る）。D の token は未決 #20。別 host の desktop・web は IP と token を入れて繋ぐ。
-
+**#4 web の BFF の形（認証は決定済み）**
+- 決定済み: 認証は鍵の方式（決定 7・8、2.4）。以前の案（Bearer 1 本 / client ごとの token / TLS）は置き換わった。
+- web の形（未決）: (a) BFF を残す（鍵をブラウザに出さない。GraphQL を中継する。BFF が center の client になり、鍵を持つ）、(b) 薄い proxy にする、(c) ブラウザが center を直接叩く（鍵がブラウザに出る）。
+- 推奨: (a)（Cloudflare Access の守りと、secret をブラウザに出さない設計が既にある。`packages/web/server/`）。BFF から center への接続が IP の範囲に入るか（中継を挟むか）は #28。D の center の鍵の渡し方は決定 7 で置き換わった（旧 #20）。
 **#5 `/mcp`（外向け MCP）を残すか、`session_delete` などを GraphQL に出すか**
 - 案 A: `/mcp` はそのまま残す（素のエージェントが `claude mcp add` で cap 運用する入口。`docs/concept.md` の「center は MCP サーバー」）。GraphQL は画面用。
 - 案 B: `/mcp` を GraphQL に統合して廃止。
 - 推奨: A。理由: `/mcp` は master-cap・外部のエージェントが使う入口で、`docs/design/center-tools.md` の設計がある。画面（GraphQL）と エージェント（MCP）は別の利用者。`session_delete` は desktop の UI が使っていない（web も許可していない）ので、GraphQL には出さず MCP だけにする案を推奨。
 
-**#6 launcher 鍵が守る 7 項目の扱い（D の center）**
-- 守る項目は 7 つ: `memory` / `mcpServers` / `projectMemory` / `mcp` / `mcpConnections` / `mcpSecrets` / `coordinator`（`packages/center-client/src/tool-policy.ts:45` の `CENTER_ONLY_KEYS`。center 側は `packages/center/src/project-settings.ts` の `LAUNCHER_KEYS` + `LEGACY_INTERNAL_KEYS` + `FILE_ONLY_KEYS` で、同じ 7 つ）。2 か所に別々の定義があるので、GraphQL の層は 1 か所にそろえる。書きは `assertCenterOnly`（`project-settings.ts:176`。`tools.ts:113・175・198` と `sessions.ts:237` が呼ぶ）、読みは `withoutLauncherKeys`（`:184`。`tools.ts:98` の `shown`）が絞る。
-- 今の扱い（項目ごと）:
+**#6 launcher 鍵が守っていた 7 項目の扱い（決定 6 で決定済み）**
+- 決定（利用者、決定 6）: client の app の上で、設定の変更を全部できる。launcher 鍵で守っていた 7 項目（`memory` / `mcpServers` / `projectMemory` / `mcp` / `mcpConnections` / `mcpSecrets` / `coordinator`）も含む。保存先は server 側。見え方は S・D・web で同じ。以前の案 A（bantou-center の起動元の鍵）・B（GraphQL では 7 項目を扱わない）・C（admin token）は、この決定で不要になった。
+- 今の扱い（【事実】。項目ごと）:
 
 | 項目 | 分類 | 起動元 | 起動元以外 |
 |---|---|---|---|
 | `memory`・`mcpServers` | `LAUNCHER_KEYS` | 読み書きできる | 書くと error。読みの応答から除く |
 | `projectMemory` | `FILE_ONLY_KEYS` | 読める。書きは設定の更新（MCP）では誰もできず、`bantou-center memory set --session`・移行・設定 file の直接編集だけ | 書くと error。読みの応答から除く |
 | `mcp`・`mcpConnections`・`coordinator` | `LEGACY_INTERNAL_KEYS`（旧設定） | 誰からも MCP では書けない（起動元にも別の error）。読みの応答からは `withoutLauncherKeys` は除かない（旧設定が残っていれば応答に出うる【未確認】） | 書くと error |
-| `mcpSecrets` | 同上 | settings の key としては同上。鍵の実体は別 file `mcp-secrets.json`（0600）で、入れるのは `bantou-center mcp secret`（標準入力か file）だけ。値は表示・log・error に出さない（`packages/center/src/mcp-secrets.ts` の冒頭）。どの経路でも値は読めない | 同上 |
+| `mcpSecrets` | 同上 | settings の key としては同上。鍵の実体は別 file `mcp-secrets.json`（0600）で、入れるのは `bantou-center mcp secret`（標準入力か file）だけ。値は表示・log・error に出さない（`packages/center/src/mcp-secrets.ts` の冒頭） | 同上 |
 
-- 前提: S は今のまま（desktop が起動ごとの鍵で証明する）。D の center は desktop が起動しないので、desktop は「起動した所」ではない。bantou-center が起動元になる。
-- 案 A: bantou-center が初回に鍵を作って保存する（0600 の file など。center は env から取り出して消す `takeLauncherKey` の形）。同じ Mac の desktop は、その file を読んで header を付ける。項目ごと: `memory`・`mcpServers` は GraphQL で読み書きできる。`projectMemory` は読めるが書きは今のまま CLI など。旧設定 4 項目（`mcp`・`mcpConnections`・`mcpSecrets`・`coordinator`）は GraphQL でも書けない。`mcpSecrets` の値は読めず、入れるのは CLI の標準入力だけ。別 host の desktop・web は 7 項目とも読み書きできない（今と同じ）。
-- 案 B: GraphQL では 7 項目すべてを読み書きしない（今の web と同じ。書くと error、読みの応答から除く。schema の `ProjectSettings` も 7 項目を持たない）。`memory`・`mcpServers`・`projectMemory` は center の host の CLI（`bantou-center memory` / `bantou-center mcp`、`cli.ts`・`memory-settings.ts`・`mcp-cli.ts`）で書く。`mcpSecrets` の値は今どおり CLI の `mcp secret` だけ。旧設定 4 項目は書かない。
-- 案 C: admin 権限の token を別に持つ。admin で繋いだ client だけ、`memory`・`mcpServers` を読み書き、`projectMemory` を読める。それ以外の項目は案 A と同じ。
-- 推奨: B（権限の仕組みを新しく足さない。CLI は既にある。A は desktop が同じ Mac の file を読む形で、利用者が決めた「IP の指定だけ」の線引き（自動の発見をしない）と近い所に踏み込む）。D の center の外部記憶・追加の MCP を desktop の画面から書きたい要望があれば、A か C を別の決定にする。その間、D の center の desktop の設定画面は「center の host で設定する」案内になる（S は今のまま画面から書ける。画面の体験が S と D で違う点なので、決定を要する）。
-
+- 実装の task が決める細部（利用者が決めたのは「全部できる」まで）: 7 項目それぞれの GraphQL 上の field の形、旧設定 4 項目と `mcpSecrets` の値を画面に出すか入れるか。2 か所にある定義（`tool-policy.ts` と `project-settings.ts`）は GraphQL の層で 1 か所にそろえる。
+- 影響: 設定の変更は鍵を持つ client なら誰でもできる形になる（2.4）。
 **#7 端末の入出力と添付を GraphQL に載せる範囲**
 - 案 A: 出力は subscription、入力・サイズは mutation、添付の画像（bytes）は既存の HTTP route `POST /sessions/<n>/attachments` を残す。
 - 案 B: 全部 GraphQL（添付は GraphQL multipart upload か base64 の mutation）。
@@ -578,11 +626,11 @@ code は書かないので、ここは実装の task が足す test と、実機
 - 案 C: 廃止する。
 - 推奨: A（利用者の指示は center の起動の仕組みで、これらは center と無関係。`docs/handoff.md` の Open にも、使われていない command がある）。web がこれらを出していない（web 設計の判断 5）のと同じ扱い。廃止の可否は別の決定。
 
-**#9 状態 dir の置き場と、設定の分け方（接続先 / center の起動項目）**
-- 案 A: 今 desktop が使う `~/.local/share/bantou/` をそのまま使う（`sessions.json`・`remotes.json`・`handoffs/`・`center-id` が引き継がれ、session・remote-cap の記録が残る）。
+**#9 状態 dir の置き場と、設定の保存先（決定 6）**
+- 決定（利用者、決定 6）: 設定の保存先は server 側（center の host。今は mac200）。client が保存する設定は center の IP だけ（port は変えた時だけ）。以前の案の「`remote`（接続先 URL・token）は client のローカルの設定へ」は、token が鍵に置き換わり、client が center を MCP の server として指定する形が無くなるので、IP だけになる。
+- 状態 dir の案 A: 今 desktop が使う `~/.local/share/bantou/` をそのまま使う（`sessions.json`・`remotes.json`・`handoffs/`・`center-id` が引き継がれ、session・remote-cap の記録が残る）。
 - 案 B: service 用の新しい場所（`~/.config/bantou/` など。`packages/center/README.md` の既定）に作り直す。
-- 推奨: A。理由: 移行で session と cap の記録が消えない。`center-id`（cap_id の素、`docs/architecture.md`）が変わると cap の記録の対応が崩れる。設定の分け方は、`CenterSettings` の起動項目（enabled・bind・workspace・claudePath・token）は center の config へ、`remote`（接続先 URL・token）は client のローカルの設定へ、とする案を推奨する。
-
+- 推奨: A。理由: 移行で session と cap の記録が消えない。`center-id`（cap_id の素、`docs/architecture.md`）が変わると cap の記録の対応が崩れる。設定（起動項目・port・IP の範囲・鍵）の置き場の細部は #29・#30。
 **#10 Windows**
 - 案 A: center の同梱と常駐は mac の app だけを対象にする（今の cask は arm64 の macOS だけ、`packages/desktop/Casks/bantou.rb` の `depends_on`）。bantou-center も mac の app。Windows の desktop は client としてだけ使い、IP を指定して center に GraphQL で繋ぐ。
 - 案 B: Windows の center の常駐（Windows service）も扱う。
@@ -618,7 +666,7 @@ code は書かないので、ここは実装の task が足す test と、実機
 - 推奨: X（最少の新しい部品。Rust 側に既に center の起動・監視・停止がある。center の `parent-watch.ts` の「親が死ねば終わる」もそのまま働く）。launchd と app の 2 段の再起動（launchd の `KeepAlive` と、`center.rs` の backoff の二重）の整理は #16。
 
 **#16 落ちた時の再起動の持ち主と、二重起動の時の終わり方**
-- 案 A: launchd に任せる（異常終了だけ再起動する設定。値は実測して決める）。後から起動して「規定 port が使用中」と分かった時は、異常終了にせず自分から終わる（launchd が再起動し続ける loop を避ける。2.8・#19）。
+- 案 A: launchd に任せる（異常終了だけ再起動する設定。値は実測して決める）。後から起動して「center の port が使用中」と分かった時は、異常終了にせず自分から終わる（launchd が再起動し続ける loop を避ける。2.8・#19）。
 - 案 B: launchd は起動だけ。再起動は app（案 X なら shell）が見る（今の S と同じ backoff・断念）。
 - 推奨: A（常駐の再起動は launchd に任せる）。X の shell の中の backoff を残すか外すかは実装の task が決める。連続して失敗した時の振る舞い（launchd 側の扱い）は【未確認】。
 
@@ -635,52 +683,82 @@ code は書かないので、ここは実装の task が足す test と、実機
 - 案 C: OS の操作だけ（System Settings の Login Items、`launchctl`、Activity Monitor）。
 - 推奨: A と B の両方（画面から操作できるのが A、desktop が無い host や画面が使えない時に B。C は利用者の手間が大きい）。A の mutation は `Mutation` に足す（2.3）。再起動すると session の claude が止まる（1.6）ので、画面に出す文言で知らせる。更新後の再起動（#12）も同じ入口にする。
 
-**#19 同じ Mac で S（desktop が裏で起こす center）と D（bantou-center）が両方動く時（決定済み。規定 port で片付いた。残る小さな点）**
-- 決定（利用者）: center は規定 port でだけ起動し、別の port に逃げない。同じ Mac に center は 1 つ。2 つ目は port が使用中で起動に失敗する。desktop は「center を起動」を選んでも、規定 port で center が動いていれば起こさずにそれにつなぐ（2.8）。前の版の案 B（D 優先）・C（別 port・別状態 dir で両立）・D（禁止）は、この決定で不要になった。
-- 残る点 1: bantou-center が、S の center が規定 port を持っている間に起動して port の使用中で失敗した時の終わり方。案 A: 正常終了として終わり、launchd が再起動し続けないようにする（#16 の設定）。案 B: 異常終了にする（launchd が再起動を試み続ける）。案 C: A の上に、失敗を log と desktop の画面で知らせる（2.8.3）。推奨: A と C（loop を作らず、理由を見せる）。
-- 残る点 2: S が止まって規定 port が空いた後、D が自動で戻るか。案 A: 戻らない（次の login か、利用者が bantou-center を起動した時に起動する）。案 B: 戻す（port が空くのを待つ仕組みを足す）。推奨: A（待ちの仕組みを足さない）。
-- 残る点 3: 同じ Mac の別の user の center（2.8.5）。規定 port の決定どおり、起動できない扱いでよいか。推奨: そのまま（決定を変えない）。
+**#19 同じ Mac で S（desktop が裏で起こす center）と D（bantou-center）が両方動く時（残る 3 点は推奨どおり。決定 9）**
+- 前提: S と D が同じ設定（同じ port）を使う（#30 の推奨）。別の設定を持つ形（#30 案 B）なら、この項は組み直す。
+- 決定（利用者、決定 5）: center は設定した port でだけ起動し、別の port に逃げない。同じ port の center は 1 つ。2 つ目は port が使用中で起動に失敗する。desktop は「center を起動」を選んでも、その port で center が動いていれば起こさずにそれにつなぐ（2.8）。前の版の案 B（D 優先）・C（別 port・別状態 dir で両立）・D（禁止）は、この決定で不要になった。
+- 残る点 1（推奨どおり: A と C）: bantou-center が、S の center が port を持っている間に起動して port の使用中で失敗した時の終わり方。案 A: 正常終了として終わり、launchd が再起動し続けないようにする（#16 の設定）。案 B: 異常終了にする（launchd が再起動を試み続ける）。案 C: A の上に、失敗を log と desktop の画面で知らせる（2.8.3）。
+- 残る点 2（推奨どおり: A）: S が止まって port が空いた後、D が自動で戻るか。案 A: 戻らない（次の login か、利用者が bantou-center を起動した時に起動する）。案 B: 戻す（port が空くのを待つ仕組みを足す）。
+- 残る点 3（推奨どおり: そのまま）: 同じ Mac の別の user の center（2.8.5）。同じ port なら起動できない扱いでよいか。推奨: そのまま（決定を変えない）。
 
-**#20 D の center の token（作り方・渡し方）と、接続先の指定の入力**
-- 決めてある事: desktop から center を見つける方法は IP の指定だけ（固定）。
-- 案 A: bantou-center が初回に token を作って config に書く。利用者が `bantou-center` の subcommand（接続情報を表示する）か log file で token を見て、desktop の接続先（IP・port・token）に貼る（今の「別 host の center の接続設定を貼る」と同じ形）。
-- 案 B: 同じ Mac の desktop が config file（`~/.local/share/bantou/center.json`）から token を読む（IP は指定するが、token は自動で入る）。
-- 案 C: 初回の起動の時だけ、bantou-center が接続情報を小さな画面か通知で出す。
-- 推奨: A（利用者が決めた「IP の指定だけ」を超える自動化を足さない。今の接続設定の貼り付けと同じ流儀）。port は規定 port で入力しない（2.8）。B は desktop が同じ user の file を読む形で、#6 の案 A と同じ線上の判断になる。
+**#20 D の center の認証と接続先の入力（決定 7 で置き換え済み）**
+- 以前の案（bantou-center が token を作り、利用者が log や subcommand で見て貼る / desktop が config file を読む / 初回に画面で出す）は、決定 7 で不要になった。client は IP を入れ、初めてつないだ時に center が鍵を渡す（2.4）。desktop が config file を読んで認証情報を拾う自動化はしない（決定 4・7）。
+- 残る点は、鍵を取れる接続元の指定（#27・#29）と、鍵の失効と再発行（#26）。
 
 **#21 app の無い host（web 用の Linux の host など）の center の入れ方**
 - 案 A: center の `service` subcommand（#18 の B）と単独の配布物で入れる。配り方は別の決定。
 - 案 B: bantou-center.app の対象外とし、今の手順（ソースから起動する。web 設計 6.1）のまま。
 - 推奨: B（この設計の範囲は app 同梱の center。app の無い host の配布は利用者がまだ決めていない）。#18 の B を作れば、A に進める余地が残る。
 
-**#22 規定 port の番号（利用者が決める）**
-- 案 A: 今の既定の 7910 を規定 port にする（center の `--port` の既定、desktop の `DEFAULT_PORT`、`packages/center/README.md`）。
-- 案 B: 別の番号にする（利用者が決める）。
-- 案 C: 番号を設定で変えられるようにする。→ 「規定 port のみ」の決定に反するので案から外す。
-- 推奨: A。理由: 既存の docs・設定が 7910 で、port を変えていない利用者の接続先が変わらない。web 設計 9.2 の表に載る他の使用（bantou-server の 7901・7902、memory の 7930）に 7910 は無い。ただし host ごとの他の program との衝突は【未確認】（他の program が 7910 を使う Mac では center が起動しない）。設定画面で port を変えていた利用者は、規定 port に移る（接続先を IP だけに直す）。番号は利用者が決める。
+**#22 center の port の番号（決定 9 で決定済み: 7910）**
+- 決定（master-cap、決定 9）: 既定は 7910（旧案 A）。center の `--port` の既定、desktop の `DEFAULT_PORT`、`packages/center/README.md` と同じ。
+- 旧案 C（番号を設定で変えられる）は、以前は「規定 port のみ」に反するとして外していたが、決定 5 の訂正（「設定はできるようにする。でも固定が基本」）で、設定で変えられる形になった。
+- 注意: 他の program が 7910 を使う Mac では、既定のままでは center が起動しない（2.8.3 の error が出る。【未確認】）。web 設計 9.2 の表に載る他の使用（bantou-server の 7901・7902、memory の 7930）に 7910 は無い。
 
-**#23 LAN から届く時の認証**
-規定 port は誰にも予測できる番号になるので、LAN の中で center を探しやすくなる。center は今、常に全アドレスで待ち受け、Bearer token だけで守る（平文、`center.rs:29`、`docs/architecture.md`）。
-- 案 A: 今のまま（全アドレス + Bearer token。token は 12 文字以上、desktop が作る物は 32 文字の base62）。
-- 案 B: 待ち受けを既定で loopback にし、LAN へ開くのは明示の設定にする（「常に全アドレス」の確定事項を変える）。S だけ使う利用者は LAN に開かなくて済む。
-- 案 C: A に TLS を足す（center が終端、または前段の reverse proxy。web 設計 11 の判断 13 が同じ論点）。
-- 案 D: client ごとの token と、接続元 IP の許可 list を足す。
-- 推奨: A（利用者の決めてある線は今と同じ強さ。新しい仕組みを足さない）。B は仕組みを足さず安全側に倒せる案なので、LAN から使わない利用者向けの次の候補にして、別の決定にする。規定 port を知る者が token を試せる状態になる点を、手順書に書く（失敗の回数の制限などは利用者が決めていないので足さない）。
+**#23 LAN から届く時の認証（決定 7・8 で置き換え済み）**
+- 以前の案 A〜D（今のまま Bearer / loopback 既定 / TLS / client ごとの token と IP の許可 list）は、決定 7・8（鍵と、鍵を渡してよい IP の範囲）で置き換わった。LAN から届く接続は、IP の範囲に入っていれば鍵を取れ、鍵が無い通信は断られる（2.4）。
+- 残る点は #26〜#28。TLS（平文のまま）と待ち受けの範囲（全アドレス）は、利用者が決めていないので今のまま。
 
-**#24 test・開発用の port（本番の起動は規定 port のみ）**
-- 案 A: `--port` を廃止し、test も規定 port を使う（実行中の center と衝突する。test を 1 つずつ直列にする必要がある）。
-- 案 B: 本番の経路（S・D・launchd の起動）では port を変えられず、test・開発用の起動の関数の引数（`startHttpServer` の `port` option など）でだけ変えられる。CLI の引数と環境変数では受けない。
-- 案 C: 今のまま `--port` を残す。→ 「別の port に逃げない」の決定に反する（誤って別 port で起動できる）ので案から外す。
-- 推奨: B（`packages/center/test/` と `scripts/e2e.ts` が `--port 0` で動いており、規定 port にすると開発中の center と衝突する。本番の起動の経路だけが規定 port に縛られる）。
+**#24 test・開発用の port（決定 9: 案 B）**
+- 決定（master-cap、決定 9）: 案 B。本番の経路（S・D・launchd の起動）では、center の port は設定でだけ決まる。CLI の引数と環境変数では受けない。test・開発用の起動の関数の引数（`startHttpServer` の `port` option など）でだけ別の port を使える。
+- 理由: `packages/center/test/` と `scripts/e2e.ts` が `--port 0` で動いており、設定の port にすると開発中の center と衝突する。
+- 決定 5（設定で変えられる）との関係: 設定で変えられるのは本番の経路の port の設定だけ。CLI の引数で逃げられる形は取らない（「設定した port でしか起動しない」）。
+- 旧案 A（`--port` を廃止し、test も同じ port）と旧案 C（`--port` を残す）は採らない。
+
 **#25 `/graphql` の Host の検査**
 - 事実: `/events`・core route・`/mcp` は、bind が loopback の時だけ Host を検査する（3.5）。S も D も全アドレスで待ち受けるので、通常は検査が無い。
 - 案 A: 今の `/mcp`・`/events` と同じにする（loopback bind の時だけ検査する）。
 - 案 B: 常に検査する（IP で繋ぐので、許可する Host の集め方が要る）。
-- 案 C: 検査しない（Bearer だけ）。
-- 推奨: A（今と同じ強さにそろえる。全アドレス待ち受けと規定 port の下での強化は #23）。
+- 案 C: 検査しない（鍵だけ）。
+- 推奨: A（今と同じ強さにそろえる。全アドレス待ち受けの下での守りは、鍵と IP の範囲（2.4））。
+
+
+**#26 鍵の失効と再発行**
+- 背景: 決定 7 は「初回の接続で center が鍵を渡し、client が覚える」まで。鍵を失った client、漏れた鍵、client の入れ替えの扱いは決まっていない。
+- 案 A: center の host で、渡した鍵を全部失効にする入口を持つ（メニューバー、または center の subcommand）。client は、IP の範囲に入っていれば、次の接続で鍵を取り直す。
+- 案 B: client ごとに鍵を記録し、1 つずつ失効にする。
+- 案 C: 入口を作らない（center の host の鍵の保存 file を手で消す）。
+- 推奨: A。理由: 鍵を渡すかを IP の範囲だけで決める決定 8 と合い、client ごとの管理（B）は決定に無い仕組みになる。C は手順書に書く運用に落ちる。
+
+**#27 メニューバーの無い環境での IP の範囲の指定**
+- 背景: 決定 8 は、IP の範囲を server 側のメニューバーで指定する。メニューバーの無い host（Linux の host、web 用の host、ssh だけで使う Mac）では、メニューバーから指定できない。範囲が未設定の時に鍵を渡すかも決まっていない。
+- 案 A: center の subcommand（`bantou-center service …` と同じ流儀、#18 の B）か、設定 file の編集で指定する。
+- 案 B: 環境変数で指定する。
+- 案 C: client の画面から指定する（決定 8「この設定だけは server 側のメニューバーで指定」に反するので外す）。
+- 範囲が未設定の時: 案 a: 誰にも鍵を渡さない。案 b: 何も制限しない。
+- 推奨: A、未設定は a（鍵を渡す相手を決めるまで渡さない側に倒す。ただし S の desktop が自分の center につなぐ時の扱いは #29）。
+
+**#28 中継越しの接続元 IP**
+- 背景: 決定 8 の判定は「設定した IP の範囲からか」だけを見る。reverse proxy・Cloudflare Access・tunnel などの中継を挟むと、center から見える接続元は中継の IP になり、実際の client の IP が分からない。
+- 案 A: center から見える接続元 IP（中継の IP）だけで判定する。中継の IP を範囲に入れるかは利用者が決める。
+- 案 B: 中継が付ける header（`X-Forwarded-For` など）を、信頼する中継からの接続の時だけ見る。
+- 案 C: 中継越しの接続には鍵を渡さない（直接つなぐ client だけ）。
+- 推奨: A（header を信じる仕組みを足さない）。web の BFF は center に直接つなぐ形（#4 の (a)）にして、中継を挟まない。
+
+**#29 S での IP の範囲と port の設定の置き場**
+- 背景: S は desktop の app が裏で起こす center で、「server 側のメニューバー」（決定 8）に当たる物が、desktop の app の menu になる。D は bantou-center のメニューバー。S の時に、IP の範囲と port をどこで指定し、どこに保存するかが決まっていない。
+- 案 A: desktop の設定画面で S の分を指定し、今の `write_config`（`center.rs:223`）が center の config に書く（S の設定の今の流れ）。
+- 案 B: desktop の app のメニューバー（`menu.rs`）に、D のメニューと同じ項目を置く。保存先は center の設定（server 側）。
+- 案 C: S は IP の範囲を持たず、自分の desktop（`127.0.0.1`）だけに鍵を渡す。
+- 推奨: B（IP の範囲は server 側のメニューバーで指定する決定 8 に合う。port は決定 6 で server 側に保存する。S の desktop は、その設定の書き込み口になるだけ）。保存先は S も D も center の設定 1 つ（#30 の推奨）。
+
+**#30 S と D で同じ設定を使うか**
+- 背景: 設定（port・IP の範囲・鍵）を S と D が共有するかで、同じ Mac に center が 1 つか 2 つかが決まる（2.8.5）。
+- 案 A: 同じ Mac では 1 つの設定（状態 dir `~/.local/share/bantou/` の center の設定）を S も D も使う。port・IP の範囲・渡した鍵が同じになり、同じ Mac に center は 1 つ。
+- 案 B: S と D が別の設定を持つ。port が違えば同じ Mac に 2 つ動きうる。状態 dir・`center-id`・peer 名の奪い合い（#19）が戻る。
+- 推奨: A（#9 の状態 dir の推奨と同じ。#19 の残り 3 点が成り立つ前提）。
 
 ## 8. 次にやる事（推奨の順）
 
-1. 未決 #22（規定 port の番号。利用者が決める）・#23（LAN の認証）・#24（test の port）・#25（/graphql の Host の検査）と、#2・#3・#14・#15・#20（bantou-center の作り方・登録・token）、#4・#6・#7 の決定（schema と配布の形に効く）。#11 は進行中の 2 branch の merge の前に決める。
-2. 段階 A の worker を、query / mutation / subscription に分けて並行で出す（schema の合意、2.3 を先に固める）。
+1. 利用者が決める未決: #26（鍵の失効と再発行）・#27（メニューバーの無い環境）・#28（中継越しの IP）・#29（S の設定の置き場）・#30（S と D の設定の共有）。#25（`/graphql` の Host の検査）。#2・#3・#14・#15（bantou-center の作り方・登録）、#4（web の BFF）・#7（端末・添付）。#11 は進行中の 2 branch の merge の前に決める。
+2. 段階 A の worker を、query / mutation / subscription に分けて並行で出す（schema の合意、2.3 を先に固める）。段階 A3（鍵の方式）は #26〜#29 の決定の後。
 3. 並行して段階 C の実測（`SMAppService` の登録が ad-hoc 署名の app で通るか、launchd 下で center が `claude` の認証を通すか、窓無し app の Local Network の許可）を行う。結果で #2・#14・#15 が決まる。
