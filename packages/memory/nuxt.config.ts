@@ -16,7 +16,5 @@ export default defineNuxtConfig({
   },
   nitro: {
     experimental: { tasks: true },
-    // 抽出・埋め込み・Graphiti への反映を 1 分ごとに起動（する事が無ければ何もしない）。別名の task は並行に動き、互いを待たない
-    scheduledTasks: { "* * * * *": ["memory:extract", "memory:embed", "memory:graphiti"] },
   },
 });
